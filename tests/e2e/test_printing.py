@@ -181,9 +181,9 @@ def wait_video(page: Any, mode: str) -> Optional[dict]:
 
 
 def open_printing_ui(page: Any, dashboard: str) -> bool:
-    """Reach the printing controls: the classic sidebar section, or the wish
-    menubar's Printing submenu."""
-    if dashboard == "classic":
+    """Reach the printing controls: the sidebar's Printing section, or the
+    toolbar menu's Printing submenu."""
+    if dashboard == "default":
         try:
             if page.locator("#printing-content").count() == 0:
                 page.locator(".toggle-handle").first.click()
@@ -193,7 +193,7 @@ def open_printing_ui(page: Any, dashboard: str) -> bool:
                 time.sleep(0.6)
             return page.locator("#printing-content").count() > 0
         except Exception as e:
-            print(f"      (classic printing section: {e!r})")
+            print(f"      (printing section: {e!r})")
             return False
     for _ in range(4):
         if page.locator('[role="menu"]').count() == 0:
@@ -205,7 +205,7 @@ def open_printing_ui(page: Any, dashboard: str) -> bool:
 
 def rows(page: Any, dashboard: str) -> int:
     """Documents listed: one save link each, whatever else the row offers."""
-    if dashboard == "classic":
+    if dashboard == "default":
         return page.locator("#printing-content .print-job").count()
     return page.locator('[role="menu"] a[download]').count()
 
@@ -221,22 +221,19 @@ def drop_frames(page: Any, timeout: float = 10) -> None:
 
 
 def press(control: Any) -> None:
-    """Click a control; the classic sidebar scrolls, so a section below the
-    fold takes a dispatched click rather than a pointer one."""
+    """Click a control; the sidebar scrolls, so a section below the fold takes
+    a dispatched click rather than a pointer one."""
     control.dispatch_event("click")
     time.sleep(0.5)
 
 
 def click_switch(page: Any, dashboard: str) -> None:
-    if dashboard == "classic":
-        press(page.locator("#printAutoToggle"))
-    else:
-        press(page.locator('[role="menu"] [role="switch"]').first)
+    press(page.locator("#printAutoToggle"))
 
 
 def row_control(page: Any, dashboard: str, label: str, index: int = 0) -> Any:
     """A document row's icon control, named by its title ("Print" or "Save")."""
-    if dashboard == "classic":
+    if dashboard == "default":
         rows_ = page.locator("#printing-content .print-job")
         return rows_.nth(index).locator(f'[title="{label}"]')
     return page.locator(f'[role="menu"] :is(button, a)[title="{label}"]').nth(index)
@@ -257,8 +254,7 @@ def print_preview_open(browser: Any) -> bool:
 def dashboard_round(res: "H.Results", pw: Any, mode: str, dashboard: str) -> None:
     fresh_spool()
     pending = spool("Pending.pdf")
-    H.server_start(mode=mode, wayland=False, web_root=H.CLASSIC_DIST if dashboard == "classic" else H.WISH_DIST,
-                   extra_env=SERVER_ENV)
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard, extra_env=SERVER_ENV)
     browser, page = new_page(pw, mode)
     try:
         res.check(f"{dashboard}: video streams over {mode}", wait_video(page, mode) is not None)
@@ -290,7 +286,7 @@ def dashboard_round(res: "H.Results", pw: Any, mode: str, dashboard: str) -> Non
         time.sleep(1)
         res.check(f"{dashboard}: the print button opens it in a frame", page.evaluate(FRAMES_JS) == 2, page.evaluate(FRAMES_JS))
         drop_frames(page)
-        # The wish panel is a menu, and printing from it closed it.
+        # The toolbar's panel is a menu, and printing from it closed it.
         open_printing_ui(page, dashboard)
         with page.expect_download(timeout=15000) as dl:
             press(row_control(page, dashboard, "Save", 0))
@@ -325,13 +321,13 @@ def write_sample(name: str) -> str:
 def transport_block(mode: str) -> "H.Results":
     res = H.Results(f"printing-{mode}")
     with sync_playwright() as pw:
-        for dashboard in ("classic", "wish"):
+        for dashboard in H.LAYOUTS:
             dashboard_round(res, pw, mode, dashboard)
         if mode == "websockets":
             if shutil.which("google-chrome") and H.TEST_DISPLAY:
                 fresh_spool()
                 spool("Preview.pdf")
-                H.server_start(mode=mode, wayland=False, web_root=H.CLASSIC_DIST, extra_env=SERVER_ENV)
+                H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, extra_env=SERVER_ENV)
                 browser, page = new_page(pw, mode, headed_chrome=True)
                 try:
                     res.check("Chrome: video streams", wait_video(page, mode) is not None)
@@ -350,7 +346,7 @@ def policy_block() -> "H.Results":
     with sync_playwright() as pw:
         fresh_spool()
         spool("Off.pdf")
-        H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST,
+        H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST,
                        extra_env={**SERVER_ENV, "SELKIES_PRINTING_ENABLED": "false"})
         res.check("printing off: no queue is started", not os.path.exists(CUPS_SOCKET))
         res.check("printing off: the route refuses", route_status("Off.pdf") == 403, route_status("Off.pdf"))
@@ -366,7 +362,7 @@ def policy_block() -> "H.Results":
             browser.close()
 
         fresh_spool()
-        H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST, extra_env=SERVER_ENV)
+        H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, extra_env=SERVER_ENV)
         owner_browser, owner = new_page(pw, "websockets")
         viewer_browser, viewer = new_page(pw, "websockets", url_hash="#shared")
         try:

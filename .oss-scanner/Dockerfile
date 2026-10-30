@@ -6,7 +6,7 @@ FROM node:26-trixie
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/venv/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates build-essential gcc-multilib git libxkbcommon0 pkg-config python3 python3-dev python3-venv \
+      ca-certificates build-essential gcc-multilib git jq libxkbcommon0 pkg-config python3 python3-dev python3-venv \
       shellcheck xkb-data \
     && rm -rf /var/lib/apt/lists/*
 
@@ -19,7 +19,7 @@ RUN python3 -m venv /opt/venv && python3 scripts/ci/unit-deps.py > /tmp/unit-req
 RUN for dir in addons/input-interposer addons/v4l2-interposer addons/fake-udev tests/tools; do \
       make -C "$dir" CFLAGS="-O1 -g -fno-omit-frame-pointer" || exit 1; \
     done
-RUN for dir in addons/selkies-web-core addons/selkies-dashboard addons/selkies-dashboard-wish; do \
+RUN for dir in addons/selkies-web-core addons/selkies-dashboard; do \
       (cd "$dir" && npm ci --no-audit --no-fund) || exit 1; \
     done
 

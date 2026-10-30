@@ -326,7 +326,7 @@ class Cell:
 
 
 def open_sidebar(page: Any) -> bool:
-    """Open the classic dashboard's sidebar, as its edge handle does; whether it is open."""
+    """Open the dashboard's sidebar, as its edge handle does; whether it is open."""
     if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
         try:
             page.locator(".toggle-handle").first.click(timeout=3000)
@@ -337,7 +337,7 @@ def open_sidebar(page: Any) -> bool:
 
 
 def reveal(page: Any, sel: str) -> bool:
-    """Bring a classic dashboard control into the DOM: open the sidebar, then try
+    """Bring a sidebar control into the DOM: open the sidebar, then try
     each collapsed section until the control renders. Whether it is there."""
     if page.locator(sel).count():
         return True

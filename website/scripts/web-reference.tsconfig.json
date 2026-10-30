@@ -12,7 +12,7 @@
     "types": [],
     "baseUrl": "..",
     "paths": {
-      "@/*": ["../../addons/selkies-dashboard-wish/src/*"],
+      "@/*": ["../../addons/selkies-dashboard/src/*"],
       "react": ["./node_modules/@types/react"],
       "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime"],
       "react-dom": ["./node_modules/@types/react-dom"],
@@ -22,7 +22,6 @@
   "include": [
     "../../addons/selkies-web-core/*.js",
     "../../addons/selkies-web-core/lib/*.js",
-    "../../addons/selkies-dashboard/src/**/*",
-    "../../addons/selkies-dashboard-wish/src/**/*"
+    "../../addons/selkies-dashboard/src/**/*"
   ]
 }

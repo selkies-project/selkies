@@ -18,7 +18,6 @@ COPY pyproject.toml ./
 COPY scripts/ci/build-web.sh ./scripts/ci/
 COPY addons/selkies-web-core ./addons/selkies-web-core
 COPY addons/selkies-dashboard ./addons/selkies-dashboard
-COPY addons/selkies-dashboard-wish ./addons/selkies-dashboard-wish
 COPY addons/universal-touch-gamepad ./addons/universal-touch-gamepad
 COPY docs/assets/logo ./docs/assets/logo
 

@@ -5,7 +5,7 @@ The page's collector asks the server for the moving figures only while a
 dashboard has its stats open, never for a viewer, and again on a fresh
 connection, and a status row warns where the session fell short of what it
 asked for and never for a choice. The rules are JavaScript, shared by both
-cores and both dashboards, so the checks live in
+cores and the dashboard, so the checks live in
 tests/tools/stream_stats_audit.mjs.
 """
 import os

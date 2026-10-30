@@ -5,7 +5,7 @@ Every server route moves under the prefix, so the client has to follow it: it
 derives the prefix from its own document path rather than assuming the root,
 and a client that gets that wrong asks a server that only answers
 ``/desk/api/...`` for ``/api/...`` and comes up dead with no visible cause.
-Both streaming cores and both dashboards compute it, so each payload is served
+Both streaming cores and the dashboard compute it, so each payload is served
 under the prefix here and watched for where its requests, its websocket, and
 its static assets actually go.
 """
@@ -35,15 +35,16 @@ def status(path: str) -> int:
         return 0
 
 
-def drive(label: str, web_root: str, mode: str) -> None:
+def drive(label: str, web_root: str, mode: str, layout: str = "") -> None:
     """Serve one payload under the prefix and record where the client goes.
 
     Args:
         label: Name the checks are reported under.
         web_root: Directory served as the web client.
         mode: Transport the server runs, "websockets" or "webrtc".
+        layout: The dashboard layout the server names, where the client is the dashboard.
     """
-    H.server_start(mode=mode, wayland=False, web_root=web_root,
+    H.server_start(mode=mode, wayland=False, web_root=web_root, layout=layout or None,
                    extra_env={"SELKIES_SUBFOLDER": f"/{PREFIX}/"})
     try:
         res.check(f"{label}: prefixed status answers",
@@ -87,7 +88,7 @@ def drive(label: str, web_root: str, mode: str) -> None:
 
 drive("core-ws", H.CORE_DIST, "websockets")
 drive("core-wr", H.CORE_DIST, "webrtc")
-drive("classic", H.CLASSIC_DIST, "websockets")
-drive("wish", H.WISH_DIST, "websockets")
+drive("default", H.DASHBOARD_DIST, "websockets", "default")
+drive("wish", H.DASHBOARD_DIST, "websockets", "wish")
 
 sys.exit(0 if res.summary() else 1)

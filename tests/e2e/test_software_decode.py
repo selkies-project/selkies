@@ -496,13 +496,13 @@ def block_striped(r: "H.Results") -> None:
 
 def block_nowebcodecs(r: "H.Results") -> None:
     """No WebCodecs at all: the stream comes up as striped JPEG without a reload,
-    the encoder is pinned to jpeg for the session, and the classic dashboard's
+    the encoder is pinned to jpeg for the session, and the dashboard's
     encoder menu offers only what this engine can play. The next browser to take
     the display, and a later visit of the same profile with WebCodecs, the way a
     browser update brings it, stream video."""
     from playwright.sync_api import sync_playwright
     import test_dashboards as TD
-    H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
+    H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST)
     try:
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)
@@ -525,7 +525,7 @@ def block_nowebcodecs(r: "H.Results") -> None:
                 r.check("no fatal WebCodecs message", "WebCodecs" not in (status or ""), status)
                 navs = page.evaluate("Number(sessionStorage.getItem('__navs') || 0)")
                 r.check("page never reloaded", navs == 1, navs)
-                opened = TD.classic_open_video(page)
+                opened = TD.open_video_settings(page, "default")
                 # The menu lists every allowed encoder and disables the ones this engine cannot
                 # play, labeling them unsupported, so jpeg is the only selectable option here.
                 options = page.evaluate(
@@ -547,7 +547,7 @@ def block_nowebcodecs(r: "H.Results") -> None:
                         state["codec"])
                 other.close()
                 # A fresh server, so what the later visit streams comes from its own storage.
-                H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
+                H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST)
                 later = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                                             device_scale_factor=1)
                 later.add_init_script(NAV_JS)

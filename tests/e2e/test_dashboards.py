@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Dashboard e2e: selkies-dashboard (classic) and selkies-dashboard-wish,
-covering both dashboards' settings loop, mode switching, and admin UI gates."""
+"""Dashboard e2e: the dashboard in both its layouts, the sidebar (`default`)
+and the toolbar (`wish`), covering the settings loop, mode switching, and the
+admin UI gates in each."""
 import json
 import os
 import re
@@ -31,71 +32,92 @@ def wait_chunk(page, timeout: float = 15) -> bool:
     return False
 
 
-def classic_open_video(page) -> bool:
-    """Open the classic dashboard's Video section.
-
-    The sidebar starts closed: open it via the edge toggle-handle first, then
-    the video section header (sections start closed too).
-
-    Returns:
-        True when the Video section header was found and clicked.
-    """
-    try:
+def sidebar_open(page) -> None:
+    """Open the sidebar layout's drawer where it is shut."""
+    if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
         page.locator('.toggle-handle').first.click()
         time.sleep(0.8)
-    except Exception:
-        pass
-    try:
-        el = page.locator('.sidebar-section-header:has-text("Video")').first
-        if el.count():
-            el.scroll_into_view_if_needed()
-            el.click()
-            time.sleep(0.8)
-            return True
-    except Exception:
-        pass
-    return False
 
 
-def classic_stats_strip_check(page, res: "H.Results") -> None:
-    """The stats section's switch lays the strip over the stream, which keeps the
-    numbers coming with the sidebar shut, shows the server's figures, takes no
-    pointer input, and goes with the switch."""
-    strip = """() => {
+def sidebar_close(page) -> None:
+    """Shut the sidebar layout's drawer where it is open."""
+    if page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+        page.locator('.toggle-handle').first.click()
+        time.sleep(0.8)
+
+
+def sidebar_section(page, name: str, open: bool = True) -> bool:
+    """Unfold (or fold) the sidebar section whose header carries `name`, the
+    drawer opened first.
+
+    Returns:
+        True when the header was found.
+    """
+    sidebar_open(page)
+    header = page.locator(f'.sidebar-section-header:has-text("{name}")').first
+    if not header.count():
+        return False
+    if (header.get_attribute("aria-expanded") == "true") != open:
+        header.scroll_into_view_if_needed()
+        header.click()
+        time.sleep(0.8)
+    return True
+
+
+def open_video_settings(page, layout: str) -> bool:
+    """Reach the video settings: the sidebar's Video section, or the toolbar's
+    settings card on its Video tab.
+
+    Returns:
+        True when the controls were reached.
+    """
+    if layout == "default":
+        return sidebar_section(page, "Video")
+    return open_wish_settings_tab(page, "Video")
+
+
+def open_screen_settings(page, layout: str) -> bool:
+    """Reach the screen settings: the sidebar's Screen section, or the toolbar's
+    settings card on its Resolution tab."""
+    if layout == "default":
+        return sidebar_section(page, "Screen")
+    return open_wish_settings_tab(page, "Resolution")
+
+
+def stats_overlay_check(page, res: "H.Results") -> None:
+    """The stats section's switch lays the strip over the stream, which keeps
+    the numbers coming with the sidebar shut, shows the server's figures,
+    takes no pointer input, and goes with the switch."""
+    overlay = """() => {
       const el = document.querySelector('.stream-strip');
       const latest = window.stream_stats && window.stream_stats.latest;
-      return el ? { text: el.innerText, pointer: getComputedStyle(el).pointerEvents,
-                    figures: el.querySelectorAll('.stream-strip-figure').length,
+      return el ? { figures: el.querySelectorAll('.stream-strip-figure').length,
+                    pointer: getComputedStyle(el).pointerEvents,
                     t: latest && latest.t, server: !!(latest && latest.server),
                     sent: !!(latest && typeof latest.send_ms === 'number') } : null;
     }"""
     try:
-        page.locator('.toggle-handle').first.click()
-        time.sleep(0.8)
-        page.locator('.sidebar-section-header:has-text("Stats")').first.click()
-        time.sleep(0.8)
+        sidebar_section(page, "Stats")
         page.locator('#statsStripToggle').click()
         time.sleep(0.5)
-        page.locator('.toggle-handle').first.click()
+        sidebar_close(page)
         time.sleep(4.0)
-        first = page.evaluate(strip)
+        first = page.evaluate(overlay)
         time.sleep(2.5)
-        later = page.evaluate(strip)
+        later = page.evaluate(overlay)
         res.check("the stats section's switch lays a strip over the stream that takes no pointer input",
                   bool(first) and first["figures"] >= 3 and first["pointer"] == "none", first)
         res.check("which keeps the server's figures coming with the sidebar shut, the time to the wire among them",
                   bool(later) and later["server"] and later["sent"] and later["t"] != first["t"], later)
-        page.locator('.toggle-handle').first.click()
-        time.sleep(0.8)
+        sidebar_open(page)
         page.locator('#statsStripToggle').click()
         time.sleep(0.5)
-        gone = page.evaluate(strip)
-        page.locator('.sidebar-section-header:has-text("Stats")').first.click()
-        page.locator('.toggle-handle').first.click()
-        time.sleep(0.8)
+        gone = page.evaluate(overlay)
+        sidebar_section(page, "Stats", open=False)
+        sidebar_close(page)
         res.check("and goes with the switch", gone is None, gone)
     except Exception as e:
-        res.check("the stats strip check ran", False, str(e)[:200])
+        res.check("the stats overlay check ran", False, str(e)[:200])
 
 
 def set_range_slider(page, idx: int, value) -> None:
@@ -112,14 +134,16 @@ def set_range_slider(page, idx: int, value) -> None:
     }""", [idx, value])
 
 
-#: The Wish top bar's buttons that open a menu (its Menu dropdown).
+#: The toolbar layout's buttons that open a menu (its overflow menu).
 WISH_MENU_TRIGGERS = '[data-slot="tooltip-trigger"][aria-haspopup="menu"]'
-#: Anything in the Wish top bar, which the chrome checks look for.
+#: Anything in the toolbar, which the chrome checks look for.
 WISH_CHROME = '[data-slot="button-group"]'
+#: Either layout's chrome.
+CHROME = f'.sidebar, .toolbar, {WISH_CHROME}'
 
 
 def wish_close_menus(page) -> None:
-    """Close the Wish menus left open: a submenu (the clipboard's) takes an
+    """Close the toolbar's menus left open: a submenu (the clipboard's) takes an
     Escape of its own before the menu under it, which would take the next
     click."""
     for _ in range(3):
@@ -137,8 +161,8 @@ def wish_close_menus(page) -> None:
 
 
 def wish_show_toolbar(page) -> None:
-    """Close any Wish menu left open, whose trigger would only close it, and
-    bring the top bar back where gaming mode slid it up behind the top edge,
+    """Close any toolbar menu left open, whose trigger would only close it, and
+    bring the bar back where gaming mode slid it up behind the top edge,
     leaving only the tab that shows it again."""
     wish_close_menus(page)
     show = page.locator('button[aria-label="Show toolbar"]')
@@ -148,9 +172,9 @@ def wish_show_toolbar(page) -> None:
 
 
 def wish_open_menu_item(page, label: str) -> bool:
-    """Open the Wish top-bar menu that carries `label` and click that item.
+    """Open the toolbar menu that carries `label` and click that item.
 
-    Each menu the top bar opens is tried in turn until one renders a menu
+    Each menu the toolbar opens is tried in turn until one renders a menu
     item with the label (a submenu trigger or a checkbox item counts).
 
     Returns:
@@ -175,7 +199,7 @@ def wish_open_menu_item(page, label: str) -> bool:
 
 
 def wish_gamepad_panel(page) -> dict:
-    """What the Wish Gamepads panel offers, opened from its top-bar button and
+    """What the toolbar's Gamepads panel offers, opened from its button and
     closed again: the gamepad input switch (`input`), and the pads part that
     ui_sidebar_show_gamepads gates (`pads`: the touch gamepad, rumble, and the
     pad preview), told by its Rumble switch."""
@@ -193,8 +217,8 @@ def wish_gamepad_panel(page) -> dict:
 
 
 def wish_clipboard_seed_check(page, res: "H.Results") -> None:
-    """A server clipboard change that arrives while the Wish Clipboard panel
-    is closed must show in the textarea when the panel is opened: the panel
+    """A server clipboard change that arrives while the toolbar's Clipboard
+    panel is closed must show in the textarea when the panel is opened: the panel
     mounts lazily, so it seeds from the last clipboardContentUpdate."""
     push = f"e2e-wish-clip-{int(time.time())}"
     _, stop = H.x_own_clipboard(push.encode())
@@ -231,7 +255,7 @@ def wish_stats_fit_check(page, res: "H.Results") -> None:
     drag clamp, pinning its top at 0, cannot bring them.
     """
     measure = """() => {
-      const h3 = [...document.querySelectorAll('h3')].find((h) => h.innerText.trim() === 'System Performance Monitor');
+      const h3 = [...document.querySelectorAll('.stats-overlay h3')].find((h) => h.innerText.trim() === 'Stats');
       if (!h3) return null;
       const panel = h3.closest('[class*="rounded"]');
       const scroller = [panel, ...panel.querySelectorAll('div')].find(
@@ -251,17 +275,22 @@ def wish_stats_fit_check(page, res: "H.Results") -> None:
         page.evaluate("() => document.querySelector('svg.lucide-chevron-down').closest('button').click()")
         time.sleep(1.0)
         got = page.evaluate(measure)
-        res.check("wish detailed stats fit a 720-px window and scroll to their last row",
+        res.check("the detailed stats fit a 720-px window and scroll to their last row",
                   bool(got) and got["bottom"] <= got["viewport"] and got["last_bottom"] <= got["shown_bottom"],
                   got)
         if got:
             page.mouse.move(got["left"] + 120, got["top"] + 14)
             page.mouse.down()
             page.mouse.move(got["left"] + 220, got["top"] + 4, steps=5)
+            # Read while the button is still down: a transition on the panel
+            # would draw it behind the place the drag set until the pointer rests.
+            trail = page.evaluate("""() => { const el = document.querySelector('.stats-overlay');
+              return Math.round(el.getBoundingClientRect().left - parseFloat(el.style.left)); }""")
             page.mouse.up()
             time.sleep(0.3)
             moved = page.evaluate(measure)
-            res.check("wish detailed stats still drag, and stay in the window",
+            res.check("the detailed stats follow the pointer as it moves, not after it rests", abs(trail) <= 1, trail)
+            res.check("the detailed stats still drag, and stay in the window",
                       bool(moved) and moved["left"] == got["left"] + 100
                       and moved["bottom"] <= moved["viewport"], (got, moved))
         page.evaluate("() => document.querySelector('svg.lucide-gauge').closest('button').click()")
@@ -270,8 +299,44 @@ def wish_stats_fit_check(page, res: "H.Results") -> None:
         page.set_viewport_size({"width": 1440, "height": 900})
 
 
-def classic_viewer_check(page, res: "H.Results") -> None:
-    """A client demoted to viewer by the server gets no classic sidebar: an
+def resize_check(page, res: "H.Results", dashboard: str) -> None:
+    """The chrome the user drags (the sidebar's handle, the toolbar) keeps its
+    place in proportion to the window: dragged to the far edge, it is still
+    on screen in a window that shrank, and back at that edge in one that grew.
+    """
+    chrome = ".toggle-handle" if dashboard == "default" else ".toolbar"
+    rect = f"""() => {{ const b = document.querySelector('{chrome}').getBoundingClientRect();
+      return {{left: b.left, top: b.top, right: b.right, bottom: b.bottom, w: innerWidth, h: innerHeight}}; }}"""
+    inside = lambda r: r["left"] >= 0 and r["top"] >= 0 and r["right"] <= r["w"] + 1 and r["bottom"] <= r["h"] + 1
+    page.set_viewport_size({"width": 1440, "height": 900})
+    try:
+        time.sleep(0.3)
+        # The handle is dragged by itself, the bar by its grip, the Hand button.
+        grip = page.locator(chrome if dashboard == "default" else ".toolbar button.cursor-grab").first.bounding_box()
+        cx, cy = grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2
+        page.mouse.move(cx, cy)
+        page.mouse.down()
+        page.mouse.move(cx + (0 if dashboard == "default" else 2000), cy + (2000 if dashboard == "default" else 0), steps=8)
+        page.mouse.up()
+        time.sleep(0.3)
+        far = page.evaluate(rect)
+        at_edge = (abs(far["bottom"] - far["h"]) <= 1) if dashboard == "default" else (abs(far["right"] - far["w"]) <= 1)
+        res.check(f"{dashboard}: dragged to the far edge, the chrome stops at it", at_edge and inside(far), far)
+        page.set_viewport_size({"width": 800, "height": 500})
+        time.sleep(0.5)
+        small = page.evaluate(rect)
+        res.check(f"{dashboard}: a window that shrank keeps the chrome on screen", inside(small), small)
+        page.set_viewport_size({"width": 1440, "height": 900})
+        time.sleep(0.5)
+        back = page.evaluate(rect)
+        res.check(f"{dashboard}: a window that grew puts the chrome back in proportion",
+                  inside(back) and abs(back["top"] - far["top"]) <= 1 and abs(back["left"] - far["left"]) <= 1, (far, back))
+    finally:
+        page.set_viewport_size({"width": 1440, "height": 900})
+
+
+def viewer_check(page, res: "H.Results") -> None:
+    """A client demoted to viewer by the server gets no sidebar: an
     open sidebar folds, the handle goes, and Ctrl+Shift+M (the core's own
     chord, and the toggleDashboard message it posts) opens nothing."""
     is_open = "!!document.querySelector('.sidebar.is-open')"
@@ -310,7 +375,7 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     appears only once touch is seen. The Ctrl+Shift+X chord is the core's own,
     so it works whatever the dashboard shows.
     """
-    if dashboard == "classic":
+    if dashboard == "default":
         present = lambda: page.evaluate("""() => ({
             gaming: !!document.querySelector('.header-controls .gaming-mode-button'),
             trackpad: !!document.querySelector('.sidebar-action-buttons .trackpad-mode-button'),
@@ -352,9 +417,9 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     res.check("Ctrl+Shift+X leaves gaming mode", entered and not left, posted)
 
 
-def classic_layout_check(page, res: "H.Results") -> None:
-    """Pin the classic sidebar layout: header icon parity, uniform tiles,
-    and a files modal whose close control sits inside the panel.
+def sidebar_layout_check(page, res: "H.Results") -> None:
+    """Pin the sidebar layout: header icon parity, uniform tiles, and a files
+    dialog that follows the theme.
 
     Runs after gaming_mode_check: the touchstart it dispatches is what makes
     the keyboard and trackpad tiles render, so the action row is at its
@@ -391,7 +456,7 @@ def classic_layout_check(page, res: "H.Results") -> None:
         n: els.length,
         widths: r.map(x => Math.round(x.width * 10) / 10),
         rows: [...new Set(r.map(x => Math.round(x.top)))].length,
-        keyRow: [...document.querySelectorAll('.sidebar-mobile-key-actions .mobile-key-button')].length,
+        keyRow: [...document.querySelectorAll('.sidebar-mobile-key-actions .mobile-key-button:not(.key-palette-toggle)')].length,
         keyRowIcons: document.querySelectorAll('.sidebar-mobile-key-actions svg').length,
       };
     }""")
@@ -405,94 +470,35 @@ def classic_layout_check(page, res: "H.Results") -> None:
     try:
         page.locator('.sidebar-section-header:has-text("Files")').first.click()
         time.sleep(0.6)
-        page.locator('button[title="Download Files"]').first.click()
-        time.sleep(2.5)
-        opened = page.locator('.files-modal').count() > 0
+        page.locator('button:has-text("Download Files")').first.click()
+        page.locator('[role="dialog"]:has-text("Files")').first.wait_for(timeout=10000)
+        opened = True
     except Exception:
         pass
     if not opened:
-        res.check("files modal opens", False, "no .files-modal")
+        res.check("files dialog opens", False, "no files dialog")
         return
-    modal = page.evaluate("""() => {
-      const m = document.querySelector('.files-modal').getBoundingClientRect();
-      const c = document.querySelector('.files-modal-close').getBoundingClientRect();
-      const f = document.querySelector('.files-modal iframe').getBoundingClientRect();
-      let iframeBg = null, iframeTheme = null;
-      try {
-        const doc = document.querySelector('.files-modal iframe').contentDocument;
-        iframeBg = doc && doc.body ? getComputedStyle(doc.body).backgroundColor : null;
-        iframeTheme = doc ? doc.documentElement.dataset.theme || null : null;
-      } catch (e) { iframeBg = 'err:' + e; }
-      return {
-        clear: c.right <= m.right - 4 && c.top >= m.top + 2 && c.bottom <= f.top,
-        iframeBg, iframeTheme,
-        dashTheme: document.querySelector('.sidebar').className.includes('theme-dark') ? 'dark' : 'light',
-      };
-    }""")
-    res.check("files close button sits inside the panel above the frame",
-              modal["clear"], modal)
-    palettes = {"dark": "rgb(18, 22, 29)", "light": "rgb(244, 245, 248)"}
-    res.check("file index follows the dashboard theme",
-              modal["iframeTheme"] == modal["dashTheme"]
-              and modal["iframeBg"] == palettes.get(modal["dashTheme"]), modal)
-
-    # The mirror is live: the dashboard's own toggle re-renders the modal
-    # frame while its storage write restyles the page inside the frame.
-    page.locator('.theme-toggle').click()
+    palette = """() => {
+      const dialog = document.querySelector('[data-slot="dialog-content"]');
+      const close = dialog.querySelector('[data-slot="dialog-close"]');
+      const d = dialog.getBoundingClientRect(), c = close ? close.getBoundingClientRect() : null;
+      return { bg: getComputedStyle(dialog).backgroundColor,
+               closeInside: !!c && c.right <= d.right && c.top >= d.top,
+               dark: document.documentElement.classList.contains('dark') };
+    }"""
+    before = page.evaluate(palette)
+    res.check("the files dialog's close control sits inside the panel", before["closeInside"], before)
+    # The mirror is live: the dashboard's own toggle restyles the open dialog.
+    page.locator('.theme-toggle').first.click()
     time.sleep(0.6)
-    flipped = page.evaluate("""() => {
-      const out = {modalBg: getComputedStyle(document.querySelector('.files-modal')).backgroundColor};
-      try {
-        const doc = document.querySelector('.files-modal iframe').contentDocument;
-        out.theme = doc.documentElement.dataset.theme;
-        out.bg = getComputedStyle(doc.body).backgroundColor;
-      } catch (e) { out.theme = 'err'; out.bg = '' + e; }
-      return out;
-    }""")
-    res.check("frame and file index follow a live theme flip",
-              flipped["theme"] == "light" and flipped["bg"] == palettes["light"]
-              and flipped["modalBg"] == "rgb(255, 255, 255)", flipped)
-    page.locator('.theme-toggle').click()
+    after = page.evaluate(palette)
+    res.check("the files dialog follows a live theme flip",
+              before["dark"] and not after["dark"] and before["bg"] != after["bg"], (before, after))
+    page.locator('.theme-toggle').first.click()
     time.sleep(0.4)
-    settled = page.evaluate("""() => {
-      const f = document.querySelector('.files-modal iframe');
-      return {spinner: document.querySelectorAll('.files-modal-loading').length,
-              opacity: getComputedStyle(f).opacity};
-    }""")
-    res.check("a loaded file index shows the frame and no spinner",
-              settled == {"spinner": 0, "opacity": "1"}, settled)
-    page.locator('.files-modal-close').click()
-    time.sleep(0.4)
-
-    # Watched rather than sampled: the frame loads from this same process in a
-    # few milliseconds, far inside any poll interval, so the spinner is caught
-    # by recording that it was mounted at all.
-    page.evaluate("""() => {
-      window.__spinner = {seen: false, label: null};
-      const note = () => {
-        const el = document.querySelector('.files-modal-loading');
-        if (el) {
-          window.__spinner.seen = true;
-          const p = el.querySelector('p');
-          window.__spinner.label = p ? p.textContent : '';
-        }
-      };
-      new MutationObserver(note).observe(document.body, {childList: true, subtree: true});
-      note();
-    }""")
-    page.locator('button[title="Download Files"]').first.click()
-    time.sleep(2.5)
-    spun = page.evaluate("""() => {
-      const f = document.querySelector('.files-modal iframe');
-      return {seen: window.__spinner.seen, label: window.__spinner.label,
-              spinner: document.querySelectorAll('.files-modal-loading').length,
-              opacity: f ? getComputedStyle(f).opacity : null};
-    }""")
-    res.check("opening the files modal shows a labeled spinner that the loaded frame clears",
-              spun["seen"] and bool(spun["label"]) and spun["spinner"] == 0
-              and spun["opacity"] == "1", spun)
-    page.locator('.files-modal-close').click()
-    time.sleep(0.4)
+    page.keyboard.press("Escape")
+    time.sleep(0.5)
+    res.check("Escape closes the files dialog", page.locator('[role="dialog"]').count() == 0)
     # Leave the sidebar as found: the blocks after this one open it themselves.
     if page.evaluate("!!document.querySelector('.sidebar.is-open')"):
         page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
@@ -508,7 +514,7 @@ CLIPBOARD_PNG = bytes.fromhex(
 
 def open_clipboard_panel(page, dashboard: str) -> bool:
     """Open the dashboard's clipboard panel; False when it did not open."""
-    if dashboard == "classic":
+    if dashboard == "default":
         if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
             page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
             time.sleep(0.8)
@@ -523,7 +529,7 @@ def pick_clipboard_image(page, dashboard: str, file: dict) -> bool:
     """Choose `file` through the panel's Upload Image button, as a user does.
 
     The browser's file dialog takes the window's focus while it is open, which
-    closes any menu around the button (the Wish panel is a submenu). Playwright
+    closes any menu around the button (the toolbar's panel is a submenu). Playwright
     answers the dialog without showing it, so the blur the dialog would cause
     is dispatched between the click and the answer.
 
@@ -549,7 +555,7 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
     anything else is refused.
 
     The upload button is the only way binary clipboard content leaves the
-    client unasked, and Wish previews what was picked: a preview showing
+    client unasked, and the panel previews what was picked: a preview showing
     anything but the pixels of the picked file would be rendering something
     from somewhere else entirely.
     """
@@ -587,13 +593,9 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
       const pixel = canvas.getContext('2d').getImageData(0, 0, 1, 1).data;
       return { w: canvas.width, h: canvas.height, pixel: [...pixel] };
     }""")
-    if dashboard == "wish":
-        res.check("wish: the preview draws the picked image itself",
-                  urls == 0 and drawn is not None and [drawn["w"], drawn["h"]] == [2, 2]
-                  and drawn["pixel"][:3] == [255, 0, 0], drawn)
-    else:
-        res.check("classic: the panel shows no preview to point anywhere",
-                  urls == 0 and drawn is None, drawn)
+    res.check(f"{dashboard}: the preview draws the picked image itself",
+              urls == 0 and drawn is not None and [drawn["w"], drawn["h"]] == [2, 2]
+              and drawn["pixel"][:3] == [255, 0, 0], drawn)
     if dashboard == "wish":
         for _ in range(2):
             page.keyboard.press("Escape")
@@ -605,7 +607,7 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
               page.evaluate("window.__clipImages") == [len(CLIPBOARD_PNG)]
               and page.evaluate("window.__clipRefusals.length") == 1,
               page.evaluate("[window.__clipImages, window.__clipRefusals]"))
-    if dashboard == "classic":
+    if dashboard == "default":
         # Leave the sidebar as found: the checks after this one open it themselves.
         page.locator('.sidebar-section-header:has-text("Clipboard")').first.click()
         time.sleep(0.4)
@@ -645,15 +647,15 @@ def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
     res.check(f"{dashboard}: the touch gamepad draws its controls", shown > 0, shown)
 
     panel = ".sidebar"
-    if dashboard == "classic":
+    if dashboard == "default":
         if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
             page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
             time.sleep(0.8)
     else:
-        # Wish portals its panels to the body rather than into the dashboard
-        # root, so they are the half of its chrome that has to clear the pad on
-        # its own footing. Its menus sit at the top out of the pad's way; the
-        # file manager the Files item opens is the one drawn over it.
+        # The toolbar's dialogs are portaled to the body rather than into the
+        # dashboard root, so they are the half of its chrome that has to clear
+        # the pad on their own footing. Its menus sit at the top out of the
+        # pad's way; the file manager the Files item opens is the one drawn over it.
         panel = '[data-slot="dialog-overlay"]'
         opened = wish_open_menu_item(page, "Files")
         if opened:
@@ -702,7 +704,7 @@ def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
       payload: { visible: false, targetDivId: 'touch-gamepad-host' },
     }, window.location.origin)""")
     time.sleep(0.5)
-    if dashboard == "classic":
+    if dashboard == "default":
         # Leave the sidebar as found, like the layout check before it.
         if page.evaluate("!!document.querySelector('.sidebar.is-open')"):
             page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
@@ -712,18 +714,17 @@ def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
         time.sleep(0.3)
 
 
-def dash_block(dashboard: str, dist: str) -> "H.Results":
-    """Exercise one dashboard's settings loop and mode-switch round trip.
+def dash_block(dashboard: str) -> "H.Results":
+    """Exercise one layout's settings loop and mode-switch round trip.
 
     Args:
-        dashboard: ``classic`` or ``wish``.
-        dist: Path to that dashboard's built web root.
+        dashboard: The layout, ``default`` or ``wish``.
 
     Returns:
-        The Results accumulator for this dashboard's checks.
+        The Results accumulator for this layout's checks.
     """
     res = H.Results(f"dash-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
     # The served document names the tab. Left to the client script, the browser
     # shows the host URL there until the bundle runs.
     shell = H.curl("/")[1].decode("utf-8", "replace")
@@ -758,15 +759,15 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
 
         chrome = page.evaluate("""(() => ({
             body: document.body.innerText.length,
-            sidebar: !!document.querySelector('.sidebar, .top-menu, .sidebar-container, ' + WISH_CHROME),
-        }))()""".replace("WISH_CHROME", repr(WISH_CHROME)))
+            sidebar: !!document.querySelector(CHROME),
+        }))()""".replace("CHROME", repr(CHROME)))
         res.check("dashboard chrome renders", chrome["sidebar"] or chrome["body"] > 400,
                   chrome)
         info = wait_canvas(page)
         res.check("video streams", info is not None, info)
 
         # Positive control for the gates block below.
-        if dashboard == "classic":
+        if dashboard == "default":
             section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
         else:
             section = wish_gamepad_panel(page)["pads"]
@@ -776,75 +777,45 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
             wish_clipboard_seed_check(page, res)
             wish_stats_fit_check(page, res)
         gaming_mode_check(page, res, dashboard)
-        if dashboard == "classic":
-            classic_layout_check(page, res)
-            classic_stats_strip_check(page, res)
+        if dashboard == "default":
+            sidebar_layout_check(page, res)
+            stats_overlay_check(page, res)
         touch_gamepad_layer_check(page, res, dashboard)
+        resize_check(page, res, dashboard)
         clipboard_image_check(page, res, dashboard)
 
         st = len(H.server_log())
         changed = False
-        if dashboard == "classic":
-            try:
-                opened = classic_open_video(page)
-                time.sleep(1.0)
-                if page.locator('#framerateSlider').count():
-                    # The slider carries an index into its frame rate stops, and the
-                    # display's own stop sits right after the listed stop of its rate,
-                    # so two stops down is a change of rate from whatever the default is.
-                    page.evaluate("""() => {
-                      const el = document.getElementById('framerateSlider');
-                      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                      setter.call(el, String(Number(el.value) > 1 ? Number(el.value) - 2 : 2));
-                      el.dispatchEvent(new Event('input', {bubbles: true}));
-                      el.dispatchEvent(new Event('change', {bubbles: true}));
-                    }""")
-                    changed = True
-                else:
-                    print("classic: framerateSlider not found after open:", opened)
-            except Exception as e:
-                print("classic slider err:", e)
-        else:
-            # The sliders are driven by click-to-focus plus arrow keys; the
-            # frame rate is the first of the Performance card.
-            try:
-                opened = (open_wish_settings_tab(page, "Video", "Performance")
-                          and page.locator('[data-slot="slider-thumb"]').count() > 0)
-                if opened:
-                    track = page.locator('[data-slot="slider-thumb"]').first
-                    track.click(force=True, timeout=2000)
-                    time.sleep(0.2)
-                    for _ in range(2):
-                        page.keyboard.press("ArrowRight")
-                        time.sleep(0.15)
-                    changed = True
-                else:
-                    print("wish: settings panel did not open")
-            except Exception as e:
-                print("wish slider err:", e)
+        try:
+            opened = open_video_settings(page, dashboard)
+            time.sleep(1.0)
+            if page.locator('#framerateSlider').count():
+                # The slider carries an index into its frame rate stops, and the
+                # display's own stop sits right after the listed stop of its rate,
+                # so two stops down is a change of rate from whatever the default is.
+                page.evaluate("""() => {
+                  const el = document.getElementById('framerateSlider');
+                  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                  setter.call(el, String(Number(el.value) > 1 ? Number(el.value) - 2 : 2));
+                  el.dispatchEvent(new Event('input', {bubbles: true}));
+                  el.dispatchEvent(new Event('change', {bubbles: true}));
+                }""")
+                changed = True
+            else:
+                print(f"{dashboard}: framerateSlider not found after open:", opened)
+        except Exception as e:
+            print(f"{dashboard} slider err:", e)
         time.sleep(3.0)
         newlog = H.server_log()[st:]
         applied = ("Applying video settings" in newlog or "Updated framerate to" in newlog
                    or "framerate" in newlog.lower())
         res.check("UI framerate change applied server-side", changed and applied, newlog[-160:])
 
-        if dashboard == "classic":
-            sel = page.locator('select').first
-            if sel.count():
-                sel.select_option(value="webrtc")
-            else:
-                page.evaluate("""window.postMessage({type:'mode', mode:'webrtc'}, window.location.origin)""")
+        sel = page.locator('#streamModeSelect').first
+        if sel.count():
+            sel.select_option(value="webrtc")
         else:
-            try:
-                dd = page.locator('button:has-text("WebSocket"), button:has-text("WebRTC")').first
-                if dd.count() and dd.is_visible():
-                    dd.click()
-                    time.sleep(0.5)
-                    page.locator('div[role="option"]:has-text("WebRTC")').first.click()
-                else:
-                    page.evaluate("window.postMessage({type:'mode', mode:'webrtc'}, window.location.origin)")
-            except Exception:
-                page.evaluate("window.postMessage({type:'mode', mode:'webrtc'}, window.location.origin)")
+            page.evaluate("""window.postMessage({type:'mode', mode:'webrtc'}, window.location.origin)""")
         time.sleep(1.5)
         # The dashboard may call /api/switch; do it directly if not flipped yet.
         status_mode = json.loads(H.curl("/api/status")[1]).get("current_mode")
@@ -869,8 +840,8 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         res.check("video flows back in websockets", info3 is not None, info3)
         # On the fresh page (its input context is attached, so the chord is
         # live), and last: the demotion leaves the page without a sidebar.
-        if dashboard == "classic":
-            classic_viewer_check(page3, res)
+        if dashboard == "default":
+            viewer_check(page3, res)
         page3.close()
 
         # The signaling handshake is refused (409, 503) while the server the
@@ -886,15 +857,15 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
-def gates_block(dashboard: str, dist: str) -> "H.Results":
+def gates_block(dashboard: str) -> "H.Results":
     """ui_sidebar_show_shortcuts=false and ui_sidebar_show_webcam=false must
-    hide the shortcuts UI and the webcam toggle on BOTH dashboards;
-    ui_sidebar_show_gamepads=false hides the gamepads section (the visualizer
-    card in Wish) and nothing else, so the gamepad input toggle stays; and
-    enable_resize=false offers no resolution to pick on the primary, whose
-    size the server keeps."""
+    hide the shortcuts UI and the webcam toggle in BOTH layouts;
+    ui_sidebar_show_gamepads=false hides the gamepads section (the pads part
+    of the toolbar's panel) and nothing else, so the gamepad input toggle
+    stays; and enable_resize=false offers no resolution to pick on the
+    primary, whose size the server keeps."""
     res = H.Results(f"gates-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist,
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
                    extra_env={
                        "SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false",
                        "SELKIES_UI_SHOW_SIDEBAR": "false",
@@ -906,12 +877,11 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         page = ctx.new_page()
         page.goto(H.BASE_URL, wait_until="load")
         time.sleep(8.0)
-        chrome = page.evaluate("""(() => !!document.querySelector('.sidebar, .top-menu, .sidebar-container, WISH_CHROME'))()"""
-                               .replace("WISH_CHROME", WISH_CHROME))
+        chrome = page.evaluate("""(() => !!document.querySelector('CHROME'))()""".replace("CHROME", CHROME))
         res.check("ui_show_sidebar=false hides chrome", not chrome, chrome)
         # The shortcuts gate needs the sidebar enabled, so it gets its own boot.
         browser.close()
-    H.server_start(mode="websockets", wayland=False, web_root=dist,
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
                    extra_env={
                        "SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false",
                        "SELKIES_UI_SIDEBAR_SHOW_WEBCAM": "false",
@@ -926,7 +896,7 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         page.goto(H.BASE_URL, wait_until="load")
         time.sleep(8.0)
         body = page.evaluate("document.body.innerText")
-        # 'Shortcuts' is a section/menu label in both dashboards, and the label
+        # 'Shortcuts' is a section/menu label in both layouts, and the label
         # text shows up in innerText even when the section exists only as a DOM
         # label, so this catches a section that was merely collapsed.
         has_shortcuts = "Shortcuts" in body
@@ -935,7 +905,7 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         # The webcam gate hides one entry of the core-button group while its
         # siblings stay, so the microphone control doubles as proof that the
         # group itself was reached (sidebar opened / stream menu expanded).
-        if dashboard == "classic":
+        if dashboard == "default":
             try:
                 page.locator('.toggle-handle').first.click()
                 time.sleep(0.8)
@@ -966,15 +936,8 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         res.check("ui_sidebar_show_webcam=false hides webcam toggle", not cam, cam)
         res.check("ui_sidebar_show_gamepads=false keeps the gamepad input toggle", pad, pad)
         res.check("ui_sidebar_show_gamepads=false hides the gamepads section", not section, section)
-        if dashboard == "classic":
-            header = page.locator('.sidebar-section-header:has-text("Screen")').first
-            header.scroll_into_view_if_needed()
-            header.click()
-            time.sleep(0.8)
-            preset = page.locator('#resolutionPresetSelect').count()
-        else:
-            open_wish_settings_tab(page, "Resolution", "Resolution")
-            preset = page.locator('button:has-text("Select Preset")').count()
+        open_screen_settings(page, dashboard)
+        preset = page.locator('#resolutionPresetSelect').count()
         # The button beside the resolution controls, so an unopened panel cannot pass.
         scale = page.locator('button:has-text("Scale Locally")').count()
         res.check("screen settings reachable (scale-locally button present)", scale > 0, scale)
@@ -984,7 +947,7 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
-def hidpi_default_block(dashboard: str, dist: str, mode: str = "websockets") -> "H.Results":
+def hidpi_default_block(dashboard: str, mode: str = "websockets") -> "H.Results":
     """A deployment that configures a resolution turns HiDPI off, and the core
     has to stream that way. The dashboard resolves the default; the core starts
     from its own stored value, so without a push it streams pixel-perfect on
@@ -992,7 +955,7 @@ def hidpi_default_block(dashboard: str, dist: str, mode: str = "websockets") -> 
     core sends is what it is actually applying. Both cores resolve it, so both
     transports are driven."""
     res = H.Results(f"hidpi-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=dist,
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
                    extra_env={"SELKIES_MANUAL_WIDTH": "1280",
                               "SELKIES_MANUAL_HEIGHT": "800"})
     # The core persists every `useCssScaling` it applies, so the stored value is
@@ -1061,7 +1024,7 @@ UDP_BLACKHOLE_JS = """
 """
 
 
-def transport_advice_block(dashboard: str, dist: str, dual: bool, engine: str = "chromium") -> "H.Results":
+def transport_advice_block(dashboard: str, dual: bool, engine: str = "chromium") -> "H.Results":
     """A WebRTC session whose media path fails beside a working signaling
     socket raises a notice offering WebSockets, whichever engine gives the
     path up. With dual mode on, its button switches the server and the page
@@ -1069,13 +1032,10 @@ def transport_advice_block(dashboard: str, dist: str, dual: bool, engine: str = 
     button and says who can switch."""
     res = H.Results(f"transport-advice-{dashboard}-{'dual' if dual else 'single'}"
                     + ("" if engine == "chromium" else f"-{engine}"))
-    H.server_start(mode="webrtc", wayland=False, web_root=dist,
+    H.server_start(mode="webrtc", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
                    extra_env={"SELKIES_ENABLE_DUAL_MODE": "true" if dual else "false"})
-    if dashboard == "classic":
-        notice, button = ".notification-item.transport", ".notification-transport-switch"
-    else:
-        notice = '[data-sonner-toast]:has-text("WebRTC cannot connect")'
-        button = '[data-sonner-toast] button:has-text("Switch to WebSockets")'
+    notice = '[data-sonner-toast]:has-text("WebRTC cannot connect")'
+    button = '[data-sonner-toast] button:has-text("Switch to WebSockets")'
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p) if engine == "chromium" else C.launch_browser(p, engine)
@@ -1128,7 +1088,7 @@ def wait_xft(want: int, timeout: float = 20) -> int:
     return got
 
 
-def dpi_for_resolution_block(dashboard: str, dist: str) -> "H.Results":
+def dpi_for_resolution_block(dashboard: str) -> "H.Results":
     """A resolution picked in the dashboard carries the UI-scaling default with it.
 
     The picker and the desktop have to land on the same number: the framebuffer
@@ -1136,12 +1096,11 @@ def dpi_for_resolution_block(dashboard: str, dist: str) -> "H.Results":
     says nothing about it, and the dashboard posts its own derived value over
     the core's whenever the two differ. Driven through the control a user uses,
     at dpr 1, where the display itself would ask for 96 whatever the resolution
-    is. The classic dashboard's selects are what can be driven; the Wish
-    dashboard mirrors the same formula, which
-    tests/unit/test_dpi_default_mirror.py holds it to.
+    is, in either layout; tests/unit/test_dpi_default_mirror.py holds the
+    dashboard's formula to the core's.
     """
     res = H.Results(f"dpi-for-resolution-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
@@ -1150,12 +1109,7 @@ def dpi_for_resolution_block(dashboard: str, dist: str) -> "H.Results":
             page = ctx.new_page()
             page.goto(H.BASE_URL, wait_until="load")
             res.check("video flowing", bool(wait_canvas(page, 30)), "")
-            page.locator('.toggle-handle').first.click()
-            time.sleep(0.8)
-            header = page.locator('.sidebar-section-header:has-text("Screen")').first
-            header.scroll_into_view_if_needed()
-            header.click()
-            time.sleep(0.8)
+            open_screen_settings(page, dashboard)
             # The desktop's own DPI is left where the last session put it until
             # something changes it, so the picker is where the starting pick
             # reads: the display's, with no resolution of its own to follow.
@@ -1176,7 +1130,7 @@ def dpi_for_resolution_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
-def second_screen_block(dashboard: str, dist: str) -> "H.Results":
+def second_screen_block(dashboard: str) -> "H.Results":
     """A refused second-display window leaves the placement arrows up.
 
     The window is opened from an async continuation, so the click's transient
@@ -1187,7 +1141,7 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
     appearing to do nothing at all.
     """
     res = H.Results(f"second-screen-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
     arrows = "[...document.querySelectorAll('.screen-placement-overlay button')]"
     try:
         with sync_playwright() as p:
@@ -1201,13 +1155,7 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
             if dashboard == "wish":
                 opened = wish_open_menu_item(page, "Add a second screen")
             else:
-                opened = classic_open_video(page)
-                page.evaluate("""() => {
-                  const header = [...document.querySelectorAll('.sidebar-section-header')]
-                    .find(e => /screen/i.test(e.textContent));
-                  if (header) header.click();
-                }""")
-                time.sleep(1.0)
+                opened = open_screen_settings(page, dashboard)
                 page.evaluate("""() => {
                   const add = [...document.querySelectorAll('button')]
                     .find(b => /add screen/i.test(b.textContent));
@@ -1224,8 +1172,8 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
                       still == shown, f"{still} of {shown} arrows")
             res.check("no second window was opened", len(ctx.pages) == 1,
                       f"{len(ctx.pages)} page(s)")
-            if dashboard == "classic":
-                classic_arrow_theme_check(page, res)
+            if dashboard == "default":
+                arrow_theme_check(page, res)
             browser.close()
     finally:
         H.server_stop()
@@ -1233,18 +1181,15 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
-def classic_arrow_theme_check(page, res: "H.Results") -> None:
-    """The placement arrows are the theme's filled button in either theme.
-
-    The overlay is a sibling of the sidebar, so it only sees the palette it
-    carries the theme class for itself; a stale color here is the one
-    control on the page that never follows the theme.
-    """
+def arrow_theme_check(page, res: "H.Results") -> None:
+    """The placement arrows are the theme's filled button in either theme: a
+    stale color here would be the one control on the page that never follows
+    the theme."""
     probe = """() => {
       const arrow = document.querySelector('.screen-placement-overlay button');
       const swatch = document.createElement('div');
-      swatch.style.background = 'var(--button-bg)';
-      document.querySelector('.sidebar').appendChild(swatch);
+      swatch.style.background = 'var(--primary)';
+      document.body.appendChild(swatch);
       const out = {arrow: getComputedStyle(arrow).backgroundColor,
                    token: getComputedStyle(swatch).backgroundColor};
       swatch.remove();
@@ -1256,7 +1201,7 @@ def classic_arrow_theme_check(page, res: "H.Results") -> None:
             page.evaluate("document.querySelector('.theme-toggle').click()")
             time.sleep(0.5)
         theme = page.evaluate(
-            "document.querySelector('.sidebar').className.includes('theme-light') ? 'light' : 'dark'")
+            "document.documentElement.classList.contains('light') ? 'light' : 'dark'")
         colors = page.evaluate(probe)
         seen[theme] = colors["arrow"]
         res.check(f"placement arrows use the {theme} theme's button fill",
@@ -1265,7 +1210,7 @@ def classic_arrow_theme_check(page, res: "H.Results") -> None:
               len(seen) == 2 and len(set(seen.values())) == 2, f"{seen}")
 
 
-def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
+def second_screen_auto_block(dashboard: str) -> "H.Results":
     """With one adjacent screen the button places the display on it, unasked.
 
     The arrows exist for every other case; this is the branch that skips them,
@@ -1275,7 +1220,7 @@ def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
     Management API answers nothing without it.
     """
     res = H.Results(f"second-screen-auto-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
     profile = tempfile.mkdtemp(prefix=f"selkies-screens-{dashboard}-")
     try:
         with sync_playwright() as p:
@@ -1300,9 +1245,7 @@ def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
             if dashboard == "wish":
                 wish_open_menu_item(page, "Add a second screen")
             else:
-                classic_open_video(page)
-                page.locator('.sidebar-section-header:has-text("Screen")').first.click()
-                time.sleep(1.0)
+                open_screen_settings(page, dashboard)
                 page.get_by_role("button", name=re.compile("add screen", re.I)).first.click()
             time.sleep(4.0)
             arrows = page.evaluate(
@@ -1324,11 +1267,10 @@ def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
-def open_wish_settings_tab(page, tab: str, card: str = "") -> bool:
-    """Open the Wish Settings panel (the Settings2 icon in the control strip)
-    unless it is open, switch it to the tab labeled `tab`, and open the card
-    titled `card` there: a tab's cards are an accordion that keeps one open.
-    A bar that gaming mode slid up behind the top edge is brought back first."""
+def open_wish_settings_tab(page, tab: str) -> bool:
+    """Open the toolbar's settings card (the Settings2 icon in the control
+    strip) unless it is open and switch it to the tab labeled `tab`. A bar
+    that gaming mode slid up behind the top edge is brought back first."""
     wish_show_toolbar(page)
     if not page.locator('[role="tab"]').count():
         trig = page.locator('button:has(svg.lucide-settings-2)').first
@@ -1341,35 +1283,18 @@ def open_wish_settings_tab(page, tab: str, card: str = "") -> bool:
         return False
     tab_button.click()
     time.sleep(0.8)
-    if card:
-        trigger = page.locator('[data-slot="accordion-trigger"]:visible', has_text=card).first
-        if not trigger.count():
-            return False
-        if trigger.get_attribute("aria-expanded") != "true":
-            trigger.click()
-            time.sleep(0.6)
     return True
 
 
 def click_raw_pointer_motion(page, dashboard: str) -> bool:
-    """Click the raw pointer motion toggle in either dashboard's screen settings.
+    """Click the raw pointer motion toggle in either layout's screen settings.
 
     Returns:
         True when the toggle was found and clicked.
     """
-    if dashboard == "classic":
-        classic_open_video(page)
-        header = page.locator('.sidebar-section-header:has-text("Screen")').first
-        if not header.count():
-            return False
-        header.click()
-        time.sleep(1.0)
-        toggle = page.locator('#rawPointerMotionToggle')
-    else:
-        if not open_wish_settings_tab(page, "Resolution"):
-            return False
-        toggle = page.locator(
-            'div:has(> label:has-text("Raw pointer motion")) > [role="switch"]')
+    if not open_screen_settings(page, dashboard):
+        return False
+    toggle = page.locator('#rawPointerMotionToggle')
     if not toggle.count():
         return False
     toggle.first.scroll_into_view_if_needed()
@@ -1377,7 +1302,7 @@ def click_raw_pointer_motion(page, dashboard: str) -> bool:
     return True
 
 
-def raw_pointer_motion_block(dashboard: str, dist: str, mode: str = "websockets") -> "H.Results":
+def raw_pointer_motion_block(dashboard: str, mode: str = "websockets") -> "H.Results":
     """The raw pointer motion toggle reaches the running client and is kept.
 
     On this platform the setting resolves on (the server's default, and Linux
@@ -1387,7 +1312,7 @@ def raw_pointer_motion_block(dashboard: str, dist: str, mode: str = "websockets"
     transports, since each core applies the setting itself.
     """
     res = H.Results(f"raw-motion-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=dist)
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
     state = "() => window.webrtcInput ? window.webrtcInput.constructor.rawPointerMotion : null"
     stored = """(() => {
       for (let i = 0; i < localStorage.length; i++) {
@@ -1425,30 +1350,22 @@ def raw_pointer_motion_block(dashboard: str, dist: str, mode: str = "websockets"
 
 
 def pick_rate_control(page, dashboard: str, mode: str) -> bool:
-    """Pick `mode` ("cbr" or "crf") in either dashboard's rate-control menu,
+    """Pick `mode` ("cbr" or "crf") in either layout's rate-control menu,
     opening the video settings first where they are closed.
 
     Returns:
         True when the menu was found and the pick made.
     """
     try:
-        if dashboard == "classic":
-            if not page.locator('#rateControlSelect').count():
-                classic_open_video(page)
-            page.select_option('#rateControlSelect', mode, timeout=5000)
-            return True
-        box = page.locator("div.space-y-2:has(> label:text-is('Encoder Rate Control Mode'))")
-        if not box.count():
-            open_wish_settings_tab(page, "Video", "Performance")
-        box.first.locator("button").first.click(timeout=5000)
-        item = "CRF (Constant Quality)" if mode == "crf" else "CBR (Constant Bitrate)"
-        page.locator(f"[role='menuitem']:has-text('{item}')").first.click(timeout=5000)
+        if not page.locator('#rateControlSelect').count():
+            open_video_settings(page, dashboard)
+        page.select_option('#rateControlSelect', mode, timeout=5000)
         return True
     except Exception:
         return False
 
 
-def rate_control_block(dashboard: str, dist: str, mode: str = "websockets") -> "H.Results":
+def rate_control_block(dashboard: str, mode: str = "websockets") -> "H.Results":
     """A rate-control pick streams at the quality the dashboard shows.
 
     The operator sets a CRF and a bitrate of its own. Picking CRF, then CBR
@@ -1459,7 +1376,7 @@ def rate_control_block(dashboard: str, dist: str, mode: str = "websockets") -> "
     would move the stream off what the page shows.
     """
     res = H.Results(f"rate-control-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=dist,
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
                    extra_env={"SELKIES_VIDEO_CRF": "30", "SELKIES_VIDEO_BITRATE": "4000"})
     steps = (
         {"pick": "crf", "label": "Video CRF (", "shown": "(30)", "line": "CRF: 30",
@@ -1503,7 +1420,7 @@ def rate_control_block(dashboard: str, dist: str, mode: str = "websockets") -> "
     return res
 
 
-def settings_follow_block(dashboard: str, dist: str, mode: str = "websockets") -> "H.Results":
+def settings_follow_block(dashboard: str, mode: str = "websockets") -> "H.Results":
     """A page with no picks of its own shows what the display streams with.
 
     The server keeps a display's settings when its page goes, so a page whose
@@ -1514,7 +1431,8 @@ def settings_follow_block(dashboard: str, dist: str, mode: str = "websockets") -
     a page opens in a fresh browser context.
     """
     res = H.Results(f"settings-follow-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=dist, extra_env={"SELKIES_VIDEO_CRF": "30"})
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
+                   extra_env={"SELKIES_VIDEO_CRF": "30"})
 
     def shown(page, step: str) -> None:
         if mode == "webrtc":
@@ -1567,45 +1485,28 @@ def settings_follow_block(dashboard: str, dist: str, mode: str = "websockets") -
 
 
 def pick_rate_control_open(page, dashboard: str) -> bool:
-    """Open either dashboard's video settings, where the rate control and its value show."""
+    """Open either layout's video settings, where the rate control and its value show."""
     try:
-        if dashboard == "classic":
-            if not page.locator('#rateControlSelect').count():
-                classic_open_video(page)
-            return page.locator('#rateControlSelect').count() > 0
-        box = page.locator("div.space-y-2:has(> label:text-is('Encoder Rate Control Mode'))")
-        if not box.count():
-            open_wish_settings_tab(page, "Video", "Performance")
-        return box.count() > 0
+        if not page.locator('#rateControlSelect').count():
+            open_video_settings(page, dashboard)
+        return page.locator('#rateControlSelect').count() > 0
     except Exception:
         return False
 
 
 def paint_over_switches(page, dashboard: str):
-    """The Turbo and paint-over switches of either dashboard, opening its video
+    """The Turbo and paint-over switches of either layout, opening its video
     settings first."""
-    if dashboard == "classic":
-        if not page.locator('#videoStreamingModeToggle').count():
-            classic_open_video(page)
-        return page.locator('#videoStreamingModeToggle'), page.locator('#usePaintOverQualityToggle')
-    if not page.locator("label:text-is('Use Paint-Overs')").count():
-        open_wish_settings_tab(page, "Video", "Performance")
-
-    def row(label: str):
-        return page.locator(f"div.justify-between:has(> label:text-is('{label}')) > [role='switch']").first
-    return row("Turbo"), row("Use Paint-Overs")
+    if not page.locator('#videoStreamingModeToggle').count():
+        open_video_settings(page, dashboard)
+    return page.locator('#videoStreamingModeToggle'), page.locator('#usePaintOverQualityToggle')
 
 
 def cpu_threading_switch(page, dashboard: str):
-    """Either dashboard's CPU encoding threads switch, opening its video settings first."""
-    label = "Multithreaded CPU Encoding"
-    if dashboard == "classic":
-        if not page.locator('#encoderSelect').count():
-            classic_open_video(page)
-        return page.locator('#cpuEncodeThreadingToggle')
-    if not page.locator(f"label:text-is('{label}')").count():
-        open_wish_settings_tab(page, "Video", "Performance")
-    return page.locator(f"div.justify-between:has(> label:text-is('{label}')) > [role='switch']")
+    """Either layout's CPU encoding threads switch, opening its video settings first."""
+    if not page.locator('#encoderSelect').count():
+        open_video_settings(page, dashboard)
+    return page.locator('#cpuEncodeThreadingToggle')
 
 
 def encoder_threads_logged() -> int:
@@ -1615,7 +1516,7 @@ def encoder_threads_logged() -> int:
     return int(found.group(1)) if found else 0
 
 
-def cpu_threading_block(dashboard: str, dist: str) -> "H.Results":
+def cpu_threading_block(dashboard: str) -> "H.Results":
     """The CPU encoding threads switch shows the server's value while the session encodes in software.
 
     A session with software encoding forced shows the switch, on as the server
@@ -1625,11 +1526,11 @@ def cpu_threading_block(dashboard: str, dist: str) -> "H.Results":
     codes on one thread; turned on it runs threaded, and a reload keeps the
     pick. An operator's true keeps VP8 threaded, a locked value hides the
     switch, and a JPEG session, whose stripes it codes one after another,
-    shows it. On the classic dashboard a page that moves from x264 to VP8 sees
-    it go off, the server's value for the new encoder.
+    shows it. A page that moves from x264 to VP8 sees it go off, the
+    server's value for the new encoder.
     """
     res = H.Results(f"cpu-threading-{dashboard}")
-    cases = ["unset", "locked", "jpeg", "vp8", "vp8-operator"] + (["to-vp8", "vp8-webrtc"] if dashboard == "classic" else [])
+    cases = ["unset", "locked", "jpeg", "vp8", "vp8-operator", "to-vp8", "vp8-webrtc"]
     for case in cases:
         env = {"SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true"}
         if case == "locked":
@@ -1643,7 +1544,7 @@ def cpu_threading_block(dashboard: str, dist: str) -> "H.Results":
         elif case == "to-vp8":
             env["SELKIES_ENCODER"] = "h264enc,vp8enc"
         mode = "webrtc" if case == "vp8-webrtc" else "websockets"
-        H.server_start(mode=mode, wayland=False, web_root=dist, extra_env=env)
+        H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard, extra_env=env)
         try:
             with sync_playwright() as p:
                 browser = C.launch_browser(p, "chromium")
@@ -1738,11 +1639,11 @@ def cpu_threading_block(dashboard: str, dist: str) -> "H.Results":
 
 
 def switch_on(switch) -> bool:
-    """Whether a dashboard switch reads on (the classic toggle's aria-pressed, the wish Switch's aria-checked)."""
-    return (switch.get_attribute("aria-pressed") or switch.get_attribute("aria-checked")) == "true"
+    """Whether a dashboard switch reads on."""
+    return switch.get_attribute("aria-checked") == "true"
 
 
-def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
+def paint_over_block(dashboard: str, engine: str) -> "H.Results":
     """Paint-over follows Turbo where nothing pins it, at a constant quality.
 
     A video encoder under Turbo sends every frame and leaves no still screen to
@@ -1759,7 +1660,7 @@ def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
         env = {"SELKIES_RATE_CONTROL_MODE": "crf"}
         if operator:
             env["SELKIES_USE_PAINT_OVER_QUALITY"] = operator
-        H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=env)
+        H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard, extra_env=env)
         try:
             with sync_playwright() as p:
                 browser = C.launch_browser(p, engine)
@@ -1825,7 +1726,7 @@ def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
                 C.close_browser(browser)
         finally:
             H.server_stop()
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
     try:
         with sync_playwright() as p:
             browser = C.launch_browser(p, engine)
@@ -1837,8 +1738,7 @@ def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
             C.wait_ws_video(page, timeout=45)
             time.sleep(2.0)
             turbo, paint = paint_over_switches(page, dashboard)
-            quality = (page.locator("#videoPaintoverCRFSlider") if dashboard == "classic"
-                       else page.locator("label:has-text('Paint-Overs CRF')"))
+            quality = page.locator("#videoPaintoverCRFSlider")
             res.check("CBR: the paint-over switch is hidden", turbo.count() == 1 and paint.count() == 0,
                       f"switches {turbo.count()} {paint.count()}")
             res.check("CBR: the paint-over quality is shown", quality.count() == 1, quality.count())
@@ -1859,13 +1759,13 @@ def wait_second_display(timeout: float = 15.0) -> bool:
     return False
 
 
-def page_socket_block(dashboard: str, dist: str, engine: str) -> "H.Results":
+def page_socket_block(dashboard: str, engine: str) -> "H.Results":
     """With the session socket on the page (`socket_worker=false`, or a policy that forbids
     blob workers), the settings the server sends at connect can arrive before the dashboard's
     listeners are up, WebKit's first among them; the dashboard still starts from them, so the
     controls they gate come up enabled."""
     res = H.Results(f"page-socket-{dashboard}-{engine}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
     try:
         with sync_playwright() as p:
             browser = C.launch_browser(p, engine)
@@ -1885,7 +1785,7 @@ def page_socket_block(dashboard: str, dist: str, engine: str) -> "H.Results":
     return res
 
 
-# The languages the dashboards ship, by the locale a browser would ask for.
+# The languages the dashboard ships, by the locale a browser would ask for.
 LOCALES = ["en-US", "es-ES", "zh-CN", "hi-IN", "pt-BR", "fr-FR", "ru-RU", "de-DE", "tr-TR", "it-IT",
            "nl-NL", "ar-SA", "ko-KR", "ja-JP", "vi-VN", "th-TH", "fil-PH", "da-DK", "zh-TW"]
 # What of the open sidebar reaches past its content's right edge, or is cut off inside a box: the
@@ -1910,13 +1810,13 @@ WIDE_FONT = ".sidebar, .sidebar * { font-family: 'DejaVu Sans', sans-serif !impo
 
 
 def layout_block() -> "H.Results":
-    """The classic sidebar, every section open and on a touch screen the key
-    palette too, keeps its contents inside it in every language the dashboards
-    ship, on a desktop window, a touch laptop's (the 280-pixel sidebar with the
-    palette open) and a 320-pixel phone; the wish dashboard's top bar and soft
-    keys fit that phone."""
+    """The sidebar, every section open and on a touch screen the key palette
+    too, keeps its contents inside it in every language the dashboard ships,
+    on a desktop window, a touch laptop's (the 280-pixel sidebar with the
+    palette open) and a 320-pixel phone; the toolbar and its soft keys fit
+    that phone."""
     res = H.Results("dash-layout")
-    H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout="default")
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
@@ -1947,11 +1847,11 @@ def layout_block() -> "H.Results":
                     if found is None or found:
                         spilled[locale] = found
                     ctx.close()
-                res.check(f"classic: the sidebar holds its contents in every language ({form})", not spilled, spilled)
+                res.check(f"default: the sidebar holds its contents in every language ({form})", not spilled, spilled)
             browser.close()
     finally:
         H.server_stop()
-    H.server_start(mode="websockets", wayland=False, web_root=H.WISH_DIST)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout="wish")
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
@@ -1963,7 +1863,7 @@ def layout_block() -> "H.Results":
             time.sleep(1.0)
             reach = page.evaluate("""() => Math.max(...[...document.querySelectorAll('#dashboard-root button')]
               .filter((b) => b.offsetParent).map((b) => b.getBoundingClientRect().right))""")
-            res.check("wish: the top bar and the soft keys fit a 320-pixel phone", reach <= PHONE["width"], reach)
+            res.check("wish: the toolbar and the soft keys fit a 320-pixel phone", reach <= PHONE["width"], reach)
             browser.close()
     finally:
         H.server_stop()
@@ -1975,66 +1875,41 @@ def main() -> None:
     """Run the dashboard blocks named on argv (default: all)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
-    if which in ("all", "classic"):
-        blocks.append(dash_block("classic", H.CLASSIC_DIST))
+    if which in ("all", "default", "classic"):
+        blocks.append(dash_block("default"))
     if which in ("all", "wish"):
-        blocks.append(dash_block("wish", H.WISH_DIST))
-    if which in ("all", "gates"):
-        blocks.append(gates_block("classic", H.CLASSIC_DIST))
-        blocks.append(gates_block("wish", H.WISH_DIST))
-    if which in ("all", "hidpi"):
-        blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST))
-        blocks.append(hidpi_default_block("wish", H.WISH_DIST))
-    if which in ("all", "hidpi-webrtc"):
-        blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST, "webrtc"))
-        blocks.append(hidpi_default_block("wish", H.WISH_DIST, "webrtc"))
-    if which in ("all", "cpu-threading"):
-        blocks.append(cpu_threading_block("classic", H.CLASSIC_DIST))
-        blocks.append(cpu_threading_block("wish", H.WISH_DIST))
-    if which in ("all", "raw-motion"):
-        blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST))
-        blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST))
-    if which in ("all", "raw-motion-webrtc"):
-        blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST, "webrtc"))
-        blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST, "webrtc"))
-    if which in ("all", "rate-control"):
-        blocks.append(rate_control_block("classic", H.CLASSIC_DIST))
-        blocks.append(rate_control_block("wish", H.WISH_DIST))
-    if which in ("all", "rate-control-webrtc"):
-        blocks.append(rate_control_block("classic", H.CLASSIC_DIST, "webrtc"))
-        blocks.append(rate_control_block("wish", H.WISH_DIST, "webrtc"))
-    if which in ("all", "settings-follow"):
-        blocks.append(settings_follow_block("classic", H.CLASSIC_DIST))
-        blocks.append(settings_follow_block("wish", H.WISH_DIST))
-    if which in ("all", "settings-follow-webrtc"):
-        blocks.append(settings_follow_block("classic", H.CLASSIC_DIST, "webrtc"))
-        blocks.append(settings_follow_block("wish", H.WISH_DIST, "webrtc"))
-    if which in ("all", "paint-over"):
-        for engine in ("chromium", "firefox", "webkit"):
-            blocks.append(paint_over_block("classic", H.CLASSIC_DIST, engine))
-            blocks.append(paint_over_block("wish", H.WISH_DIST, engine))
-    if which in ("all", "page-socket"):
-        for engine in ("chromium", "firefox", "webkit"):
-            blocks.append(page_socket_block("classic", H.CLASSIC_DIST, engine))
-            blocks.append(page_socket_block("wish", H.WISH_DIST, engine))
-    if which in ("all", "dpi-resolution"):
-        blocks.append(dpi_for_resolution_block("classic", H.CLASSIC_DIST))
+        blocks.append(dash_block("wish"))
+    per_layout = {
+        "gates": lambda layout: [gates_block(layout)],
+        "hidpi": lambda layout: [hidpi_default_block(layout)],
+        "hidpi-webrtc": lambda layout: [hidpi_default_block(layout, "webrtc")],
+        "cpu-threading": lambda layout: [cpu_threading_block(layout)],
+        "raw-motion": lambda layout: [raw_pointer_motion_block(layout)],
+        "raw-motion-webrtc": lambda layout: [raw_pointer_motion_block(layout, "webrtc")],
+        "rate-control": lambda layout: [rate_control_block(layout)],
+        "rate-control-webrtc": lambda layout: [rate_control_block(layout, "webrtc")],
+        "settings-follow": lambda layout: [settings_follow_block(layout)],
+        "settings-follow-webrtc": lambda layout: [settings_follow_block(layout, "webrtc")],
+        "paint-over": lambda layout: [paint_over_block(layout, engine) for engine in ("chromium", "firefox", "webkit")],
+        "page-socket": lambda layout: [page_socket_block(layout, engine) for engine in ("chromium", "firefox", "webkit")],
+        "transport-advice": lambda layout: [transport_advice_block(layout, dual) for dual in (True, False)],
+        "dpi-resolution": lambda layout: [dpi_for_resolution_block(layout)],
+        "second-screen": lambda layout: [second_screen_block(layout)],
+    }
+    for name, run in per_layout.items():
+        if which in ("all", name):
+            for layout in H.LAYOUTS:
+                blocks.extend(run(layout))
     if which in ("all", "transport-advice"):
-        for dual in (True, False):
-            blocks.append(transport_advice_block("classic", H.CLASSIC_DIST, dual))
-            blocks.append(transport_advice_block("wish", H.WISH_DIST, dual))
         for engine in ("firefox", "webkit"):
-            blocks.append(transport_advice_block("classic", H.CLASSIC_DIST, True, engine))
+            blocks.append(transport_advice_block("default", True, engine))
+    if which in ("all", "second-screen"):
+        blocks.append(second_screen_auto_block("default"))
     if which in ("all", "layout"):
         blocks.append(layout_block())
-    if which in ("all", "second-screen"):
-        blocks.append(second_screen_block("classic", H.CLASSIC_DIST))
-        blocks.append(second_screen_block("wish", H.WISH_DIST))
-        blocks.append(second_screen_auto_block("classic", H.CLASSIC_DIST))
-        blocks.append(second_screen_auto_block("wish", H.WISH_DIST))
     failed = sum(len(b.failed()) for b in blocks)
     total = sum(len(b.items) for b in blocks)
-    print(f"\n=== DASH: {total - failed}/{total} passed ===")
+    print(f"\n=== DASHBOARDS: {total - failed}/{total} passed ===")
     sys.exit(1 if failed else 0)
 
 

@@ -50,7 +50,6 @@ jobs:
           cache-dependency-path: |
             addons/selkies-web-core/package-lock.json
             addons/selkies-dashboard/package-lock.json
-            addons/selkies-dashboard-wish/package-lock.json
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
