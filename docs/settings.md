@@ -189,22 +189,23 @@ What the shipped web interface shows; the feature behind a hidden control keeps 
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `--ui-title`<br>`SELKIES_UI_TITLE` | `Selkies`<br>str | Title in the top left corner of the sidebar, and of the browser tab when set. |
-| `--ui-show-logo`<br>`SELKIES_UI_SHOW_LOGO` | `true`<br>bool | Show the Selkies logo in the sidebar. |
-| `--ui-show-sidebar`<br>`SELKIES_UI_SHOW_SIDEBAR` | `true`<br>bool | Show the main sidebar UI. |
+| `--ui-title`<br>`SELKIES_UI_TITLE` | `Selkies`<br>str | Title in the dashboard's header, and of the browser tab when set. |
+| `--ui-show-logo`<br>`SELKIES_UI_SHOW_LOGO` | `true`<br>bool | Show the Selkies logo in the dashboard's header. |
+| `--ui-layout`<br>`SELKIES_UI_LAYOUT` | `default`<br>enum: one of `default`, `wish` | How the dashboard arranges its panels: "default" is the sidebar, a drawer on the left edge with every panel as a section; "wish" is the toolbar, a floating bar along the top edge with the panels in its menus. The first value listed is what a page shows until its user picks the other with the layout toggle, which the page keeps per browser; a single value locks the layout and hides the toggle. |
+| `--ui-show-sidebar`<br>`SELKIES_UI_SHOW_SIDEBAR` | `true`<br>bool | Show the dashboard's chrome: the layout's menu with every panel in it. Off, the page streams with no controls at all. |
 | `--ui-show-connection-indicator`<br>`SELKIES_UI_SHOW_CONNECTION_INDICATOR` | `true`<br>bool | Show the mark over the stream while the server finds the client's connection poor, with or without the sidebar. |
 | `--ui-show-core-buttons`<br>`SELKIES_UI_SHOW_CORE_BUTTONS` | `true`<br>bool | Show the core components buttons display, audio, microphone, webcam, and gamepad. |
 | `--ui-sidebar-show-video-settings`<br>`SELKIES_UI_SIDEBAR_SHOW_VIDEO_SETTINGS` | `true`<br>bool | Show the video settings section in the sidebar. |
 | `--ui-sidebar-show-screen-settings`<br>`SELKIES_UI_SIDEBAR_SHOW_SCREEN_SETTINGS` | `true`<br>bool | Show the screen settings section in the sidebar. |
 | `--ui-sidebar-show-audio-settings`<br>`SELKIES_UI_SIDEBAR_SHOW_AUDIO_SETTINGS` | `true`<br>bool | Show the audio settings section in the sidebar. |
 | `--ui-sidebar-show-stats`<br>`SELKIES_UI_SIDEBAR_SHOW_STATS` | `true`<br>bool | Show the stats section in the sidebar. |
-| `--ui-sidebar-show-shortcuts`<br>`SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS` | `true`<br>bool | Show the keyboard shortcuts section in the sidebar (both dashboards honor this). |
+| `--ui-sidebar-show-shortcuts`<br>`SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS` | `true`<br>bool | Show the keyboard shortcuts panel. |
 | `--ui-sidebar-show-clipboard`<br>`SELKIES_UI_SIDEBAR_SHOW_CLIPBOARD` | `true`<br>bool | Show the clipboard section in the sidebar. |
 | `--ui-sidebar-show-files`<br>`SELKIES_UI_SIDEBAR_SHOW_FILES` | `true`<br>bool | Show the file transfer section in the sidebar. |
 | `--ui-sidebar-show-apps`<br>`SELKIES_UI_SIDEBAR_SHOW_APPS` | `true`<br>bool | Show the applications section in the sidebar. |
 | `--ui-sidebar-show-sharing`<br>`SELKIES_UI_SIDEBAR_SHOW_SHARING` | `true`<br>bool | Show the sharing section in the sidebar. |
 | `--ui-sidebar-show-gamepads`<br>`SELKIES_UI_SIDEBAR_SHOW_GAMEPADS` | `true`<br>bool | Show the gamepads section in the sidebar. |
-| `--ui-sidebar-show-webcam`<br>`SELKIES_UI_SIDEBAR_SHOW_WEBCAM` | `true`<br>bool | Show the webcam toggle among the core buttons (classic sidebar) and stream controls (wish top menu). Hides the control only; webcam_enabled governs whether the server accepts webcam frames. |
+| `--ui-sidebar-show-webcam`<br>`SELKIES_UI_SIDEBAR_SHOW_WEBCAM` | `true`<br>bool | Show the webcam toggle among the stream controls. Hides the control only; webcam_enabled governs whether the server accepts webcam frames. |
 | `--ui-sidebar-show-fullscreen`<br>`SELKIES_UI_SIDEBAR_SHOW_FULLSCREEN` | `true`<br>bool | Show the fullscreen button in the sidebar. |
 | `--ui-sidebar-show-gaming-mode`<br>`SELKIES_UI_SIDEBAR_SHOW_GAMING_MODE` | `true`<br>bool | Show the gaming mode button in the sidebar. |
 | `--ui-sidebar-show-trackpad`<br>`SELKIES_UI_SIDEBAR_SHOW_TRACKPAD` | `true`<br>bool | Show the virtual trackpad button in the sidebar. |

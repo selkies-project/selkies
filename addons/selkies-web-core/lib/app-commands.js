@@ -1,5 +1,5 @@
 /**
- * Apps-panel command contract, shared by both dashboards.
+ * Apps-panel command contract, which the dashboard's apps panel speaks.
  *
  * The UI applies install and remove results optimistically, so every posted
  * command is tracked here until the server's command watch settles it: a

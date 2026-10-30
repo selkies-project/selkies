@@ -10,7 +10,7 @@ striped:  a server configured with ``h264enc-striped``. Over WebSockets the
 cpu:      ``h264enc`` forced onto the software encoder (``use_cpu``): the
           stream is a single full-frame stripe, the log names the CPU encoder,
           and the picture decodes.
-switch:   over WebSockets the classic dashboard's encoder select moves a live
+switch:   over WebSockets the dashboard's encoder select moves a live
           session from the default encoder onto h264enc-striped and back; the
           server restarts the capture each way and the picture survives.
           Over WebRTC the same select must not offer the striped encoder.
@@ -443,7 +443,7 @@ def block_cpu(mode: str, wayland: bool, res: "H.Results", engine: str = "chromiu
 
 def block_switch(mode: str, wayland: bool, res: "H.Results", engine: str = "chromium") -> None:
     tag = "switch" if engine == "chromium" else "switch " + engine
-    H.server_start(mode=mode, wayland=wayland, web_root=H.CLASSIC_DIST)
+    H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST)
     picture = Picture(wayland)
     try:
         picture.paint()
@@ -452,7 +452,7 @@ def block_switch(mode: str, wayland: bool, res: "H.Results", engine: str = "chro
             try:
                 video = wait_video(page, mode)
                 res.check(f"{tag}: stream up", bool(video), video)
-                opened = TD.classic_open_video(page)
+                opened = TD.open_video_settings(page, "default")
                 options = page.evaluate(
                     "Array.from(document.querySelectorAll('#encoderSelect option')).map(o => o.value)") if opened else []
                 if mode == "webrtc":

@@ -14,7 +14,7 @@ release-artifacts/
 release/
 AppDir/
 infra/appimage/AppDir/
-addons/selkies-dashboard/src/universalTouchGamepad.js
+addons/selkies-dashboard/public/selkies-core.js
 
 # Built by tests/tools/Makefile
 tests/tools/*.so

@@ -4,7 +4,7 @@ A second page opens `#display2`; a window of the session's Chrome is moved to
 the right of the primary and has to show up in the second display's stream:
 with xdotool on X11; on Wayland by a KWin script where KWin composes (the window
 a native client with no X id), else with xdotool on a Chrome run on XWayland,
-which the compositor places as the client asks. The classic dashboard's screen controls are then driven one
+which the compositor places as the client asks. The sidebar's screen controls are then driven one
 by one, each checked on the session (its xrandr geometry, its Xft.dpi, and the
 tester page's own size, which is what a maximized window does) and on the page
 (its stream, its canvas style).

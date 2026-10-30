@@ -1,6 +1,6 @@
 ---
 title: Web Client and Dashboards
-description: The bundled HTML5 client, the two reference dashboards and what each is for, the on-screen touch gamepad, and the settings that shape what the interface shows.
+description: The bundled HTML5 client, the dashboard and its two layouts, the on-screen touch gamepad, and the settings that shape what the interface shows.
 ---
 
 ## Web Client
@@ -11,18 +11,20 @@ Over WebSockets a browser short of WebCodecs still gets the whole session. Where
 
 The core is embeddable in any HTML5 page and is what a custom interface builds on, through `window` messaging; [Session Sharing](../usage.md#session-sharing) and [Secure Mode](../secure-mode.md) describe the URLs a page is opened with.
 
-## Dashboards
+## Dashboard
 
-Two reference dashboards ship with the client, and the server chooses which is served. Both are React, both put the same controls in a sidebar, and both are starting points for a dashboard of your own rather than a required component:
+One dashboard ships with the client, [`selkies-dashboard`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-dashboard): React and TypeScript over the core's `window` messaging, with one set of panels (the video, screen, and audio settings, stats, shortcuts, clipboard, files, printing, apps, sharing, and gamepads) and the stream toggles for the display, audio, microphone, webcam, and gamepad, painted by one of two layouts:
 
-| Dashboard | Purpose |
-| --- | --- |
-| [Selkies Dashboard](https://github.com/selkies-project/selkies/tree/main/addons/selkies-dashboard) | The default: the classic sidebar with the display, audio, microphone, webcam, and gamepad toggles up top, and the video, screen, and audio settings, stats, shortcuts, clipboard, file transfer, apps, sharing, and gamepad sections below |
-| [Selkies Dashboard (Wish)](https://github.com/selkies-project/selkies/tree/main/addons/selkies-dashboard-wish) | The TypeScript variant with the same sections in a different layout, written as the example a modern toolchain starts from |
+| Layout | `ui_layout` | What it draws |
+| --- | --- | --- |
+| Sidebar | `default` | A drawer on the left edge, opened by the handle there or by `Control + Shift + M`, with the toggles as a row of tiles and every panel as a section below |
+| Toolbar | `wish` | A floating bar along the top edge, dragged where it suits, with the panels in its menus, the settings hanging under it as tabs, and the stats and gamepads as floating panels |
 
-What the shipped interface *shows* is a server setting rather than a build: `--ui-title` and `--ui-show-logo` name and brand the sidebar header, `--ui-show-sidebar` and `--ui-show-core-buttons` drop the sidebar or its device toggles entirely, and one `--ui-sidebar-show-<section>` flag per section — video, screen, and audio settings, stats, shortcuts, clipboard, files, apps, sharing, gamepads, webcam, fullscreen, gaming mode, trackpad, keyboard button, soft buttons — hides just that one. These govern the page only: the capability behind a hidden control keeps working, so the feature's own setting (`--webcam-enabled`, `--file-transfers`, `--enable-sharing`) is what actually turns it off. The [Settings Reference](../settings.md#client-interface) lists them.
+Both layouts carry a toggle that switches to the other, beside the dark and light theme toggle; the pick is kept per browser. `--ui-layout` names the layout a page starts with, and listing one value alone locks it. A layout is a component that arranges the panels, so another is one entry in the dashboard's layout registry; the panels know nothing of where they are painted.
 
-The apps panel of both dashboards is backed by [proot-apps](https://github.com/linuxserver/proot-apps) in the container images, which [Desktop Container](desktop-image.md) describes.
+What the shipped interface *shows* is a server setting rather than a build: `--ui-title` and `--ui-show-logo` name and brand the dashboard's header, `--ui-show-sidebar` and `--ui-show-core-buttons` drop the chrome or its device toggles entirely, and one `--ui-sidebar-show-<section>` flag per panel — video, screen, and audio settings, stats, shortcuts, clipboard, files, apps, sharing, gamepads, webcam, fullscreen, gaming mode, trackpad, keyboard button, soft buttons — hides just that one in either layout. These govern the page only: the capability behind a hidden control keeps working, so the feature's own setting (`--webcam-enabled`, `--file-transfers`, `--enable-sharing`) is what actually turns it off. The [Settings Reference](../settings.md#client-interface) lists them.
+
+The apps panel is backed by [proot-apps](https://github.com/linuxserver/proot-apps) in the container images, which [Desktop Container](desktop-image.md) describes.
 
 ## Universal Touch Gamepad
 

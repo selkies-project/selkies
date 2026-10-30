@@ -322,16 +322,16 @@ def viewer_checks(res: "H.Results", tag: str, browser, mode: str, wayland: bool)
 
 def block(mode: str, wayland: bool) -> "H.Results":
     res = H.Results(f"clipsecret-{'wl' if wayland else mode}")
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+    for dashboard in H.LAYOUTS:
         tag = f"[{'wl' if wayland else mode}/{dashboard}]"
-        H.server_start(mode=mode, wayland=wayland, web_root=dist)
+        H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, layout=dashboard)
         with sync_playwright() as p:
             closer, page, connected = open_page(p, "chromium", mode, dashboard)
             try:
                 res.check(f"{tag} the session's clipboard policy arrived", connected)
                 masked_checks(res, tag, page, wayland, dashboard, "chromium",
-                              1 if dashboard == "classic" else 2)
-                if dashboard == "classic":
+                              1 if dashboard == "default" else 2)
+                if dashboard == "default":
                     take_back_checks(res, tag, page, wayland)
                     viewer_checks(res, tag, closer, mode, wayland)
             finally:
@@ -343,18 +343,18 @@ def block(mode: str, wayland: bool) -> "H.Results":
 def engines_block() -> "H.Results":
     """Firefox and WebKit: masked and kept nowhere; nothing read to take it back."""
     res = H.Results("clipsecret-engines")
-    H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout="default")
     for engine in ("firefox", "webkit"):
         tag = f"[websockets/{engine}]"
         with sync_playwright() as p:
             try:
-                closer, page, connected = open_page(p, engine, "websockets", "classic")
+                closer, page, connected = open_page(p, engine, "websockets", "default")
             except Exception as e:
                 res.skip(f"{tag} engine unavailable", str(e)[:120])
                 continue
             try:
                 res.check(f"{tag} the session's clipboard policy arrived", connected)
-                masked_checks(res, tag, page, False, "classic", engine, 3 if engine == "firefox" else 4)
+                masked_checks(res, tag, page, False, "default", engine, 3 if engine == "firefox" else 4)
                 reads = page.evaluate("window.__clipReads")
                 owner = Owner(False, f"pw-{engine}-limit-Zq8!")
                 wait_until(lambda page=page: last_preview(page).get("secret") is True, 10)

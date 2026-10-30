@@ -422,13 +422,13 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_title",
         "type": "str",
         "default": "Selkies",
-        "help": "Title in the top left corner of the sidebar, and of the browser tab when set.",
+        "help": "Title in the dashboard's header, and of the browser tab when set.",
     },
     {
         "name": "ui_show_logo",
         "type": "bool",
         "default": True,
-        "help": "Show the Selkies logo in the sidebar.",
+        "help": "Show the Selkies logo in the dashboard's header.",
     },
     {
         "name": "ui_show_core_buttons",
@@ -440,7 +440,14 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_show_sidebar",
         "type": "bool",
         "default": True,
-        "help": "Show the main sidebar UI.",
+        "help": "Show the dashboard's chrome: the layout's menu with every panel in it. Off, the page streams with no controls at all.",
+    },
+    {
+        "name": "ui_layout",
+        "type": "enum",
+        "default": "default",
+        "meta": {"allowed": ["default", "wish"]},
+        "help": 'How the dashboard arranges its panels: "default" is the sidebar, a drawer on the left edge with every panel as a section; "wish" is the toolbar, a floating bar along the top edge with the panels in its menus. The first value listed is what a page shows until its user picks the other with the layout toggle, which the page keeps per browser; a single value locks the layout and hides the toggle.',
     },
     {
         "name": "ui_show_connection_indicator",
@@ -476,7 +483,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_sidebar_show_shortcuts",
         "type": "bool",
         "default": True,
-        "help": "Show the keyboard shortcuts section in the sidebar (both dashboards honor this).",
+        "help": "Show the keyboard shortcuts panel.",
     },
     {
         "name": "ui_sidebar_show_clipboard",
@@ -512,7 +519,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_sidebar_show_webcam",
         "type": "bool",
         "default": True,
-        "help": "Show the webcam toggle among the core buttons (classic sidebar) and stream controls (wish top menu). Hides the control only; webcam_enabled governs whether the server accepts webcam frames.",
+        "help": "Show the webcam toggle among the stream controls. Hides the control only; webcam_enabled governs whether the server accepts webcam frames.",
     },
     {
         "name": "ui_sidebar_show_fullscreen",

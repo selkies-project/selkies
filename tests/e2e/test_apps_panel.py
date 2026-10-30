@@ -104,7 +104,7 @@ def open_apps_modal(page) -> bool:
     time.sleep(0.6)
     page.locator('#apps-content button').first.click()
     time.sleep(1.0)
-    return page.locator(".apps-modal").count() > 0
+    return page.locator('[role="dialog"]:has-text("Apps")').count() > 0
 
 
 def run(mode: str, res: "H.Results") -> None:
@@ -115,7 +115,7 @@ def run(mode: str, res: "H.Results") -> None:
         res: Results accumulator shared across both transports.
     """
     stub = runner_stub(os.path.join(H.WORKDIR, f"apps-stub-bin-{mode}"))
-    H.server_start(mode=mode, wayland=False, web_root=H.CLASSIC_DIST,
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST,
                    extra_env={"PATH": stub + os.pathsep + os.environ.get("PATH", ""),
                               "SELKIES_COMMAND_ENABLED": "true"})
     with sync_playwright() as pw:
@@ -130,18 +130,18 @@ def run(mode: str, res: "H.Results") -> None:
             time.sleep(8.0)
             res.check(f"{mode}: the panel is published where its runner works", open_apps_modal(page))
 
-            card = page.locator('.apps-modal-content:has-text("E2E App")').first
+            card = page.locator('[role="dialog"] [data-slot="card"]:has-text("E2E App")').first
             res.check(f"{mode}: the catalog is listed", card.count() > 0)
             page.locator('text=E2E App').first.click()
             time.sleep(0.5)
-            install = page.locator('.app-action-button.install').first
+            install = page.locator('[role="dialog"] button:has-text("Install")').first
             res.check(f"{mode}: an uninstalled app offers Install", install.count() > 0)
 
             install.click()
             running = held = False
             deadline = time.time() + INSTALL_SECONDS - 1
             while time.time() < deadline:
-                if page.locator(".app-action-button.running").count() > 0:
+                if page.locator('[role="dialog"] button:has(svg.animate-spin)').count() > 0:
                     running = True
                     held = install.is_disabled()
                     break
@@ -152,13 +152,13 @@ def run(mode: str, res: "H.Results") -> None:
             settled = False
             deadline = time.time() + INSTALL_SECONDS + 20
             while time.time() < deadline:
-                if page.locator(".app-action-button.running").count() == 0:
+                if page.locator('[role="dialog"] button:has(svg.animate-spin)').count() == 0:
                     settled = True
                     break
                 time.sleep(0.3)
             res.check(f"{mode}: the server settling the command clears it", settled)
             res.check(f"{mode}: the panel then offers the app as installed",
-                      page.locator('.app-action-button.remove').count() > 0)
+                      page.locator('[role="dialog"] button:has-text("Remove")').count() > 0)
 
             # What is installed belongs to the session, not to one browser: a
             # page with no stored record of the install must still be told.
@@ -169,7 +169,7 @@ def run(mode: str, res: "H.Results") -> None:
             page.locator('text=E2E App').first.click()
             time.sleep(0.5)
             res.check(f"{mode}: a page with no stored record is told what is installed",
-                      reopened and page.locator('.app-action-button.remove').count() > 0)
+                      reopened and page.locator('[role="dialog"] button:has-text("Remove")').count() > 0)
         finally:
             browser.close()
     H.server_stop()
@@ -184,7 +184,7 @@ def run_local_repository(mode: str, res: "H.Results") -> None:
     """
     stub = runner_stub(os.path.join(H.WORKDIR, f"apps-stub-bin-{mode}"))
     folder = local_repository(os.path.join(H.WORKDIR, f"apps-local-repo-{mode}"))
-    H.server_start(mode=mode, wayland=False, web_root=H.CLASSIC_DIST,
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST,
                    extra_env={"PATH": stub + os.pathsep + os.environ.get("PATH", ""),
                               "SELKIES_COMMAND_ENABLED": "true", "PA_REPO_FOLDER": folder})
     with sync_playwright() as pw:
@@ -199,9 +199,9 @@ def run_local_repository(mode: str, res: "H.Results") -> None:
             page.goto(H.BASE_URL, wait_until="load")
             time.sleep(8.0)
             res.check(f"{mode}: the panel is published on a local repository", open_apps_modal(page))
-            card = page.locator('.apps-modal-content:has-text("Local App")').first
+            card = page.locator('[role="dialog"] [data-slot="card"]:has-text("Local App")').first
             res.check(f"{mode}: the repository's own catalog is listed", card.count() > 0)
-            icon = page.locator('.app-card-icon[alt="Local App"]').first
+            icon = card.locator('img').first
             width = 0
             deadline = time.time() + 10
             while time.time() < deadline:

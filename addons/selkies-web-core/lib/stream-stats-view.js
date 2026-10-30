@@ -5,7 +5,7 @@
  */
 
 /**
- * What both dashboards draw of `lib/stream-stats.js`'s contract, kept free of
+ * What the dashboard draws of `lib/stream-stats.js`'s contract, kept free of
  * any framework so the two cannot read the same session differently: the four
  * status rows and what makes one a warning, the figures under the graphs, the
  * host meters, the geometry of a graph, and the plain-text report a user pastes

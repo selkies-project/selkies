@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """The per-display setting lists stay in their intended relationship.
 
-Four copies exist: one per streaming core, and one per dashboard. They are not
+Three copies exist: one per streaming core, and the dashboard's. They are not
 identical on purpose -- JPEG quality has no meaning over WebRTC, and the WS
-core alone carries the jpeg-stock paint-over pair -- but each dashboard has to
-hold the union, because a dashboard drives both transports and a key missing
-from its list is written to the primary's storage key instead of the display's
-own. That is a silent failure: the control appears to work and changes the
-wrong display.
+core alone carries the jpeg-stock paint-over pair -- but the dashboard has to
+hold the union, because it drives both transports and a key missing from its
+list is written to the primary's storage key instead of the display's own.
+That is a silent failure: the control appears to work and changes the wrong
+display.
 """
 import os
 import re
@@ -19,8 +19,7 @@ ADDONS = os.path.join(ROOT, "addons")
 SOURCES = {
     "ws-core": "selkies-web-core/selkies-ws-core.js",
     "wr-core": "selkies-web-core/selkies-wr-core.js",
-    "dashboard": "selkies-dashboard/src/components/Sidebar.jsx",
-    "wish": "selkies-dashboard-wish/src/utils.ts",
+    "dashboard": "selkies-dashboard/src/utils.ts",
 }
 
 # Keys that belong to one transport only: the jpeg-stock controls ride the
@@ -60,10 +59,9 @@ def main() -> bool:
         lists[name] = keys
 
     union = lists["ws-core"] | lists["wr-core"]
-    for dash in ("dashboard", "wish"):
-        check("{} holds the union of both cores".format(dash), lists[dash] == union,
-              "missing={} extra={}".format(sorted(union - lists[dash]),
-                                           sorted(lists[dash] - union)))
+    check("the dashboard holds the union of both cores", lists["dashboard"] == union,
+          "missing={} extra={}".format(sorted(union - lists["dashboard"]),
+                                       sorted(lists["dashboard"] - union)))
 
     check("WebSocket-only keys are absent from the WebRTC core",
           not (WS_ONLY & lists["wr-core"]), sorted(WS_ONLY & lists["wr-core"]))

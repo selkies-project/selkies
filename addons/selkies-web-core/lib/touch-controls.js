@@ -5,7 +5,7 @@
  */
 
 /**
- * What both dashboards offer touch clients beside their soft modifier keys.
+ * What the dashboard offers touch clients beside its soft modifier keys.
  *
  * The special-key palette: the keys an on-screen keyboard lacks (function
  * keys, arrows, the editing block), a few chords, and the user's own chords.

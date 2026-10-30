@@ -228,7 +228,7 @@ def run(cell: Any) -> None:
     # Upload Image: the panel's button and its file chooser.
     image3 = noise_png(900, 640, len(tag) + 2)
     open_sidebar(page)
-    picked = TD.pick_clipboard_image(page, "classic", {"name": "upload.png", "mimeType": "image/png",
+    picked = TD.pick_clipboard_image(page, "default", {"name": "upload.png", "mimeType": "image/png",
                                                        "buffer": image3})
     page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
     time.sleep(1.0)

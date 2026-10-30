@@ -49,15 +49,15 @@ def run(cell: Any) -> None:
     page.locator(".toggle-handle").first.click()
     time.sleep(0.5)
     R.check("the Apps panel opens its catalog", AP.open_apps_modal(page))
-    card = page.locator(f'.apps-modal-content:has-text("{LABEL}")').first
+    card = page.locator(f'[role="dialog"] [data-slot="card"]:has-text("{LABEL}")').first
     if not card.count():
         R.check(f"the catalog lists {LABEL}", False, "catalog without it (offline?)")
         return
     page.locator(f"text={LABEL}").first.click()
     time.sleep(0.5)
-    install = page.locator(".app-action-button.install").first
+    install = page.locator('[role="dialog"] button:has-text("Install")').first
     if not install.count():
-        R.check(f"{LABEL} offers Install", page.locator(".app-action-button.remove").count() > 0,
+        R.check(f"{LABEL} offers Install", page.locator('[role="dialog"] button:has-text("Remove")').count() > 0,
                 "neither Install nor Remove")
     else:
         install.click()

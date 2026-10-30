@@ -5,7 +5,7 @@
  */
 
 /**
- * The transport switch both dashboards run, from their mode menus and from
+ * The transport switch the dashboard runs, from its mode menu and from
  * the notice the WebRTC core raises when its media path keeps failing.
  * @module
  */

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Touch clients' own controls in both dashboards: the special-key palette and
+"""Touch clients' own controls in both layouts: the special-key palette and
 the trackpad's speed, end to end.
 
 The palette, beside the soft modifier keys a touch client gets, holds the keys
@@ -76,7 +76,7 @@ def touch_once(page: Any, engine: str) -> None:
 
 
 def open_palette(page: Any, dashboard: str) -> bool:
-    if dashboard == "classic" and not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+    if dashboard == "default" and not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
         page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
         time.sleep(0.8)
     toggle = page.locator(".key-palette-toggle").first
@@ -98,9 +98,9 @@ def keys_since(watcher: XWatcher, t: float, codes: dict) -> list:
     return out
 
 
-def palette_block(res: "H.Results", dashboard: str, dist: str, engine: str, mode: str) -> None:
+def palette_block(res: "H.Results", dashboard: str, engine: str, mode: str) -> None:
     tag = f"{dashboard} {engine} {mode}"
-    H.server_start(mode=mode, web_root=dist)
+    H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, layout=dashboard)
     watcher = None
     try:
         with sync_playwright() as pw:
@@ -204,13 +204,13 @@ RECT_JS = """(sel) => {
 }"""
 
 
-def keyboard_button_block(res: "H.Results", dashboard: str, dist: str, engine: str) -> None:
+def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None:
     """A tablet's attached keyboard keeps the system's on-screen one down, so
     the button that pops it goes once a key only a keyboard has is pressed,
-    not on a letter, which an on-screen keyboard types too; each dashboard's
-    own keyboard control brings it back (the classic tile, Wish's menu button)."""
+    not on a letter, which an on-screen keyboard types too; each layout's
+    own keyboard control brings it back (the sidebar's tile, the toolbar's button)."""
     tag = f"{dashboard} {engine}"
-    H.server_start(mode="websockets", web_root=dist)
+    H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST, layout=dashboard)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, engine, "websockets")
@@ -220,11 +220,10 @@ def keyboard_button_block(res: "H.Results", dashboard: str, dist: str, engine: s
                 if not video:
                     return
                 touch_once(page, engine)
-                button = page.locator(".virtual-keyboard-button" if dashboard == "classic"
-                                      else "[data-virtual-keyboard-button]")
+                button = page.locator("[data-virtual-keyboard-button]")
                 shown = button.count() > 0 and button.first.is_visible()
-                if dashboard == "wish" and not shown:
-                    # The Wish dashboard offers it by `(pointer: coarse)`, which a
+                if not shown:
+                    # The dashboard offers it by `(pointer: coarse)`, which a
                     # touch-emulating desktop engine may not report.
                     print(f"[{tag}] no keyboard button offered on this engine's emulation", flush=True)
                     return
@@ -239,15 +238,12 @@ def keyboard_button_block(res: "H.Results", dashboard: str, dist: str, engine: s
                 time.sleep(0.4)
                 res.check(f"{tag}: a key only a keyboard has takes it away",
                           button.count() == 0 or not button.first.is_visible())
-                if dashboard == "classic":
+                if dashboard == "default":
                     open_sidebar(page)
-                    page.locator(".keyboard-toggle-button").first.click()
-                    time.sleep(0.4)
+                page.locator(".keyboard-toggle-button").first.click()
+                time.sleep(0.4)
+                if dashboard == "default":
                     close_sidebar(page)
-                else:
-                    page.locator("button:has(svg.lucide-keyboard):not([data-virtual-keyboard-button])"
-                                 ).first.click()
-                    time.sleep(0.4)
                 res.check(f"{tag}: the dashboard's own keyboard control brings it back",
                           button.count() > 0 and button.first.is_visible())
             finally:
@@ -285,13 +281,13 @@ POINTER_POSTURE_JS = """
 """
 
 
-def keyboard_posture_block(res: "H.Results", dashboard: str, dist: str, engine: str) -> None:
+def keyboard_posture_block(res: "H.Results", dashboard: str, engine: str) -> None:
     """A convertible says at once whether its keyboard is attached: the
     primary pointer turns coarse when it is detached and fine when it is
     attached. The keyboard button follows at once, with no key pressed and no
     touch needed, and a touch does not bring it back while the keyboard is on."""
     tag = f"{dashboard} {engine} posture"
-    H.server_start(mode="websockets", web_root=dist)
+    H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST, layout=dashboard)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, engine, "websockets", init_js=POINTER_POSTURE_JS)
@@ -300,8 +296,7 @@ def keyboard_posture_block(res: "H.Results", dashboard: str, dist: str, engine: 
                 res.check(f"{tag}: video up", video is not None, video)
                 if not video:
                     return
-                button = page.locator(".virtual-keyboard-button" if dashboard == "classic"
-                                      else "[data-virtual-keyboard-button]")
+                button = page.locator("[data-virtual-keyboard-button]")
 
                 def shown() -> bool:
                     time.sleep(0.4)
@@ -333,7 +328,7 @@ def in_reach(page: Any, dashboard: str, trackpad: bool) -> tuple:
     """Whether the palette's toggle opens it, its keys and its field take a click,
     and the toggle, in the viewport and uncovered, closes it again."""
     set_trackpad(page, dashboard, trackpad)
-    if dashboard == "classic":
+    if dashboard == "default":
         open_sidebar(page)
     toggle = page.locator(".key-palette-toggle").first
     steps = []
@@ -355,7 +350,7 @@ def in_reach(page: Any, dashboard: str, trackpad: bool) -> tuple:
     except Exception as e:
         return False, f"after {steps}: {str(e).splitlines()[0][:160]}"
     finally:
-        if dashboard == "classic":
+        if dashboard == "default":
             close_sidebar(page)
     ok = bool(closed and opened and closed["inside"] and closed["on_top"] and opened["inside"]
               and opened["on_top"] and shut)
@@ -409,11 +404,9 @@ def trackpad_button(page: Any, dashboard: str, engine: str = "") -> bool:
     a dashboard learns of the mode from its button, not from the core. The
     button shows once the dashboard has seen a touch; with `engine`, one more
     touch is made if it has not."""
-    if dashboard == "classic":
+    if dashboard == "default":
         open_sidebar(page)
-        button = page.locator(".trackpad-mode-button").first
-    else:
-        button = page.locator("button[title='Trackpad Mode']").first
+    button = page.locator(".trackpad-mode-button").first
     for attempt in range(3):
         try:
             button.wait_for(state="attached", timeout=3000)
@@ -422,18 +415,18 @@ def trackpad_button(page: Any, dashboard: str, engine: str = "") -> bool:
             if not engine or attempt == 2:
                 return False
             touch_once(page, engine)
-            if dashboard == "classic":
+            if dashboard == "default":
                 open_sidebar(page)
     button.click()
     time.sleep(0.6)
-    if dashboard == "classic":
+    if dashboard == "default":
         close_sidebar(page)
     return True
 
 
-def speed_block(res: "H.Results", dashboard: str, dist: str, mode: str, engine: str = "chromium") -> None:
+def speed_block(res: "H.Results", dashboard: str, mode: str, engine: str = "chromium") -> None:
     tag = f"{dashboard} {engine} {mode}"
-    H.server_start(mode=mode, web_root=dist)
+    H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, layout=dashboard)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, engine, mode)
@@ -453,16 +446,16 @@ def speed_block(res: "H.Results", dashboard: str, dist: str, mode: str, engine: 
                 res.check(f"{tag}: a slow trackpad drag moves the pointer as far as the finger went",
                           90 <= slow <= 110, f"{slow} px for 100")
                 res.check(f"{tag}: a fast one moves it further", fast >= 1.8 * slow, f"{fast} px for 100")
-                if dashboard == "classic":
+                if dashboard == "default":
                     open_sidebar(page)
-                picker = page.locator("#trackpadSpeedSelect, .key-palette ~ label select, label:has-text('Trackpad') select").first
+                picker = page.locator("#trackpadSpeedSelect").first
                 offered = picker.count() > 0
                 res.check(f"{tag}: the dashboard offers the trackpad speed in trackpad mode", offered)
                 if not offered:
                     return
                 picker.select_option("2")
                 time.sleep(0.5)
-                if dashboard == "classic":
+                if dashboard == "default":
                     close_sidebar(page)
                 doubled = travel(f, 100, 50, 0.02)
                 res.check(f"{tag}: twice the speed moves a slow drag twice as far", 180 <= doubled <= 220,
@@ -478,8 +471,8 @@ def speed_block(res: "H.Results", dashboard: str, dist: str, mode: str, engine: 
 
 
 def wayland_block(res: "H.Results", mode: str, engine: str = "chromium") -> None:
-    tag = f"classic wayland {engine} {mode}"
-    H.server_start(mode=mode, wayland=True, web_root=H.CLASSIC_DIST)
+    tag = f"default wayland {engine} {mode}"
+    H.server_start(mode=mode, wayland=True, web_root=H.DASHBOARD_DIST, layout="default")
     obs = None
     try:
         with sync_playwright() as pw:
@@ -497,7 +490,7 @@ def wayland_block(res: "H.Results", mode: str, engine: str = "chromium") -> None
                 time.sleep(0.06)
                 f.up(1)
                 time.sleep(0.8)
-                if not open_palette(page, "classic"):
+                if not open_palette(page, "default"):
                     res.check(f"{tag}: a touch client is offered the key palette", False)
                     return
                 mark = len(obs.lines)
@@ -520,15 +513,15 @@ def main() -> None:
     only = sys.argv[2] if len(sys.argv) > 2 else ""
     res = H.Results(f"touch-controls-{which}")
     if which == "x11":
-        for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+        for dashboard in H.LAYOUTS:
             for mode in ("websockets", "webrtc") if only != "keyboard" else ():
                 for engine in ("chromium", "firefox", "webkit"):
-                    palette_block(res, dashboard, dist, engine, mode)
-                    speed_block(res, dashboard, dist, mode, engine)
-        for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+                    palette_block(res, dashboard, engine, mode)
+                    speed_block(res, dashboard, mode, engine)
+        for dashboard in H.LAYOUTS:
             for engine in ("chromium", "firefox", "webkit"):
-                keyboard_button_block(res, dashboard, dist, engine)
-                keyboard_posture_block(res, dashboard, dist, engine)
+                keyboard_button_block(res, dashboard, engine)
+                keyboard_posture_block(res, dashboard, engine)
     elif which == "wl":
         for mode in ("websockets", "webrtc"):
             for engine in ("chromium", "firefox", "webkit"):

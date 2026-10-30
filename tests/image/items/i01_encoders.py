@@ -1,6 +1,6 @@
 """1. Check all encoders, CRF/CBR, paintover, video streaming mode, 4:4:4 colors, and CPU encoding working properly.
 
-Driven from the dashboard's own controls (the classic dashboard's video
+Driven from the dashboard's own controls (the dashboard's video
 section, which the images serve): every encoder its menu offers under CBR and
 then CRF, Turbo (the video streaming mode) with paint-over on and off, 4:4:4
 where its switch is offered, and CPU encoding. Each is verified on the decoded
@@ -107,7 +107,7 @@ def slider_to(page: Any, sid: str, label: str) -> Optional[list]:
 
 
 def toggle(page: Any, sel: str, on: bool) -> Optional[bool]:
-    """Set a classic dashboard toggle; its state after, or None where it is not offered."""
+    """Set a dashboard toggle; its state after, or None where it is not offered."""
     el = page.locator(sel)
     if not el.count():
         return None
@@ -123,7 +123,7 @@ def run(cell: Any) -> None:
     page = cell.open()
     first = cell.wait_pattern(page, 30)
     R.check("the stream shows the session's picture", pattern_matches(first), first)
-    TD.classic_open_video(page)
+    TD.open_video_settings(page, "default")
     if not page.locator("#encoderSelect").count():
         R.check("the dashboard offers the encoder menu", False, "no #encoderSelect")
         return
@@ -138,12 +138,12 @@ def run(cell: Any) -> None:
             R.skip(f"{value}", f"the menu greys it out here: {text}")
     # A run that stopped midway leaves its pick on the server; start from the defaults.
     page.select_option("#encoderSelect", "h264enc", timeout=5000)
-    TD.pick_rate_control(page, "classic", "cbr")
+    TD.pick_rate_control(page, "default", "cbr")
     for enc in offered:
         page.select_option("#encoderSelect", enc, timeout=5000)
         # JPEG has a quality, not a rate control.
         for rc in ("cbr", "crf") if enc != "jpeg" else ("quality",):
-            picked = rc == "quality" or TD.pick_rate_control(page, "classic", rc)
+            picked = rc == "quality" or TD.pick_rate_control(page, "default", rc)
             d = described(page, {"codec": CODEC.get(enc, enc)})
             name = f"{enc} {rc.upper() if rc != 'quality' else ''}"
             used = f"({d.get('encoder')}{', hardware' if d.get('hardware') else ''})"
@@ -158,7 +158,7 @@ def run(cell: Any) -> None:
                     picked and pattern_matches(s) and d.get("codec") == CODEC.get(enc, enc),
                     f"sample {s and s['points']} codec {d.get('codec')} ({d.get('encoder_reason') or 'no reason'})")
     page.select_option("#encoderSelect", "h264enc", timeout=5000)
-    TD.pick_rate_control(page, "classic", "cbr")
+    TD.pick_rate_control(page, "default", "cbr")
     described(page, {"codec": "h264"})
 
     # Turbo off on a detailed still picture: under CBR at a low rate the screen gets
@@ -179,7 +179,7 @@ def run(cell: Any) -> None:
         if mode == "crf" and low:
             slider(page, "videoBitrateSlider", rate[0] if rate else None)
             low = None
-        TD.pick_rate_control(page, "classic", mode)
+        TD.pick_rate_control(page, "default", mode)
         t = TD.switch_on(page.locator("#videoStreamingModeToggle").first)
         p = toggle(page, "#usePaintOverQualityToggle", paint)
         cell.go(f"/texture.html?motion=1&seed={seed}")
@@ -207,7 +207,7 @@ def run(cell: Any) -> None:
     on, off = errors["crf", True], errors["crf", False]
     R.check("paint-over leaves the still screen no worse than without it",
             None not in (on, off) and on <= off + 1, f"error {on} levels with it, {off} without")
-    TD.pick_rate_control(page, "classic", "cbr")
+    TD.pick_rate_control(page, "default", "cbr")
     slider(page, "videoBitrateSlider", rate[0] if rate else None)
     t = toggle(page, "#videoStreamingModeToggle", True)
     still = frames_while(cell, page, 3.0)
