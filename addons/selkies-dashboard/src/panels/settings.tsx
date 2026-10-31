@@ -11,6 +11,10 @@
  * switch between layouts keeps every value and every pending push. A control
  * renders only while the server's constraints leave something to change
  * (`show`), and a panel none of whose controls is shown renders nothing.
+ * The toolbar's card draws each tab as a `SectionAccordion` (Video: Format and
+ * Performance; Audio: Quality and Devices; Resolution: Display and
+ * Resolution) in which the first visible card starts open and a card with no
+ * shown control is left out.
  * @module
  */
 import * as React from "react";
@@ -20,6 +24,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Field, NativeSelect, RangeSlider, SwitchRow, Clip } from "@/panels/controls";
+import { SectionAccordion, SectionItem } from "@/panels/section-accordion";
 import { useDashboard } from "@/state/dashboard";
 import { RESOLUTION_PRESETS, STREAMING_MODES, WEBCAM_ENCODER_OPTIONS, canPlayEncoder, displayLabel, framerateLabel } from "@/state/settings";
 import { useSettings, useSettingsPanels } from "@/state/settings-context";
@@ -144,8 +149,24 @@ export function PerformanceSettings() {
   );
 }
 
-/** The audio bitrate and the device pickers; mounting asks for the devices. */
-export function AudioSettings() {
+/** The audio bitrate. */
+export function AudioQualitySettings() {
+  const s = useSettings();
+  return (
+    <>
+      {s.show.audioBitrate && (
+        <Field htmlFor="audioBitrateSlider" label={tl('sections.audio.bitrateLabel', { bitrate: s.audioBitRate / 1000 })}>
+          <RangeSlider id="audioBitrateSlider" className={TOUCH_RANGE} min={0} max={s.audioBitrateChoices.length - 1} step={1}
+            value={Math.max(0, s.audioBitrateChoices.indexOf(s.audioBitRate))}
+            onValueChange={(index) => s.setAudioBitRate(s.audioBitrateChoices[index])} />
+        </Field>
+      )}
+    </>
+  );
+}
+
+/** The audio device pickers; mounting asks for the devices. */
+export function AudioDeviceSettings() {
   const s = useSettings();
   const { ensureAudioDevices } = s;
   React.useEffect(() => { ensureAudioDevices(); }, [ensureAudioDevices]);
@@ -157,13 +178,6 @@ export function AudioSettings() {
   };
   return (
     <>
-      {s.show.audioBitrate && (
-        <Field htmlFor="audioBitrateSlider" label={tl('sections.audio.bitrateLabel', { bitrate: s.audioBitRate / 1000 })}>
-          <RangeSlider id="audioBitrateSlider" className={TOUCH_RANGE} min={0} max={s.audioBitrateChoices.length - 1} step={1}
-            value={Math.max(0, s.audioBitrateChoices.indexOf(s.audioBitRate))}
-            onValueChange={(index) => s.setAudioBitRate(s.audioBitrateChoices[index])} />
-        </Field>
-      )}
       {s.audioDeviceError && <p className="text-xs text-destructive">{s.audioDeviceError}</p>}
       <Field htmlFor="audioInputSelect" label={tl('sections.audio.inputLabel')}>
         <NativeSelect id="audioInputSelect" value={s.selectedInputDeviceId} disabled={s.isLoadingAudioDevices || !!s.audioDeviceError}
@@ -177,6 +191,16 @@ export function AudioSettings() {
       ) : (!s.isLoadingAudioDevices && !s.audioDeviceError && (
         <p className="text-xs text-muted-foreground">{t('sections.audio.outputNotSupported')}</p>
       ))}
+    </>
+  );
+}
+
+/** The audio controls as one list: the bitrate, then the device pickers. */
+export function AudioSettings() {
+  return (
+    <>
+      <AudioQualitySettings />
+      <AudioDeviceSettings />
     </>
   );
 }
@@ -283,13 +307,61 @@ export function ScreenSettings() {
   );
 }
 
-/** The settings as a card of tabs, one per panel, which the toolbar layout hangs under its bar. */
+/** One card of a tab's accordion: its value, its translated title, and its controls. */
+interface SettingsSection {
+  /** Identifies the card to the accordion. */
+  value: string;
+  /** Whether any control of the card is shown; a card with none is not rendered. */
+  shown: boolean;
+  /** The card's heading, already translated. */
+  title: string;
+  /** The card's controls. */
+  content: React.ReactNode;
+}
+
+/**
+ * The cards of one tab as a `SectionAccordion`, the first visible card open.
+ * @param props The cards, in order.
+ * @returns The accordion, or nothing when no card is shown.
+ */
+function SettingsSections({ sections }: { sections: SettingsSection[] }) {
+  const visible = sections.filter((section) => section.shown);
+  if (visible.length === 0) return null;
+  return (
+    <SectionAccordion defaultValue={[visible[0].value]}>
+      {visible.map((section) => (
+        <SectionItem key={section.value} value={section.value} title={section.title}>{section.content}</SectionItem>
+      ))}
+    </SectionAccordion>
+  );
+}
+
+/** The settings as a card of tabs, one per panel, each an accordion of cards, which the toolbar layout hangs under its bar. */
 export function SettingsCard() {
   const panels = useSettingsPanels();
+  const s = useSettings();
   const tabs = [
-    { value: "video", shown: panels.video, label: t('settingsTabs.video'), content: <VideoSettings /> },
-    { value: "audio", shown: panels.audio, label: t('settingsTabs.audio'), content: <div className="space-y-3"><AudioSettings /></div> },
-    { value: "resolution", shown: panels.screen, label: t('settingsTabs.resolution'), content: <ScreenSettings /> },
+    {
+      value: "video", shown: panels.video, label: t('settingsTabs.video'),
+      content: <SettingsSections sections={[
+        { value: "format", shown: panels.format, title: t('settingsSections.format'), content: <FormatSettings /> },
+        { value: "performance", shown: panels.performance, title: t('settingsSections.performance'), content: <PerformanceSettings /> },
+      ]} />,
+    },
+    {
+      value: "audio", shown: panels.audio, label: t('settingsTabs.audio'),
+      content: <SettingsSections sections={[
+        { value: "quality", shown: s.show.audioBitrate, title: t('settingsSections.quality'), content: <AudioQualitySettings /> },
+        { value: "devices", shown: true, title: t('settingsSections.devices'), content: <AudioDeviceSettings /> },
+      ]} />,
+    },
+    {
+      value: "resolution", shown: panels.screen, label: t('settingsTabs.resolution'),
+      content: <SettingsSections sections={[
+        { value: "display", shown: true, title: t('settingsSections.display'), content: <DisplaySettings /> },
+        { value: "resolution", shown: true, title: t('settingsSections.resolution'), content: <ResolutionSettings /> },
+      ]} />,
+    },
   ].filter((tab) => tab.shown);
   if (tabs.length === 0) return null;
   return (
@@ -300,7 +372,7 @@ export function SettingsCard() {
         </TabsList>
         {tabs.map((tab) => (
           <TabsContent key={tab.value} value={tab.value}>
-            <CardContent className="max-h-[calc(100dvh-8rem)] overflow-x-hidden overflow-y-auto px-2 pb-2">{tab.content}</CardContent>
+            <CardContent className="max-h-[calc(100dvh-8rem)] overflow-x-hidden overflow-y-auto px-0 pb-2">{tab.content}</CardContent>
           </TabsContent>
         ))}
       </Tabs>

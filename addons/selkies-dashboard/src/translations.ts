@@ -271,6 +271,14 @@ const en: Dictionary = {
         audio: "Audio",
         resolution: "Resolution",
     },
+    settingsSections: {
+        format: "Format",
+        performance: "Performance",
+        quality: "Quality",
+        devices: "Devices",
+        display: "Display",
+        resolution: "Resolution",
+    },
     audio: {
         defaultDevice: "Default",
     },
@@ -603,6 +611,14 @@ const es: Dictionary = {
     settingsTabs: {
         video: "Vídeo",
         audio: "Audio",
+        resolution: "Resolución",
+    },
+    settingsSections: {
+        format: "Formato",
+        performance: "Rendimiento",
+        quality: "Calidad",
+        devices: "Dispositivos",
+        display: "Pantalla",
         resolution: "Resolución",
     },
     audio: {
@@ -939,6 +955,14 @@ const zh_cn: Dictionary = {
         audio: "音频",
         resolution: "分辨率",
     },
+    settingsSections: {
+        format: "格式",
+        performance: "性能",
+        quality: "质量",
+        devices: "设备",
+        display: "显示",
+        resolution: "分辨率",
+    },
     audio: {
         defaultDevice: "默认",
     },
@@ -1271,6 +1295,14 @@ const zh_tw: Dictionary = {
     settingsTabs: {
         video: "視訊",
         audio: "音訊",
+        resolution: "解析度",
+    },
+    settingsSections: {
+        format: "格式",
+        performance: "效能",
+        quality: "品質",
+        devices: "裝置",
+        display: "顯示",
         resolution: "解析度",
     },
     audio: {
@@ -1607,6 +1639,14 @@ const hi: Dictionary = {
         audio: "ऑडियो",
         resolution: "रिज़ॉल्यूशन",
     },
+    settingsSections: {
+        format: "प्रारूप",
+        performance: "प्रदर्शन",
+        quality: "गुणवत्ता",
+        devices: "डिवाइस",
+        display: "डिस्प्ले",
+        resolution: "रिज़ॉल्यूशन",
+    },
     audio: {
         defaultDevice: "डिफ़ॉल्ट",
     },
@@ -1939,6 +1979,14 @@ const pt: Dictionary = {
     settingsTabs: {
         video: "Vídeo",
         audio: "Áudio",
+        resolution: "Resolução",
+    },
+    settingsSections: {
+        format: "Formato",
+        performance: "Desempenho",
+        quality: "Qualidade",
+        devices: "Dispositivos",
+        display: "Tela",
         resolution: "Resolução",
     },
     audio: {
@@ -2275,6 +2323,14 @@ const fr: Dictionary = {
         audio: "Audio",
         resolution: "Résolution",
     },
+    settingsSections: {
+        format: "Format",
+        performance: "Performances",
+        quality: "Qualité",
+        devices: "Périphériques",
+        display: "Affichage",
+        resolution: "Résolution",
+    },
     audio: {
         defaultDevice: "Par défaut",
     },
@@ -2607,6 +2663,14 @@ const ru: Dictionary = {
     settingsTabs: {
         video: "Видео",
         audio: "Аудио",
+        resolution: "Разрешение",
+    },
+    settingsSections: {
+        format: "Формат",
+        performance: "Производительность",
+        quality: "Качество",
+        devices: "Устройства",
+        display: "Экран",
         resolution: "Разрешение",
     },
     audio: {
@@ -2943,6 +3007,14 @@ const de: Dictionary = {
         audio: "Audio",
         resolution: "Auflösung",
     },
+    settingsSections: {
+        format: "Format",
+        performance: "Leistung",
+        quality: "Qualität",
+        devices: "Geräte",
+        display: "Anzeige",
+        resolution: "Auflösung",
+    },
     audio: {
         defaultDevice: "Standard",
     },
@@ -3275,6 +3347,14 @@ const tr: Dictionary = {
     settingsTabs: {
         video: "Video",
         audio: "Ses",
+        resolution: "Çözünürlük",
+    },
+    settingsSections: {
+        format: "Biçim",
+        performance: "Performans",
+        quality: "Kalite",
+        devices: "Aygıtlar",
+        display: "Ekran",
         resolution: "Çözünürlük",
     },
     audio: {
@@ -3611,6 +3691,14 @@ const it: Dictionary = {
         audio: "Audio",
         resolution: "Risoluzione",
     },
+    settingsSections: {
+        format: "Formato",
+        performance: "Prestazioni",
+        quality: "Qualità",
+        devices: "Dispositivi",
+        display: "Schermo",
+        resolution: "Risoluzione",
+    },
     audio: {
         defaultDevice: "Predefinito",
     },
@@ -3943,6 +4031,14 @@ const nl: Dictionary = {
     settingsTabs: {
         video: "Video",
         audio: "Audio",
+        resolution: "Resolutie",
+    },
+    settingsSections: {
+        format: "Indeling",
+        performance: "Prestaties",
+        quality: "Kwaliteit",
+        devices: "Apparaten",
+        display: "Weergave",
         resolution: "Resolutie",
     },
     audio: {
@@ -4279,6 +4375,14 @@ const ar: Dictionary = {
         audio: "الصوت",
         resolution: "الدقة",
     },
+    settingsSections: {
+        format: "التنسيق",
+        performance: "الأداء",
+        quality: "الجودة",
+        devices: "الأجهزة",
+        display: "العرض",
+        resolution: "الدقة",
+    },
     audio: {
         defaultDevice: "افتراضي",
     },
@@ -4611,6 +4715,14 @@ const ko: Dictionary = {
     settingsTabs: {
         video: "비디오",
         audio: "오디오",
+        resolution: "해상도",
+    },
+    settingsSections: {
+        format: "형식",
+        performance: "성능",
+        quality: "품질",
+        devices: "장치",
+        display: "디스플레이",
         resolution: "해상도",
     },
     audio: {
@@ -4947,6 +5059,14 @@ const ja: Dictionary = {
         audio: "音声",
         resolution: "解像度",
     },
+    settingsSections: {
+        format: "形式",
+        performance: "パフォーマンス",
+        quality: "音質",
+        devices: "デバイス",
+        display: "ディスプレイ",
+        resolution: "解像度",
+    },
     audio: {
         defaultDevice: "既定",
     },
@@ -5279,6 +5399,14 @@ const vi: Dictionary = {
     settingsTabs: {
         video: "Video",
         audio: "Âm thanh",
+        resolution: "Độ phân giải",
+    },
+    settingsSections: {
+        format: "Định dạng",
+        performance: "Hiệu năng",
+        quality: "Chất lượng",
+        devices: "Thiết bị",
+        display: "Hiển thị",
         resolution: "Độ phân giải",
     },
     audio: {
@@ -5615,6 +5743,14 @@ const th: Dictionary = {
         audio: "เสียง",
         resolution: "ความละเอียด",
     },
+    settingsSections: {
+        format: "รูปแบบ",
+        performance: "ประสิทธิภาพ",
+        quality: "คุณภาพ",
+        devices: "อุปกรณ์",
+        display: "การแสดงผล",
+        resolution: "ความละเอียด",
+    },
     audio: {
         defaultDevice: "ค่าเริ่มต้น",
     },
@@ -5949,6 +6085,14 @@ const fil: Dictionary = {
         audio: "Audio",
         resolution: "Resolusyon",
     },
+    settingsSections: {
+        format: "Format",
+        performance: "Performance",
+        quality: "Kalidad",
+        devices: "Mga device",
+        display: "Display",
+        resolution: "Resolusyon",
+    },
     audio: {
         defaultDevice: "Default",
     },
@@ -6281,6 +6425,14 @@ const da: Dictionary = {
     settingsTabs: {
         video: "Video",
         audio: "Lyd",
+        resolution: "Opløsning",
+    },
+    settingsSections: {
+        format: "Format",
+        performance: "Ydeevne",
+        quality: "Kvalitet",
+        devices: "Enheder",
+        display: "Skærm",
         resolution: "Opløsning",
     },
     audio: {
