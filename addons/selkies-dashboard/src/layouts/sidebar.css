@@ -273,15 +273,22 @@
 .sidebar .mobile-key-button,
 .sidebar .key-palette-toggle {
   flex: 1 1 auto;
-  min-height: 36px;
-  padding: 6px 8px;
+  min-height: var(--soft-key-h);
+  padding: 0.375rem 0.5rem;
   border: 1px solid var(--sk-border-strong);
   border-radius: 6px;
   background-color: var(--sk-surface-alt);
   color: var(--sk-text);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   box-shadow: none;
+}
+.sidebar .key-palette-toggle { flex: 0 0 auto; }
+/* A palette grid cell is only a few rem wide: the padding and size that suit a full-width key clip "Home" and "PgUp". */
+.sidebar .mobile-key-button.palette-grid-key {
+  min-width: 0;
+  padding-inline: 0.125rem;
+  font-size: 0.75rem;
 }
 .sidebar .mobile-key-button:hover { border-color: var(--sk-accent-border); }
 .sidebar .mobile-key-button[data-variant="default"],
