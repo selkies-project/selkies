@@ -10,7 +10,8 @@
 // Light surfaces take a deeper pink so white text clears 4.5:1; dark surfaces a
 // lighter one under near-black text.
 //
-// RULES are the open and active states of accordions, tabs, and separators,
+// RULES are the open and active states of accordions, tabs, and separators, the
+// white knob of a switch that is on, and the accent on the range input's thumb,
 // written between marker comments at the end of the file so they are replaced
 // in place, or added when init has removed them.
 import fs from 'node:fs';
@@ -71,6 +72,31 @@ const RULES = `${RULES_START}
 
 [data-slot="accordion-content"] > div {
   border-top-color: color-mix(in oklab, var(--primary) 35%, var(--border));
+}
+
+/* A switch's knob, on or off, takes the text color of the theme: white in the
+   dark theme and black in the light one. It covers the kit's switch and the
+   knob of a menu item in its switch variant, a bare span in the checked or
+   unchecked indicator. Unlayered, so it beats the kit's
+   \`dark:data-checked:bg-primary-foreground\` and the menu's \`bg-background\`,
+   which are near-black in the dark theme and sink into the track. */
+[data-slot="switch-thumb"],
+[data-slot="menu-checkbox-item"] [data-checked] > span,
+[data-slot="menu-checkbox-item"] [data-unchecked] > span {
+  background-color: var(--foreground);
+}
+
+/* The thumb of the browser's range input in the accent, ringed in the surface
+   so it stands out from the filled track. Its size and the width of its ring
+   stay with \`.range-slider\`. */
+.range-slider::-webkit-slider-thumb {
+  border-color: var(--background);
+  background: var(--primary);
+}
+
+.range-slider::-moz-range-thumb {
+  border-color: var(--background);
+  background: var(--primary);
 }
 ${RULES_END}`;
 
