@@ -87,14 +87,14 @@ export function SoftKeys({ showTrackpad: trackpadButton = true, showKeyboardButt
         </div>
       )}
       <div className="flex shrink-0 flex-col items-start gap-1.5">
-        <div className="flex w-full flex-nowrap items-center gap-1">
+        <div className="flex w-full flex-wrap items-center gap-1">
           {showKeys && (
             <>
-              <Key active={d.heldKeys.Control} className="min-w-0 flex-auto px-1 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.holdKey('Control', 'ControlLeft')}>CTRL</Key>
-              <Key active={d.heldKeys.Alt} className="min-w-0 flex-auto px-1 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.holdKey('Alt', 'AltLeft')}>ALT</Key>
-              <Key active={d.heldKeys.Meta} className="min-w-0 flex-auto px-1 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.holdKey('Meta', 'MetaLeft')}>WIN</Key>
-              <Key className="min-w-0 flex-auto px-1 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.pressKey('Tab', 'Tab')}>TAB</Key>
-              <Key className="min-w-0 flex-auto px-1 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.pressKey('Escape', 'Escape')}>ESC</Key>
+              <Key active={d.heldKeys.Control} className="flex-auto px-1.5 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.holdKey('Control', 'ControlLeft')}>CTRL</Key>
+              <Key active={d.heldKeys.Alt} className="flex-auto px-1.5 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.holdKey('Alt', 'AltLeft')}>ALT</Key>
+              <Key active={d.heldKeys.Meta} className="flex-auto px-1.5 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.holdKey('Meta', 'MetaLeft')}>WIN</Key>
+              <Key className="flex-auto px-1.5 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.pressKey('Tab', 'Tab')}>TAB</Key>
+              <Key className="flex-auto px-1.5 text-[clamp(0.6875rem,3.4vw,0.875rem)]" onClick={() => d.pressKey('Escape', 'Escape')}>ESC</Key>
               {showKeyboardButton && d.renderable.keyboardButton && (
                 <Button variant="secondary" size="sm" className="h-(--soft-key-h) shrink-0 aspect-square px-0" aria-label={t('topMenu.virtualKeyboard')} onClick={d.showVirtualKeyboard}>
                   <Keyboard className="size-4" />
