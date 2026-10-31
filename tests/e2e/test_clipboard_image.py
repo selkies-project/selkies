@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The image clipboard, both directions, against a live session.
 
-The dashboards' Upload Image button is the only way an image the user did not
+The dashboard's Upload Image button is the only way an image the user did not
 copy reaches the session clipboard. Choosing the file takes the window's focus
-while the dialog is open -- which closes the Wish panel's menu -- and gives it
+while the dialog is open -- which closes the toolbar panel's menu -- and gives it
 back as the dialog closes, which fires the focus-driven local sync. Whether the
 image survives that is the whole feature, so the checks read the session's own
 clipboard rather than the message that carried the image to the core, in both
@@ -39,7 +39,6 @@ import core_lib as C  # noqa: E402
 import test_dashboards as TD  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-DASHES = {"classic": H.CLASSIC_DIST, "wish": H.WISH_DIST}
 WL_SOCKET = "wayland-1"
 # Stays under python-xlib's request size (it has no BIG-REQUESTS), as the
 # server's own selection owner does.
@@ -279,7 +278,7 @@ def block(mode: str, wayland: bool, dashboard: str) -> "H.Results":
 def checks(res: "H.Results", tag: str, mode: str, wayland: bool, dashboard: str) -> None:
     """The checks of one block, each recorded in `res`."""
     uploaded = png(23)
-    H.server_start(mode=mode, wayland=wayland, web_root=DASHES[dashboard],
+    H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, layout=dashboard,
                    extra_env={"SELKIES_DEBUG": "true"})
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
@@ -313,7 +312,7 @@ def checks(res: "H.Results", tag: str, mode: str, wayland: bool, dashboard: str)
             res.check("an uploaded JPEG is offered to the session as PNG as well",
                       mime == "image/png" and dims(data) == (40, 30) and "image/jpeg" in targets,
                       f"{mime} {dims(data) if data else None}, offered {targets}")
-            if dashboard != "classic":
+            if dashboard != "default":
                 return
 
             copied = png(91)
@@ -377,7 +376,7 @@ def checks(res: "H.Results", tag: str, mode: str, wayland: bool, dashboard: str)
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "websockets"
     mode, wayland = ("websockets", True) if which == "wayland" else (which, False)
-    results = [block(mode, wayland, dashboard) for dashboard in DASHES]
+    results = [block(mode, wayland, dashboard) for dashboard in H.LAYOUTS]
     H.server_stop()
     failed = sum(len(r.failed()) for r in results)
     print(f"\n=== CLIPBOARD IMAGE: {'FAIL' if failed else 'PASS'} ===")

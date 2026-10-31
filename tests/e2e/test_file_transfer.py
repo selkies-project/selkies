@@ -6,17 +6,17 @@ websockets / webrtc:
     The server's upload and download routes, driven the way the client drives
     them (POST /api/upload with the X-Upload-Path header and the chunked
     X-Upload-* headers; GET /api/files/<name> and the directory index), with
-    the bytes compared on disk and on the wire; then both dashboards on a real
+    the bytes compared on disk and on the wire; then both layouts on a real
     page: the Files UI's upload button feeds the browser's file chooser and the
     upload lands in the directory. The download then comes back the way each
-    dashboard offers it — classic's Download Files modal through the index it
+    dashboard offers it — the file manager through the index it
     renders in an iframe, whose link is both fetched and clicked, and Wish's file
     manager through the Download button on the uploaded file's row. The
     websockets block also drives one file above the client's slicing threshold
     through the page so the client's chunked path is exercised end to end.
 policy:
     `file_transfers=upload`, `download`, and `none` each refuse the other
-    direction on the wire and hide its button in both dashboards; Wish's JSON
+    direction on the wire and hide its button in both layouts; the manager's JSON
     listing and its folder creation follow the same two permissions; with Basic
     auth the view-only password (the server's viewer ceiling) can neither
     upload nor list or download files, and a shared/viewer page never starts
@@ -252,7 +252,7 @@ def api_checks(res: "H.Results", full: bool) -> None:
     status, _, _ = request("GET", "/api/files/../seed.txt")
     res.check("a traversal in the download path is refused", status in (403, 404), status)
 
-    # The file manager's JSON API, which the Wish dashboard speaks instead of the
+    # The file manager's JSON API, which the dashboard's file manager speaks instead of the
     # index: one directory at a time, and the changes as their own verbs.
     status, _, body = request("GET", "/api/file-manager/browse")
     names = {e.get("name") for e in json.loads(body).get("entries", [])} if status == 200 else set()
@@ -351,33 +351,31 @@ def close_menus(page: Any) -> None:
 
 
 def open_files_ui(page: Any, dashboard: str) -> bool:
-    """Reach the Files controls: the classic sidebar section, or the Wish
-    top-bar menu's Files item, which opens the file manager dialog."""
-    if dashboard == "classic":
+    """Reach the Files controls: the sidebar's Files section, or the toolbar
+    menu's Files item, which opens the file manager dialog."""
+    if dashboard == "default":
         try:
-            page.locator('.toggle-handle').first.click()
-            time.sleep(0.6)
-            page.locator('.sidebar-section-header:has-text("Files")').first.click()
-            time.sleep(0.6)
+            TD.sidebar_section(page, "Files")
             return page.locator('#files-content').count() > 0
         except Exception as e:
-            print(f"      (classic files section: {e!r})")
+            print(f"      (files section: {e!r})")
             return False
     close_menus(page)
     return TD.wish_open_menu_item(page, "Files")
 
 
 def files_buttons(page: Any, dashboard: str) -> tuple:
-    """`(upload shown, download shown)` for the dashboard.
+    """`(upload shown, download shown)` for the layout.
 
-    Classic keeps two buttons in its Files section. Wish has one menu entry that
-    opens the file manager, which carries both: uploads through its Upload
-    button, downloads through the Download button each file's row offers, so the
-    manager's own buttons are what its answer is read from.
+    The sidebar's Files section keeps two buttons, Upload Files and Download
+    Files, the second opening the file manager. The toolbar has one menu entry
+    that opens the manager, which carries both: uploads through its Upload
+    button, downloads through the Download button each file's row offers, so
+    the manager's own buttons are what its answer is read from.
     """
-    if dashboard == "classic":
-        return (page.locator('button:has-text("Upload Files")').count() > 0,
-                page.locator('button:has-text("Download Files")').count() > 0)
+    if dashboard == "default":
+        return (page.locator('#files-content button:has-text("Upload Files")').count() > 0,
+                page.locator('#files-content button:has-text("Download Files")').count() > 0)
     dialog = page.locator('[role="dialog"]:has-text("Files")')
     if not dialog.count():
         return (False, False)
@@ -389,13 +387,13 @@ def files_buttons(page: Any, dashboard: str) -> tuple:
 
 
 def wish_manager_dialog(page: Any) -> Optional[Any]:
-    """The open Wish file manager dialog, or None when it is not up."""
+    """The open file manager dialog, or None when it is not up."""
     dialog = page.locator('[role="dialog"]:has-text("Files")').first
     return dialog if dialog.count() else None
 
 
 def wish_row_download(page: Any, dialog: Any, name: str, timeout: float = 30) -> tuple:
-    """Download `name` out of the Wish file manager, the way a user does: the
+    """Download `name` out of the file manager, the way a user does: the
     Download button on its row, which opens the file as an attachment.
 
     Returns:
@@ -450,11 +448,8 @@ def upload_progress_shown(page: Any, dashboard: str, name: str) -> bool:
     """Whether the dashboard is showing this upload's progress at this moment.
 
     A transfer with no visible progress reads as a dashboard that dropped it,
-    which is the whole reason the notification exists; each dashboard has its
-    own: a progress bar in the classic sidebar, a toast in wish.
+    which is the whole reason the notification exists: a toast in either layout.
     """
-    if dashboard == "classic":
-        return page.locator(".notification-progress-bar-inner").count() > 0
     return page.locator(f'[data-sonner-toast]:has-text("{name}")').count() > 0
 
 
@@ -475,130 +470,96 @@ def wait_video(page: Any, mode: str) -> Optional[dict]:
 
 
 def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> None:
-    """Upload through the dashboard's button and download through its modal."""
+    """Upload through the dashboard's controls and download through its file manager."""
     name = f"{dashboard}-{mode}.bin"
     payload = os.urandom(256 * 1024)
     folder = f"into {mode}"
-    if dashboard == "wish":
-        # Listed when the manager opens, for the upload into a folder below.
-        os.makedirs(on_disk(folder), exist_ok=True)
+    # Listed when the manager opens, for the upload into a folder below.
+    os.makedirs(on_disk(folder), exist_ok=True)
     res.check(f"{dashboard}: the Files UI opens", open_files_ui(page, dashboard))
-    chosen = False
-    try:
-        # Wish's file manager has its own Upload button, which asks the core's
-        # uploader for its picker as classic's Upload Files does.
-        upload = ((wish_manager_dialog(page) or page).locator('button[aria-label="Upload"]')
-                  if dashboard == "wish" else page.locator('button:has-text("Upload Files")'))
-        with page.expect_file_chooser(timeout=8000) as chooser:
-            upload.first.click()
-        chooser.value.set_files({"name": name, "mimeType": "application/octet-stream", "buffer": payload})
-        chosen = True
-    except Exception as e:
-        print(f"      (file chooser: {e!r})")
-    res.check(f"{dashboard}: Upload Files opens the browser's file chooser", chosen)
-    ups = wait_upload_end(page, name)
-    res.check(f"{dashboard}: the upload reports its end to the dashboard",
-              any(u.get("fileName") == name and u.get("status") == "end" for u in ups), ups[-2:])
-    res.check(f"{dashboard}: the upload landed in file_manager_path byte for byte",
-              wait_file(on_disk(name), 5) and file_sha(on_disk(name)) == sha(payload))
-
-    if dashboard == "wish":
-        # Wish has no index frame: the menu's Files item opened the file manager,
-        # which lists the directory over the JSON API and downloads from a row's
-        # own action rather than from a link in a rendered listing.
-        dialog = wish_manager_dialog(page)
-        if dialog is None:
-            res.check(f"{dashboard}: the file manager lists the upload", False, "the dialog is not open")
-            return
-        found, downloaded = wish_row_download(page, dialog, name)
-        res.check(f"{dashboard}: the file manager lists the upload", found)
-        res.check(f"{dashboard}: the row's Download action hands over the same bytes",
-                  downloaded == sha(payload), f"{name} -> {downloaded}")
-        # The folder the manager shows is where its Upload sends the picked
-        # files: the request names it to the core's uploader.
-        inner = f"{dashboard}-{mode}-in-folder.bin"
-        inner_payload = os.urandom(4096)
+    if dashboard == "default":
+        # The sidebar's Upload Files button asks the core's uploader for its
+        # picker straight away, with no manager in between.
+        chosen = False
         try:
-            dialog.locator(f'button:has-text("{folder}")').first.click()
-            dialog.locator(f'nav button:has-text("{folder}")').first.wait_for(timeout=10000)
             with page.expect_file_chooser(timeout=8000) as chooser:
-                dialog.locator('button[aria-label="Upload"]').first.click()
-            chooser.value.set_files({"name": inner, "mimeType": "application/octet-stream",
-                                     "buffer": inner_payload})
+                page.locator('#files-content button:has-text("Upload Files")').first.click()
+            chooser.value.set_files({"name": name, "mimeType": "application/octet-stream", "buffer": payload})
+            chosen = True
         except Exception as e:
-            print(f"      (upload into a folder: {e!r})")
-        target = on_disk(os.path.join(folder, inner))
-        res.check(f"{dashboard}: Upload in an open folder lands in that folder",
-                  wait_file(target, 15) and file_sha(target) == sha(inner_payload)
-                  and not os.path.exists(on_disk(inner)))
+            print(f"      (file chooser: {e!r})")
+        res.check(f"{dashboard}: Upload Files opens the browser's file chooser", chosen)
+        ups = wait_upload_end(page, name)
+        res.check(f"{dashboard}: the upload reports its end to the dashboard",
+                  any(u.get("fileName") == name and u.get("status") == "end" for u in ups), ups[-2:])
+        res.check(f"{dashboard}: the upload landed in file_manager_path byte for byte",
+                  wait_file(on_disk(name), 5) and file_sha(on_disk(name)) == sha(payload))
+        # The chooser took the focus; the manager is reached through the section again.
+        open_files_ui(page, dashboard)
+        page.locator('#files-content button:has-text("Download Files")').first.click()
+        time.sleep(1.5)
+    else:
+        # The manager's own Upload button asks the core's uploader for its picker.
+        chosen = False
+        try:
+            upload = (wish_manager_dialog(page) or page).locator('button[aria-label="Upload"]')
+            with page.expect_file_chooser(timeout=8000) as chooser:
+                upload.first.click()
+            chooser.value.set_files({"name": name, "mimeType": "application/octet-stream", "buffer": payload})
+            chosen = True
+        except Exception as e:
+            print(f"      (file chooser: {e!r})")
+        res.check(f"{dashboard}: Upload opens the browser's file chooser", chosen)
+        ups = wait_upload_end(page, name)
+        res.check(f"{dashboard}: the upload reports its end to the dashboard",
+                  any(u.get("fileName") == name and u.get("status") == "end" for u in ups), ups[-2:])
+        res.check(f"{dashboard}: the upload landed in file_manager_path byte for byte",
+                  wait_file(on_disk(name), 5) and file_sha(on_disk(name)) == sha(payload))
+
+    # The manager lists the directory over the JSON API and downloads from a
+    # row's own action rather than from a link in a rendered listing.
+    dialog = wish_manager_dialog(page)
+    if dialog is None:
+        res.check(f"{dashboard}: the file manager lists the upload", False, "the dialog is not open")
         return
-
-    def listing_frame(seconds: float):
-        """The modal's index frame once it lists `name`, or None."""
-        # The index shares the server's loop with the encoder; starved runners lag it.
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            for frame in page.frames:
-                if "/api/files/" in frame.url:
-                    try:
-                        if name in frame.content():
-                            return frame
-                    except Exception:
-                        pass
-            time.sleep(0.5)
-        return None
-
-    listing = None
-    # The chooser takes the focus, which folds the classic sidebar, so the
-    # controls are reopened before reaching for the second button — and again if
-    # the click found nothing.
-    for attempt in (0, 1):
-        if attempt:
-            open_files_ui(page, dashboard)
-        try:
-            page.locator('button:has-text("Download Files")').first.click()
-        except Exception as e:
-            print(f"      (download button: {e!r})")
-        listing = listing_frame(30 if attempt == 0 else 15)
-        if listing is not None:
-            break
-    res.check(f"{dashboard}: the Download Files modal lists the upload", listing is not None,
-              [f.url for f in page.frames])
-    fetched = None
-    href = None
-    if listing is not None:
-        link = listing.locator(f'table#list td a[href^="{name}"]').first
-        href = link.get_attribute("href") if link.count() else None
-        if href:
-            response = page.request.get(urllib.parse.urljoin(listing.url, href))
-            fetched = sha(response.body()) if response.status == 200 else f"status {response.status}"
-    res.check(f"{dashboard}: the listing's link serves the same bytes", fetched == sha(payload), f"{href} -> {fetched}")
-    # A real click focuses the iframe, which blurs the window; Radix closes every
-    # menu on that, tearing down a modal mounted inside a menubar submenu.
-    downloaded = None
-    detail = ""
-    if listing is not None and href:
-        try:
-            with page.expect_download(timeout=20000) as dl:
-                listing.locator(f'table#list td a[href="{href}"]').first.click()
-            path = dl.value.path()
-            downloaded = file_sha(path) if path else None
-        except Exception as e:
-            detail = f"no download: {str(e).splitlines()[0][:60]}"
-        if listing.is_detached():
-            detail += "; the modal closed on the click"
-    res.check(f"{dashboard}: a real click on the listing link downloads the same bytes",
-              downloaded == sha(payload), detail)
+    chunks = page.evaluate("window.videoChunksReceived || 0")
+    found, downloaded = wish_row_download(page, dialog, name)
+    res.check(f"{dashboard}: the file manager lists the upload", found)
+    res.check(f"{dashboard}: the row's Download action hands over the same bytes",
+              downloaded == sha(payload), f"{name} -> {downloaded}")
+    # A download that navigates the tab fires beforeunload, on which the core
+    # closes the session even though the attachment keeps the page.
+    time.sleep(2)
+    res.check(f"{dashboard}: the download leaves the stream running",
+              page.evaluate("window.videoChunksReceived || 0") > chunks)
+    # The folder the manager shows is where its Upload sends the picked
+    # files: the request names it to the core's uploader.
+    inner = f"{dashboard}-{mode}-in-folder.bin"
+    inner_payload = os.urandom(4096)
+    try:
+        dialog.locator(f'button:has-text("{folder}")').first.click()
+        dialog.locator(f'nav button:has-text("{folder}")').first.wait_for(timeout=10000)
+        with page.expect_file_chooser(timeout=8000) as chooser:
+            dialog.locator('button[aria-label="Upload"]').first.click()
+        chooser.value.set_files({"name": inner, "mimeType": "application/octet-stream",
+                                 "buffer": inner_payload})
+    except Exception as e:
+        print(f"      (upload into a folder: {e!r})")
+    target = on_disk(os.path.join(folder, inner))
+    res.check(f"{dashboard}: an upload from inside a folder lands in that folder",
+              wait_file(target, 10) and file_sha(target) == sha(inner_payload), target)
+    page.keyboard.press("Escape")
+    time.sleep(0.5)
 
 
 def transport_block(mode: str) -> "H.Results":
-    """Routes and both dashboards' file UI on one transport."""
+    """Routes and both layouts' file UI on one transport."""
     res = H.Results(f"files-{mode}")
     fresh_files_dir()
     H.server_start(mode=mode, wayland=False, extra_env={"SELKIES_FILE_MANAGER_PATH": FILES_DIR})
     api_checks(res, full=(mode == "websockets"))
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
-        H.server_start(mode=mode, wayland=False, web_root=dist,
+    for dashboard in H.LAYOUTS:
+        H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
                        extra_env={"SELKIES_FILE_MANAGER_PATH": FILES_DIR})
         with sync_playwright() as pw:
             browser, page = dashboard_page(pw, mode)
@@ -655,11 +616,11 @@ def policy_block() -> "H.Results":
     """`file_transfers` values and the viewer ceiling."""
     res = H.Results("files-policy")
     for value, upload_ok, download_ok in (("upload", True, False), ("download", False, True), ("none", False, False)):
-        for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+        for dashboard in H.LAYOUTS:
             fresh_files_dir()
-            H.server_start(mode="websockets", wayland=False, web_root=dist,
+            H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
                            extra_env={"SELKIES_FILE_MANAGER_PATH": FILES_DIR, "SELKIES_FILE_TRANSFERS": value})
-            if dashboard == "classic":
+            if dashboard == "default":
                 status, _ = client_upload(f"{value}.bin", b"policy")
                 landed = os.path.exists(on_disk(f"{value}.bin"))
                 res.check(f"file_transfers={value}: upload {'accepted' if upload_ok else 'refused'}",
@@ -671,9 +632,8 @@ def policy_block() -> "H.Results":
                 res.check(f"file_transfers={value}: the index follows the download permission",
                           status == (200 if download_ok else 403), status)
             else:
-                # The file manager's own routes, which only Wish speaks: its
-                # listing is gated like the index, and its folder creation like
-                # an upload.
+                # The file manager's own routes: its listing is gated like the
+                # index, and its folder creation like an upload.
                 status, _, body = request("GET", "/api/file-manager/browse")
                 res.check(f"file_transfers={value}: the JSON listing follows the download permission",
                           (status == 200 and b'"status": "ok"' in body or b'"status":"ok"' in body)
@@ -692,8 +652,7 @@ def policy_block() -> "H.Results":
                     opened = open_files_ui(page, dashboard)
                     up, down = files_buttons(page, dashboard)
                     if value == "none":
-                        # Wish drops the Files entry entirely; classic keeps the
-                        # section but renders neither button.
+                        # Neither layout offers the files at all.
                         res.check(f"file_transfers=none: {dashboard} offers neither button",
                                   not up and not down, f"opened={opened} upload={up} download={down}")
                     else:
@@ -704,7 +663,7 @@ def policy_block() -> "H.Results":
                     browser.close()
 
     fresh_files_dir()
-    H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST, extra_env={
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, extra_env={
         "SELKIES_FILE_MANAGER_PATH": FILES_DIR, "SELKIES_ENABLE_BASIC_AUTH": "true",
         "SELKIES_BASIC_AUTH_USER": BASIC_USER, "SELKIES_BASIC_AUTH_PASSWORD": BASIC_PASSWORD,
         "SELKIES_BASIC_AUTH_VIEWONLY_PASSWORD": VIEWONLY_PASSWORD})

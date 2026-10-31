@@ -26,10 +26,10 @@ webrtc:      the same page over WebRTC fetches its TURN configuration with
              the Bearer header and streams; loaded with #token= through the
              proxy, in Chromium and Firefox, it does so with no token in any
              request line.
-dashboards:  both dashboards open their file manager with the page's token
+dashboards:  both layouts open their file manager with the page's token
              and the listing renders inside the modal, and on a #token= page
              the file manager's URL and the listing's links carry none; the
-             classic one's sharing links carry no token, the sharer's own
+             sidebar's sharing links carry no token, the sharer's own
              included, and it switches transport on that same token, asking
              the user for nothing (the master token is the operator's, not a
              session user's, so a prompt for it would be unanswerable).
@@ -730,10 +730,10 @@ def run_tokens_file() -> "H.Results":
 
 
 def open_files_modal(page, dashboard: str) -> bool:
-    """Click through the dashboard to its files: classic's Download Files
-    modal, or the file manager Wish's Files menu item opens."""
+    """Click through the dashboard to its file manager: the sidebar's Download
+    Files button, or the toolbar menu's Files item."""
     try:
-        if dashboard == "classic":
+        if dashboard == "default":
             page.locator('.toggle-handle').first.click()
             time.sleep(0.5)
             page.locator('.sidebar-section-header:has-text("Files")').first.click()
@@ -748,52 +748,33 @@ def open_files_modal(page, dashboard: str) -> bool:
         return False
 
 
-def check_index_frame(res: "H.Results", page, label: str, token_in_links: bool) -> None:
-    """Classic's Download Files modal: the server's index in an iframe, which
-    carries the page's query token on its own URL and links, or none."""
-    src = page.evaluate("() => { const f = document.querySelector('iframe'); return f ? f.getAttribute('src') : null; }")
-    carried = src is not None and "/api/files/" in src and (
-        f"token={CTRL_TOKEN}" in src if token_in_links else "token" not in src)
-    res.check(f"classic: the file-manager iframe {'carries the' if token_in_links else 'carries no'} token "
-              f"on the {label} page", carried, src)
-    listing = find_listing(page)
-    res.check(f"classic: the listing rendered on the {label} page", listing is not None,
-              [f.url for f in page.frames])
-    if listing is not None:
-        hrefs = listing.evaluate("() => [...document.querySelectorAll('table#list td a')].map(a => a.getAttribute('href'))")
-        res.check(f"classic: the listing's links {'keep the' if token_in_links else 'carry no'} token "
-                  f"on the {label} page",
-                  hrefs and all((f"token={CTRL_TOKEN}" in h) if token_in_links else ("token" not in h)
-                                for h in hrefs), hrefs)
-
-
-def check_wish_manager(res: "H.Results", page, requests: list, label: str) -> None:
-    """Wish's file manager lists the directory over the JSON API, whose
-    requests carry the session token as a Bearer header and never in the URL,
-    however the page itself was handed it."""
+def check_manager(res: "H.Results", page, requests: list, label: str, dashboard: str) -> None:
+    """The file manager lists the directory over the JSON API, whose requests
+    carry the session token as a Bearer header and never in the URL, however
+    the page itself was handed it."""
     dialog = '[role="dialog"]:has-text("hello.txt")'
     deadline = time.time() + 15
     while time.time() < deadline and not page.locator(dialog).count():
         time.sleep(0.5)
-    res.check(f"wish: the file manager lists the directory on the {label} page",
+    res.check(f"{dashboard}: the file manager lists the directory on the {label} page",
               page.locator(dialog).count() > 0)
     browses = [r for r in requests if "/api/file-manager/browse" in r[1]]
-    res.check(f"wish: the listing's requests carry the Bearer token on the {label} page",
+    res.check(f"{dashboard}: the listing's requests carry the Bearer token on the {label} page",
               browses and all(r[2].get("authorization") == f"Bearer {CTRL_TOKEN}" for r in browses),
               [r[2].get("authorization") for r in browses])
-    res.check(f"wish: no listing request carries the token in its URL on the {label} page",
+    res.check(f"{dashboard}: no listing request carries the token in its URL on the {label} page",
               browses and all("token" not in r[1] for r in browses), [r[1] for r in browses])
 
 
 def run_dashboards() -> "H.Results":
     from playwright.sync_api import sync_playwright
     res = H.Results("dashboards")
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
-        if not os.path.isfile(os.path.join(dist, "index.html")):
-            res.skip(f"{dashboard}: dist not built", dist)
+    for dashboard in H.LAYOUTS:
+        if not os.path.isfile(os.path.join(H.DASHBOARD_DIST, "index.html")):
+            res.skip(f"{dashboard}: dist not built", H.DASHBOARD_DIST)
             continue
         fresh_files_dir()
-        H.server_start(mode="websockets", wayland=False, web_root=dist,
+        H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
                        extra_env=secure_env(SELKIES_ENABLE_DUAL_MODE="true"))
         provision(res)
         with sync_playwright() as pw:
@@ -802,10 +783,7 @@ def run_dashboards() -> "H.Results":
                 info = C.wait_ws_video(page, timeout=30)
                 res.check(f"{dashboard}: the dashboard page streams with #token=", info is not None, info)
                 res.check(f"{dashboard}: the files modal opens on the #token= page", open_files_modal(page, dashboard))
-                if dashboard == "classic":
-                    check_index_frame(res, page, "#token=", token_in_links=False)
-                else:
-                    check_wish_manager(res, page, requests, "#token=")
+                check_manager(res, page, requests, "#token=", dashboard)
             finally:
                 browser.close()
             browser, page, requests = launch(pw, f"?token={CTRL_TOKEN}", "websockets")
@@ -826,21 +804,22 @@ def run_dashboards() -> "H.Results":
                 info = C.wait_ws_video(page, timeout=30)
                 res.check(f"{dashboard}: the dashboard page streams with ?token=", info is not None, info)
                 res.check(f"{dashboard}: the files modal opens", open_files_modal(page, dashboard))
-                if dashboard == "classic":
-                    check_index_frame(res, page, "?token=", token_in_links=True)
-                else:
-                    check_wish_manager(res, page, requests, "?token=")
-                if dashboard == "classic":
+                check_manager(res, page, requests, "?token=", dashboard)
+                if dashboard == "default":
                     # A controller switches on the token its own page was opened
                     # with. Nobody is asked to paste the master token: it is an
                     # operator credential a session user does not hold.
-                    page.locator('.files-modal-close').first.click()
+                    page.keyboard.press("Escape")
                     time.sleep(0.5)
                     page.locator('.sidebar-section-header:has-text("Sharing")').first.click()
                     time.sleep(0.5)
-                    shared = page.evaluate("() => [...document.querySelectorAll('a.sharing-link')].map(a => a.href)")
-                    res.check("classic: the sharing links carry no token, the sharer's own included",
-                              shared and all("token" not in h for h in shared), shared)
+                    shared = page.evaluate("() => { const links = [];"
+                                           " for (const b of document.querySelectorAll('#sharing-content button[aria-label]')) links.push(b.getAttribute('aria-label'));"
+                                           " return links; }")
+                    res.check("default: the sharing section lists the links to copy", len(shared) >= 1, shared)
+                    shareable = page.evaluate("() => location.href.split('#')[0].split('?')[0]")
+                    res.check("default: the shareable address carries no token, the sharer's own included",
+                              "token" not in shareable, shareable)
                     page.locator('.sidebar-section-header:has-text("Video")').first.click()
                     time.sleep(0.5)
                     base_navs = len(navigations)
@@ -852,13 +831,13 @@ def run_dashboards() -> "H.Results":
                         page.wait_for_timeout(500)
                         status, _, body = request("GET", "/api/status")
                         switched = status == 200 and json.loads(body).get("current_mode") == "webrtc"
-                    res.check("classic: the switch went through on the session token", switched)
-                    res.check("classic: nothing asked the user for the master token",
+                    res.check("default: the switch went through on the session token", switched)
+                    res.check("default: nothing asked the user for the master token",
                               not prompts, prompts)
-                    res.check("classic: the switch did not reload the page",
+                    res.check("default: the switch did not reload the page",
                               len(navigations) == base_navs, navigations[base_navs:])
                     switch_reqs = [r for r in requests if r[0] == "POST" and "/api/switch" in r[1]]
-                    res.check("classic: the dashboard presents its own token on the switch",
+                    res.check("default: the dashboard presents its own token on the switch",
                               switch_reqs and switch_reqs[0][2].get("authorization")
                               == f"Bearer {CTRL_TOKEN}",
                               [r[2].get("authorization") for r in switch_reqs])

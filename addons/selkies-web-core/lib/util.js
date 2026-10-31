@@ -5,7 +5,7 @@
  */
 
 /**
- * Helpers shared by the streaming cores and both dashboards: a small FIFO
+ * Helpers shared by the streaming cores and the dashboard: a small FIFO
  * queue, the human-readable labels for wire values, the decodability checks
  * that keep a client from asking for a stream it cannot play, the route
  * prefix and localStorage namespace every caller derives the same way, and

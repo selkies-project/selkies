@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""The derived `scaling_dpi` default is the same number on all three sides.
+"""The derived `scaling_dpi` default is the same number on both sides.
 
-Three copies exist: the cores' shared rule in lib/stream-density.js and one per
-dashboard, which cannot import it. They have to agree, because they do not
+Two copies exist: the cores' shared rule in lib/stream-density.js and the
+dashboard's, which cannot import it. They have to agree, because they do not
 merely display the same value: on connect the core sends its derived default,
 and the dashboard posts *its* over the top whenever the two differ (the
 `willPostDerived` gate). A formula changed on one side alone would leave the
 desktop taking one DPI and the picker showing another, then quietly overwrite
 the one the core applied.
 
-The rules are JavaScript, so what is compared here is what each source
-declares: the stops offered, the rows a 96 DPI desktop is for, and the two
-expressions a density is read from -- a manual resolution's shorter side, or
-the local display scaling.
+What is compared here is what each source declares: the stops offered, the
+rows a 96 DPI desktop is for, and the two expressions a density is read from
+-- a manual resolution's shorter side, or the local display scaling.
 
 Usage: python3 tests/unit/test_dpi_default_mirror.py
 """
@@ -25,12 +24,11 @@ ADDONS = os.path.join(ROOT, "addons")
 
 SOURCES = {
     "lib": "selkies-web-core/lib/stream-density.js",
-    "dashboard": "selkies-dashboard/src/components/Sidebar.jsx",
-    "wish": "selkies-dashboard-wish/src/components/dashboard/settings.tsx",
+    "dashboard": "selkies-dashboard/src/state/settings.ts",
 }
 # The density each side reads off a manual resolution, and off the display when
-# there is none. Written the same way in all three, so a change to either rule
-# has to be made in all three.
+# there is none. Written the same way in both, so a change to either rule has
+# to be made in both.
 EXPRESSIONS = ("96 * rows / DPI_UNITY_ROWS", "Math.round(dpr * 4) * 24")
 
 results = []
@@ -59,9 +57,8 @@ def main() -> bool:
     texts = {name: read(rel) for name, rel in SOURCES.items()}
     reference = stops(texts["lib"])
     check("the lib names the stops", len(reference) > 1, reference)
-    for name in ("dashboard", "wish"):
-        got = stops(texts[name])
-        check(f"{name} offers the same stops", got == reference, f"{got} vs {reference}")
+    got = stops(texts["dashboard"])
+    check("the dashboard offers the same stops", got == reference, f"{got} vs {reference}")
 
     rows = {name: re.findall(r"DPI_UNITY_ROWS\s*(?::\s*number)?\s*=\s*(\d+)", text)
             for name, text in texts.items()}

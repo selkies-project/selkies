@@ -1183,7 +1183,7 @@ export default function webrtc() {
 	 * heavier picture but no picture, so the setting is dropped rather than
 	 * asked for. The receiver's own capabilities answer for VP9 (profile 1);
 	 * the decoder probe answers for H.264 and H.265. Written to storage, which
-	 * is what every payload and both dashboards read, so the toggle shows what
+	 * is what every payload and the dashboard read, so the toggle shows what
 	 * the stream is.
 	 */
 	async function settleFullColorSupport() {

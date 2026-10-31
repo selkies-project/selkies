@@ -17,7 +17,7 @@ The mark has its own setting, ui_show_connection_indicator: it hides the mark,
 and hiding the sidebar does not. On a touch page the mark sits clear of the
 soft keys.
 
-Usage: python3 tests/e2e/test_connection_indicator.py [classic|wish|engines|webrtc|settings|all]
+Usage: python3 tests/e2e/test_connection_indicator.py [default|wish|engines|webrtc|settings|all]
 (`engines` runs the default dashboard in Firefox and WebKit, whose session
 socket can run in a worker.)
 """
@@ -72,12 +72,12 @@ def wait_for(page: Any, verdict: str, seconds: float) -> Optional[float]:
     return None
 
 
-def ws_block(dashboard: str, dist: str, engine: str = "chromium") -> "H.Results":
+def ws_block(dashboard: str, engine: str = "chromium") -> "H.Results":
     from playwright.sync_api import sync_playwright
 
     res = H.Results(f"connection-{dashboard}" + ("" if engine == "chromium" else f"-{engine}"))
     painter = relay = None
-    H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=ENV)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard, extra_env=ENV)
     try:
         painter = H.spawn([sys.executable, PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"])
         relay = H.spawn([sys.executable, BWRELAY, str(RELAY_PORT), str(H.PORT), str(LINK_KBIT)])
@@ -166,7 +166,7 @@ def webrtc_block() -> "H.Results":
     return res
 
 
-# A poor verdict as the core records one, for the dashboards to show.
+# A poor verdict as the core records one, for the dashboard to show.
 FORCE_POOR = """() => { window.stream_client = window.stream_client || {};
   window.stream_client.connection = 'poor';
   window.dispatchEvent(new Event('selkies-stream-stats')); }"""
@@ -176,14 +176,14 @@ OVERLAP = """() => { const m = document.querySelector('[role=status]'), k = docu
   return a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom; }"""
 
 
-def settings_block(dashboard: str, dist: str) -> "H.Results":
+def settings_block(dashboard: str) -> "H.Results":
     from playwright.sync_api import sync_playwright
 
     res = H.Results(f"connection-settings-{dashboard}")
     cases = [("the setting hides the mark", {"SELKIES_UI_SHOW_CONNECTION_INDICATOR": "false"}, False),
              ("hiding the sidebar leaves the mark", {"SELKIES_UI_SHOW_SIDEBAR": "false"}, True)]
     for label, env, shown in cases:
-        H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=env)
+        H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard, extra_env=env)
         try:
             with sync_playwright() as p:
                 browser = C.chromium_launch(p)
@@ -199,7 +199,7 @@ def settings_block(dashboard: str, dist: str) -> "H.Results":
         finally:
             H.server_stop()
     if dashboard == "wish":
-        H.server_start(mode="websockets", wayland=False, web_root=dist)
+        H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
         try:
             with sync_playwright() as p:
                 browser = C.chromium_launch(p)
@@ -226,18 +226,18 @@ def settings_block(dashboard: str, dist: str) -> "H.Results":
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
-    if which in ("all", "classic"):
-        blocks.append(ws_block("classic", H.CLASSIC_DIST))
+    if which in ("all", "default", "classic"):
+        blocks.append(ws_block("default"))
     if which in ("all", "wish"):
-        blocks.append(ws_block("wish", H.WISH_DIST))
+        blocks.append(ws_block("wish"))
     if which in ("all", "engines"):
         for engine in ("firefox", "webkit"):
-            blocks.append(ws_block("classic", H.CLASSIC_DIST, engine))
+            blocks.append(ws_block("default", engine))
     if which in ("all", "webrtc"):
         blocks.append(webrtc_block())
     if which in ("all", "settings"):
-        blocks.append(settings_block("classic", H.CLASSIC_DIST))
-        blocks.append(settings_block("wish", H.WISH_DIST))
+        for layout in H.LAYOUTS:
+            blocks.append(settings_block(layout))
     failed = sum(len(b.failed()) for b in blocks)
     total = sum(len(b.items) for b in blocks)
     print(f"\n=== CONNECTION: {total - failed}/{total} passed ===")

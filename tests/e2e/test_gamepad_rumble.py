@@ -15,7 +15,7 @@ the transport named on argv:
   is handed it at once rather than at the next renewal, and hears its stop.
 - touch: the on-screen touch gamepad's pad vibrates the device through
   `navigator.vibrate`, stubbed, since a desktop engine has no motor.
-- dashboards: each dashboard's Rumble toggle turns playing off in the core,
+- dashboards: each layout's Rumble toggle turns playing off in the core,
   stopping what plays, and the core keeps the pick over a reload.
 
     python3 tests/e2e/test_gamepad_rumble.py [websockets|webrtc]
@@ -352,7 +352,7 @@ def touch(pw, mode: str, preload: str, res: "H.Results", dashboard: str, engines
 
 
 def click_rumble_toggle(page, dashboard: str) -> bool:
-    if dashboard == "classic":
+    if dashboard == "default":
         try:
             page.locator('.toggle-handle').first.click()
             time.sleep(0.8)
@@ -372,14 +372,14 @@ def click_rumble_toggle(page, dashboard: str) -> bool:
         toggle.first.click()
         time.sleep(0.5)
         return True
-    # Wish keeps it in the Gamepads panel its top bar opens.
+    # The toolbar keeps it in the Gamepads panel its button opens.
     wish_show_toolbar(page)
     panel = page.locator('button[aria-label="Gamepads"]').first
     if not panel.count():
         return False
     panel.click()
     time.sleep(0.6)
-    toggle = page.locator("div:has(> label:text-is('Rumble')) > [role='switch']").first
+    toggle = page.locator('#gamepadRumbleToggle').first
     ok = toggle.count() > 0
     if ok:
         toggle.click()
@@ -397,10 +397,10 @@ def dashboards(pw, mode: str, preload: str, res: "H.Results") -> None:
       return null;
     })()"""
     state = "() => window.webrtcInput ? window.webrtcInput.gamepadRumble : null"
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+    for dashboard in H.LAYOUTS:
         tag = f"{dashboard} {mode}"
         H.server_stop()
-        H.server_start(mode=mode, web_root=dist)
+        H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, layout=dashboard)
         browser, _, page = open_page(pw, "chromium", mode, init=PAD_INIT % ("false", "false"))
         try:
             wait_video(page, mode)
@@ -463,12 +463,12 @@ def run(mode: str, res: "H.Results") -> None:
             H.server_start(mode=mode)
             pads(pw, mode, preload, res)
             takeover(pw, mode, preload, res)
-            # The touch gamepad lives in the dashboards.
+            # The touch gamepad lives in the dashboard.
             H.server_stop()
-            H.server_start(mode=mode, web_root=H.CLASSIC_DIST)
-            touch(pw, mode, preload, res, "classic", ("chromium", "firefox", "webkit"))
+            H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, layout="default")
+            touch(pw, mode, preload, res, "default", ("chromium", "firefox", "webkit"))
             H.server_stop()
-            H.server_start(mode=mode, web_root=H.WISH_DIST)
+            H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, layout="wish")
             touch(pw, mode, preload, res, "wish", ("chromium",))
             dashboards(pw, mode, preload, res)
     finally:

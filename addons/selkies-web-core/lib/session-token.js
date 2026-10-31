@@ -5,7 +5,7 @@
  */
 
 /**
- * Secure-mode session token, shared by both transports and both dashboards.
+ * Secure-mode session token, shared by both transports and the dashboard.
  *
  * The token arrives in the page URL, in one of two places:
  *  - the fragment, as a `token=` item beside the keyword that picks the

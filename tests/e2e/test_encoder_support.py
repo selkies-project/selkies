@@ -20,8 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import helpers as H
 import core_lib as C
-from test_dashboard_matrix import encoder_menu_button
-from test_dashboards import open_wish_settings_tab
+from test_dashboards import open_video_settings
 from playwright.sync_api import sync_playwright
 
 UNSUPPORTED = "Unsupported Browser"
@@ -52,16 +51,11 @@ def wait_video(page: Any, mode: str) -> Optional[dict]:
     return C.wait_wr_video(page, timeout=45) if mode == "webrtc" else C.wait_ws_video(page, timeout=30)
 
 
-def classic_menu(page: Any) -> Optional[list]:
-    """The classic dashboard's encoder options as `(text, disabled)`, with its
-    Video section opened; None when the select never renders."""
-    if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
-        page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
-        page.wait_for_timeout(500)
-    if not page.locator("#encoderSelect").count():
-        header = page.locator('.sidebar-section-header:has-text("Video")').first
-        if header.count():
-            header.click(force=True, timeout=3000)
+def encoder_menu(page: Any, layout: str) -> Optional[list]:
+    """The encoder menu's options as `(text, disabled)`, the video settings
+    opened in `layout` first; None when the select never renders."""
+    if not open_video_settings(page, layout):
+        return None
     deadline = time.time() + 10
     while time.time() < deadline:
         options = page.evaluate(
@@ -73,29 +67,9 @@ def classic_menu(page: Any) -> Optional[list]:
     return None
 
 
-def wish_menu(page: Any) -> Optional[list]:
-    """The wish dashboard's encoder menu items as `(text, disabled)`, opened
-    from its Settings panel's Format card; None when the menu never renders."""
-    if not open_wish_settings_tab(page, "Video", "Format"):
-        return None
-    button = encoder_menu_button(page)
-    if button is None:
-        return None
-    button.click(force=True, timeout=3000)
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        items = page.evaluate(
-            "() => Array.from(document.querySelectorAll('[role=\"menu\"][data-open] [role=\"menuitem\"]'))"
-            ".map((i) => [i.textContent, i.getAttribute('aria-disabled') === 'true' || i.hasAttribute('data-disabled')])")
-        if items:
-            return items
-        time.sleep(0.3)
-    return None
-
-
 def menu_block(dashboard: str, mode: str) -> "H.Results":
     res = H.Results(f"encoder-menu-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=H.WISH_DIST if dashboard == "wish" else H.CLASSIC_DIST)
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
     with sync_playwright() as pw:
         browser = C.chromium_launch(pw)
         try:
@@ -104,7 +78,7 @@ def menu_block(dashboard: str, mode: str) -> "H.Results":
             page = ctx.new_page()
             page.goto(H.BASE_URL, wait_until="load")
             res.check("video streams", wait_video(page, mode) is not None)
-            entries = classic_menu(page) if dashboard == "classic" else wish_menu(page)
+            entries = encoder_menu(page, dashboard)
             by_label = {text.replace(UNSUPPORTED, "").strip().strip("()[]").strip(): (text, disabled)
                         for text, disabled in (entries or [])}
             res.check("every encoder the server allows is listed",
@@ -113,13 +87,6 @@ def menu_block(dashboard: str, mode: str) -> "H.Results":
                       H265 in by_label and by_label[H265][1] and UNSUPPORTED in by_label[H265][0], by_label.get(H265))
             res.check("H.264 is listed, enabled, and unmarked",
                       H264 in by_label and not by_label[H264][1] and UNSUPPORTED not in by_label[H264][0], by_label.get(H264))
-            if dashboard == "wish":
-                layers = page.evaluate(
-                    "() => { const m = document.querySelector('[role=\"menu\"][data-open]');"
-                    " const z = (e) => parseInt(getComputedStyle(e).zIndex, 10);"
-                    " return m ? [z(m.parentElement), z(document.getElementById('dashboard-root'))] : null; }")
-                res.check("the open menu stacks above the dashboard root that hosts the panel",
-                          layers is not None and layers[0] > layers[1], layers)
         finally:
             browser.close()
     H.server_stop()
@@ -180,7 +147,7 @@ def main() -> None:
     blocks = []
     try:
         if which in ("all", "menu"):
-            for dashboard in ("classic", "wish"):
+            for dashboard in H.LAYOUTS:
                 for mode in ("websockets", "webrtc"):
                     blocks.append(menu_block(dashboard, mode))
         if which in ("all", "pinned"):

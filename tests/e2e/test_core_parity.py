@@ -153,7 +153,7 @@ def new_page(browser: Any, mode: str, extra_init: Optional[list] = None) -> Any:
         ctx.add_init_script(script)
     page = ctx.new_page()
     page.goto(H.BASE_URL + "/", wait_until="load")
-    # Dashboards can constrain media globally, as Wish's Tailwind preflight does.
+    # The dashboard can constrain media globally, as its Tailwind preflight does.
     page.add_style_tag(content="video { max-width: 100%; height: auto; }")
     return page
 
