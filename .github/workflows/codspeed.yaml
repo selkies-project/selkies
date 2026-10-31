@@ -1,0 +1,47 @@
+name: CodSpeed
+
+# CPU benchmarks of the pure-Python hot paths in benchmarks/, measured with
+# CodSpeed's simulation instrument so a pull request's change in instruction
+# count is reported against main. Like the unit tier, they import the source
+# tree and need neither pixelflux nor pcmflux.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets CodSpeed run the benchmarks of a branch on request
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  benchmarks:
+    name: Run benchmarks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # CodSpeed authenticates the upload through OIDC
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install the benchmark dependencies
+        run: |
+          python scripts/ci/unit-deps.py > "${RUNNER_TEMP}/unit-requirements.txt"
+          python -m pip install pytest pytest-codspeed -r "${RUNNER_TEMP}/unit-requirements.txt"
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@61efe07e57e55bedeab750c434504de272a56e8c # v5.6.1
+        with:
+          mode: simulation
+          run: python -m pytest benchmarks --codspeed
