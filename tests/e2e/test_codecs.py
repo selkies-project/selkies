@@ -23,6 +23,12 @@ the <video> must then keep presenting frames while the screen changes.
 
 A selector may carry the engine as a third part (``ws-x11-firefox``); without
 one every engine runs.
+
+``av1crop`` (``ws-x11 av1crop``, also run last by ``ws-x11 chromium``) holds
+the AV1 picture a hardware VA-API encoder codes to the size it was asked for:
+some drivers pad the coded size (AMD VCN 4 codes 1920x1080 as 1920x1082 and
+1366x768 as 1408x768) and Chromium's decoder ignores the render size that
+trims it, so the page itself must crop. It skips without a VA-API AV1 encoder.
 """
 import os
 import re
@@ -43,6 +49,11 @@ CODECS = [("h264enc", "H264", "avc1.64001F", "video/H264"),
           ("vp9enc", "VP9", "vp09.00.31.08", "video/VP9"),
           ("av1enc", "AV1", "av01.0.05M.08", "video/AV1")]
 ENGINES = TENC.ENGINES
+
+# What the AV1 crop block streams: sizes where AMD pads the coded height or
+# width, with a bar painted over the last rows and one over the last columns.
+CROP_SIZES = [(1920, 1080), (1366, 768)]
+CROP_BAR = 8
 
 PROBE_JS = """async (codec) => {
   if (typeof VideoDecoder === 'undefined') return false;
@@ -189,6 +200,69 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
         H.server_stop()
 
 
+def paint_bars(w: int, h: int) -> Any:
+    """A bar over the last CROP_BAR rows and another over the last columns, on
+    the test display, so the edge a padded picture would push out of view is
+    a known color."""
+    from selkies.Xlib import display as xdisp, X
+    d = xdisp.Display(H.require_display())
+    scr = d.screen()
+    for geometry, argb in (((0, h - CROP_BAR, w, CROP_BAR), TENC.PAINT_ARGB),
+                           ((w - CROP_BAR, 0, CROP_BAR, h), TENC.SATURATED_ARGB)):
+        win = scr.root.create_window(*geometry, 0, scr.root_depth, window_class=X.InputOutput,
+                                     background_pixel=int(argb[2:], 16), override_redirect=True)
+        win.map()
+    d.sync()
+    return d
+
+
+def block_av1_crop(res: "H.Results") -> None:
+    """The AV1 picture the page shows is the configured size, edges intact."""
+    node = os.environ.get("E2E_VAAPI_NODE", "/dev/dri/renderD128")
+    if not os.path.exists(node):
+        res.skip("av1 crop: needs a VA-API AV1 encoder", f"{node} does not exist")
+        return
+    for w, h in CROP_SIZES:
+        tag = f"chromium av1enc {w}x{h}"
+        # No fallback rungs: a stream that left AV1 would crop nothing.
+        H.server_start(extra_env={"SELKIES_ENCODER": "av1enc", "DRI_NODE": node})
+        bars = paint_bars(w, h)
+        try:
+            with sync_playwright() as p:
+                browser = C.launch_browser(p, "chromium")
+                ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=1)
+                ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+                page = ctx.new_page()
+                try:
+                    page.goto(H.BASE_URL + "/", wait_until="load")
+                    video = C.wait_ws_video(page, timeout=30)
+                    line = wait_stream_mode("AV1")
+                    if not video or "VAAPI" not in line:
+                        res.skip(f"{tag}: needs a VA-API AV1 encoder", TENC.encoder_field(line))
+                        continue
+                    points = [w // 2, h - 1, w - 1, h // 2, w // 2, h // 2]
+                    deadline, got = time.time() + 20, None
+                    while time.time() < deadline:
+                        got = page.evaluate(TENC.SAMPLE_JS, points)
+                        if got and got["w"] == w and got["h"] == h:
+                            break
+                        time.sleep(0.5)
+                    got = got or {}
+                    res.check(f"{tag}: the picture is the configured size",
+                              (got.get("w"), got.get("h")) == (w, h), f"{got.get('w')}x{got.get('h')}")
+                    res.check(f"{tag}: the last rows keep their color",
+                              TENC.near(got.get("inside"), TENC.PAINT), got.get("inside"))
+                    res.check(f"{tag}: the last columns keep their color",
+                              TENC.near(got.get("outside"), TENC.SATURATED, TENC.SATURATED_TOLERANCE), got.get("outside"))
+                    res.check(f"{tag}: the middle is still the ground",
+                              TENC.near(got.get("saturated"), (0, 0, 0)), got.get("saturated"))
+                finally:
+                    browser.close()
+        finally:
+            bars.close()
+            H.server_stop()
+
+
 def main() -> bool:
     cell = sys.argv[1] if len(sys.argv) > 1 else "ws-x11"
     parts = cell.split("-")
@@ -196,11 +270,19 @@ def main() -> bool:
     which = parts[2] if len(parts) > 2 else (sys.argv[2] if len(sys.argv) > 2 else "all")
     mode = "websockets" if transport == "ws" else "webrtc"
     wayland = backend == "wl"
-    engines = ENGINES if which == "all" else (which,)
     res = H.Results(f"codecs {cell}")
+    if which == "av1crop":
+        if mode != "websockets" or wayland:
+            res.skip("av1 crop", "the check runs over ws-x11")
+        else:
+            block_av1_crop(res)
+        return res.summary()
+    engines = ENGINES if which == "all" else (which,)
     for engine in engines:
         for encoder, mode_name, probe, rtp_mime in CODECS:
             block_codec(mode, wayland, engine, encoder, mode_name, probe, rtp_mime, res)
+    if mode == "websockets" and not wayland and "chromium" in engines:
+        block_av1_crop(res)
     return res.summary()
 
 

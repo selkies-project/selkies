@@ -2092,13 +2092,30 @@ function closeDecoder() {
   wireCodec = null; wireW = 0; wireH = 0; wireDesc = null;
 }
 
+// A hardware encoder may code a larger picture than the stream's (VA-API on AMD
+// pads AV1 to its alignment, 1920x1080 to 1920x1082 and 1366x768 to 1408x768) and
+// names the stream's size in the AV1 render size, which Chromium's decoder does
+// not apply: the canvas would then take the padded size and the desktop would
+// come out squeezed or stretched at its edges. Crop the frame to the size the
+// decoder was configured for; a visibleRect crop copies no pixels.
+function fitDecoded(f) {
+  const c = decConfig;
+  if (!c || (f.displayWidth === c.codedWidth && f.displayHeight === c.codedHeight)
+      || f.codedWidth < c.codedWidth || f.codedHeight < c.codedHeight) return f;
+  try {
+    const g = new VideoFrame(f, { visibleRect: { x: 0, y: 0, width: c.codedWidth, height: c.codedHeight } });
+    f.close();
+    return g;
+  } catch (_) { return f; }
+}
+
 function configureDecoder(codec, w, h, software, description) {
   // Another picture size costs the decoder another rate; a new codec string
   // alone, such as the level a lower rate declares, does not.
   if (decConfig && (decConfig.codedWidth !== w || decConfig.codedHeight !== h)) resetPace();
   closeDecoder();
   try {
-    dec = new VideoDecoder({ output: (f) => { pace.decoded(); statsFormat = f.format; tellFacts(); present(f, statsOpen ? arrivalOf(f.timestamp) : NaN); },
+    dec = new VideoDecoder({ output: (f) => { pace.decoded(); statsFormat = f.format; tellFacts(); present(fitDecoded(f), statsOpen ? arrivalOf(f.timestamp) : NaN); },
                              error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
     // configure() is synchronous, so the next chunk decodes without an async gap and
     // an unsupported config surfaces via error(). The page owns the acceleration
@@ -4684,6 +4701,20 @@ function armSharedStallWatchdog() {
   }, 1000);
 }
 
+// The page-side twin of fitDecoded in the video worker: a hardware encoder may
+// code a larger picture than the stream's, and Chromium's decoder does not crop
+// it to the AV1 render size, so the frame is cropped to the size the row's
+// decoder was configured for. A visibleRect crop copies no pixels.
+function fitFrameToStream(frame, width, height) {
+  if ((frame.displayWidth === width && frame.displayHeight === height)
+      || frame.codedWidth < width || frame.codedHeight < height) return frame;
+  try {
+    const cropped = new VideoFrame(frame, { visibleRect: { x: 0, y: 0, width, height } });
+    frame.close();
+    return cropped;
+  } catch (e) { return frame; }
+}
+
 /**
  * Output callback of the stripe decoders. A full-frame h264enc frame (the
  * single decoder at row 0) is presented the instant it decodes, for the lowest
@@ -4709,6 +4740,8 @@ function handleDecodedVncStripeFrame(yPos, frame) {
       if (streamStats.open) pageShown.superseded(decodedStripesQueue.length);
       decodedStripesQueue.length = 0;
     }
+    const row = vncStripeDecoders[0];
+    if (row) frame = fitFrameToStream(frame, row.width, row.height);
     if (supportsWindowMSTG && presentFrameToVideo(frame)) {
       // Handed to the main-thread track generator.
     } else if (USE_OFFSCREEN_WORKER && presentFrameToWorker(frame)) {
