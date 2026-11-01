@@ -25,6 +25,7 @@ path's or other traffic's, becomes the floor, so the stream runs at its share ra
 than at the least rate; one the stream filled itself never does, nor does one a
 stream already held at its share sits behind.
 """
+import logging
 import os
 import random
 import sys
@@ -417,6 +418,29 @@ run(20.0, 0.0, 20)
 check("a display steered up from the rate it started at reports the rate it runs at as its target",
       module.rates[-1:] == [4000] and server._cbr_target_kbps("display2") == 4000,
       (module.rates[-1:], server._cbr_target_kbps("display2")))
+
+
+
+class Lines(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+
+said = Lines()
+logging.getLogger("ws").addHandler(said)
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5)
+state["loop_late_ms"] = 120.0
+run(320.0, t, 0.5, delivered_kbps=3000.0)
+cuts = [line for line in said.lines if "video bitrate 4000 ->" in line]
+check("a cut says how late the server's own loop woke, which every round trip it times carries",
+      len(cuts) == 1 and cuts[0].endswith("the server's loop 120 ms late)"), cuts)
+logging.getLogger("ws").removeHandler(said)
 
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

@@ -3840,12 +3840,16 @@ class DataStreamingServer(BaseStreamingService):
                 _start_link_window(started, time.monotonic())
 
             while True:
+                slept_at = time.monotonic()
                 await asyncio.sleep(self.backpressure_check_interval_s)
+                # How late the server's own event loop woke: delay it adds to every round trip it times.
+                late_ms = max((time.monotonic() - slept_at - self.backpressure_check_interval_s) * 1000.0, 0.0)
 
                 display_state = self.display_clients.get(display_id)
                 if not display_state:
                     data_logger.warning(f"Backpressure task for '{display_id}' exiting: display no longer exists.")
                     break
+                display_state['loop_late_ms'] = late_ms
                 
                 if display_id not in self.capture_instances:
                     if not display_state.get('backpressure_enabled', True):
@@ -4175,7 +4179,8 @@ class DataStreamingServer(BaseStreamingService):
             (data_logger.info if rate < current else data_logger.debug)(
                 f"Congestion control[{display_id}]: video bitrate {current:.0f} -> {rate} kbps "
                 f"(round trip {least_ms:.0f} ms over a {floor_ms:.0f} ms floor, "
-                f"{delivered_bps / 1000:.0f} kbps delivered)")
+                f"{delivered_bps / 1000:.0f} kbps delivered, the server's loop "
+                f"{display_state.get('loop_late_ms', 0.0):.0f} ms late)")
             try:
                 module.update_video_bitrate(rate)
                 self._track_capture_settings(display_id, video_bitrate_kbps=rate)
