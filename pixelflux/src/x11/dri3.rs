@@ -40,9 +40,12 @@
 //!
 //! Everything that can be checked is checked before a frame is delivered, and the path is
 //! declined otherwise: a codec no hardware engine serves, software encoding, a server without
-//! DRI3 1.2, Damage, or Render, a server drawing on a GPU other than the encode node's, a buffer
+//! DRI3, Damage, or Render, a server drawing on a GPU other than the encode node's, a buffer
 //! the server will not import, or a first frame the encoder cannot read. A watermark is not among
 //! them: it is composited by the server through Render, as the cursor is. The capture then runs the XShm path with nothing half-built.
+//!
+//! A DRI3 1.0 server (the NVIDIA X driver before 595) takes no layout with a buffer, so the pool is
+//! linear there and each buffer goes over with its stride alone.
 
 use std::ffi::c_void;
 use std::fs::File;
@@ -134,6 +137,10 @@ struct XScreen {
     /// What the server accepts for buffers of the screen's depth; empty leaves the driver's
     /// choice and the server learns the layout from the modifier the allocation reports.
     modifiers: Vec<u64>,
+    /// Whether the server takes a buffer with its modifier (DRI3 1.2). A DRI3 1.0 server
+    /// (the NVIDIA X driver before 595) learns no layout with a buffer, so the pool is
+    /// linear there and each buffer goes over with its stride alone (`PixmapFromBuffer`).
+    explicit: bool,
     device: String,
     /// SELKIES-SEMAPHORE's major opcode, where the server offers it.
     semaphore_opcode: Option<u8>,
@@ -253,12 +260,13 @@ impl XScreen {
             .map_err(|e| x_err("DRI3 query", e))?
             .reply()
             .map_err(|e| x_err("the server has no DRI3", e))?;
-        if dri3.major_version < 1 || (dri3.major_version == 1 && dri3.minor_version < 2) {
+        if dri3.major_version < 1 {
             return Err(format!(
-                "the server's DRI3 is {}.{}, and buffers with modifiers need 1.2",
+                "the server's DRI3 is {}.{}",
                 dri3.major_version, dri3.minor_version
             ));
         }
+        let explicit = dri3.major_version > 1 || dri3.minor_version >= 2;
         conn.xfixes_query_version(5, 0)
             .map_err(|e| x_err("XFixes query", e))?
             .reply()
@@ -301,17 +309,20 @@ impl XScreen {
             ));
         }
 
-        let modifiers_reply = conn
-            .dri3_get_supported_modifiers(root, depth, 32)
-            .map_err(|e| x_err("DRI3 modifiers", e))?
-            .reply()
-            .map_err(|e| x_err("the server listed no buffer modifiers", e))?;
-        let mut modifiers = if modifiers_reply.window_modifiers.is_empty() {
-            modifiers_reply.screen_modifiers
-        } else {
-            modifiers_reply.window_modifiers
-        };
-        modifiers.retain(|&m| !intel_compressed(m));
+        let mut modifiers = Vec::new();
+        if explicit {
+            let modifiers_reply = conn
+                .dri3_get_supported_modifiers(root, depth, 32)
+                .map_err(|e| x_err("DRI3 modifiers", e))?
+                .reply()
+                .map_err(|e| x_err("the server listed no buffer modifiers", e))?;
+            modifiers = if modifiers_reply.window_modifiers.is_empty() {
+                modifiers_reply.screen_modifiers
+            } else {
+                modifiers_reply.window_modifiers
+            };
+            modifiers.retain(|&m| !intel_compressed(m));
+        }
 
         let gc = conn.generate_id().map_err(|e| x_err("GC id", e))?;
         conn.create_gc(
@@ -342,6 +353,7 @@ impl XScreen {
                 rgb_format,
                 argb_format,
                 modifiers,
+                explicit,
                 device: encode_path,
                 semaphore_opcode,
             },
@@ -487,6 +499,32 @@ impl GpuCapture {
     /// auxiliary planes (a compressed layout) is dropped from the server's list and the
     /// allocation retried, down to the driver's own choice.
     fn alloc_bo(&mut self, w: u16, h: u16) -> Result<BufferObject<()>, String> {
+        if !self.x.explicit {
+            // Linear as the one modifier allowed first: NVIDIA's GBM takes that and refuses the
+            // LINEAR usage flag, which Mesa's takes.
+            let by_modifier = self.gbm.create_buffer_object_with_modifiers::<()>(
+                w as u32,
+                h as u32,
+                GbmFormat::Argb8888,
+                std::iter::once(gbm::Modifier::Linear),
+            );
+            return match by_modifier {
+                Ok(bo) => Ok(bo),
+                Err(first) => self
+                    .gbm
+                    .create_buffer_object::<()>(
+                        w as u32,
+                        h as u32,
+                        GbmFormat::Argb8888,
+                        gbm::BufferObjectFlags::RENDERING | gbm::BufferObjectFlags::LINEAR,
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "linear GBM allocation {w}x{h}: {first:?} by modifier, {e:?} by flag"
+                        )
+                    }),
+            };
+        }
         loop {
             let bo = if self.x.modifiers.is_empty() {
                 crate::alloc_render_target(&self.gbm, w as u32, h as u32, GbmFormat::Argb8888)
@@ -547,31 +585,55 @@ impl GpuCapture {
                 .conn
                 .generate_id()
                 .map_err(|e| x_err("pixmap id", e))?;
-            self.x
-                .conn
-                .dri3_pixmap_from_buffers(
-                    pixmap,
-                    self.x.root,
-                    w,
-                    h,
-                    bo.stride(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    self.x.depth,
-                    32,
-                    modifier,
-                    vec![server_fd],
-                )
-                .map_err(|e| x_err("PixmapFromBuffers", e))?
-                .check()
-                .map_err(|e| {
-                    format!("the server did not import the buffer (modifier {modifier:#x}): {e}")
-                })?;
+            if self.x.explicit {
+                self.x
+                    .conn
+                    .dri3_pixmap_from_buffers(
+                        pixmap,
+                        self.x.root,
+                        w,
+                        h,
+                        bo.stride(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        self.x.depth,
+                        32,
+                        modifier,
+                        vec![server_fd],
+                    )
+                    .map_err(|e| x_err("PixmapFromBuffers", e))?
+                    .check()
+                    .map_err(|e| {
+                        format!(
+                            "the server did not import the buffer (modifier {modifier:#x}): {e}"
+                        )
+                    })?;
+            } else {
+                // DRI3 1.0: one plane, its stride, and no layout but the linear one.
+                let stride = u16::try_from(bo.stride())
+                    .map_err(|_| format!("a {w}-pixel row's stride overflows DRI3 1.0"))?;
+                self.x
+                    .conn
+                    .dri3_pixmap_from_buffer(
+                        pixmap,
+                        self.x.root,
+                        bo.stride() * h as u32,
+                        w,
+                        h,
+                        stride,
+                        self.x.depth,
+                        32,
+                        server_fd,
+                    )
+                    .map_err(|e| x_err("PixmapFromBuffer", e))?
+                    .check()
+                    .map_err(|e| format!("the server did not import the linear buffer: {e}"))?;
+            }
             let picture = self
                 .x
                 .conn

@@ -103,10 +103,11 @@ path the Wayland zero-copy capture uses, so no frame crosses to the CPU. The Dam
 whether anything was drawn since the last frame and ends the wait for the next one, so a change is
 published as it lands; its region says how much, so a blinking caret stays a small change and the
 still-screen cleanup refines around it. The XFixes cursor is composited by the server through Render. It is declined, with one line saying why, for a codec no hardware engine serves,
-software encoding, a server without DRI3 1.2, Damage, or Render, a server drawing on a GPU other
+software encoding, a server without DRI3, Damage, or Render, a server drawing on a GPU other
 than the encode node's, a buffer the server will not import, or a first frame the encoder cannot
 read; the session then streams through XShm. A watermark is not a reason: the server composites it
-through Render like the cursor, so it costs no readback here.
+through Render like the cursor, so it costs no readback here. A DRI3 1.0 server (the NVIDIA X driver
+before 595) takes buffers without a layout, so the pool is linear there.
 
 Each blit is waited for with a one-pixel `GetImage`, which the server answers once it has landed.
 Where the server offers `SELKIES-SEMAPHORE` (the Selkies images' Xvfb) and the session encodes on
