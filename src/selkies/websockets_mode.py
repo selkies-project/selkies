@@ -4115,6 +4115,7 @@ class DataStreamingServer(BaseStreamingService):
         held = gated or display_state.get('gate_moved_at', 0.0) > last_tick
         offered_bps = (sent - sent_then) * 8 / (now - last_tick) if last_tick and not held else None
         acked_offered_bps = None
+        capacity_bps = None
         if not window:
             delivered_bps, queue_s = 0.0, LINK_QUEUE_MS / 1000.0
         else:
@@ -4153,7 +4154,17 @@ class DataStreamingServer(BaseStreamingService):
             row = queued_ms[-run - 1:-1] if lone else queued_ms[-run:]
             rising = (len(row) >= LINK_RISE_ACKS and all(b > a for a, b in zip(row, row[1:]))
                       and row[-1] - floor_ms > allowed_ms)
-            queued = (least_ms - floor_ms > allowed_ms or rising) and not catching_up
+            standing = least_ms - floor_ms > allowed_ms
+            queued = (standing or rising) and not catching_up
+            if rising and not standing:
+                # A queue that only builds stood over the row's acks, not the window's: what the
+                # path delivered over them is its capacity, where the window's rate is mostly the
+                # trickle before the burst that built it.
+                acks = list(display_state['link_acks'])
+                burst = acks[-run - 2:-1] if lone else acks[-run - 1:]
+                burst_span = burst[-1][0] - burst[0][0]
+                if burst_span > 0:
+                    capacity_bps = (burst[-1][2] - burst[0][2]) * 8 / burst_span
             if not queued and not catching_up and jitter_ms is not None:
                 display_state['link_jitter_ms'] = jitter_ms + LINK_JITTER_GAIN * (
                     _round_trip_jitter(stand) - jitter_ms)
@@ -4168,7 +4179,7 @@ class DataStreamingServer(BaseStreamingService):
             display_state['link_carried'] = measured_bps >= LINK_CARRIED_SHARE * offered_bps
         steer = display_state.setdefault('link_steer', CongestionSteer())
         rate = round(steer.target(current, target, float(lo_kbps), delivered_bps, 0.0, now, queue_s,
-                                  offered_bps, acked_offered_bps))
+                                  offered_bps, acked_offered_bps, capacity_bps))
         display_state['link_kbps'] = rate
         held_kbps = display_state.setdefault('link_hold', RateHold()).note(rate, now)
         ws = display_state.get('ws')

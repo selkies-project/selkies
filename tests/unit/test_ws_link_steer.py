@@ -442,5 +442,36 @@ check("a cut says how late the server's own loop woke, which every round trip it
       len(cuts) == 1 and cuts[0].endswith("the server's loop 120 ms late)"), cuts)
 logging.getLogger("ws").removeHandler(said)
 
+# A desktop's trickle (a caret, a clock: 200 kbps in 2.5 kB frames) over a 145 ms path, then a window switch:
+# six 60 kB frames sent at once, which the 10 Mbps path carries one every 48 ms, each acked later than the last.
+# The steer's tick lands with five of them acked, so it reads a queue still building on a window whose rate
+# the trickle before the burst halves.
+state = fresh_state()
+state["video_bitrate"] = 8000
+server.capture_instances["display2"].pop("settings", None)
+module.rates.clear()
+t, sent = 0.0, 0
+for i in range(100):
+    t = round(t + 0.1, 3)
+    sent += 2500
+    state["sent_bytes"] = sent
+    _note_round_trip(state, 145.0 + i % 2, sent, t)
+    if i % 5 == 4:
+        server._steer_bitrate_to_link("display2", state, t)
+for _ in range(2):
+    t = round(t + 0.1, 3)
+    sent += 2500
+    state["sent_bytes"] = sent
+    _note_round_trip(state, 145.0, sent, t)
+burst_at = t
+state["sent_bytes"] = sent + 6 * 60_000
+for k in range(1, 6):
+    sent += 60_000
+    _note_round_trip(state, 145.0 + 48.0 * k, sent, round(burst_at + 0.048 * k, 3))
+server._steer_bitrate_to_link("display2", state, round(burst_at + 0.25, 3))
+check("a burst that builds a queue over a desktop's trickle backs off from what the path carried through the burst, "
+      "not from the window the trickle halves", module.rates and module.rates[-1] >= 6000, module.rates)
+
+
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

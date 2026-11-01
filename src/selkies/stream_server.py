@@ -409,7 +409,8 @@ class CongestionSteer:
                goodput_bps: float, loss: float, now: float,
                queue_s: Optional[float] = None,
                offered_bps: Optional[float] = None,
-               acked_offered_bps: Optional[float] = None) -> float:
+               acked_offered_bps: Optional[float] = None,
+               capacity_bps: Optional[float] = None) -> float:
         """The next target in kbps for one tick.
 
         Args:
@@ -428,6 +429,10 @@ class CongestionSteer:
                 measures delivery by acked frames: the queue's app-limited
                 test takes it over offered_bps, since the tick's offer counts
                 a burst's tail still unacked, which the delivery does not.
+            capacity_bps: What the path carried while the queue built, where
+                the transport measured it apart from goodput_bps (a burst over
+                a trickle, whose window's rate the trickle dilutes); the
+                backoff takes the higher.
         """
         dt = 1.0 if self._tick_at is None else min(max(now - self._tick_at, 0.0), 2.0)
         self._tick_at = now
@@ -449,7 +454,8 @@ class CongestionSteer:
                        and sent_bps < current * 1_000 * self.APP_LIMITED
                        and (goodput_bps <= 0 or sent_bps <= goodput_bps / self.APP_LIMITED_DELIVERED))
             if now >= self.hold_until and not limited:
-                current = self._queue_backoff(current, goodput_bps / 1_000, queue_s, now)
+                capacity = max(goodput_bps, capacity_bps or 0.0)
+                current = self._queue_backoff(current, capacity / 1_000, queue_s, now)
             return max(floor, min(ceiling, current))
         if drained:
             self.strikes = 0
