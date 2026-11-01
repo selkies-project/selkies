@@ -2288,6 +2288,19 @@ def socket_dir(configured: str) -> str:
     return configured or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
 
 
+def enum_allowed(name: str) -> List[str]:
+    """The values an enum setting allows after the operator's narrowing.
+
+    Args:
+        name: The setting's name.
+
+    Returns:
+        Its allowed values, first the default; empty for a name that is no enum.
+    """
+    setting_def = next((s for s in SETTING_DEFINITIONS if s['name'] == name), None)
+    return list(setting_def.get('meta', {}).get('allowed', [])) if setting_def else []
+
+
 def _published_enum_allowed(setting_def: Dict[str, Any], value: Any) -> List[str]:
     """Build the `allowed` list a client is told about for an enum, with the
     server's resolved value merged in when it sits off the curated stops.

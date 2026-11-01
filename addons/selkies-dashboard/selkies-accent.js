@@ -8,10 +8,13 @@
 // `ring` (focus), with the sidebar and chart tokens that follow it. `--accent`
 // stays neutral: in shadcn it is the hover and selection surface, not the brand.
 // Light surfaces take a deeper pink so white text clears 4.5:1; dark surfaces a
-// lighter one under near-black text.
+// lighter one under near-black text. Text drawn in the accent itself takes
+// `primary-text`, which clears 4.5:1 on the surfaces it sits on in either theme
+// (the dark theme's `primary` reads 3.9:1 on a tab list).
 //
 // RULES are the open and active states of accordions, tabs, and separators, the
-// white knob of a switch that is on, and the accent on the range input's thumb,
+// knob of a switch and the outline of one that is off, and the accent on the
+// range input's thumb,
 // written between marker comments at the end of the file so they are replaced
 // in place, or added when init has removed them.
 import fs from 'node:fs';
@@ -22,6 +25,7 @@ const ACCENT = {
   ':root': {
     '--primary': '#b83280',
     '--primary-foreground': '#ffffff',
+    '--primary-text': '#b83280',
     '--ring': '#d5499a',
     '--chart-1': '#d5499a',
     '--chart-2': '#7967c5',
@@ -32,6 +36,7 @@ const ACCENT = {
   '.dark': {
     '--primary': '#db5ba7',
     '--primary-foreground': 'oklch(0.145 0 0)',
+    '--primary-text': '#ef7dbf',
     '--ring': '#db5ba7',
     '--chart-1': '#db5ba7',
     '--chart-2': '#9085e9',
@@ -54,7 +59,7 @@ const RULES = `${RULES_START}
 
 [data-slot="accordion-trigger"][aria-expanded="true"],
 [data-slot="tabs-trigger"][data-active] {
-  color: var(--primary);
+  color: var(--primary-text);
 }
 
 [data-slot="tabs-trigger"][data-active] {
@@ -84,6 +89,13 @@ const RULES = `${RULES_START}
 [data-slot="menu-checkbox-item"] [data-checked] > span,
 [data-slot="menu-checkbox-item"] [data-unchecked] > span {
   background-color: var(--foreground);
+}
+
+/* An off switch is outlined in the muted text color, so its track reads
+   against the surface at 3:1 as the sidebar's own switch does; the kit's
+   track alone reads 1.3:1 there. */
+[data-slot="switch"][data-unchecked] {
+  border-color: var(--muted-foreground);
 }
 
 /* The thumb of the browser's range input in the accent, ringed in the surface

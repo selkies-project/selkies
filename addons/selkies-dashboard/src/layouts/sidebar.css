@@ -72,7 +72,7 @@
   --stat-series-2: #5b4ba3;
   --stat-good: #0a7d0a;
   --stat-warn: #9a6400;
-  --sk-icon-sun: #e8890c;
+  --sk-icon-sun: #b45309;
   --sk-icon-moon: #b7791f;
 }
 
@@ -324,17 +324,19 @@
   transition: background-color 0.15s ease;
 }
 .sidebar-section-header:hover { background-color: var(--sk-item-bg-hover); }
+/* A title or label too long for its row wraps rather than being cut: a touch
+   screen, where the drawer is read most, has no hover to read a cut one by. */
 .sidebar-section-header h3 {
   margin: 0;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  hyphens: auto;
   font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.sidebar .clip { overflow: visible; white-space: normal; text-overflow: clip; overflow-wrap: anywhere; hyphens: auto; }
 .sidebar-section-header[aria-expanded="true"] h3 { color: var(--sk-accent-text); }
 .sidebar-section-header svg { flex-shrink: 0; width: 16px; height: 16px; margin-left: 10px; color: var(--sk-text-muted); }
 .sidebar-section-content { padding: 4px 14px 14px; }

@@ -204,16 +204,15 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   // The layout the server allows and names: the status probe before the
   // stream connects, the settings payload after.
   const layoutSetting = serverSettings?.ui_layout;
-  const layoutChoices = React.useMemo(() => {
-    const allowed: string[] | undefined = layoutSetting?.allowed;
-    return allowed ? LAYOUTS.filter((layout) => allowed.includes(layout.id)) : LAYOUTS;
-  }, [layoutSetting]);
+  const layoutAllowed: string[] | null = layoutSetting?.allowed ?? window.__SELKIES_UI_LAYOUT_ALLOWED__ ?? null;
+  const layoutChoices = React.useMemo(
+    () => (layoutAllowed ? LAYOUTS.filter((layout) => layoutAllowed.includes(layout.id)) : LAYOUTS),
+    [layoutAllowed]);
   const layout = React.useMemo(() => {
-    const serverValue = layoutSetting?.value ?? (window as any).__SELKIES_UI_LAYOUT__ ?? null;
-    const allowed: string[] | null = layoutSetting?.allowed ?? null;
+    const serverValue = layoutSetting?.value ?? window.__SELKIES_UI_LAYOUT__ ?? null;
     if (layoutPick && layoutChoices.some((choice) => choice.id === layoutPick)) return layoutById(layoutPick);
-    return resolveLayout(serverValue, allowed);
-  }, [layoutSetting, layoutPick, layoutChoices]);
+    return resolveLayout(serverValue, layoutAllowed);
+  }, [layoutSetting, layoutPick, layoutChoices, layoutAllowed]);
   const setLayout = React.useCallback((id: string) => {
     storeLayout(id);
     setLayoutPick(id);

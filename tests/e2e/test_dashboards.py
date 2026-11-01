@@ -64,24 +64,24 @@ def sidebar_section(page, name: str, open: bool = True) -> bool:
     return True
 
 
-def open_video_settings(page, layout: str) -> bool:
+def open_video_settings(page, layout: str, reveal: str = "") -> bool:
     """Reach the video settings: the sidebar's Video section, or the toolbar's
-    settings card on its Video tab.
+    settings card on its Video tab with the card holding `reveal` open.
 
     Returns:
         True when the controls were reached.
     """
     if layout == "default":
         return sidebar_section(page, "Video")
-    return open_wish_settings_tab(page, "Video")
+    return open_wish_settings_tab(page, "Video", reveal)
 
 
-def open_screen_settings(page, layout: str) -> bool:
+def open_screen_settings(page, layout: str, reveal: str = "") -> bool:
     """Reach the screen settings: the sidebar's Screen section, or the toolbar's
-    settings card on its Resolution tab."""
+    settings card on its Resolution tab with the card holding `reveal` open."""
     if layout == "default":
         return sidebar_section(page, "Screen")
-    return open_wish_settings_tab(page, "Resolution")
+    return open_wish_settings_tab(page, "Resolution", reveal)
 
 
 def stats_overlay_check(page, res: "H.Results") -> None:
@@ -209,8 +209,9 @@ def wish_gamepad_panel(page) -> dict:
         return {"input": False, "pads": False}
     button.click()
     time.sleep(0.6)
-    got = {"input": page.locator("label:text-is('Gamepad Input')").count() > 0,
-           "pads": page.locator("label:text-is('Rumble')").count() > 0}
+    # A label clips its text in a span of its own, so the text is matched, not the label.
+    got = {"input": page.get_by_text("Gamepad Input", exact=True).count() > 0,
+           "pads": page.get_by_text("Rumble", exact=True).count() > 0}
     button.click()
     time.sleep(0.3)
     return got
@@ -442,7 +443,8 @@ def sidebar_layout_check(page, res: "H.Results") -> None:
       const fs = document.querySelector('.fullscreen-button svg');
       const gm = document.querySelector('.gaming-mode-button svg');
       if (!fs || !gm) return null;
-      return { fs: ink(fs, 0), gm: ink(gm, 2) };
+      // Both icons are stroked: their ink is the geometry and a stroke's width (2 units).
+      return { fs: ink(fs, 2), gm: ink(gm, 2) };
     }""")
     same = (icons and icons["fs"]["box"] == icons["gm"]["box"]
             and abs(icons["fs"]["w"] - icons["gm"]["w"]) <= 1.0
@@ -488,13 +490,14 @@ def sidebar_layout_check(page, res: "H.Results") -> None:
     }"""
     before = page.evaluate(palette)
     res.check("the files dialog's close control sits inside the panel", before["closeInside"], before)
-    # The mirror is live: the dashboard's own toggle restyles the open dialog.
-    page.locator('.theme-toggle').first.click()
+    # The mirror is live: the dashboard's own toggle restyles the open dialog. The dialog is
+    # modal, its overlay over the drawer, so the toggle is pressed from the page, not the pointer.
+    page.locator('.theme-toggle').first.dispatch_event("click")
     time.sleep(0.6)
     after = page.evaluate(palette)
     res.check("the files dialog follows a live theme flip",
               before["dark"] and not after["dark"] and before["bg"] != after["bg"], (before, after))
-    page.locator('.theme-toggle').first.click()
+    page.locator('.theme-toggle').first.dispatch_event("click")
     time.sleep(0.4)
     page.keyboard.press("Escape")
     time.sleep(0.5)
@@ -787,7 +790,7 @@ def dash_block(dashboard: str) -> "H.Results":
         st = len(H.server_log())
         changed = False
         try:
-            opened = open_video_settings(page, dashboard)
+            opened = open_video_settings(page, dashboard, "#framerateSlider")
             time.sleep(1.0)
             if page.locator('#framerateSlider').count():
                 # The slider carries an index into its frame rate stops, and the
@@ -811,6 +814,7 @@ def dash_block(dashboard: str) -> "H.Results":
                    or "framerate" in newlog.lower())
         res.check("UI framerate change applied server-side", changed and applied, newlog[-160:])
 
+        open_video_settings(page, dashboard, "#streamModeSelect")
         sel = page.locator('#streamModeSelect').first
         if sel.count():
             sel.select_option(value="webrtc")
@@ -936,7 +940,7 @@ def gates_block(dashboard: str) -> "H.Results":
         res.check("ui_sidebar_show_webcam=false hides webcam toggle", not cam, cam)
         res.check("ui_sidebar_show_gamepads=false keeps the gamepad input toggle", pad, pad)
         res.check("ui_sidebar_show_gamepads=false hides the gamepads section", not section, section)
-        open_screen_settings(page, dashboard)
+        open_screen_settings(page, dashboard, 'button:has-text("Scale Locally")')
         preset = page.locator('#resolutionPresetSelect').count()
         # The button beside the resolution controls, so an unopened panel cannot pass.
         scale = page.locator('button:has-text("Scale Locally")').count()
@@ -1109,7 +1113,7 @@ def dpi_for_resolution_block(dashboard: str) -> "H.Results":
             page = ctx.new_page()
             page.goto(H.BASE_URL, wait_until="load")
             res.check("video flowing", bool(wait_canvas(page, 30)), "")
-            open_screen_settings(page, dashboard)
+            open_screen_settings(page, dashboard, "#uiScalingSelect")
             # The desktop's own DPI is left where the last session put it until
             # something changes it, so the picker is where the starting pick
             # reads: the display's, with no resolution of its own to follow.
@@ -1267,10 +1271,13 @@ def second_screen_auto_block(dashboard: str) -> "H.Results":
     return res
 
 
-def open_wish_settings_tab(page, tab: str) -> bool:
+def open_wish_settings_tab(page, tab: str, reveal: str = "") -> bool:
     """Open the toolbar's settings card (the Settings2 icon in the control
     strip) unless it is open and switch it to the tab labeled `tab`. A bar
-    that gaming mode slid up behind the top edge is brought back first."""
+    that gaming mode slid up behind the top edge is brought back first. A tab
+    folds its cards in an accordion with one open at a time: where `reveal`
+    names a control the open card does not hold, the cards are opened in turn
+    until one does."""
     wish_show_toolbar(page)
     if not page.locator('[role="tab"]').count():
         trig = page.locator('button:has(svg.lucide-settings-2)').first
@@ -1283,6 +1290,15 @@ def open_wish_settings_tab(page, tab: str) -> bool:
         return False
     tab_button.click()
     time.sleep(0.8)
+    if reveal and not page.locator(reveal).count():
+        cards = page.locator('[role="tabpanel"] [data-slot="accordion-trigger"]')
+        for i in range(cards.count()):
+            if cards.nth(i).get_attribute("aria-expanded") == "true":
+                continue
+            cards.nth(i).click()
+            time.sleep(0.5)
+            if page.locator(reveal).count():
+                break
     return True
 
 
@@ -1292,7 +1308,7 @@ def click_raw_pointer_motion(page, dashboard: str) -> bool:
     Returns:
         True when the toggle was found and clicked.
     """
-    if not open_screen_settings(page, dashboard):
+    if not open_screen_settings(page, dashboard, "#rawPointerMotionToggle"):
         return False
     toggle = page.locator('#rawPointerMotionToggle')
     if not toggle.count():
@@ -1358,7 +1374,7 @@ def pick_rate_control(page, dashboard: str, mode: str) -> bool:
     """
     try:
         if not page.locator('#rateControlSelect').count():
-            open_video_settings(page, dashboard)
+            open_video_settings(page, dashboard, "#rateControlSelect")
         page.select_option('#rateControlSelect', mode, timeout=5000)
         return True
     except Exception:
@@ -1488,7 +1504,7 @@ def pick_rate_control_open(page, dashboard: str) -> bool:
     """Open either layout's video settings, where the rate control and its value show."""
     try:
         if not page.locator('#rateControlSelect').count():
-            open_video_settings(page, dashboard)
+            open_video_settings(page, dashboard, "#rateControlSelect")
         return page.locator('#rateControlSelect').count() > 0
     except Exception:
         return False
@@ -1498,14 +1514,14 @@ def paint_over_switches(page, dashboard: str):
     """The Turbo and paint-over switches of either layout, opening its video
     settings first."""
     if not page.locator('#videoStreamingModeToggle').count():
-        open_video_settings(page, dashboard)
+        open_video_settings(page, dashboard, "#videoStreamingModeToggle")
     return page.locator('#videoStreamingModeToggle'), page.locator('#usePaintOverQualityToggle')
 
 
 def cpu_threading_switch(page, dashboard: str):
     """Either layout's CPU encoding threads switch, opening its video settings first."""
-    if not page.locator('#encoderSelect').count():
-        open_video_settings(page, dashboard)
+    if not page.locator('#cpuEncodeThreadingToggle').count():
+        open_video_settings(page, dashboard, "#cpuEncodeThreadingToggle")
     return page.locator('#cpuEncodeThreadingToggle')
 
 
@@ -1595,6 +1611,7 @@ def cpu_threading_block(dashboard: str) -> "H.Results":
                         res.check("and the server runs it", encoder_threads_logged() > 1, encoder_threads_logged())
                 elif case == "to-vp8":
                     res.check("x264 first: shown on", switch.count() == 1 and switch_on(switch.first), "")
+                    open_video_settings(page, dashboard, "#encoderSelect")
                     page.select_option('#encoderSelect', 'vp8enc')
                     time.sleep(6.0)
                     switch = cpu_threading_switch(page, dashboard)
@@ -1608,6 +1625,7 @@ def cpu_threading_block(dashboard: str) -> "H.Results":
                     C.wait_ws_video(page, timeout=45)
                     time.sleep(3.0)
                     cpu_threading_switch(page, dashboard)
+                    open_video_settings(page, dashboard, "#encoderSelect")
                     page.select_option('#encoderSelect', 'h264enc')
                     time.sleep(6.0)
                     switch = cpu_threading_switch(page, dashboard)

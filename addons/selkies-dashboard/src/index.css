@@ -71,13 +71,14 @@
   --popover-foreground: oklch(0.145 0 0);
   --primary: #b83280;
   --primary-foreground: #ffffff;
+  --primary-text: #b83280;
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  --muted-foreground: oklch(0.52 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
+  --destructive: oklch(0.55 0.235 27.3);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: #d5499a;
@@ -113,6 +114,7 @@
   --popover-foreground: oklch(0.985 0 0);
   --primary: #db5ba7;
   --primary-foreground: oklch(0.145 0 0);
+  --primary-text: #ef7dbf;
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.269 0 0);
@@ -352,7 +354,7 @@ select optgroup {
 
 [data-slot="accordion-trigger"][aria-expanded="true"],
 [data-slot="tabs-trigger"][data-active] {
-  color: var(--primary);
+  color: var(--primary-text);
 }
 
 [data-slot="tabs-trigger"][data-active] {
@@ -382,6 +384,13 @@ select optgroup {
 [data-slot="menu-checkbox-item"] [data-checked] > span,
 [data-slot="menu-checkbox-item"] [data-unchecked] > span {
   background-color: var(--foreground);
+}
+
+/* An off switch is outlined in the muted text color, so its track reads
+   against the surface at 3:1 as the sidebar's own switch does; the kit's
+   track alone reads 1.3:1 there. */
+[data-slot="switch"][data-unchecked] {
+  border-color: var(--muted-foreground);
 }
 
 /* The thumb of the browser's range input in the accent, ringed in the surface
