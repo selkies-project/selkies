@@ -149,16 +149,17 @@ const subscribeCoarsePointer = (onChange: () => void) => {
 const isCoarsePointer = () => coarsePointer?.matches ?? false;
 
 /**
- * The button that asks the core to show the virtual keyboard on a touch client
- * (a coarse primary pointer: a phone, a tablet, a convertible in its tablet
- * posture; or a touch seen) with no keyboard attached, unless the keyboard
- * toggle has hidden it.
+ * The button that asks the core to show the virtual keyboard while the primary
+ * pointer is coarse (a phone, a tablet, a convertible in its tablet posture)
+ * and no keyboard is attached, unless the keyboard toggle has hidden it.
  */
 export function VirtualKeyboardButton() {
   const d = useDashboard();
   const coarse = React.useSyncExternalStore(subscribeCoarsePointer, isCoarsePointer);
-  // Gated as the toggle that hides it is (the keyboard button's own setting, a touch client), not on the gamepads.
-  if (!d.keyboardButton || !(coarse || d.isTouch) || d.isSecondaryDisplay || d.isViewer || !d.renderable.chrome
+  // On its own setting, not on the gamepads, and only while the primary pointer is coarse: a fine one on a touch
+  // screen is a convertible with its keyboard attached (Edge on a Surface turns it fine with the type cover), where
+  // the system keeps its on-screen keyboard down, a touch on the screen notwithstanding.
+  if (!d.keyboardButton || !coarse || d.isSecondaryDisplay || d.isViewer || !d.renderable.chrome
     || !d.renderable.keyboardButton) return null;
   return (
     <Button variant="default" size="icon" className="virtual-keyboard-button fixed right-4 bottom-4 z-[2050]" data-virtual-keyboard-button=""

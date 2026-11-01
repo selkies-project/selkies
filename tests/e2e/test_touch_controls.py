@@ -344,6 +344,9 @@ def keyboard_posture_block(res: "H.Results", dashboard: str, engine: str) -> Non
                     return button.count() > 0 and button.first.is_visible()
 
                 res.check(f"{tag}: opened with the keyboard attached, no button", not shown())
+                # The screen still takes touches with the keyboard on: a touch says nothing of the keyboard.
+                touch_once(page, engine)
+                res.check(f"{tag}: nor once the screen is touched", not shown())
                 page.evaluate("__setPointerFine(false)")
                 res.check(f"{tag}: detaching the keyboard brings the button at once", shown())
                 page.evaluate("__setPointerFine(true)")
