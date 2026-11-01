@@ -40,14 +40,19 @@ function CardAccordion({ cards }: { cards: PanelCard[] }) {
   );
 }
 
-/** The settings panels the page shows as a card of tabs. */
+/**
+ * The settings panels the page shows as a card of tabs. A picked tab the
+ * server's constraints then hide hands its place to the first visible one.
+ */
 export function SettingsCard() {
   const ctx = usePanelContext();
+  const [picked, setPicked] = React.useState<string | null>(null);
   const tabs = PANELS.filter((panel) => panel.kind === "settings" && panel.shown(ctx, "menu"));
   if (tabs.length === 0) return null;
+  const value = picked && tabs.some((tab) => tab.id === picked) ? picked : tabs[0].id;
   return (
     <Card className="w-[272px] max-w-[calc(100vw-1rem)] gap-1 py-1">
-      <Tabs defaultValue={tabs[0].id} className="w-full px-1">
+      <Tabs value={value} onValueChange={(next) => setPicked(String(next))} className="w-full px-1">
         <TabsList className="w-full">
           {tabs.map((tab) => <TabsTrigger key={tab.id} value={tab.id}>{t(tab.tab ?? tab.title)}</TabsTrigger>)}
         </TabsList>
