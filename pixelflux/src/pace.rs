@@ -224,6 +224,30 @@ impl FramePace {
         self.rephase = true;
     }
 
+    /// Record a tick of a capture the Damage extension wakes (the X11 paths), once it is known
+    /// whether it sent a frame: a sent one counts (`Self::ticked`), and one that published
+    /// nothing holds the timer off a period (`Self::defer`). A sent timer's tick that finds the
+    /// screen still gives the change after it a fresh capture's pull (`Self::stood_still`):
+    /// where every tick is sent (streaming mode, XShm), the changes before it spent the budget,
+    /// which a still screen's frames, never late, do not pay back, and each change would wait
+    /// for the next tick. A tick that sent nothing spent nothing, and the budget refills alone.
+    pub fn record_tick(
+        &mut self,
+        trigger: TickTrigger,
+        period: Duration,
+        now: Instant,
+        sent: bool,
+    ) {
+        if !sent {
+            self.defer(now + period);
+            return;
+        }
+        self.ticked(trigger, period, now, false);
+        if trigger == TickTrigger::Timer && self.still(period, now) {
+            self.stood_still();
+        }
+    }
+
     /// Hold the timer off this capture until `until` without a frame counting: a tick that
     /// published nothing must neither spin the timer nor move the cadence a fresh frame is
     /// measured against.
@@ -616,14 +640,24 @@ mod pacing_tests {
         );
     }
 
-    /// The X11 capture's wait on a screen that stands still between changes: its still ticks
+    /// The X11 captures' wait on a screen that stands still between changes: their still ticks
     /// give each change the whole pull, so a change is due as it lands from half a period after
     /// a tick on, however many came before it (counted without it, the changes spent the budget
-    /// and waited for the timer), and the frame after it waits a whole period.
+    /// and waited for the timer), and where the still ticks were sent the frame after it waits a
+    /// whole period. It holds whether a still tick sends a frame (streaming mode, and XShm
+    /// always) or publishes nothing.
     #[test]
     fn changes_between_still_periods_pull_as_a_fresh_capture_does() {
+        for sent in [true, false] {
+            changes_between_still_periods_pull(sent);
+        }
+    }
+
+    fn changes_between_still_periods_pull(sent: bool) {
         let base = Instant::now();
         let mut pace = FramePace::default();
+        // A capture's first frame is always sent.
+        pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
         let mut t = base;
         for i in 0..40u32 {
             let change = t + PERIOD * 16 + Duration::from_micros(500 + u64::from(i) * 470 % 19_000);
@@ -635,24 +669,29 @@ mod pacing_tests {
                 }
                 t = due;
                 tick = t;
-                pace.ticked(TickTrigger::Timer, PERIOD, t, false);
-                if pace.still(PERIOD, t) {
-                    pace.stood_still();
-                }
+                pace.record_tick(TickTrigger::Timer, PERIOD, t, sent);
             }
             let at = pace
                 .pull_at(TickTrigger::Damage, PERIOD, change)
                 .max(change);
             assert!(
                 at <= change.max(tick + PERIOD / 2),
-                "change {i} waited {:?}",
+                "change {i} (still ticks sent: {sent}) waited {:?}",
                 at - change
             );
-            pace.ticked(TickTrigger::Damage, PERIOD, at, false);
+            pace.record_tick(TickTrigger::Damage, PERIOD, at, true);
+            // Where the still ticks were sent, the pull spent a fresh capture's budget whole; where
+            // none was, the change came a still spell after the last frame, which refilled it. The
+            // first change follows the first frame, which is sent on a screen still till then.
+            let left = if sent || i == 0 {
+                Duration::ZERO
+            } else {
+                PERIOD / 2
+            };
             assert_eq!(
                 pace.pull_at(TickTrigger::Damage, PERIOD, at),
-                at + PERIOD,
-                "the change after change {i} borrows nothing"
+                at + PERIOD - left,
+                "the change after change {i} (still ticks sent: {sent}) borrows {left:?}"
             );
             t = at;
         }

@@ -66,12 +66,12 @@ use x11rb::rust_connection::RustConnection;
 
 use super::{
     Controls, RootDamage, captured_damage, clamp_offset, cursor_image_origin, require_32bpp,
-    resolve_dims, wait_for_frame,
+    resolve_dims, take_tick, wait_for_frame,
 };
 use crate::RustCaptureSettings;
 use crate::encoders::software::{EncodedStripe, FrameTiming, StripeState};
 use crate::encoders::{self, FrameEncoder, FrameSource};
-use crate::pace::{FramePace, TickTrigger};
+use crate::pace::FramePace;
 use crate::pipeline::{Damage, EncoderQuality, decide_hw_fullframe};
 use crate::recording_sink::RecordingSink;
 
@@ -1091,15 +1091,12 @@ where
         let frame_dur = Duration::from_secs_f64(1.0 / fps.max(1.0));
         let trigger = wait_for_frame(&gpu.x.conn, Some(&gpu.x.damage), &pace, frame_dur);
         let woke = Instant::now();
-        // The report is spent where it is read, so a change racing this frame wakes the next one
-        // rather than being cleared along with what the blit captured.
-        let is_dirty = trigger == TickTrigger::Damage || first_frame;
+        // The report is spent where it is read, before the blit, so a change racing the blit
+        // wakes the next frame rather than being cleared along with what the blit captured.
+        let (dirty, changed) = take_tick(&gpu.x.damage, &gpu.x.conn, trigger);
+        let is_dirty = dirty || first_frame;
         // Where the root changed, None where the server cannot say or the frame is the first.
-        let changed = gpu
-            .x
-            .damage
-            .take(&gpu.x.conn)
-            .filter(|rects| !first_frame && !rects.is_empty());
+        let changed = changed.filter(|rects| !first_frame && !rects.is_empty());
         first_frame = false;
         damaged_frames += is_dirty as u64;
         if controls.stop.load(Ordering::Relaxed) {
@@ -1215,11 +1212,7 @@ where
         );
         // A tick that publishes nothing is no frame: counted as one, it would hold a change
         // landing just after it back by a pull's worth of budget or a whole period.
-        if decision.send {
-            pace.ticked(trigger, frame_dur, woke, false);
-        } else {
-            pace.defer(woke + frame_dur);
-        }
+        pace.record_tick(trigger, frame_dur, woke, decision.send);
         let mut delivered = false;
         if decision.send {
             // The frame is the screen as the CopyArea finds it, so it is stamped as that is sent:

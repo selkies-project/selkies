@@ -441,15 +441,15 @@ impl RootDamage {
     }
 
     /// [`Self::clear`], saying where the root changed: the damaged rectangles, empty where
-    /// nothing was reported, None where the server cannot say.
+    /// nothing was reported, None where a change was reported but the server cannot say where.
     fn take(&self, conn: &RustConnection) -> Option<Vec<Rectangle>> {
+        if !self.reported(conn) {
+            return Some(Vec::new());
+        }
         let Some(parts) = self.parts else {
             self.clear(conn);
             return None;
         };
-        if !self.reported(conn) {
-            return Some(Vec::new());
-        }
         self.reported.set(false);
         conn.damage_subtract(self.id, x11rb::NONE, parts).ok()?;
         Some(
@@ -460,6 +460,21 @@ impl RootDamage {
                 .rectangles,
         )
     }
+}
+
+/// [`RootDamage::take`] for a tick `trigger` woke: whether the root changed since the last
+/// frame, and where. A report the take finds counts whatever woke the tick: one landing after
+/// the wait gave up is spent here all the same, and called clean, its change would be cleared
+/// with nothing left to report it (a capture that sends only changes would never send it).
+fn take_tick(
+    damage: &RootDamage,
+    conn: &RustConnection,
+    trigger: TickTrigger,
+) -> (bool, Option<Vec<Rectangle>>) {
+    let rects = damage.take(conn);
+    let dirty =
+        trigger == TickTrigger::Damage || rects.as_ref().is_none_or(|rects| !rects.is_empty());
+    (dirty, rects)
 }
 
 /// The share of the captured area at (`x`, `y`), `width` x `height`, that the root's damaged
@@ -1281,13 +1296,9 @@ where
             }
             let trigger = wait_for_frame(&conn, damage.as_ref(), &pace, frame_dur);
             let woke = Instant::now();
-            pace.ticked(trigger, frame_dur, woke, false);
-            // A tick that finds the screen still gives a change after it the pull a fresh
-            // capture has: the changes before it spent the budget, which a still screen's
-            // frames, never late, do not pay back.
-            if trigger == TickTrigger::Timer && damage.is_some() && pace.still(frame_dur, woke) {
-                pace.stood_still();
-            }
+            // Every grab is published; without Damage the still check never matters, since
+            // nothing pulls a frame forward.
+            pace.record_tick(trigger, frame_dur, woke, true);
             if controls.stop.load(Ordering::Relaxed) {
                 break;
             }
@@ -1889,28 +1900,50 @@ mod damage_tests {
 
     const PERIOD: Duration = Duration::from_millis(400);
 
-    fn repaint(color: u32) {
-        fill(color, 0, 0, 64, 64);
+    fn fill(color: u32, x: i16, y: i16, width: u16, height: u16) {
+        Painter::connect().fill(color, x, y, width, height);
     }
 
-    fn fill(color: u32, x: i16, y: i16, width: u16, height: u16) {
-        let (conn, screen) = x11rb::connect(None).expect("connect");
-        let root = conn.setup().roots[screen].root;
-        let gc = conn.generate_id().expect("id");
-        conn.create_gc(gc, root, &CreateGCAux::new().foreground(color))
-            .expect("gc");
-        conn.poly_fill_rectangle(
-            root,
-            gc,
-            &[Rectangle {
-                x,
-                y,
-                width,
-                height,
-            }],
-        )
-        .expect("fill");
-        conn.flush().expect("flush");
+    /// A client of its own that paints the root, connected ahead of when it paints, so a paint
+    /// timed within a period is not held up by the connection's setup.
+    struct Painter {
+        conn: RustConnection,
+        root: u32,
+    }
+
+    impl Painter {
+        fn connect() -> Self {
+            let (conn, screen) = x11rb::connect(None).expect("connect");
+            let root = conn.setup().roots[screen].root;
+            Self { conn, root }
+        }
+
+        /// Paints and waits for the server to have done it: a request only flushed may be
+        /// carried out after the test has moved on, and land in the next one.
+        fn fill(&self, color: u32, x: i16, y: i16, width: u16, height: u16) {
+            let gc = self.conn.generate_id().expect("id");
+            self.conn
+                .create_gc(gc, self.root, &CreateGCAux::new().foreground(color))
+                .expect("gc");
+            self.conn
+                .poly_fill_rectangle(
+                    self.root,
+                    gc,
+                    &[Rectangle {
+                        x,
+                        y,
+                        width,
+                        height,
+                    }],
+                )
+                .expect("fill");
+            self.conn.free_gc(gc).expect("free");
+            self.conn
+                .get_input_focus()
+                .expect("sync")
+                .reply()
+                .expect("sync");
+        }
     }
 
     /// The root's damaged rectangles read in the captured area's own coordinates, clipped to it.
@@ -1985,6 +2018,30 @@ mod damage_tests {
         println!("a 2x20 caret on a {w}x{h} root reads as {caret:?}, read in {took:?}");
     }
 
+    /// A change reported after the wait gave up, before the tick takes the report, is the
+    /// tick's: taken and called clean, it would be cleared and never sent.
+    #[test]
+    #[ignore]
+    fn x11_damage_a_change_after_the_wait_is_the_ticks() {
+        let (conn, screen) = x11rb::connect(None).expect("connect");
+        let root = conn.setup().roots[screen].root;
+        let damage = RootDamage::create(&conn, root).expect("the server carries DAMAGE");
+        let mut pace = FramePace::default();
+        pace.ticked(TickTrigger::Timer, PERIOD, Instant::now(), false);
+        damage.clear(&conn);
+        let trigger = wait_for_frame(&conn, Some(&damage), &pace, PERIOD);
+        assert_eq!(trigger, TickTrigger::Timer, "a quiet screen is the timer's");
+        fill(0x0040_8020, 10, 10, 8, 8);
+        let (dirty, rects) = take_tick(&damage, &conn, trigger);
+        assert!(dirty, "the late change is the tick's: {rects:?}");
+        assert!(
+            rects.is_some_and(|rects| !rects.is_empty()),
+            "and says where"
+        );
+        let (dirty, rects) = take_tick(&damage, &conn, TickTrigger::Timer);
+        assert!(!dirty, "taken once: {rects:?}");
+    }
+
     /// A screen that changes mid-period publishes the change then, while a screen that does not
     /// keeps the cadence: the latency of a change is its own, not the frame rate's.
     #[test]
@@ -2012,9 +2069,10 @@ mod damage_tests {
 
         pace.ticked(TickTrigger::Timer, PERIOD, Instant::now(), false);
         damage.clear(&conn);
-        let painter = thread::spawn(|| {
+        let brush = Painter::connect();
+        let painter = thread::spawn(move || {
             thread::sleep(PERIOD.mul_f64(0.6));
-            repaint(0x0020_4060);
+            brush.fill(0x0020_4060, 0, 0, 64, 64);
         });
         let start = Instant::now();
         let pulled = wait_for_frame(&conn, Some(&damage), &pace, PERIOD);
