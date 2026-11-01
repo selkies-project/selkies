@@ -46,6 +46,7 @@ SUITES: list = [
     {"path": "unit/test_track_transform.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_stripe_clock.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_chunk_stamp.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_fit_frame.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ice_port_range.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_port_range_setting.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ice_udp_mux.py", "tier": "unit", "timeout": 120},

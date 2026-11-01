@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { createStripeClock } from '../../addons/selkies-web-core/lib/stripe-clock.js';
 import { createChunkStamp } from '../../addons/selkies-web-core/lib/chunk-stamp.js';
+import { createFrameFit } from '../../addons/selkies-web-core/lib/fit-frame.js';
 import { createPresentMeter } from '../../addons/selkies-web-core/lib/present-meter.js';
 import { isSkiaWebKit } from '../../addons/selkies-web-core/lib/util.js';
 
@@ -83,7 +84,7 @@ function literal(text, name) {
 }
 
 /** Helpers a worker source splices in that its own module imports. */
-const IMPORTED = { createStripeClock, createChunkStamp, createPresentMeter, isSkiaWebKit };
+const IMPORTED = { createStripeClock, createChunkStamp, createFrameFit, createPresentMeter, isSkiaWebKit };
 
 /** Module sources a worker splices in whole, by their `?raw` import name. */
 const RAW_SOURCES = {

@@ -143,6 +143,7 @@ import decodeGateSource from './lib/decode-gate.js?raw';
 import decodePaceSource from './lib/decode-pace.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { createChunkStamp } from './lib/chunk-stamp.js';
+import { createFrameFit } from './lib/fit-frame.js';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
 import { DecodePace } from './lib/decode-pace.js';
@@ -2092,30 +2093,17 @@ function closeDecoder() {
   wireCodec = null; wireW = 0; wireH = 0; wireDesc = null;
 }
 
-// A hardware encoder may code a larger picture than the stream's (VA-API on AMD
-// pads AV1 to its alignment, 1920x1080 to 1920x1082 and 1366x768 to 1408x768) and
-// names the stream's size in the AV1 render size, which Chromium's decoder does
-// not apply: the canvas would then take the padded size and the desktop would
-// come out squeezed or stretched at its edges. Crop the frame to the size the
-// decoder was configured for; a visibleRect crop copies no pixels.
-function fitDecoded(f) {
-  const c = decConfig;
-  if (!c || (f.displayWidth === c.codedWidth && f.displayHeight === c.codedHeight)
-      || f.codedWidth < c.codedWidth || f.codedHeight < c.codedHeight) return f;
-  try {
-    const g = new VideoFrame(f, { visibleRect: { x: 0, y: 0, width: c.codedWidth, height: c.codedHeight } });
-    f.close();
-    return g;
-  } catch (_) { return f; }
-}
-
 function configureDecoder(codec, w, h, software, description) {
   // Another picture size costs the decoder another rate; a new codec string
   // alone, such as the level a lower rate declares, does not.
   if (decConfig && (decConfig.codedWidth !== w || decConfig.codedHeight !== h)) resetPace();
   closeDecoder();
   try {
-    dec = new VideoDecoder({ output: (f) => { pace.decoded(); statsFormat = f.format; tellFacts(); present(fitDecoded(f), statsOpen ? arrivalOf(f.timestamp) : NaN); },
+    dec = new VideoDecoder({ output: (f) => {
+                               pace.decoded(); statsFormat = f.format; tellFacts();
+                               const at = statsOpen ? arrivalOf(f.timestamp) : NaN;
+                               present(decConfig ? fitFrameToStream(f, decConfig.codedWidth, decConfig.codedHeight) : f, at);
+                             },
                              error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
     // configure() is synchronous, so the next chunk decodes without an async gap and
     // an unsupported config surfaces via error(). The page owns the acceleration
@@ -2183,6 +2171,8 @@ ${wireCodecsSource.replace(/^export /gm, '')}
 // back over the wire port so the server paces against what reached the screen.
 const createStripeClock = ${createStripeClock.toString()};
 const createChunkStamp = ${createChunkStamp.toString()};
+const createFrameFit = ${createFrameFit.toString()};
+const fitFrameToStream = createFrameFit();
 const chunkStamp = createChunkStamp();
 const STRIPE_DECODE_QUEUE_LIMIT = ${STRIPE_DECODE_QUEUE_LIMIT};
 const JPEG_STRIPE_REORDER_WINDOW = ${JPEG_STRIPE_REORDER_WINDOW};
@@ -4448,6 +4438,8 @@ let lastPresentedVideoFrameAt = 0;
 const stripeClock = createStripeClock();
 /** The timestamps of the chunks the page hands a decoder, its own or the video worker's (lib/chunk-stamp.js). */
 const chunkStamp = createChunkStamp();
+/** Decoded pictures cut to the stream's size, where an encoder padded them (lib/fit-frame.js). */
+const fitFrameToStream = createFrameFit();
 /**
  * Creates the back-buffer, resized to the canvas.
  * @returns {CanvasRenderingContext2D|null}
@@ -4699,20 +4691,6 @@ function armSharedStallWatchdog() {
       `resending START_VIDEO (attempt ${sharedStallRecoveryAttempts}, next retry in ${backoff}ms).`);
     try { websocket.send('START_VIDEO'); } catch (_) { /* onclose path recovers */ }
   }, 1000);
-}
-
-// The page-side twin of fitDecoded in the video worker: a hardware encoder may
-// code a larger picture than the stream's, and Chromium's decoder does not crop
-// it to the AV1 render size, so the frame is cropped to the size the row's
-// decoder was configured for. A visibleRect crop copies no pixels.
-function fitFrameToStream(frame, width, height) {
-  if ((frame.displayWidth === width && frame.displayHeight === height)
-      || frame.codedWidth < width || frame.codedHeight < height) return frame;
-  try {
-    const cropped = new VideoFrame(frame, { visibleRect: { x: 0, y: 0, width, height } });
-    frame.close();
-    return cropped;
-  } catch (e) { return frame; }
 }
 
 /**
