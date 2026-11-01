@@ -134,7 +134,7 @@ export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 	return (
 		<div className="flex w-full flex-col gap-0.5 p-2">
 			<div className="sharing-header flex items-center justify-between gap-2 px-2 py-1">
-				<span className="min-w-0 text-xs font-medium text-muted-foreground">{t('sharing.shareLinksTitle')}</span>
+				<span className="min-w-0 text-sm font-medium text-muted-foreground">{t('sharing.shareLinksTitle')}</span>
 				<Tooltip>
 					<TooltipTrigger
 						render={<span className="sharing-info inline-flex shrink-0 cursor-help justify-center" />}
@@ -150,7 +150,7 @@ export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 			{filteredSharingLinks.map((link) => {
 					const fullUrl = `${baseUrl}${link.hash}`;
 					const copyButton = (
-						<button type="button" className="copy-button flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-accent"
+						<button type="button" className="copy-button flex size-8 shrink-0 items-center justify-center rounded-md hover:bg-accent"
 							onClick={() => handleCopyLink(fullUrl, link.id, link.label)} aria-label={t('sharing.copyAria', { label: link.label })}>
 							{copiedId === link.id ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
 						</button>
@@ -170,7 +170,7 @@ export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 						<div key={link.id} className="flex items-center justify-between gap-2 rounded-md px-2 py-1 hover:bg-accent">
 							<span className="flex min-w-0 items-center gap-2">
 								<span className="truncate text-sm font-medium">{link.label}</span>
-								<Badge variant="green" className="shrink-0 px-1.5 text-[10px]">{link.badge}</Badge>
+								<Badge variant="green" className="shrink-0 px-1.5 text-xs">{link.badge}</Badge>
 							</span>
 							{copyButton}
 						</div>

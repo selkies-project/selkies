@@ -23,7 +23,7 @@ import { t } from "@/i18n";
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
   return (
-    <Button variant="outline" size="icon-xs" className="theme-toggle" aria-label={t('toggleThemeTitle')} title={t('toggleThemeTitle')}
+    <Button variant="outline" size="icon-sm" className="theme-toggle" aria-label={t('toggleThemeTitle')} title={t('toggleThemeTitle')}
       onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
       <Sun className="size-3.5 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
       <Moon className="absolute size-3.5 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
@@ -54,7 +54,7 @@ export function LayoutToggle({ className }: { className?: string }) {
   return (
     <Tooltip>
       <TooltipTrigger render={
-        <Button variant="outline" size="icon-xs" className={`layout-toggle ${className ?? ""}`} aria-label={label} data-layout={layout.id}
+        <Button variant="outline" size="icon-sm" className={`layout-toggle ${className ?? ""}`} aria-label={label} data-layout={layout.id}
           onClick={() => setLayout(next.id)} />
       }>
         <Icon className="size-3.5" />

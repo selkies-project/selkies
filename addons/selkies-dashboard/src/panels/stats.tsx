@@ -63,8 +63,8 @@ const TILES_SKIN: TilesSkin = {
   calm: "border-transparent",
   warn: "border-[var(--stat-warn)]",
   value: "flex items-center gap-1 text-[13px]",
-  detail: "text-[9px] tabular-nums text-muted-foreground",
-  label: "text-[10.5px] text-muted-foreground",
+  detail: "text-[10.5px] tabular-nums text-muted-foreground",
+  label: "text-[11px] text-muted-foreground",
 };
 
 interface GaugeProps {
@@ -102,18 +102,18 @@ function Gauge({ label, value, percent, warn, title, compact }: GaugeProps) {
   const endX = (20 + 16 * Math.cos(angle)).toFixed(2);
   const endY = (20 + 16 * Math.sin(angle)).toFixed(2);
   return (
-    <div title={title} className={`flex flex-col items-center ${compact ? "w-9" : "w-10"}`}>
-      <div className={`relative ${compact ? "w-9" : "w-10"}`}>
-        <svg viewBox="0 0 40 22" className={`block w-full ${compact ? "h-4" : "h-5.5"}`} role="img" aria-label={`${label}: ${value}`}>
+    <div title={title} className="flex w-12 flex-col items-center">
+      <div className="relative w-12">
+        <svg viewBox="0 0 40 22" className={`block w-full ${compact ? "h-6" : "h-6.5"}`} role="img" aria-label={`${label}: ${value}`}>
           <path d="M 4 20 A 16 16 0 0 1 36 20" fill="none" stroke="var(--muted)" strokeWidth={4} strokeLinecap="round" />
           {fill > 0.5 && (
             <path d={`M 4 20 A 16 16 0 0 1 ${endX} ${endY}`} fill="none"
               stroke={warn ? "var(--stat-warn)" : "var(--primary)"} strokeWidth={4} strokeLinecap="round" />
           )}
         </svg>
-        <b className={`absolute inset-x-0 bottom-0 text-center leading-none text-foreground ${compact ? "text-[7px]" : "text-[10px]"}`}>{value}</b>
+        <b className="absolute inset-x-0 bottom-0 text-center text-xs leading-none text-foreground">{value}</b>
       </div>
-      <span className={`mt-0.5 whitespace-nowrap uppercase tracking-wide text-muted-foreground ${compact ? "text-[7px] leading-none" : "text-[9px] leading-none"}`}>{label}</span>
+      <span className="mt-1 whitespace-nowrap text-[10px] leading-none tracking-wide text-muted-foreground uppercase">{label}</span>
     </div>
   );
 }
@@ -181,14 +181,17 @@ export function StreamStats() {
 
   if (!detailed) {
     return (
-      <div data-drag-handle className="flex h-[42px] items-center gap-2 rounded-lg border bg-background px-2 text-xs shadow-lg tabular-nums cursor-grab active:cursor-grabbing select-none">
-        <div className="flex items-center gap-1 pointer-events-none">
-          {streamGauges.map(({ key, ...gauge }) => <Gauge key={key} compact {...gauge} />)}
+      // The stream's figures on one row and the host's meters on the next, each gauge wide enough for its figure
+      // at a readable size: one row of seven had squeezed them to 7-pixel text.
+      <div data-drag-handle className="flex items-start gap-2 rounded-lg border bg-background px-2 py-2 text-xs shadow-lg tabular-nums cursor-grab active:cursor-grabbing select-none">
+        <div className="flex flex-col gap-2 pointer-events-none">
+          <div className="flex items-end gap-1.5">
+            {streamGauges.map(({ key, ...gauge }) => <Gauge key={key} compact {...gauge} />)}
+          </div>
           {meterGauges.length > 0 && (
-            <>
-              <div className="mx-1 h-6 w-px bg-border" aria-hidden />
+            <div className="flex items-end gap-1.5 border-t pt-2">
               {meterGauges.map(({ key, ...gauge }) => <Gauge key={key} compact {...gauge} />)}
-            </>
+            </div>
           )}
         </div>
         {toggle}
@@ -215,7 +218,7 @@ export function StreamStats() {
         </div>
 
         {/* One row of seven gauges where the panel is its full width; a narrower one wraps them evenly. */}
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(2.5rem,1fr))] justify-items-center gap-y-1.5 border-b border-border pb-2">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(3rem,1fr))] justify-items-center gap-y-1.5 border-b border-border pb-2">
           {[...streamGauges, ...meterGauges].map(({ key, ...gauge }) => (
             <Gauge key={key} {...gauge} />
           ))}

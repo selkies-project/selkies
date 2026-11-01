@@ -238,8 +238,8 @@ export default function ToolbarLayout() {
         {/* What stays in view while the bar is up behind the top edge: a tab hanging from it that brings it back. */}
         {collapsed && (
           <button type="button" aria-label={t('topMenu.showToolbar')} title={t('topMenu.showToolbar')} onClick={() => setCollapsed(false)}
-            className="absolute top-full left-1/2 flex h-4 w-12 -translate-x-1/2 items-center justify-center rounded-b-md border border-t-0 bg-background text-muted-foreground hover:text-foreground">
-            <ChevronDown className="size-3" />
+            className="absolute top-full left-1/2 flex h-6 w-16 -translate-x-1/2 items-center justify-center rounded-b-md border border-t-0 bg-background text-muted-foreground hover:text-foreground">
+            <ChevronDown className="size-4" />
           </button>
         )}
       </div>
@@ -252,10 +252,10 @@ export default function ToolbarLayout() {
 
       {floats.filter(({ id }) => floating[id]).map(({ id, title, Body }) => (
         <FloatingPanel key={id} initial={{ x: 1, y: 0.06 }}>
-          <div className="flex min-h-0 w-[300px] flex-col rounded-lg border bg-background text-xs shadow-lg">
+          <div className="flex min-h-0 w-[320px] flex-col rounded-lg border bg-background text-sm shadow-lg">
             <div data-drag-handle className="flex cursor-grab items-center justify-between px-3 py-2 select-none active:cursor-grabbing">
               <h3 className="pointer-events-none text-sm font-semibold">{t(title)}</h3>
-              <Button variant="ghost" size="icon-xs" onClick={() => toggleFloating(id)} aria-label={t('common.close')} title={t('common.close')}><X className="size-3" /></Button>
+              <Button variant="ghost" size="icon-sm" onClick={() => toggleFloating(id)} aria-label={t('common.close')} title={t('common.close')}><X className="size-4" /></Button>
             </div>
             <div className="min-h-0 cursor-default overflow-y-auto border-t px-3 py-3">{Body && <Body place="float" />}</div>
           </div>

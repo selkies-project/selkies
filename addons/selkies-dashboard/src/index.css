@@ -305,6 +305,16 @@ select optgroup {
   --switch-knob: 1rem;
   --switch-inset: 0px;
   --bar-button: 2rem;
+  --menu-item-h: 2.25rem;
+}
+/* On a touch screen the controls a finger lands on keep the sidebar's size whatever the window's width: fields and
+   buttons 40 px, bar buttons 36, menu rows 44 (the sidebar sets its own on `.sidebar`). */
+@media (pointer: coarse) {
+  :root {
+    --control-h: 2.5rem;
+    --bar-button: 2.25rem;
+    --menu-item-h: 2.75rem;
+  }
 }
 [role="menu"] {
   --stack-gap: 0.75rem;
