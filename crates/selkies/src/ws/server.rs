@@ -3314,7 +3314,6 @@ impl WsService {
         };
         loop {
             self.reconfigure_pending.store(false, Ordering::Relaxed);
-            debug!(target: "ws", "Starting display reconfiguration...");
             self.reconfigure_locked().await;
             drop(guard);
             if !self.reconfigure_pending.load(Ordering::Relaxed) {
@@ -3428,6 +3427,7 @@ impl WsService {
             }
             return;
         }
+        debug!(target: "ws", "Calculating new extended desktop layout from ALL clients...");
         let Some((mut layouts, mut total_w, mut total_h, stream_fps)) = self.compute_layouts()
         else {
             error!(target: "ws", "Calculated total display size is zero. Aborting reconfiguration.");
@@ -3938,7 +3938,7 @@ impl WsService {
         if self.shutdown_called.swap(true, Ordering::Relaxed) {
             return;
         }
-        debug!(target: "ws", "Service shutdown initiated...");
+        debug!(target: "ws", "Transport shutdown initiated...");
         let port: Arc<dyn DemandTransport> = self.arc();
         self.deps.webcam.demand_detach(&port);
         let clients = self.clients();
@@ -3977,7 +3977,7 @@ impl WsService {
             task.abort();
         }
         self.stop_stats_collectors().await;
-        info!(target: "ws", "Service shutdown complete.");
+        info!(target: "ws", "Transport shutdown complete.");
     }
 }
 

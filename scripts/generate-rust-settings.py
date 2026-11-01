@@ -14,6 +14,7 @@ module is read statically, like scripts/generate-settings-doc.py does. Run from 
 import argparse
 import ast
 import os
+import subprocess
 import sys
 from typing import Any, Dict, List
 
@@ -142,7 +143,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--check", action="store_true", help="exit 1 when the table is stale")
     args = parser.parse_args()
-    text = render(load())
+    text = subprocess.run(
+        ["rustfmt", "--edition", "2024"],
+        input=render(load()),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
     if args.check:
         current = open(OUTPUT, encoding="utf-8").read() if os.path.exists(OUTPUT) else ""
         if current != text:

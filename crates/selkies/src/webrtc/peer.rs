@@ -361,6 +361,8 @@ struct Media {
     twcc_rx: TwccReceiver,
     sctp_out: mpsc::UnboundedSender<Bytes>,
     sctp: Option<SctpTransport>,
+    /// The inbound SCTP packets of a negotiated association DTLS has yet to carry.
+    sctp_negotiated: Option<mpsc::Receiver<Bytes>>,
     video_feed: RelayTrack<Arc<EncodedFrame>>,
     audio_feed: Option<RelayTrack<AudioSample>>,
     dtls_connected: bool,
@@ -462,6 +464,7 @@ impl Peer {
             twcc_rx: TwccReceiver::new(),
             sctp_out,
             sctp: None,
+            sctp_negotiated: None,
             video_feed,
             audio_feed,
             dtls_connected: false,
@@ -976,26 +979,40 @@ impl Media {
             let _ = self.transport.add_remote_candidate(None).await;
         }
 
-        if negotiated.sctp
-            && let Some(rx) = sctp_in.take()
-        {
-            let side = if self.transport.ice_role() == "controlling" {
-                Side::Client
-            } else {
-                Side::Server
-            };
-            let caps = self.session.sctp.as_ref().and_then(|s| s.remote_caps);
-            let (sctp, sctp_events) =
-                SctpTransport::spawn(side, caps, Arc::new(SctpOut(self.sctp_out.clone())), rx);
-            tokio::spawn(run_sctp_events(
-                self.peer_id.clone(),
-                self.events.clone(),
-                sctp.clone(),
-                sctp_events,
-            ));
-            self.sctp = Some(sctp);
+        if negotiated.sctp && self.sctp_negotiated.is_none() {
+            self.sctp_negotiated = sctp_in.take();
+            self.start_sctp();
         }
         Ok(settled)
+    }
+
+    /// Start the association once DTLS can carry it, with what the answer negotiated.
+    ///
+    /// An INIT sent any earlier has no keys to leave under and is lost, so the channels would
+    /// open only on its retransmission a full RTO.Initial later, with the video already up and
+    /// input going nowhere. A peer's INIT that arrives first waits in the inbound channel.
+    fn start_sctp(&mut self) {
+        if !self.dtls_connected {
+            return;
+        }
+        let Some(rx) = self.sctp_negotiated.take() else {
+            return;
+        };
+        let side = if self.transport.ice_role() == "controlling" {
+            Side::Client
+        } else {
+            Side::Server
+        };
+        let caps = self.session.sctp.as_ref().and_then(|s| s.remote_caps);
+        let (sctp, sctp_events) =
+            SctpTransport::spawn(side, caps, Arc::new(SctpOut(self.sctp_out.clone())), rx);
+        tokio::spawn(run_sctp_events(
+            self.peer_id.clone(),
+            self.events.clone(),
+            sctp.clone(),
+            sctp_events,
+        ));
+        self.sctp = Some(sctp);
     }
 
     fn on_transport_event(&mut self, event: TransportEvent) {
@@ -1016,7 +1033,10 @@ impl Media {
             TransportEvent::DtlsState(state) => {
                 debug!(target: "webrtc", "Peer {}: DTLS {}", self.peer_id, state.as_str());
                 match state {
-                    DtlsState::Connected => self.dtls_connected = true,
+                    DtlsState::Connected => {
+                        self.dtls_connected = true;
+                        self.start_sctp();
+                    }
                     DtlsState::Failed => {
                         self.stop_sending();
                         self.set_state(PeerState::Failed);
