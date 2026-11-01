@@ -7,7 +7,7 @@
 //! per operation: one-shot [`list_types`]/[`read`], a [`write`] that returns with
 //! the selection taken (a detached thread then serves paste requests until
 //! another client takes the selection), and [`watch`] (a thread reporting
-//! selection changes to a Python callback). The compositor is spoken to through
+//! selection changes to a `SelectionWatch`). The compositor is spoken to through
 //! `ext_data_control_manager_v1` (KWin since Plasma 6.3, wlroots since 0.19) or
 //! `zwlr_data_control_manager_v1` (earlier wlroots and KWin), preferring the
 //! standardized ext form when both are advertised. Every compositor round-trip
@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use pyo3::{Py, PyAny, Python};
+use crate::sink::SelectionWatch;
 use wayland_client::backend::ObjectId;
 use wayland_client::protocol::{wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, delegate_noop};
@@ -606,7 +606,7 @@ static WATCHERS: Mutex<Option<HashMap<String, WatchHandle>>> = Mutex::new(None);
 /// Report every selection change on `socket_path` (including the one current at
 /// start) to `callback(mimes: list[str])` from a background thread, a cleared
 /// selection as no mimes. A second watch on the same socket replaces the first.
-pub(crate) fn watch(socket_path: &str, callback: Py<PyAny>) -> Result<(), String> {
+pub(crate) fn watch(socket_path: &str, callback: Arc<dyn SelectionWatch>) -> Result<(), String> {
     let stop = Arc::new(AtomicBool::new(false));
     {
         let mut reg = WATCHERS.lock().unwrap();
@@ -648,7 +648,11 @@ pub(crate) fn unwatch(socket_path: &str) {
     }
 }
 
-fn watch_loop(socket_path: &str, callback: Py<PyAny>, stop: &AtomicBool) -> Result<(), String> {
+fn watch_loop(
+    socket_path: &str,
+    callback: Arc<dyn SelectionWatch>,
+    stop: &AtomicBool,
+) -> Result<(), String> {
     let (conn, mut queue, mut state, device) = open_device(socket_path)?;
     while !stop.load(Ordering::Relaxed) && !state.finished {
         if state.selection_changed {
@@ -661,11 +665,7 @@ fn watch_loop(socket_path: &str, callback: Py<PyAny>, stop: &AtomicBool) -> Resu
             if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
                 break;
             }
-            Python::attach(|py| {
-                if let Err(e) = callback.call1(py, (mimes,)) {
-                    e.print(py);
-                }
-            });
+            callback.mimes(mimes);
         }
         queue.flush().map_err(|e| format!("flush: {e}"))?;
         if let Some(guard) = conn.prepare_read() {

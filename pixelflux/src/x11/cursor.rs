@@ -7,8 +7,8 @@
 //! Out-of-band X11 cursor delivery, the X11 counterpart of the Wayland compositor's cursor
 //! callback: one process-wide monitor thread (the X pointer is global, however many captures
 //! run) parks in `wait_for_event` on its own connection for XFixes `DisplayCursorNotify` and
-//! hands each new cursor to the Python callback as `(msg_type, png_bytes, hot_x, hot_y)` —
-//! the same payload the Wayland backend sends, so a consumer needs one handler for both.
+//! hands each new cursor to the registered `CursorSink` — the same payload the Wayland
+//! backend sends, so a consumer needs one handler for both.
 //! Keeping the cursor out of the framebuffer means pointer motion over static content never
 //! dirties the damage hash or re-encodes video; `capture_cursor` compositing stays available
 //! as the opt-in alternative.
@@ -23,8 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use crate::sink::{CursorImage, CursorSink};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xfixes::{ConnectionExt as XfixesExt, CursorNotifyMask, GetCursorImageReply};
@@ -34,8 +33,8 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::rust_connection::RustConnection;
 
-/// The Python cursor callback from `set_cursor_callback`, shared by every X11 capture.
-static CALLBACK: Mutex<Option<Py<PyAny>>> = Mutex::new(None);
+/// The cursor sink from `set_cursor_callback`, shared by every X11 capture.
+static CALLBACK: Mutex<Option<Arc<dyn CursorSink>>> = Mutex::new(None);
 /// Longest delivered cursor edge; larger images are downscaled (`<= 0` = uncapped).
 /// 128 is what a browser shows as a cursor, so an application's own sprite travels whole.
 static SIZE_CAP: AtomicI32 = AtomicI32::new(128);
@@ -64,7 +63,7 @@ static SLOT: Mutex<Slot> = Mutex::new(Slot {
 /// Register/replace the callback and re-deliver the current cursor to it. `None` withdraws
 /// it, releasing what the callback holds: the slot is process-wide and outlives the capture
 /// that set it, so a consumer that is going away has no other way to let go.
-pub fn set_callback(cb: Option<Py<PyAny>>) {
+pub fn set_callback(cb: Option<Arc<dyn CursorSink>>) {
     let registered = cb.is_some();
     *CALLBACK.lock().unwrap() = cb;
     if !registered {
@@ -109,14 +108,14 @@ pub fn acquire() {
     }
 }
 
-/// An X11 capture stopped: the last one out stops and joins the monitor. Runs detached
-/// from the GIL — the thread may be blocked attaching to deliver a cursor — and the join
-/// is bounded: a thread that misses the wake (X server wedged mid-shutdown) is abandoned
-/// with a warning rather than hanging the caller; it exits on its own next event. A stop
-/// issued from inside the cursor callback runs on the monitor thread itself, where a join
-/// can only time out: it signals and detaches instead, and the loop observes the stop flag
-/// once the callback unwinds.
-pub fn release(py: Python<'_>) {
+/// An X11 capture stopped: the last one out stops and joins the monitor. A caller holding
+/// the GIL runs it detached — the thread may be blocked delivering a cursor to a sink that
+/// needs it — and the join is bounded: a thread that misses the wake (X server wedged
+/// mid-shutdown) is abandoned with a warning rather than hanging the caller; it exits on its
+/// own next event. A stop issued from inside the cursor sink runs on the monitor thread
+/// itself, where a join can only time out: it signals and detaches instead, and the loop
+/// observes the stop flag once the sink returns.
+pub fn release() {
     let monitor = {
         let mut slot = SLOT.lock().unwrap();
         slot.users = slot.users.saturating_sub(1);
@@ -132,24 +131,21 @@ pub fn release(py: Python<'_>) {
             wake(&m.wake_win);
             return;
         }
-        py.detach(move || {
-            m.stop.store(true, Ordering::SeqCst);
-            wake(&m.wake_win);
-            match m.done_rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    eprintln!("[X11] cursor monitor did not stop in time; detaching");
-                }
-                _ => {
-                    let _ = m.join.join();
-                }
+        m.stop.store(true, Ordering::SeqCst);
+        wake(&m.wake_win);
+        match m.done_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!("[X11] cursor monitor did not stop in time; detaching");
             }
-        });
+            _ => {
+                let _ = m.join.join();
+            }
+        }
     }
 }
 
-/// Interpreter teardown: drop the Python callback (the caller holds the GIL, so the decref
-/// is immediate) and signal the thread without joining — `PY_SHUTDOWN` already gates it off
-/// Python, and a normal capture stop reaps it via `release`.
+/// Consumer teardown: drop the sink and signal the thread without joining — `PY_SHUTDOWN`
+/// already gates it off the consumer, and a normal capture stop reaps it via `release`.
 pub fn shutdown() {
     *CALLBACK.lock().unwrap() = None;
     let slot = SLOT.lock().unwrap();
@@ -201,7 +197,7 @@ fn wake(wake_win: &AtomicU32) {
     eprintln!("[X11] cursor monitor wake failed: {last_err}");
 }
 
-/// The last payload handed to Python, retained so a replay (late callback registration)
+/// The last payload handed to the sink, retained so a replay (late callback registration)
 /// re-sends it without touching the server — mirroring the Wayland backend, and immune to
 /// XFixes' transient "cursor not displayed" fetch errors.
 type Payload = (&'static str, Vec<u8>, i32, i32);
@@ -315,8 +311,8 @@ fn fetch_payload(conn: &RustConnection) -> Option<Payload> {
     Some((msg_type, png, hot_x, hot_y))
 }
 
-/// Hand a payload to the Python callback (skips quietly with no callback, no payload, or
-/// a finalizing interpreter).
+/// Hand a payload to the sink (skips quietly with no sink, no payload, or a consumer that
+/// is gone).
 fn deliver(payload: Option<&Payload>) {
     let (msg_type, png, hot_x, hot_y) = match payload {
         Some(p) => p,
@@ -325,18 +321,15 @@ fn deliver(payload: Option<&Payload>) {
     if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
         return;
     }
-    if CALLBACK.lock().unwrap().is_none() {
-        return;
+    let cb = CALLBACK.lock().unwrap().clone();
+    if let Some(cb) = cb {
+        cb.cursor(CursorImage {
+            kind: msg_type,
+            png: png.clone(),
+            hot_x: *hot_x,
+            hot_y: *hot_y,
+        });
     }
-    Python::attach(|py| {
-        let cb = { CALLBACK.lock().unwrap().as_ref().map(|c| c.clone_ref(py)) };
-        if let Some(cb) = cb {
-            let py_bytes = PyBytes::new(py, png);
-            if let Err(e) = cb.call1(py, (*msg_type, py_bytes, *hot_x, *hot_y)) {
-                e.print(py);
-            }
-        }
-    });
 }
 
 /// XFixes ARGB image -> callback payload: cropped to the visible bounding box (hotspot

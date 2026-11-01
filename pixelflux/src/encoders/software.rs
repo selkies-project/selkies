@@ -1268,6 +1268,24 @@ pub struct EncodedStripe {
     pub reference: Reference,
 }
 
+impl EncodedStripe {
+    /// The encoded bytes, shared with the encoder's buffer.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// The codec tag the wire carries: the codec id.
+    pub fn data_type(&self) -> i32 {
+        self.codec.data_type()
+    }
+
+    /// The frame this one predicts from: its id, -1 for a frame that decodes on its own,
+    /// -2 where the encoder does not track its references.
+    pub fn reference_frame_id(&self) -> i32 {
+        self.reference.frame_id()
+    }
+}
+
 /// When a frame was captured and when its encode began and ended, as CLOCK_MONOTONIC
 /// nanoseconds, so a consumer can attribute a frame's age to the host rather than the
 /// network or the decoder. An encoder leaves them zero; the capture that ran it stamps

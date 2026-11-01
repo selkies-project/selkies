@@ -150,6 +150,8 @@ pub mod recorder;
 pub mod recording_sink;
 /// What each capture streams and how it got there, as values a caller reads.
 pub mod report;
+/// What a capture hands its consumer, and the traits a consumer implements to receive it.
+pub mod sink;
 /// Kernel uinput devices, the first rung of host-capture input injection.
 pub mod uinput;
 /// Headless Wayland compositor and cursor rendering.
@@ -706,11 +708,11 @@ pub type WindowDesc = (u32, String, String, u32, bool);
 /// computer-use queries that read back the screen, cursor, and geometry.
 pub enum ThreadCommand {
     /// Start (or in-place reconfigure) the capture bound to output `display_id`.
-    /// `callback` is the Python per-frame delivery target; `None` starts an internal
-    /// capture with no Python consumer (the built-in recorder taps the delivery layer).
+    /// `callback` receives every frame; `None` starts an internal capture with no consumer
+    /// (the built-in recorder taps the delivery layer).
     StartCapture {
         display_id: u32,
-        callback: Option<Py<PyAny>>,
+        callback: Option<Arc<dyn crate::sink::FrameSink>>,
         settings: RustCaptureSettings,
     },
     /// Stop the capture bound to output `display_id` (other displays keep running).
@@ -786,8 +788,8 @@ pub enum ThreadCommand {
     ListWindows {
         reply: std::sync::mpsc::Sender<Vec<WindowDesc>>,
     },
-    SetCursorCallback(Option<Py<PyAny>>),
-    SetClipboardCallback(Py<PyAny>),
+    SetCursorCallback(Option<Arc<dyn crate::sink::CursorSink>>),
+    SetClipboardCallback(Arc<dyn crate::sink::ClipboardSink>),
     /// Server-side clipboard offer: the compositor owns the selection and serves one payload
     /// per `(mime, data)` entry (plus text aliases), so a paste takes the flavor it asks for.
     SetClipboard {
@@ -2729,7 +2731,7 @@ pub(crate) const HW_ERROR_RECOVERY_THRESHOLD: u32 = 30;
 fn start_capture_on_display(
     state: &mut AppState,
     display_id: u32,
-    cb: Option<Arc<Py<PyAny>>>,
+    cb: Option<Arc<dyn crate::sink::FrameSink>>,
     mut settings: RustCaptureSettings,
 ) {
     // The cursor worker outlives individual captures, so the starting settings have to
@@ -3229,12 +3231,12 @@ fn start_capture_on_display(
         let discard = Arc::new(AtomicBool::new(false));
         let thread_discard = discard.clone();
         let predecessor = prior_deliver_join;
-        // With no Python callback (internal recorder-owned capture) the delivery thread
+        // With no consumer (internal recorder-owned capture) the delivery thread
         // only drains the channel: the recorder already consumed the frames at the
         // delivery-layer tap, upstream of this per-consumer handoff.
         let join = thread::spawn(move || {
             // The predecessor capture's deliver thread finishes first, off the
-            // event loop: encoded stripes reach Python in capture order across
+            // event loop: encoded stripes reach the consumer in capture order across
             // a reconfigure, and a stale pre-teardown stripe can never land
             // after this capture's first frame.
             if let Some(handle) = predecessor {
@@ -3250,29 +3252,7 @@ fn start_capture_on_display(
                             continue;
                         }
                         stream_report.tally(&stripes);
-                        Python::attach(|py| {
-                            for s in stripes {
-                                match Py::new(
-                                    py,
-                                    StripeFrame::new_owned_meta(
-                                        s.data,
-                                        s.codec.data_type(),
-                                        s.stripe_y_start,
-                                        s.stripe_height,
-                                        s.frame_id,
-                                        s.timing,
-                                        s.reference,
-                                    ),
-                                ) {
-                                    Ok(f) => {
-                                        if let Err(e) = cb.call1(py, (f,)) {
-                                            e.print(py);
-                                        }
-                                    }
-                                    Err(e) => eprintln!("[Wayland] frame alloc error: {e:?}"),
-                                }
-                            }
-                        });
+                        cb.frames(stripes);
                     }
                 }
                 None => while rx.recv().is_ok() {},
@@ -6647,13 +6627,13 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 callback,
                 settings,
             } => {
-                start_capture_on_display(state, display_id, callback.map(Arc::new), settings);
+                start_capture_on_display(state, display_id, callback, settings);
             }
             ThreadCommand::StopCapture { display_id } => {
-                // Cursor and clipboard callbacks deliberately SURVIVE StopCapture:
+                // Cursor and clipboard sinks deliberately SURVIVE StopCapture:
                 // captures cycle on client disconnects and setting restarts, and a
-                // copy or cursor change during that gap must still reach Python.
-                // PY_SHUTDOWN gates every use against a finalizing interpreter.
+                // copy or cursor change during that gap must still reach the consumer.
+                // PY_SHUTDOWN gates every use against a consumer that is gone.
                 stop_capture_on_display(state, display_id);
             }
             ThreadCommand::CreateOutput {
@@ -7795,6 +7775,137 @@ impl StripeFrame {
     unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
 }
 
+impl From<crate::sink::Frame> for StripeFrame {
+    fn from(s: crate::sink::Frame) -> Self {
+        Self::new_owned_meta(
+            s.data,
+            s.codec.data_type(),
+            s.stripe_y_start,
+            s.stripe_height,
+            s.frame_id,
+            s.timing,
+            s.reference,
+        )
+    }
+}
+
+/// A Python callable a sink holds. Dropped under the GIL so its decref happens at once:
+/// dropped without it, the decref waits for some thread's next attach, which a withdrawn
+/// callback may never see. A finalizing interpreter (`PY_SHUTDOWN`) is never attached to.
+struct PyCallable(Option<Py<PyAny>>);
+
+impl PyCallable {
+    fn new(cb: Py<PyAny>) -> Self {
+        Self(Some(cb))
+    }
+
+    fn get(&self) -> &Py<PyAny> {
+        self.0.as_ref().expect("held until drop")
+    }
+}
+
+impl Drop for PyCallable {
+    fn drop(&mut self) {
+        if let Some(cb) = self.0.take() {
+            if PY_SHUTDOWN.load(Ordering::Relaxed) {
+                drop(cb);
+            } else {
+                Python::attach(move |_| drop(cb));
+            }
+        }
+    }
+}
+
+/// The Python frame callback: `cb(frame: StripeFrame)` per stripe, under the GIL.
+struct PyFrameSink(PyCallable);
+
+impl PyFrameSink {
+    fn new(cb: Py<PyAny>) -> Self {
+        Self(PyCallable::new(cb))
+    }
+}
+
+impl crate::sink::FrameSink for PyFrameSink {
+    fn frames(&self, frames: Vec<crate::sink::Frame>) {
+        Python::attach(|py| {
+            for s in frames {
+                match Py::new(py, StripeFrame::from(s)) {
+                    Ok(f) => {
+                        if let Err(e) = self.0.get().call1(py, (f,)) {
+                            e.print(py);
+                        }
+                    }
+                    Err(e) => eprintln!("[pixelflux] frame alloc error: {e:?}"),
+                }
+            }
+        });
+    }
+}
+
+/// The Python cursor callback: `cb(msg_type: str, png: bytes, hot_x: int, hot_y: int)`.
+struct PyCursorSink(PyCallable);
+
+impl PyCursorSink {
+    fn new(cb: Py<PyAny>) -> Self {
+        Self(PyCallable::new(cb))
+    }
+}
+
+impl crate::sink::CursorSink for PyCursorSink {
+    fn cursor(&self, image: crate::sink::CursorImage) {
+        Python::attach(|py| {
+            let png = pyo3::types::PyBytes::new(py, &image.png);
+            if let Err(e) = self
+                .0
+                .get()
+                .call1(py, (image.kind, png, image.hot_x, image.hot_y))
+            {
+                e.print(py);
+            }
+        });
+    }
+}
+
+/// The Python clipboard callback: `cb(entries: list[tuple[str, bytes]])`.
+struct PyClipboardSink(PyCallable);
+
+impl PyClipboardSink {
+    fn new(cb: Py<PyAny>) -> Self {
+        Self(PyCallable::new(cb))
+    }
+}
+
+impl crate::sink::ClipboardSink for PyClipboardSink {
+    fn selection(&self, entries: Vec<(String, Vec<u8>)>) {
+        Python::attach(|py| {
+            let entries: Vec<(String, Bound<'_, pyo3::types::PyBytes>)> = entries
+                .iter()
+                .map(|(mime, bytes)| (mime.clone(), pyo3::types::PyBytes::new(py, bytes)))
+                .collect();
+            let _ = self.0.get().call1(py, (entries,));
+        });
+    }
+}
+
+/// The Python selection watch: `cb(mimes: list[str])`.
+struct PySelectionWatch(PyCallable);
+
+impl PySelectionWatch {
+    fn new(cb: Py<PyAny>) -> Self {
+        Self(PyCallable::new(cb))
+    }
+}
+
+impl crate::sink::SelectionWatch for PySelectionWatch {
+    fn mimes(&self, mimes: Vec<String>) {
+        Python::attach(|py| {
+            if let Err(e) = self.0.get().call1(py, (mimes,)) {
+                e.print(py);
+            }
+        });
+    }
+}
+
 /// The Python handle to the one long-lived compositor thread. Because calloop, EGL/GBM, and
 /// the Wayland display are all thread-affine and the compositor has to keep running to serve its
 /// clients even between captures, the backend cannot be a passive object that starts work on demand:
@@ -7818,6 +7929,21 @@ impl WaylandBackend {
         self.tx.send(cmd).map_err(|e| e.to_string())?;
         let _ = self.wake_tx.send(());
         Ok(())
+    }
+
+    /// Register the consumer of cursor images; `None` withdraws it.
+    fn set_cursor_sink(
+        &self,
+        sink: Option<Arc<dyn crate::sink::CursorSink>>,
+    ) -> Result<(), String> {
+        self.send(ThreadCommand::SetCursorCallback(sink))
+            .map_err(|e| format!("Failed to set cursor callback: {e}"))
+    }
+
+    /// Register the consumer of what client applications copy to the clipboard.
+    fn set_clipboard_sink(&self, sink: Arc<dyn crate::sink::ClipboardSink>) -> Result<(), String> {
+        self.send(ThreadCommand::SetClipboardCallback(sink))
+            .map_err(|e| format!("Failed to set clipboard callback: {e}"))
     }
 }
 
@@ -7893,7 +8019,7 @@ impl WaylandBackend {
         PY_SHUTDOWN.store(false, Ordering::Relaxed);
         self.send(ThreadCommand::StartCapture {
             display_id,
-            callback: Some(callback),
+            callback: Some(Arc::new(PyFrameSink::new(callback))),
             settings: rust_settings,
         })
         .map_err(|e| {
@@ -8151,14 +8277,8 @@ impl WaylandBackend {
 
     /// cb(msg_type: str, png: bytes, hot_x: int, hot_y: int); `None` withdraws it.
     fn set_cursor_callback(&self, callback: Option<Py<PyAny>>) -> PyResult<()> {
-        self.send(ThreadCommand::SetCursorCallback(callback))
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to set cursor callback: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+        self.set_cursor_sink(callback.map(|cb| Arc::new(PyCursorSink::new(cb)) as _))
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
     fn clear_cursor_callback(&self) -> PyResult<()> {
@@ -8190,14 +8310,8 @@ impl WaylandBackend {
     /// password manager's hint beside a secret; a client clearing the clipboard fires it with
     /// no entries.
     fn set_clipboard_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
-        self.send(ThreadCommand::SetClipboardCallback(callback))
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to set clipboard callback: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+        self.set_clipboard_sink(Arc::new(PyClipboardSink::new(callback)))
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
     /// Compositor-side clipboard offer: serve one payload per `(mime, data)` entry, so a
@@ -8856,14 +8970,15 @@ fn wait_socket_name(timeout: Duration) -> Option<String> {
 /// Cursor callback registered before the backend exists (selkies registers it pre-start);
 /// applied when the backend is created, which is deferred to capture start so the real
 /// render node (not a placeholder) reaches the compositor.
-static PENDING_CURSOR_CALLBACK: Mutex<Option<Py<PyAny>>> = Mutex::new(None);
+static PENDING_CURSOR_CALLBACK: Mutex<Option<Arc<dyn crate::sink::CursorSink>>> = Mutex::new(None);
 /// Every capture's own cursor callback, the latest registration last: the process-wide slots
 /// carry the latest one's, so a capture withdrawing its own (a second display leaving) hands
 /// the cursor back to the capture registered before it.
-static CURSOR_REGISTRATIONS: Mutex<Vec<(u64, Py<PyAny>)>> = Mutex::new(Vec::new());
-/// Interpreter-teardown gate, set by the atexit sweep: the detached compositor and delivery
-/// threads must never attach to a finalizing interpreter (aborts the process pre-3.13).
-/// Cleared by a fresh capture start (only a live interpreter can start one).
+static CURSOR_REGISTRATIONS: Mutex<Vec<(u64, Arc<dyn crate::sink::CursorSink>)>> =
+    Mutex::new(Vec::new());
+/// Consumer-gone gate, set by the Python bridge's atexit sweep: the detached compositor and
+/// delivery threads must never call a sink into a finalizing interpreter (aborts the process
+/// pre-3.13). Cleared by a fresh capture start (only a live consumer can start one).
 pub(crate) static PY_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// Per-display capture ownership: display id -> the ScreenCapture id that owns that
 /// display's capture. Only the owner may stop it, so an input-only or stale instance can't
@@ -9151,7 +9266,7 @@ fn ensure_wayland_backend(
             WaylandBackend::new(width, height, node, auto_gpu_selected, cursor_size),
         )?;
         if let Some(cb) = PENDING_CURSOR_CALLBACK.lock().unwrap().take() {
-            let _ = be.bind(py).borrow().set_cursor_callback(Some(cb));
+            let _ = be.bind(py).borrow().set_cursor_sink(Some(cb));
         }
         *g = Some(be);
     }
@@ -9253,6 +9368,38 @@ struct ScreenCapture {
 }
 
 impl ScreenCapture {
+    /// Register this capture's consumer of cursor images in the process-wide slots: the X11
+    /// cursor monitor's, and the compositor's where one runs, else the stash
+    /// `PENDING_CURSOR_CALLBACK` that `ensure_wayland_backend` applies at creation (the
+    /// backend slot lock is held across the check so a concurrent creation cannot miss it).
+    /// Both slots outlive the capture that set them, so they carry the latest live
+    /// registration (`CURSOR_REGISTRATIONS`): `None` withdraws this capture's own, releasing
+    /// what it holds and restoring the one registered before it.
+    fn set_cursor_sink(
+        &self,
+        py: Python<'_>,
+        sink: Option<Arc<dyn crate::sink::CursorSink>>,
+    ) -> Result<(), String> {
+        let sink = {
+            let mut regs = CURSOR_REGISTRATIONS.lock().unwrap();
+            regs.retain(|(id, _)| *id != self.id);
+            if let Some(cb) = sink {
+                regs.push((self.id, cb));
+            }
+            regs.last().map(|(_, cb)| cb.clone())
+        };
+        crate::x11::cursor::set_callback(sink.clone());
+        let slot = WAYLAND_BACKEND.get_or_init(|| Mutex::new(None));
+        let g = slot.lock().unwrap();
+        match g.as_ref() {
+            Some(be) => be.bind(py).borrow().set_cursor_sink(sink),
+            None => {
+                *PENDING_CURSOR_CALLBACK.lock().unwrap() = sink;
+                Ok(())
+            }
+        }
+    }
+
     /// Hand what a client said of a frame to the capture: the X11 controls, drained ahead of the
     /// next encode, or the shared Wayland backend.
     fn hand_report(&self, py: Python<'_>, report: encoders::reference::ReferenceReport) {
@@ -9348,7 +9495,7 @@ impl ScreenCapture {
             live_x11().lock().unwrap().retain(|x| !Arc::ptr_eq(x, c));
         }
         if cursor_ref {
-            crate::x11::cursor::release(py);
+            py.detach(crate::x11::cursor::release);
         }
         if backend == 2 {
             let did = wl_display;
@@ -9544,15 +9691,14 @@ impl ScreenCapture {
         }
         let c2 = controls.clone();
         let c3 = controls.clone();
-        let cb = callback;
+        let cb: Arc<dyn crate::sink::FrameSink> = Arc::new(PyFrameSink::new(callback));
         let err_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let err_slot2 = err_slot.clone();
 
-        // The Python callback is GIL-bound: run it on its own thread (as the
-        // Wayland backend and pcmflux do) so encode(N+1) never serializes behind
-        // deliver(N). Bounded at one in-flight frame: a slower consumer
-        // backpressures the encoder by exactly one frame instead of growing a
-        // queue, and no frame is ever dropped.
+        // The consumer runs on its own thread (as the Wayland backend and pcmflux
+        // do) so encode(N+1) never serializes behind deliver(N). Bounded at one
+        // in-flight frame: a slower consumer backpressures the encoder by exactly
+        // one frame instead of growing a queue, and no frame is ever dropped.
         let (deliver_tx, deliver_rx) = std::sync::mpsc::sync_channel::<Vec<EncodedStripe>>(1);
         let deliver_handle = thread::spawn(move || {
             crate::boost_thread_priority(-10);
@@ -9560,29 +9706,7 @@ impl ScreenCapture {
                 if PY_SHUTDOWN.load(Ordering::Relaxed) {
                     continue;
                 }
-                Python::attach(|py| {
-                    for s in frame {
-                        match Py::new(
-                            py,
-                            StripeFrame::new_owned_meta(
-                                s.data,
-                                s.codec.data_type(),
-                                s.stripe_y_start,
-                                s.stripe_height,
-                                s.frame_id,
-                                s.timing,
-                                s.reference,
-                            ),
-                        ) {
-                            Ok(f) => {
-                                if let Err(e) = cb.call1(py, (f,)) {
-                                    e.print(py);
-                                }
-                            }
-                            Err(e) => eprintln!("[X11] frame alloc error: {e:?}"),
-                        }
-                    }
-                });
+                cb.frames(frame);
             }
         });
         let deliver_thread_id = deliver_handle.thread().id();
@@ -10276,7 +10400,8 @@ impl ScreenCapture {
         display: String,
         callback: Py<PyAny>,
     ) -> PyResult<()> {
-        py.detach(move || crate::wayland::dcclient::watch(&app_socket_path(&display)?, callback))
+        let watch: Arc<dyn crate::sink::SelectionWatch> = Arc::new(PySelectionWatch::new(callback));
+        py.detach(move || crate::wayland::dcclient::watch(&app_socket_path(&display)?, watch))
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
     /// Stop the selection watch for `display` (no-op without one).
@@ -10346,33 +10471,13 @@ impl ScreenCapture {
             be.bind(py).borrow().set_cursor_rendering(enabled)
         })
     }
-    /// Register the client-copy cursor callback for whichever backend runs: the X11 cursor
-    /// monitor reads it from its shared slot (re-delivering the current cursor to a late
-    /// registration), and the Wayland backend takes it directly — or stashes it in
-    /// `PENDING_CURSOR_CALLBACK`, applied by `ensure_wayland_backend` at creation; the
-    /// backend slot lock is held across the check so a concurrent creation cannot miss the
-    /// stash. Both slots are process-wide and outlive the capture that set them, so they carry
-    /// the latest live registration (`CURSOR_REGISTRATIONS`): `None` withdraws this capture's
-    /// own, releasing what it holds and restoring the one registered before it.
+    /// `cb(msg_type: str, png: bytes, hot_x: int, hot_y: int)` for whichever backend runs,
+    /// the X11 cursor monitor re-delivering the current cursor to a late registration;
+    /// `None` withdraws this capture's own (`set_cursor_sink`).
     fn set_cursor_callback(&self, py: Python<'_>, callback: Option<Py<PyAny>>) -> PyResult<()> {
-        let callback = {
-            let mut regs = CURSOR_REGISTRATIONS.lock().unwrap();
-            regs.retain(|(id, _)| *id != self.id);
-            if let Some(cb) = callback {
-                regs.push((self.id, cb));
-            }
-            regs.last().map(|(_, cb)| cb.clone_ref(py))
-        };
-        crate::x11::cursor::set_callback(callback.as_ref().map(|c| c.clone_ref(py)));
-        let slot = WAYLAND_BACKEND.get_or_init(|| Mutex::new(None));
-        let g = slot.lock().unwrap();
-        match g.as_ref() {
-            Some(be) => be.bind(py).borrow().set_cursor_callback(callback),
-            None => {
-                *PENDING_CURSOR_CALLBACK.lock().unwrap() = callback;
-                Ok(())
-            }
-        }
+        let callback = callback.map(|cb| Arc::new(PyCursorSink::new(cb)) as _);
+        self.set_cursor_sink(py, callback)
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
     /// Withdraw this capture's cursor callback, releasing what it holds; another capture's
@@ -10393,7 +10498,11 @@ impl ScreenCapture {
     /// no entries.
     fn set_clipboard_callback(&self, py: Python<'_>, callback: Py<PyAny>) -> PyResult<()> {
         match wayland_backend_running(py) {
-            Some(be) => be.bind(py).borrow().set_clipboard_callback(callback),
+            Some(be) => be
+                .bind(py)
+                .borrow()
+                .set_clipboard_sink(Arc::new(PyClipboardSink::new(callback)))
+                .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>),
             None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "wayland backend not running",
             )),
@@ -10626,7 +10735,7 @@ impl Drop for ScreenCapture {
             // handle that never got stop_capture would pin the refcount and its
             // monitor thread forever.
             if std::mem::take(&mut st.cursor_ref) && !crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
-                Python::attach(crate::x11::cursor::release);
+                crate::x11::cursor::release();
             }
         }
     }

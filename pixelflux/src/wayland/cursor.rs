@@ -5,15 +5,15 @@
  */
 
 //! Wayland cursor shape resolution: converts a `CursorImageStatus` into a PNG image buffer
-//! suitable for the Python cursor callback. Uses `xcursor` to load the system cursor theme
-//! and render the appropriate frame at the current scale.
+//! for the cursor sink. Uses `xcursor` to load the system cursor theme and render the
+//! appropriate frame at the current scale.
 
+use crate::sink::{CursorImage, CursorSink};
 use image::{ImageBuffer, Rgba, RgbaImage};
-use pyo3::prelude::*;
-use pyo3::types::PyBytes;
 use std::collections::HashMap;
 use std::io::Cursor as IoCursor;
 use std::io::Read;
+use std::sync::Arc;
 use std::time::Duration;
 use xcursor::{
     CursorTheme,
@@ -22,12 +22,12 @@ use xcursor::{
 
 /// One unit of cursor-callback work handed from the calloop thread to the `wl-cursor`
 /// worker. The calloop resolves everything renderer/surface-affine (SHM copies, dmabuf
-/// readbacks, hotspots); the worker does the PNG encode, the cache, and the GIL-bound Python
-/// call so none of that latency lands on the input/render thread. One channel keeps cursor
-/// updates ordered with callback (re)registration.
+/// readbacks, hotspots); the worker does the PNG encode, the cache, and the call into the
+/// sink so none of that latency lands on the input/render thread. One channel keeps cursor
+/// updates ordered with sink (re)registration.
 pub enum CursorJob {
-    /// `None` withdraws the callback, releasing what it holds.
-    SetCallback(Option<Py<PyAny>>),
+    /// `None` withdraws the sink, releasing what it holds.
+    SetCallback(Option<Arc<dyn CursorSink>>),
     /// Reload the worker's theme handle at a new pixel size; later `Named` jobs render at it.
     SetSize(i32),
     /// Cap the longest delivered cursor edge in pixels; larger sprites are downscaled with
@@ -61,8 +61,8 @@ pub enum CursorJob {
 }
 
 /// Spawn the cursor delivery worker; returns its job channel. The worker owns its own
-/// theme handle, the PNG cache, and the Python callback until one replaces or withdraws it
-/// (like the compositor thread itself); `PY_SHUTDOWN` gates every Python call.
+/// theme handle, the PNG cache, and the sink until one replaces or withdraws it (like the
+/// compositor thread itself); `PY_SHUTDOWN` gates every call into it.
 pub fn spawn_cursor_worker(cursor_size: i32, size_cap: i32) -> std::sync::mpsc::Sender<CursorJob> {
     let (tx, rx) = std::sync::mpsc::channel::<CursorJob>();
     let _ = std::thread::Builder::new()
@@ -71,14 +71,11 @@ pub fn spawn_cursor_worker(cursor_size: i32, size_cap: i32) -> std::sync::mpsc::
             let mut helper = Cursor::load(cursor_size);
             let mut cap = size_cap;
             let mut cache: HashMap<(u64, i32), CappedSprite> = HashMap::new();
-            let mut callback: Option<Py<PyAny>> = None;
+            let mut callback: Option<Arc<dyn CursorSink>> = None;
             while let Ok(job) = rx.recv() {
-                let (msg_type, data, hot_x, hot_y): (&str, Vec<u8>, i32, i32) = match job {
+                let (msg_type, data, hot_x, hot_y): (&'static str, Vec<u8>, i32, i32) = match job {
                     CursorJob::SetCallback(cb) => {
-                        // Attached for the swap: dropping the old callback without the
-                        // GIL defers its decref to this thread's next attach, which a
-                        // withdrawal means may never come.
-                        Python::attach(|_| callback = cb);
+                        callback = cb;
                         continue;
                     }
                     CursorJob::SetSize(size) => {
@@ -133,10 +130,12 @@ pub fn spawn_cursor_worker(cursor_size: i32, size_cap: i32) -> std::sync::mpsc::
                 if crate::PY_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                     continue;
                 }
-                if let Some(ref cb) = callback {
-                    Python::attach(|py| {
-                        let py_bytes = PyBytes::new(py, &data);
-                        let _ = cb.call1(py, (msg_type, py_bytes, hot_x, hot_y));
+                if let Some(cb) = &callback {
+                    cb.cursor(CursorImage {
+                        kind: msg_type,
+                        png: data,
+                        hot_x,
+                        hot_y,
                     });
                 }
             }
