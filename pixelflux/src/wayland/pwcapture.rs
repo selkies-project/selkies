@@ -160,6 +160,55 @@ pub struct StreamConfig {
     pub fps_milli: u32,
     /// The size the consumer expects (the preferred value of the size range).
     pub expect: (i32, i32),
+    /// The output's place in the compositor's logical layout as `(x, y, width, height)`,
+    /// placing its cursor metas in the union layout (`HOST_POINTER`); zero width = unknown.
+    pub layout: (i32, i32, i32, i32),
+}
+
+/// Host capture's pointer, from the newest cursor meta of any output, for
+/// `WaylandBackend.pointer_location`: the compositor's own `PointerShare` stays empty under
+/// host capture, the host compositor owning the pointer. Process-wide like the backend slot.
+pub static HOST_POINTER: Mutex<Option<crate::wayland::frontend::PointerAt>> = Mutex::new(None);
+/// The newest motion number handed to the host session; a cursor meta is taken to include
+/// every move sent before it arrived.
+pub static HOST_MOTION: AtomicU64 = AtomicU64::new(0);
+
+/// A cursor meta's stream-pixel position `(x, y)` as the pointer in physical union-layout
+/// pixels: the output's logical origin scaled by its physical-per-logical ratio (the
+/// negotiated `width` over the layout's), plus the position within the stream.
+fn host_pointer_at(
+    layout: (i32, i32, i32, i32),
+    width: i32,
+    x: i32,
+    y: i32,
+    motion: u64,
+) -> crate::wayland::frontend::PointerAt {
+    let (lx, ly, lw, _) = layout;
+    let scale = if lw > 0 && width > 0 {
+        f64::from(width) / f64::from(lw)
+    } else {
+        1.0
+    };
+    crate::wayland::frontend::PointerAt {
+        x: f64::from(lx) * scale + f64::from(x),
+        y: f64::from(ly) * scale + f64::from(y),
+        scale,
+        motion,
+    }
+}
+
+/// The pointer `WaylandBackend.pointer_location` reports: host capture's when it has one,
+/// since the compositor's own share may hold a pass from before the host session attached.
+pub fn prefer_host_pointer<T>(host: Option<T>, share: impl FnOnce() -> Option<T>) -> Option<T> {
+    host.or_else(share)
+}
+
+/// Publish a cursor meta's stream-pixel position to `HOST_POINTER`.
+fn publish_host_pointer(shared: &Shared, x: i32, y: i32) {
+    let layout = shared.cfg.lock().unwrap().layout;
+    let width = shared.negotiated.lock().unwrap().map_or(0, |n| n.width);
+    let at = host_pointer_at(layout, width, x, y, HOST_MOTION.load(Ordering::Relaxed));
+    *HOST_POINTER.lock().unwrap() = Some(at);
 }
 
 /// The fixated format of a stream.
@@ -456,6 +505,7 @@ unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta) {
         ((cursor.x as i64) << 32) | (cursor.y as u32 as i64),
         Ordering::Relaxed,
     );
+    publish_host_pointer(shared, cursor.x, cursor.y);
     if cursor.bitmap_offset < std::mem::size_of::<SpaMetaCursor>() as u32
         || cursor.bitmap_offset + std::mem::size_of::<SpaMetaBitmap>() as u32 > meta.size
     {
@@ -1029,6 +1079,32 @@ mod tests {
     const PERIOD: i64 = 16_683_333;
     const NOW: i64 = 5_000_000_000_000;
 
+    /// A cursor meta lands in the union layout scaled by the output's physical-per-logical
+    /// ratio, and without a known layout or size it is taken at scale one from the origin.
+    #[test]
+    fn a_cursor_meta_is_placed_in_the_union_layout() {
+        let at = host_pointer_at((960, 0, 1920, 1080), 3840, 100, 50, 7);
+        assert_eq!(
+            (at.x, at.y, at.scale, at.motion),
+            (1920.0 + 100.0, 50.0, 2.0, 7)
+        );
+        let at = host_pointer_at((0, 0, 0, 0), 1920, 10, 20, 0);
+        assert_eq!((at.x, at.y, at.scale), (10.0, 20.0, 1.0));
+        let at = host_pointer_at((100, 200, 1920, 1080), 0, 10, 20, 0);
+        assert_eq!((at.x, at.y, at.scale), (110.0, 220.0, 1.0));
+    }
+
+    /// The host pointer wins over the compositor's share, which is read only without one.
+    #[test]
+    fn the_host_pointer_is_preferred_over_the_share() {
+        assert_eq!(
+            prefer_host_pointer(Some(1), || panic!("share read")),
+            Some(1)
+        );
+        assert_eq!(prefer_host_pointer(None, || Some(2)), Some(2));
+        assert_eq!(prefer_host_pointer::<u8>(None, || None), None);
+    }
+
     /// A stamp a little before its frame's arrival, later than the last, is the capture
     /// instant; each refusal falls back to the arrival, which still advances past the last.
     #[test]
@@ -1106,6 +1182,7 @@ mod tests {
             ],
             fps_milli: 59_940,
             expect: (1920, 1080),
+            layout: (0, 0, 1920, 1080),
         }
     }
 

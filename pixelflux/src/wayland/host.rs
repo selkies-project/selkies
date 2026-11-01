@@ -2457,6 +2457,9 @@ fn portal_capture_loop(
             dma_formats: dma_formats.clone(),
             fps_milli: w.fps_milli,
             expect: w.size,
+            layout: geoms.get(index).map_or((0, 0, 0, 0), |g| {
+                (g.pos.0, g.pos.1, g.logical.0, g.logical.1)
+            }),
         };
         match &stream {
             Some((s, _)) => {
