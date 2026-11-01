@@ -551,6 +551,42 @@ function stage(ids, locked = null) {
           `gaming=${input.gamingMode} events=${events.join(',')}`);
 }
 
+// --- the mode's lock goes with the mode -------------------------------------
+// The lock is taken on the gesture, before fullscreen, so leaving the mode
+// without a fullscreen to exit (a refused request, or one the page never got)
+// must release it: held, it keeps every click from the page's own controls.
+// A lock the engine grants only after the mode was left goes the same way.
+for (const how of ['refused', 'toggled', 'late']) {
+    const element = makeElement('ok');
+    reset(element);
+    let grant = null;
+    const ask = element.requestPointerLock.bind(element);
+    element.requestPointerLock = (options) => {
+        const answer = ask(options);
+        const take = () => { document.pointerLockElement = element; };
+        if (how === 'late') return new Promise((resolve) => { grant = () => { take(); resolve(); }; });
+        return answer.then(take);
+    };
+    const exits = [];
+    document.exitPointerLock = () => { exits.push('exit'); document.pointerLockElement = null; };
+    document.fullscreenElement = null;
+    document.documentElement = { requestFullscreen: () => (how === 'refused'
+        ? Promise.reject(new Error('denied')) : new Promise(() => {})) };
+    const input = makeInput(element, false);
+    input.ongamingmode = () => {};
+    input.send = () => {};
+    input.enterGamingMode();
+    await sleep(20);
+    if (how !== 'refused') input.toggleGamingMode();
+    if (how === 'late') grant();
+    await sleep(how === 'late' ? 20 : 400);
+    check({ refused: 'a refused fullscreen releases the pointer the mode locked',
+            toggled: 'the mode left with no fullscreen to exit releases the pointer',
+            late: 'a lock granted after the mode was left is released' }[how],
+          input.gamingMode === false && document.pointerLockElement === null && exits.length === 1,
+          `gaming=${input.gamingMode} locked=${document.pointerLockElement !== null} exits=${exits.length}`);
+}
+
 // --- the lock on the gesture, before fullscreen -----------------------------
 // A fullscreen request spends the gesture's transient activation, and Chromium
 // refuses a pointer lock asked for without one, in fullscreen as well (Edge on

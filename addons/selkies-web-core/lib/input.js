@@ -5649,7 +5649,11 @@ export class Input {
                 go();
                 return;
             }
-            request.then(go, (err) => {
+            // A lock granted after the mode was left again is not the mode's to keep.
+            request.then(() => {
+                if (!this.gamingMode) this._exitPointerLock();
+                go();
+            }, (err) => {
                 if (raw && err && err.name === 'NotSupportedError') {
                     Input._rawMotionRefused = true;
                     ask(false);
@@ -5697,12 +5701,18 @@ export class Input {
         };
     }
 
-    /** Publishes the mode to `ongamingmode`, releasing the keyboard as it ends. */
+    /**
+     * Publishes the mode to `ongamingmode`, releasing the keyboard and the
+     * pointer as it ends: the lock is taken on the entering gesture, before
+     * fullscreen, so a mode left without a fullscreen to exit (a refused
+     * request, or one the page never got) holds it too.
+     */
     _setGamingMode(active) {
         if (this.gamingMode === active) return;
         this.gamingMode = active;
         if (!active) {
             this.releaseKeyboardLock();
+            this._exitPointerLock();
         }
         if (this.ongamingmode) {
             this.ongamingmode(active);
