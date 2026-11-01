@@ -91,6 +91,23 @@ export default function ToolbarLayout() {
   const [collapsed, setCollapsed] = React.useState(false);
   // The soft keys' panel, shut until its button opens it.
   const [softKeysOpen, setSoftKeysOpen] = React.useState(false);
+  // How far the open panel reaches up from the bottom, published as --soft-keys-top for the
+  // poor-connection mark (notices.tsx) to sit above it; removed as the panel goes.
+  const softKeysObserver = React.useRef<ResizeObserver | null>(null);
+  const softKeysRef = React.useCallback((panel: HTMLDivElement | null) => {
+    const root = document.documentElement;
+    softKeysObserver.current?.disconnect();
+    softKeysObserver.current = null;
+    if (!panel) {
+      root.style.removeProperty('--soft-keys-top');
+      return;
+    }
+    const publish = () => root.style.setProperty(
+      '--soft-keys-top', `${parseFloat(getComputedStyle(panel).bottom) + panel.offsetHeight}px`);
+    softKeysObserver.current = new ResizeObserver(publish);
+    softKeysObserver.current.observe(panel);
+    publish();
+  }, []);
   // The bar's place as a fraction of the room the window leaves it, centered
   // at the top until dragged: a resize, or a group joining the bar, keeps it
   // in proportion rather than letting it run off the edge.
@@ -265,7 +282,7 @@ export default function ToolbarLayout() {
       {softKeys && softKeysOpen && !collapsed && (
         // A flex column, so the palette inside shrinks and scrolls rather than pushing the keys off the screen;
         // its height leaves the bar above it in view.
-        <div className="fixed bottom-4 left-4 z-[2040] flex flex-col rounded-lg border bg-card p-2 shadow-lg animate-in fade-in slide-in-from-bottom-2" style={{ maxWidth: "calc(100vw - 2rem)", maxHeight: "calc(100dvh - 5rem)" }}>
+        <div ref={softKeysRef} className="fixed bottom-4 left-4 z-[2040] flex flex-col rounded-lg border bg-card p-2 shadow-lg animate-in fade-in slide-in-from-bottom-2" style={{ maxWidth: "calc(100vw - 2rem)", maxHeight: "calc(100dvh - 5rem)" }}>
           <SoftKeys showTrackpad={false} />
         </div>
       )}
