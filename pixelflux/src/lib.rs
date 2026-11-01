@@ -7178,15 +7178,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 .output_nodes
                 .iter()
                 .filter_map(|n| n.capture.as_ref())
-                .map(|cap| {
-                    let period = capture_period(cap);
-                    let due = cap.pace.next_due(period, now);
-                    if cap.change_pending {
-                        due.min(cap.pace.pull_at(TickTrigger::Damage, period, now))
-                    } else {
-                        due
-                    }
-                })
+                .map(|cap| cap.pace.next_wake(capture_period(cap), now, cap.change_pending))
                 .min()
                 .unwrap_or(loop_start_time + frame_period(state.settings.target_fps));
             let wait = next_due.saturating_duration_since(now);

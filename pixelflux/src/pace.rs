@@ -389,6 +389,21 @@ impl FramePace {
         });
         self.deferred_until.map_or(due, |held| held.max(due))
     }
+
+    /// When a frame timer armed at `now` next has to fire for this capture. It wakes for a window
+    /// still to open whether or not a change waits on it yet: a change landing later has nothing
+    /// else to wake it, since a client that draws on frame callbacks goes quiet after its commit.
+    /// A window already open takes a change as it lands, so only a change that could not be
+    /// rendered keeps the timer close.
+    pub fn next_wake(&self, period: Duration, now: Instant, change_pending: bool) -> Instant {
+        let due = self.next_due(period, now);
+        let pull = self.pull_at(TickTrigger::Damage, period, now);
+        if change_pending || pull > now {
+            due.min(pull)
+        } else {
+            due
+        }
+    }
 }
 
 #[cfg(test)]
@@ -557,6 +572,79 @@ mod pacing_tests {
         assert!(!pace.due(TickTrigger::Timer, PERIOD, at(base, 40)));
         pace.ticked(TickTrigger::HostFrame, PERIOD, at(base, 45), false);
         assert_eq!(pace.next_due(PERIOD, at(base, 46)), at(base, 80));
+    }
+
+    /// The compositor's loop: the timer is armed only when it fires, a little late as a real
+    /// timer does, a client commits `draws` after each frame's callback and then waits for the
+    /// next, and a commit in an open window is served as it lands. The frames a run renders in
+    /// two seconds at 50 fps.
+    fn frames_of_a_callback_client(draws: Duration) -> u32 {
+        let base = Instant::now();
+        let end = base + Duration::from_secs(2);
+        let mut pace = FramePace::windowed();
+        pace.ticked(TickTrigger::Timer, PERIOD, base, false);
+        let mut frames = 1;
+        let late = Duration::from_micros(100);
+        let mut fires = pace.next_wake(PERIOD, base, false) + late;
+        let mut commit = Some(base + draws);
+        let mut pending = false;
+        loop {
+            let now = commit.map_or(fires, |c| c.min(fires));
+            if now >= end {
+                return frames;
+            }
+            let fired = now == fires;
+            if commit == Some(now) {
+                commit = None;
+                pending = true;
+            }
+            let trigger = if pending && pace.due(TickTrigger::Damage, PERIOD, now) {
+                Some(TickTrigger::Damage)
+            } else if fired && pace.due(TickTrigger::Timer, PERIOD, now) {
+                Some(TickTrigger::Timer)
+            } else {
+                None
+            };
+            if let Some(trigger) = trigger {
+                pace.ticked(trigger, PERIOD, now, false);
+                frames += 1;
+                pending = false;
+                commit = Some(now + draws);
+            }
+            if fired {
+                fires = pace.next_wake(PERIOD, now, pending).max(now) + late;
+            }
+        }
+    }
+
+    /// A client that waits for its callback goes quiet after its commit, so only the timer can
+    /// take a commit that landed in a window a frame already took: it wakes as each window opens,
+    /// and the client keeps the cadence however early in the period it commits.
+    #[test]
+    fn a_client_drawing_on_frame_callbacks_keeps_the_cadence() {
+        for draws_us in [100, 2_000, 10_000, 19_000] {
+            let frames = frames_of_a_callback_client(Duration::from_micros(draws_us));
+            assert!(
+                (99..=101).contains(&frames),
+                "{frames} frames in two seconds at 50 fps, drawing {draws_us} us"
+            );
+        }
+    }
+
+    /// With nothing waiting the timer sleeps past a window already open to its end, so a still
+    /// screen does not spin it, and a change a frame could not take keeps it close.
+    #[test]
+    fn the_timer_wakes_for_an_opening_window_and_not_an_open_one() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.ticked(TickTrigger::Timer, PERIOD, base, false);
+        assert_eq!(pace.next_wake(PERIOD, at(base, 1), false), at(base, 20));
+        assert_eq!(pace.next_wake(PERIOD, at(base, 1), true), base);
+        pace.ticked(TickTrigger::Damage, PERIOD, at(base, 3), false);
+        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 20));
+        pace.defer(at(base, 70));
+        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 20));
+        assert_eq!(pace.next_wake(PERIOD, at(base, 21), false), at(base, 70));
     }
 
     /// The earliest pull and the pull gate agree, so a caller may wait for the one and skip
