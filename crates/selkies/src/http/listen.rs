@@ -82,6 +82,9 @@ pub struct ConnInfo {
     pub remote: Option<SocketAddr>,
     /// Whether the connection is TLS.
     pub secure: bool,
+    /// The accepted socket, valid while this connection's handlers run, for what reads its
+    /// kernel state (`TCP_INFO`, the unacknowledged bytes); none where nothing accepted one.
+    pub fd: Option<std::os::fd::RawFd>,
 }
 
 /// Why the listener could not come up.
@@ -585,6 +588,7 @@ async fn accept_tcp(
             local,
             remote: Some(remote),
             secure: tls.is_some(),
+            fd: Some(std::os::fd::AsRawFd::as_raw_fd(&stream)),
         };
         tokio::spawn(serve_connection(
             stream,
@@ -617,6 +621,7 @@ async fn accept_unix(
             local: None,
             remote: None,
             secure: tls.is_some(),
+            fd: None,
         };
         tokio::spawn(serve_connection(
             stream,
@@ -716,6 +721,7 @@ mod tests {
             local: Some(SocketAddr::new(ip.parse().unwrap(), port)),
             remote: None,
             secure: false,
+        fd: None,
         }
     }
 
@@ -798,6 +804,7 @@ mod tests {
                     local: Some("127.0.0.1:8080".parse().unwrap()),
                     remote: None,
                     secure: false,
+                    fd: None,
                 },
                 &[("host", "localhost:8080")],
                 "/",
@@ -818,6 +825,7 @@ mod tests {
                     local: None,
                     remote: None,
                     secure: false,
+                    fd: None,
                 },
                 &[("host", "localhost:8080")],
                 "/",
