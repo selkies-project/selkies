@@ -504,7 +504,7 @@ impl Demands {
     }
 
     /// The watches `on_demand` turns on, created where missing.
-    fn active(&self, on_demand: &dyn Fn(&str) -> bool) -> Vec<Arc<CaptureDemand>> {
+    fn active(&self, on_demand: &(dyn Fn(&str) -> bool + Sync)) -> Vec<Arc<CaptureDemand>> {
         let mut watches = self.watches.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = Vec::new();
         for subject in ["webcam", "microphone"] {
@@ -523,7 +523,7 @@ impl Demands {
     /// Attaches `port` to every watch `on_demand` turns on and re-routes the answer.
     pub async fn sync_with(
         &self,
-        on_demand: &dyn Fn(&str) -> bool,
+        on_demand: &(dyn Fn(&str) -> bool + Sync),
         port: Arc<dyn DemandTransport>,
     ) {
         for watch in self.active(on_demand) {

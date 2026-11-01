@@ -109,7 +109,11 @@ impl PeerInfo {
             });
         PeerInfo {
             remote,
-            fd: parts.extensions.get::<PeerSocket>().map(|p| p.0),
+            fd: parts
+                .extensions
+                .get::<PeerSocket>()
+                .map(|p| p.0)
+                .or_else(|| parts.extensions.get::<ConnInfo>().and_then(|c| c.fd)),
         }
     }
 }

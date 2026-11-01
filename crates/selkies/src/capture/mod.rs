@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use log::{debug, info};
+use log::debug;
 use pixelflux::sink::{Frame, FrameSink};
 use pixelflux::{CaptureSettings, Error, LiveTunables, ScreenCapture, StreamInfo, StreamStats};
 use tokio::sync::broadcast;
@@ -104,9 +104,11 @@ impl DisplayCapture {
     /// Start (or reconfigure in place, where pixelflux can) with `settings`; frames flow to
     /// every subscriber from here on.
     pub fn start(&self, settings: CaptureSettings) -> Result<(), Error> {
-        info!(target: "display", "Capture started for {}: {}x{} {} at {} fps",
+        debug!(target: "display", "Starting capture of {}: {}x{} {} at {} fps",
             self.display_id, settings.width, settings.height, settings.codec.name(), settings.target_fps);
-        let sink: Arc<dyn FrameSink> = Arc::new(Fanout { tx: self.tx.clone() });
+        let sink: Arc<dyn FrameSink> = Arc::new(Fanout {
+            tx: self.tx.clone(),
+        });
         self.capture.start_capture(sink, settings)
     }
 
@@ -174,7 +176,13 @@ impl DisplayCapture {
         LiveTunables::from_settings(settings)
     }
 
-    pub fn update_capture_region(&self, x: i32, y: i32, width: i32, height: i32) -> Result<(), Error> {
+    pub fn update_capture_region(
+        &self,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<(), Error> {
         self.capture.update_capture_region(x, y, width, height)
     }
 
@@ -227,6 +235,9 @@ mod tests {
                 reference: Reference::None,
             }]);
         }
-        assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Lagged(_))));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ));
     }
 }
