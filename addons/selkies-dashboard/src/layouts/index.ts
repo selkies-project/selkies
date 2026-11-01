@@ -6,10 +6,17 @@
 
 /**
  * The layouts: how the one set of panels is arranged over the stream. A
- * layout is a component that reads `useDashboard` and `useSettings` and
- * decides where each panel is painted, and the stats it lays over the stream;
- * the panels themselves know nothing of it. Adding a layout is one entry
- * here, the server's `ui_layout` enum, and its name in the dictionary
+ * layout is a component that decides where each panel is painted and the
+ * stats it lays over the stream; the panels themselves know nothing of it.
+ * What a layout places is decided for all of them: the panels and their
+ * order by `panels/catalog.ts` (`PANELS`, each with its gate and body), the
+ * other controls by `useActions` and the events its chrome answers by
+ * `useChromeEvents` (`./actions`). Its look is its own stylesheet plus the
+ * size tokens `index.css` names on `:root` (`--control-h`, `--stack-gap` and
+ * the rest), which it may set again on its root.
+ *
+ * Adding a layout is a component over those, one entry here, its value in the
+ * server's `ui_layout` enum (`settings.py`), and its name in the dictionary
  * (`layout.<id>`).
  *
  * Which layout a page shows: the pick stored under the prefixed `ui_layout`

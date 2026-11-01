@@ -7,8 +7,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Button } from "@/components/ui/button";
-import { SwitchRow, Clip } from "@/panels/controls";
+import { ActionButton, SwitchRow, Clip } from "@/panels/controls";
 import { computeRenderableSettings, getLastClipboardContent, getLastServerSettings, getPrefixedKey, onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
 
@@ -250,9 +249,9 @@ export function Clipboard() {
 			{clipboardSecret && (
 				<div className="flex flex-col gap-1.5">
 					<p className="text-xs text-muted-foreground">{t('sections.clipboard.secretHidden')}</p>
-					<Button variant="outline" size="sm" className="h-7 min-w-0" title={t('sections.clipboard.copySecret')} onClick={handleCopySecret}>
+					<ActionButton title={t('sections.clipboard.copySecret')} onClick={handleCopySecret}>
 						<Clip>{t('sections.clipboard.copySecret')}</Clip>
-					</Button>
+					</ActionButton>
 				</div>
 			)}
 
@@ -261,25 +260,13 @@ export function Clipboard() {
 			<div className="flex flex-col gap-2">
 				{/* Clear goes on a line of its own under Upload when an image is held, rather than halving it. */}
 				<div className="flex flex-col gap-2">
-					<Button
-						variant="outline"
-						size="sm"
-						onClick={handleImageButtonClick}
-						className="min-w-0 w-full"
-						title={t('clipboard.uploadImage')}
-					>
+					<ActionButton onClick={handleImageButtonClick} className="w-full" title={t('clipboard.uploadImage')}>
 						<Clip>{t('clipboard.uploadImage')}</Clip>
-					</Button>
+					</ActionButton>
 					{clipboardImage && (
-						<Button
-							variant="outline"
-							size="sm"
-							onClick={handleClearImage}
-							className="min-w-0 w-full"
-							title={t('clipboard.clearImage')}
-						>
+						<ActionButton onClick={handleClearImage} className="w-full" title={t('clipboard.clearImage')}>
 							<Clip>{t('clipboard.clearImage')}</Clip>
-						</Button>
+						</ActionButton>
 					)}
 				</div>
 

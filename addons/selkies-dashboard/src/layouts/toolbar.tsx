@@ -21,14 +21,15 @@
  * @module
  */
 import * as React from "react";
-import { ChevronDown, ChevronUp, Command, Crosshair, Gamepad2, Gauge, Hand, Keyboard, Maximize, ScreenShare, Settings2, Touchpad, ToolCase, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Command, Hand, ScreenShare, Settings2, ToolCase, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { cn } from "cn";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { Menu, MenuCheckboxItem, MenuItem, MenuPopup, MenuSeparator, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger } from "@/components/ui/menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SelkiesLogo } from "@/components/logo";
 import { LayoutToggle, ThemeToggle } from "@/panels/appearance";
-import { PANELS, STREAMS, usePanelContext } from "@/panels/catalog";
+import { PANELS, usePanelContext } from "@/panels/catalog";
 import { Clip } from "@/panels/controls";
 import { FloatingPanel } from "@/panels/floating-panel";
 import { place, useAnchorDrag, useElementSize, useViewport } from "@/panels/anchor";
@@ -36,23 +37,32 @@ import { SettingsCard } from "@/panels/settings-card";
 import { SoftKeys } from "@/panels/soft-keys";
 import { CiteLink } from "@/panels/shortcuts";
 import { PROJECT_URL, useDashboard } from "@/state/dashboard";
-import { onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
+import { useActions, useChromeEvents, type Action } from "./actions";
 
-/** Height of the toolbar in pixels, which sliding it up by hides it exactly. */
-const TOOLBAR_HEIGHT = 42;
+/** The toolbar's height in pixels before it is measured; sliding it up by its measured height hides it exactly. */
+const TOOLBAR_HEIGHT = 50;
 
-/** A toolbar button with its tooltip. */
-function Tool({ label, active, onClick, className, children }: { label: string; active?: boolean; onClick: () => void; className?: string; children: React.ReactNode }) {
+/** A toolbar button with its tooltip, which says `tip` where that says more than the name. */
+function Tool({ label, tip, active, onClick, className, children }: { label: string; tip?: string; active?: boolean; onClick: () => void; className?: string; children: React.ReactNode }) {
   return (
     <Tooltip>
       <TooltipTrigger render={
-        <Button variant={active ? "default" : "secondary"} size="icon-xs" className={className} aria-label={label} aria-pressed={active} onClick={onClick} />
+        <Button variant={active ? "default" : "secondary"} size="icon-sm" className={cn("size-(--bar-button)", className)} aria-label={label} aria-pressed={active} onClick={onClick} />
       }>
         {children}
       </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
+      <TooltipContent>{tip ?? label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+/** One of the shared controls (`actions.ts`) as a toolbar button. */
+function ActionTool({ action }: { action: Action }) {
+  return (
+    <Tool label={action.label} tip={action.title} active={action.active} className={action.className} onClick={action.run}>
+      <action.icon className="size-4" />
+    </Tool>
   );
 }
 
@@ -91,37 +101,19 @@ export default function ToolbarLayout() {
   const position = place(anchor, viewport, barSize);
   const drag = useAnchorDrag(setAnchor, viewport, barSize);
   const panelRef = React.useRef<HTMLDivElement>(null);
-  const { reportChromeOpen } = d;
 
   const fold = React.useCallback(() => {
     setSettingsOpen(false);
     setMenuOpen(false);
   }, []);
 
-  React.useEffect(() => {
-    const offMessages = onCoreMessage((message) => {
-      // Ctrl+Shift+M, owned by the core: the bar slides up or back down.
-      if (message.type === "toggleDashboard") {
-        fold();
-        setCollapsed((value) => !value);
-      }
-      // Gaming mode holds the pointer and keyboard: the bar slides up and leaves its tab.
-      if (message.type === "gamingModeUpdate" && message.active) {
-        fold();
-        setCollapsed(true);
-      }
-    });
-    const onFullscreen = () => { if (document.fullscreenElement) setSettingsOpen(false); };
-    document.addEventListener("fullscreenchange", onFullscreen);
-    return () => {
-      offMessages();
-      document.removeEventListener("fullscreenchange", onFullscreen);
-    };
-  }, [fold]);
-
-  React.useEffect(() => {
-    reportChromeOpen(settingsOpen || floatingOpen || d.statsOpen);
-  }, [settingsOpen, floatingOpen, d.statsOpen, reportChromeOpen]);
+  // The bar slides up on Ctrl+Shift+M and in gaming mode, leaving its tab; fullscreen closes the settings.
+  useChromeEvents({
+    open: settingsOpen || floatingOpen || d.statsOpen,
+    onToggle: () => { fold(); setCollapsed((value) => !value); },
+    onGamingMode: () => { fold(); setCollapsed(true); },
+    onFullscreen: () => setSettingsOpen(false),
+  });
 
   // An outside click closes the settings; a Base UI popup is a body child,
   // so a click in one still belongs to the panel's controls.
@@ -151,20 +143,22 @@ export default function ToolbarLayout() {
 
   const r = d.renderable;
   const primary = !d.isSecondaryDisplay;
-  const streams = primary && r.coreButtons ? STREAMS.filter((stream) => !stream.input && stream.allowed(r)) : [];
+  const actions = useActions();
+  // The gamepad's input switch is the floating gamepads panel's here.
+  const streams = actions.streams.filter((stream) => !stream.input);
+  const touch = [actions.touchGamepad, actions.trackpad, actions.keyboardButton].filter((action): action is Action => action !== null);
   const menuPanels = PANELS.filter((panel) => panel.kind === "panel" && !panel.floats && panel.shown(ctx, "menu"));
   const floats = PANELS.filter((panel) => panel.floats && panel.shown(ctx, "float"));
   const menuAvailable = streams.length > 0 || menuPanels.length > 0 || (primary && r.secondScreen);
-  // The keys, or where only the trackpad is allowed, its speed while it is on.
-  const softKeys = d.isTouch && (r.softButtons || (r.trackpad && d.trackpad));
+  const softKeys = actions.softKeys;
 
   return (
     <>
       <div ref={barRef} className="toolbar fixed left-0 z-[2000] w-fit max-w-[100vw] rounded-lg border bg-background shadow-lg"
-        style={{ transform: `translate(${position.x}px, ${position.y}px)`, top: collapsed ? -(TOOLBAR_HEIGHT + position.y) : 0, transition: "top 300ms" }}>
-        {/* Tighter on a phone, where the touch buttons join the bar: 320 pixels hold it, the logo left
-            to the menu's footer there. */}
-        <div className="flex items-center gap-1 px-1 py-2 sm:gap-1.5 sm:px-2">
+        style={{ transform: `translate(${position.x}px, ${position.y}px)`, top: collapsed ? -(barSize.height + position.y) : 0, transition: "top 300ms" }}>
+        {/* Tighter on a phone, where the touch buttons join the bar: 320 pixels hold it, with smaller buttons
+            and the logo left to the menu's footer there. */}
+        <div className="flex items-center gap-1 px-1 py-2 max-sm:[--bar-button:1.5rem] sm:gap-1.5 sm:px-2">
           {d.uiShowLogo && (
             <a href={PROJECT_URL} target="_blank" rel="noopener noreferrer" aria-label={d.uiTitle} title={d.uiTitle} className="flex items-center pr-1 transition-colors hover:text-primary max-sm:hidden">
               <SelkiesLogo width={20} height={20} />
@@ -174,7 +168,7 @@ export default function ToolbarLayout() {
           {menuAvailable && (
             <Menu open={menuOpen} onOpenChange={(open) => { setMenuOpen(open); if (open) setSettingsOpen(false); }}>
               <Tooltip>
-                <TooltipTrigger render={<MenuTrigger render={<Button variant="secondary" size="icon-xs" aria-label={t('topMenu.menu')}><ToolCase className="size-4" /></Button>} />} />
+                <TooltipTrigger render={<MenuTrigger render={<Button variant="secondary" size="icon-sm" className="size-(--bar-button)" aria-label={t('topMenu.menu')}><ToolCase className="size-4" /></Button>} />} />
                 <TooltipContent>{t('topMenu.menu')}</TooltipContent>
               </Tooltip>
               <MenuPopup align="start" sideOffset={15}>
@@ -211,7 +205,7 @@ export default function ToolbarLayout() {
                   </a>
                   <span className="ms-auto flex items-center gap-1"><LayoutToggle /><ThemeToggle /></span>
                 </div>
-                {r.shortcuts && <div className="px-2 pb-1.5"><CiteLink /></div>}
+                {actions.cite && <div className="px-2 pb-1.5"><CiteLink /></div>}
               </MenuPopup>
             </Menu>
           )}
@@ -221,24 +215,20 @@ export default function ToolbarLayout() {
             {floats.map(({ id, title, icon: Icon }) => (
               <Tool key={id} label={t(title)} active={!!floating[id]} onClick={() => toggleFloating(id)}>{Icon && <Icon className="size-4" />}</Tool>
             ))}
-            {primary && r.stats && <Tool label={t('topMenu.systemMonitoring')} active={d.statsOpen} onClick={() => d.setStatsOpen(!d.statsOpen)}><Gauge className="size-4" /></Tool>}
-            {r.fullscreen && <Tool label={t('topMenu.toggleFullscreen')} className="fullscreen-button" onClick={d.toggleFullscreen}><Maximize className="size-4" /></Tool>}
+            {actions.stats && <ActionTool action={actions.stats} />}
+            {actions.fullscreen && <ActionTool action={actions.fullscreen} />}
           </ButtonGroup>
 
-          {r.gamingMode && (
-            <Tool label={`${t('gamingModeTitle')} — ${t('gamingModeHint')}`} className="gaming-mode-button" onClick={d.toggleGamingMode}><Crosshair className="size-4" /></Tool>
-          )}
+          {actions.gamingMode && <ActionTool action={actions.gamingMode} />}
 
-          {d.isTouch && (
+          {(touch.length > 0 || softKeys) && (
             <ButtonGroup>
-              {primary && <Tool label={t('topMenu.touchGamepad')} active={d.touchGamepad} onClick={d.toggleTouchGamepad}><Gamepad2 className="size-4" /></Tool>}
-              {r.trackpad && <Tool label={t('trackpadModeTitle')} active={d.trackpad} className="trackpad-mode-button" onClick={d.toggleTrackpad}><Touchpad className="size-4" /></Tool>}
-              {r.keyboardButton && <Tool label={t('keyboardButtonToggleTitle')} active={d.keyboardButton} className="keyboard-toggle-button" onClick={d.toggleKeyboardButton}><Keyboard className="size-4" /></Tool>}
+              {touch.map((action) => <ActionTool key={action.className} action={action} />)}
               {softKeys && <Tool label={t('keyPalette.title')} active={softKeysOpen} className="soft-keys-button" onClick={() => setSoftKeysOpen((open) => !open)}><Command className="size-4" /></Tool>}
             </ButtonGroup>
           )}
 
-          <Button variant="secondary" size="icon-xs" className="cursor-grab touch-none select-none active:cursor-grabbing" aria-label={t('topMenu.dragHandle')} title={t('topMenu.dragHandle')}
+          <Button variant="secondary" size="icon-sm" className="size-(--bar-button) cursor-grab touch-none select-none active:cursor-grabbing" aria-label={t('topMenu.dragHandle')} title={t('topMenu.dragHandle')}
             onPointerDown={(event) => drag.begin(event, position)}>
             <Hand className="size-4" />
           </Button>
@@ -255,7 +245,7 @@ export default function ToolbarLayout() {
       </div>
 
       {settingsOpen && (
-        <div ref={panelRef} className="fixed z-[2020] w-fit animate-in fade-in slide-in-from-top-2" style={{ left: position.x, top: position.y + 48 }}>
+        <div ref={panelRef} className="fixed z-[2020] w-fit animate-in fade-in slide-in-from-top-2" style={{ left: position.x, top: position.y + barSize.height + 6 }}>
           <SettingsCard />
         </div>
       )}

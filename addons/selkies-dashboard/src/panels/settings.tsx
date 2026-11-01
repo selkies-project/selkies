@@ -17,10 +17,9 @@
  * @module
  */
 import * as React from "react";
-import { Button } from "@/components/ui/button";
 import { hint } from "@/utils";
 import { Input } from "@/components/ui/input";
-import { Field, NativeSelect, RangeSlider, SwitchRow, Clip } from "@/panels/controls";
+import { ActionButton, Field, NativeSelect, RangeSlider, SwitchRow, Clip } from "@/panels/controls";
 import { useDashboard } from "@/state/dashboard";
 import { RESOLUTION_PRESETS, STREAMING_MODES, WEBCAM_ENCODER_OPTIONS, canPlayEncoder, displayLabel, framerateLabel } from "@/state/settings";
 import { useSettings } from "@/state/settings-context";
@@ -198,9 +197,9 @@ export function DisplaySettings() {
   return (
     <>
       {!isSecondaryDisplay && renderable.secondScreen && (
-        <Button variant="outline" size="xs" className="w-full min-w-0" onClick={addScreen} title={hint(t('sections.screen.addScreenButton'), t('sections.screen.addScreenTitle'))}>
+        <ActionButton className="w-full" onClick={addScreen} title={hint(t('sections.screen.addScreenButton'), t('sections.screen.addScreenTitle'))}>
           <Clip>{t('sections.screen.addScreenButton')}</Clip>
-        </Button>
+        </ActionButton>
       )}
       <SwitchRow id="antiAliasingToggle" label={t('sections.screen.antiAliasingLabel')} checked={s.antiAliasing} onToggle={s.toggleAntiAliasing} />
       {s.show.useBrowserCursors && (
@@ -248,27 +247,27 @@ export function ResolutionSettings() {
           </Field>
           <div className="resolution-size flex gap-2">
             <Field htmlFor="manualWidthInput" label={tl('sections.screen.widthLabel')} className="min-w-0 flex-1">
-              <Input id="manualWidthInput" type="number" min="1" step="2" className="allow-native-input h-7 text-xs" value={s.manualWidth}
+              <Input id="manualWidthInput" type="number" min="1" step="2" className="allow-native-input h-(--control-h) text-(length:--control-font)" value={s.manualWidth}
                 onChange={(event) => s.setManualWidth(event.target.value)} placeholder={t('sections.screen.widthPlaceholder')} />
             </Field>
             <Field htmlFor="manualHeightInput" label={tl('sections.screen.heightLabel')} className="min-w-0 flex-1">
-              <Input id="manualHeightInput" type="number" min="1" step="2" className="allow-native-input h-7 text-xs" value={s.manualHeight}
+              <Input id="manualHeightInput" type="number" min="1" step="2" className="allow-native-input h-(--control-h) text-(length:--control-font)" value={s.manualHeight}
                 onChange={(event) => s.setManualHeight(event.target.value)} placeholder={t('sections.screen.heightPlaceholder')} />
             </Field>
           </div>
           {/* Side by side, each label wrapping and both growing to the taller one. */}
           <div className="resolution-actions flex items-stretch gap-2">
-            <Button variant="outline" size="xs" className="h-auto min-h-6 min-w-0 flex-1 py-1 whitespace-normal" onClick={s.setManualResolution}
-              title={t('sections.screen.setManualButton')}>{t('sections.screen.setManualButton')}</Button>
-            <Button variant="outline" size="xs" className="h-auto min-h-6 min-w-0 flex-1 py-1 whitespace-normal" onClick={s.resetResolution}
-              title={t('sections.screen.resetButton')}>{t('sections.screen.resetButton')}</Button>
+            <ActionButton className="flex-1" onClick={s.setManualResolution}
+              title={t('sections.screen.setManualButton')}>{t('sections.screen.setManualButton')}</ActionButton>
+            <ActionButton className="flex-1" onClick={s.resetResolution}
+              title={t('sections.screen.resetButton')}>{t('sections.screen.resetButton')}</ActionButton>
           </div>
         </>
       )}
-      <Button variant={s.scaleLocally ? "default" : "outline"} size="xs" className="w-full min-w-0" onClick={s.toggleScaleLocally}
+      <ActionButton variant={s.scaleLocally ? "default" : "outline"} className="w-full" onClick={s.toggleScaleLocally}
         title={`${tl('sections.screen.scaleLocallyLabel')}: ${t(s.scaleLocally ? 'sections.screen.scaleLocallyOn' : 'sections.screen.scaleLocallyOff')}`}>
         <Clip>{tl('sections.screen.scaleLocallyLabel')}: {t(s.scaleLocally ? 'sections.screen.scaleLocallyOn' : 'sections.screen.scaleLocallyOff')}</Clip>
-      </Button>
+      </ActionButton>
     </>
   );
 }

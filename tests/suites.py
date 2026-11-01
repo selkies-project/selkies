@@ -435,8 +435,9 @@ SUITES: list = [
     {"path": "e2e/test_system_usage.py", "tier": "e2e", "timeout": 600,
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_apps_panel.py", "tier": "e2e", "timeout": 600},
-    {"path": "e2e/test_dashboard_look.py", "tier": "e2e", "timeout": 1500,
-     "selectors": ["contrast", "spacing"]},
+    # A layout's contrast walk takes about nine minutes on an idle host (the suite's docstring).
+    {"path": "e2e/test_dashboard_look.py", "tier": "e2e", "timeout": 1800,
+     "selectors": ["contrast-default", "contrast-wish", "spacing"]},
     {"path": "e2e/test_dashboard_matrix.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["wish-webrtc-x11", "wish-ws-wl", "wish-webrtc-wl",
                    "gates-webrtc-x11", "gates-ws-wl", "gates-webrtc-wl"]},

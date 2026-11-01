@@ -10,12 +10,19 @@ src/
   App.tsx           the providers, the layout, and what every layout shares (dialogs, notices, floating stats)
   state/            dashboard.tsx (the shared state and the core's echoes), settings.ts (the stream settings' rules)
   panels/           one component per panel, drawn wherever a layout puts it
-  layouts/          index.ts (the registry), sidebar.tsx (the default), toolbar.tsx (wish)
+  layouts/          index.ts (the registry), actions.ts (the controls every layout places), sidebar.tsx (the default), toolbar.tsx (wish)
   i18n.ts           the translator over translations.ts, one dictionary per locale
   utils.ts          storage keys, the core's cached broadcasts, the visibility flags the server's settings derive
 ```
 
-A layout is a component that reads `useDashboard()` and `useSettings()` and decides where each panel is painted. The sidebar lays them out as sections of a drawer; the toolbar hangs them from a floating bar as menus, tabs, and floating panels. Adding a layout is one entry in `layouts/index.ts`, its value in the server's `ui_layout` enum, and its name in the dictionary.
+A layout only arranges: the sidebar lays the panels out as sections of a drawer; the toolbar hangs them from a floating bar as menus, tabs, and floating panels. What there is to arrange is decided once for every layout:
+
+- the panels, their order, and when each shows, by `PANELS` in `panels/catalog.ts`;
+- the other controls (stream switches, touch controls, soft keys, fullscreen, gaming mode, stats, the citation link), with their names, marks, states and actions, by `useActions()` in `layouts/actions.ts`;
+- the events every layout's chrome answers (Ctrl+Shift+M, gaming mode starting, fullscreen), by `useChromeEvents()` beside it;
+- the controls' sizes, by the tokens on `:root` in `index.css` (`--control-h`, `--control-font`, `--stack-gap`, `--field-gap`, the `--switch-*` set, `--bar-button`), which a layout sets again on its own root to change them; the sidebar's are on `.sidebar` in `layouts/sidebar.css`.
+
+Adding a layout is a component over those, its stylesheet, one entry in `layouts/index.ts`, its value in the server's `ui_layout` enum (`src/selkies/settings.py`), and its name in the dictionary (`layout.<id>`).
 
 ## Core interaction
 

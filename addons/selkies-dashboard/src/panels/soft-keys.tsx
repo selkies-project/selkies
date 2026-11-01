@@ -16,7 +16,7 @@
  * @module
  */
 import * as React from "react";
-import { ChevronDown, ChevronUp, Keyboard, Touchpad } from "lucide-react";
+import { Keyboard, Touchpad } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/panels/controls";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, useDashboard } from "@/state/dashboard";
@@ -115,10 +115,9 @@ export function SoftKeys({ showTrackpad: trackpadButton = true, showKeyboardButt
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {showKeys && (
-            // A disclosure, not a key: no key face, the accent's text, and a chevron toward where the palette opens.
-            <Button variant="ghost" size="sm" className="key-palette-toggle h-(--soft-key-h) gap-1 px-2 text-(--primary-text)" aria-expanded={paletteOpen}
+            // A button like the keys, set apart from them by the accent's text.
+            <Button variant="outline" size="sm" className="key-palette-toggle h-(--soft-key-h) text-(--primary-text)" aria-expanded={paletteOpen}
               onMouseDown={(event) => event.preventDefault()} onClick={() => setPaletteOpen((open) => !open)}>
-              {paletteOpen === below ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
               {paletteOpen ? t('keyPalette.less') : t('keyPalette.more')}
             </Button>
           )}

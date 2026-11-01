@@ -74,6 +74,8 @@
   --primary: #b83280;
   --primary-foreground: #ffffff;
   --primary-text: #b83280;
+  /* A pressed-in primary: darker under its white text, so a hovered button reads as well as one at rest. */
+  --primary-hover: color-mix(in oklab, var(--primary) 85%, black);
   --secondary: #eceef3;
   --secondary-foreground: oklch(0.205 0 0);
   --muted: #eceef3;
@@ -118,6 +120,8 @@
   --primary: #db5ba7;
   --primary-foreground: oklch(0.145 0 0);
   --primary-text: #f9a8d4;
+  /* Lighter under its dark text. */
+  --primary-hover: color-mix(in oklab, var(--primary) 85%, white);
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.269 0 0);
@@ -151,7 +155,7 @@
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring;
   }
   body {
     @apply bg-background text-foreground;
@@ -258,10 +262,10 @@
   background: var(--background);
 }
 .range-slider:focus-visible::-webkit-slider-thumb {
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+  box-shadow: 0 0 0 3px var(--ring);
 }
 .range-slider:focus-visible::-moz-range-thumb {
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+  box-shadow: 0 0 0 3px var(--ring);
 }
 @media (pointer: coarse) {
   .range-slider::-webkit-slider-thumb {
@@ -285,11 +289,22 @@ select optgroup {
   color: var(--popover-foreground);
 }
 
-/* One rhythm for every panel: the gap between the rows of a stack, and from a
-   label to its control. A menu packs its rows tighter; the sidebar sets its own. */
+/* What a layout sets to give the shared controls its look, rather than restyling
+   them: the rhythm of every panel (the gap between the rows of a stack, and from
+   a label to its control), a field's height and text, a switch's track, knob and
+   the knob's inset, and the size of a bar's buttons. These are the toolbar
+   layout's, and any layout's that sets none; the sidebar sets its own on
+   `.sidebar`, and a menu packs its rows tighter. */
 :root {
   --stack-gap: 1rem;
   --field-gap: 0.375rem;
+  --control-h: 2.25rem;
+  --control-font: 0.875rem;
+  --switch-w: 2.25rem;
+  --switch-h: 1.25rem;
+  --switch-knob: 1rem;
+  --switch-inset: 0px;
+  --bar-button: 2rem;
 }
 [role="menu"] {
   --stack-gap: 0.75rem;
@@ -420,3 +435,19 @@ select optgroup {
   background: var(--primary);
 }
 /* selkies-accent:end */
+
+/* The toasts: Sonner's rich colours, with the light theme's text darkened to read 4.5:1 on its tint (its own
+   success, info, warning and error text fall to 3.1-4.4), and a focus ring in the theme's own, which reads over the
+   stream; Sonner's is a faint black one. */
+.toaster[data-sonner-toaster][data-sonner-theme="light"] {
+  --success-text: #00802b;
+  --info-text: #0869c9;
+  --warning-text: #a25707;
+  --error-text: #d10000;
+}
+.toaster[data-sonner-toaster] [data-sonner-toast]:focus-visible,
+.toaster[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-button]:focus-visible,
+.toaster[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-cancel]:focus-visible,
+.toaster[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-close-button]:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}

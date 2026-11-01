@@ -11,9 +11,8 @@
  * @module
  */
 import { FileUp, FolderOpen, LayoutGrid } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import type { PanelCard, PanelPlace } from "@/panels/catalog";
-import { Clip } from "@/panels/controls";
+import { ActionButton, Clip } from "@/panels/controls";
 import { GamepadControls } from "@/panels/gamepads";
 import { Sharing } from "@/panels/sharing";
 import { useDashboard } from "@/state/dashboard";
@@ -25,14 +24,14 @@ export function FilesActions() {
   return (
     <div className="files-actions">
       {d.renderable.fileUpload && (
-        <Button variant="outline" className="min-w-0" title={t("sections.files.uploadButton")} onClick={() => window.dispatchEvent(new CustomEvent("requestFileUpload"))}>
+        <ActionButton title={t("sections.files.uploadButton")} onClick={() => window.dispatchEvent(new CustomEvent("requestFileUpload"))}>
           <FileUp /><Clip>{t("sections.files.uploadButton")}</Clip>
-        </Button>
+        </ActionButton>
       )}
       {d.renderable.fileDownload && (
-        <Button variant="outline" className="min-w-0" title={t("sections.files.downloadButtonTitle")} onClick={() => d.openDialog("files")}>
+        <ActionButton title={t("sections.files.downloadButtonTitle")} onClick={() => d.openDialog("files")}>
           <FolderOpen /><Clip>{t("sections.files.downloadButtonTitle")}</Clip>
-        </Button>
+        </ActionButton>
       )}
     </div>
   );
@@ -42,9 +41,9 @@ export function FilesActions() {
 export function AppsAction() {
   const d = useDashboard();
   return (
-    <Button variant="outline" className="w-full min-w-0" title={t("sections.apps.openButton")} onClick={() => d.openDialog("apps")}>
+    <ActionButton className="w-full" title={t("sections.apps.openButton")} onClick={() => d.openDialog("apps")}>
       <LayoutGrid /><Clip>{t("sections.apps.openButton")}</Clip>
-    </Button>
+    </ActionButton>
   );
 }
 

@@ -21,11 +21,11 @@
  * @module
  */
 import * as React from "react";
-import { ChevronDown, ChevronUp, Crosshair, Keyboard, Maximize, Touchpad } from "lucide-react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { SelkiesLogo } from "@/components/logo";
 import { LayoutToggle, ThemePill } from "@/panels/appearance";
 import { fractionOf, place, useViewport } from "@/panels/anchor";
-import { PANELS, STREAMS, shownCards, usePanelContext, type PanelSpec } from "@/panels/catalog";
+import { PANELS, shownCards, usePanelContext, type PanelSpec } from "@/panels/catalog";
 import { CardList } from "@/panels/catalog-bodies";
 import { SwitchRow } from "@/panels/controls";
 import { SoftKeys } from "@/panels/soft-keys";
@@ -33,8 +33,8 @@ import { CiteLink } from "@/panels/shortcuts";
 import { StatsSection } from "@/panels/stats-section";
 import { PROJECT_URL, useDashboard } from "@/state/dashboard";
 import { useSettings } from "@/state/settings-context";
-import { onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
+import { useActions, useChromeEvents, type Action } from "./actions";
 import "./sidebar.css";
 
 /** Height of the handle in pixels, which its drag keeps inside the window. */
@@ -45,6 +45,16 @@ function Tile({ active, label, className, onClick, children }: { active: boolean
   return (
     <button type="button" className={`action-button ${className ?? ""}`} aria-pressed={active} aria-label={label} title={label} onClick={onClick}>
       {children}
+    </button>
+  );
+}
+
+/** One of the header's buttons, beside the theme and layout toggles. */
+function HeaderButton({ action }: { action: Action }) {
+  return (
+    <button type="button" className={`header-action-button ${action.className}`} aria-label={action.label} title={action.title}
+      onClick={action.run}>
+      <action.icon />
     </button>
   );
 }
@@ -85,24 +95,9 @@ export default function SidebarLayout() {
   const handleSize = React.useMemo(() => ({ width: 0, height: HANDLE_HEIGHT }), []);
   const handleTop = place({ x: 0, y: handleAt }, viewport, handleSize).y;
   const drag = React.useRef<{ startY: number; startTop: number; moved: boolean } | null>(null);
-  const { reportChromeOpen } = d;
-
-  React.useEffect(() => {
-    const offMessages = onCoreMessage((message) => {
-      if (message.type === "toggleDashboard") setOpen((shown) => !shown);
-    });
-    // Entering fullscreen (button, gaming mode, Ctrl+Shift+F, or browser UI)
-    // folds the drawer so the user lands in the session.
-    const onFullscreen = () => { if (document.fullscreenElement) setOpen(false); };
-    document.addEventListener("fullscreenchange", onFullscreen);
-    return () => {
-      offMessages();
-      document.removeEventListener("fullscreenchange", onFullscreen);
-    };
-  }, []);
-
+  // Hidden for a viewer and in gaming mode; entering fullscreen folds the drawer.
   const shown = open && !d.isViewer && !d.isGamingMode;
-  React.useEffect(() => { reportChromeOpen(shown); }, [shown, reportChromeOpen]);
+  useChromeEvents({ open: shown, onToggle: () => setOpen((value) => !value), onFullscreen: () => setOpen(false) });
 
   const onHandleDown = (event: React.PointerEvent<HTMLDivElement>) => {
     drag.current = { startY: event.clientY, startTop: handleTop, moved: false };
@@ -139,9 +134,9 @@ export default function SidebarLayout() {
     return Body ? <Body place="section" /> : null;
   };
 
-  const showCoreButtons = !d.isSecondaryDisplay && d.renderable.coreButtons;
-  const showKeyboardTile = d.isTouch && d.renderable.softButtons;
-  const showTrackpadTile = d.isTouch && d.renderable.trackpad;
+  const actions = useActions();
+  // The touch client's own beside the stream switches; the touch gamepad's switch is in the gamepads section.
+  const tiles = [actions.keyboardButton, actions.trackpad].filter((action): action is Action => action !== null);
   const handleLabel = t(shown ? "topMenu.hideToolbar" : "topMenu.showToolbar");
 
   return (
@@ -161,34 +156,23 @@ export default function SidebarLayout() {
           <div className="header-controls">
             <ThemePill />
             <LayoutToggle className="header-action-button" />
-            {d.renderable.fullscreen && (
-              <button type="button" className="header-action-button fullscreen-button" aria-label={t("fullscreenTitle")} title={t("fullscreenTitle")} onClick={d.toggleFullscreen}>
-                {/* Its corners stop a unit inside the crosshair's circle: drawn to that circle's extent, the two read as one size. */}
-                <Maximize viewBox="1.09 1.09 21.82 21.82" />
-              </button>
-            )}
-            {d.renderable.gamingMode && (
-              <button type="button" className="header-action-button gaming-mode-button" aria-label={t("gamingModeTitle")}
-                title={`${t("gamingModeTitle")} — ${t("gamingModeHint")}`} onClick={d.toggleGamingMode}>
-                <Crosshair />
-              </button>
-            )}
+            {actions.fullscreen && <HeaderButton action={actions.fullscreen} />}
+            {actions.gamingMode && <HeaderButton action={actions.gamingMode} />}
           </div>
         </header>
 
-        {(showCoreButtons || showKeyboardTile || showTrackpadTile) && (
+        {(actions.streams.length > 0 || tiles.length > 0) && (
           <div className="sidebar-action-buttons">
-            {showCoreButtons && STREAMS.filter((stream) => stream.allowed(d.renderable)).map((stream) => (
+            {actions.streams.map((stream) => (
               <Tile key={stream.id} active={stream.on(d)} label={t(stream.on(d) ? stream.disable : stream.enable)} onClick={() => stream.toggle(d)}>
                 <stream.icon />
               </Tile>
             ))}
-            {showKeyboardTile && (
-              <Tile active={d.keyboardButton} className="keyboard-toggle-button" label={t("keyboardButtonToggleTitle")} onClick={d.toggleKeyboardButton}><Keyboard /></Tile>
-            )}
-            {showTrackpadTile && (
-              <Tile active={d.trackpad} className="trackpad-mode-button" label={t("trackpadModeTitle")} onClick={d.toggleTrackpad}><Touchpad /></Tile>
-            )}
+            {tiles.map((action) => (
+              <Tile key={action.className} active={!!action.active} className={action.className} label={action.label} onClick={action.run}>
+                <action.icon />
+              </Tile>
+            ))}
           </div>
         )}
 
@@ -202,7 +186,7 @@ export default function SidebarLayout() {
           </Section>
         ))}
 
-        {d.renderable.shortcuts && <footer className="sidebar-footer"><CiteLink /></footer>}
+        {actions.cite && <footer className="sidebar-footer"><CiteLink /></footer>}
       </aside>
     </>
   );

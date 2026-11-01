@@ -20,7 +20,7 @@
 import * as React from "react";
 import { Keyboard, Vibrate } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { SwitchRow, Clip } from "@/panels/controls";
+import { ActionButton, SwitchRow, Clip } from "@/panels/controls";
 import { useDashboard } from "@/state/dashboard";
 import { getPrefixedKey, isMobileClient, onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
@@ -126,10 +126,10 @@ export function GamepadControls({ showInput = false, rumbleButton = false }: Gam
         <>
           <SwitchRow id="touchGamepadToggle" label={t('topMenu.touchGamepad')} checked={d.touchGamepad} onToggle={d.toggleTouchGamepad} />
           {rumbleButton ? (
-            <Button id="gamepadRumbleToggle" variant="outline" className="w-full min-w-0" aria-pressed={rumble}
+            <ActionButton id="gamepadRumbleToggle" className="w-full" aria-pressed={rumble}
               title={t('sections.gamepads.rumbleTitle')} onClick={toggleRumble}>
               <Vibrate /><Clip>{t(rumble ? 'sections.gamepads.rumbleActiveLabel' : 'sections.gamepads.rumbleInactiveLabel')}</Clip>
-            </Button>
+            </ActionButton>
           ) : (
             <SwitchRow id="gamepadRumbleToggle" label={t('topMenu.rumble')} title={t('sections.gamepads.rumbleTitle')} checked={rumble} onToggle={toggleRumble} />
           )}

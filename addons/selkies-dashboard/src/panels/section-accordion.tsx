@@ -20,7 +20,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 /** Classes that draw the accordion as separate cards rather than one list. */
 const GROUP = "gap-1 overflow-visible rounded-none border-0";
 const CARD = "rounded-lg border";
-const HEADER = "items-center px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:no-underline";
+const HEADER = "items-center px-3 py-2.5 text-[0.8125rem] font-semibold uppercase tracking-wide text-muted-foreground hover:no-underline";
 // The body pads as much under its last row as above its first; a paragraph in it takes the stack's gap, not a margin.
 const BODY = "flex flex-col gap-(--stack-gap) border-t px-3 py-3 [&_p:not(:last-child)]:mb-0";
 

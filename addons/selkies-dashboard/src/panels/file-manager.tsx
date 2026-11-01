@@ -8,7 +8,7 @@
 
 import * as React from "react"
 import {
-  ChevronRight,
+  CornerLeftUp,
   Download,
   Eye,
   EyeOff,
@@ -109,6 +109,27 @@ interface FileManagerProps {
 }
 
 /**
+ * One call to the file manager's API with the session's credentials: a GET, or
+ * a POST of `body` as JSON. Resolves to the reply, or throws its message when
+ * the route refuses or fails.
+ */
+async function request(url: string, body?: unknown): Promise<any> {
+  const resp = await fetch(url, body === undefined
+    ? { credentials: "same-origin", headers: sessionAuthHeaders() }
+    : {
+        method: "POST",
+        credentials: "same-origin",
+        headers: sessionAuthHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      })
+  const data = await resp.json().catch(() => null)
+  if (!resp.ok || !data || data.status !== "ok") {
+    throw new Error((data && data.message) || `HTTP ${resp.status}`)
+  }
+  return data
+}
+
+/**
  * The file manager over the JSON file API: one directory at a time, in whichever
  * of the three layouts the user picked, with the upload and mkdir actions in the
  * header and a download on every row. The breadcrumb and the back button move
@@ -151,14 +172,7 @@ export function FileManager({
     async (dir: string): Promise<FileManagerItem[]> => {
       const url = new URL(`${apiBase}/browse`)
       if (dir) url.searchParams.set("path", dir)
-      const resp = await fetch(url.href, {
-        credentials: "same-origin",
-        headers: sessionAuthHeaders(),
-      })
-      const data = await resp.json().catch(() => null)
-      if (!resp.ok || !data || data.status !== "ok") {
-        throw new Error((data && data.message) || `HTTP ${resp.status}`)
-      }
+      const data = await request(url.href)
       return (data.entries || []) as FileManagerItem[]
     },
     [apiBase]
@@ -244,19 +258,7 @@ export function FileManager({
     [apiBase]
   )
 
-  async function post(action: string, body: unknown) {
-    const resp = await fetch(`${apiBase}/${action}`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: sessionAuthHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body),
-    })
-    const data = await resp.json().catch(() => null)
-    if (!resp.ok || !data || data.status !== "ok") {
-      throw new Error((data && data.message) || `HTTP ${resp.status}`)
-    }
-    return data
-  }
+  const post = (action: string, body: unknown) => request(`${apiBase}/${action}`, body)
 
   // A file's name is not its download: the row's Download button is, so a
   // click on a file does nothing rather than saving it, and a click on a
@@ -328,16 +330,19 @@ export function FileManager({
       <div className="shrink-0 border-b p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              disabled={!cwd}
-              onClick={() => navigateTo(getParentPath(cwd))}
-            >
-              <ChevronRight className="h-4 w-4 rotate-180" />
-              <span className="sr-only">{t("files.goBack")}</span>
-            </Button>
+            {/* Up to the parent folder, offered only where there is one. */}
+            {cwd && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                title={t("files.goBack")}
+                onClick={() => navigateTo(getParentPath(cwd))}
+              >
+                <CornerLeftUp className="h-4 w-4" />
+                <span className="sr-only">{t("files.goBack")}</span>
+              </Button>
+            )}
             <nav aria-label={t("files.rootLabel")} className="flex min-w-0 flex-wrap items-center gap-1 text-sm font-medium">
               <button
                 type="button"

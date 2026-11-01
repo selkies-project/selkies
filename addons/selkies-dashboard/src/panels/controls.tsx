@@ -15,6 +15,7 @@
  */
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
@@ -45,8 +46,19 @@ export function SwitchRow({ id, label, title, checked, onToggle, disabled }: Swi
   return (
     <div className="setting-item toggle-item flex items-center justify-between gap-3">
       <Label htmlFor={id} title={hint(label, title)} className="min-w-0"><Clip>{label}</Clip></Label>
-      <Switch id={id} nativeButton size="sm" checked={checked} onCheckedChange={onToggle} disabled={disabled} />
+      <Switch id={id} nativeButton checked={checked} onCheckedChange={onToggle} disabled={disabled} />
     </div>
+  );
+}
+
+/**
+ * A panel's action button, at the layout's field metrics (`--control-h`, `--control-font`) like the fields beside it,
+ * its label wrapping rather than clipping. Outlined unless asked otherwise.
+ */
+export function ActionButton({ className, variant = "outline", ...props }: React.ComponentProps<typeof Button>) {
+  return (
+    <Button variant={variant} {...props}
+      className={cn("h-auto min-h-(--control-h) min-w-0 py-1 text-(length:--control-font) whitespace-normal", className)} />
   );
 }
 
@@ -92,8 +104,8 @@ export function NativeSelect({ options, onValueChange, placeholder, className, .
         {...props}
         onChange={(event) => onValueChange(event.target.value)}
         className={cn(
-          "h-7 w-full cursor-pointer appearance-none truncate rounded-md border border-input bg-background pr-7 pl-2 text-xs text-foreground shadow-xs outline-none",
-          "hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50",
+          "h-(--control-h) w-full cursor-pointer appearance-none truncate rounded-md border border-input bg-background pr-8 pl-2.5 text-(length:--control-font) text-foreground shadow-xs outline-none",
+          "hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
           "dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
           className,
         )}
