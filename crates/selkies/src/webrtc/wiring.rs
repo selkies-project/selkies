@@ -549,6 +549,8 @@ pub struct RtcStreaming {
     pub dispatcher: Arc<crate::input::Dispatcher>,
     pub clipboard: Arc<crate::clipboard::Clipboard>,
     pub gamepads: Arc<crate::gamepad::GamepadSlots>,
+    /// The published keyboard and pointer, which the first transport to run opens.
+    pub devices: Arc<crate::server::stack::PublishedDevices>,
     pub screens: Arc<crate::session_screens::SessionScreens>,
     pub stop: tokio::sync::Notify,
 }
@@ -564,6 +566,7 @@ impl crate::http::supervisor::StreamingService for RtcStreaming {
         let host: Arc<dyn GamepadHost> = Arc::new(RtcGamepadHost(self.service.clone()));
         self.gamepads.set_host(Some(host));
         self.dispatcher.connect().await;
+        self.devices.open(&self.dispatcher).await;
         self.clipboard.spawn_monitor();
         let dispatcher = self.dispatcher.clone();
         tokio::spawn(async move { dispatcher.apps().probe().await });

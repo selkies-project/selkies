@@ -140,6 +140,11 @@ pub async fn run() -> Result<(), String> {
     use crate::http::{self, AppState, HttpConfig, Server};
     use crate::input::{Dispatcher, GamepadSink, InputConfig, WaylandSeat};
     use crate::session_screens::{AppScreens, SessionScreens};
+    use crate::webrtc::WebRtcService;
+    use crate::webrtc::host::{PixelPipelines, ServerPlane, WebRtcDeps};
+    use crate::webrtc::wiring::{
+        RtcClipboardHost, RtcClipboardPolicy, RtcInputHost, RtcPointerSink, RtcStreaming, ice_topology,
+    };
     use crate::ws::host::WsDeps;
     use crate::ws::{self, WsService, wiring};
     use std::sync::Arc;
@@ -190,10 +195,17 @@ pub async fn run() -> Result<(), String> {
     let static_root = http::static_files::resolve_static_root(&cfg.web_root);
 
     let late_ws = Arc::new(stack::LateService::default());
-    let modes = Arc::new(http::supervisor::ModeSupervisor::new(vec![(
-        "websockets".to_string(),
-        late_ws.clone() as Arc<dyn http::supervisor::StreamingService>,
-    )]));
+    let late_rtc = Arc::new(stack::LateService::default());
+    let modes = Arc::new(http::supervisor::ModeSupervisor::new(vec![
+        (
+            "websockets".to_string(),
+            late_ws.clone() as Arc<dyn http::supervisor::StreamingService>,
+        ),
+        (
+            "webrtc".to_string(),
+            late_rtc.clone() as Arc<dyn http::supervisor::StreamingService>,
+        ),
+    ]));
     let metrics = settings().enable_metrics_http().on.then(|| {
         Arc::new(stack::ServerMetrics(Arc::new(crate::stats::metrics::Metrics::new(false))))
     });
@@ -209,6 +221,11 @@ pub async fn run() -> Result<(), String> {
         is_wayland,
         std::env::var_os("XDG_RUNTIME_DIR").map(Into::into),
     );
+    let transport_supervisor = Arc::new(stack::TransportSupervisor {
+        modes: modes.clone(),
+        files: files_state.clone(),
+        present: AtomicBool::new(false),
+    });
     let late_clipboard = Arc::new(stack::LateClipboard::default());
     let service = WsService::new(WsDeps {
         tokens: Arc::new(state.tokens.clone()),
@@ -218,11 +235,7 @@ pub async fn run() -> Result<(), String> {
         audio: Arc::new(wiring::EngineAudio(crate::audio::AudioEngine::new(crate::audio::Framing::Headered))),
         webcam: Arc::new(wiring::SharedWebcam),
         stats: Arc::new(wiring::MonitorStats::default()),
-        supervisor: Arc::new(stack::TransportSupervisor {
-            modes: modes.clone(),
-            files: files_state.clone(),
-            present: AtomicBool::new(false),
-        }),
+        supervisor: transport_supervisor.clone(),
         metrics: metrics.clone().map(|m| m as Arc<dyn ws::host::Metrics>),
     });
 
@@ -255,13 +268,77 @@ pub async fn run() -> Result<(), String> {
         dispatcher,
         clipboard,
         gamepads: gamepads.clone(),
-        devices,
+        devices: devices.clone(),
         screens: screens.clone(),
         stop: tokio::sync::Notify::new(),
     }));
 
+    // The WebRTC transport has its own input stack and clipboard over the same seat, gamepads, and
+    // devices, and a session ladder of its own; only one transport runs at a time.
+    let rtc_screens = SessionScreens::new(
+        is_wayland.then(|| screens_backend.clone() as Arc<dyn AppScreens>),
+        is_wayland,
+        std::env::var_os("XDG_RUNTIME_DIR").map(Into::into),
+    );
+    let rtc_policy = Arc::new(RtcClipboardPolicy(std::sync::OnceLock::new()));
+    let rtc_service = WebRtcService::new(
+        WebRtcDeps {
+            tokens: Arc::new(state.tokens.clone()),
+            clipboard: rtc_policy.clone(),
+            display: Arc::new(ServerPlane(Arc::new(wiring::ServerDisplay::new(rtc_screens.clone())))),
+            pipelines: Arc::new(PixelPipelines {
+                captures: Arc::new(wiring::Captures),
+            }),
+            audio: Some(Arc::new(crate::audio::AudioEngine::new(crate::audio::Framing::Raw))),
+            webcam: Arc::new(wiring::SharedWebcam),
+            stats: Arc::new(wiring::MonitorStats::default()),
+            supervisor: transport_supervisor.clone(),
+            metrics: metrics.clone().map(|m| m as Arc<dyn ws::host::Metrics>),
+            rtc_metrics: metrics.clone().map(|m| Arc::new(m.0.clone()) as Arc<dyn crate::webrtc::host::RtcMetrics>),
+        },
+        ice_topology(Vec::new())?,
+    )?;
+    let rtc_dispatcher = Dispatcher::new(
+        InputConfig::from_settings(),
+        Arc::new(RtcInputHost {
+            service: rtc_service.clone(),
+            screens: rtc_screens.clone(),
+        }),
+        gamepads.clone() as Arc<dyn GamepadSink>,
+        Arc::new(RtcPointerSink(Arc::downgrade(&rtc_service))),
+        is_wayland.then(|| screens_backend.clone() as Arc<dyn WaylandSeat>),
+        Some(devices.clone()),
+    );
+    rtc_screens.attach(&rtc_dispatcher);
+    let rtc_clipboard = Clipboard::new(
+        RtcClipboardHost::new(rtc_service.engine().clone()),
+        rtc_dispatcher.clone(),
+        is_wayland.then(|| screens_backend.clone() as Arc<dyn CompositorClipboard>),
+        Policy::from_settings(),
+    );
+    rtc_dispatcher.set_clipboard(Arc::new(rtc_clipboard.clone()));
+    let _ = rtc_policy.0.set(rtc_clipboard.clone());
+    rtc_service.attach_input(Arc::new(wiring::DispatcherInput(rtc_dispatcher.clone())));
+    state.tokens.add_reconcile_hook(rtc_service.clone());
+    late_rtc.bind(Arc::new(RtcStreaming {
+        service: rtc_service.clone(),
+        dispatcher: rtc_dispatcher,
+        clipboard: rtc_clipboard,
+        gamepads: gamepads.clone(),
+        devices: devices.clone(),
+        screens: rtc_screens,
+        stop: tokio::sync::Notify::new(),
+    }));
+    let rtc_sessions = Arc::new(crate::webrtc::wiring::RtcSessions::default());
+    rtc_sessions.bind(rtc_service.clone());
+    let state = state.with_turn(rtc_service.clone());
+
     let hooks = Hooks {
-        sessions: Some(Arc::new(stack::WsSessions(service.clone()))),
+        sessions: Some(Arc::new(stack::ActiveSessions {
+            modes: modes.clone(),
+            ws: service.clone(),
+            rtc: rtc_sessions,
+        })),
         audit: http::audit::current().map(|a| a as Arc<dyn files::AuditSink>),
         capture_sink: Some(Arc::new(stack::SinkProvisioner)),
         wayland_output_id: Some(|name: &str| crate::display::wayland_output_id(Some(name))),
@@ -275,6 +352,7 @@ pub async fn run() -> Result<(), String> {
     let extra = vec![
         axum::Router::new().nest("/api", files::router(files_state.clone())),
         ws::routes(service.clone()),
+        crate::webrtc::routes(rtc_service.clone()),
     ];
     let router = http::build(state.clone(), extra);
 
