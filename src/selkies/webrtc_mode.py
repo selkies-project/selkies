@@ -60,7 +60,7 @@ from .webrtc_signaling_server import SERVER_PEER_SECRET, WebRTCPeerManagement
 from .input_handler import WebRTCInput, page_put_to_use
 from .display_utils import (resize_display, refresh_output_mode, applied_dpi, set_dpi, set_cursor_size, parse_gpu_id,
                             compute_dual_layout, apply_extended_layout, get_new_res,
-                            retire_displays, clamp_primary_feedback,
+                            grow_framebuffer, retire_displays, clamp_primary_feedback,
                             WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
                             wayland_reposition_primary, wayland_shrink_output,
                             parse_resize_dims, cursor_size_for_dpi, align_dims_16)
@@ -1109,6 +1109,7 @@ class WebRTCService(BaseStreamingService):
                 )
                 return
 
+            await self._retarget_ahead_of_root({"primary": (0, 0, target_w, target_h)}, target_w, target_h)
             realized = await resize_display(f"{target_w}x{target_h}", self.media_pipeline.framerate)
             if realized:
                 realized_w, realized_h = realized
@@ -1149,6 +1150,7 @@ class WebRTCService(BaseStreamingService):
                     f"resize_display('{target_w}x{target_h}') reported failure"
                 )
                 self.media_pipeline.last_resize_success = False
+            await self.media_pipeline.revive_screen_capture()
 
         except Exception as e:
             logger.error(
@@ -1156,6 +1158,40 @@ class WebRTCService(BaseStreamingService):
             )
             if self.media_pipeline:
                 self.media_pipeline.last_resize_success = False
+
+    async def _retarget_ahead_of_root(self, rects: Dict[str, Tuple[int, int, int, int]],
+                                      root_w: int, root_h: int) -> None:
+        """Grow first, shrink after (websockets parity): before the X11 root
+        changes to `root_w`x`root_h`, move each live capture of a pinned region
+        the new root would not hold to its new rectangle in `rects`, growing the
+        root first where that rectangle lies past the current one. A grab past
+        the root's edge fails, and NvFBC cannot rebuild a session whose box the
+        root no longer holds (pixelflux#56). A capture that follows the root
+        (no region) is left to follow it."""
+        moves = []
+        for did, rect in rects.items():
+            pipeline = self.display_pipelines.get(did)
+            if pipeline is None or not pipeline.is_screen_capturing() or pipeline.capture_region is None:
+                continue
+            x, y = pipeline.capture_region
+            if x + pipeline.width > root_w or y + pipeline.height > root_h:
+                moves.append((did, pipeline, rect))
+        if not moves:
+            return
+        curr, _, _, _, _ = await get_new_res("1x1")
+        try:
+            cur_w, cur_h = (int(v) for v in curr.lower().replace(" ", "").split("x"))
+        except (ValueError, AttributeError):
+            return
+        need_w = max(cur_w, *(x + w for _, _, (x, _y, w, _h) in moves))
+        need_h = max(cur_h, *(y + h for _, _, (_x, y, _w, h) in moves))
+        if (need_w, need_h) != (cur_w, cur_h) and not await grow_framebuffer(need_w, need_h):
+            need_w, need_h = cur_w, cur_h
+        for did, pipeline, (x, y, w, h) in moves:
+            w, h = min(w, need_w - x), min(h, need_h - y)
+            if w > 0 and h > 0:
+                logger.debug(f"Capture '{did}' moves to {w}x{h}+{x}+{y} ahead of the root's change")
+                await pipeline.update_capture_region(x, y, w, h)
 
     async def request_idr_for_display(self, display_id: str = "primary",
                                       unless_pending: bool = False) -> None:
@@ -1295,6 +1331,7 @@ class WebRTCService(BaseStreamingService):
             audio_wanted = any(not p.get("audio_paused", False) for p in consumers) or not consumers
             await self.media_pipeline.start_media_pipeline(video=video_wanted, audio=audio_wanted)
             await self._settle_primary_consumers()
+            await self.media_pipeline.revive_screen_capture()
             if (IS_WAYLAND and video_wanted and self.media_pipeline.is_media_pipeline_running()
                     and not await self._wayland_capture_live("primary", self.media_pipeline)):
                 last_error = self._wayland_capture_last_error(self.media_pipeline, "primary")
@@ -2379,6 +2416,7 @@ class WebRTCService(BaseStreamingService):
                             self.media_pipeline.width, self.media_pipeline.height)
                         self._broadcast_display_config()
                         return
+                    await self._retarget_ahead_of_root({"primary": (0, 0, p_w, p_h)}, p_w, p_h)
                     # Before the shrink, so no monitor lingers outside the framebuffer.
                     await retire_displays()
                     realized = await resize_display(f"{p_w}x{p_h}", self.media_pipeline.framerate)
@@ -2388,6 +2426,7 @@ class WebRTCService(BaseStreamingService):
                     self.media_pipeline.width, self.media_pipeline.height = p_w, p_h
                     if self.media_pipeline.is_media_pipeline_running():
                         await self.media_pipeline.restart_screen_capture()
+                    await self.media_pipeline.revive_screen_capture()
                     self._push_x11_layout_geometry({"primary": {"w": p_w, "h": p_h}})
                 elif self._primary_dims is not None:
                     await self._resize_primary_display(
@@ -2434,6 +2473,8 @@ class WebRTCService(BaseStreamingService):
                 # apply_extended_layout fits `layouts` to the root really produced:
                 # kept displays may shrink and an unplaceable one disappears from it.
                 requested = {d: (r["w"], r["h"]) for d, r in layouts.items()}
+                await self._retarget_ahead_of_root(
+                    {d: (r["x"], r["y"], r["w"], r["h"]) for d, r in layouts.items()}, total_w, total_h)
                 if (not await apply_extended_layout(
                         layouts, total_w, total_h, self.media_pipeline.framerate)
                         or did not in layouts):
@@ -2461,6 +2502,7 @@ class WebRTCService(BaseStreamingService):
                     await self._push_wayland_realized_geometry("primary", self.media_pipeline)
             else:
                 await self.media_pipeline.update_capture_region(p["x"], p["y"], p["w"], p["h"])
+                await self.media_pipeline.revive_screen_capture()
             s = layouts[did]
             pipeline = self.display_pipelines.get(did)
             if pipeline is None:
@@ -2545,6 +2587,7 @@ class WebRTCService(BaseStreamingService):
                     await pipeline.update_capture_region(s["x"], s["y"], s["w"], s["h"])
                     if IS_WAYLAND:
                         await self._push_wayland_realized_geometry(did, pipeline)
+                await pipeline.revive_screen_capture()
             if not IS_WAYLAND:
                 self._push_x11_layout_geometry(layouts)
             elif self.input_handler:

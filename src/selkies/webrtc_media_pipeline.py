@@ -850,6 +850,35 @@ class MediaPipelinePixel(MediaPipeline):
             await self._start_audio_pipeline()
             return self._is_pcmflux_capturing
 
+    def capture_ended(self) -> bool:
+        """Whether the X11 capture this pipeline runs ended on its own while
+        the pipeline still counts it running: pixelflux gives up on a region it
+        cannot grab or an X server that does not come back. Wayland reports its
+        own through the host reap."""
+        module = self.capture_module
+        if not self._is_screen_capturing or module is None or bool(app_settings.wayland[0]):
+            return False
+        try:
+            return not bool(module.is_capturing)
+        except Exception:
+            return False
+
+    async def revive_screen_capture(self) -> bool:
+        """Start again, at the current settings, a capture that ended on its
+        own (`capture_ended`), as websockets rebuilds a stale capture on the
+        next resize or start. Returns whether one was started."""
+        async with self.async_lock:
+            if not self.capture_ended():
+                return False
+            logger.warning(f"The capture of '{self.display_id}' ended on its own; starting it again.")
+            await self.stop_screen_capture()
+            try:
+                await self.start_screen_capture()
+            except MediaPipelineError as e:
+                logger.error(f"The capture of '{self.display_id}' did not start again: {e}")
+                return False
+            return True
+
     async def restart_screen_capture(self) -> None:
         """Reapply the current settings snapshot to the live capture module.
 

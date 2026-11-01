@@ -137,6 +137,9 @@ class FakePipeline:
         self.video = False
         return was
 
+    async def revive_screen_capture(self) -> bool:
+        return False
+
     async def resume_screen_capture(self) -> bool:
         self.calls.append(("resume_video",))
         if not self.running or self.video:

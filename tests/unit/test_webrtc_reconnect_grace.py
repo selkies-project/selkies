@@ -41,6 +41,9 @@ class FakePipeline:
     async def pause_screen_capture(self) -> bool:
         return False
 
+    async def revive_screen_capture(self) -> bool:
+        return False
+
     async def resume_screen_capture(self) -> bool:
         return False
 
