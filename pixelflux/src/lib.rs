@@ -137,6 +137,9 @@ use smithay::{
 
 /// Encoder backends and the codec identities, wire framing, and rate-control policy they share.
 pub mod encoders;
+/// The one error type the public API returns.
+pub mod error;
+pub use error::Error;
 /// The debug switch behind every backend's tagged line.
 pub mod log;
 
@@ -312,16 +315,33 @@ pub(crate) fn create_dmabuf_from_bo(bo: &BufferObject<()>) -> Dmabuf {
     builder.build().expect("Failed to build Dmabuf from GBM BO")
 }
 
-/// The full set of capture + encode parameters the Python layer hands to the Rust backend.
+/// The full set of capture + encode parameters a consumer hands the backend.
 ///
-/// A single value configures a capture session end to end: capture geometry and frame rate, the
-/// codec (striped JPEG, striped or full-frame H.264, or a full-frame video codec), the video
-/// quality and rate-control knobs,
-/// cursor and watermark options, the encode-device selection, and the optional recording socket.
-/// It derives `PartialEq` so the backend can detect when a live setting actually changed, and
-/// `Clone` so each capture pipeline can own its own copy.
+/// A single value configures a capture session end to end: which display and backend, capture
+/// geometry and frame rate, the codec (striped JPEG, striped or full-frame H.264, or a
+/// full-frame video codec), the video quality and rate-control knobs, cursor and watermark
+/// options, the encode-device selection, and the optional recording socket. It derives
+/// `PartialEq` so the backend can detect when a live setting actually changed, and `Clone` so
+/// each capture pipeline can own its own copy. `Default` is the library's own baseline; the
+/// Python `CaptureSettings` class carries the defaults selkies sessions start from.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RustCaptureSettings {
+pub struct CaptureSettings {
+    /// Wayland display key this capture binds to (0 = primary output); ignored on X11.
+    pub display_id: u32,
+    /// Backend choice: `Some(true)` or `Some(false)` force Wayland or X11; `None` follows
+    /// `WAYLAND_DISPLAY` (`wants_wayland`).
+    pub use_wayland: Option<bool>,
+    /// Compositor render node (Wayland): an explicit path wins; empty with `auto_gpu` set lets
+    /// the library pick one; empty without falls back to the encoder node.
+    pub render_node_path: String,
+    /// The encoder's render node by path, where the consumer names one beside
+    /// `encode_node_index`; the Wayland backend takes it as the fallback render node.
+    pub encode_node_path: String,
+    /// Auto-GPU request: empty for off, `true` for the first GPU, any other token for the
+    /// first GPU whose kernel identity matches (vendor name, driver name, DT prefix, PCI id).
+    pub auto_gpu: String,
+    /// Compositor cursor-theme size in pixels; `<= 0` keeps the theme default (24).
+    pub cursor_size: i32,
     pub width: i32,
     pub height: i32,
     pub scale: f64,
@@ -421,7 +441,7 @@ pub struct LiveTunables {
 
 impl LiveTunables {
     /// Snapshot the live-tunable subset out of a full settings value.
-    pub fn from_settings(s: &RustCaptureSettings) -> Self {
+    pub fn from_settings(s: &CaptureSettings) -> Self {
         Self {
             jpeg_quality: s.jpeg_quality,
             paint_over_jpeg_quality: s.paint_over_jpeg_quality,
@@ -438,7 +458,7 @@ impl LiveTunables {
     }
 
     /// Write these live tunables back into a full settings value in place.
-    pub fn apply_to(&self, s: &mut RustCaptureSettings) {
+    pub fn apply_to(&self, s: &mut CaptureSettings) {
         s.jpeg_quality = self.jpeg_quality;
         s.paint_over_jpeg_quality = self.paint_over_jpeg_quality;
         s.use_paint_over_quality = self.use_paint_over_quality;
@@ -453,9 +473,15 @@ impl LiveTunables {
     }
 }
 
-impl Default for RustCaptureSettings {
+impl Default for CaptureSettings {
     fn default() -> Self {
         Self {
+            display_id: 0,
+            use_wayland: None,
+            render_node_path: String::new(),
+            encode_node_path: String::new(),
+            auto_gpu: String::new(),
+            cursor_size: -1,
             width: 1024,
             height: 768,
             scale: 1.0,
@@ -504,7 +530,19 @@ impl Default for RustCaptureSettings {
 /// The frame rate `paint_over_trigger_frames` is counted at.
 const TRIGGER_FPS: f64 = 60.0;
 
-impl RustCaptureSettings {
+impl CaptureSettings {
+    /// Whether this capture goes through the Wayland backend: an explicit `use_wayland` wins
+    /// (selkies forwards --wayland / SELKIES_WAYLAND there); left unset, capture goes through
+    /// Wayland exactly when the session exposes a `WAYLAND_DISPLAY`.
+    pub fn wants_wayland(&self) -> bool {
+        if let Some(explicit) = self.use_wayland {
+            return explicit;
+        }
+        std::env::var("WAYLAND_DISPLAY")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Whether a still screen is cleaned up (`pipeline::cleanup_due`): a constant-rate video
     /// stream always, whose rate control alone stops short of a clean picture where the rate is
     /// low for the frame rate, to the paint-over quality (`video_paintover_crf`), the finest a
@@ -538,9 +576,9 @@ impl RustCaptureSettings {
 ///
 /// # Returns
 ///
-/// An owned [`RustCaptureSettings`] on success, or a Python exception if a required field is
+/// An owned [`CaptureSettings`] on success, or a Python exception if a required field is
 /// missing or has the wrong type.
-pub(crate) fn extract_settings(settings: &Bound<'_, PyAny>) -> PyResult<RustCaptureSettings> {
+pub(crate) fn extract_settings(settings: &Bound<'_, PyAny>) -> PyResult<CaptureSettings> {
     let watermark_path_obj = settings.getattr("watermark_path")?;
     let watermark_path = if let Ok(s) = watermark_path_obj.extract::<String>() {
         s
@@ -576,7 +614,39 @@ pub(crate) fn extract_settings(settings: &Bound<'_, PyAny>) -> PyResult<RustCapt
         }
     };
 
-    Ok(RustCaptureSettings {
+    let text = |attr: &str| -> String {
+        settings
+            .getattr(attr)
+            .ok()
+            .and_then(|o| {
+                o.extract::<String>()
+                    .or_else(|_| {
+                        o.extract::<Vec<u8>>()
+                            .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    })
+                    .ok()
+            })
+            .unwrap_or_default()
+    };
+
+    Ok(CaptureSettings {
+        display_id: settings
+            .getattr("display_id")
+            .ok()
+            .and_then(|v| v.extract::<u32>().ok())
+            .unwrap_or(0),
+        use_wayland: settings
+            .getattr("use_wayland")
+            .ok()
+            .and_then(|v| v.extract::<bool>().ok()),
+        render_node_path: text("render_node_path"),
+        encode_node_path: text("encode_node_path"),
+        auto_gpu: text("auto_gpu"),
+        cursor_size: settings
+            .getattr("cursor_size")
+            .ok()
+            .and_then(|v| v.extract::<i32>().ok())
+            .unwrap_or(-1),
         width: sanitize_dim(settings.getattr("capture_width")?.extract()?),
         height: sanitize_dim(settings.getattr("capture_height")?.extract()?),
         scale: sanitize_scale(scale),
@@ -621,7 +691,7 @@ pub(crate) fn extract_settings(settings: &Bound<'_, PyAny>) -> PyResult<RustCapt
             .getattr("cursor_size_cap")
             .ok()
             .and_then(|v| v.extract::<i32>().ok())
-            .unwrap_or(RustCaptureSettings::default().cursor_size_cap),
+            .unwrap_or(CaptureSettings::default().cursor_size_cap),
         watermark_path,
         watermark_location_enum: settings.getattr("watermark_location_enum")?.extract()?,
         encode_node_index: settings.getattr("encode_node_index")?.extract()?,
@@ -713,7 +783,7 @@ pub enum ThreadCommand {
     StartCapture {
         display_id: u32,
         callback: Option<Arc<dyn crate::sink::FrameSink>>,
-        settings: RustCaptureSettings,
+        settings: CaptureSettings,
     },
     /// Stop the capture bound to output `display_id` (other displays keep running).
     StopCapture {
@@ -924,7 +994,7 @@ pub enum ThreadCommand {
         fps: Option<f64>,
     },
     /// The rate the path one display's stream crosses carries
-    /// (`RustCaptureSettings::video_link_kbps`).
+    /// (`CaptureSettings::video_link_kbps`).
     UpdateLinkRate {
         display_id: u32,
         link_kbps: i32,
@@ -1345,7 +1415,7 @@ pub struct WlEncodeControls {
     bitrate_kbps: AtomicI32,
     vbv_mult_milli: AtomicI32,
     fps_bits: AtomicU64,
-    /// The rate the path carries (`RustCaptureSettings::video_link_kbps`), read every frame.
+    /// The rate the path carries (`CaptureSettings::video_link_kbps`), read every frame.
     link_kbps: AtomicI32,
     force_idr: AtomicBool,
     reference_reports: Mutex<Vec<encoders::reference::ReferenceReport>>,
@@ -1446,7 +1516,7 @@ impl WlEncodeStats {
 /// StartCapture reconfigure tears the thread down and spawns a fresh one). Rate changes
 /// flow through `controls`; damage and the IDR request arrive per-frame in `WlFrame`.
 struct WlEncodeConfig {
-    settings: RustCaptureSettings,
+    settings: CaptureSettings,
     /// Output/display id this encode loop serves; keys the recorder's delivery-layer tap.
     display_id: u32,
     /// GLES readback is RGBA; the pixman framebuffer is BGRA. Selects CSC + encoder input kind.
@@ -1561,7 +1631,7 @@ impl WlPayload for Dmabuf {
 /// session handed over from the previous encode thread is reconfigured in place rather than
 /// rebuilt, which would stall the stream.
 fn build_readback_encoders(
-    settings: &mut RustCaptureSettings,
+    settings: &mut CaptureSettings,
     try_gpu: bool,
     rgba: bool,
     prior: Option<FrameEncoder>,
@@ -1941,7 +2011,7 @@ fn wayland_encode_loop<B: WlPayload>(
 /// Compose the encoder half of the 1 s debug log line (backend, colorspace, frame mode, rate
 /// control) for whichever thread owns the encoders.
 fn encoder_desc(
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     video_encoder: Option<&FrameEncoder>,
     zero_copy: bool,
 ) -> String {
@@ -1985,7 +2055,7 @@ fn encoder_desc(
 /// A full-frame session (`fullframe_encoder`: a HW encoder, or a forced `video_fullframe`) is
 /// one contiguous H.264 stream and so a single stripe. Everything else asks the encoder's own
 /// rule, so what is reported is what is encoded.
-fn wayland_stripe_count(settings: &RustCaptureSettings, fullframe_encoder: bool) -> usize {
+fn wayland_stripe_count(settings: &CaptureSettings, fullframe_encoder: bool) -> usize {
     crate::encoders::software::stripe_count(
         settings.height,
         settings.codec,
@@ -1998,7 +2068,7 @@ fn wayland_stripe_count(settings: &RustCaptureSettings, fullframe_encoder: bool)
 /// X11 zero-copy backends at their start), tagged for the backend that prints it.
 pub(crate) fn log_stream_settings(
     tag: &str,
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     n_stripes: usize,
     video_encoder: Option<&FrameEncoder>,
 ) {
@@ -2024,7 +2094,7 @@ pub(crate) fn log_stream_settings(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn log_stream_settings_of(
     tag: &str,
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     n_stripes: usize,
     backend: Option<(&str, bool)>,
     fixed_rate: Option<&str>,
@@ -2046,7 +2116,7 @@ pub(crate) fn log_stream_settings_of(
 #[allow(clippy::too_many_arguments)]
 fn stream_settings_line(
     tag: &str,
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     n_stripes: usize,
     backend: Option<(&str, bool)>,
     fixed_rate: Option<&str>,
@@ -2115,14 +2185,14 @@ mod stream_settings_line_tests {
     /// paint-over that cannot raise the quality is not named.
     #[test]
     fn the_line_states_what_the_session_applies() {
-        let crf = RustCaptureSettings {
+        let crf = CaptureSettings {
             codec: Codec::H264,
             video_crf: 25,
             video_bitrate_kbps: 8000,
             use_paint_over_quality: false,
             ..Default::default()
         };
-        let line = |s: &RustCaptureSettings, fixed: Option<&str>| {
+        let line = |s: &CaptureSettings, fixed: Option<&str>| {
             stream_settings_line(
                 "X11",
                 s,
@@ -2147,7 +2217,7 @@ mod stream_settings_line_tests {
         assert!(line(&crf, Some("CBR")).contains("| CBR 8000 |"));
         assert!(
             line(
-                &RustCaptureSettings {
+                &CaptureSettings {
                     video_cbr_mode: true,
                     ..crf.clone()
                 },
@@ -2155,7 +2225,7 @@ mod stream_settings_line_tests {
             )
             .contains("| CBR 8000 |")
         );
-        let jpeg = RustCaptureSettings {
+        let jpeg = CaptureSettings {
             codec: Codec::Jpeg,
             jpeg_quality: 75,
             paint_over_jpeg_quality: 95,
@@ -2164,7 +2234,7 @@ mod stream_settings_line_tests {
         assert!(line(&jpeg, None).contains("| PaintOver Q: 95 "));
         assert!(
             !line(
-                &RustCaptureSettings {
+                &CaptureSettings {
                     paint_over_jpeg_quality: 60,
                     ..jpeg
                 },
@@ -2732,7 +2802,7 @@ fn start_capture_on_display(
     state: &mut AppState,
     display_id: u32,
     cb: Option<Arc<dyn crate::sink::FrameSink>>,
-    mut settings: RustCaptureSettings,
+    mut settings: CaptureSettings,
 ) {
     // The cursor worker outlives individual captures, so the starting settings have to
     // reach it here — same point X11 applies the cap — or it keeps the previous capture's.
@@ -6418,15 +6488,15 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         gles_renderer,
         pixman_renderer,
         gbm_device: gbm_device_raw,
-        settings: RustCaptureSettings {
+        settings: CaptureSettings {
             width,
             height,
-            ..RustCaptureSettings::default()
+            ..CaptureSettings::default()
         },
         cursor_callback_set: false,
         cursor_tx: wayland::cursor::spawn_cursor_worker(
             cursor_size,
-            RustCaptureSettings::default().cursor_size_cap,
+            CaptureSettings::default().cursor_size_cap,
         ),
         clipboard_callback: None,
         pending_clipboard_read: None,
@@ -8014,7 +8084,7 @@ impl WaylandBackend {
     /// interpreter is live again after a manual atexit sweep.
     fn start_capture(&self, callback: Py<PyAny>, settings: &Bound<'_, PyAny>) -> PyResult<()> {
         let rust_settings = extract_settings(settings)?;
-        let display_id = read_display_id(settings);
+        let display_id = rust_settings.display_id;
 
         PY_SHUTDOWN.store(false, Ordering::Relaxed);
         self.send(ThreadCommand::StartCapture {
@@ -8712,16 +8782,6 @@ impl WaylandBackend {
     }
 }
 
-/// The optional `display_id` attribute on a settings object (absent/invalid = 0, the
-/// primary display).
-fn read_display_id(settings: &Bound<'_, PyAny>) -> u32 {
-    settings
-        .getattr("display_id")
-        .ok()
-        .and_then(|v| v.extract::<u32>().ok())
-        .unwrap_or(0)
-}
-
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 
@@ -8755,8 +8815,8 @@ fn stripe_frame_from_buffer(
 /// Capture configuration read by `start_capture` (each field by attribute name via
 /// `extract_settings`, so the field names must match exactly). Declared `dict` so callers
 /// can stash extra attributes not listed here.
-#[pyclass(dict)]
-struct CaptureSettings {
+#[pyclass(dict, name = "CaptureSettings")]
+struct PyCaptureSettings {
     /// Wayland display key this capture binds to (0 = primary output); ignored on X11.
     #[pyo3(get, set)]
     display_id: u32,
@@ -8883,7 +8943,7 @@ struct CaptureSettings {
 }
 
 #[pymethods]
-impl CaptureSettings {
+impl PyCaptureSettings {
     #[new]
     fn new(py: Python<'_>) -> Self {
         Self {
@@ -9282,22 +9342,6 @@ fn wayland_backend_running(py: Python<'_>) -> Option<Py<WaylandBackend>> {
     g.as_ref().map(|b| b.clone_ref(py))
 }
 
-/// Backend choice: an explicit `use_wayland` bool in the settings wins (selkies
-/// forwards --wayland / SELKIES_WAYLAND there); when left unset (None), capture
-/// goes through Wayland exactly when the session exposes a WAYLAND_DISPLAY.
-fn want_wayland(settings: &Bound<'_, PyAny>) -> bool {
-    if let Some(explicit) = settings
-        .getattr("use_wayland")
-        .ok()
-        .and_then(|v| v.extract::<bool>().ok())
-    {
-        return explicit;
-    }
-    std::env::var("WAYLAND_DISPLAY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-}
-
 /// Mutable per-capture state behind `ScreenCapture`'s mutex: the active backend, the live
 /// X11 controls and thread handle, and the capture / encode thread ids used to detect a re-entrant
 /// stop.
@@ -9596,8 +9640,10 @@ impl ScreenCapture {
         callback: Py<PyAny>,
         settings: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let display_id = read_display_id(settings);
-        let live_wayland_restart = want_wayland(settings)
+        let rs = extract_settings(settings)?;
+        let display_id = rs.display_id;
+        let wants_wayland = rs.wants_wayland();
+        let live_wayland_restart = wants_wayland
             && {
                 let st = self.inner.lock().unwrap();
                 st.backend == 2 && st.wl_display == display_id
@@ -9607,32 +9653,16 @@ impl ScreenCapture {
         if !live_wayland_restart {
             self.stop_internal(py)?;
         }
-        let rs = extract_settings(settings)?;
 
-        if want_wayland(settings) {
-            let read_node = |attr: &str| -> Option<String> {
-                settings.getattr(attr).ok().and_then(|o| {
-                    o.extract::<String>()
-                        .or_else(|_| {
-                            o.extract::<Vec<u8>>()
-                                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                        })
-                        .ok()
-                })
-            };
-            let cursor_size = settings
-                .getattr("cursor_size")
-                .ok()
-                .and_then(|v| v.extract::<i32>().ok())
-                .unwrap_or(-1);
+        if wants_wayland {
             let be = ensure_wayland_backend(
                 py,
                 rs.width,
                 rs.height,
-                read_node("render_node_path").unwrap_or_default(),
-                read_node("auto_gpu").unwrap_or_default(),
-                read_node("encode_node_path").unwrap_or_default(),
-                cursor_size,
+                rs.render_node_path.clone(),
+                rs.auto_gpu.clone(),
+                rs.encode_node_path.clone(),
+                rs.cursor_size,
             )?;
             be.bind(py).borrow().start_capture(callback, settings)?;
             wayland_owners().lock().unwrap().insert(display_id, self.id);
@@ -9650,19 +9680,7 @@ impl ScreenCapture {
         PY_SHUTDOWN.store(false, Ordering::Relaxed);
         let mut rs = rs;
         if rs.encode_node_index < -1 {
-            let auto_gpu = settings
-                .getattr("auto_gpu")
-                .ok()
-                .and_then(|o| {
-                    o.extract::<String>()
-                        .or_else(|_| {
-                            o.extract::<Vec<u8>>()
-                                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                        })
-                        .ok()
-                })
-                .unwrap_or_default();
-            if let Some(picked) = auto_render_node(&auto_gpu)
+            if let Some(picked) = auto_render_node(&rs.auto_gpu)
                 && let Some(idx) = render_node_index(&picked)
             {
                 println!("[X11] AUTO_GPU selected {picked}.");
@@ -10790,12 +10808,8 @@ fn start_recording(
                 "recording requires H.264 capture settings (codec='h264')",
             ));
         }
-        opts.display_id = read_display_id(s);
-        if let Some(explicit) = s
-            .getattr("use_wayland")
-            .ok()
-            .and_then(|v| v.extract::<bool>().ok())
-        {
+        opts.display_id = rs.display_id;
+        if let Some(explicit) = rs.use_wayland {
             opts.backend = Some(if explicit {
                 crate::recorder::PreferredBackend::Wayland
             } else {
@@ -11124,7 +11138,7 @@ fn pixelflux(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<WaylandBackend>()?;
     m.add_class::<StripeFrame>()?;
-    m.add_class::<CaptureSettings>()?;
+    m.add_class::<PyCaptureSettings>()?;
     m.add_class::<ScreenCapture>()?;
     m.add_class::<webcam::VirtualCamera>()?;
     m.add_class::<webcam::VirtualCameraSettings>()?;

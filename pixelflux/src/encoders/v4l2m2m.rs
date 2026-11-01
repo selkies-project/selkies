@@ -37,7 +37,7 @@ use super::codec::{
 };
 use super::reference::Reference;
 use super::sps::{self, ColorSignal};
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 
 const V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE: u32 = 9;
 const V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE: u32 = 10;
@@ -550,7 +550,7 @@ pub struct V4l2M2mEncoder {
 unsafe impl Send for V4l2M2mEncoder {}
 
 impl V4l2M2mEncoder {
-    pub fn new(codec: Codec, settings: &RustCaptureSettings, rgba: bool) -> Result<Self, String> {
+    pub fn new(codec: Codec, settings: &CaptureSettings, rgba: bool) -> Result<Self, String> {
         let info = node().ok_or("no V4L2 M2M encode node")?;
         let coded = coded_fourcc(codec)
             .filter(|f| info.coded.contains(f))
@@ -666,7 +666,7 @@ impl V4l2M2mEncoder {
         }
     }
 
-    fn setup(&mut self, settings: &RustCaptureSettings, rgba: bool) -> Result<(), String> {
+    fn setup(&mut self, settings: &CaptureSettings, rgba: bool) -> Result<(), String> {
         let input = input_format(rgba);
         let mut output_format = empty_format(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
         output_format.pix_mp.width = self.width as u32;
@@ -1027,7 +1027,7 @@ impl V4l2M2mEncoder {
     /// Apply a live bitrate or frame rate change. Both are writable while streaming on this path,
     /// and the frame rate goes down with the bitrate: left behind, it would budget a new bitrate
     /// against an old rate.
-    pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
+    pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> Result<(), String> {
         let wanted = (settings.video_bitrate_kbps.max(1) as u32).saturating_mul(1000);
         let fps = settings.target_fps.max(1.0);
         if (fps - self.fps).abs() > 0.01 {
@@ -1378,8 +1378,8 @@ mod tests {
 mod hardware_tests {
     use super::*;
 
-    fn settings(width: i32, height: i32) -> RustCaptureSettings {
-        RustCaptureSettings {
+    fn settings(width: i32, height: i32) -> CaptureSettings {
+        CaptureSettings {
             width,
             height,
             codec: Codec::H264,

@@ -29,7 +29,7 @@ use super::codec::{
 };
 use super::reference::{Reference, ReferenceSlots, SlotPlan, SlotRefresh};
 use super::session::{Pending, Planes, Quality, RateSettings, encode_threads};
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 
 /// The lowest quantizer level the real-time mode runs at. Below three the library faults, and
 /// below ten it codes every other frame of a scrolling text desktop with the lower third of
@@ -133,7 +133,7 @@ impl Drop for SvtAv1Encoder {
 
 impl SvtAv1Encoder {
     /// Open a session on host frames; `rgba` names the byte order they arrive in.
-    pub fn new(settings: &RustCaptureSettings, rgba: bool) -> Result<Self, String> {
+    pub fn new(settings: &CaptureSettings, rgba: bool) -> Result<Self, String> {
         let _ = rgba;
         let width = settings.width.max(1) as usize;
         let height = settings.height.max(1) as usize;
@@ -396,7 +396,7 @@ impl SvtAv1Encoder {
     /// Apply a rate or frame-rate change: a new bitrate with the next picture where the library
     /// takes one live, since the VBV it holds spans the same time at any bitrate; anything else
     /// re-opens the encoder.
-    pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
+    pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> Result<(), String> {
         let Some(rate) = self.rate.changed(settings) else {
             return Ok(());
         };
@@ -596,7 +596,7 @@ mod tests {
     fn a_session_let_go_before_its_first_frame_closes() {
         let (done, closed) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let settings = RustCaptureSettings {
+            let settings = CaptureSettings {
                 width: 64,
                 height: 64,
                 target_fps: 30.0,
@@ -620,7 +620,7 @@ mod tests {
     fn the_frame_rate_reaches_the_library_as_its_fraction() {
         for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
             let fps = num as f64 / den as f64;
-            let settings = RustCaptureSettings {
+            let settings = CaptureSettings {
                 width: 64,
                 height: 64,
                 target_fps: fps,
@@ -637,7 +637,7 @@ mod tests {
                 ),
                 (num, den)
             );
-            enc.reconfigure_rate(&RustCaptureSettings {
+            enc.reconfigure_rate(&CaptureSettings {
                 target_fps: 30.0,
                 ..settings.clone()
             })
@@ -661,7 +661,7 @@ mod tests {
         if !HAS_EVENTS {
             return;
         }
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: 64,
             height: 64,
             target_fps: 30.0,
@@ -692,7 +692,7 @@ mod tests {
     /// Sessions opened and closed on many threads at once each encode their frame.
     #[test]
     fn sessions_open_and_close_on_many_threads_at_once() {
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: 64,
             height: 64,
             target_fps: 30.0,

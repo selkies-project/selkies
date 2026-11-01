@@ -10,7 +10,7 @@
 //! which one produced a frame — a paint-over refresh or a recovery keyframe has to behave
 //! identically either way. Keeping the decision logic here, source-agnostic, is what guarantees it.
 
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use crate::encoders::software::{
     EncodedStripe, StripeState, acknowledge_reference, encode_cpu, invalidate_reference,
     stripes_held_still,
@@ -486,7 +486,7 @@ pub fn frame_budget(kbps: i32, fps: f64) -> f64 {
 /// is more. A still screen's frames past what the path carries queue on it, where congestion
 /// control reads them as the path falling behind; at 60 fps and 500 kbps NVENC's rate control
 /// refines a 1080p page a budget a frame, and now and then mispredicts one at fifty.
-fn cleanup_cap(settings: &RustCaptureSettings) -> usize {
+fn cleanup_cap(settings: &CaptureSettings) -> usize {
     let vbv = (crate::encoders::vbv_bits(
         (settings.video_bitrate_kbps.max(1) as u32).saturating_mul(1000),
         settings.target_fps,
@@ -497,12 +497,12 @@ fn cleanup_cap(settings: &RustCaptureSettings) -> usize {
 }
 
 /// The rate (kbps) a constant-rate cleanup's sweep is paced to and its frames capped by: what the
-/// path carries (`RustCaptureSettings::video_link_kbps`), never under the session's rate nor over
+/// path carries (`CaptureSettings::video_link_kbps`), never under the session's rate nor over
 /// `CLEANUP_RATE_MAX` times it, and the session's rate where the path's is not known. A still
 /// screen's refresh at the paint-over quantizer is many seconds of a low rate (1080p text at
 /// 500 kbps, 20 s), which a path faster than the stream carries at once and one near its rate
 /// only at that rate.
-pub fn cleanup_rate(settings: &RustCaptureSettings) -> i32 {
+pub fn cleanup_rate(settings: &CaptureSettings) -> i32 {
     let rate = settings.video_bitrate_kbps.max(1);
     settings
         .video_link_kbps
@@ -545,18 +545,18 @@ fn plateau(st: &mut StripeState, psnr: Option<f32>, period: u32) -> (bool, bool)
 }
 
 /// Frames a constant-rate cleanup through the rate control flows at most (`CONVERGE_S`).
-pub fn converge_frames(settings: &RustCaptureSettings) -> i32 {
+pub fn converge_frames(settings: &CaptureSettings) -> i32 {
     (CONVERGE_S * settings.target_fps.max(1.0)).round() as i32
 }
 
 /// Frames a constant-rate cleanup through a rate control that says its quantizer flows at most,
 /// with no refresh to fall back to (`REFINE_S`).
-pub fn refine_frames(settings: &RustCaptureSettings) -> i32 {
+pub fn refine_frames(settings: &CaptureSettings) -> i32 {
     (REFINE_S * settings.target_fps.max(1.0)).round() as i32
 }
 
 /// `converge_frames` for the session `encoder` describes (`REFINE_S`).
-fn cleanup_frames(settings: &RustCaptureSettings, encoder: EncoderQuality) -> i32 {
+fn cleanup_frames(settings: &CaptureSettings, encoder: EncoderQuality) -> i32 {
     if encoder.holds || (encoder.last.is_none() && !encoder.measures) {
         converge_frames(settings)
     } else {
@@ -574,7 +574,7 @@ fn cleanup_frames(settings: &RustCaptureSettings, encoder: EncoderQuality) -> i3
 /// that holds no quantizer is cleaned up by the rate control's own frames, a refresh and its
 /// burst, which it refines; a key frame there would come out at the rate control's quantizer,
 /// which a small buffer starves.
-pub fn paint_over_improves(settings: &RustCaptureSettings, encoder: EncoderQuality) -> bool {
+pub fn paint_over_improves(settings: &CaptureSettings, encoder: EncoderQuality) -> bool {
     let paint = settings.video_paintover_crf.max(0) as u32;
     settings.cleans_up()
         && if settings.video_cbr_mode {
@@ -640,7 +640,7 @@ impl HwFrameDecision {
 /// # Returns
 ///
 /// `true` if a periodic IDR should be forced on this frame.
-pub fn periodic_idr_due(settings: &RustCaptureSettings, frame_counter: u16) -> bool {
+pub fn periodic_idr_due(settings: &CaptureSettings, frame_counter: u16) -> bool {
     let secs = settings.keyframe_interval_s;
     if secs <= 0.0 {
         return false;
@@ -658,14 +658,14 @@ pub fn periodic_idr_due(settings: &RustCaptureSettings, frame_counter: u16) -> b
 /// sized to a frame's budget, are coded at the paint-over quantizer instead: counted from the rate
 /// control's last quantizer, which a key frame after a loss leaves at the coarsest, the sweep
 /// ended up to 13 dB short of it at 8 fps.
-pub fn held_refresh_quality(settings: &RustCaptureSettings, encoder: EncoderQuality) -> u32 {
+pub fn held_refresh_quality(settings: &CaptureSettings, encoder: EncoderQuality) -> u32 {
     refresh_quality(settings, encoder, 1.0)
 }
 
 /// `held_refresh_quality` from a rate control's last frame of `spent` frame budgets rather than
 /// one: a rate control pinned at its coarsest quantizer (`OVERSHOOT_BUDGETS`) refreshed in one
 /// held frame, which then costs that much more.
-fn refresh_quality(settings: &RustCaptureSettings, encoder: EncoderQuality, spent: f64) -> u32 {
+fn refresh_quality(settings: &CaptureSettings, encoder: EncoderQuality, spent: f64) -> u32 {
     let paint = settings.video_paintover_crf.max(0) as u32;
     match (settings.video_cbr_mode, encoder.last) {
         (true, Some(last)) => {
@@ -782,7 +782,7 @@ fn refresh_quality(settings: &RustCaptureSettings, encoder: EncoderQuality, spen
 /// picture it covers).
 pub fn decide_hw_fullframe(
     st: &mut StripeState,
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     frame_counter: u16,
     damage: Damage,
     is_animated: bool,
@@ -1208,7 +1208,7 @@ fn sweep_refresh(st: &mut StripeState, d: &mut HwFrameDecision, qp: u32) {
 /// as a key frame, as main's paint-over did.
 fn decide_constant_quality(
     st: &mut StripeState,
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     frame_counter: u16,
     damage: Damage,
     is_animated: bool,
@@ -1529,7 +1529,7 @@ fn cpu_list(list: &str) -> Option<libc::cpu_set_t> {
 /// Recording fan-out (socket sink and MP4 recorder) is handled at the delivery layer; a
 /// consumer needing a keyframe goes through [`X11Pipeline::request_idr`] like everyone else.
 pub struct X11Pipeline {
-    settings: RustCaptureSettings,
+    settings: CaptureSettings,
     stripes: Vec<StripeState>,
     /// Smoothed number of stripes carrying the encode budget (see `stripe_rate_control`).
     stripes_carrying: f32,
@@ -1563,7 +1563,7 @@ impl X11Pipeline {
     /// selects, then the codec's software encoder, or the striped software path for JPEG and
     /// H.264. A codec no backend serves falls through to the video codecs the host does serve,
     /// JPEG last.
-    pub fn new(mut settings: RustCaptureSettings) -> Self {
+    pub fn new(mut settings: CaptureSettings) -> Self {
         let hw = encoders::select_frame_encoder(
             &mut settings,
             FrameSource::Host { rgba: false },
@@ -1747,7 +1747,7 @@ impl X11Pipeline {
     /// cannot follow (VAAPI on resize), or the striped software path stands where an engine
     /// may take the new size (one that refused the old size, past its maximum), and the caller
     /// must rebuild.
-    pub fn reshape(&mut self, settings: &RustCaptureSettings, size_changed: bool) -> bool {
+    pub fn reshape(&mut self, settings: &CaptureSettings, size_changed: bool) -> bool {
         // A demotion (`recover_hw`) holds for the pipeline's life.
         let demoted = self.settings.use_cpu;
         if !size_changed {
@@ -1808,7 +1808,7 @@ impl X11Pipeline {
         }
     }
 
-    /// Take the rate the path carries (`RustCaptureSettings::video_link_kbps`), which the next
+    /// Take the rate the path carries (`CaptureSettings::video_link_kbps`), which the next
     /// process() reads.
     pub fn set_link_rate(&mut self, kbps: i32) {
         self.settings.video_link_kbps = kbps;
@@ -2144,8 +2144,8 @@ mod tests {
     /// its frames (`HOLDS` reports no quality of its own, so the cleanup always improves),
     /// paint-over on and clearly finer than normal, a short burst, a short trigger, and no
     /// scheduled IDR. `crf_settings` is the constant-quality one.
-    fn hw_settings() -> RustCaptureSettings {
-        RustCaptureSettings {
+    fn hw_settings() -> CaptureSettings {
+        CaptureSettings {
             codec: Codec::H264,
             video_cbr_mode: true,
             video_crf: 25,
@@ -2161,8 +2161,8 @@ mod tests {
     }
 
     /// `hw_settings` at a constant quality.
-    fn crf_settings() -> RustCaptureSettings {
-        RustCaptureSettings {
+    fn crf_settings() -> CaptureSettings {
+        CaptureSettings {
             video_cbr_mode: false,
             ..hw_settings()
         }
@@ -2171,7 +2171,7 @@ mod tests {
     /// Drive the policy through `frames` frames of `damage`, returning the decisions.
     fn run(
         st: &mut StripeState,
-        s: &RustCaptureSettings,
+        s: &CaptureSettings,
         damage: Damage,
         frames: usize,
     ) -> Vec<HwFrameDecision> {
@@ -2222,7 +2222,7 @@ mod tests {
     #[test]
     fn a_still_screen_is_cleaned_up_whatever_turbo_sends() {
         for turbo in [false, true] {
-            let s = RustCaptureSettings {
+            let s = CaptureSettings {
                 video_streaming_mode: turbo,
                 ..hw_settings()
             };
@@ -2276,7 +2276,7 @@ mod tests {
     /// cap coarsened is refined back.
     #[test]
     fn a_constant_rate_cleanup_keeps_to_its_budget() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_cbr_mode: true,
             ..hw_settings()
         };
@@ -2329,7 +2329,7 @@ mod tests {
     /// key frame earns a key frame once the screen holds still long enough.
     #[test]
     fn a_small_change_is_refreshed_and_a_large_one_keyed() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_paintover_burst_frames: 0,
             ..hw_settings()
         };
@@ -2367,7 +2367,7 @@ mod tests {
     /// where one that holds only key frames (SVT-AV1) ends on a key frame.
     #[test]
     fn a_refresh_that_restores_the_picture_is_not_followed_by_a_key_frame() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_paintover_burst_frames: 0,
             ..hw_settings()
         };
@@ -2413,7 +2413,7 @@ mod tests {
     #[test]
     fn a_slower_session_waits_as_long_for_its_cleanup() {
         for (fps, frames) in [(120.0, 15), (60.0, 15), (30.0, 8), (8.0, 2), (1.0, 1)] {
-            let s = RustCaptureSettings {
+            let s = CaptureSettings {
                 paint_over_trigger_frames: 15,
                 target_fps: fps,
                 ..hw_settings()
@@ -2435,7 +2435,7 @@ mod tests {
     /// as a caret's, still waits for the trigger.
     #[test]
     fn a_cleanup_through_the_rate_control_starts_on_the_first_still_frame() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             paint_over_trigger_frames: 15,
             ..hw_settings()
         };
@@ -2866,7 +2866,7 @@ mod tests {
     /// every frame at that quantizer.
     #[test]
     fn a_rate_control_pinned_at_its_coarsest_quantizer_is_refreshed_once() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_bitrate_kbps: 100,
             ..hw_settings()
         };
@@ -2917,7 +2917,7 @@ mod tests {
     #[test]
     fn a_pinned_rate_control_withheld_is_refreshed_all_the_same() {
         use crate::encoders::reference::ReferenceReport;
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_bitrate_kbps: 100,
             ..hw_settings()
         };
@@ -2958,7 +2958,7 @@ mod tests {
     /// which ends at once where the rate control is pinned at its coarsest quantizer.
     #[test]
     fn a_pinned_rate_control_ends_a_recovery_burst() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_bitrate_kbps: 100,
             video_paintover_crf: 51,
             use_paint_over_quality: false,
@@ -3021,7 +3021,7 @@ mod tests {
     /// (`LEVEL_S`).
     #[test]
     fn same_sized_frames_end_a_cleanup_that_says_no_quantizer() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_bitrate_kbps: 2000,
             ..hw_settings()
         };
@@ -3065,7 +3065,7 @@ mod tests {
     /// cleanup carries on.
     #[test]
     fn a_cleanup_frame_coded_at_the_cleanup_rate_is_judged_by_its_budget() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_bitrate_kbps: 500,
             video_link_kbps: 2000,
             ..hw_settings()
@@ -3109,7 +3109,7 @@ mod tests {
     /// control's (at 8 fps, 18 steps under it: 25 here, 33 from the key frame's 51).
     #[test]
     fn a_rate_control_refining_a_recovery_key_frame_is_not_pinned() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_bitrate_kbps: 500,
             target_fps: 8.0,
             video_paintover_crf: 18,
@@ -3326,7 +3326,7 @@ mod tests {
 
     #[test]
     fn a_stalled_rate_control_that_holds_a_band_sweeps_the_picture_within_the_budget() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_link_kbps: hw_settings().video_bitrate_kbps,
             ..hw_settings()
         };
@@ -3390,7 +3390,7 @@ mod tests {
     /// sweep keeps to that rate, a band past its budget waited out before the next.
     #[test]
     fn a_sweep_keeps_to_the_rate_the_path_carries() {
-        let at = |link: i32| RustCaptureSettings {
+        let at = |link: i32| CaptureSettings {
             video_link_kbps: link,
             ..hw_settings()
         };
@@ -3618,7 +3618,7 @@ mod tests {
     /// paint-over quantizer.
     #[test]
     fn a_held_refresh_swept_under_turbo_keeps_the_refresh_quantizer() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_streaming_mode: true,
             ..hw_settings()
         };
@@ -3815,7 +3815,7 @@ mod tests {
     /// small), ends its cleanup after `EMPTY_S` of them rather than `REFINE_S`.
     #[test]
     fn a_cleanup_whose_frames_keep_one_size_ends() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_bitrate_kbps: 100,
             ..hw_settings()
         };
@@ -3961,7 +3961,7 @@ mod tests {
 
     #[test]
     fn a_large_change_after_a_clean_still_screen_is_not_keyed_as_it_lands() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_paintover_burst_frames: 0,
             ..hw_settings()
         };
@@ -4025,7 +4025,7 @@ mod tests {
     /// with it.
     #[test]
     fn low_motion_does_not_hold_off_the_cleanup_forever() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             paint_over_trigger_frames: 4,
             ..hw_settings()
         };
@@ -4140,7 +4140,7 @@ mod tests {
     /// rate it is not held.
     #[test]
     fn a_requested_key_frame_is_the_rate_controls_own() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             paint_over_trigger_frames: 30,
             ..crf_settings()
         };
@@ -4172,7 +4172,7 @@ mod tests {
         let burst = decide_hw_fullframe(&mut st, &s, 31, Damage::None, false, false, HOLDS);
         assert_eq!(burst.target_qp, paint);
 
-        let cbr = RustCaptureSettings {
+        let cbr = CaptureSettings {
             video_cbr_mode: true,
             paint_over_trigger_frames: 30,
             ..hw_settings()
@@ -4244,7 +4244,7 @@ mod tests {
             (true, 18, false, Some(18), true, Seen::Nothing),
             (true, 18, false, Some(30), false, Seen::Unheld),
         ] {
-            let s = RustCaptureSettings {
+            let s = CaptureSettings {
                 video_cbr_mode: cbr,
                 video_paintover_crf: paint,
                 use_paint_over_quality: on,
@@ -4313,7 +4313,7 @@ mod tests {
     #[test]
     fn a_constant_quality_cleanup_moves_the_session_quality() {
         for turbo in [false, true] {
-            let s = RustCaptureSettings {
+            let s = CaptureSettings {
                 video_streaming_mode: turbo,
                 ..crf_settings()
             };
@@ -4403,7 +4403,7 @@ mod tests {
     /// of unknown extent, takes it back to the session's quality until its next cleanup.
     #[test]
     fn a_clean_region_keeps_its_quality_until_it_moves() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             video_streaming_mode: true,
             ..crf_settings()
         };
@@ -4430,7 +4430,7 @@ mod tests {
             normal
         );
 
-        let off = RustCaptureSettings {
+        let off = CaptureSettings {
             use_paint_over_quality: false,
             ..s
         };
@@ -4483,7 +4483,7 @@ mod tests {
     /// and paint-over is disabled to keep the static-frame assertions clean.
     #[test]
     fn x11_software_emits_on_change_and_stays_quiet_when_static() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 128,
             height: 128,
             codec: Codec::Jpeg,
@@ -4516,7 +4516,7 @@ mod tests {
     /// stream goes quiet again once the burst ends.
     #[test]
     fn x11_software_h264_streams_recovery_burst_after_requested_idr() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 128,
             height: 128,
             codec: Codec::H264,
@@ -4574,7 +4574,7 @@ mod tests {
     #[cfg(feature = "gpl")]
     #[test]
     fn an_x264_cleanup_whose_frames_refine_nothing_ends() {
-        let mut p = X11Pipeline::new(RustCaptureSettings {
+        let mut p = X11Pipeline::new(CaptureSettings {
             width: 640,
             height: 384,
             codec: Codec::H264,
@@ -4621,10 +4621,7 @@ mod tests {
     /// The probes (`X11Pipeline::hold`) of a Turbo session's first still frame coded at a
     /// cleanup's quality, as a key frame where `key`, and of the same frame in a second session
     /// where the screen moves on it.
-    fn cleanup_frame_that_moved(
-        s: &RustCaptureSettings,
-        key: bool,
-    ) -> [[(Option<u32>, bool); 2]; 2] {
+    fn cleanup_frame_that_moved(s: &CaptureSettings, key: bool) -> [[(Option<u32>, bool); 2]; 2] {
         let still = noise(42);
         let lead = |p: &mut X11Pipeline| {
             for i in 0..3u8 {
@@ -4657,7 +4654,7 @@ mod tests {
     /// encoded and goes to the rate control, a refresh or a key frame alike.
     #[test]
     fn a_turbo_frame_decided_held_that_moved_goes_to_the_rate_control() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 640,
             height: 384,
             codec: Codec::Av1,
@@ -4698,7 +4695,7 @@ mod tests {
     /// moved is coded at the session's own.
     #[test]
     fn a_turbo_frame_at_the_paint_over_quality_that_moved_is_coded_at_the_session_quality() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 640,
             height: 384,
             codec: Codec::Vp9,
@@ -4738,7 +4735,7 @@ mod tests {
     fn a_turbo_stripe_at_the_paint_over_quality_codes_a_change_at_the_session_quality() {
         use crate::encoders::codec::{FRAME_KEY, parse_video_type};
         let session = |turbo: bool| {
-            let mut p = X11Pipeline::new(RustCaptureSettings {
+            let mut p = X11Pipeline::new(CaptureSettings {
                 width: 640,
                 height: 384,
                 codec: Codec::H264,
@@ -4814,7 +4811,7 @@ mod tests {
             "I420 (Limited Range)"
         };
         for (fullcolor, expected) in [(true, i444), (false, "I420 (Limited Range)")] {
-            let settings = RustCaptureSettings {
+            let settings = CaptureSettings {
                 width: 64,
                 height: 64,
                 codec: Codec::H264,
@@ -4848,7 +4845,7 @@ mod tests {
     fn x11_pipeline_reports_the_session_it_settled_on() {
         let report = crate::report::StreamReport::new("x11");
         let _scope = crate::report::enter(&report);
-        let mut p = X11Pipeline::new(RustCaptureSettings {
+        let mut p = X11Pipeline::new(CaptureSettings {
             width: 64,
             height: 64,
             codec: Codec::H264,
@@ -4888,14 +4885,14 @@ mod tests {
     /// keeps.
     #[test]
     fn x11_software_h264_reshapes_in_place_where_no_engine_may_take_it() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 640,
             height: 384,
             codec: Codec::H264,
             use_cpu: true,
             ..Default::default()
         };
-        let resized = RustCaptureSettings {
+        let resized = CaptureSettings {
             width: 1280,
             height: 720,
             ..s.clone()
@@ -4904,14 +4901,14 @@ mod tests {
         assert!(p.hw.is_none());
         assert!(p.reshape(&resized, true), "software was asked for");
 
-        let off_node = RustCaptureSettings {
+        let off_node = CaptureSettings {
             use_cpu: false,
             encode_node_index: -1,
             ..s.clone()
         };
         let mut p = X11Pipeline::new(off_node.clone());
         assert!(p.reshape(
-            &RustCaptureSettings {
+            &CaptureSettings {
                 width: 1280,
                 height: 720,
                 ..off_node
@@ -4921,14 +4918,14 @@ mod tests {
 
         // The demotion `recover_hw` leaves.
         let mut p = X11Pipeline::new(s.clone());
-        let live = RustCaptureSettings {
+        let live = CaptureSettings {
             use_cpu: false,
             ..s.clone()
         };
         assert!(p.reshape(&live, false));
         assert!(p.settings.use_cpu, "a reshape keeps the demotion");
         assert!(p.reshape(
-            &RustCaptureSettings {
+            &CaptureSettings {
                 width: 1280,
                 height: 720,
                 ..live
@@ -4942,7 +4939,7 @@ mod tests {
     #[test]
     #[ignore]
     fn gpu_x11_h264_past_the_engine_maximum_takes_the_engine_once_resized() {
-        let big = RustCaptureSettings {
+        let big = CaptureSettings {
             width: 8192,
             height: 4096,
             ..crate::x11::gpu_test_support::settings(Codec::H264)
@@ -4952,7 +4949,7 @@ mod tests {
             p.hw.is_none(),
             "8192x4096 is past every engine's H.264 maximum"
         );
-        let resized = RustCaptureSettings {
+        let resized = CaptureSettings {
             width: 1362,
             height: 1036,
             ..big
@@ -4970,7 +4967,7 @@ mod tests {
     fn x11_jpeg_pipeline_names_its_encoder() {
         let report = crate::report::StreamReport::new("x11");
         let _scope = crate::report::enter(&report);
-        let p = X11Pipeline::new(RustCaptureSettings {
+        let p = X11Pipeline::new(CaptureSettings {
             width: 64,
             height: 64,
             codec: Codec::Jpeg,
@@ -4986,7 +4983,7 @@ mod tests {
     fn gpu_x11_pipeline_reports_the_hardware_session() {
         let report = crate::report::StreamReport::new("x11");
         let _scope = crate::report::enter(&report);
-        let p = X11Pipeline::new(RustCaptureSettings {
+        let p = X11Pipeline::new(CaptureSettings {
             width: 1280,
             height: 720,
             codec: Codec::H264,
@@ -5012,7 +5009,7 @@ mod tests {
     #[ignore]
     fn gpu_a_turbo_still_screen_reads_still_through_its_cleanup() {
         let (w, h) = (1280usize, 720usize);
-        let mut p = X11Pipeline::new(RustCaptureSettings {
+        let mut p = X11Pipeline::new(CaptureSettings {
             width: w as i32,
             height: h as i32,
             codec: Codec::H264,
@@ -5050,7 +5047,7 @@ mod tests {
     /// infinite, so there is no scheduled IDR to break the silence.
     #[test]
     fn static_frames_stay_silent_without_request() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             use_paint_over_quality: false,
             ..hw_settings()
         };
@@ -5069,7 +5066,7 @@ mod tests {
     /// so a constant-rate session can refine it.
     #[test]
     fn requested_idr_recovers_even_without_paint_over() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             use_paint_over_quality: false,
             video_paintover_burst_frames: 5,
             ..hw_settings()
@@ -5145,13 +5142,13 @@ mod tests {
     /// that coded near the paint-over quantizer, gets the paint-over one.
     #[test]
     fn a_held_refresh_fits_the_budget_a_constant_rate_leaves() {
-        let cbr = RustCaptureSettings {
+        let cbr = CaptureSettings {
             video_cbr_mode: true,
             video_paintover_crf: 18,
             target_fps: 30.0,
             ..hw_settings()
         };
-        let q = |s: &RustCaptureSettings, last| {
+        let q = |s: &CaptureSettings, last| {
             held_refresh_quality(
                 s,
                 EncoderQuality {
@@ -5178,7 +5175,7 @@ mod tests {
         assert_eq!(q(&cbr, Some(45)), 18);
         assert_eq!(q(&cbr, Some(30)), 18);
         assert_eq!(q(&cbr, None), 18);
-        let crf = RustCaptureSettings {
+        let crf = CaptureSettings {
             video_cbr_mode: false,
             ..cbr.clone()
         };

@@ -26,7 +26,7 @@ use super::reference::Reference;
 use super::reference::{Invalidation, ReferenceWindow};
 #[cfg(feature = "gpl")]
 use super::sps::{WideFrameNum, h264_frame_num_range};
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use crate::pipeline::{Cleanup, Damage};
 use rayon::prelude::*;
 use smithay::utils::{Physical, Rectangle};
@@ -1154,7 +1154,7 @@ pub struct StripeState {
 
 /// The bits per sample the striped H.264 path codes `settings` at: 10 where they ask for it
 /// and the build's libx264 opens such a session, else 8.
-pub fn stripe_bit_depth(settings: &RustCaptureSettings) -> u32 {
+pub fn stripe_bit_depth(settings: &CaptureSettings) -> u32 {
     #[cfg(feature = "gpl")]
     if settings.codec == Codec::H264
         && settings.video_bit_depth >= 10
@@ -1329,14 +1329,14 @@ const CARRY_FALL: f32 = 0.05;
 /// libx264 does under either rate control, and OpenH264 moves its quantizer only at a constant
 /// quality (`Openh264Encoder::update_qp`), so a stripe that holds none is cleaned up through its
 /// rate control (`encode_cpu`), never by a key frame, which that would starve.
-pub fn stripes_hold_quantizer(settings: &RustCaptureSettings) -> bool {
+pub fn stripes_hold_quantizer(settings: &CaptureSettings) -> bool {
     cfg!(feature = "gpl") || !settings.video_cbr_mode
 }
 
 /// Whether a frame that holds still codes a stripe at the paint-over quality instead of the
 /// session's (`encode_cpu`): at a constant quality, a stripe whose cleanup falls due, whose burst
 /// is held, or which keeps the quality it was cleaned up at. A constant rate holds none there.
-pub fn stripes_held_still(stripes: &[StripeState], settings: &RustCaptureSettings) -> bool {
+pub fn stripes_held_still(stripes: &[StripeState], settings: &CaptureSettings) -> bool {
     !settings.video_cbr_mode
         && settings.use_paint_over_quality
         && settings.video_paintover_crf < settings.video_crf
@@ -1454,7 +1454,7 @@ pub fn encode_cpu(
     width: i32,
     height: i32,
     damage_rects: &[Rectangle<i32, Physical>],
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     frame_counter: u16,
     use_gpu: bool,
     hash_damage: bool,
@@ -2106,7 +2106,7 @@ pub fn encode_cpu(
 
 /// Whether a frame's `n` stripes are coded at once across the rayon pool, or one after another on
 /// the encode thread: one stripe, or a session without `cpu_encode_threading`, takes no other.
-fn stripes_at_once(settings: &RustCaptureSettings, n: usize) -> bool {
+fn stripes_at_once(settings: &CaptureSettings, n: usize) -> bool {
     n > 1 && settings.cpu_encode_threading
 }
 
@@ -2193,7 +2193,7 @@ const CLEANUP_VBV_FRAMES: f64 = 4.0;
 /// The buffer, in kbit, of a stripe at `bitrate_kbps` while it is cleaned up
 /// (`CLEANUP_VBV_FRAMES`).
 #[cfg(feature = "gpl")]
-fn cleanup_vbv_kbit(settings: &RustCaptureSettings, bitrate_kbps: i32) -> i32 {
+fn cleanup_vbv_kbit(settings: &CaptureSettings, bitrate_kbps: i32) -> i32 {
     let frames = crate::encoders::vbv_bits(
         (bitrate_kbps as u32).saturating_mul(1000),
         settings.target_fps,
@@ -2208,7 +2208,7 @@ fn cleanup_vbv_kbit(settings: &RustCaptureSettings, bitrate_kbps: i32) -> i32 {
 /// the session's rate gives `REFINE_STRIPE_KBPS` each, one at least; OpenH264's, all of them,
 /// since held to that count a GPL-off build left the page at 25 and 19 dB at 8 and 60 fps
 /// 0.5 Mbit/s, against 42 with every stripe refining.
-fn refine_slots(settings: &RustCaptureSettings, n_stripes: usize) -> usize {
+fn refine_slots(settings: &CaptureSettings, n_stripes: usize) -> usize {
     let all = n_stripes.max(1);
     if !cfg!(feature = "gpl") {
         return all;
@@ -2227,11 +2227,7 @@ fn refine_slots(settings: &RustCaptureSettings, n_stripes: usize) -> usize {
 /// corner moves would spend a fraction of what was configured. The divisor is the smoothed
 /// count so it changes on the scale of a moving average and not every frame: a rate that
 /// swings frame to frame leaves the encoder chasing it and delivers less than either rate would.
-fn stripe_rate_control(
-    settings: &RustCaptureSettings,
-    carrying: f32,
-    n_stripes: usize,
-) -> (i32, i32) {
+fn stripe_rate_control(settings: &CaptureSettings, carrying: f32, n_stripes: usize) -> (i32, i32) {
     let divisor = (carrying.round().max(1.0) as usize).min(n_stripes.max(1)) as i32;
     let bitrate = (settings.video_bitrate_kbps / divisor).max(1);
     if !settings.video_cbr_mode && settings.video_vbv_multiplier <= 0.0 {
@@ -2323,9 +2319,9 @@ mod tests {
     #[test]
     fn stripes_are_coded_at_once_only_with_cpu_encode_threading() {
         use super::stripes_at_once;
-        use crate::RustCaptureSettings;
-        let on = RustCaptureSettings::default();
-        let off = RustCaptureSettings {
+        use crate::CaptureSettings;
+        let on = CaptureSettings::default();
+        let off = CaptureSettings {
             cpu_encode_threading: false,
             ..Default::default()
         };
@@ -2342,9 +2338,9 @@ mod tests {
     /// spends a multiple of it whenever the whole screen does.
     #[test]
     fn cbr_budget_is_split_across_the_stripes_carrying_it() {
-        use crate::RustCaptureSettings;
+        use crate::CaptureSettings;
         for &kbps in &[500i32, 4000, 8000, 20000] {
-            let settings = RustCaptureSettings {
+            let settings = CaptureSettings {
                 video_cbr_mode: true,
                 video_bitrate_kbps: kbps,
                 ..Default::default()
@@ -2381,10 +2377,10 @@ mod tests {
     /// at 0.5 Mbit/s, all eight from 2 Mbit/s. OpenH264's all clean up at once.
     #[test]
     fn stripes_refine_as_many_at_once_as_the_rate_feeds() {
-        use crate::RustCaptureSettings;
+        use crate::CaptureSettings;
         let slots = |kbps| {
             super::refine_slots(
-                &RustCaptureSettings {
+                &CaptureSettings {
                     video_cbr_mode: true,
                     video_bitrate_kbps: kbps,
                     ..Default::default()
@@ -2408,8 +2404,8 @@ mod tests {
     /// buffer that multiplier names at the configured rate as its peak; CBR always has one.
     #[test]
     fn crf_stripes_take_a_vbv_only_where_a_multiplier_asks() {
-        use crate::RustCaptureSettings;
-        let crf = |mult| RustCaptureSettings {
+        use crate::CaptureSettings;
+        let crf = |mult| CaptureSettings {
             video_bitrate_kbps: 8000,
             video_vbv_multiplier: mult,
             target_fps: 30.0,
@@ -2418,7 +2414,7 @@ mod tests {
         assert_eq!(super::stripe_rate_control(&crf(0.0), 1.0, 4), (8000, 0));
         assert_eq!(super::stripe_rate_control(&crf(12.0), 1.0, 4), (8000, 3200));
         assert_eq!(super::stripe_rate_control(&crf(12.0), 4.0, 4), (2000, 800));
-        let cbr = RustCaptureSettings {
+        let cbr = CaptureSettings {
             video_cbr_mode: true,
             ..crf(0.0)
         };
@@ -2431,9 +2427,9 @@ mod tests {
     /// which leaves the encoder chasing a square wave and delivering less than either rate.
     #[test]
     fn the_budget_divisor_follows_motion_and_is_smoothed() {
-        use crate::RustCaptureSettings;
+        use crate::CaptureSettings;
         let (w, h) = (64, 512);
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w,
             height: h,
             codec: Codec::Jpeg,
@@ -2512,11 +2508,11 @@ mod tests {
     #[cfg(not(feature = "gpl"))]
     #[test]
     fn openh264_cleans_up_past_the_frames_it_skips() {
-        use crate::RustCaptureSettings;
+        use crate::CaptureSettings;
         use openh264::decoder::Decoder;
         use openh264::formats::YUVSource;
         let (w, h) = (640, 352);
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w,
             height: h,
             codec: Codec::H264,
@@ -2614,11 +2610,11 @@ mod tests {
     #[cfg(not(feature = "gpl"))]
     #[test]
     fn openh264_stripes_are_independent_streams() {
-        use crate::RustCaptureSettings;
+        use crate::CaptureSettings;
         use openh264::decoder::Decoder;
         use openh264::formats::YUVSource;
         let (w, h) = (128, 512);
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w,
             height: h,
             codec: Codec::H264,
@@ -2792,10 +2788,10 @@ mod tests {
     /// tail is the idle fast path, which skips the stripe fan-out entirely.
     #[test]
     fn clean_frames_countdown_fire_paintover_then_go_quiescent() {
-        use crate::RustCaptureSettings;
+        use crate::CaptureSettings;
         let (w, h) = (64, 128);
         let pixels = vec![128u8; (w * h * 4) as usize];
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w,
             height: h,
             codec: Codec::Jpeg,
@@ -2869,11 +2865,11 @@ mod tests {
     /// the fast path must not swallow the wake-up).
     #[test]
     fn hash_scan_idles_after_paintover_and_wakes_on_change() {
-        use crate::RustCaptureSettings;
+        use crate::CaptureSettings;
         let (w, h) = (64, 128);
         let static_px = vec![128u8; (w * h * 4) as usize];
         let changed_px = vec![200u8; (w * h * 4) as usize];
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w,
             height: h,
             codec: Codec::Jpeg,
@@ -2950,9 +2946,9 @@ mod tests {
     /// around it are cleaned up at the trigger as if it were not there.
     #[test]
     fn a_blinking_caret_starves_no_stripe_of_its_cleanup() {
-        use crate::RustCaptureSettings;
+        use crate::CaptureSettings;
         let (w, h) = (64i32, 256i32);
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w,
             height: h,
             codec: Codec::Jpeg,
@@ -3385,7 +3381,7 @@ mod qp_bound_sweep {
     //! sweep runs in every build (the crate is a dev-dependency), the x264 one needs `gpl`.
     #[cfg(feature = "gpl")]
     use super::H264EncoderWrapper;
-    use crate::RustCaptureSettings;
+    use crate::CaptureSettings;
     use crate::encoders::Codec;
     use crate::encoders::oh264::Openh264Encoder;
     use openh264::decoder::Decoder;
@@ -3800,7 +3796,7 @@ mod qp_bound_sweep {
         const KBPS: i32 = 1000;
         const SCROLL: usize = 30;
         const STILL: usize = 600;
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             target_fps: 60.0,
             ..Default::default()
         };
@@ -4171,7 +4167,7 @@ mod qp_bound_sweep {
     /// broadcast to a gray BGRA frame), returning each frame's bitstream for comparison with the
     /// x264 run.
     fn encode_oh264(cbr: bool, kbps: i32, crf: i32, min_qp: i32, max_qp: i32) -> Vec<Vec<u8>> {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: W as i32,
             height: H as i32,
             target_fps: 60.0,

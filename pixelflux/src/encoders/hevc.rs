@@ -16,7 +16,7 @@ use std::ffi::CString;
 use super::codec::{Codec, VIDEO_HEADER_LEN, h265_frame_type, push_video_header};
 use super::reference::Reference;
 use super::session::{Pending, Planes, Quality, RateSettings, encode_threads};
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 
 /// One software HEVC session for one capture.
 pub struct HevcEncoder {
@@ -68,7 +68,7 @@ struct Coded {
 
 impl HevcEncoder {
     /// Open a session on host frames; `rgba` names the byte order they arrive in.
-    pub fn new(settings: &RustCaptureSettings, rgba: bool) -> Result<Self, String> {
+    pub fn new(settings: &CaptureSettings, rgba: bool) -> Result<Self, String> {
         let _ = rgba;
         let fullcolor = settings.video_fullcolor && Backend::FULLCOLOR;
         let bit_depth = if settings.video_bit_depth >= 10 && Backend::ten_bit() {
@@ -195,7 +195,7 @@ impl HevcEncoder {
 
     /// Re-open the encoder when a rate or frame-rate setting changed: neither library's rate
     /// control takes a new target while it runs.
-    pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
+    pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> Result<(), String> {
         let Some(rate) = self.rate.changed(settings) else {
             return Ok(());
         };
@@ -782,7 +782,7 @@ mod tests {
     /// between are deltas that name no reference.
     #[test]
     fn key_frames_come_on_request_and_deltas_name_no_reference() {
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: 64,
             height: 48,
             target_fps: 30.0,
@@ -817,7 +817,7 @@ mod tests {
     /// than the paint-over quantizer, a constant quality's at it.
     #[test]
     fn a_constant_rate_cleanup_reaches_six_steps_finer() {
-        let mut settings = RustCaptureSettings {
+        let mut settings = CaptureSettings {
             width: 64,
             height: 48,
             target_fps: 30.0,
@@ -847,7 +847,7 @@ mod tests {
     #[test]
     fn x265_codes_with_8x8_coding_units() {
         for (width, height) in [(1920, 1080), (64, 48), (16, 16)] {
-            let settings = RustCaptureSettings {
+            let settings = CaptureSettings {
                 width,
                 height,
                 target_fps: 30.0,
@@ -865,7 +865,7 @@ mod tests {
     #[cfg(feature = "gpl")]
     #[test]
     fn a_constant_rates_filler_stays_off_the_wire() {
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: 320,
             height: 240,
             target_fps: 30.0,
@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn the_frame_rate_reaches_the_library_as_its_fraction() {
         for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
-            let settings = RustCaptureSettings {
+            let settings = CaptureSettings {
                 width: 64,
                 height: 48,
                 target_fps: num as f64 / den as f64,

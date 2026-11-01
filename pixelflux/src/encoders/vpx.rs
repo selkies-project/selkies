@@ -33,7 +33,7 @@ use super::codec::{
 };
 use super::reference::{Reference, ReferenceSlots, SlotPlan, SlotRefresh};
 use super::session::{Pending, Planes, Quality, RateSettings, encode_threads};
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 
 /// The rate target, in kbit/s, a pinned-quantizer session names and never reaches.
 const RATE_CEILING_KBPS: u32 = 100_000;
@@ -149,7 +149,7 @@ fn error(ctx: &vpx_codec_ctx_t, what: &str) -> String {
 
 impl VpxEncoder {
     /// Open a VP8 or VP9 session on host frames in the byte order `rgba` names.
-    pub fn new(settings: &RustCaptureSettings, codec: Codec, rgba: bool) -> Result<Self, String> {
+    pub fn new(settings: &CaptureSettings, codec: Codec, rgba: bool) -> Result<Self, String> {
         if !matches!(codec, Codec::Vp8 | Codec::Vp9) {
             return Err(format!("libvpx encodes no {}", codec.display()));
         }
@@ -542,7 +542,7 @@ impl VpxEncoder {
     }
 
     /// Re-program the rate control when a rate or frame-rate setting changed, live.
-    pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
+    pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> Result<(), String> {
         let Some(rate) = self.rate.changed(settings) else {
             return Ok(());
         };
@@ -837,8 +837,8 @@ mod tests {
     const W: usize = 320;
     const H: usize = 240;
 
-    fn settings(codec: Codec) -> RustCaptureSettings {
-        RustCaptureSettings {
+    fn settings(codec: Codec) -> CaptureSettings {
+        CaptureSettings {
             width: W as i32,
             height: H as i32,
             target_fps: 30.0,
@@ -899,7 +899,7 @@ mod tests {
             for (num, den) in [(60000i32, 1001i32), (120000, 1001), (144000, 1001), (60, 1)] {
                 let fps = num as f64 / den as f64;
                 let mut enc = VpxEncoder::new(
-                    &RustCaptureSettings {
+                    &CaptureSettings {
                         target_fps: fps,
                         ..settings(codec)
                     },
@@ -912,7 +912,7 @@ mod tests {
                     (den, num),
                     "{codec:?}"
                 );
-                enc.reconfigure_rate(&RustCaptureSettings {
+                enc.reconfigure_rate(&CaptureSettings {
                     target_fps: 30.0,
                     ..settings(codec)
                 })

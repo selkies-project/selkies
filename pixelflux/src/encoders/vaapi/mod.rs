@@ -61,7 +61,7 @@ use super::reference::{
 };
 use super::session::{RateSettings, check_host_frame};
 use super::sps::{NoReorder, h264_frame_num_range};
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 
 /// The slices an H.264 or HEVC picture is cut into, a decoder threading a frame across them.
 /// AMD's VCE is the exception for H.264: it codes a picture cut into four slices at less than
@@ -1078,7 +1078,7 @@ impl Drop for VaapiEncoder {
 impl VaapiEncoder {
     /// Stand up a session for `codec` on the render node the settings select, fed through
     /// `input`, with the libva of this process.
-    pub fn new(settings: &RustCaptureSettings, codec: Codec, input: Input) -> Result<Self, String> {
+    pub fn new(settings: &CaptureSettings, codec: Codec, input: Input) -> Result<Self, String> {
         if !codec.is_video() {
             return Err("JPEG has no VA-API encoder".into());
         }
@@ -1093,7 +1093,7 @@ impl VaapiEncoder {
     /// `new` on an open device.
     pub(crate) fn on_device(
         device: Arc<Device>,
-        settings: &RustCaptureSettings,
+        settings: &CaptureSettings,
         codec: Codec,
         input: Input,
     ) -> Result<Self, String> {
@@ -1152,7 +1152,7 @@ impl VaapiEncoder {
     #[allow(clippy::too_many_arguments)]
     fn open(
         device: &Arc<Device>,
-        settings: &RustCaptureSettings,
+        settings: &CaptureSettings,
         codec: Codec,
         input: Input,
         profile: VAProfile,
@@ -1738,7 +1738,7 @@ impl VaapiEncoder {
 
     /// Take a rate or frame-rate change: the next frame opens a sequence with the new rate
     /// control, as a key frame.
-    pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
+    pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> Result<(), String> {
         let Some(rate) = self.rate.changed(settings) else {
             return Ok(());
         };
@@ -2960,7 +2960,7 @@ mod tests {
     /// everywhere: a host without a VA-API device exercises the error path.
     #[test]
     fn construction_answers_or_refuses() {
-        let mut settings = RustCaptureSettings {
+        let mut settings = CaptureSettings {
             width: 128,
             height: 128,
             codec: Codec::H264,
@@ -2993,7 +2993,7 @@ mod tests {
     #[ignore]
     fn vaapi_vce_h264_is_one_slice() {
         let (w, h) = (1920usize, 1080usize);
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w as i32,
             height: h as i32,
             codec: Codec::H264,
@@ -3070,7 +3070,7 @@ mod tests {
     ) -> Option<(usize, usize, usize, f64, f64)> {
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h) = (1280usize, 720usize);
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w as i32,
             height: h as i32,
             codec,
@@ -3209,7 +3209,7 @@ mod tests {
         use crate::encoders::sps::fixtures::assert_no_reorder;
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h) = (1280usize, 720usize);
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w as i32,
             height: h as i32,
             codec: Codec::H264,

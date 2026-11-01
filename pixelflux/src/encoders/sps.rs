@@ -994,7 +994,7 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::*;
     use super::*;
-    use crate::RustCaptureSettings;
+    use crate::CaptureSettings;
 
     #[test]
     fn a_stream_that_declares_nothing_reads_as_nothing() {
@@ -1245,7 +1245,7 @@ mod tests {
         use crate::encoders::oh264::Openh264Encoder;
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h) = (160usize, 96usize);
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: w as i32,
             height: h as i32,
             target_fps: 30.0,

@@ -37,7 +37,7 @@ use super::codec::{
     h264_frame_type, h265_dpb_frames, h265_frame_type, push_video_header,
 };
 use super::reference::{Reference, ReferenceWindow};
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 
 const V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE: u32 = 9;
 const V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE: u32 = 10;
@@ -837,7 +837,7 @@ pub struct TegraEncoder {
 }
 
 impl TegraEncoder {
-    pub fn new(codec: Codec, settings: &RustCaptureSettings, rgba: bool) -> Result<Self, String> {
+    pub fn new(codec: Codec, settings: &CaptureSettings, rgba: bool) -> Result<Self, String> {
         abi_matches()?;
         let coded = coded_fourcc(codec)
             .ok_or_else(|| format!("the encoder does not serve {}", codec.display()))?;
@@ -1387,7 +1387,7 @@ impl TegraEncoder {
 
     fn setup(
         &mut self,
-        settings: &RustCaptureSettings,
+        settings: &CaptureSettings,
         fps: f64,
         bitrate_bps: u32,
         rgba: bool,
@@ -1587,7 +1587,7 @@ impl TegraEncoder {
 
     /// Apply a live bitrate change. The control is writable while streaming on this path, unlike
     /// the same change through the vendor GStreamer element, which the driver accepts and ignores.
-    pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
+    pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> Result<(), String> {
         let wanted = (settings.video_bitrate_kbps.max(1) as u32).saturating_mul(1000);
         let fps = settings.target_fps.max(1.0);
         // A changed frame rate goes to the driver too: leaving it behind would budget the new
@@ -2010,7 +2010,7 @@ mod tests {
     /// Test helper: a session with the unit headers left off, so each unit decodes as it comes;
     /// None where this host has no Tegra encoder.
     fn session(codec: Codec, w: usize, h: usize, keyframe_s: f64) -> Option<TegraEncoder> {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: w as i32,
             height: h as i32,
             codec,

@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use crate::ThreadCommand;
 use crate::encoders::software::EncodedStripe;
 
@@ -94,7 +94,7 @@ pub struct RecordOptions {
     pub backend: Option<PreferredBackend>,
     /// Full capture settings for a recorder-owned capture; `None` derives them (full root /
     /// current output geometry, H.264 full-frame).
-    pub capture: Option<RustCaptureSettings>,
+    pub capture: Option<CaptureSettings>,
     /// Unix socket serving an Ogg Opus stream to record as the audio track; empty for none.
     pub audio_socket: String,
 }
@@ -560,7 +560,7 @@ fn audio_thread(
 /// Capture settings for a recorder-owned capture: explicit settings when given (validated
 /// H.264), otherwise derived defaults, always forced to the one recordable shape (full-frame
 /// H.264, no socket rebind, scheduled recovery keyframes).
-fn own_capture_settings(opts: &RecordOptions) -> Result<RustCaptureSettings, String> {
+fn own_capture_settings(opts: &RecordOptions) -> Result<CaptureSettings, String> {
     let mut s = match &opts.capture {
         Some(explicit) => {
             if explicit.codec != crate::encoders::Codec::H264 {
@@ -568,7 +568,7 @@ fn own_capture_settings(opts: &RecordOptions) -> Result<RustCaptureSettings, Str
             }
             explicit.clone()
         }
-        None => RustCaptureSettings {
+        None => CaptureSettings {
             width: 0,
             height: 0,
             codec: crate::encoders::Codec::H264,

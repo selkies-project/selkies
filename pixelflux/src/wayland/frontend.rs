@@ -141,7 +141,7 @@ use smithay::{
     },
 };
 
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use crate::encoders::FrameEncoder;
 use crate::encoders::overlay::OverlayState;
 
@@ -188,7 +188,7 @@ use crate::pace::FramePace;
 /// output; all fields mirror the pipeline strategy documented on [`AppState`], instantiated
 /// per display.
 pub struct WlCapture {
-    pub settings: RustCaptureSettings,
+    pub settings: CaptureSettings,
     /// The frame sink, shared with the delivery thread. Kept here so a reconfigure the
     /// calloop performs on its own (a host that kept a different mode) can respawn delivery
     /// with the same consumer; `None` for a recorder-owned capture.
@@ -940,7 +940,7 @@ pub struct AppState {
 
     /// Mirror of the PRIMARY display's capture settings (geometry fallbacks, computer-use
     /// info); per-display settings live on each capture.
-    pub settings: RustCaptureSettings,
+    pub settings: CaptureSettings,
     /// A cursor sink is registered on the `wl-cursor` worker (which owns it); tracked here
     /// so sprite resolution is skipped while nobody listens.
     pub cursor_callback_set: bool,

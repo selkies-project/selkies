@@ -14,8 +14,8 @@ use crate::encoders::sps::{
 const W: i32 = 320;
 const H: i32 = 240;
 
-fn settings(codec: Codec, cbr: bool) -> RustCaptureSettings {
-    RustCaptureSettings {
+fn settings(codec: Codec, cbr: bool) -> CaptureSettings {
+    CaptureSettings {
         width: W,
         height: H,
         target_fps: 30.0,
@@ -33,7 +33,7 @@ fn device() -> Arc<Device> {
     Arc::new(Device::on(mock::api(), node.into(), "stand-in").unwrap())
 }
 
-fn open(codec: Codec, settings: &RustCaptureSettings) -> Result<VaapiEncoder, String> {
+fn open(codec: Codec, settings: &CaptureSettings) -> Result<VaapiEncoder, String> {
     VaapiEncoder::on_device(device(), settings, codec, Input::Host { rgba: false })
 }
 
@@ -179,7 +179,7 @@ fn the_frame_rate_reaches_every_codec_as_its_fraction() {
             mock::reset(Driver::generous());
             let mut enc = open(
                 codec,
-                &RustCaptureSettings {
+                &CaptureSettings {
                     target_fps: fps,
                     ..settings(codec, true)
                 },
@@ -1395,8 +1395,8 @@ fn fullcolor_takes_the_surface_the_driver_renders() {
 }
 
 /// A session at `width` x `height` and `fps` on the stood-in driver.
-fn sized(codec: Codec, cbr: bool, width: i32, height: i32, fps: f64) -> RustCaptureSettings {
-    RustCaptureSettings {
+fn sized(codec: Codec, cbr: bool, width: i32, height: i32, fps: f64) -> CaptureSettings {
+    CaptureSettings {
         width,
         height,
         target_fps: fps,
@@ -1780,7 +1780,7 @@ fn a_session_without_headers_returns_the_coded_bytes_alone() {
         let mut framed = session(codec, false);
         let mut bare = open(
             codec,
-            &RustCaptureSettings {
+            &CaptureSettings {
                 omit_stripe_headers: true,
                 ..settings(codec, false)
             },

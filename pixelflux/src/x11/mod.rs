@@ -49,7 +49,7 @@ use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 use crate::pace::{FramePace, TickTrigger};
 
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use crate::encoders::overlay::blend_pixel_premultiplied;
 use crate::encoders::software::{EncodedStripe, FrameTiming};
 use crate::pipeline::X11Pipeline;
@@ -76,7 +76,7 @@ pub mod nvfbc;
 ///    multiplier * 1000, held as an integer for atomics; `<= 0` selects the policy default), and
 ///    `fps_bits` (the target fps as `f64` bits, so a fractional rate reaches the encoders exactly,
 ///    re-read every frame for dynamic pacing and rate control), and `link_kbps`, the rate the path
-///    carries (`RustCaptureSettings::video_link_kbps`), also re-read every frame. These
+///    carries (`CaptureSettings::video_link_kbps`), also re-read every frame. These
 ///    atomics always hold the CURRENT values, so a pipeline rebuild can carry live rates forward.
 /// 3. **Tunables** (gated by `tunables_dirty`): one `LiveTunables` struct behind `tunables`, set
 ///    rarely, carrying the per-frame quality knobs for the encode thread.
@@ -112,7 +112,7 @@ pub struct Controls {
 impl Controls {
     /// Seed the controls from the initial settings so the first loop iteration reads the
     /// configured bitrate / VBV / fps / region / cursor state rather than defaults.
-    pub fn new(s: &RustCaptureSettings) -> Self {
+    pub fn new(s: &CaptureSettings) -> Self {
         Self {
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -272,7 +272,7 @@ fn clamp_offset(x: i32, root: u16) -> i16 {
 /// `u16` clamp (minimum 2) keep pathological settings from overflowing or collapsing to an
 /// unusable surface. Video codecs require even dimensions, so both are then rounded down to
 /// a multiple of two.
-fn resolve_dims(root_w: u16, root_h: u16, s: &RustCaptureSettings) -> (u16, u16) {
+fn resolve_dims(root_w: u16, root_h: u16, s: &CaptureSettings) -> (u16, u16) {
     let cap_x = clamp_offset(s.capture_x, root_w) as i32;
     let cap_y = clamp_offset(s.capture_y, root_h) as i32;
     let avail_w = (root_w as i32).saturating_sub(cap_x).max(2);
@@ -307,7 +307,7 @@ fn resolve_dims(root_w: u16, root_h: u16, s: &RustCaptureSettings) -> (u16, u16)
 fn try_rebuild_channel(
     conn: &mut RustConnection,
     root: &mut u32,
-    rsettings: &RustCaptureSettings,
+    rsettings: &CaptureSettings,
     cap_x: &mut i16,
     cap_y: &mut i16,
     cap_w: &mut u16,
@@ -858,7 +858,7 @@ impl FramePool {
 fn encode_loop<F>(
     pool: &FramePool,
     controls: &Controls,
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     on_frame: &mut F,
 ) where
     F: FnMut(Vec<EncodedStripe>),
@@ -1128,7 +1128,7 @@ pub fn follow_frame_rate() {
 ///
 /// Blocking; intended to run on a dedicated thread.
 pub fn run_capture<F>(
-    settings: RustCaptureSettings,
+    settings: CaptureSettings,
     controls: Arc<Controls>,
     encode_tid_tx: Sender<thread::ThreadId>,
     mut on_frame: F,
@@ -1202,7 +1202,7 @@ where
 /// Blocking; intended to run on a dedicated thread. The X connection and shm surfaces live on this
 /// thread and the encoder lives on the encode thread — nothing X-related crosses the boundary.
 fn run_shm_capture<F>(
-    settings: RustCaptureSettings,
+    settings: CaptureSettings,
     controls: Arc<Controls>,
     encode_tid_tx: Sender<thread::ThreadId>,
     on_frame: F,
@@ -1540,14 +1540,14 @@ where
 pub(crate) mod gpu_test_support {
     use std::time::Duration;
 
-    use crate::RustCaptureSettings;
+    use crate::CaptureSettings;
     use crate::encoders::codec::Codec;
     use crate::webcam::decode::{Decoder, VideoDecoder};
 
     /// Full-frame capture settings for `codec` at CRF 25, streaming every frame, on the render
     /// node `auto_gpu` picks first.
-    pub(crate) fn settings(codec: Codec) -> RustCaptureSettings {
-        RustCaptureSettings {
+    pub(crate) fn settings(codec: Codec) -> CaptureSettings {
+        CaptureSettings {
             codec,
             target_fps: 60.0,
             video_crf: 25,
@@ -1840,7 +1840,7 @@ mod cursor_tests {
 
     #[test]
     fn resolve_dims_survives_past_end_offset() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             capture_x: 100000,
             capture_y: 100000,
             width: 1920,
@@ -2130,7 +2130,7 @@ mod vblank_tests {
     use super::*;
 
     fn capture_at(fps: f64) -> Arc<Controls> {
-        Arc::new(Controls::new(&RustCaptureSettings {
+        Arc::new(Controls::new(&CaptureSettings {
             target_fps: fps,
             ..Default::default()
         }))

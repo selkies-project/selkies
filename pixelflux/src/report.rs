@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use crate::encoders::software::EncodedStripe;
 
 /// The description half of a report. `capture_reason` says why the capture is not zero-copy
@@ -236,7 +236,7 @@ pub fn encoder_reason(reason: &str) {
 /// What the stream settled on, from the same inputs as the `Stream settings active` line.
 /// `backend` is the full-frame session as `(name, hardware)`, `None` the striped software path.
 pub fn stream(
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     stripes: usize,
     backend: Option<(&str, bool)>,
     fullcolor: bool,

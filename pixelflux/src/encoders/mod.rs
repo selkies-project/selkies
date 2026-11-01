@@ -67,7 +67,7 @@ use std::sync::{Mutex, OnceLock};
 use nvenc::NvencEncoder;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 
 #[cfg(not(any(feature = "gpl", feature = "openh264")))]
 compile_error!(
@@ -307,7 +307,7 @@ fn encodes_in_child(codec: Codec) -> bool {
             return;
         };
         pool.install(|| {
-            let settings = RustCaptureSettings {
+            let settings = CaptureSettings {
                 width: 256,
                 height: 128,
                 ..Default::default()
@@ -458,7 +458,7 @@ pub(crate) const QP_HYSTERESIS_LIMIT: u32 = 60;
 ///
 /// VBV buffer size in bits, clamped to `[1, u32::MAX]`.
 /// The most frames an H.264 or H.265 session keeps for reference (`video_reference_frames`).
-pub fn reference_frames(settings: &RustCaptureSettings) -> u32 {
+pub fn reference_frames(settings: &CaptureSettings) -> u32 {
     match settings.video_reference_frames {
         0 => reference::REFERENCE_FRAMES,
         n => n.min(reference::REFERENCE_FRAMES),
@@ -494,7 +494,7 @@ pub fn colorspace_desc(fullcolor: bool, full_range: bool) -> &'static str {
 /// with one rate control (`fixed`, from `FrameEncoder::fixed_rate_control`) runs it at the
 /// bitrate target whatever the mode, and every other session runs its mode, a CRF one with no
 /// bitrate cap.
-pub fn rate_desc(settings: &RustCaptureSettings, fixed: Option<&str>) -> String {
+pub fn rate_desc(settings: &CaptureSettings, fixed: Option<&str>) -> String {
     match fixed {
         Some(mode) => format!("{mode} {}", settings.video_bitrate_kbps),
         None if settings.video_cbr_mode => format!("CBR {}", settings.video_bitrate_kbps),
@@ -512,7 +512,7 @@ pub fn rate_desc(settings: &RustCaptureSettings, fixed: Option<&str>) -> String 
 /// at a quantizer (`holds`, `FrameEncoder::holds_quantizer`), and as a refresh and its burst at the
 /// rate control's own quality elsewhere.
 pub fn paint_over_desc(
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     fixed: Option<&str>,
     holds: bool,
 ) -> Option<String> {
@@ -554,13 +554,13 @@ mod tests {
     /// bitrate target in either mode, and every other session runs its mode, CRF naming no bitrate.
     #[test]
     fn the_rate_field_names_what_the_backend_applies() {
-        let crf = RustCaptureSettings {
+        let crf = CaptureSettings {
             codec: Codec::H264,
             video_crf: 25,
             video_bitrate_kbps: 8000,
             ..Default::default()
         };
-        let cbr = RustCaptureSettings {
+        let cbr = CaptureSettings {
             video_cbr_mode: true,
             ..crf.clone()
         };
@@ -579,7 +579,7 @@ mod tests {
     /// higher quality; and nothing where it cannot fire.
     #[test]
     fn the_paint_over_field_names_what_paint_over_does() {
-        let crf = RustCaptureSettings {
+        let crf = CaptureSettings {
             codec: Codec::H264,
             video_crf: 25,
             video_paintover_crf: 18,
@@ -588,11 +588,11 @@ mod tests {
             video_streaming_mode: false,
             ..Default::default()
         };
-        let cbr = RustCaptureSettings {
+        let cbr = CaptureSettings {
             video_cbr_mode: true,
             ..crf.clone()
         };
-        let turbo = |s: &RustCaptureSettings| RustCaptureSettings {
+        let turbo = |s: &CaptureSettings| CaptureSettings {
             video_streaming_mode: true,
             ..s.clone()
         };
@@ -626,7 +626,7 @@ mod tests {
         }
         assert_eq!(
             paint_over_desc(
-                &RustCaptureSettings {
+                &CaptureSettings {
                     use_paint_over_quality: false,
                     ..crf.clone()
                 },
@@ -636,7 +636,7 @@ mod tests {
             None
         );
         // A constant rate cleans up with the paint-over off too, to the same quality.
-        let cbr_off = RustCaptureSettings {
+        let cbr_off = CaptureSettings {
             use_paint_over_quality: false,
             ..cbr.clone()
         };
@@ -650,7 +650,7 @@ mod tests {
         );
         assert_eq!(
             paint_over_desc(
-                &RustCaptureSettings {
+                &CaptureSettings {
                     video_paintover_crf: 25,
                     ..crf.clone()
                 },
@@ -661,7 +661,7 @@ mod tests {
         );
         assert_eq!(
             paint_over_desc(
-                &RustCaptureSettings {
+                &CaptureSettings {
                     video_paintover_crf: 25,
                     ..cbr.clone()
                 },
@@ -671,7 +671,7 @@ mod tests {
             .as_deref(),
             Some("PaintOver CRF: 25 (Burst: 5f)")
         );
-        let jpeg = RustCaptureSettings {
+        let jpeg = CaptureSettings {
             codec: Codec::Jpeg,
             jpeg_quality: 40,
             paint_over_jpeg_quality: 90,
@@ -688,7 +688,7 @@ mod tests {
         );
         assert_eq!(
             paint_over_desc(
-                &RustCaptureSettings {
+                &CaptureSettings {
                     paint_over_jpeg_quality: 40,
                     ..jpeg.clone()
                 },
@@ -699,7 +699,7 @@ mod tests {
         );
         assert_eq!(
             paint_over_desc(
-                &RustCaptureSettings {
+                &CaptureSettings {
                     use_paint_over_quality: false,
                     ..jpeg
                 },
@@ -745,7 +745,7 @@ mod tests {
     /// JPEG is the ladder's last leg, not its answer to one missing encoder.
     #[test]
     fn a_session_lands_on_a_video_codec_the_host_serves() {
-        let mut settings = RustCaptureSettings {
+        let mut settings = CaptureSettings {
             width: 256,
             height: 128,
             codec: Codec::Av1,
@@ -852,7 +852,7 @@ mod tests {
             .expect("the device had no NVENC session to spare for 30 s");
         let report = crate::report::StreamReport::new("x11");
         let _scope = crate::report::enter(&report);
-        let mut settings = RustCaptureSettings {
+        let mut settings = CaptureSettings {
             width: 256,
             height: 128,
             codec: Codec::Vp8,
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn the_av1_probe_survives_sessions_opening_beside_it() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: 64,
             height: 64,
             target_fps: 30.0,
@@ -1009,7 +1009,7 @@ mod tests {
         assert_eq!(colorspace_desc(false, true), "I420 (Full Range)");
         assert_eq!(colorspace_desc(false, false), "I420 (Limited Range)");
 
-        let mut settings = RustCaptureSettings {
+        let mut settings = CaptureSettings {
             codec: Codec::H264,
             video_fullcolor: false,
             ..Default::default()
@@ -1138,7 +1138,7 @@ impl FrameEncoder {
 
     /// Apply a live bitrate / VBV / frame-rate change. `Err` means the session lost its codec
     /// context and has to be rebuilt.
-    pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
+    pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> Result<(), String> {
         match self {
             FrameEncoder::Nvenc(enc) => {
                 enc.reconfigure_rate(settings);
@@ -1549,7 +1549,7 @@ impl FrameEncoder {
 
 /// The full-frame software session of `codec` on host frames in the byte order `rgba` names.
 pub fn software_session(
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     codec: Codec,
     rgba: bool,
 ) -> Result<FrameEncoder, String> {
@@ -1586,7 +1586,7 @@ pub enum FrameSource {
 
 /// The threads a striped H.264 session encodes on: its stripes at once, one a rayon worker, or
 /// one after another where `cpu_encode_threading` is off.
-fn striped_threads(settings: &RustCaptureSettings) -> i32 {
+fn striped_threads(settings: &CaptureSettings) -> i32 {
     if !settings.cpu_encode_threading {
         return 1;
     }
@@ -1621,7 +1621,7 @@ fn threads_desc(threads: i32) -> String {
 ///    for a full-frame session, then the striped H.264 path, and JPEG only past all of them.
 ///    `settings.codec` names what came up.
 pub fn select_frame_encoder(
-    settings: &mut RustCaptureSettings,
+    settings: &mut CaptureSettings,
     source: FrameSource,
     prior: Option<FrameEncoder>,
     tag: &str,
@@ -1709,7 +1709,7 @@ fn fallback_codecs(requested: Codec, hardware: &[Codec], fullframe: bool) -> Vec
 /// codec without 10 bits at the chroma it would run, and the build's software encoder codes
 /// them, so the session takes the software path as a 4:4:4 the engine lacks does rather than
 /// streaming 8 bits on hardware.
-fn hardware_lacks_ten_bit(served: &HardwareEncoders, settings: &RustCaptureSettings) -> bool {
+fn hardware_lacks_ten_bit(served: &HardwareEncoders, settings: &CaptureSettings) -> bool {
     let codec = settings.codec;
     if settings.video_bit_depth < 10 || !software_ten_bit(codec) {
         return false;
@@ -1725,7 +1725,7 @@ fn hardware_lacks_ten_bit(served: &HardwareEncoders, settings: &RustCaptureSetti
 
 /// `hardware_lacks_ten_bit` for the encode node `settings` names, for a capture path that opens
 /// its engine's session itself (NvFBC).
-pub(crate) fn ten_bit_is_softwares(settings: &RustCaptureSettings) -> bool {
+pub(crate) fn ten_bit_is_softwares(settings: &CaptureSettings) -> bool {
     probe_node(settings.encode_node_index.max(0))
         .is_ok_and(|served| hardware_lacks_ten_bit(&served, settings))
 }
@@ -1734,7 +1734,7 @@ pub(crate) fn ten_bit_is_softwares(settings: &RustCaptureSettings) -> bool {
 /// forced, and the encode node's probe found an engine for it, at the depth asked, or found every
 /// session taken. A session the ladder left in software where this holds was refused for
 /// something a resize can change (an engine's maximum size), so it runs the ladder again.
-pub(crate) fn engine_may_serve(settings: &RustCaptureSettings) -> bool {
+pub(crate) fn engine_may_serve(settings: &CaptureSettings) -> bool {
     if settings.use_cpu || settings.encode_node_index == -1 {
         return false;
     }
@@ -1754,7 +1754,7 @@ pub(crate) fn engine_may_serve(settings: &RustCaptureSettings) -> bool {
 /// The ladder for the one codec `settings` names; `None` where no backend of it opened, and for
 /// H.264 on host frames, whose software path the caller encodes itself.
 fn select_for_codec(
-    settings: &mut RustCaptureSettings,
+    settings: &mut CaptureSettings,
     source: FrameSource,
     prior: Option<FrameEncoder>,
     tag: &str,
@@ -1937,7 +1937,7 @@ fn select_for_codec(
 /// The codec's software encoder; `None` for H.264, whose software path is the striped one, and
 /// where the build carries none for the codec, which the ladder then falls through on.
 fn software_fallback(
-    settings: &mut RustCaptureSettings,
+    settings: &mut CaptureSettings,
     rgba: bool,
     tag: &str,
 ) -> Option<FrameEncoder> {
@@ -2062,8 +2062,8 @@ mod software_tests {
         }
     }
 
-    pub(super) fn settings(codec: Codec) -> RustCaptureSettings {
-        RustCaptureSettings {
+    pub(super) fn settings(codec: Codec) -> CaptureSettings {
+        CaptureSettings {
             width: W as i32,
             height: H as i32,
             target_fps: 30.0,
@@ -2074,7 +2074,7 @@ mod software_tests {
         }
     }
 
-    pub(super) fn session(codec: Codec, s: &RustCaptureSettings, rgba: bool) -> Session {
+    pub(super) fn session(codec: Codec, s: &CaptureSettings, rgba: bool) -> Session {
         let _turn = turn(codec);
         let encoder = software_session(s, codec, rgba)
             .unwrap_or_else(|e| panic!("{codec:?} software session: {e}"));
@@ -2836,7 +2836,7 @@ mod software_tests {
     fn decoded_chroma_is_neutral_on_a_tile_that_averages_to_gray() {
         const N: usize = 128;
         let bgra = chroma_siting::bgra(N, N);
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: N as i32,
             height: N as i32,
             target_fps: 30.0,
@@ -2870,7 +2870,7 @@ mod software_tests {
     fn the_chart_decodes_to_the_color_that_was_painted() {
         const N: usize = 256;
         let bgra = chroma_siting::chart_bgra(N, N / 2);
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: N as i32,
             height: (N / 2) as i32,
             target_fps: 30.0,
@@ -3100,7 +3100,7 @@ pub(crate) mod chroma_siting {
 /// The chroma format a session actually carries, which is not always the one requested: a
 /// hardware session only when the device carries it, the software path only when the build's
 /// encoder for the codec does. Every consumer of "is this stream 4:4:4" reads it from here.
-pub fn session_fullcolor(encoder: Option<&FrameEncoder>, settings: &RustCaptureSettings) -> bool {
+pub fn session_fullcolor(encoder: Option<&FrameEncoder>, settings: &CaptureSettings) -> bool {
     match encoder {
         Some(enc) => enc.is_fullcolor(),
         None => settings.video_fullcolor && software_fullcolor(settings.codec),
@@ -3110,7 +3110,7 @@ pub fn session_fullcolor(encoder: Option<&FrameEncoder>, settings: &RustCaptureS
 /// The bits per sample a session carries, which is not always what was asked for: a
 /// full-frame session's own answer, and for the striped path (`None`) what its H.264 encoder
 /// opens at.
-pub fn session_bit_depth(encoder: Option<&FrameEncoder>, settings: &RustCaptureSettings) -> u32 {
+pub fn session_bit_depth(encoder: Option<&FrameEncoder>, settings: &CaptureSettings) -> u32 {
     match encoder {
         Some(enc) => enc.bit_depth(),
         None => software::stripe_bit_depth(settings),
@@ -3121,7 +3121,7 @@ pub fn session_bit_depth(encoder: Option<&FrameEncoder>, settings: &RustCaptureS
 /// striped path (`None`) is whenever it carries 4:4:4, or a device that converted in fixed
 /// function at a range it chose. The one answer every description of a session reads, so no
 /// two of them can disagree.
-pub fn session_full_range(encoder: Option<&FrameEncoder>, settings: &RustCaptureSettings) -> bool {
+pub fn session_full_range(encoder: Option<&FrameEncoder>, settings: &CaptureSettings) -> bool {
     match encoder {
         Some(enc) => enc.is_full_range(),
         None => session_fullcolor(None, settings),

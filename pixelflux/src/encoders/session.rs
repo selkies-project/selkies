@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use super::frame_rate::FrameRate;
 use super::software::{convert_to_yuv_mt, convert_to_yuv10_mt};
 use super::{QP_HYSTERESIS_LIMIT, vbv_bits};
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 
 /// A planar picture, 4:2:0 or 4:4:4, with tightly packed rows: 8-bit samples in `y`, `u`, and
 /// `v`, or 10-bit ones in `y16`, `u16`, and `v16`, the planes of the other depth staying empty.
@@ -245,7 +245,7 @@ pub struct RateSettings {
 }
 
 impl RateSettings {
-    pub fn new(settings: &RustCaptureSettings) -> Self {
+    pub fn new(settings: &CaptureSettings) -> Self {
         Self {
             cbr: settings.video_cbr_mode,
             bitrate_kbps: settings.video_bitrate_kbps,
@@ -259,7 +259,7 @@ impl RateSettings {
 
     /// The settings as they stand now, if a rate or frame-rate value the encoder was programmed
     /// with changed: in CBR a bitrate or VBV multiplier, in any mode the frame rate.
-    pub fn changed(&self, settings: &RustCaptureSettings) -> Option<Self> {
+    pub fn changed(&self, settings: &CaptureSettings) -> Option<Self> {
         let next = Self {
             cbr: self.cbr,
             min_qp: self.min_qp,
@@ -323,7 +323,7 @@ impl Pending {
 /// The encode threads a software session spreads across, between one and `most`: one less than
 /// the host's cores, or one alone where `cpu_encode_threading` is off. The conversion ahead of
 /// the encoder runs on as many.
-fn threads_up_to(settings: &RustCaptureSettings, most: usize) -> i32 {
+fn threads_up_to(settings: &CaptureSettings, most: usize) -> i32 {
     if !settings.cpu_encode_threading {
         return 1;
     }
@@ -337,14 +337,14 @@ fn threads_up_to(settings: &RustCaptureSettings, most: usize) -> i32 {
 /// The encode threads a full-frame H.265, VP8, VP9, or AV1 software session spreads across
 /// (`threads_up_to` eight): x265's and kvazaar's wavefront, libvpx's token partitions and
 /// rows, and SVT-AV1's logical processors.
-pub fn encode_threads(settings: &RustCaptureSettings) -> i32 {
+pub fn encode_threads(settings: &CaptureSettings) -> i32 {
     threads_up_to(settings, 8)
 }
 
 /// The encode threads a full-frame H.264 software session spreads across (`threads_up_to`
 /// four): x264's sliced threads, and OpenH264's threads over its four slices, more than which
 /// would buy nothing.
-pub fn h264_fullframe_threads(settings: &RustCaptureSettings) -> i32 {
+pub fn h264_fullframe_threads(settings: &CaptureSettings) -> i32 {
     threads_up_to(settings, 4)
 }
 
@@ -356,13 +356,13 @@ mod tests {
     /// off, and with it on one less than the cores within the session's ceiling, one at least.
     #[test]
     fn cpu_encode_threading_off_leaves_every_session_one_thread() {
-        let off = RustCaptureSettings {
+        let off = CaptureSettings {
             cpu_encode_threading: false,
             ..Default::default()
         };
         assert_eq!(encode_threads(&off), 1);
         assert_eq!(h264_fullframe_threads(&off), 1);
-        let on = RustCaptureSettings::default();
+        let on = CaptureSettings::default();
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn a_rate_change_is_noticed_only_where_the_encoder_reads_it() {
-        let mut settings = RustCaptureSettings {
+        let mut settings = CaptureSettings {
             target_fps: 30.0,
             video_bitrate_kbps: 4000,
             ..Default::default()
@@ -418,7 +418,7 @@ mod tests {
             rate.changed(&settings).map(|r| r.fps),
             Some(FrameRate { num: 60, den: 1 })
         );
-        let ntsc = RateSettings::new(&RustCaptureSettings {
+        let ntsc = RateSettings::new(&CaptureSettings {
             target_fps: 60000.0 / 1001.0,
             ..settings.clone()
         });

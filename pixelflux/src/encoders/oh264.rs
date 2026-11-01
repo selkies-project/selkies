@@ -18,7 +18,7 @@
 //! strict-GOP streaming behavior. Host ARGB is converted to I420 with the same
 //! BT.709 limited-range path the x264 encoder uses, then fed to OpenH264 as borrowed planes.
 
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use crate::encoders::QP_HYSTERESIS_LIMIT;
 use crate::encoders::codec::{
     Codec, FRAME_ANCHOR, FRAME_DELTA, FRAME_INTRA, FRAME_KEY, VIDEO_HEADER_LEN, push_video_header,
@@ -82,7 +82,7 @@ const BITRATE_CEILING_BPS: u32 = 100_000_000;
 /// applied by rebuilding the encoder from it (see `update_qp`).
 pub struct Openh264Encoder {
     encoder: Encoder,
-    settings: RustCaptureSettings,
+    settings: CaptureSettings,
     width: usize,
     height: usize,
     threads: u16,
@@ -105,7 +105,7 @@ pub struct Openh264Encoder {
 impl Openh264Encoder {
     /// Build a full-frame OpenH264 encoder from the capture settings (their width, height,
     /// CRF, and bitrate), or `None` on init failure: `new_stripe` with the whole-frame policy.
-    pub fn new(settings: &RustCaptureSettings) -> Option<Self> {
+    pub fn new(settings: &CaptureSettings) -> Option<Self> {
         Self::new_stripe(
             settings,
             settings.width.max(2) as usize,
@@ -166,7 +166,7 @@ impl Openh264Encoder {
     ///
     /// A multi-threaded instance is then primed for its four fixed slices via `enable_slices`.
     pub fn new_stripe(
-        settings: &RustCaptureSettings,
+        settings: &CaptureSettings,
         width: usize,
         height: usize,
         crf: i32,
@@ -243,7 +243,7 @@ impl Openh264Encoder {
     /// request), and it codes a scrolling document as well (41.4 against 41.3 dB moving, 57.1 both
     /// still, 1080p at 8 Mbit/s).
     fn build_encoder(
-        settings: &RustCaptureSettings,
+        settings: &CaptureSettings,
         fps: f32,
         bitrate_bps: u32,
         crf: u8,
@@ -753,7 +753,7 @@ mod tests {
     fn a_consumer_that_misses_frames_is_predicted_past_from_a_long_term_reference() {
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h) = (320usize, 192usize);
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: w as i32,
             height: h as i32,
             target_fps: 30.0,
@@ -856,7 +856,7 @@ mod tests {
     /// slices kept for the client's decoder.
     #[test]
     fn cpu_encode_threading_off_converts_in_one_band() {
-        let off = RustCaptureSettings {
+        let off = CaptureSettings {
             width: 320,
             height: 192,
             target_fps: 30.0,
@@ -865,7 +865,7 @@ mod tests {
         };
         let enc = Openh264Encoder::new(&off).expect("openh264 init");
         assert_eq!((enc.threads, enc.slices, enc.csc_bands), (1, 4, 1));
-        let on = RustCaptureSettings {
+        let on = CaptureSettings {
             cpu_encode_threading: true,
             ..off
         };
@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn declares_the_conversion_matrix() {
         use crate::webcam::decode::{ColorTags, Decoder, VideoDecoder};
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 128,
             height: 96,
             target_fps: 30.0,
@@ -899,7 +899,7 @@ mod tests {
     fn bounds_reordering_at_zero() {
         use crate::encoders::sps::fixtures::assert_no_reorder;
         for (cbr, whole) in [(false, true), (true, true), (true, false)] {
-            let s = RustCaptureSettings {
+            let s = CaptureSettings {
                 width: 320,
                 height: 192,
                 target_fps: 30.0,
@@ -932,7 +932,7 @@ mod tests {
         use crate::encoders::chroma_siting::{BT709, chart_bgra, chart_error};
         use crate::webcam::decode::{Decoder, VideoDecoder};
         let (w, h) = (256usize, 128usize);
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: w as i32,
             height: h as i32,
             target_fps: 30.0,
@@ -958,7 +958,7 @@ mod tests {
     /// whose header carries the passed frame number.
     #[test]
     fn encodes_annexb_idr_then_p() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 128,
             height: 96,
             video_bitrate_kbps: 2000,
@@ -998,7 +998,7 @@ mod tests {
     /// no wire header.
     #[test]
     fn omit_stripe_headers_yields_bare_annexb() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 128,
             height: 96,
             video_bitrate_kbps: 2000,
@@ -1022,7 +1022,7 @@ mod tests {
     fn lower_bitrate_yields_smaller_output() {
         let (w, h, stride) = (256usize, 192usize, 256 * 4);
         let encode_run = |kbps: i32| -> usize {
-            let s = RustCaptureSettings {
+            let s = CaptureSettings {
                 width: w as i32,
                 height: h as i32,
                 video_cbr_mode: true,
@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn live_reconfigure_rate_takes_effect() {
         let (w, h, stride) = (256usize, 192usize, 256 * 4);
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: w as i32,
             height: h as i32,
             video_cbr_mode: true,
@@ -1094,7 +1094,7 @@ mod tests {
     #[test]
     fn live_reconfigure_rate_raise_takes_effect() {
         let (w, h, stride) = (256usize, 192usize, 256 * 4);
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: w as i32,
             height: h as i32,
             video_cbr_mode: true,
@@ -1139,7 +1139,7 @@ mod tests {
     fn crf_mode_qp_scales_output() {
         let (w, h, stride) = (256usize, 192usize, 256 * 4);
         let run = |crf: i32| -> usize {
-            let s = RustCaptureSettings {
+            let s = CaptureSettings {
                 width: w as i32,
                 height: h as i32,
                 video_cbr_mode: false,
@@ -1181,7 +1181,7 @@ mod tests {
     #[test]
     fn live_update_qp_takes_effect() {
         let (w, h, stride) = (256usize, 192usize, 256 * 4);
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: w as i32,
             height: h as i32,
             video_cbr_mode: false,
@@ -1220,7 +1220,7 @@ mod tests {
     #[test]
     fn rgba_and_bgra_inputs_both_encode() {
         let (w, h, stride) = (128usize, 96usize, 128 * 4);
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: w as i32,
             height: h as i32,
             video_bitrate_kbps: 2000,
@@ -1270,7 +1270,7 @@ mod slice_tests {
     /// confirming the fixed four-slice configuration primed by `enable_slices`.
     #[test]
     fn four_slices_per_frame() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 640,
             height: 480,
             codec: Codec::H264,
@@ -1293,7 +1293,7 @@ mod slice_tests {
     /// send, so the client's per-stripe decoders cannot tell the builds apart.
     #[test]
     fn stripe_instance_is_single_slice_and_stamps_y_start() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 640,
             height: 480,
             codec: Codec::H264,
@@ -1372,7 +1372,7 @@ mod slice_tests {
         let (w, h) = (1280usize, 720usize);
         let stride = w * 4;
         let run = |cbr: bool, kbps: i32, crf: i32| -> (usize, usize) {
-            let s = RustCaptureSettings {
+            let s = CaptureSettings {
                 width: w as i32,
                 height: h as i32,
                 video_cbr_mode: cbr,
@@ -1424,7 +1424,7 @@ mod slice_tests {
     #[test]
     fn four_slice_reinit_preserves_rc_params() {
         let (w, h) = (1280usize, 720usize);
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: w as i32,
             height: h as i32,
             video_cbr_mode: true,
@@ -1486,7 +1486,7 @@ mod rebuild_cost {
     /// slow every time, while a loaded host stretches single ones past that.
     #[test]
     fn construction_cost_is_milliseconds() {
-        let s = RustCaptureSettings {
+        let s = CaptureSettings {
             width: 1920,
             height: 1080,
             codec: Codec::H264,

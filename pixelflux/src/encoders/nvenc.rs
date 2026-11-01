@@ -45,7 +45,7 @@ use super::dmabuf_identity::DmaBufIdentity;
 use super::frame_rate::FrameRate;
 use super::reference::{ANCHORS, Invalidation, Reference, ReferenceReport, ReferenceWindow};
 use super::sps::{WideFrameNum, h264_frame_num_range};
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use nvcodec_sys::cuda::*;
 use nvcodec_sys::*;
 
@@ -800,14 +800,14 @@ fn split_mode(
 
 /// The CBR target of a session at `settings`, in bits per second, held to the codec's
 /// `nvenc_rate_ceiling`.
-fn cbr_bps(settings: &RustCaptureSettings) -> u32 {
+fn cbr_bps(settings: &CaptureSettings) -> u32 {
     (settings.video_bitrate_kbps.max(0) as u32)
         .saturating_mul(1000)
         .min(nvenc_rate_ceiling(settings.codec))
 }
 
 /// Say so where `cbr_bps` held the target `settings` asks for to the codec's ceiling.
-fn log_held_rate(settings: &RustCaptureSettings, bps: u32) {
+fn log_held_rate(settings: &CaptureSettings, bps: u32) {
     let asked = settings.video_bitrate_kbps.max(0) as u64 * 1000;
     if (bps as u64) < asked {
         eprintln!(
@@ -821,7 +821,7 @@ fn log_held_rate(settings: &RustCaptureSettings, bps: u32) {
 
 /// The VBV of a CBR session at `bps`, from the session's frame rate, key-frame interval, and
 /// explicit multiplier.
-fn cbr_vbv(settings: &RustCaptureSettings, bps: u32) -> u32 {
+fn cbr_vbv(settings: &CaptureSettings, bps: u32) -> u32 {
     crate::encoders::vbv_bits(
         bps,
         settings.target_fps,
@@ -2192,14 +2192,14 @@ impl NvencEncoder {
     /// `init_params.encodeConfig` raw pointer is nulled before the struct is returned (it points at
     /// a local `config` about to move); the reconfigure paths repoint it at `self.encode_config`
     /// when they resubmit.
-    pub fn new(settings: &RustCaptureSettings, egl_display: *const c_void) -> Result<Self, String> {
+    pub fn new(settings: &CaptureSettings, egl_display: *const c_void) -> Result<Self, String> {
         Self::new_tuned(settings, egl_display, NvencTuning::default())
     }
 
     /// `new` with the preset, rate-control passes, and adaptive quantization named, for the
     /// tuning bench; production sessions take `NvencTuning::default`.
     pub(crate) fn new_tuned(
-        settings: &RustCaptureSettings,
+        settings: &CaptureSettings,
         egl_display: *const c_void,
         tuning: NvencTuning,
     ) -> Result<Self, String> {
@@ -3194,10 +3194,7 @@ impl NvencEncoder {
     ///    the byte order the session was last fed.
     ///
     /// On a resize the next encoded frame is a reset-RC IDR and `Ok(true)` is returned.
-    pub fn reconfigure_resolution(
-        &mut self,
-        settings: &RustCaptureSettings,
-    ) -> Result<bool, String> {
+    pub fn reconfigure_resolution(&mut self, settings: &CaptureSettings) -> Result<bool, String> {
         let new_w = settings.width as u32;
         let new_h = settings.height as u32;
         let is_cbr = self.encode_config.rcParams.rateControlMode
@@ -3714,7 +3711,7 @@ impl NvencEncoder {
     /// only ever has to be high enough and the driver refuses one below the decoded picture
     /// buffer the session declared — so calling it every frame is cheap. A reconfigure the driver
     /// refuses leaves the session encoding at its previous rate, logged with the driver's reason.
-    pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> bool {
+    pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> bool {
         unsafe {
             let mut changed = false;
             let mut level_raised = false;
@@ -5185,8 +5182,8 @@ pub(crate) mod gpu_tests {
     use crate::encoders::reference::REFERENCE_FRAMES;
 
     /// Test helper: H.264 full-frame capture settings at `w×h`, `fps`, CRF 25.
-    fn settings(w: i32, h: i32, fps: f64) -> RustCaptureSettings {
-        RustCaptureSettings {
+    fn settings(w: i32, h: i32, fps: f64) -> CaptureSettings {
+        CaptureSettings {
             width: w,
             height: h,
             codec: Codec::H264,
@@ -5200,7 +5197,7 @@ pub(crate) mod gpu_tests {
     /// none of: a registration outlives the buffer it page-locked, and a later buffer at an
     /// overlapping address then fails to upload, or uploads the pages of the freed one, where a
     /// capture's persistent shm is released on every reshape.
-    fn host_session(s: &RustCaptureSettings) -> Result<NvencEncoder, String> {
+    fn host_session(s: &CaptureSettings) -> Result<NvencEncoder, String> {
         NvencEncoder::new(s, ptr::null()).map(|mut enc| {
             enc.pin_uploads = false;
             enc
@@ -5209,7 +5206,7 @@ pub(crate) mod gpu_tests {
 
     /// Test helper: `host_session`, or `None` where the device has no engine for the codec (AV1
     /// before Ada, HEVC on Kepler) or for its 4:4:4 (Kepler), which the caller skips.
-    fn codec_session(s: &RustCaptureSettings) -> Option<NvencEncoder> {
+    fn codec_session(s: &CaptureSettings) -> Option<NvencEncoder> {
         match host_session(s) {
             Ok(enc) => Some(enc),
             Err(e) if e.contains("engine") => {
@@ -8181,7 +8178,7 @@ pub(crate) mod gpu_tests {
             "NVENC's own conversion weights the columns 3:1: {hardware:?} against {weighted:?}"
         );
 
-        let full = RustCaptureSettings {
+        let full = CaptureSettings {
             video_fullcolor: true,
             ..st
         };
@@ -8215,7 +8212,7 @@ pub(crate) mod gpu_tests {
             (Codec::H264, true),
             (Codec::H265, true),
         ] {
-            let st = RustCaptureSettings {
+            let st = CaptureSettings {
                 codec,
                 video_fullcolor: fullcolor,
                 ..settings(w as i32, h as i32, 60.0)
@@ -8270,7 +8267,7 @@ pub(crate) mod gpu_tests {
             // A resize rebuilds the convert's surface around the new geometry, so the chart is
             // read back again at a size the session was not opened for.
             let (w2, h2) = (w + 64, h + 32);
-            let grown = RustCaptureSettings {
+            let grown = CaptureSettings {
                 width: w2 as i32,
                 height: h2 as i32,
                 ..st
@@ -10085,7 +10082,7 @@ mod decision_tests {
             (Codec::H264, 1_000_000, 1_000_000_000),
             (Codec::H264, 5_000_000, 1_000_000_000),
         ] {
-            let s = RustCaptureSettings {
+            let s = CaptureSettings {
                 codec,
                 video_bitrate_kbps: kbps,
                 ..Default::default()

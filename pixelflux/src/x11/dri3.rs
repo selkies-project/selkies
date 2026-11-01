@@ -71,7 +71,7 @@ use super::{
     Controls, RootDamage, captured_damage, clamp_offset, cursor_image_origin, require_32bpp,
     resolve_dims, take_tick, wait_for_frame,
 };
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use crate::encoders::software::{EncodedStripe, FrameTiming, StripeState};
 use crate::encoders::{self, FrameEncoder, FrameSource};
 use crate::pace::FramePace;
@@ -170,10 +170,10 @@ struct GpuCapture {
     next: usize,
     /// The live session: its geometry is what is captured and encoded, and its rate and quality
     /// fields follow the cross-thread controls.
-    settings: RustCaptureSettings,
+    settings: CaptureSettings,
     /// The geometry that was asked for, which a region change updates and every region is
     /// resolved from, kept apart from `settings` so a capture following the root keeps following.
-    request: RustCaptureSettings,
+    request: CaptureSettings,
     cap_x: i16,
     cap_y: i16,
     root_w: u16,
@@ -992,7 +992,7 @@ impl Drop for GpuCapture {
 /// back to the XShm path with nothing half-built. The server is asked first, over a connection
 /// of our own, because whether it draws on the GPU at all, and on which device, is its answer to
 /// give; the encoder is built on the device the server named.
-fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
+fn open(settings: &CaptureSettings) -> Option<GpuCapture> {
     if !settings.codec.is_video() {
         return declined("the codec is JPEG");
     }
@@ -1115,7 +1115,7 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
 /// and only then blits, waits, and encodes through the same send / quality / key-frame policy every
 /// full-frame encoder obeys.
 pub fn run_capture<F>(
-    settings: RustCaptureSettings,
+    settings: CaptureSettings,
     controls: Arc<Controls>,
     encode_tid_tx: std::sync::mpsc::Sender<std::thread::ThreadId>,
     on_frame: &mut F,

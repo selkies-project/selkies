@@ -28,7 +28,7 @@
 //! `cargo test --release --lib cleanup_bench::cleanup_bench -- --exact --ignored --nocapture
 //! --test-threads=1`, and `cleanup_bench::cleanup_hold_experiment` the same way.
 
-use crate::RustCaptureSettings;
+use crate::CaptureSettings;
 use crate::encoders::codec::{
     Codec, FRAME_KEY, JPEG_HEADER_LEN, VIDEO_HEADER_LEN, parse_video_type,
 };
@@ -242,7 +242,7 @@ fn cleanup_bench() {
     let codec = Codec::parse(&env("CODEC", "h264".to_string())).expect("codec");
     let (w, h): (usize, usize) = (env("W", 1920), env("H", 1080));
     let fps: f64 = env("FPS", 60.0);
-    let settings = RustCaptureSettings {
+    let settings = CaptureSettings {
         width: w as i32,
         height: h as i32,
         target_fps: fps,
@@ -522,7 +522,7 @@ enum Session {
 }
 
 impl Session {
-    fn open(settings: &RustCaptureSettings) -> (Self, String) {
+    fn open(settings: &CaptureSettings) -> (Self, String) {
         #[cfg(feature = "gpl")]
         if settings.codec == Codec::H264 && settings.use_cpu {
             let bps = settings.video_bitrate_kbps.max(1) as u32 * 1000;
@@ -624,7 +624,7 @@ fn cleanup_hold_experiment() {
     let codec = Codec::parse(&env("CODEC", "h264".to_string())).expect("codec");
     let (w, h): (usize, usize) = (env("W", 1920), env("H", 1080));
     let fps: f64 = env("FPS", 60.0);
-    let settings = RustCaptureSettings {
+    let settings = CaptureSettings {
         width: w as i32,
         height: h as i32,
         target_fps: fps,
