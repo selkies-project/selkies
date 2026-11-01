@@ -6,7 +6,9 @@ disk arrives as the JPEG or WebP it was saved as, so the server offers a PNG of
 it beside it, first. The client's later messages, its input among them, wait
 for the write, so the conversion is waited for only briefly: a photo taking
 longer is offered as it came at once and the PNG joins it when ready, unless a
-newer copy took the clipboard meanwhile. The offers are recorded, not made.
+newer copy took the clipboard meanwhile. A paste chord pressed before then waits
+for the PNG, since the session's browsers paste nothing from the JPEG alone;
+no other key waits. The offers are recorded, not made.
 """
 import asyncio
 import io
@@ -44,6 +46,8 @@ def make_handler() -> WebRTCInput:
     h._x11_clipboard_monitor = None
     h._clipboard_last_bytes = None
     h._clipboard_self_write = None
+    h._png_beside = None
+    h.pressed_keys = {}
     h.offers = []
 
     async def set_clipboard(data, mime_type="text/plain", flavours=None):
@@ -90,6 +94,30 @@ async def main() -> None:
         await asyncio.sleep(1.2)
         check("its PNG joins it once ready",
               [o[0] for o in h.offers] == [["image/jpeg"], ["image/png", "image/jpeg"]], h.offers)
+
+        # A paste chord pressed while the PNG is still being made waits for it;
+        # another key, or the chord's key with no modifier held, does not.
+        for name, mod, key in (("Ctrl+V", 0xffe3, 0x76), ("Shift+Insert", 0xffe1, 0xff63)):
+            h = make_handler()
+            await h.write_clipboard(photo, "image/jpeg")
+            start = time.monotonic()
+            await h._paste_waits_for_png(key)
+            bare = time.monotonic() - start
+            h.pressed_keys = {mod: time.monotonic()}
+            start = time.monotonic()
+            await h._paste_waits_for_png(0x61)
+            other = time.monotonic() - start
+            start = time.monotonic()
+            await h._paste_waits_for_png(key)
+            waited = time.monotonic() - start
+            check(f"{name} pressed while the PNG is being made waits until it is offered, no other key does",
+                  bare < 0.05 and other < 0.05 and waited > 0.2
+                  and [o[0] for o in h.offers][-1] == ["image/png", "image/jpeg"],
+                  f"bare {bare:.2f}s other {other:.2f}s paste {waited:.2f}s {[o[0] for o in h.offers]}")
+        h.pressed_keys = {0xffe3: time.monotonic()}
+        start = time.monotonic()
+        await h._paste_waits_for_png(0x76)
+        check("once the PNG is offered a paste does not wait", time.monotonic() - start < 0.05)
 
         # A newer copy lands while the PNG is still being made: it stays.
         h = make_handler()

@@ -2262,6 +2262,11 @@ def clipboard_png_beside(mime_type: str, data: bytes) -> Optional[bytes]:
 # How long a client's clipboard write waits for the PNG of an image sent in
 # another format: the client's later messages, its input among them, wait too.
 CLIPBOARD_PNG_WAIT_S = 0.25
+# How long a paste chord waits for that PNG when it is still being made
+# (`_paste_waits_for_png`): only the chord waits, the rest of the input does not.
+CLIPBOARD_PASTE_WAIT_S = 5.0
+# Ctrl+V and Shift+Insert: the keysym pasted and the modifiers either needs held.
+PASTE_CHORDS = {0x76: (0xffe3, 0xffe4), 0x56: (0xffe3, 0xffe4), 0xff63: (0xffe1, 0xffe2)}
 
 # Re-reads the outbound monitor gives one selection-change edge whose read came
 # back empty, before treating the selection as genuinely empty.
@@ -4580,6 +4585,10 @@ class WebRTCInput:
             hidden tab's heartbeat, one a second, leaves the key up.
         keymap_watch_task: The session's MappingNotify consumer.
     """
+
+    # The PNG still being made for a client's image (`write_clipboard`), which a
+    # paste waits for (`_paste_waits_for_png`); none until a write starts one.
+    _png_beside: Optional[asyncio.Task] = None
 
     def __init__(
         self,
@@ -8069,14 +8078,32 @@ class WebRTCInput:
             if not done:
                 ok = await self._set_clipboard(data, mime_type)
                 if ok:
-                    self._spawn_task(self._add_png_beside(conversion, mime_type, data),
-                                     name="ClipboardPng")
+                    self._png_beside = self._spawn_task(self._add_png_beside(conversion, mime_type, data),
+                                                        name="ClipboardPng")
                 return ok
             png = conversion.result()
             if png is not None:
                 return await self._set_clipboard(png, "image/png",
                                                  [("image/png", png), (mime_type, data)])
         return await self._set_clipboard(data, mime_type, flavours)
+
+    async def _paste_waits_for_png(self, keysym: int) -> None:
+        """Hold a paste chord (Ctrl+V, Shift+Insert) until the PNG of a client's
+        image is on the clipboard, `CLIPBOARD_PASTE_WAIT_S` at most. A photo
+        takes a second or more to convert, and until then the clipboard offers
+        it only as it came (a JPEG), which the session's browsers do not paste:
+        the first Ctrl+V after an Upload Image pasted nothing. The transports
+        hand a client's messages over one at a time, so the keys after the
+        chord's wait behind it and keep their order."""
+        task = self._png_beside
+        mods = PASTE_CHORDS.get(keysym)
+        if task is None or task.done() or not mods or not any(m in self.pressed_keys for m in mods):
+            return
+        logger_webrtc_input.debug("paste waits for the PNG of the client's image")
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=CLIPBOARD_PASTE_WAIT_S)
+        except Exception:
+            pass
 
     async def _add_png_beside(self, conversion: "asyncio.Future", mime_type: str,
                               data: bytes) -> None:
@@ -8101,6 +8128,9 @@ class WebRTCInput:
         input_bytes = data if isinstance(data, bytes) else data.encode('utf-8')
         self._clipboard_last_bytes = input_bytes
         self._clipboard_self_write = input_bytes
+        # A newer copy than the image whose PNG is being made: a paste no longer waits for that PNG.
+        if self._png_beside is not None and self._png_beside is not asyncio.current_task():
+            self._png_beside = None
         # `data`/`mime_type` stay the flavour the session reads back and echoes
         # against; `flavours` is everything the copy carried, offered together.
         entries = [(m, d if isinstance(d, bytes) else d.encode('utf-8'))
@@ -9109,6 +9139,7 @@ class WebRTCInput:
             self.on_ping_response(float("%.3f" % ((time.time() - self.ping_start) / 2 * 1000)))
         elif msg_type == "kd":
             keysym = int(toks[1])
+            await self._paste_waits_for_png(keysym)
             self.key_suspended.pop(keysym, None)
             # At the cap the oldest entry goes, not the new one: the key is
             # injected below regardless, and untracked it would never auto-release.
