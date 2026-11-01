@@ -469,6 +469,15 @@ def wait_video(page: Any, mode: str) -> Optional[dict]:
     return C.wait_wr_video(page, timeout=45) if mode == "webrtc" else C.wait_ws_video(page, timeout=30)
 
 
+def frames_seen(page: Any, mode: str) -> int:
+    """The video the page has had so far: the chunks the WebSockets core counts, or over WebRTC the frames its
+    `<video>` decoded (that core keeps no chunk count)."""
+    if mode == "webrtc":
+        return page.evaluate("""(() => { const v = document.querySelector('video');
+          return v && v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : 0; })()""")
+    return page.evaluate("window.videoChunksReceived || 0")
+
+
 def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> None:
     """Upload through the dashboard's controls and download through its file manager."""
     name = f"{dashboard}-{mode}.bin"
@@ -522,7 +531,7 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
     if dialog is None:
         res.check(f"{dashboard}: the file manager lists the upload", False, "the dialog is not open")
         return
-    chunks = page.evaluate("window.videoChunksReceived || 0")
+    chunks = frames_seen(page, mode)
     found, downloaded = wish_row_download(page, dialog, name)
     res.check(f"{dashboard}: the file manager lists the upload", found)
     res.check(f"{dashboard}: the row's Download action hands over the same bytes",
@@ -530,8 +539,7 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
     # A download that navigates the tab fires beforeunload, on which the core
     # closes the session even though the attachment keeps the page.
     time.sleep(2)
-    res.check(f"{dashboard}: the download leaves the stream running",
-              page.evaluate("window.videoChunksReceived || 0") > chunks)
+    res.check(f"{dashboard}: the download leaves the stream running", frames_seen(page, mode) > chunks)
     # The folder the manager shows is where its Upload sends the picked
     # files: the request names it to the core's uploader.
     inner = f"{dashboard}-{mode}-in-folder.bin"

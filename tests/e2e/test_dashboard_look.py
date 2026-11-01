@@ -644,7 +644,16 @@ ROWS_JS = r"""
     const el = n.parentElement;
     if (!n.textContent.trim() || !el || !vis(el) || seen.has(el) || inside(el)) continue;
     const range = document.createRange(); range.selectNodeContents(n);
-    const r = range.getBoundingClientRect();
+    let r = range.getBoundingClientRect();
+    // A block of text alone is measured by its line box, as the other atoms are by their boxes: the glyphs'
+    // own box is the font's ascent and descent, which differ between fonts (DejaVu's sits 3 px inside its line).
+    const cs = getComputedStyle(el);
+    if (!el.childElementCount && cs.display !== 'inline') {
+      const b = el.getBoundingClientRect();
+      r = { top: b.top + parseFloat(cs.borderTopWidth) + parseFloat(cs.paddingTop),
+            bottom: b.bottom - parseFloat(cs.borderBottomWidth) - parseFloat(cs.paddingBottom),
+            height: b.height };
+    }
     if (r.height > 0) atoms.push([r.top, r.bottom, n.textContent.trim().slice(0, 24)]);
   }
   atoms.sort((a, b) => a[0] - b[0]);

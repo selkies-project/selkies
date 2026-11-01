@@ -1121,11 +1121,16 @@ def dpi_for_resolution_block(dashboard: str) -> "H.Results":
             # reads: the display's, with no resolution of its own to follow.
             before = page.locator("#uiScalingSelect").input_value()
             res.check("the picker starts on the display's own pick", before == "96", before)
+            # The toolbar's tab holds the picker and the presets in two cards, one open at a time.
+            if dashboard != "default":
+                open_screen_settings(page, dashboard, "#resolutionPresetSelect")
             page.select_option("#resolutionPresetSelect", DPI_PRESET)
             time.sleep(1.0)
             dpi = wait_xft(DPI_PRESET_PICK)
             res.check(f"a {DPI_PRESET} preset scales the desktop to its own pick",
                       dpi == DPI_PRESET_PICK, f"Xft.dpi={dpi}")
+            if dashboard != "default":
+                open_screen_settings(page, dashboard, "#uiScalingSelect")
             shown = page.locator("#uiScalingSelect").input_value()
             res.check("and the picker shows the same number",
                       shown == str(DPI_PRESET_PICK), shown)
