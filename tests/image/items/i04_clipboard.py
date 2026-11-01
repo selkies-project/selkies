@@ -235,4 +235,27 @@ def run(cell: Any) -> None:
     got = wait(lambda: session.read(page, "image"), lambda g: g[1] == dims(image3), 30 if x11 else 1)
     R.check("Upload Image puts the picked image on the session's clipboard", picked and got[1] == dims(image3),
             f"picked={picked}, {got[0]} bytes, {got[1]} in the session")
+
+    # One Ctrl+V into an application of the session's has to paste what was just put on the clipboard: the
+    # checks above read until it arrives, and a paste that brings it only on a later press passes them.
+    app = session if isinstance(session, PageSession) else PageSession(cell)
+    if app is session or app.prepare(page, text, image):
+        for how in ("upload", "local") if real else ("upload",):
+            image4 = noise_png(1200, 720 + (how == "local") * 16, len(tag) + 3)
+            if how == "local":
+                client_own(cell, image4, "image/png")
+                focus.leave()
+                focus.enter(page)
+            else:
+                open_sidebar(page)
+                TD.pick_clipboard_image(page, "default", {"name": "first.png", "mimeType": "image/png", "buffer": image4})
+                page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+                time.sleep(1.0)
+            first = app.read(page, "image")
+            R.check(f"the first Ctrl+V pastes an image {'copied locally' if how == 'local' else 'from Upload Image'} "
+                    "into the session's browser", first[1] == dims(image4), f"{first[0]} bytes, {first[1]}")
+        if app is not session:
+            app.done()
+    else:
+        R.check("the session's browser is up for a paste", False, "the session's Chrome did not report ready")
     session.done()

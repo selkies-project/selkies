@@ -79,6 +79,7 @@ def run(cell: Any) -> None:
         leave(page)
         chord(page, "KeyX")
         g = state(page)
+        R.check("Ctrl+Shift+X locks the pointer at once, without a click on the stream", g["gaming"] and g["lock"], g)
         if g["gaming"] and not g["lock"]:
             page.mouse.click(700, 400)
             time.sleep(1.5)
@@ -88,6 +89,21 @@ def run(cell: Any) -> None:
         chord(page, "KeyX")
         leave(page)
         R.check("Ctrl+Shift+X turns gaming mode off again", not state(page)["gaming"], state(page))
+        # The dashboard's own button, the way most users enter it: the click on it must leave the
+        # keyboard to the stream, or not one key reaches the game.
+        open_sidebar(page)
+        button = page.locator(".gaming-mode-button").first
+        if button.count():
+            button.click(timeout=5000)
+            time.sleep(1.5)
+            g = state(page)
+            keys = page.evaluate("() => !(document.activeElement && document.activeElement.closest('.allow-native-input'))")
+            R.check("the gaming mode button goes fullscreen and locks the pointer, the keyboard left to the stream",
+                    g["gaming"] and g["fullscreen"] and g["lock"] and keys, {**g, "keys": keys})
+            chord(page, "KeyX")
+            leave(page)
+        else:
+            R.check("the dashboard shows its gaming mode button", False, "no .gaming-mode-button")
     # Shortcuts off: the chords are the session's.
     if reveal(page, "#keyboardShortcutsToggle"):
         page.locator("#keyboardShortcutsToggle").first.click(timeout=5000)
