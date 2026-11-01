@@ -103,6 +103,8 @@ const MOTION_BACKLOG_BYTES = 16 * 1024;
  * Animation frames gaming mode's pointer lock waits at most for the engine to
  * place the fullscreen viewport (`Input._viewportSettled`) before asking anyway.
  */
+// How long gaming mode's fullscreen waits on a pointer lock request that has not settled (`_lockOnGesture`).
+const LOCK_GESTURE_WAIT_MS = 300;
 const LOCK_SETTLE_FRAMES = 30;
 
 /**
@@ -5566,11 +5568,19 @@ export class Input {
      * browser. A locked keyboard delivers a short Escape to the session, so
      * holding it is what leaves this mode.
      *
-     * A lock requested before the transition would be canceled by it, so the
-     * fullscreenchange handler arms both once fullscreen lands, still inside
-     * the gesture's transient-activation window. A refused request takes the
-     * mode back down with it: left set, the next transition from any source
-     * would arm the locks. From a fullscreen the page holds already, an engine
+     * The pointer lock is asked for first, on the gesture that asked for the
+     * mode, and fullscreen once the lock settled (`_lockOnGesture`): a
+     * fullscreen request spends the gesture's transient activation, and
+     * Chromium refuses a lock asked for without one, in fullscreen as well
+     * (Edge on Windows on every entry); a lock taken first survives the
+     * switch to fullscreen. Gecko goes the other way round: it grants a lock
+     * in fullscreen without a gesture, and measures the first movement of a
+     * lock taken before the switch from where the viewport was, so there the
+     * fullscreenchange handler takes it once the viewport settled. That
+     * handler also asks again wherever the first request did not take, and
+     * arms the keyboard lock. A refused fullscreen takes the mode back down
+     * with it: left set, the next transition from any source would arm the
+     * locks. From a fullscreen the page holds already, an engine
      * without the Keyboard Lock API asks for the same element again with the
      * gaming options: by the Fullscreen spec that sets the element's keyboard
      * lock with no transition (Firefox 156 holds Escape after it); it comes
@@ -5581,11 +5591,16 @@ export class Input {
         this._setGamingMode(true);
         this._focusStream();
         if (document.fullscreenElement === null) {
-            document.documentElement.requestFullscreen(this._gamingFullscreenOptions())
-                .catch(err => {
-                    console.error("Fullscreen request failed:", err);
-                    this._setGamingMode(false);
-                });
+            const enter = () => {
+                if (!this.gamingMode || document.fullscreenElement !== null) return;
+                document.documentElement.requestFullscreen(this._gamingFullscreenOptions())
+                    .catch(err => {
+                        console.error("Fullscreen request failed:", err);
+                        this._setGamingMode(false);
+                    });
+            };
+            if (browser.isFirefox()) enter();
+            else this._lockOnGesture(enter);
             return;
         }
         this._armPointerLock();
@@ -5597,6 +5612,53 @@ export class Input {
                 });
         }
         this.requestKeyboardLock();
+    }
+
+    /**
+     * Asks for the pointer lock while the gesture that entered gaming mode is
+     * unspent, then runs `next` once the request settled: granted, refused,
+     * or after `LOCK_GESTURE_WAIT_MS` where it has not. A request for raw
+     * motion the platform refuses (Linux, Android) is asked again plainly at
+     * once, still on the same gesture, since a lock request leaves it
+     * unspent. An engine with no promise from the request (an old one) goes
+     * straight on, and the fullscreenchange handler's request stands in.
+     * @param {() => void} next The fullscreen request.
+     */
+    _lockOnGesture(next) {
+        let done = false;
+        const go = () => {
+            if (done) return;
+            done = true;
+            next();
+        };
+        setTimeout(go, LOCK_GESTURE_WAIT_MS);
+        const el = this.element;
+        if (!this.inputAttached || !el || this._isStreamLocked()) {
+            go();
+            return;
+        }
+        const ask = (raw) => {
+            let request;
+            try {
+                request = raw ? el.requestPointerLock({ unadjustedMovement: true }) : el.requestPointerLock();
+            } catch (e) {
+                go();
+                return;
+            }
+            if (!request || typeof request.then !== 'function') {
+                go();
+                return;
+            }
+            request.then(go, (err) => {
+                if (raw && err && err.name === 'NotSupportedError') {
+                    Input._rawMotionRefused = true;
+                    ask(false);
+                    return;
+                }
+                go();
+            });
+        };
+        ask(Input._asksRawMotion());
     }
 
     /**

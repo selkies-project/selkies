@@ -166,9 +166,18 @@ def wait_mode(page: Any, timeout: float, **want: bool) -> dict:
     return mode
 
 
+# Every pointer lock refusal the page meets, by the error's name: a lock refused for want of a user gesture
+# (NotAllowedError) is the one asked for after fullscreen spent the gesture that entered gaming mode, which a
+# strict engine (Edge on Windows) never grants, however often it is asked again.
+LOCK_TAP_JS = """(() => { window.__lockRefusals = []; const ask = Element.prototype.requestPointerLock;
+  Element.prototype.requestPointerLock = function (...a) { const p = ask.apply(this, a);
+    if (p && p.catch) p.catch((e) => window.__lockRefusals.push(e && e.name)); return p; }; })();"""
+
+
 def open_page(browser: Any, shields: bool) -> Any:
     ctx = browser.new_context(no_viewport=True)
     ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+    ctx.add_init_script(LOCK_TAP_JS)
     ctx.add_init_script(C.WIRE_TAP_JS)
     ctx.add_init_script(NOTICE_TAP_JS)
     if shields:
@@ -421,9 +430,17 @@ def enter_by_button(res: "H.Results", desk: Desk, page: Any, tag: str) -> bool:
     mode = wait_mode(page, 15, fullscreen=True, locked=True)
     ok = mode["fullscreen"] and mode["locked"] and mode["gaming"]
     res.check(f"{tag}: the gaming mode button fullscreens the page and locks the pointer", ok, mode)
+    gesture_check(res, page, tag)
     if ok:
         time.sleep(0.5)
     return ok
+
+
+def gesture_check(res: "H.Results", page: Any, tag: str) -> None:
+    """The lock is asked for on the gesture that entered the mode: never refused for want of one."""
+    refused = page.evaluate("window.__lockRefusals || []")
+    res.check(f"{tag}: the pointer lock is asked for on the gesture that entered gaming mode, never refused for want "
+              "of one", "NotAllowedError" not in refused, refused)
 
 
 def enter_gaming_mode(res: "H.Results", desk: Desk, page: Any, tag: str) -> bool:
@@ -434,6 +451,7 @@ def enter_gaming_mode(res: "H.Results", desk: Desk, page: Any, tag: str) -> bool
     mode = wait_mode(page, 15, fullscreen=True, locked=True)
     ok = mode["fullscreen"] and mode["locked"] and mode["gaming"]
     res.check(f"{tag}: the gaming mode chord fullscreens the page and locks the pointer", ok, mode)
+    gesture_check(res, page, tag)
     if ok:
         time.sleep(0.5)
     return ok

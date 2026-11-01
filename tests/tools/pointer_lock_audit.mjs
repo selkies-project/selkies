@@ -551,6 +551,64 @@ function stage(ids, locked = null) {
           `gaming=${input.gamingMode} events=${events.join(',')}`);
 }
 
+// --- the lock on the gesture, before fullscreen -----------------------------
+// A fullscreen request spends the gesture's transient activation, and Chromium
+// refuses a pointer lock asked for without one, in fullscreen as well (Edge on
+// Windows refused every entry by the dashboard's button). So gaming mode asks
+// for the lock first and fullscreen once the lock settled; a raw request the
+// platform refuses is asked again plainly before fullscreen, and an engine
+// whose request never settles still gets its fullscreen.
+for (const outcome of ['ok', 'refuse-option', 'never']) {
+    const order = [];
+    const element = makeElement(outcome === 'never' ? 'ok' : outcome);
+    reset(element);
+    const ask = element.requestPointerLock.bind(element);
+    element.requestPointerLock = (options) => {
+        order.push(options && options.unadjustedMovement ? 'lock-raw' : 'lock');
+        return outcome === 'never' ? new Promise(() => {}) : ask(options);
+    };
+    document.fullscreenElement = null;
+    document.pointerLockElement = null;
+    document.documentElement = { requestFullscreen: () => { order.push('fullscreen'); return Promise.resolve(); } };
+    const input = makeInput(element, false);
+    input.ongamingmode = () => {};
+    input.enterGamingMode();
+    await sleep(outcome === 'never' ? 400 : 20);
+    const want = { ok: 'lock-raw,fullscreen', 'refuse-option': 'lock-raw,lock,fullscreen', never: 'lock-raw,fullscreen' }[outcome];
+    check({ ok: 'gaming mode asks for the pointer lock before fullscreen, on the same gesture',
+            'refuse-option': 'a raw lock the platform refuses is asked again plainly, still before fullscreen',
+            never: 'a lock request that never settles still lets fullscreen through' }[outcome],
+          order.join(',') === want, order.join(','));
+}
+
+{
+    // Gecko grants a lock in fullscreen without a gesture and measures the first
+    // movement of one taken before the switch from where the viewport was: there
+    // fullscreen goes first, and the lock follows once it landed.
+    const order = [];
+    const element = makeElement('ok');
+    reset(element);
+    const ask = element.requestPointerLock.bind(element);
+    element.requestPointerLock = (options) => { order.push('lock'); return ask(options); };
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { value: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64; rv:158.0) Gecko/20100101 Firefox/158.0' }, configurable: true });
+    document.fullscreenElement = null;
+    document.pointerLockElement = null;
+    document.documentElement = { requestFullscreen: () => { order.push('fullscreen'); return Promise.resolve(); } };
+    const input = makeInput(element, false);
+    input.ongamingmode = () => {};
+    input.send = () => {};
+    input.resetKeyboard = () => {};
+    input.enterGamingMode();
+    await sleep(20);
+    document.fullscreenElement = element;
+    input._onFullscreenChange();
+    await sleep(60);
+    if (saved) Object.defineProperty(globalThis, 'navigator', saved);
+    check('Firefox asks for fullscreen first and the lock once it landed', order[0] === 'fullscreen' && order.includes('lock'),
+          order.join(','));
+}
+
 // --- a keyboard the engine will not lock -----------------------------------
 // Without the Keyboard Lock API a single Escape leaves fullscreen and the
 // pointer lock, and gaming mode with them; the page can neither prevent that
