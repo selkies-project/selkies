@@ -139,7 +139,7 @@ fn due_t3_survives_forward_only_sack_and_same_instant_is_idempotent() -> Result<
     let first_timeout = a.timers.get(Timer::T3RTX).unwrap();
     a.handle_timeout(first_timeout);
     assert_eq!(a.stats.get_num_t3timeouts(), 1);
-    assert_eq!(a.rto_mgr.get_rto(), 2000);
+    assert_eq!(a.rto_mgr.get_rto(), 1000, "a T3 backoff holds at its cap");
     assert_eq!(a.inflight_queue.get_num_bytes(), 0);
     assert_eq!(a.inflight_queue.len(), 1);
     assert!(a.inflight_queue.get(first).unwrap().abandoned());

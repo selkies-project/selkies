@@ -1149,3 +1149,38 @@ fn a_silent_path_outlasts_the_retries_of_a_stock_association() {
         "repaired when the path returns"
     );
 }
+
+/// Input shares the association, so a lost repair is tried again within about a second however
+/// long the outage ran, rather than at the minute RFC 9260's doubling reaches.
+#[test]
+fn a_t3_backoff_holds_a_repair_near_a_flat_retransmission() {
+    let mut rig = Rig::new();
+    rig.establish();
+    let tsns = rig.outstanding(1);
+    let mut repairs = 0;
+    let mut waited = Duration::ZERO;
+    let mut longest = Duration::ZERO;
+    let mut since = Duration::ZERO;
+    let step = Duration::from_millis(50);
+    while waited < Duration::from_secs(60) {
+        waited += step;
+        since += step;
+        if rig
+            .tick(step)
+            .iter()
+            .any(|c| c.kind == 0 && parse_data(&c.body).0 == tsns[0])
+        {
+            longest = longest.max(since);
+            since = Duration::ZERO;
+            repairs += 1;
+        }
+    }
+    assert!(
+        repairs >= 50,
+        "a minute's outage retries about once a second: {repairs}"
+    );
+    assert!(
+        longest <= Duration::from_millis(1100),
+        "the longest wait: {longest:?}"
+    );
+}

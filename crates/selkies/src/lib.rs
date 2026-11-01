@@ -16,21 +16,24 @@
 //! `src/selkies`, whose module docstrings are the specification each Rust module is held
 //! to; the suites under `tests/` drive either server unchanged.
 
-pub mod log;
-pub mod settings;
-pub mod core;
-pub mod capture;
-pub mod display;
-pub mod input;
-pub mod gamepad;
-pub mod clipboard;
 pub mod audio;
-pub mod http;
+pub mod capture;
+pub mod clipboard;
+pub mod commands;
+pub mod core;
+pub mod display;
 pub mod files;
-pub mod ws;
+pub mod gamepad;
+pub mod http;
+pub mod input;
+pub mod log;
+pub mod server;
+pub mod session_screens;
+pub mod settings;
 pub mod stats;
 pub mod webcam;
-pub mod commands;
+pub mod webrtc;
+pub mod ws;
 
 /// The capture stack this build links, as the startup line names it.
 pub fn capture_stack() -> String {
@@ -58,7 +61,9 @@ fn software_encoders() -> String {
     use pixelflux::encoders::{Codec, software_encoder};
     Codec::VIDEO
         .into_iter()
-        .filter_map(|codec| software_encoder(codec).map(|enc| format!("{}={}", codec.name(), enc.library)))
+        .filter_map(|codec| {
+            software_encoder(codec).map(|enc| format!("{}={}", codec.name(), enc.library))
+        })
         .collect::<Vec<_>>()
         .join(",")
 }

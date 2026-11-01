@@ -318,6 +318,24 @@ impl PeerRegistry {
         }
     }
 
+    /// Every browser client's socket, session token, and remote address, oldest first: the
+    /// signaling socket stays open for a session's life, which makes it the transport's window
+    /// onto the client's uplink.
+    pub fn client_sockets(&self) -> Vec<(Arc<PeerSocket>, Option<String>, String)> {
+        self.state()
+            .by_age()
+            .into_iter()
+            .filter(|peer| !peer.is_server)
+            .map(|peer| {
+                (
+                    peer.socket.clone(),
+                    peer.client_token.clone(),
+                    peer.raddr.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// Close every client still registered as going away, for a service shutting down: its
     /// server peer may already be gone, and an open socket keeps the listener waiting.
     pub fn close_clients(&self) {

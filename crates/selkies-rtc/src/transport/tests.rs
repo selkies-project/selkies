@@ -340,3 +340,78 @@ async fn a_peer_config_without_muxes_binds_sockets_of_its_own() {
     );
     side.transport.close().await;
 }
+
+/// What `Transport::send_rtp` costs on a connected pair, mutex, cipher, path lookup, and socket
+/// included: `RTC_BENCH_PEERS` senders at once, each on its own connected pair, as a server's peers
+/// send. Ignored outside a measurement: `cargo test --release -p selkies-rtc --lib send_path --
+/// --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "a measurement, not a check"]
+async fn send_path() {
+    const PACKET: usize = 1200;
+    const PACKETS: usize = 100_000;
+    let peers: usize = std::env::var("RTC_BENCH_PEERS")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(1);
+    let mut pairs = Vec::new();
+    for _ in 0..peers {
+        let mut a = Side::new(config(IceConfig {
+            controlling: true,
+            ..IceConfig::default()
+        }))
+        .await;
+        let mut b = Side::new(config(IceConfig {
+            controlling: false,
+            ..IceConfig::default()
+        }))
+        .await;
+        signal(&a, &b, (DtlsRole::Auto, DtlsRole::Auto)).await;
+        let connected = |t: &Transport| t.dtls_state() == DtlsState::Connected;
+        assert!(a.until(connected).await);
+        assert!(b.until(connected).await);
+        pairs.push((a, b));
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(peers));
+    let mut senders = Vec::new();
+    for (peer, (a, b)) in pairs.into_iter().enumerate() {
+        let barrier = barrier.clone();
+        senders.push(tokio::spawn(async move {
+            let mut rtp = vec![0u8; PACKET];
+            rtp[0] = 0x80;
+            rtp[1] = 96;
+            rtp[8..12].copy_from_slice(&(peer as u32 + 1).to_be_bytes());
+            barrier.wait().await;
+            // A frame's burst at a time, the receiver given room between, so a full socket buffer
+            // does not read as a fast send.
+            let (mut elapsed, mut failed) = (Duration::ZERO, 0usize);
+            for frame in 0..PACKETS / 833 {
+                let started = Instant::now();
+                for seq in 0..833usize {
+                    let seq = frame * 833 + seq;
+                    rtp[2..4].copy_from_slice(&(seq as u16).to_be_bytes());
+                    if a.transport.send_rtp(&rtp).is_err() {
+                        failed += 1;
+                    }
+                }
+                elapsed += started.elapsed();
+                tokio::time::sleep(Duration::from_millis(16)).await;
+            }
+            drop(b);
+            (elapsed, failed)
+        }));
+    }
+    let (mut total, mut failed) = (Duration::ZERO, 0);
+    for sender in senders {
+        let (elapsed, errors) = sender.await.unwrap();
+        total += elapsed;
+        failed += errors;
+    }
+    let sent = peers * (PACKETS / 833) * 833;
+    let per_packet_us = total.as_secs_f64() * 1e6 / sent as f64;
+    println!(
+        "send_rtp: {peers} peer(s), {PACKET} B: {per_packet_us:.2} us a packet ({failed} refused of {sent}), {:.0} Mbps a peer's task, one frame of 833 packets (1 MB) {:.2} ms",
+        PACKET as f64 * 8.0 / per_packet_us,
+        833.0 * per_packet_us / 1000.0
+    );
+}

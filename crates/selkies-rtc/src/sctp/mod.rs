@@ -45,7 +45,10 @@
 //! overflowed at the TSN wrap, a SACK past anything sent left the ack point behind its queue
 //! for good, a retransmitted INIT started a new association rather than being answered, and
 //! duplicates were never reported. A lone pending SACK flushes after 20 ms rather than 200,
-//! and DATA is retried until ICE or DTLS gives up on the peer rather than five times.
+//! and DATA is retried until ICE or DTLS gives up on the peer rather than five times. A T3 expiry
+//! doubles the RTO to 1 s at most, or the RTO the path last measured where that is longer, rather
+//! than to the 60 s RFC 9260 allows, so input repairs at about a second after an outage rather than a
+//! minute: this association carries input, and its congestion window is what protects the path.
 
 pub mod association;
 pub mod channel;
