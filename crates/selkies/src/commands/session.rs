@@ -969,6 +969,7 @@ pub fn jupyter(selkies: &Path, icon: &Path) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_screens::testing::{isolated, run_isolated};
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
@@ -1240,6 +1241,14 @@ mod tests {
     /// none of them and no runtime directory.
     #[test]
     fn a_session_groups_and_stops_its_children() {
+        // A session reaps and signals every child of its process, so it needs one of its own.
+        if !isolated() {
+            run_isolated(
+                "commands::session::tests::a_session_groups_and_stops_its_children",
+                &[],
+            );
+            return;
+        }
         let mut session = Session::new_in(None, Env::new()).unwrap();
         let first = session.spawn(&argv(&["sleep", "30"]), None, None).unwrap();
         let second = session.spawn(&argv(&["sleep", "30"]), None, None).unwrap();
@@ -1276,6 +1285,14 @@ mod tests {
     #[test]
     #[ignore = "starts an Xvfb; run where one is installed"]
     fn an_xvfb_comes_up_on_a_free_display() {
+        // A session reaps and signals every child of its process, so it needs one of its own.
+        if !isolated() {
+            run_isolated(
+                "commands::session::tests::an_xvfb_comes_up_on_a_free_display",
+                &[],
+            );
+            return;
+        }
         let mut session = Session::new_in(None, Env::new()).unwrap();
         session.x11("").expect("Xvfb comes up");
         let display = session.env["DISPLAY"].clone();

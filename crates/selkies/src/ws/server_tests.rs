@@ -1546,3 +1546,92 @@ async fn the_ping_for_a_key_frames_arrival_is_written_behind_it() {
         "a ping ahead of the frame would report it arrived before it left: {order:?}"
     );
 }
+
+// --- A single-display Wayland resize (test_wayland_resize_session_screen.py) --------------------
+
+/// What the screens were asked since the last call, the capture compositor's and the session's.
+fn sized(rig: &Rig) -> Vec<String> {
+    std::mem::take(&mut *rig.display.calls.lock())
+        .into_iter()
+        .filter(|c| c.starts_with("screen") || c.starts_with("realize"))
+        .collect()
+}
+
+/// A nested session's screen is its own compositor's, so the in-place resize carries it along;
+/// the Wayland setting is read once per process.
+#[tokio::test]
+#[ignore = "run by a_lone_wayland_resize_carries_the_session_screen, in a process of its own"]
+async fn a_lone_wayland_resize_in_its_process() {
+    if !crate::session_screens::testing::isolated() {
+        return;
+    }
+    crate::settings::install(crate::settings::Settings::parse(
+        &["--wayland=true".to_string()],
+        &|_| None,
+    ));
+    let rig = Rig::new();
+    let mut page = rig.controller().await;
+    page.say(r#"SETTINGS,{"initialClientWidth":1280,"initialClientHeight":720,"tabId":"a"}"#)
+        .await;
+    let capture = rig.primary_capture();
+    {
+        let mut st = rig.service.st.lock();
+        let d = st.displays.get_mut(PRIMARY_DISPLAY).expect("the primary");
+        d.scaling_dpi = Some("192".into());
+    }
+
+    // The compositor even-masks to 1920x928; the session must land there too.
+    *capture.geometry.lock() = Ok(Some((1920, 928, 1.0)));
+    sized(&rig);
+    rig.service.handle_resize("1920x936", PRIMARY_DISPLAY).await;
+    assert_eq!(
+        sized(&rig),
+        [
+            "screen 1920x936 grow_only=true",
+            "screen 1920x928 grow_only=false",
+            "realize 192 primary Some((1920, 928))",
+        ],
+        "the capture screen is grown, then fitted to what was realized, and the session's sized \
+         once, to the realized geometry, at the DPI the display holds, for the display being resized"
+    );
+
+    // At DPR 2 the media resizes, at DPR 1 it comes back, and the session screen arrives at both.
+    *capture.geometry.lock() = Ok(None);
+    rig.service
+        .handle_resize("2400x1440", PRIMARY_DISPLAY)
+        .await;
+    assert_eq!(
+        sized(&rig).last().map(String::as_str),
+        Some("realize 192 primary Some((2400, 1440))")
+    );
+    rig.service
+        .st
+        .lock()
+        .displays
+        .get_mut(PRIMARY_DISPLAY)
+        .expect("the primary")
+        .scaling_dpi = Some("96".into());
+    rig.service.handle_resize("1920x936", PRIMARY_DISPLAY).await;
+    assert_eq!(
+        sized(&rig).last().map(String::as_str),
+        Some("realize 96 primary Some((1920, 936))"),
+        "a resize after a DPI change moves the session screen with it"
+    );
+
+    rig.service.handle_resize("1920x936", PRIMARY_DISPLAY).await;
+    assert!(sized(&rig).is_empty(), "a redundant resize sizes nothing");
+
+    rig.service.handle_resize("800x600", "display9").await;
+    assert!(
+        sized(&rig).is_empty(),
+        "a display nobody holds sizes nothing"
+    );
+}
+
+#[test]
+fn a_lone_wayland_resize_carries_the_session_screen() {
+    crate::session_screens::testing::run_isolated(
+        "ws::server_tests::a_lone_wayland_resize_in_its_process",
+        &[],
+    );
+}

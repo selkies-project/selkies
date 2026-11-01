@@ -160,6 +160,11 @@ impl WsService {
         })
     }
 
+    /// Make the service ready to serve again after a `shutdown`, as a mode switch back needs.
+    pub fn begin(&self) {
+        self.shutdown_called.store(false, Ordering::Relaxed);
+    }
+
     /// Attach the input stack, which is built over this service (`InputHost`).
     pub fn attach_input(&self, input: Arc<dyn Input>) {
         *self.input.write() = Some(input);
@@ -1114,6 +1119,43 @@ impl WsService {
         }
     }
 
+    /// The DPI a display's page asked for, else the configured default.
+    fn display_dpi(&self, display_id: &str) -> String {
+        self.st
+            .lock()
+            .displays
+            .get(display_id)
+            .and_then(|d| d.scaling_dpi.clone())
+            .unwrap_or_else(|| settings().scaling_dpi().to_string())
+    }
+
+    /// A session compositor was adopted after captures started: run the scale ladder again for
+    /// every display, so the session takes the desktop DPI as its output scale and the capture
+    /// output, which took it while the session was still starting, drops back to 1.0. Serialized
+    /// against reconfiguration: the adoption can land during the pass that started the captures
+    /// this restarts. `dpi` is the primary's; each other display re-applies its own.
+    pub async fn resync_wayland_session_scale(&self, dpi: i32) {
+        if !Self::is_wayland() || self.input().is_none() {
+            return;
+        }
+        {
+            let _guard = self.reconfigure_lock.lock().await;
+            let ids: Vec<String> = self.st.lock().display_ids();
+            for display_id in ids {
+                let target = if display_id == PRIMARY_DISPLAY {
+                    dpi
+                } else {
+                    let own = self.display_dpi(&display_id).trim().parse::<f64>();
+                    own.map_or(96, |own| own as i32)
+                };
+                self.realize_wayland_display_dpi(&display_id, target).await;
+            }
+        }
+        if self.reconfigure_pending.load(Ordering::Relaxed) {
+            self.reconfigure_displays().await;
+        }
+    }
+
     /// Run the Wayland scale ladder for one display and restart its capture when the scale left
     /// for the capture output changed. A `STOP_VIDEO`'d display stays stopped.
     async fn realize_wayland_display_dpi(&self, display_id: &str, dpi: i32) {
@@ -1214,7 +1256,10 @@ impl WsService {
     /// A lone Wayland display resizes its live capture in place, bracketed by the screen sizing
     /// the restart does not do: the capture is a view over screen 0 and pixelflux sizes only the
     /// view, so the screen is grown first, the geometry read back, and the screen fitted to it.
-    async fn resize_lone_wayland(&self, display_id: &str, w: i32, h: i32) {
+    /// A nested session's screen is its own compositor's, not the capture's: sizing only the
+    /// capture leaves its applications laid out for the size the last DPI change realized, so it
+    /// takes what was realized too, at the DPI the display holds.
+    pub(crate) async fn resize_lone_wayland(&self, display_id: &str, w: i32, h: i32) {
         let scale = {
             let mut st = self.st.lock();
             if let Some(l) = st.layouts.get_mut(display_id) {
@@ -2469,24 +2514,7 @@ impl WsService {
         if !Self::is_wayland() {
             return (true, None);
         }
-        let output = wayland_output_id(Some(display_id));
-        let probe = capture.clone();
-        let read = tokio::task::spawn_blocking(move || {
-            let barrier = probe.realized_geometry(output);
-            let (_, last_error) = probe.capture_state(output);
-            (barrier, last_error)
-        })
-        .await;
-        let last_error = match read {
-            Ok((barrier, last_error)) => {
-                if let Err(e) = barrier {
-                    warn!(target: "ws", "Wayland start barrier failed for '{display_id}': {e}");
-                }
-                last_error
-            }
-            Err(_) => None,
-        };
-        (capture.is_capturing(), last_error)
+        crate::session_screens::verdict::start_verdict(capture, display_id).await
     }
 
     /// Read back, once frames flow, the codec a fresh capture streams: the selection ladder
@@ -3334,10 +3362,18 @@ impl WsService {
             self.deps.display.wayland_destroy_output(display_id).await;
         }
         self.stop_capture_for_display(display_id).await;
-        {
+        let attached: Vec<String> = {
             let mut st = self.st.lock();
             st.displays.remove(display_id);
             st.layouts.remove(display_id);
+            st.displays
+                .keys()
+                .filter(|d| *d != PRIMARY_DISPLAY)
+                .cloned()
+                .collect()
+        };
+        if Self::is_wayland() {
+            self.deps.display.retire_session_screens(&attached).await;
         }
         let owner = {
             let mut reg = self.reg.lock();
@@ -3810,18 +3846,23 @@ impl WsService {
                 .wayland_size_screen(primary.w, primary.h, scale, false)
                 .await;
         }
-        let dpi_of: std::collections::HashMap<String, f64> = {
-            let st = self.st.lock();
-            st.displays
-                .iter()
-                .map(|(d, s)| (d.clone(), s.scale))
-                .collect()
-        };
+        let dpis: std::collections::HashMap<String, String> = layouts
+            .keys()
+            .map(|d| (d.clone(), self.display_dpi(d)))
+            .collect();
         let outcome = self
             .deps
             .display
-            .wayland_layout_after_primary(layouts, &dpi_of)
+            .wayland_layout_after_primary(layouts, &dpis)
             .await;
+        {
+            let mut st = self.st.lock();
+            for (did, scale) in &outcome.scales {
+                if let Some(d) = st.displays.get_mut(did) {
+                    d.scale = *scale;
+                }
+            }
+        }
         for dropped in &outcome.dropped {
             keep.remove(&dropped.display_id);
         }
@@ -4250,6 +4291,16 @@ impl RelayHost for WsService {
                 item.data.len(),
             );
         }
+        #[cfg(feature = "frame-log")]
+        crate::stats::frame_log::record(crate::stats::frame_log::FrameRecord {
+            kind: "ws",
+            capture_ns: item.capture_ns,
+            encode_start_ns: item.encode_end_ns,
+            encode_end_ns: item.encode_end_ns,
+            bytes: item.data.len(),
+            rtp_packets: 1,
+            keyframe: item.data.get(1).is_some_and(|kind| kind & 0x01 != 0),
+        });
         link.is_some_and(|link| link.lock().note_send(item.frame_id, item.data.len(), now()))
     }
 

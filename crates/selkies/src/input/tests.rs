@@ -19,15 +19,21 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use pixelflux::Error;
 
+use super::command::{AppSession, live_x_displays};
 use super::dispatch::{FINGER_SCROLL_MAX_PX, POINTER_ECHO_MIN, POINTER_ECHO_POLL, PointerReader};
-use super::handler::{InputConfig, KeyItem, xdotool_type_args};
+use super::handler::{InputConfig, KeyItem, detect_app_compositor_in, xdotool_type_args};
 use super::pointer::Rect;
 use super::wayland_keymap::testing::{FakeSeat, keymap_text};
 use super::x11_keyboard::testing::FakeLink;
 use super::x11_link::XLink;
 use super::x11_worker::XWorker;
 use super::*;
+use crate::clipboard::Session;
 use crate::core::Role;
+use crate::session_screens::testing::{
+    Owned, PrivateLabwc, Scratch, isolated, private_x_server, run_isolated,
+};
+use crate::session_screens::{AppCompositor, SessionScreens};
 
 const A: Option<ConnId> = Some(1);
 const B: Option<ConnId> = Some(2);
@@ -129,9 +135,6 @@ impl InputHost for Rec {
         sy: f64,
     ) {
         self.call(format!("box {display_id} {ox} {oy} {sx} {sy}"));
-    }
-    async fn command_finished(&self, command: &str) {
-        self.call(format!("finished {command}"));
     }
     fn app_compositor_adopted(&self, display: &str) {
         self.call(format!("adopted {display}"));
@@ -2035,4 +2038,250 @@ async fn real_x_server_round_trip() {
     send(&h, &["m,5,6,0,0"], A).await;
     assert_eq!(pointer(), (5, 6), "input flows on the new connection");
     h.disconnect().await;
+}
+
+// --- The session the applications run in (test_app_compositor_socket.py, test_app_session.py,
+// test_session_xwayland.py) ----------------------------------------------------------------------
+
+/// Lay `names` out as live sockets in a fresh directory beside their lock files.
+fn live_sockets(names: &[&str]) -> (Scratch, Vec<std::os::unix::net::UnixListener>) {
+    let runtime = Scratch::new("appsock");
+    let listeners = names
+        .iter()
+        .map(|name| {
+            std::fs::write(runtime.path(&format!("{name}.lock")), b"").expect("lock file");
+            std::os::unix::net::UnixListener::bind(runtime.path(name)).expect("bind")
+        })
+        .collect();
+    (runtime, listeners)
+}
+
+#[test]
+fn which_socket_input_and_clipboard_are_aimed_at() {
+    let detect = |names: &[&str]| {
+        let (runtime, _listeners) = live_sockets(names);
+        detect_app_compositor_in(&runtime.text(), "wayland-1")
+    };
+    assert_eq!(
+        detect(&["wayland-1"]),
+        None,
+        "a plain session keeps input on the capture compositor"
+    );
+    assert_eq!(
+        detect(&["wayland-1", "wayland-0"]).as_deref(),
+        Some("wayland-0"),
+        "a nested compositor is adopted"
+    );
+    assert_eq!(
+        detect(&["wayland-1", "wayland-0", "wayland-wm"]).as_deref(),
+        Some("wayland-0"),
+        "a relay socket beside a nested compositor does not hide it"
+    );
+    assert_eq!(
+        detect(&["wayland-1", "wayland-0", "wayland-2"]),
+        None,
+        "two nested compositors stay ambiguous"
+    );
+
+    let (runtime, listeners) = live_sockets(&["wayland-1", "wayland-0"]);
+    drop(listeners);
+    assert!(runtime.path("wayland-0").exists());
+    assert_eq!(
+        detect_app_compositor_in(&runtime.text(), "wayland-1"),
+        None,
+        "a stale socket file is not adopted: a compositor that died must not take input with it"
+    );
+}
+
+#[tokio::test]
+async fn the_configured_socket_wins_and_the_session_hears() {
+    let seat = Arc::new(FakeSeat::new(&keymap_text("us")));
+    let cfg = InputConfig {
+        is_wayland: true,
+        app_wayland_display: "wayland-2".into(),
+        wayland_socket_index: 1,
+        ..Default::default()
+    };
+    let (h, rec) = dispatcher(cfg, Some(seat as Arc<dyn WaylandSeat>));
+    assert_eq!(h.app_wayland_display(), "wayland-2");
+    assert!(h.has_separate_app_compositor());
+    assert!(
+        rec.calls().contains(&"adopted wayland-2".to_string()),
+        "the transport hears: {:?}",
+        rec.calls()
+    );
+}
+
+#[test]
+fn a_synced_dpi_scales_the_cursor_cap() {
+    let cfg = InputConfig {
+        max_cursor_size: 32,
+        ..Default::default()
+    };
+    let (h, _) = dispatcher(cfg, None);
+    assert_eq!(h.cursor_metrics(), (96.0, 32));
+    h.set_system_dpi(192.0);
+    assert_eq!(h.cursor_metrics(), (192.0, 64));
+    assert_eq!(AppCompositor::system_dpi(&*h), 192.0);
+    h.set_system_dpi(96.0);
+    assert_eq!(h.cursor_metrics(), (96.0, 32), "and comes back");
+}
+
+#[test]
+fn display_names_resolve_to_sockets() {
+    use crate::clipboard::x11::display_live;
+    use crate::input::x11_link::x_display_socket;
+    for (name, want) in [
+        (":0", "/tmp/.X11-unix/X0"),
+        (":12.1", "/tmp/.X11-unix/X12"),
+        ("unix:3", "/tmp/.X11-unix/X3"),
+        ("unix:3.0", "/tmp/.X11-unix/X3"),
+        (" :4 ", "/tmp/.X11-unix/X4"),
+    ] {
+        assert_eq!(x_display_socket(name).as_deref(), Some(want), "{name:?}");
+    }
+    for name in [
+        "host:0",
+        "192.168.0.2:0",
+        "localhost:10.0",
+        "tcp/host:0",
+        "::1:0",
+        "",
+        ":",
+        ":abc",
+        ":0.",
+    ] {
+        assert_eq!(x_display_socket(name), None, "{name:?}");
+    }
+    assert!(
+        !display_live("host:0"),
+        "a remote display is reported dead rather than connected to"
+    );
+}
+
+#[test]
+fn where_the_applications_run() {
+    let (h, _) = dispatcher(InputConfig::default(), None);
+    assert_eq!(
+        h.app_session_on(Some(":7".into())),
+        AppSession {
+            x11_display: Some(":7".into()),
+            wayland_display: None,
+            kind: "x11"
+        },
+        "x11 backend: apps on the server's DISPLAY"
+    );
+
+    let (h, _) = wayland(Arc::new(FakeSeat::new(&keymap_text("us"))), false);
+    assert_eq!(
+        h.app_session_on(None),
+        AppSession {
+            x11_display: None,
+            wayland_display: Some("wayland-capture".into()),
+            kind: "wayland"
+        },
+        "plain Wayland session: capture compositor socket"
+    );
+
+    let (h, _) = wayland(Arc::new(FakeSeat::new(&keymap_text("us"))), true);
+    let session = h.app_session_on(Some(":selkies-none".into()));
+    assert_eq!(session.wayland_display.as_deref(), Some("wayland-nested"));
+    assert_eq!(session.kind, "wayland");
+    assert_eq!(
+        session.x11_display,
+        live_x_displays().first().cloned(),
+        "nested compositor: its socket and its Xwayland"
+    );
+    assert!(
+        !crate::clipboard::x11::display_is_xwayland(""),
+        "empty display name is rejected"
+    );
+}
+
+/// A Wayland handler reading its own DISPLAY, in a process of its own.
+#[tokio::test]
+#[ignore = "run by a_rootful_xwayland_is_adopted_only_when_it_really_is_one, in a process of its own"]
+async fn a_rootful_xwayland_is_read_in_its_process() {
+    if !isolated() {
+        return;
+    }
+    crate::settings::install(crate::settings::Settings::parse(&[], &|_| None));
+    let display = std::env::var("DISPLAY").expect("a server");
+    let want_xwayland = std::env::var("EXPECT_XWAYLAND").is_ok_and(|v| v == "1");
+    let (h, rec) = wayland(Arc::new(FakeSeat::new(&keymap_text("us"))), false);
+    let screens = SessionScreens::new(None, true, None);
+    screens.attach(&h);
+    assert!(crate::clipboard::x11::display_live(&display));
+    assert_eq!(
+        crate::clipboard::x11::display_is_xwayland(&display),
+        want_xwayland
+    );
+    let session = h.app_session();
+    let (offered, why) = screens.capability();
+    if want_xwayland {
+        assert_eq!(Session::x11_session_display(&*h), Some(display.clone()));
+        assert_eq!(
+            session,
+            AppSession {
+                x11_display: Some(display.clone()),
+                wayland_display: None,
+                kind: "x11"
+            },
+            "app_session adopts the rootful Xwayland as an X session"
+        );
+        assert!(
+            !offered && why.contains("rootful Xwayland"),
+            "and offers it no second display: {why}"
+        );
+        Session::x11_session_adopted(&*h);
+        assert!(
+            rec.calls().contains(&"screens".to_string()),
+            "its monitor coming up tells the transport"
+        );
+    } else {
+        assert_eq!(Session::x11_session_display(&*h), None);
+        assert_eq!(
+            session,
+            AppSession {
+                x11_display: None,
+                wayland_display: Some("wayland-capture".into()),
+                kind: "wayland"
+            },
+            "app_session ignores a non-Xwayland server, apps stay Wayland"
+        );
+        assert!(offered, "Wayland clients are offered a second display");
+    }
+    let (nested, _) = wayland(Arc::new(FakeSeat::new(&keymap_text("us"))), true);
+    assert_eq!(
+        Session::x11_session_display(&*nested),
+        None,
+        "nested session: its XWM bridges its Xwayland, so no unbridged X monitor"
+    );
+}
+
+#[test]
+#[ignore = "needs labwc, Xwayland, and Xvfb"]
+fn a_rootful_xwayland_is_adopted_only_when_it_really_is_one() {
+    let inner = "input::tests::a_rootful_xwayland_is_read_in_its_process";
+    let (_xvfb, xvfb_display) = private_x_server(320, 240);
+    run_isolated(
+        inner,
+        &[("DISPLAY", &xvfb_display), ("EXPECT_XWAYLAND", "0")],
+    );
+
+    let labwc = PrivateLabwc::start(1);
+    let number = 3000 + std::process::id() % 5000;
+    let display = format!(":{number}");
+    let _xwayland = Owned::spawn(
+        std::process::Command::new("Xwayland")
+            .arg(&display)
+            .env("XDG_RUNTIME_DIR", &labwc.runtime.0)
+            .env("WAYLAND_DISPLAY", "wayland-0"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !crate::clipboard::x11::display_live(&display) {
+        assert!(Instant::now() < deadline, "Xwayland never listened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    run_isolated(inner, &[("DISPLAY", &display), ("EXPECT_XWAYLAND", "1")]);
 }

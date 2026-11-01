@@ -47,6 +47,7 @@ use super::x11_worker::XWorker;
 use super::{ClipboardSink, GamepadSink, InputHost, NullSink, PointerSink, VirtualDeviceSink};
 use crate::clipboard::{PasteKeys, Session};
 use crate::gamepad::ConnId;
+use crate::session_screens::{AppCompositor, AppsRunner};
 
 /// Ctrl+V and Shift+Insert: the keysym pasted and the modifiers either needs held.
 pub const PASTE_CHORDS: &[(u32, [u32; 2])] = &[
@@ -320,6 +321,7 @@ pub struct Dispatcher {
     pub(crate) queue_notify: Notify,
     wl_keymap_owner_lock: tokio::sync::Mutex<()>,
     wl_typer_lock: tokio::sync::Mutex<()>,
+    apps: AppsRunner,
     me: Weak<Dispatcher>,
 }
 
@@ -351,6 +353,7 @@ impl Dispatcher {
             queue_notify: Notify::new(),
             wl_keymap_owner_lock: tokio::sync::Mutex::new(()),
             wl_typer_lock: tokio::sync::Mutex::new(()),
+            apps: AppsRunner::default(),
             me: me.clone(),
         })
     }
@@ -375,23 +378,48 @@ impl Dispatcher {
         self.state.lock().x.clone()
     }
 
+    /// The apps panel's runner.
+    pub fn apps(&self) -> &AppsRunner {
+        &self.apps
+    }
+
+    /// A DPI a client synced: what a session compositor adopted later takes, and the scale of the
+    /// remote-cursor delivery cap.
+    pub fn set_system_dpi(&self, dpi: f64) {
+        let mut st = self.state.lock();
+        st.system_dpi = dpi;
+        st.cursor_size_cap = (self.max_cursor_size() as f64 * dpi / 96.0) as u32;
+    }
+
+    /// The remote-cursor cap at unity: the configured maximum, or the operator's cursor size above it.
+    fn max_cursor_size(&self) -> u32 {
+        if self.cfg.cursor_size > 0 {
+            self.cfg.max_cursor_size.max(self.cfg.cursor_size as u32)
+        } else {
+            self.cfg.max_cursor_size
+        }
+    }
+
+    /// Re-read and announce the installed set after an apps command ran.
+    async fn note_app_command_finished(&self, command: &str) {
+        if let Some(action) = self.apps.note_command_finished(command).await {
+            self.send_command_status(&action, None);
+        }
+    }
+
     /// Bring the input backends up: the X connection or the Wayland worker, DPI detection,
-    /// the keyboard reset, and the background key tasks.
+    /// the keyboard reset, the background key tasks, and the apps runner's probe.
     pub async fn connect(self: &Arc<Self>) {
+        let me = self.clone();
+        tokio::spawn(async move { me.apps.probe().await });
         if !self.cfg.is_wayland {
             self.open_x().await;
         }
         if let Some(x) = self.x() {
             if let Some(dpi) = x.call(|s| s.link().screen_dpi()).await.flatten() {
-                let mut st = self.state.lock();
-                st.system_dpi = dpi;
-                let max = if self.cfg.cursor_size > 0 {
-                    self.cfg.max_cursor_size.max(self.cfg.cursor_size as u32)
-                } else {
-                    self.cfg.max_cursor_size
-                };
-                st.cursor_size_cap = (max as f64 * dpi / 96.0) as u32;
-                debug!(target: "input", "System DPI detected as ~{dpi:.0}. Cursor size cap set to {}x{}px.", st.cursor_size_cap, st.cursor_size_cap);
+                self.set_system_dpi(dpi);
+                let cap = self.cursor_metrics().1;
+                debug!(target: "input", "System DPI detected as ~{dpi:.0}. Cursor size cap set to {cap}x{cap}px.");
             }
             if let Some(Some((delay_ms, interval_ms))) = x.call(|s| s.link().autorepeat()).await {
                 let mut st = self.state.lock();
@@ -1935,10 +1963,16 @@ impl Dispatcher {
     /// not a leftover Xvfb or Xorg holding the number; otherwise the apps are Wayland clients of
     /// the capture compositor itself. Blocking.
     pub fn app_session(&self) -> AppSession {
-        let env_display = std::env::var("DISPLAY")
-            .ok()
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty());
+        self.app_session_on(
+            std::env::var("DISPLAY")
+                .ok()
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty()),
+        )
+    }
+
+    /// `app_session` for the server's `DISPLAY` as given.
+    pub(crate) fn app_session_on(&self, env_display: Option<String>) -> AppSession {
         if !self.cfg.is_wayland {
             return AppSession {
                 x11_display: env_display,
@@ -2012,8 +2046,8 @@ impl Dispatcher {
         run_client_command(command, env, move |outcome| match outcome {
             CommandOutcome::Done => {
                 me.send_command_status(&format!("command_done,{echoed}"), conn);
-                let host = me.host.clone();
-                tokio::spawn(async move { host.command_finished(&echoed).await });
+                let finished = me.clone();
+                tokio::spawn(async move { finished.note_app_command_finished(&echoed).await });
             }
             CommandOutcome::Error(text) => {
                 me.send_command_status(&format!("command_error,{text}"), conn)
@@ -2052,6 +2086,24 @@ impl PasteKeys for PasteChord {
 
     fn modifier_held(&self, keysym: u32) -> bool {
         self.0.state.lock().active_modifiers.contains(&keysym)
+    }
+}
+
+impl AppCompositor for Dispatcher {
+    fn app_wayland_display(&self) -> String {
+        Dispatcher::app_wayland_display(self)
+    }
+
+    fn has_separate_app_compositor(&self) -> bool {
+        Dispatcher::has_separate_app_compositor(self)
+    }
+
+    fn x11_session_display(&self) -> Option<String> {
+        Session::x11_session_display(self)
+    }
+
+    fn system_dpi(&self) -> f64 {
+        self.cursor_metrics().0
     }
 }
 
@@ -2116,12 +2168,17 @@ fn detect_app_compositor(capture: &str) -> Option<String> {
     let runtime = std::env::var("XDG_RUNTIME_DIR")
         .ok()
         .filter(|r| !r.is_empty())?;
+    detect_app_compositor_in(&runtime, capture)
+}
+
+/// `detect_app_compositor` over the runtime directory given.
+pub(crate) fn detect_app_compositor_in(runtime: &str, capture: &str) -> Option<String> {
     let cap_base = std::path::Path::new(capture)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(capture)
         .to_string();
-    let entries = std::fs::read_dir(&runtime).ok()?;
+    let entries = std::fs::read_dir(runtime).ok()?;
     let mut others: Vec<String> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {

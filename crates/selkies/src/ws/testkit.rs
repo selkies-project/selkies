@@ -37,8 +37,10 @@ pub fn settings_installed() {
     crate::settings::install(Settings::parse(&[], &|_| None));
 }
 
+/// What the realized-geometry barrier answers.
+pub type RealizedGeometry = Result<Option<(i32, i32, f64)>, String>;
+
 /// A `ScreenCapture` stand-in recording the live requests it is given.
-#[derive(Default)]
 pub struct FakeCapture {
     pub calls: Mutex<Vec<String>>,
     pub capturing: Mutex<bool>,
@@ -46,6 +48,25 @@ pub struct FakeCapture {
     pub active: Mutex<Option<String>>,
     pub tx: Mutex<Option<broadcast::Sender<Arc<FrameBatch>>>>,
     pub fail_start: Mutex<bool>,
+    /// What the realized-geometry barrier reads back.
+    pub geometry: Mutex<RealizedGeometry>,
+    /// The recorded `(state, last_error)`.
+    pub state: Mutex<(String, Option<String>)>,
+}
+
+impl Default for FakeCapture {
+    fn default() -> FakeCapture {
+        FakeCapture {
+            calls: Mutex::default(),
+            capturing: Mutex::default(),
+            starts: Mutex::default(),
+            active: Mutex::default(),
+            tx: Mutex::default(),
+            fail_start: Mutex::default(),
+            geometry: Mutex::new(Ok(None)),
+            state: Mutex::new(("running".into(), None)),
+        }
+    }
 }
 
 impl FakeCapture {
@@ -173,12 +194,12 @@ impl CaptureHandle for FakeCapture {
 
     fn set_cursor_sink(&self, _sink: Option<Arc<dyn CursorSink>>) {}
 
-    fn realized_geometry(&self, _output: u32) -> Result<Option<(i32, i32, f64)>, String> {
-        Ok(None)
+    fn realized_geometry(&self, _output: u32) -> RealizedGeometry {
+        self.geometry.lock().clone()
     }
 
     fn capture_state(&self, _output: u32) -> (String, Option<String>) {
-        ("running".into(), None)
+        self.state.lock().clone()
     }
 }
 
@@ -273,22 +294,33 @@ impl Display for FakeDisplay {
     async fn wayland_layout_after_primary(
         &self,
         _l: &mut Layouts,
-        _s: &HashMap<String, f64>,
+        _d: &HashMap<String, String>,
     ) -> LayoutOutcome {
         LayoutOutcome::default()
     }
 
-    async fn wayland_size_screen(&self, _w: i32, _h: i32, _s: f64, _g: bool) {}
+    async fn wayland_size_screen(&self, w: i32, h: i32, _s: f64, grow_only: bool) {
+        self.calls
+            .lock()
+            .push(format!("screen {w}x{h} grow_only={grow_only}"));
+    }
 
     async fn wayland_scale_screen(&self, _s: f64) {}
 
     async fn wayland_destroy_output(&self, _d: &str) {}
 
+    async fn retire_session_screens(&self, secondaries: &[String]) {
+        self.calls.lock().push(format!("retire {secondaries:?}"));
+    }
+
     async fn wayland_set_cursor_size(&self, _size: i32) -> bool {
         true
     }
 
-    async fn realize_wayland_dpi(&self, _dpi: &str, _d: &str, _s: Option<(i32, i32)>) -> f64 {
+    async fn realize_wayland_dpi(&self, dpi: &str, d: &str, size: Option<(i32, i32)>) -> f64 {
+        self.calls
+            .lock()
+            .push(format!("realize {dpi} {d} {size:?}"));
         1.0
     }
 

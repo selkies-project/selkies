@@ -322,6 +322,11 @@ impl ConnectionVerdict {
         }
     }
 
+    /// Take back a frame counted missed from the pacer's hand: its last packet left after all.
+    pub fn take_back_missed(&mut self) {
+        self.missed = self.missed.saturating_sub(1);
+    }
+
     /// Count `frames` the display produced for the page and `missed` frames of those or
     /// earlier ones that will not reach it; the new verdict, or `None`.
     pub fn note(&mut self, frames: u64, missed: u64, now: f64) -> Option<bool> {

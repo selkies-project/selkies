@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use log::{error, warn};
-use pixelflux::{Compositor, OutputDesc};
+use pixelflux::{Compositor, Error, OutputDesc};
 
 use crate::core::PRIMARY_DISPLAY;
 
@@ -58,29 +58,94 @@ pub fn wayland_output_id(display_id: Option<&str>) -> u32 {
 /// The compositor's outputs by id.
 pub type Outputs = BTreeMap<u32, OutputDesc>;
 
+/// The capture compositor's output calls, one to one, so the layout passes and their shrink and
+/// fit rules run against a model of its overlap rule in the suites and `Compositor` in a session.
+pub trait CompositorOutputs: Send + Sync + 'static {
+    /// Every live output.
+    fn list_outputs(&self) -> Result<Vec<OutputDesc>, Error>;
+    /// Create an output; false when the id is taken or the rectangle overlaps a live output.
+    fn create_output(
+        &self,
+        id: u32,
+        width: i32,
+        height: i32,
+        x: i32,
+        y: i32,
+        scale: f64,
+    ) -> Result<bool, Error>;
+    /// Destroy an output; false for the primary or an unknown id.
+    fn destroy_output(&self, id: u32) -> Result<bool, Error>;
+    /// Move an output; false when the rectangle overlaps a live output.
+    fn reposition_output(&self, id: u32, x: i32, y: i32) -> Result<bool, Error>;
+    /// Resize an output in place.
+    fn resize_output(&self, id: u32, width: i32, height: i32, scale: f64) -> Result<bool, Error>;
+    /// Recreate the cursor theme at `size` pixels.
+    fn set_cursor_size(&self, size: i32) -> Result<bool, Error>;
+    /// The realized size and scale of an output, past the queued capture start.
+    fn get_realized_geometry(&self, id: u32) -> Result<Option<(i32, i32, f64)>, Error>;
+}
+
+impl CompositorOutputs for Compositor {
+    fn list_outputs(&self) -> Result<Vec<OutputDesc>, Error> {
+        Compositor::list_outputs(self)
+    }
+
+    fn create_output(
+        &self,
+        id: u32,
+        width: i32,
+        height: i32,
+        x: i32,
+        y: i32,
+        scale: f64,
+    ) -> Result<bool, Error> {
+        Compositor::create_output(self, id, width, height, x, y, scale)
+    }
+
+    fn destroy_output(&self, id: u32) -> Result<bool, Error> {
+        Compositor::destroy_output(self, id)
+    }
+
+    fn reposition_output(&self, id: u32, x: i32, y: i32) -> Result<bool, Error> {
+        Compositor::reposition_output(self, id, x, y)
+    }
+
+    fn resize_output(&self, id: u32, width: i32, height: i32, scale: f64) -> Result<bool, Error> {
+        Compositor::resize_output(self, id, width, height, scale)
+    }
+
+    fn set_cursor_size(&self, size: i32) -> Result<bool, Error> {
+        Compositor::set_cursor_size(self, size)
+    }
+
+    fn get_realized_geometry(&self, id: u32) -> Result<Option<(i32, i32, f64)>, Error> {
+        Compositor::get_realized_geometry(self, id)
+    }
+}
+
 /// The compositor output operations, each off the runtime's workers.
 #[derive(Clone)]
 pub struct WaylandOutputs {
-    compositor: Arc<Compositor>,
+    compositor: Arc<dyn CompositorOutputs>,
 }
 
 impl WaylandOutputs {
     /// Output management over `compositor`.
-    pub fn new(compositor: Arc<Compositor>) -> WaylandOutputs {
+    pub fn new(compositor: Arc<dyn CompositorOutputs>) -> WaylandOutputs {
         WaylandOutputs { compositor }
     }
 
     /// Output management over the running compositor, `None` before one runs.
     pub fn running() -> Option<WaylandOutputs> {
-        pixelflux::running_compositor().map(WaylandOutputs::new)
+        pixelflux::running_compositor().map(|c| WaylandOutputs::new(c))
     }
 
     async fn blocking<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&Compositor) -> T + Send + 'static,
+        f: impl FnOnce(&dyn CompositorOutputs) -> T + Send + 'static,
     ) -> Option<T> {
         let compositor = self.compositor.clone();
-        tokio::task::spawn_blocking(move || f(&compositor))
+        tokio::task::spawn_blocking(move || f(&*compositor))
             .await
             .ok()
     }

@@ -6,22 +6,15 @@
 
 //! The `host` traits over the server's own modules: what the integrator hands `WsDeps`.
 //!
-//! The Wayland layout apply lives here, on `display::WaylandOutputs`, split around the
-//! primary's capture start, since pixelflux refuses a placement that overlaps a live output and
-//! the primary's screen takes its new size only once its capture has restarted: the first half
-//! removes, shrinks, moves, and grows, and the second creates the secondaries in the room the
-//! primary gave up. The session-compositor ladder (`realize_wayland_dpi`, session screens) has
-//! no Rust owner yet, so this adapter takes the plain session's path: the capture output
-//! carries the DPI as its scale, and a second display is limited by what the capture
-//! compositor offers.
+//! The Wayland side goes to `session_screens`: its layout passes split around the primary's
+//! capture start, the session compositor's DPI ladder, and what backs a second display.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::future::BoxFuture;
-use log::{error, info, warn};
+use log::warn;
 use parking_lot::Mutex;
 use pixelflux::sink::CursorSink;
 use pixelflux::{CaptureSettings, StreamInfo, StreamStats};
@@ -30,11 +23,11 @@ use tokio::sync::broadcast;
 
 use crate::audio::{AudioEngine, AudioPacket, MicWrite, MicrophoneUplink};
 use crate::capture::{DisplayCapture, FrameBatch};
-use crate::core::{DisplayId, PRIMARY_DISPLAY, Role};
-use crate::display::wayland::{SecondaryAction, secondary_action};
+use crate::core::{DisplayId, Role};
 use crate::display::{Layouts, WaylandOutputs, wayland_output_id};
 use crate::input::authority::Sender;
 use crate::input::{ConnId, CursorMessage, Dispatcher, InputHost};
+use crate::session_screens::{ScreenTransport, SessionScreens, layout};
 use crate::settings::settings;
 use crate::stats::StreamSource;
 use crate::stats::resources::ResourceMonitor;
@@ -42,8 +35,8 @@ use crate::webcam::demand::DemandTransport;
 use crate::webcam::{WebcamFrame, shared_webcam, webcam_uplink_allowed};
 use crate::ws::client::ClientId;
 use crate::ws::host::{
-    Audio, CaptureFactory, CaptureHandle, Display, DroppedDisplay, Input, LayoutOutcome, MicUplink,
-    Stats, TokenEntry, Tokens, Webcam,
+    Audio, CaptureFactory, CaptureHandle, Display, Input, LayoutOutcome, MicUplink, Stats,
+    TokenEntry, Tokens, Webcam,
 };
 use crate::ws::server::WsService;
 
@@ -234,14 +227,7 @@ impl Webcam for SharedWebcam {
     }
 
     async fn demand_sync(&self, port: Arc<dyn DemandTransport>) {
-        // The watches' future holds a `&dyn Fn` that is not `Sync`, so it runs on a thread of its own.
-        let runtime = tokio::runtime::Handle::current();
-        let synced = tokio::task::spawn_blocking(move || {
-            runtime.block_on(crate::webcam::demand::sync(port))
-        });
-        if let Err(e) = synced.await {
-            warn!(target: "ws", "Capture demand sync failed: {e}");
-        }
+        crate::webcam::demand::sync(port).await;
     }
 
     fn demand_detach(&self, port: &Arc<dyn DemandTransport>) {
@@ -307,10 +293,20 @@ impl Stats for MonitorStats {
     }
 }
 
-/// The display server, through `crate::display`.
-#[derive(Default)]
+/// The display server, through `crate::display` and `crate::session_screens`.
 pub struct ServerDisplay {
     wm: crate::display::monitors::MultiMonitorWindowManager,
+    screens: Arc<SessionScreens>,
+}
+
+impl ServerDisplay {
+    /// The display server over the session's screens, which `WsInputHost` shares.
+    pub fn new(screens: Arc<SessionScreens>) -> ServerDisplay {
+        ServerDisplay {
+            wm: Default::default(),
+            screens,
+        }
+    }
 }
 
 #[async_trait]
@@ -363,153 +359,26 @@ impl Display for ServerDisplay {
         keep: &HashSet<String>,
         primary_scale: f64,
     ) -> LayoutOutcome {
-        let mut outcome = LayoutOutcome::default();
-        let Some(outputs) = WaylandOutputs::running() else {
-            return outcome;
-        };
-        let existing = outputs.list().await;
-        let wanted: HashMap<u32, String> = layouts
-            .keys()
-            .filter(|d| *d != PRIMARY_DISPLAY)
-            .map(|d| (wayland_output_id(Some(d)), d.clone()))
-            .collect();
-        // The primary's screen and the view its capture binds to always persist.
-        let session = [
-            crate::display::WAYLAND_SCREEN_OUTPUT_ID,
-            wayland_output_id(None),
-        ];
-        for desc in existing.values() {
-            let oid = desc.0;
-            if !session.contains(&oid) && !wanted.contains_key(&oid) {
-                info!(target: "ws", "Destroying stale Wayland output {oid}.");
-                outputs.destroy_output(oid).await;
+        match WaylandOutputs::running() {
+            Some(outputs) => {
+                layout::before_primary(&outputs, Some(&self.screens), layouts, keep, primary_scale)
+                    .await
             }
+            None => LayoutOutcome::default(),
         }
-        let mut present: HashSet<u32> = existing.keys().copied().collect();
-        for (oid, did) in &wanted {
-            let (Some(layout), Some(desc)) = (layouts.get(did).copied(), existing.get(oid)) else {
-                continue;
-            };
-            let recreate = match secondary_action(desc, &layout) {
-                SecondaryAction::Keep => None,
-                SecondaryAction::Recreate(why) => Some(why),
-                SecondaryAction::Shrink => (!outputs.shrink_output(desc, layout.w, layout.h).await)
-                    .then(|| format!("cannot shrink to {}x{}", layout.w, layout.h)),
-            };
-            if let Some(why) = recreate {
-                info!(target: "ws", "Wayland output {oid} {why}; recreating it.");
-                outputs.destroy_output(*oid).await;
-                present.remove(oid);
-                if keep.contains(did) {
-                    outcome.restart.push(did.clone());
-                }
-            }
-        }
-        let target = layouts
-            .get(PRIMARY_DISPLAY)
-            .map(|p| (p.x, p.y))
-            .unwrap_or((0, 0));
-        let current = existing
-            .get(&crate::display::WAYLAND_SCREEN_OUTPUT_ID)
-            .map(|d| (d.1, d.2))
-            .unwrap_or((0, 0));
-        if target != current {
-            let mut moved = outputs.reposition_primary(target.0, target.1).await;
-            if !moved && wanted.keys().any(|oid| present.contains(oid)) {
-                for (oid, did) in &wanted {
-                    if present.remove(oid) {
-                        info!(target: "ws", "Wayland output {oid} blocks the primary's move; recreating it.");
-                        outputs.destroy_output(*oid).await;
-                        if keep.contains(did) {
-                            outcome.restart.push(did.clone());
-                        }
-                    }
-                }
-                moved = outputs.reposition_primary(target.0, target.1).await;
-            }
-            if !moved {
-                outputs.reposition_primary(0, 0).await;
-                if let Some(primary) = layouts.get_mut(PRIMARY_DISPLAY) {
-                    primary.x = 0;
-                    primary.y = 0;
-                }
-                outcome.reanchored = true;
-                let secondaries: Vec<String> = layouts
-                    .keys()
-                    .filter(|d| *d != PRIMARY_DISPLAY)
-                    .cloned()
-                    .collect();
-                for did in secondaries {
-                    layouts.remove(&did);
-                    outcome.dropped.push(DroppedDisplay {
-                        display_id: did,
-                        reason:
-                            "The compositor cannot move the primary output for this arrangement."
-                                .into(),
-                    });
-                }
-            }
-        }
-        if let Some(primary) = layouts.get(PRIMARY_DISPLAY) {
-            outputs
-                .size_screen(primary.w, primary.h, primary_scale, true)
-                .await;
-        }
-        outcome
     }
 
     async fn wayland_layout_after_primary(
         &self,
         layouts: &mut Layouts,
-        scales: &HashMap<String, f64>,
+        dpis: &HashMap<String, String>,
     ) -> LayoutOutcome {
-        let mut outcome = LayoutOutcome::default();
-        let Some(outputs) = WaylandOutputs::running() else {
-            return outcome;
-        };
-        let existing = outputs.list().await;
-        let mut secondaries: Vec<String> = layouts
-            .keys()
-            .filter(|d| *d != PRIMARY_DISPLAY)
-            .cloned()
-            .collect();
-        secondaries.sort_by_key(|d| wayland_output_id(Some(d)));
-        for did in secondaries {
-            let oid = wayland_output_id(Some(&did));
-            if existing.contains_key(&oid) {
-                continue;
+        match WaylandOutputs::running() {
+            Some(outputs) => {
+                layout::after_primary(&outputs, Some(&self.screens), layouts, dpis).await
             }
-            let Some(layout) = layouts.get(&did).copied() else {
-                continue;
-            };
-            if outputs
-                .create_output(
-                    &did,
-                    layout.x,
-                    layout.y,
-                    layout.w,
-                    layout.h,
-                    scales.get(&did).copied().unwrap_or(1.0),
-                )
-                .await
-            {
-                continue;
-            }
-            error!(target: "ws", "Wayland create_output {oid} failed.");
-            layouts.remove(&did);
-            outcome.dropped.push(DroppedDisplay {
-                display_id: did,
-                reason: "The compositor cannot create an output for this display.".into(),
-            });
-            if let Some(primary) = layouts.get_mut(PRIMARY_DISPLAY)
-                && (primary.x, primary.y) != (0, 0)
-                && outputs.reposition_primary(0, 0).await
-            {
-                primary.x = 0;
-                primary.y = 0;
-            }
+            None => LayoutOutcome::default(),
         }
-        outcome
     }
 
     async fn wayland_size_screen(&self, w: i32, h: i32, scale: f64, grow_only: bool) {
@@ -532,6 +401,10 @@ impl Display for ServerDisplay {
         }
     }
 
+    async fn retire_session_screens(&self, secondaries: &[String]) {
+        self.screens.ensure_screens(secondaries).await;
+    }
+
     async fn wayland_set_cursor_size(&self, size: i32) -> bool {
         match WaylandOutputs::running() {
             Some(outputs) => outputs.set_cursor_size(size).await,
@@ -542,10 +415,10 @@ impl Display for ServerDisplay {
     async fn realize_wayland_dpi(
         &self,
         dpi: &str,
-        _display_id: &str,
-        _size: Option<(i32, i32)>,
+        display_id: &str,
+        size: Option<(i32, i32)>,
     ) -> f64 {
-        dpi.parse::<f64>().map(|d| d / 96.0).unwrap_or(1.0)
+        self.screens.realize_dpi(dpi, display_id, size).await
     }
 
     async fn host_output_capacity(&self) -> Option<i64> {
@@ -557,14 +430,16 @@ impl Display for ServerDisplay {
     }
 
     fn session_screen_capability(&self) -> (bool, String) {
-        (true, String::new())
+        self.screens.capability()
     }
 
     async fn probe_session_screen_capability(&self) -> (bool, String) {
-        (true, String::new())
+        self.screens.probe_capability().await
     }
 
-    fn schedule_session_screen_layout(&self, _layouts: &Layouts) {}
+    fn schedule_session_screen_layout(&self, layouts: &Layouts) {
+        self.screens.schedule_layout(layouts);
+    }
 }
 
 /// The token table `http` provisions.
@@ -638,29 +513,38 @@ impl Input for DispatcherInput {
             .and_then(|c| serde_json::to_value(c).ok())
     }
 
-    fn set_system_dpi(&self, _dpi: f64) {}
+    fn set_system_dpi(&self, dpi: f64) {
+        self.0.set_system_dpi(dpi);
+    }
 
     fn cursor_size_cap(&self) -> i32 {
         self.0.cursor_metrics().1 as i32
     }
 
     fn apps_available(&self) -> bool {
-        false
+        self.0.apps().available()
     }
 
     fn installed_apps(&self) -> Option<Vec<String>> {
-        None
+        self.0.apps().installed()
     }
 }
 
-/// What a client's command that exited cleanly does next: an apps command re-reads and announces
-/// the installed set, which the apps runner owns.
-pub type CommandFinished = Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>;
+#[async_trait]
+impl ScreenTransport for WsService {
+    async fn resync_session_scale(&self, dpi: i32) {
+        self.resync_wayland_session_scale(dpi).await;
+    }
+
+    async fn republish_second_screen(&self) {
+        WsService::republish_second_screen(self).await;
+    }
+}
 
 /// `input::InputHost` over the service: what the input stack's verbs do to the stream.
 pub struct WsInputHost {
     pub service: Arc<WsService>,
-    pub command_finished: CommandFinished,
+    pub screens: Arc<SessionScreens>,
 }
 
 #[async_trait]
@@ -795,17 +679,12 @@ impl InputHost for WsInputHost {
             .await;
     }
 
-    async fn command_finished(&self, command: &str) {
-        (self.command_finished)(command.to_string()).await;
-    }
-
     fn session_screens_changed(&self) {
         let service = self.service.clone();
         tokio::spawn(async move { service.republish_second_screen().await });
     }
 
     fn app_compositor_adopted(&self, _display: &str) {
-        let service = self.service.clone();
-        tokio::spawn(async move { service.republish_second_screen().await });
+        self.screens.compositor_adopted(self.service.clone());
     }
 }

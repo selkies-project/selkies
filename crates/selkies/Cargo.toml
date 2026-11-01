@@ -22,6 +22,7 @@ path = "src/main.rs"
 [dependencies]
 pixelflux.workspace = true
 pcmflux.workspace = true
+selkies-rtc = { path = "../selkies-rtc" }
 log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -39,6 +40,8 @@ http = "1"
 http-body-util = "0.1"
 rustls = "0.23"
 rustls-pemfile = "2"
+tokio-rustls = "0.26"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "aws-lc-rs", "native-tokio"] }
 rcgen = "0.13"
 flate2 = "1"
 base64 = "0.22"
@@ -46,6 +49,7 @@ rand = "0.9"
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 hmac = "0.12"
+subtle = "2"
 hex = "0.4"
 regex = "1"
 percent-encoding = "2"
@@ -56,8 +60,8 @@ parking_lot = "0.12"
 dashmap = "6"
 async-trait = "0.1"
 libc = "0.2"
-nix = { version = "0.29", features = ["fs", "socket", "signal", "process", "user", "poll", "ioctl"] }
-x11rb = { version = "0.14", features = ["xtest", "xfixes", "randr", "xkb", "xinput", "render"] }
+nix = { version = "0.29", features = ["fs", "socket", "net", "hostname", "signal", "process", "user", "poll", "ioctl"] }
+x11rb = { version = "0.14", features = ["xtest", "xfixes", "randr", "xkb", "xinput", "render", "res"] }
 libpulse-binding = "2.30"
 sysinfo = "0.33"
 nvml-wrapper = "0.10"
@@ -65,3 +69,12 @@ prometheus-client = "0.23"
 rmp-serde = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 chrono = "0.4"
+shlex = "1"
+tempfile = "3"
+xkbcommon = { version = "0.9", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+
+[features]
+## Writes one line per frame sent to `$BASELINE_FRAME_LOG`, what the comparison benchmark reads; a
+## measurement build only, never a release.
+frame-log = []

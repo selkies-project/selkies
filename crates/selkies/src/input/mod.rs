@@ -132,11 +132,9 @@ pub trait InputHost: Send + Sync {
         scale_x: f64,
         scale_y: f64,
     );
-    /// A client's command exited cleanly: an apps command re-reads and announces the installed
-    /// set (`note_app_command_finished`).
-    async fn command_finished(&self, command: &str);
-    /// A nested app compositor was adopted for input and clipboard: the transport runs its scale
-    /// ladder, holds the spare screens, and tells its pages what a second display can do.
+    /// A nested app compositor was adopted for input and clipboard: the transport hands it to
+    /// `session_screens::SessionScreens::compositor_adopted`, which runs its scale ladder, holds
+    /// the spare screens, and tells its pages what a second display can do.
     fn app_compositor_adopted(&self, display: &str);
     /// The session behind the displays changed after they connected (a rootful Xwayland came
     /// up): the pages are told again what a second display can do.
