@@ -293,12 +293,14 @@
   font-weight: 600;
   box-shadow: none;
 }
-/* The palette's toggle is a button like the keys, set apart by the accent's text; open, it takes the accent's tint. */
+/* The palette's toggle is a button like the keys, set apart by the accent's text and an edge of the same colour,
+   the same open as shut: only its label changes. A hover deepens both where a pointer hovers; a tap on a touch screen
+   would leave it hovered. */
 .sidebar .key-palette-toggle {
   flex: 0 0 auto;
   min-height: var(--soft-key-h);
   padding: 0.375rem 0.75rem;
-  border: 1px solid var(--sk-border-strong);
+  border: 1px solid var(--sk-accent-text);
   border-radius: 6px;
   background: none;
   color: var(--sk-accent-text);
@@ -306,8 +308,9 @@
   font-weight: 600;
   box-shadow: none;
 }
-.sidebar .key-palette-toggle:hover { border-color: var(--sk-accent-border); color: var(--sk-accent-text-strong); }
-.sidebar .key-palette-toggle[aria-expanded="true"] { background-color: var(--sk-accent-soft); border-color: var(--sk-accent-border); }
+@media (hover: hover) {
+  .sidebar .key-palette-toggle:hover { border-color: var(--sk-accent-text-strong); color: var(--sk-accent-text-strong); }
+}
 /* A palette grid cell is only a few rem wide: the padding and size that suit a full-width key clip "Home" and "PgUp". */
 .sidebar .mobile-key-button.palette-grid-key {
   min-width: 0;
@@ -470,7 +473,7 @@
   font-weight: 500;
   box-shadow: none;
 }
-.sidebar [data-slot="button"]:not(.action-button):not(.mobile-key-button):hover { border-color: var(--sk-accent-border); }
+.sidebar [data-slot="button"]:not(.action-button):not(.mobile-key-button):not(.key-palette-toggle):hover { border-color: var(--sk-accent-border); }
 .sidebar [data-slot="button"][data-variant="default"]:not(.action-button):not(.mobile-key-button) {
   background-color: var(--sk-button-bg);
   border-color: var(--sk-button-bg);

@@ -115,8 +115,9 @@ export function SoftKeys({ showTrackpad: trackpadButton = true, showKeyboardButt
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {showKeys && (
-            // A button like the keys, set apart from them by the accent's text.
-            <Button variant="outline" size="sm" className="key-palette-toggle h-(--soft-key-h) text-(--primary-text)" aria-expanded={paletteOpen}
+            // A button like the keys, set apart from them by the accent's text and an edge of the same colour, the
+            // same open as shut: only its label changes.
+            <Button variant="outline" size="sm" className="key-palette-toggle h-(--soft-key-h) border-(--primary-text) text-(--primary-text) hover:text-(--primary-text) aria-expanded:bg-background aria-expanded:text-(--primary-text) dark:border-(--primary-text) dark:aria-expanded:bg-input/30" aria-expanded={paletteOpen}
               onMouseDown={(event) => event.preventDefault()} onClick={() => setPaletteOpen((open) => !open)}>
               {paletteOpen ? t('keyPalette.less') : t('keyPalette.more')}
             </Button>
