@@ -21,6 +21,10 @@
 //! first record of each message template under a paced target through and then one per
 //! `PACE_PERIOD` seconds, carrying the count of the records it held back, while the
 //! per-packet RTP and SCTP targets stay at INFO outright.
+//!
+//! Third-party crates (smithay, the `rtc_*` stacks) log under their module paths, which is how
+//! they are told apart: they stay at WARNING in every mode, and those warnings are paced by the
+//! same filter, since `rtc_dtls` warns per unknown extension in every handshake with Chromium.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -33,6 +37,25 @@ use log::{Level, LevelFilter, Log, Metadata, Record};
 const PACED_PREFIXES: &[&str] = &["webrtc.", "ice."];
 /// Targets that fire per packet, held at INFO even in debug mode.
 const PACKET_TARGETS: &[&str] = &["webrtc.rtp.sender", "webrtc.rtp.receiver", "webrtc.sctp"];
+/// The short names Selkies logs under; anything else is a third-party crate's.
+const OWN_TARGETS: &[&str] = &[
+    "main", "server", "ws", "webrtc", "signaling", "display", "input", "gamepad", "audio",
+    "printing", "webcam", "stats", "audit", "settings", "metrics", "capture_demand", "access",
+    "ice",
+];
+
+/// Whether a record's target is Selkies' own rather than a third-party crate's.
+fn is_own(target: &str) -> bool {
+    OWN_TARGETS.contains(&target)
+        || target.starts_with("webrtc.")
+        || target.starts_with("ice.")
+        || target == "selkies"
+        || target.starts_with("selkies::")
+        || target.starts_with("selkies_rtc")
+}
+
+/// Message texts the pacing remembers before it starts over.
+const PACE_TEMPLATES: usize = 4096;
 /// How often one template of a paced target gets through at DEBUG.
 const PACE_PERIOD: Duration = Duration::from_secs(5);
 
@@ -44,11 +67,12 @@ struct PacedFilter {
 impl PacedFilter {
     /// Whether the record passes, and the count of alike records it stands for.
     fn admit(&self, target: &str, template: &str) -> Option<u64> {
-        if !PACED_PREFIXES.iter().any(|p| target.starts_with(p)) {
-            return Some(0);
-        }
         let mut seen = self.seen.lock().unwrap();
         let now = Instant::now();
+        // The text is formatted, so a peer's bytes in a message would otherwise grow this forever.
+        if seen.len() >= PACE_TEMPLATES {
+            seen.clear();
+        }
         let key = (target.to_string(), template.to_string());
         match seen.get_mut(&key) {
             Some((last, held)) if now.duration_since(*last) < PACE_PERIOD => {
@@ -79,6 +103,9 @@ impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         let target = metadata.target();
         let level = metadata.level();
+        if !is_own(target) {
+            return level <= Level::Warn;
+        }
         if PACKET_TARGETS.contains(&target) {
             return level <= Level::Info;
         }
@@ -94,15 +121,16 @@ impl Log for Logger {
         }
         let message = record.args().to_string();
         let mut suffix = String::new();
-        if record.level() == Level::Debug {
-            match self.pace.admit(record.target(), &message) {
+        let target = record.target();
+        let paced = !is_own(target)
+            || (record.level() == Level::Debug
+                && PACED_PREFIXES.iter().any(|p| target.starts_with(p)));
+        if paced {
+            match self.pace.admit(target, &message) {
                 None => return,
                 Some(0) => {}
                 Some(held) => {
-                    suffix = format!(
-                        " (+{held} alike in the last {}s)",
-                        PACE_PERIOD.as_secs()
-                    );
+                    suffix = format!(" (+{held} alike in the last {}s)", PACE_PERIOD.as_secs());
                 }
             }
         }
@@ -137,5 +165,55 @@ pub fn configure(debug: bool) {
         } else {
             LevelFilter::Info
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn logger(debug: bool) -> Logger {
+        Logger {
+            debug,
+            pace: PacedFilter {
+                seen: Mutex::new(HashMap::new()),
+            },
+        }
+    }
+
+    fn enabled(l: &Logger, target: &str, level: Level) -> bool {
+        l.enabled(&Metadata::builder().target(target).level(level).build())
+    }
+
+    #[test]
+    fn a_third_party_crate_stays_at_warning_even_in_debug_mode() {
+        for debug in [false, true] {
+            let l = logger(debug);
+            assert!(!enabled(&l, "smithay::wayland::output", Level::Info));
+            assert!(!enabled(&l, "rtc_dtls::handshake", Level::Debug));
+            assert!(enabled(&l, "rtc_dtls::handshake", Level::Warn));
+        }
+    }
+
+    #[test]
+    fn selkies_targets_follow_the_debug_switch() {
+        assert!(enabled(&logger(false), "ws", Level::Info));
+        assert!(!enabled(&logger(false), "ws", Level::Debug));
+        assert!(enabled(&logger(true), "ws", Level::Debug));
+        assert!(enabled(&logger(true), "ice.agent", Level::Debug));
+        assert!(enabled(&logger(true), "selkies_rtc::rtp::pacer", Level::Debug));
+        assert!(!enabled(&logger(true), "webrtc.sctp", Level::Debug));
+    }
+
+    #[test]
+    fn a_repeated_template_is_held_back_within_its_period() {
+        let l = logger(false);
+        assert_eq!(l.pace.admit("rtc_dtls::x", "unknown extension"), Some(0));
+        assert_eq!(l.pace.admit("rtc_dtls::x", "unknown extension"), None);
+        assert_eq!(l.pace.admit("rtc_dtls::x", "another line"), Some(0));
+        for i in 0..(PACE_TEMPLATES * 2) {
+            l.pace.admit("rtc_dtls::x", &format!("peer value {i}"));
+        }
+        assert!(l.pace.seen.lock().unwrap().len() <= PACE_TEMPLATES);
     }
 }

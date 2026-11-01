@@ -665,7 +665,7 @@ impl Connection {
         if let Some(rest) = message.strip_prefix("SET_NATIVE_CURSOR_RENDERING,") {
             let value = rest.split(',').next().unwrap_or("").trim().to_lowercase();
             let enabled = value == "1" || value == "true";
-            info!(target: "ws", "Received SET_NATIVE_CURSOR_RENDERING: {enabled}");
+            info!(target: "ws", "Received SET_NATIVE_CURSOR_RENDERING: {}", if enabled { "True" } else { "False" });
             self.service.set_native_cursor_rendering(enabled).await;
             return Flow::Continue(());
         }
@@ -740,6 +740,7 @@ impl Connection {
                 return Flow::Continue(());
             }
         };
+        debug!(target: "ws", "Parsed client settings for '{}'", parsed.display_id);
         let service = self.service.clone();
         let id = self.client.id;
         service

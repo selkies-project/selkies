@@ -3437,7 +3437,7 @@ impl WsService {
         // The single-display total still needs the framebuffer alignment.
         total_w = (total_w + 7) & !7;
         self.st.lock().layouts = layouts.clone();
-        info!(target: "ws", "Layout calculated: Total Size={total_w}x{total_h}. Layouts: {layouts:?}");
+        info!(target: "ws", "Layout calculated: Total Size={total_w}x{total_h}. Layouts: {}", crate::display::layouts_literal(&layouts));
 
         let mut keep = self.classify_running_captures(&layouts).await;
         if !wayland {
