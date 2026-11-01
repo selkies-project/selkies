@@ -16,6 +16,22 @@
 //! `src/selkies`, whose module docstrings are the specification each Rust module is held
 //! to; the suites under `tests/` drive either server unchanged.
 
+pub mod log;
+pub mod settings;
+pub mod core;
+pub mod capture;
+pub mod display;
+pub mod input;
+pub mod gamepad;
+pub mod clipboard;
+pub mod audio;
+pub mod http;
+pub mod files;
+pub mod ws;
+pub mod stats;
+pub mod webcam;
+pub mod commands;
+
 /// The capture stack this build links, as the startup line names it.
 pub fn capture_stack() -> String {
     format!(
