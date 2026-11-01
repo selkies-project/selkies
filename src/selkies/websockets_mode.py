@@ -4110,12 +4110,17 @@ class DataStreamingServer(BaseStreamingService):
         least_ms = min(stand, default=0.0) if window else 0.0
         held = gated or display_state.get('gate_moved_at', 0.0) > last_tick
         offered_bps = (sent - sent_then) * 8 / (now - last_tick) if last_tick and not held else None
+        acked_offered_bps = None
         if not window:
             delivered_bps, queue_s = 0.0, LINK_QUEUE_MS / 1000.0
         else:
             span = window[-1][0] - window[0][0]
             delivered_bps = (window[-1][2] - window[0][2]) * 8 / span if span > 0 else 0.0
             measured_bps = delivered_bps if span > 0 else None
+            # The same frames' send span: each acked at its send plus its round trip.
+            sent_span = span - (window[-1][1] - window[0][1]) / 1000.0
+            if sent_span > 0 and span > 0:
+                acked_offered_bps = (window[-1][2] - window[0][2]) * 8 / sent_span
             jitter_ms = display_state.get('link_jitter_ms')
             if jitter_ms is None and len(stand) >= LINK_RISE_ACKS:
                 jitter_ms = display_state['link_jitter_ms'] = _round_trip_jitter(stand)
@@ -4159,7 +4164,7 @@ class DataStreamingServer(BaseStreamingService):
             display_state['link_carried'] = measured_bps >= LINK_CARRIED_SHARE * offered_bps
         steer = display_state.setdefault('link_steer', CongestionSteer())
         rate = round(steer.target(current, target, float(lo_kbps), delivered_bps, 0.0, now, queue_s,
-                                  offered_bps))
+                                  offered_bps, acked_offered_bps))
         display_state['link_kbps'] = rate
         held_kbps = display_state.setdefault('link_hold', RateHold()).note(rate, now)
         ws = display_state.get('ws')

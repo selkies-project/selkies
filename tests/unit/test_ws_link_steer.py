@@ -5,8 +5,8 @@ once by the transports' shared steer, to the headroom of what the path delivered
 through that window less the queue's drain; it is held while that queue drains, then
 stepped back up while the round trip stays at its floor. A queue still building is
 read before it stands a whole window, and a gated display is measured by the frames
-still acked from before the gate shut. A window a stall acked late backs off from
-what the path delivered just before. A round trip at its floor never moves the rate,
+still acked from before the gate shut. A window a stall acked late, the gate shut
+meanwhile, backs off from what the path delivered just before. A round trip at its floor never moves the rate,
 nor does the time a low frame rate's frames take to cross a path not much faster
 than the stream, one key frame's burst does not either, round trips a jittering path
 spreads or a lossy one holds back never do, a gate shut on a moment's delay or
@@ -15,7 +15,9 @@ closing a window behind acks jitter happens to order, while a queue behind an
 encoder running over its target still does; a stream restarted after a hidden tab is
 measured from its restart; a window with nothing acked moves nothing unless the gate
 holds it on a path that carried less than was sent, nor does a queue under a still
-screen's trickle unless the gate held some of it, a page taking the display over is
+screen's trickle unless the gate held some of it, nor a longer path's standing
+round trip when motion starts over a trickle (the tick sent a burst its acked frames
+do not count), a page taking the display over is
 measured against its own path, whatever else applies a bitrate applies the steered
 one, and the capture's tracked settings carry it, so the target the stats report is
 the rate the encoder runs at. A queue that outlasts the cuts it answers, a longer
@@ -276,9 +278,19 @@ check("windows with nothing acked move nothing", len(module.rates) == n, module.
 state = fresh_state()
 module.rates.clear()
 t = run(20.0, 0.0, 5)
+state["gate_moved_at"] = t + 0.1
 run(320.0, t, 0.5, delivered_kbps=1000.0)
-check("a window whose frames a stall acked late and together backs off from what the path just "
-      "delivered, not from the stall's trickle", module.rates == [2200], module.rates)
+check("a window whose frames a stall acked late and together, the gate shut meanwhile, backs off from what the "
+      "path just delivered, not from the stall's trickle", module.rates == [2200], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5, sent_kbps=200.0)
+t = run(170.0, t, 0.45, sent_kbps=200.0)
+state["sent_bytes"] += 100_000
+run(170.0, t, 0.05, sent_kbps=200.0)
+check("a path grown 150 ms longer under a still screen's trickle cuts nothing when motion starts: the tick sent a "
+      "burst, still unacked, and the trickle's frames delivered what they sent", module.rates == [], module.rates)
 
 state = fresh_state()
 module.rates.clear()

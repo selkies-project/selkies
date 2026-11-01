@@ -353,7 +353,11 @@ class CongestionSteer:
     stream sent rather than what the path carries, and a cut to it would put
     the next motion at the floor while draining nothing the stream queued. A
     stream the path delivers less of than it offers is filling the queue,
-    whatever its target, and backs off.
+    whatever its target, and backs off. Where delivery is measured by acked
+    frames, the offer compared is what the stream sent of those same frames
+    over the span it sent them in: the tick's offer counts the tail of a burst
+    still unacked, so a window switch over a trickle, whose queue drains as
+    soon as the burst has crossed, read as a stream filling the queue.
 
     Loss backs the target off only on the second lossy tick in a row: one tick
     of a thin stream is too few packets for its loss fraction to mean anything.
@@ -404,7 +408,8 @@ class CongestionSteer:
     def target(self, current: float, ceiling: float, floor: float,
                goodput_bps: float, loss: float, now: float,
                queue_s: Optional[float] = None,
-               offered_bps: Optional[float] = None) -> float:
+               offered_bps: Optional[float] = None,
+               acked_offered_bps: Optional[float] = None) -> float:
         """The next target in kbps for one tick.
 
         Args:
@@ -418,6 +423,11 @@ class CongestionSteer:
                 0 for a clean tick, None where the transport measures no delay.
             offered_bps: What the stream sent over the tick, or None when
                 unmeasured.
+            acked_offered_bps: What the stream sent of the frames goodput_bps
+                counts, over the span it sent them in, where the transport
+                measures delivery by acked frames: the queue's app-limited
+                test takes it over offered_bps, since the tick's offer counts
+                a burst's tail still unacked, which the delivery does not.
         """
         dt = 1.0 if self._tick_at is None else min(max(now - self._tick_at, 0.0), 2.0)
         self._tick_at = now
@@ -431,9 +441,13 @@ class CongestionSteer:
             current, self._cruise_kbps = self._cruise_kbps, None
         if queue_s:
             self.strikes = 0
-            limited = (offered_bps is not None
-                       and offered_bps < current * 1_000 * self.APP_LIMITED
-                       and (goodput_bps <= 0 or offered_bps <= goodput_bps / self.APP_LIMITED_DELIVERED))
+            # Like with like: the delivery against what the stream sent of the same frames. A tick
+            # the gate held measured no offer, and backs off.
+            sent_bps = acked_offered_bps if offered_bps is not None and acked_offered_bps is not None \
+                else offered_bps
+            limited = (sent_bps is not None
+                       and sent_bps < current * 1_000 * self.APP_LIMITED
+                       and (goodput_bps <= 0 or sent_bps <= goodput_bps / self.APP_LIMITED_DELIVERED))
             if now >= self.hold_until and not limited:
                 current = self._queue_backoff(current, goodput_bps / 1_000, queue_s, now)
             return max(floor, min(ceiling, current))

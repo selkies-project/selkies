@@ -12,7 +12,9 @@ to drain; no second cut follows while that drain runs, and the target then
 settles at the headroom. A raise is slow while the path delivers near the
 capacity it showed and fast far from it, and a path that delivers clear past
 it forgets it. A queue under a stream sending a trickle of its target, which
-says nothing of the path, cuts nothing, and a clean tick of that trickle raises
+says nothing of the path, cuts nothing, the trickle measured, where the transport
+counts delivery by acked frames, by what the stream sent of those frames rather
+than a burst the tick sent after them; and a clean tick of that trickle raises
 the target no further than the capacity the path showed, or not at all while
 the steer knows none; nor does a tick that measured no offer.
 """
@@ -128,6 +130,19 @@ steer = CongestionSteer()
 got = steer.target(8000, CEILING, FLOOR, 733_000.0, 0.25, 0.0, queue_s=0.48, offered_bps=1_083_000.0)
 check("a queue under a stream offering the path more than it delivers backs off, though the stream offers under half its target",
       got < 733, got)
+steer = CongestionSteer()
+got = steer.target(8000, CEILING, FLOOR, 217_000.0, 0.0, 0.0, queue_s=0.15, offered_bps=1_558_000.0,
+                   acked_offered_bps=217_000.0)
+check("a queue under a trickle whose tick also sent a burst, still unacked, cuts nothing: the acked frames delivered "
+      "what the stream sent of them", got == 8000, got)
+steer = CongestionSteer()
+got = steer.target(8000, CEILING, FLOOR, 733_000.0, 0.25, 0.0, queue_s=0.48, offered_bps=1_083_000.0,
+                   acked_offered_bps=1_083_000.0)
+check("while frames that sent the path more than it delivered still back off", got < 733, got)
+steer = CongestionSteer()
+got = steer.target(8000, CEILING, FLOOR, 217_000.0, 0.0, 0.0, queue_s=0.15, offered_bps=None,
+                   acked_offered_bps=217_000.0)
+check("and a tick the gate held, which measured no offer, backs off whatever its acked frames sent", got < 8000, got)
 
 # A still screen's trickle after a backoff on a 5000 kbps path under a 16000 kbps ceiling.
 TOP, BOTTOM, TRICKLE = 16000.0, 1000.0, 300_000.0
