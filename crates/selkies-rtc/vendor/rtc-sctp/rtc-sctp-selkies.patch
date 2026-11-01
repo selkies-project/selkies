@@ -1,0 +1,749 @@
+diff --git a/src/association/mod.rs b/src/association/mod.rs
+index f29e75c..3973b87 100644
+--- a/src/association/mod.rs
++++ b/src/association/mod.rs
+@@ -223,6 +223,9 @@ pub struct Association {
+ 
+     // Congestion control parameters
+     max_receive_buffer_size: u32,
++    max_reassembly_bytes: u32,
++    /// Streams the peer's INIT or INIT ACK opened for its sends; 0 before it named a count.
++    peer_num_outbound_streams: u16,
+     // my congestion window size
+     pub(crate) cwnd: u32,
+     // calculated peer's receiver windows size
+@@ -318,6 +321,8 @@ impl Default for Association {
+ 
+             // Congestion control parameters
+             max_receive_buffer_size: 0,
++            max_reassembly_bytes: 0,
++            peer_num_outbound_streams: 0,
+             // my congestion window size
+             cwnd: 0,
+             // calculated peer's receiver windows size
+@@ -393,6 +398,7 @@ impl Association {
+             side,
+             handshake_completed: false,
+             max_receive_buffer_size: config.max_receive_buffer_size(),
++            max_reassembly_bytes: config.max_reassembly_bytes(),
+             max_message_size: config.max_message_size(),
+             my_max_num_outbound_streams: config.max_num_outbound_streams(),
+             my_max_num_inbound_streams: config.max_num_inbound_streams(),
+@@ -950,7 +956,14 @@ impl Association {
+         self.handle_chunk_start();
+ 
+         for c in &p.chunks {
+-            self.handle_chunk(&p, c, now)?;
++            if let Err(err) = self.handle_chunk(&p, c, now) {
++                // Only an ABORT ends the association: a malformed or premature chunk of the
++                // peer's is dropped, the rest of the packet and the association kept.
++                if matches!(err, Error::ErrAbortChunk(_)) {
++                    return Err(err);
++                }
++                debug!("[{}] dropping chunk: {}", self.side, err);
++            }
+         }
+ 
+         self.handle_chunk_end(now);
+@@ -997,11 +1010,20 @@ impl Association {
+             }
+             return Err(Error::ErrAbortChunk(err_str));
+         } else if let Some(c) = chunk_any.downcast_ref::<ChunkError>() {
++            // An ERROR ends an association still being established; one about an established
++            // association is the peer's complaint, noted and the association kept.
+             let mut err_str = String::new();
+             for e in &c.error_causes {
+                 err_str += &format!("({})", e);
+             }
+-            return Err(Error::ErrAbortChunk(err_str));
++            if matches!(
++                self.state(),
++                AssociationState::CookieWait | AssociationState::CookieEchoed
++            ) {
++                return Err(Error::ErrAbortChunk(err_str));
++            }
++            debug!("[{}] ERROR chunk from the peer: {}", self.side, err_str);
++            vec![]
+         } else if let Some(c) = chunk_any.downcast_ref::<ChunkHeartbeat>() {
+             self.handle_heartbeat(c)?
+         } else if let Some(c) = chunk_any.downcast_ref::<ChunkCookieEcho>() {
+@@ -1060,6 +1082,7 @@ impl Association {
+             std::cmp::min(i.num_inbound_streams, self.my_max_num_inbound_streams);
+         self.my_max_num_outbound_streams =
+             std::cmp::min(i.num_outbound_streams, self.my_max_num_outbound_streams);
++        self.peer_num_outbound_streams = i.num_outbound_streams;
+         self.peer_verification_tag = i.initiate_tag;
+         self.source_port = p.common_header.destination_port;
+         self.destination_port = p.common_header.source_port;
+@@ -1154,6 +1177,7 @@ impl Association {
+             std::cmp::min(i.num_inbound_streams, self.my_max_num_inbound_streams);
+         self.my_max_num_outbound_streams =
+             std::cmp::min(i.num_outbound_streams, self.my_max_num_outbound_streams);
++        self.peer_num_outbound_streams = i.num_outbound_streams;
+         self.peer_verification_tag = i.initiate_tag;
+         self.peer_last_tsn = if i.initial_tsn == 0 {
+             u32::MAX
+@@ -1326,9 +1350,23 @@ impl Association {
+         );
+         self.stats.inc_datas();
+ 
++        // A gap ack block reaches only 65535 TSNs past the cumulative one, so a TSN farther
++        // ahead can never be acknowledged: dropped unbuffered, with a SACK still going out.
++        if sna32gt(d.tsn, self.peer_last_tsn)
++            && d.tsn.wrapping_sub(self.peer_last_tsn) > u32::from(u16::MAX)
++        {
++            return self.handle_peer_last_tsn_and_acknowledgement(d.immediate_sack);
++        }
++
+         let can_push = self.payload_queue.can_push(d, self.peer_last_tsn);
+         let mut stream_handle_data = false;
+-        if can_push {
++        if can_push && !self.inbound_stream_open(d.stream_identifier) {
++            // A stream the peer never opened is acknowledged and its data discarded (RFC 4960
++            // 6.5): the TSN is held without its payload until the cumulative ack passes it.
++            let mut unopened = d.clone();
++            unopened.user_data = Bytes::new();
++            self.payload_queue.push(unopened, self.peer_last_tsn);
++        } else if can_push {
+             if self.get_or_create_stream(d.stream_identifier).is_some() {
+                 if self.get_my_receiver_window_credit() > 0 {
+                     // Pass the new chunk to stream level as soon as it arrives
+@@ -1391,7 +1429,13 @@ impl Association {
+             }
+         }
+ 
+-        let immediate_sack = d.immediate_sack;
++        // A duplicate is acknowledged at once and named, so the peer can tell its retransmission
++        // was spurious.
++        let duplicate = !can_push;
++        if duplicate {
++            self.payload_queue.note_duplicate(d.tsn);
++        }
++        let immediate_sack = d.immediate_sack || duplicate;
+ 
+         if stream_handle_data && let Some(s) = self.streams.get_mut(&d.stream_identifier) {
+             self.events.push_back(Event::DatagramReceived);
+@@ -1402,6 +1446,17 @@ impl Association {
+             }
+         }
+ 
++        if stream_handle_data && self.reassembly_bytes() > self.max_reassembly_bytes as usize {
++            // The peer ignored the advertised window and the message size, on one stream or
++            // spread over many: abort rather than buffer without bound.
++            warn!(
++                "[{}] aborting: reassembly exceeded {} bytes",
++                self.side, self.max_reassembly_bytes
++            );
++            self.abort()?;
++            return Ok(vec![]);
++        }
++
+         self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
+     }
+ 
+@@ -1440,6 +1495,16 @@ impl Association {
+             return Ok(vec![]);
+         }
+ 
++        // A cumulative TSN past anything sent acknowledges nothing real: dropped whole, before
++        // the chunks below it are popped and the ack point left behind them for good.
++        if !sna32lt(d.cumulative_tsn_ack, self.my_next_tsn) {
++            debug!(
++                "[{}] SACK Cumulative ACK {} is past the next TSN {}",
++                self.side, d.cumulative_tsn_ack, self.my_next_tsn
++            );
++            return Ok(vec![]);
++        }
++
+         // Process selective ack
+         let (bytes_acked_per_stream, total_bytes_acked, htna) =
+             self.process_selective_ack(d, now)?;
+@@ -1545,7 +1610,7 @@ impl Association {
+             "[{}] should send ack? newCumTSN={} peer_last_tsn={}",
+             self.side, c.new_cumulative_tsn, self.peer_last_tsn
+         );
+-        if sna32lte(c.new_cumulative_tsn, self.peer_last_tsn) {
++        if !sna32gt(c.new_cumulative_tsn, self.peer_last_tsn) {
+             trace!("[{}] sending ack on Forward TSN", self.side);
+             self.ack_state = AckState::Immediate;
+             self.timers.stop(Timer::Ack);
+@@ -1563,11 +1628,10 @@ impl Association {
+         //   its cumulative TSN point to the value carried in the FORWARD TSN
+         //   chunk,
+ 
+-        // Advance peer_last_tsn
+-        while sna32lt(self.peer_last_tsn, c.new_cumulative_tsn) {
+-            self.payload_queue.pop(self.peer_last_tsn + 1); // may not exist
+-            self.peer_last_tsn += 1;
+-        }
++        // Advance peer_last_tsn, pruning what the queue holds at or below it: each chunk held
++        // is visited once, never every TSN a jump of up to 2^31 - 1 spans.
++        self.payload_queue.prune_through(c.new_cumulative_tsn);
++        self.peer_last_tsn = c.new_cumulative_tsn;
+ 
+         // Report new peer_last_tsn value and abandoned largest SSN value to
+         // corresponding streams so that the abandoned chunks can be removed
+@@ -1661,8 +1725,12 @@ impl Association {
+         // Meaning, if peer_last_tsn+1 points to a chunk that is received,
+         // advance peer_last_tsn until peer_last_tsn+1 points to unreceived chunk.
+         //debug!("[{}] peer_last_tsn = {}", self.side, self.peer_last_tsn);
+-        while self.payload_queue.pop(self.peer_last_tsn + 1).is_some() {
+-            self.peer_last_tsn += 1;
++        while self
++            .payload_queue
++            .pop(self.peer_last_tsn.wrapping_add(1))
++            .is_some()
++        {
++            self.peer_last_tsn = self.peer_last_tsn.wrapping_add(1);
+             //debug!("[{}] peer_last_tsn = {}", self.side, self.peer_last_tsn);
+ 
+             let rst_reqs: Vec<ParamOutgoingResetRequest> =
+@@ -1798,10 +1866,46 @@ impl Association {
+ 
+         let mut htna = d.cumulative_tsn_ack;
+ 
++        // The gap blocks as merged ranges of offsets from the cumulative TSN, and each chunk
++        // in flight looked up in them, never each offset they span: a packet of blocks names
++        // millions, and only what was sent can be acknowledged.
++        let mut ranges: Vec<(u16, u16)> = d
++            .gap_ack_blocks
++            .iter()
++            .filter(|g| g.start <= g.end)
++            .map(|g| (g.start, g.end))
++            .collect();
++        ranges.sort_unstable();
++        let mut merged: Vec<(u16, u16)> = Vec::with_capacity(ranges.len());
++        for (start, end) in ranges {
++            match merged.last_mut() {
++                Some(last) if u32::from(start) <= u32::from(last.1) + 1 => last.1 = last.1.max(end),
++                _ => merged.push((start, end)),
++            }
++        }
++        let highest_seen = merged
++            .last()
++            .map(|(_, end)| d.cumulative_tsn_ack.wrapping_add(u32::from(*end)));
++        let gap_acked = |tsn: u32| -> bool {
++            let offset = tsn.wrapping_sub(d.cumulative_tsn_ack);
++            if offset > u32::from(u16::MAX) {
++                return false;
++            }
++            let offset = offset as u16;
++            let i = merged.partition_point(|(start, _)| *start <= offset);
++            i > 0 && offset <= merged[i - 1].1
++        };
++
+         // Record peer acknowledgments independently of local payload release.
+-        for g in &d.gap_ack_blocks {
+-            for i in g.start..=g.end {
+-                let tsn = d.cumulative_tsn_ack.wrapping_add(i as u32);
++        let in_flight: Vec<u32> = self.inflight_queue.sorted.iter().copied().collect();
++        if let Some(highest_seen) = highest_seen {
++            for tsn in in_flight {
++                if sna32gt(tsn, highest_seen) {
++                    break;
++                }
++                if !gap_acked(tsn) {
++                    continue;
++                }
+ 
+                 let newly_acknowledged = self.inflight_queue.acknowledge(tsn);
+                 let n_bytes_acked = if newly_acknowledged {
+@@ -1843,8 +1947,6 @@ impl Association {
+                             htna = tsn;
+                         }
+                     }
+-                } else {
+-                    return Err(Error::ErrTsnRequestNotExist);
+                 }
+             }
+         }
+@@ -2103,7 +2205,7 @@ impl Association {
+         // reconfig_response_sequence_number.
+         if !sis_to_reset.is_empty() {
+             let rsn = self.generate_next_rsn();
+-            let tsn = self.my_next_tsn - 1;
++            let tsn = self.my_next_tsn.wrapping_sub(1);
+ 
+             let c = ChunkReconfig {
+                 param_a: Some(Box::new(ParamOutgoingResetRequest {
+@@ -2230,14 +2332,24 @@ impl Association {
+     }
+ 
+     pub(crate) fn get_my_receiver_window_credit(&self) -> u32 {
+-        let mut bytes_queued = 0;
+-        for s in self.streams.values() {
+-            bytes_queued += s.get_num_bytes_in_reassembly_queue() as u32;
+-        }
+-
++        let bytes_queued = u32::try_from(self.reassembly_bytes()).unwrap_or(u32::MAX);
+         self.max_receive_buffer_size.saturating_sub(bytes_queued)
+     }
+ 
++    /// What every inbound stream buffers together, delivered and undelivered alike.
++    fn reassembly_bytes(&self) -> usize {
++        self.streams
++            .values()
++            .map(|s| s.get_num_bytes_in_reassembly_queue())
++            .sum()
++    }
++
++    /// Whether the peer's INIT or INIT ACK opened `stream_identifier` for its sends; any,
++    /// before it named a count.
++    fn inbound_stream_open(&self, stream_identifier: StreamId) -> bool {
++        self.peer_num_outbound_streams == 0 || stream_identifier < self.peer_num_outbound_streams
++    }
++
+     /// gather_outbound gathers outgoing packets. The returned bool value set to
+     /// false means the association should be closed down after the final send.
+     fn gather_outbound(&mut self, now: Instant) -> (Vec<Bytes>, bool) {
+@@ -2354,12 +2466,12 @@ impl Association {
+ 
+             if !sis_to_reset.is_empty() {
+                 let rsn = self.generate_next_rsn();
+-                let tsn = self.my_next_tsn - 1;
++                let tsn = self.my_next_tsn.wrapping_sub(1);
+                 debug!(
+                     "[{}] sending RECONFIG: rsn={} tsn={} streams={:?}",
+                     self.side,
+                     rsn,
+-                    self.my_next_tsn - 1,
++                    self.my_next_tsn.wrapping_sub(1),
+                     sis_to_reset
+                 );
+ 
+@@ -3008,6 +3120,22 @@ impl Association {
+             }
+         }
+ 
++        // RFC 7053: the I-bit asks the receiver to acknowledge at once when nothing follows
++        // this burst until its SACK: once the send made us cwnd-limited, so cwnd reopens
++        // without waiting a delayed-ack interval, and when it emptied the queue, so a lone
++        // message's retransmission timer is set from the path's round trip rather than the
++        // peer's ack delay.
++        if let Some(last) = chunks.last_mut()
++            && (self.pending_queue.is_empty()
++                || self.inflight_queue.get_num_bytes() + self.max_payload_size as usize
++                    >= self.cwnd as usize)
++        {
++            last.immediate_sack = true;
++            if let Some(held) = self.inflight_queue.get_mut(last.tsn) {
++                held.immediate_sack = true;
++            }
++        }
++
+         (chunks, sis_to_reset)
+     }
+ 
+@@ -3263,6 +3391,13 @@ impl Association {
+         self.awake_write_loop();
+     }
+ 
++    /// User payload bytes queued and not yet handed to a packet, over every stream: what a
++    /// channel's `bufferedAmount` means to W3C ("not yet transmitted"), as against the stream's
++    /// count, which holds bytes until they are acknowledged.
++    pub fn pending_bytes(&self) -> usize {
++        self.pending_queue.get_num_bytes()
++    }
++
+     /// buffered_amount returns total amount (in bytes) of currently buffered user data.
+     /// This is used only by testing.
+     pub(crate) fn buffered_amount(&self) -> usize {
+diff --git a/src/association/retransmission_review_test.rs b/src/association/retransmission_review_test.rs
+index df2b65a..7138ec3 100644
+--- a/src/association/retransmission_review_test.rs
++++ b/src/association/retransmission_review_test.rs
+@@ -302,7 +302,8 @@ fn public_rtt_reports_measurements_independently_of_backoff() {
+         a.rto_mgr.backoff();
+         assert_eq!(Duration::from_millis(80), a.rtt());
+     }
+-    assert_eq!(16_000, a.rto_mgr.get_rto());
++    // 240 ms measured, raised to the 400 ms floor, then doubled four times.
++    assert_eq!(6_400, a.rto_mgr.get_rto());
+     a.rto_mgr.set_new_rtt(160);
+     assert_eq!(Duration::from_millis(90), a.rtt());
+ }
+diff --git a/src/association/timer.rs b/src/association/timer.rs
+index e95b620..cf316f6 100644
+--- a/src/association/timer.rs
++++ b/src/association/timer.rs
+@@ -1,6 +1,8 @@
+ use std::time::{Duration, Instant};
+ 
+-pub(crate) const ACK_INTERVAL: u64 = 200;
++// A lone pending SACK flushes after this: the receive path acknowledges every second packet
++// anyway, and a peer sets its retransmission timer from the round trip this delay inflates.
++pub(crate) const ACK_INTERVAL: u64 = 20;
+ const MAX_INIT_RETRANS: usize = 8;
+ const PATH_MAX_RETRANS: usize = 5;
+ const NO_MAX_RETRANS: usize = usize::MAX;
+@@ -168,7 +170,11 @@ impl TimerTable {
+ // RFC 9260 §16 recommends a one-second initial RTO.  This value is used by
+ // both T1-init and T1-cookie before an RTT measurement is available.
+ const RTO_INITIAL: u64 = 1000; // msec
+-const RTO_MIN: u64 = 1000; // msec
++// A lost message nothing follows (a cursor, a clipboard, a control reply) is repaired by
++// T3 alone, so the floor is its whole cost. Chrome's dcSCTP floor: it stays above a peer's
++// delayed SACK (200 ms in dcSCTP) plus a round trip, so a peer that ignores the I-bit is
++// not sent spurious retransmissions.
++const RTO_MIN: u64 = 400; // msec
+ const RTO_MAX: u64 = 60000; // msec
+ const RTO_ALPHA: u64 = 1;
+ const RTO_BETA: u64 = 2;
+diff --git a/src/chunk/chunk_abort.rs b/src/chunk/chunk_abort.rs
+index a86f999..8229c79 100644
+--- a/src/chunk/chunk_abort.rs
++++ b/src/chunk/chunk_abort.rs
+@@ -58,7 +58,7 @@ impl Chunk for ChunkAbort {
+ 
+         let mut error_causes = vec![];
+         let mut offset = CHUNK_HEADER_SIZE;
+-        while offset + 4 <= raw.len() {
++        while offset + 4 <= CHUNK_HEADER_SIZE + header.value_length() {
+             let e = ErrorCause::unmarshal(
+                 &raw.slice(offset..CHUNK_HEADER_SIZE + header.value_length()),
+             )?;
+diff --git a/src/chunk/chunk_error.rs b/src/chunk/chunk_error.rs
+index fc46536..7725800 100644
+--- a/src/chunk/chunk_error.rs
++++ b/src/chunk/chunk_error.rs
+@@ -60,7 +60,7 @@ impl Chunk for ChunkError {
+ 
+         let mut error_causes = vec![];
+         let mut offset = CHUNK_HEADER_SIZE;
+-        while offset + 4 <= raw.len() {
++        while offset + 4 <= CHUNK_HEADER_SIZE + header.value_length() {
+             let e = ErrorCause::unmarshal(
+                 &raw.slice(offset..CHUNK_HEADER_SIZE + header.value_length()),
+             )?;
+diff --git a/src/chunk/chunk_forward_tsn.rs b/src/chunk/chunk_forward_tsn.rs
+index 9883edb..8ce66d8 100644
+--- a/src/chunk/chunk_forward_tsn.rs
++++ b/src/chunk/chunk_forward_tsn.rs
+@@ -64,7 +64,7 @@ impl Chunk for ChunkForwardTsn {
+         }
+ 
+         let mut offset = CHUNK_HEADER_SIZE + NEW_CUMULATIVE_TSN_LENGTH;
+-        if buf.len() < offset {
++        if header.value_length() < NEW_CUMULATIVE_TSN_LENGTH {
+             return Err(Error::ErrChunkTooShort);
+         }
+ 
+@@ -72,7 +72,7 @@ impl Chunk for ChunkForwardTsn {
+         let new_cumulative_tsn = reader.get_u32();
+ 
+         let mut streams = vec![];
+-        let mut remaining = buf.len() - offset;
++        let mut remaining = header.value_length() - NEW_CUMULATIVE_TSN_LENGTH;
+         while remaining > 0 {
+             let s = ChunkForwardTsnStream::unmarshal(
+                 &buf.slice(offset..CHUNK_HEADER_SIZE + header.value_length()),
+diff --git a/src/chunk/mod.rs b/src/chunk/mod.rs
+index f0ce194..cdce3ca 100644
+--- a/src/chunk/mod.rs
++++ b/src/chunk/mod.rs
+@@ -143,7 +143,7 @@ impl ErrorCause {
+         let code = ErrorCauseCode(reader.get_u16());
+         let len = reader.get_u16();
+ 
+-        if len < ERROR_CAUSE_HEADER_LENGTH as u16 {
++        if len < ERROR_CAUSE_HEADER_LENGTH as u16 || buf.len() < len as usize {
+             return Err(Error::ErrErrorCauseTooSmall);
+         }
+ 
+diff --git a/src/config.rs b/src/config.rs
+index 49697e8..374abb9 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -50,6 +50,12 @@ pub fn max_payload_size_for_mtu(mtu: u32) -> u32 {
+     (mtu - (COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE)) & !3
+ }
+ pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: u32 = 262144;
++/// Ceiling on what the inbound streams buffer together before the association is aborted: a
++/// memory backstop, not per-message policing. Under burst loss an ordered stream legitimately
++/// buffers several complete messages behind one head-of-line gap while retransmits fill it,
++/// so the bound is generous; only a peer that ignores both the advertised window and the
++/// message size reaches it.
++pub(crate) const DEFAULT_MAX_REASSEMBLY_BYTES: u32 = 16 * 1024 * 1024;
+ 
+ /// Config collects the arguments to create_association construction into
+ /// a single structure
+@@ -58,6 +64,7 @@ pub struct TransportConfig {
+     sctp_port: u16,
+     max_receive_buffer_size: u32,
+     max_message_size: u32,
++    max_reassembly_bytes: u32,
+     max_num_outbound_streams: u16,
+     max_num_inbound_streams: u16,
+     timer_config: TimerConfig,
+@@ -69,6 +76,7 @@ impl Default for TransportConfig {
+             sctp_port: 5000,
+             max_receive_buffer_size: INITIAL_RECV_BUF_SIZE,
+             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
++            max_reassembly_bytes: DEFAULT_MAX_REASSEMBLY_BYTES,
+             max_num_outbound_streams: u16::MAX,
+             max_num_inbound_streams: u16::MAX,
+             timer_config: TimerConfig::default(),
+@@ -96,6 +104,13 @@ impl TransportConfig {
+         self
+     }
+ 
++    /// Sets the ceiling on what every inbound stream buffers together before the association
++    /// is aborted (see [`DEFAULT_MAX_REASSEMBLY_BYTES`]).
++    pub fn with_max_reassembly_bytes(mut self, value: u32) -> Self {
++        self.max_reassembly_bytes = value;
++        self
++    }
++
+     /// Sets how many outbound streams to request during the handshake.
+     pub fn with_max_num_outbound_streams(mut self, value: u16) -> Self {
+         self.max_num_outbound_streams = value;
+@@ -129,6 +144,11 @@ impl TransportConfig {
+         self.max_message_size
+     }
+ 
++    /// The configured reassembly ceiling in bytes.
++    pub fn max_reassembly_bytes(&self) -> u32 {
++        self.max_reassembly_bytes
++    }
++
+     /// The configured outbound stream count.
+     pub fn max_num_outbound_streams(&self) -> u16 {
+         self.max_num_outbound_streams
+diff --git a/src/endpoint/endpoint_test.rs b/src/endpoint/endpoint_test.rs
+index 58eec59..c03132d 100644
+--- a/src/endpoint/endpoint_test.rs
++++ b/src/endpoint/endpoint_test.rs
+@@ -2475,7 +2475,7 @@ fn test_assoc_delayed_ack() -> Result<()> {
+     }
+     let delay = (pair.time.duration_since(since).as_millis() as f64) / 1000.0;
+     debug!("received in {} seconds", delay);
+-    assert!(delay >= 0.2, "should be >= 200msec");
++    assert!(delay >= 0.02, "should be >= 20msec");
+ 
+     pair.drive();
+ 
+diff --git a/src/endpoint/mod.rs b/src/endpoint/mod.rs
+index a22c139..659646f 100644
+--- a/src/endpoint/mod.rs
++++ b/src/endpoint/mod.rs
+@@ -135,8 +135,10 @@ impl Endpoint {
+         } else {
+             //TODO: improve INIT handling for DoS attack
+             if partial_decode.first_chunk_type == CT_INIT {
+-                if let Some(dst_cid) = partial_decode.initiate_tag {
+-                    self.association_ids.get(&dst_cid).cloned()
++                if let Some(initiate_tag) = partial_decode.initiate_tag {
++                    // A retransmitted INIT names the tag it first came under, and its INIT
++                    // ACK may be what was lost: it reaches the association it started.
++                    self.association_ids_init.get(&initiate_tag).cloned()
+                 } else {
+                     None
+                 }
+@@ -272,6 +274,7 @@ impl Endpoint {
+         server_config: Option<Arc<ServerConfig>>,
+         transport_config: Arc<TransportConfig>,
+     ) -> (AssociationHandle, Association) {
++        let is_incoming = server_config.is_some();
+         let conn = Association::new(
+             server_config,
+             transport_config,
+@@ -292,6 +295,9 @@ impl Endpoint {
+ 
+         let ch = AssociationHandle(id);
+         self.association_ids.insert(local_aid, ch);
++        if is_incoming {
++            self.association_ids_init.insert(remote_aid, ch);
++        }
+ 
+         (ch, conn)
+     }
+diff --git a/src/queue/payload_queue.rs b/src/queue/payload_queue.rs
+index 9e86a8f..930e90c 100644
+--- a/src/queue/payload_queue.rs
++++ b/src/queue/payload_queue.rs
+@@ -57,6 +57,9 @@ impl MessageTsns {
+     }
+ }
+ 
++/// The most duplicate TSNs one SACK names.
++const MAX_REPORTED_DUPLICATES: usize = 256;
++
+ #[derive(Default, Debug)]
+ pub(crate) struct PayloadQueue {
+     // length: usize,
+@@ -96,7 +99,8 @@ impl PayloadQueue {
+     }
+ 
+     pub(crate) fn can_push(&self, p: &ChunkPayloadData, cumulative_tsn: u32) -> bool {
+-        !(self.chunk_map.contains_key(&p.tsn) || sna32lte(p.tsn, cumulative_tsn))
++        // A duplicate unless ahead: exactly 2^31 away is neither.
++        !self.chunk_map.contains_key(&p.tsn) && sna32gt(p.tsn, cumulative_tsn)
+     }
+ 
+     fn abandonment_id(p: &ChunkPayloadData) -> Option<MessageId> {
+@@ -127,9 +131,9 @@ impl PayloadQueue {
+     /// which can later be retrieved using popDuplicates.
+     pub(crate) fn push(&mut self, p: ChunkPayloadData, cumulative_tsn: u32) -> bool {
+         let ok = self.chunk_map.contains_key(&p.tsn);
+-        if ok || sna32lte(p.tsn, cumulative_tsn) {
++        if ok || !sna32gt(p.tsn, cumulative_tsn) {
+             // Found the packet, log in dups
+-            self.dup_tsn.push(p.tsn);
++            self.note_duplicate(p.tsn);
+             return false;
+         }
+ 
+@@ -138,6 +142,22 @@ impl PayloadQueue {
+         true
+     }
+ 
++    /// Drops every queued chunk at or below `tsn` in serial-number order, for a FORWARD TSN:
++    /// each chunk held is visited once, never each TSN the jump spans.
++    pub(crate) fn prune_through(&mut self, tsn: u32) {
++        while let Some(&front) = self.sorted.front() {
++            if sna32gt(front, tsn) {
++                break;
++            }
++            if self.pop(front).is_none() {
++                self.sorted.pop_front();
++                if let Some(c) = self.chunk_map.remove(&front) {
++                    self.n_bytes -= c.user_data.len();
++                }
++            }
++        }
++    }
++
+     /// pop pops only if the oldest chunk's TSN matches the given TSN.
+     pub(crate) fn pop(&mut self, tsn: u32) -> Option<ChunkPayloadData> {
+         if self.sorted.front() != Some(&tsn) {
+@@ -181,6 +201,14 @@ impl PayloadQueue {
+         self.chunk_map.get_mut(&tsn)
+     }
+ 
++    /// Note a TSN received again, for the next SACK; a peer sending its TSNs over and over
++    /// grows this no further than a SACK reports.
++    pub(crate) fn note_duplicate(&mut self, tsn: u32) {
++        if self.dup_tsn.len() < MAX_REPORTED_DUPLICATES {
++            self.dup_tsn.push(tsn);
++        }
++    }
++
+     /// popDuplicates returns an array of TSN values that were found duplicate.
+     pub(crate) fn pop_duplicates(&mut self) -> Vec<u32> {
+         std::mem::take(&mut self.dup_tsn)
+@@ -194,16 +222,13 @@ impl PayloadQueue {
+         let mut b = GapAckBlock::default();
+         let mut gap_ack_blocks = vec![];
+         for (i, tsn) in self.sorted.iter().enumerate() {
+-            let diff = if *tsn >= cumulative_tsn {
+-                (*tsn - cumulative_tsn) as u16
+-            } else {
+-                0
+-            };
++            // Modular, so the blocks stay ascending and merged across the TSN wrap.
++            let diff = tsn.wrapping_sub(cumulative_tsn) as u16;
+ 
+             if i == 0 {
+                 b.start = diff;
+                 b.end = b.start;
+-            } else if b.end + 1 == diff {
++            } else if u32::from(b.end) + 1 == u32::from(diff) {
+                 b.end += 1;
+             } else {
+                 gap_ack_blocks.push(b);
+diff --git a/src/queue/reassembly_queue.rs b/src/queue/reassembly_queue.rs
+index a9cb00b..207cfbe 100644
+--- a/src/queue/reassembly_queue.rs
++++ b/src/queue/reassembly_queue.rs
+@@ -180,7 +180,7 @@ impl Chunks {
+                 //   used by the receiver to reassemble the message.  This means that the
+                 //   TSNs for each fragment of a fragmented user message MUST be strictly
+                 //   sequential.
+-                if c.tsn != last_tsn + 1 {
++                if c.tsn != last_tsn.wrapping_add(1) {
+                     // mid or end fragment is missing
+                     return false;
+                 }
+@@ -305,7 +305,7 @@ impl ReassemblyQueue {
+             }
+ 
+             // Check if contiguous in TSN
+-            if c.tsn != last_tsn + 1 {
++            if c.tsn != last_tsn.wrapping_add(1) {
+                 start_idx = -1;
+                 continue;
+             }
+diff --git a/src/util.rs b/src/util.rs
+index 3c94535..1027f0d 100644
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -280,7 +280,9 @@ pub(crate) fn sna32lte(i1: u32, i2: u32) -> bool {
+ 
+ #[inline]
+ pub(crate) fn sna32gt(i1: u32, i2: u32) -> bool {
+-    (i1 < i2 && (i2 - i1) >= 1 << 31) || (i1 > i2 && (i1 - i2) <= 1 << 31)
++    // Exactly 2^31 apart is neither ahead nor behind, as for `sna32lt`, so every comparison
++    // in the association reads the same order.
++    (i1 < i2 && (i2 - i1) > 1 << 31) || (i1 > i2 && (i1 - i2) < 1 << 31)
+ }
+ 
+ #[inline]
+@@ -305,7 +307,7 @@ pub(crate) fn sna16lte(i1: u16, i2: u16) -> bool {
+ 
+ #[inline]
+ pub(crate) fn sna16gt(i1: u16, i2: u16) -> bool {
+-    (i1 < i2 && (i2 - i1) >= 1 << 15) || (i1 > i2 && (i1 - i2) <= 1 << 15)
++    (i1 < i2 && (i2 - i1) > 1 << 15) || (i1 > i2 && (i1 - i2) < 1 << 15)
+ }
+ 
+ #[inline]
+@@ -401,8 +403,14 @@ mod test {
+                     s2f
+                 );
+                 assert!(
+-                    sna32gt(s1, s2b),
+-                    "s1 > s2 should be true: s1={} s2={}",
++                    !sna32gt(s1, s2b),
++                    "s1 > s2 should be false (exactly 2^31 apart): s1={} s2={}",
++                    s1,
++                    s2b
++                );
++                assert!(
++                    !sna32gt(s2b, s1),
++                    "s2 > s1 should be false (exactly 2^31 apart): s1={} s2={}",
+                     s1,
+                     s2b
+                 );
+@@ -427,8 +435,8 @@ mod test {
+                     s2f
+                 );
+                 assert!(
+-                    sna32gte(s1, s2b),
+-                    "s1 >= s2 should be true: s1={} s2={}",
++                    !sna32gte(s1, s2b),
++                    "s1 >= s2 should be false (exactly 2^31 apart): s1={} s2={}",
+                     s1,
+                     s2b
+                 );
+@@ -528,8 +536,8 @@ mod test {
+                     s2f
+                 );
+                 assert!(
+-                    sna16gt(s1, s2b),
+-                    "s1 > s2 should be true: s1={} s2={}",
++                    !sna16gt(s1, s2b),
++                    "s1 > s2 should be false (exactly 2^15 apart): s1={} s2={}",
+                     s1,
+                     s2b
+                 );
+@@ -554,8 +562,8 @@ mod test {
+                     s2f
+                 );
+                 assert!(
+-                    sna16gte(s1, s2b),
+-                    "s1 >= s2 should be true: s1={} s2={}",
++                    !sna16gte(s1, s2b),
++                    "s1 >= s2 should be false (exactly 2^15 apart): s1={} s2={}",
+                     s1,
+                     s2b
+                 );
