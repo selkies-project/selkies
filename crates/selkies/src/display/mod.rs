@@ -79,7 +79,7 @@ pub use capture::{
 pub use dpi::{applied_dpi, desktop_dpi, restore_dpi, set_cursor_size, set_dpi};
 pub use geometry::{
     DPI_FOLLOWS_PRIMARY, RealizedFit, accepts_dpi_sync, align_dims_16, clamp_primary_feedback,
-    compute_dual_layout, cursor_size_for_dpi, fit_res, layout_extent, output_layout_stage,
+    compute_dual_layout, cursor_size_for_dpi, fit_res, layout_extent, layouts_literal, output_layout_stage,
     parse_resize_dims, reconcile_realized_layout, window_moves,
 };
 pub use monitors::{

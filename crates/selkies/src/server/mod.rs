@@ -277,6 +277,12 @@ pub async fn run() -> Result<(), String> {
         ws::routes(service.clone()),
     ];
     let router = http::build(state.clone(), extra);
+
+    // The service comes up before the port opens, so a page connecting the moment it accepts
+    // finds its transport in force and has its first SETTINGS read.
+    info!(target: "main", "{}", startup_summary());
+    let mode = settings().mode().to_string();
+    crate::http::Supervisor::switch_to_mode(&*modes, &mode).await?;
     let server = Server::start(&state, router).await.map_err(|e| e.to_string())?;
 
     let mut print_watcher = None;
@@ -299,10 +305,6 @@ pub async fn run() -> Result<(), String> {
             Err(e) => warn!(target: "printing", "Printing is off: the spool cannot be watched ({e})."),
         }
     }
-
-    info!(target: "main", "{}", startup_summary());
-    let mode = settings().mode().to_string();
-    crate::http::Supervisor::switch_to_mode(&*modes, &mode).await?;
 
     let name = shutdown_signal().await;
     info!(target: "main", "Received {name}, shutting down");

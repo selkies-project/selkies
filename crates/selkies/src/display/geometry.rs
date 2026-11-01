@@ -121,6 +121,21 @@ pub fn compute_dual_layout(
     (layouts, (total_w + 7) & !7, total_h)
 }
 
+/// Layouts as the log states them, a literal the suites read back: `{'primary': {'x': 0, 'y': 0,
+/// 'w': 1280, 'h': 720}}`.
+pub fn layouts_literal(layouts: &Layouts) -> String {
+    let rects: Vec<String> = layouts
+        .iter()
+        .map(|(id, l)| {
+            format!(
+                "'{id}': {{'x': {}, 'y': {}, 'w': {}, 'h': {}}}",
+                l.x, l.y, l.w, l.h
+            )
+        })
+        .collect();
+    format!("{{{}}}", rects.join(", "))
+}
+
 /// Size of the region the laid-out displays cover together: the furthest right and
 /// bottom edge over all entries, either 0 when nothing bounds that axis.
 pub fn layout_extent(layouts: &Layouts) -> (i32, i32) {

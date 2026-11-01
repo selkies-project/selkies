@@ -195,7 +195,8 @@ def main() -> H.Results:
         res.check("the copy leaving the session is recorded each time it is sent",
                   sends == [len(COPIED), len(COPIED)], sends)
         res.check("every POST carries the configured token",
-                  all(h.get("Authorization") == f"Bearer {TOKEN}" for h in collector.headers),
+                  all({k.lower(): v for k, v in h.items()}.get("authorization") == f"Bearer {TOKEN}"
+                      for h in collector.headers),
                   collector.headers[:1])
 
         # What the queue buys: the collector holds every POST open, and the

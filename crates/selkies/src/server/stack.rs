@@ -216,7 +216,7 @@ pub struct LateClipboard(pub OnceLock<Arc<Clipboard>>);
 impl host::Clipboard for LateClipboard {
     async fn set_binary_enabled(&self, enabled: bool) {
         if let Some(clipboard) = self.0.get() {
-            clipboard.set_binary_clipboard(enabled);
+            clipboard.set_binary_clipboard(enabled).await;
         }
     }
 }

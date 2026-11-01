@@ -441,7 +441,7 @@ impl Server {
     /// Serve `router`, built from `state` by [`build`]: the certificate first, so a bad one
     /// fails before anything binds, then the tokens-file watcher when one is set, the
     /// listener, and under HTTPS the certificate watcher. Bring the supervisor's first mode up
-    /// after this, as the page polls `/api/status` before any service runs.
+    /// before this, so a page connecting the moment the port accepts finds its transport.
     pub async fn start(state: &AppState, router: Router) -> Result<Server, ServeError> {
         let config = state.config.clone();
         let tls_config = config.tls.clone();
