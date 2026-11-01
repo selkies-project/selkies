@@ -1281,7 +1281,8 @@ where
         }
     });
 
-    let mut pace = FramePace::default();
+    // One frame a period at most, a change taking its period's frame as it lands (FramePace::windowed).
+    let mut pace = FramePace::windowed();
     // Frames between root-geometry polls (auto-adjust); ~0.5s at 60fps.
     const GEOMETRY_POLL_FRAMES: i32 = 30;
     let mut geometry_check = 0i32;
@@ -1994,7 +1995,7 @@ mod damage_tests {
             damage.take(&conn).is_some_and(|rects| rects.is_empty()),
             "nothing reported yet"
         );
-        let mut pace = FramePace::default();
+        let mut pace = FramePace::windowed();
         pace.ticked(TickTrigger::Timer, PERIOD, Instant::now(), false);
         fill(0x00ff_ffff, 300, 200, 2, 20);
         assert_eq!(
@@ -2026,7 +2027,7 @@ mod damage_tests {
         let (conn, screen) = x11rb::connect(None).expect("connect");
         let root = conn.setup().roots[screen].root;
         let damage = RootDamage::create(&conn, root).expect("the server carries DAMAGE");
-        let mut pace = FramePace::default();
+        let mut pace = FramePace::windowed();
         pace.ticked(TickTrigger::Timer, PERIOD, Instant::now(), false);
         damage.clear(&conn);
         let trigger = wait_for_frame(&conn, Some(&damage), &pace, PERIOD);
@@ -2042,6 +2043,33 @@ mod damage_tests {
         assert!(!dirty, "taken once: {rects:?}");
     }
 
+    /// A change right after a frame is published as it lands, not held back half a period: the
+    /// frame it would have waited for is the window's, and no change had taken it.
+    #[test]
+    #[ignore]
+    fn x11_damage_publishes_a_change_right_after_a_frame() {
+        let (conn, screen) = x11rb::connect(None).expect("connect");
+        let root = conn.setup().roots[screen].root;
+        let damage = RootDamage::create(&conn, root).expect("the server carries DAMAGE");
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, PERIOD, Instant::now(), true);
+        damage.clear(&conn);
+        let brush = Painter::connect();
+        let painter = thread::spawn(move || {
+            thread::sleep(PERIOD.mul_f64(0.1));
+            brush.fill(0x0060_2040, 0, 0, 64, 64);
+        });
+        let start = Instant::now();
+        let pulled = wait_for_frame(&conn, Some(&damage), &pace, PERIOD);
+        let waited = start.elapsed();
+        painter.join().expect("painter");
+        assert_eq!(pulled, TickTrigger::Damage);
+        assert!(
+            waited < PERIOD.mul_f64(0.35),
+            "a change a tenth of a period after a frame was published after {waited:?}"
+        );
+    }
+
     /// A screen that changes mid-period publishes the change then, while a screen that does not
     /// keeps the cadence: the latency of a change is its own, not the frame rate's.
     #[test]
@@ -2050,7 +2078,7 @@ mod damage_tests {
         let (conn, screen) = x11rb::connect(None).expect("connect");
         let root = conn.setup().roots[screen].root;
         let damage = RootDamage::create(&conn, root).expect("the server carries DAMAGE");
-        let mut pace = FramePace::default();
+        let mut pace = FramePace::windowed();
 
         pace.ticked(TickTrigger::Timer, PERIOD, Instant::now(), false);
         damage.clear(&conn);

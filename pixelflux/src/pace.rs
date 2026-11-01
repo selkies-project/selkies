@@ -8,6 +8,10 @@
 //! change the screen or a host reports spends only what its own late frames paid back, so it
 //! moves the cadence onto the frames it reports without raising the rate. Either way a change
 //! arriving on its own schedule is published as it lands rather than up to a period later.
+//!
+//! The X11 captures, which the X server's damage reports wake, pace in windows instead
+//! (`FramePace::windowed`): one frame a period at most, a change taking its period's frame as it
+//! lands, as the NvFBC driver pushes frames.
 
 use std::time::{Duration, Instant};
 
@@ -110,9 +114,65 @@ pub struct FramePace {
     /// A still tick gave the next pull a fresh capture's budget, which that pull spends whole.
     rephase: bool,
     damage_spacing: Option<Duration>,
+    /// Paced in windows (`Self::windowed`): the end of the last period a frame closed.
+    window_end: Option<Instant>,
+    windowed: bool,
 }
 
 impl FramePace {
+    /// Pacing in windows, for a capture the X server's damage reports wake (XShm, DRI3): each
+    /// period is a window holding one frame at most. A change takes its window's frame as it
+    /// lands; a window no change took ends on the timer's frame. The rate never rises above the
+    /// cadence, and a change is published at once unless a change already took its window, in
+    /// which case it waits only for the next window to open: the NvFBC capture's schedule,
+    /// whose driver pushes frames the same way. Without windows a change could come forward no
+    /// earlier than half a period after the last frame, and one landing just after a timer
+    /// frame waited that long.
+    pub fn windowed() -> Self {
+        Self {
+            windowed: true,
+            ..Self::default()
+        }
+    }
+
+    /// Where the window a frame at `now` falls in ends: the open window after the last one a
+    /// frame closed, or a later one where whole windows went by without a tick.
+    fn window_closed_by(&self, period: Duration, now: Instant) -> Instant {
+        match self.window_end {
+            None => now,
+            Some(end) => {
+                let mut close = end + period;
+                while close < now {
+                    close += period;
+                }
+                close
+            }
+        }
+    }
+
+    /// A tick paced in windows: a timer tick ends the open window whether it sent a frame or
+    /// not, which keeps the windows on the timer's schedule; a change's frame closes the window
+    /// it lands in, and a change not sent leaves it open.
+    fn window_tick(&mut self, trigger: TickTrigger, period: Duration, now: Instant, sent: bool) {
+        if trigger == TickTrigger::Timer {
+            let scheduled = self.next_due(period, now);
+            let off = if now > scheduled {
+                now - scheduled
+            } else {
+                scheduled - now
+            };
+            self.window_end = Some(if off < period / 2 { scheduled } else { now });
+        } else if sent {
+            self.window_end = Some(self.window_closed_by(period, now));
+        }
+        if sent {
+            if trigger == TickTrigger::Damage {
+                self.damage_paced(period, now);
+            }
+            self.last_tick = Some(now);
+        }
+    }
+
     /// Whether a capture rendering every `period` is due a frame at `now`, given what asks.
     pub fn due(&self, trigger: TickTrigger, period: Duration, now: Instant) -> bool {
         let Some(last) = self.last_tick else {
@@ -149,6 +209,10 @@ impl FramePace {
         now: Instant,
         input_paced: bool,
     ) {
+        if self.windowed {
+            self.window_tick(trigger, period, now, true);
+            return;
+        }
         if trigger.pulls_forward()
             && let Some(last) = self.last_tick
         {
@@ -225,12 +289,14 @@ impl FramePace {
     }
 
     /// Record a tick of a capture the Damage extension wakes (the X11 paths), once it is known
-    /// whether it sent a frame: a sent one counts (`Self::ticked`), and one that published
-    /// nothing holds the timer off a period (`Self::defer`). A sent timer's tick that finds the
-    /// screen still gives the change after it a fresh capture's pull (`Self::stood_still`):
-    /// where every tick is sent (streaming mode, XShm), the changes before it spent the budget,
-    /// which a still screen's frames, never late, do not pay back, and each change would wait
-    /// for the next tick. A tick that sent nothing spent nothing, and the budget refills alone.
+    /// whether it sent a frame. Paced in windows (`Self::windowed`), a timer tick ends the open
+    /// window and a change's frame closes the one it lands in. Otherwise a sent frame counts
+    /// (`Self::ticked`), one that published nothing holds the timer off a period
+    /// (`Self::defer`), and a sent timer's tick that finds the screen still gives the change
+    /// after it a fresh capture's pull (`Self::stood_still`): where every tick is sent
+    /// (streaming mode, XShm), the changes before it spent the budget, which a still screen's
+    /// frames, never late, do not pay back, and each change would wait for the next tick. A
+    /// tick that sent nothing spent nothing, and the budget refills alone.
     pub fn record_tick(
         &mut self,
         trigger: TickTrigger,
@@ -238,6 +304,10 @@ impl FramePace {
         now: Instant,
         sent: bool,
     ) {
+        if self.windowed {
+            self.window_tick(trigger, period, now, sent);
+            return;
+        }
         if !sent {
             self.defer(now + period);
             return;
@@ -281,6 +351,10 @@ impl FramePace {
     /// last frame, less what its budget still allows it to borrow. A caller that waits until
     /// then need not test `due` again, since a budget only grows with time.
     pub fn pull_at(&self, trigger: TickTrigger, period: Duration, now: Instant) -> Instant {
+        if self.windowed {
+            // The window after the one the last frame closed is open from its start.
+            return self.window_end.unwrap_or(now);
+        }
         self.last_tick.map_or(now, |last| {
             last + period.saturating_sub(self.budget(trigger, period, now))
         })
@@ -289,6 +363,10 @@ impl FramePace {
     /// When the timer is next due for this capture: a period after the last frame, and the
     /// grace beyond that after an input frame the input paced.
     pub fn next_due(&self, period: Duration, now: Instant) -> Instant {
+        if self.windowed {
+            // The end of the open window, where no change took it.
+            return self.window_end.map_or(now, |end| end + period);
+        }
         let due = self.last_tick.map_or(now, |last| {
             last + if self.last_paced {
                 period.mul_f64(1.0 + TIMER_GRACE_AFTER_PULL)
@@ -308,6 +386,125 @@ mod pacing_tests {
 
     fn at(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
+    }
+
+    /// Paced in windows, a change is taken as it lands wherever it falls after a timer frame,
+    /// and the timer frame its window would have ended on is skipped: the rate stays the
+    /// cadence's.
+    #[test]
+    fn a_windowed_change_is_taken_as_it_lands_and_the_rate_holds() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
+        let mut frames = 1u32;
+        let mut t = base;
+        let end = base + Duration::from_secs(4);
+        let mut i = 0u64;
+        while t < end {
+            // A change once every 5 periods, at a phase that walks through the window.
+            let change = t + PERIOD * 4 + Duration::from_micros(300 + (i * 3700) % 19_500);
+            i += 1;
+            loop {
+                let due = pace.next_due(PERIOD, t);
+                if due >= change {
+                    break;
+                }
+                t = due;
+                pace.record_tick(TickTrigger::Timer, PERIOD, t, true);
+                frames += 1;
+            }
+            let at = pace
+                .pull_at(TickTrigger::Damage, PERIOD, change)
+                .max(change);
+            assert_eq!(at, change, "change {i} waited {:?}", at - change);
+            pace.record_tick(TickTrigger::Damage, PERIOD, at, true);
+            frames += 1;
+            t = at;
+        }
+        let windows = (t - base).as_secs_f64() / PERIOD.as_secs_f64();
+        assert!(
+            f64::from(frames) <= windows.ceil() + 1.0,
+            "{frames} frames in {windows:.1} windows"
+        );
+    }
+
+    /// A second change in a window a change already took waits for the next window, and is
+    /// taken as it opens.
+    #[test]
+    fn a_second_change_in_a_window_waits_for_the_next() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
+        pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 3), true);
+        assert_eq!(
+            pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 5)),
+            at(base, 20)
+        );
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, 5)),
+            at(base, 40),
+            "its window's timer frame is skipped"
+        );
+        pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 20), true);
+        assert_eq!(
+            pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 21)),
+            at(base, 40)
+        );
+    }
+
+    /// Changes faster than the cadence are published one a window, never faster.
+    #[test]
+    fn windowed_changes_faster_than_the_cadence_hold_its_rate() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
+        let (mut frames, mut changes, mut pending) = (1u32, 0u32, false);
+        let mut next_change = base + PERIOD.mul_f64(0.7);
+        // Stepped every 0.1 ms: a change is pending until its window opens, else the timer ends it.
+        for step in 1..=20_000u32 {
+            let now = base + Duration::from_micros(100) * step;
+            if now >= next_change {
+                pending = true;
+                changes += 1;
+                next_change += PERIOD.mul_f64(0.7);
+            }
+            if pending && now >= pace.pull_at(TickTrigger::Damage, PERIOD, now) {
+                pace.record_tick(TickTrigger::Damage, PERIOD, now, true);
+                pending = false;
+                frames += 1;
+            } else if now >= pace.next_due(PERIOD, now) {
+                pace.record_tick(TickTrigger::Timer, PERIOD, now, true);
+                frames += 1;
+            }
+        }
+        // One frame for each window closed, no more: the first frame's, then one a window.
+        let closed =
+            (pace.window_end.expect("windows") - base).as_secs_f64() / PERIOD.as_secs_f64();
+        assert!(changes > 130, "{changes} changes");
+        assert_eq!(
+            f64::from(frames),
+            closed.round() + 1.0,
+            "{frames} frames over {closed:.1} windows"
+        );
+    }
+
+    /// With streaming off the still ticks send nothing, and still keep the windows on the
+    /// timer's schedule: a change after a still spell is taken at once.
+    #[test]
+    fn unsent_ticks_keep_the_windows() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
+        for k in 1..=10u64 {
+            pace.record_tick(TickTrigger::Timer, PERIOD, at(base, 20 * k), false);
+        }
+        assert_eq!(pace.next_due(PERIOD, at(base, 200)), at(base, 220));
+        assert_eq!(
+            pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 207)),
+            at(base, 200)
+        );
+        pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 207), true);
+        assert_eq!(pace.next_due(PERIOD, at(base, 207)), at(base, 240));
     }
 
     /// The earliest pull and the pull gate agree, so a caller may wait for the one and skip

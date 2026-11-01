@@ -1070,7 +1070,8 @@ where
     let mut state = StripeState::default();
     let mut frame_counter: u16 = 0;
     let mut pending_force_idr = true;
-    let mut pace = FramePace::default();
+    // One frame a period at most, a change taking its period's frame as it lands (FramePace::windowed).
+    let mut pace = FramePace::windowed();
     let mut geometry_check = GEOMETRY_POLL_FRAMES;
     let mut x_failures = 0u32;
     let mut encode_errors = 0u32;
