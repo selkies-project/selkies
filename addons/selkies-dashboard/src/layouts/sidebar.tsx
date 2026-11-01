@@ -162,7 +162,8 @@ export default function SidebarLayout() {
             <LayoutToggle className="header-action-button" />
             {d.renderable.fullscreen && (
               <button type="button" className="header-action-button fullscreen-button" aria-label={t("fullscreenTitle")} title={t("fullscreenTitle")} onClick={d.toggleFullscreen}>
-                <Maximize />
+                {/* Its corners stop a unit inside the crosshair's circle: drawn to that circle's extent, the two read as one size. */}
+                <Maximize viewBox="1.09 1.09 21.82 21.82" />
               </button>
             )}
             {d.renderable.gamingMode && (

@@ -102,7 +102,7 @@ def log_since(mark: int, substr: str, timeout: float = 12) -> bool:
 def open_settings(page: Any) -> bool:
     """Open the toolbar's settings card on its Video tab, whose frame rate
     slider is what the block drives."""
-    if not TD.open_wish_settings_tab(page, "Video"):
+    if not TD.open_wish_settings_tab(page, "Video", "#framerateSlider"):
         return False
     deadline = time.time() + 6
     while time.time() < deadline:
@@ -218,7 +218,7 @@ def wish_block(cell: str) -> "H.Results":
             # (WebRTC streams h264enc alone, so there it is hidden).
             allowed = page.evaluate(
                 "(window.__serverSettings && window.__serverSettings.encoder || {}).allowed || []")
-            TD.open_wish_settings_tab(page, "Video")
+            TD.open_wish_settings_tab(page, "Video", "#encoderSelect")
             menu = page.locator('#encoderSelect')
             picked = None
             if len(allowed) <= 1:

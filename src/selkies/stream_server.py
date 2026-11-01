@@ -57,7 +57,7 @@ except ImportError:
 
 from abc import ABCMeta, abstractmethod
 from . import apps_catalog, audit, printing
-from .settings import apps_repo_folder
+from .settings import apps_repo_folder, enum_allowed
 
 
 logger = logging.getLogger("server")
@@ -2544,10 +2544,11 @@ class CentralizedStreamServer:
         WebSocket/WebRTC toggle from this early, transport-independent probe:
         serverSettings only arrives once a stream connects, so a WebRTC
         session that never comes up would otherwise strand the user with no
-        way back to WebSockets. `ui_layout` is surfaced for the same reason:
-        the dashboard paints its layout before the stream connects, and a
-        page that painted one and switched to the operator's on connect would
-        flash.
+        way back to WebSockets. `ui_layout` and the layouts the operator
+        allows are surfaced for the same reason: the dashboard paints its
+        layout before the stream connects, and a page that painted one and
+        switched to the operator's on connect would flash, or offer a layout
+        toggle that a locked layout hides.
         """
         return {
             "current_mode": self.current_mode,
@@ -2556,6 +2557,7 @@ class CentralizedStreamServer:
                 getattr(self.settings, "enable_dual_mode", (False,))[0]
             ),
             "ui_layout": getattr(self.settings, "ui_layout", "default"),
+            "ui_layout_allowed": enum_allowed("ui_layout"),
         }
 
     @staticmethod

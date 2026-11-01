@@ -77,7 +77,7 @@ export function SoftKeys({ showTrackpad: trackpadButton = true, showKeyboardButt
             ))}
           </div>
           <form className="flex gap-1" onSubmit={addChord}>
-            <input type="text" className="key-palette-input allow-native-input min-w-0 flex-1 h-(--soft-key-h) rounded border bg-background px-3 text-base"
+            <input type="text" className="key-palette-input allow-native-input min-w-0 flex-1 h-(--soft-key-h) rounded border bg-background px-3 text-base placeholder:text-muted-foreground"
               value={draft} onChange={(event) => { setDraft(event.target.value); setRefused(false); }}
               placeholder={t('keyPalette.addPlaceholder')} aria-label={t('keyPalette.addPlaceholder')}
               autoCapitalize="off" autoCorrect="off" spellCheck={false} />

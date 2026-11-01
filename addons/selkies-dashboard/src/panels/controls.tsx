@@ -20,9 +20,13 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { hint } from "@/utils";
 
-/** A label cut with an ellipsis where its row leaves it no room; the row's hover text carries it whole. */
+/**
+ * A label cut with an ellipsis where its row leaves it no room; the row's
+ * hover text carries it whole. A skin that would rather wrap it (the
+ * sidebar's, read on touch screens that have no hover) addresses `clip`.
+ */
 export function Clip({ className, children }: { className?: string; children: React.ReactNode }) {
-  return <span className={cn("min-w-0 truncate", className)}>{children}</span>;
+  return <span className={cn("clip min-w-0 truncate", className)}>{children}</span>;
 }
 
 interface SwitchRowProps {

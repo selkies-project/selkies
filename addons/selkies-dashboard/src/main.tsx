@@ -9,7 +9,8 @@
  *
  * Probes `/api/status` for the server's streaming mode, dual-mode flag, and
  * layout, publishes them as `window.__SELKIES_STREAMING_MODE__`,
- * `window.__SELKIES_DUAL_MODE__`, and `window.__SELKIES_UI_LAYOUT__`, waits
+ * `window.__SELKIES_DUAL_MODE__`, `window.__SELKIES_UI_LAYOUT__`, and
+ * `window.__SELKIES_UI_LAYOUT_ALLOWED__`, waits
  * for the runtime-served core script to expose `window.selkiesCoreInitialize`
  * and starts it, then mounts the dashboard: the full `App` under `#root` for
  * the primary display, only the floating gamepad button for the `#player2`
@@ -33,6 +34,7 @@ declare global {
     __SELKIES_STREAMING_MODE__?: string;
     __SELKIES_DUAL_MODE__?: boolean;
     __SELKIES_UI_LAYOUT__?: string;
+    __SELKIES_UI_LAYOUT_ALLOWED__?: string[];
     selkiesCoreInitialize?: () => void;
   }
 }
@@ -42,7 +44,8 @@ declare global {
  * into the right transport even when localStorage disagrees with the server,
  * whether it permits switching transports, so the dashboard can show the
  * WebSocket/WebRTC toggle before `serverSettings` arrive over the stream,
- * and which layout it names, so the first paint is the right one.
+ * and which layout it names and allows, so the first paint is the right one
+ * and a locked layout shows no toggle.
  */
 async function detectInitialMode(): Promise<void> {
   try {
@@ -52,6 +55,7 @@ async function detectInitialMode(): Promise<void> {
     if (data?.current_mode) window.__SELKIES_STREAMING_MODE__ = data.current_mode;
     if (data && typeof data.enable_dual_mode !== 'undefined') window.__SELKIES_DUAL_MODE__ = !!data.enable_dual_mode;
     if (typeof data?.ui_layout === 'string') window.__SELKIES_UI_LAYOUT__ = data.ui_layout;
+    if (Array.isArray(data?.ui_layout_allowed)) window.__SELKIES_UI_LAYOUT_ALLOWED__ = data.ui_layout_allowed;
   } catch (err) {
     console.warn(`Error detecting initial mode: ${err}`);
   }

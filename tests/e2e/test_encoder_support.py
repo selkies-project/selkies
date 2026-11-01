@@ -54,7 +54,7 @@ def wait_video(page: Any, mode: str) -> Optional[dict]:
 def encoder_menu(page: Any, layout: str) -> Optional[list]:
     """The encoder menu's options as `(text, disabled)`, the video settings
     opened in `layout` first; None when the select never renders."""
-    if not open_video_settings(page, layout):
+    if not open_video_settings(page, layout, "#encoderSelect"):
         return None
     deadline = time.time() + 10
     while time.time() < deadline:
