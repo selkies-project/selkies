@@ -5579,6 +5579,7 @@ export class Input {
      */
     enterGamingMode() {
         this._setGamingMode(true);
+        this._focusStream();
         if (document.fullscreenElement === null) {
             document.documentElement.requestFullscreen(this._gamingFullscreenOptions())
                 .catch(err => {
@@ -5596,6 +5597,23 @@ export class Input {
                 });
         }
         this.requestKeyboardLock();
+    }
+
+    /**
+     * Hands the keyboard to the stream. A dashboard control that entered gaming
+     * mode keeps focus otherwise, and the keys typed at it are the dashboard's
+     * (`allow-native-input`), so not one key, Escape included, would reach the
+     * game. Whatever held focus is blurred first, a text field too: the
+     * keyboard is the game's for as long as the mode lasts.
+     */
+    _focusStream() {
+        const el = this.element;
+        if (!el || typeof el.focus !== 'function') return;
+        const active = document.activeElement;
+        if (active && active !== el && active !== document.body && typeof active.blur === 'function') {
+            active.blur();
+        }
+        try { el.focus({ preventScroll: true }); } catch (e) { /* detached element */ }
     }
 
     /**

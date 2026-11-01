@@ -34,7 +34,11 @@ desktop's: what has to hold is that the lock survives the crossing and the
 deltas keep going out, with the drawing side of it read off the pixels in
 tests/integration/test_locked_cursor_across_displays.py.
 
-    python3 tests/e2e/test_gaming_mode.py x11|wl|x11-two|wl-two
+The `x11-dashboards` selector serves each dashboard layout and enters the mode
+the way a user does there, by a click on its gaming mode button: the keys have
+to reach the game then too, where the click left the keyboard on the button.
+
+    python3 tests/e2e/test_gaming_mode.py x11|wl|x11-two|wl-two|x11-dashboards
 """
 import os
 import shutil
@@ -393,6 +397,35 @@ def crossed(res: "H.Results", p: Any, desk: Desk, page: Any, wayland: bool,
         browser.close()
 
 
+# The center of the first visible element a selector matches, in the browser's desktop's coordinates.
+SCREEN_JS = """(sel) => { const el = [...document.querySelectorAll(sel)].find((e) => e.getBoundingClientRect().width > 0);
+  if (!el) return null; const r = el.getBoundingClientRect();
+  const left = window.screenX + (window.outerWidth - window.innerWidth) / 2;
+  const top = window.screenY + window.outerHeight - window.innerHeight;
+  return [Math.round(left + r.x + r.width / 2), Math.round(top + r.y + r.height / 2)]; }"""
+
+
+def enter_by_button(res: "H.Results", desk: Desk, page: Any, tag: str) -> bool:
+    """Open the sidebar where the layout has one and click its gaming mode button, or the toolbar's."""
+    desk.click(*CENTER)
+    time.sleep(0.5)
+    handle = page.evaluate(SCREEN_JS, ".toggle-handle")
+    if handle:
+        desk.click(*handle)
+        time.sleep(1.0)
+    button = page.evaluate(SCREEN_JS, ".gaming-mode-button")
+    if not button:
+        res.check(f"{tag}: the dashboard shows its gaming mode button", False, button)
+        return False
+    desk.click(*button)
+    mode = wait_mode(page, 15, fullscreen=True, locked=True)
+    ok = mode["fullscreen"] and mode["locked"] and mode["gaming"]
+    res.check(f"{tag}: the gaming mode button fullscreens the page and locks the pointer", ok, mode)
+    if ok:
+        time.sleep(0.5)
+    return ok
+
+
 def enter_gaming_mode(res: "H.Results", desk: Desk, page: Any, tag: str) -> bool:
     """Focus the stream and press the chord; True once the page is fullscreen and locked."""
     desk.click(*CENTER)
@@ -406,13 +439,17 @@ def enter_gaming_mode(res: "H.Results", desk: Desk, page: Any, tag: str) -> bool
     return ok
 
 
-def run(wayland: bool, res: "H.Results", two: bool = False) -> None:
+def run(wayland: bool, res: "H.Results", two: bool = False, layout: str = "") -> None:
     if not shutil.which("openbox"):
         H.skip_suite("openbox is not installed, and a fullscreen browser window needs a window manager")
     chrome = C.CHROME_PATH or shutil.which("google-chrome")
     if not chrome:
         H.skip_suite("no installed Chrome (E2E_CHROME or google-chrome on PATH) to hold a real keyboard lock")
-    H.server_start(mode="websockets", wayland=wayland)
+    # A layout serves that dashboard and enters by its button; the test page alone takes the chord.
+    dashboard = {"web_root": H.DASHBOARD_DIST, "layout": layout} if layout else {}
+    enter = enter_by_button if layout else enter_gaming_mode
+    at = f"{layout} " if layout else ""
+    H.server_start(mode="websockets", wayland=wayland, **dashboard)
     desk = None
     capture = ""
     try:
@@ -429,35 +466,36 @@ def run(wayland: bool, res: "H.Results", two: bool = False) -> None:
             try:
                 page = open_page(browser, shields=False)
                 video = C.wait_ws_video(page, timeout=30)
-                res.check("chrome: video flowing", bool(video), video)
+                res.check(f"{at}chrome: video flowing", bool(video), video)
                 if two:
                     crossed(res, p, desk, page, wayland, "chrome")
                     page.context.close()
                     return
-                probe = game_window(res, desk, wayland, capture, "chrome")
-                if probe is not None and enter_gaming_mode(res, desk, page, "chrome"):
-                    played(res, desk, page, probe, "chrome", shortcuts=True)
+                probe = game_window(res, desk, wayland, capture, f"{at}chrome")
+                if probe is not None and enter(res, desk, page, f"{at}chrome"):
+                    played(res, desk, page, probe, f"{at}chrome", shortcuts=True)
                 if probe is not None:
                     probe.stop()
                 page.context.close()
 
                 page = open_page(browser, shields=True)
                 video = C.wait_ws_video(page, timeout=30)
-                res.check("shields: video flowing", bool(video), video)
-                if enter_gaming_mode(res, desk, page, "shields"):
-                    shielded(res, desk, page, "shields")
+                res.check(f"{at}shields: video flowing", bool(video), video)
+                if enter(res, desk, page, f"{at}shields"):
+                    shielded(res, desk, page, f"{at}shields")
                 page.context.close()
             finally:
                 browser.close()
             if not two:
-                firefox(res, p, desk, wayland, capture)
+                firefox(res, p, desk, wayland, capture, enter, at)
     finally:
         if desk is not None:
             desk.stop()
         H.server_stop()
 
 
-def firefox(res: "H.Results", p: Any, desk: Desk, wayland: bool, capture: str) -> None:
+def firefox(res: "H.Results", p: Any, desk: Desk, wayland: bool, capture: str,
+            enter: Any = None, at: str = "") -> None:
     """The same gaming mode in the installed Firefox, which holds the keys only
     for a fullscreen asked for with `keyboardLock: "browser"`."""
     binary = C.FIREFOX_PATH or shutil.which("firefox")
@@ -476,10 +514,10 @@ def firefox(res: "H.Results", p: Any, desk: Desk, wayland: bool, capture: str) -
     try:
         page = open_page(browser, shields=False)
         video = C.wait_ws_video(page, timeout=30)
-        res.check("firefox: video flowing", bool(video), video)
-        probe = game_window(res, desk, wayland, capture, "firefox")
-        if probe is not None and enter_gaming_mode(res, desk, page, "firefox"):
-            played(res, desk, page, probe, "firefox", shortcuts=True)
+        res.check(f"{at}firefox: video flowing", bool(video), video)
+        probe = game_window(res, desk, wayland, capture, f"{at}firefox")
+        if probe is not None and (enter or enter_gaming_mode)(res, desk, page, f"{at}firefox"):
+            played(res, desk, page, probe, f"{at}firefox", shortcuts=True)
         if probe is not None:
             probe.stop()
         page.context.close()
@@ -487,7 +525,7 @@ def firefox(res: "H.Results", p: Any, desk: Desk, wayland: bool, capture: str) -
         browser.close()
 
 
-SELECTORS = ("x11", "wl", "x11-two", "wl-two")
+SELECTORS = ("x11", "wl", "x11-two", "wl-two", "x11-dashboards")
 
 
 def main() -> bool:
@@ -495,6 +533,10 @@ def main() -> bool:
     if which not in SELECTORS:
         raise SystemExit(f"unknown selector {which!r}; one of {SELECTORS}")
     res = H.Results(f"gaming-mode-{which}")
+    if which == "x11-dashboards":
+        for layout in H.LAYOUTS:
+            run(False, res, layout=layout)
+        return res.summary()
     run(which.startswith("wl"), res, two=which.endswith("-two"))
     return res.summary()
 
