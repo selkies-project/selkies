@@ -7859,6 +7859,18 @@ impl From<crate::sink::Frame> for StripeFrame {
     }
 }
 
+impl From<Error> for PyErr {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::Settings(m) => pyo3::exceptions::PyValueError::new_err(m),
+            Error::Unavailable(m) => VirtualKeyboardUnavailable::new_err(m),
+            Error::Capture(m) | Error::Compositor(m) => {
+                pyo3::exceptions::PyRuntimeError::new_err(m)
+            }
+        }
+    }
+}
+
 /// A Python callable a sink holds. Dropped under the GIL so its decref happens at once:
 /// dropped without it, the decref waits for some thread's next attach, which a withdrawn
 /// callback may never see. A finalizing interpreter (`PY_SHUTDOWN`) is never attached to.
@@ -7976,13 +7988,13 @@ impl crate::sink::SelectionWatch for PySelectionWatch {
     }
 }
 
-/// The Python handle to the one long-lived compositor thread. Because calloop, EGL/GBM, and
-/// the Wayland display are all thread-affine and the compositor has to keep running to serve its
-/// clients even between captures, the backend cannot be a passive object that starts work on demand:
-/// constructing it spawns that thread and it stays up for the process lifetime. The struct itself is
-/// nothing but the command-channel sender used to drive that thread across the boundary.
-#[pyclass]
-struct WaylandBackend {
+/// The handle to the one long-lived compositor thread. Because calloop, EGL/GBM, and the
+/// Wayland display are all thread-affine and the compositor has to keep running to serve its
+/// clients even between captures, the backend cannot be a passive object that starts work on
+/// demand: constructing it spawns that thread and it stays up for the process lifetime. The
+/// struct itself is nothing but the command-channel sender used to drive that thread across
+/// the boundary; `ensure_wayland_display` hands out the process-wide one.
+pub struct Compositor {
     tx: smithay::reexports::calloop::channel::Sender<ThreadCommand>,
     /// The compositor's pointer, as its thread last published it (`pointer_location`).
     pointer: Arc<crate::wayland::frontend::PointerShare>,
@@ -7994,7 +8006,7 @@ struct WaylandBackend {
     wake_tx: smithay::reexports::calloop::channel::Sender<()>,
 }
 
-impl WaylandBackend {
+impl Compositor {
     fn send(&self, cmd: ThreadCommand) -> Result<(), String> {
         self.tx.send(cmd).map_err(|e| e.to_string())?;
         let _ = self.wake_tx.send(());
@@ -8002,30 +8014,30 @@ impl WaylandBackend {
     }
 
     /// Register the consumer of cursor images; `None` withdraws it.
-    fn set_cursor_sink(
+    pub fn set_cursor_sink(
         &self,
         sink: Option<Arc<dyn crate::sink::CursorSink>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         self.send(ThreadCommand::SetCursorCallback(sink))
-            .map_err(|e| format!("Failed to set cursor callback: {e}"))
+            .map_err(|e| Error::Compositor(format!("Failed to set cursor callback: {e}")))
     }
 
     /// Register the consumer of what client applications copy to the clipboard.
-    fn set_clipboard_sink(&self, sink: Arc<dyn crate::sink::ClipboardSink>) -> Result<(), String> {
+    pub fn set_clipboard_sink(
+        &self,
+        sink: Arc<dyn crate::sink::ClipboardSink>,
+    ) -> Result<(), Error> {
         self.send(ThreadCommand::SetClipboardCallback(sink))
-            .map_err(|e| format!("Failed to set clipboard callback: {e}"))
+            .map_err(|e| Error::Compositor(format!("Failed to set clipboard callback: {e}")))
     }
 }
 
-#[pymethods]
-impl WaylandBackend {
+impl Compositor {
     /// Construct the backend and spawn the long-lived compositor thread, handing it the
     /// strongest scheduling edge (nice -15) because it drives the calloop, input dispatch, the render
     /// loop, and — on the zero-copy path — the encode itself, all on this single thread, so any
     /// scheduling starvation here surfaces directly as dropped or late frames.
-    #[new]
-    #[pyo3(signature = (width, height, dri_node, auto_gpu_selected = false, cursor_size = -1))]
-    fn new(
+    pub fn new(
         width: i32,
         height: i32,
         dri_node: String,
@@ -8053,7 +8065,7 @@ impl WaylandBackend {
                 pointer_share,
             });
         });
-        WaylandBackend {
+        Compositor {
             tx,
             wake_tx,
             pointer,
@@ -8070,7 +8082,7 @@ impl WaylandBackend {
     /// rather than summed from what was injected. None before the first pass and, under host
     /// capture, before its first cursor meta or where the host paints its cursor into the
     /// frames. Never waits on the compositor.
-    fn pointer_location(&self) -> Option<(f64, f64, f64, u64)> {
+    pub fn pointer_location(&self) -> Option<(f64, f64, f64, u64)> {
         let host = *crate::wayland::pwcapture::HOST_POINTER.lock().unwrap();
         crate::wayland::pwcapture::prefer_host_pointer(host, || self.pointer.read())
             .map(|at| (at.x, at.y, at.scale, at.motion))
@@ -8082,35 +8094,27 @@ impl WaylandBackend {
     ///
     /// Issuing the start also clears the interpreter-teardown gate: starting from Python proves the
     /// interpreter is live again after a manual atexit sweep.
-    fn start_capture(&self, callback: Py<PyAny>, settings: &Bound<'_, PyAny>) -> PyResult<()> {
-        let rust_settings = extract_settings(settings)?;
-        let display_id = rust_settings.display_id;
+    pub fn start_capture(
+        &self,
+        sink: Arc<dyn crate::sink::FrameSink>,
+        settings: CaptureSettings,
+    ) -> Result<(), Error> {
+        let display_id = settings.display_id;
 
         PY_SHUTDOWN.store(false, Ordering::Relaxed);
         self.send(ThreadCommand::StartCapture {
             display_id,
-            callback: Some(Arc::new(PyFrameSink::new(callback))),
-            settings: rust_settings,
+            callback: Some(sink),
+            settings,
         })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to send start command: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| Error::Compositor(format!("Failed to send start command: {e}")))?;
         Ok(())
     }
 
     /// Stop the capture bound to `display_id` (default: the primary display).
-    #[pyo3(signature = (display_id = 0))]
-    fn stop_capture(&self, display_id: u32) -> PyResult<()> {
+    pub fn stop_capture(&self, display_id: u32) -> Result<(), Error> {
         self.send(ThreadCommand::StopCapture { display_id })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to send stop command: {}",
-                    e
-                ))
-            })?;
+            .map_err(|e| Error::Compositor(format!("Failed to send stop command: {e}")))?;
         Ok(())
     }
 
@@ -8120,19 +8124,15 @@ impl WaylandBackend {
     /// live output, or the GPU render target cannot be allocated. Capture reconfigures
     /// (`start_capture` on an existing output) resize without this validation, so a
     /// multi-step relayout must stay overlap-free at every step by caller ordering.
-    // The parameter list is the Python signature; grouping it would change the ABI.
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (id, width, height, x = 0, y = 0, scale = 1.0))]
-    fn create_output(
+    pub fn create_output(
         &self,
-        py: Python<'_>,
         id: u32,
         width: i32,
         height: i32,
         x: i32,
         y: i32,
         scale: f64,
-    ) -> PyResult<bool> {
+    ) -> Result<bool, Error> {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
         self.send(ThreadCommand::CreateOutput {
             id,
@@ -8143,14 +8143,9 @@ impl WaylandBackend {
             scale,
             reply: reply_tx,
         })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create output: {}",
-                e
-            ))
-        })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
+        .map_err(|e| Error::Compositor(format!("Failed to create output: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
             .unwrap_or(false))
     }
 
@@ -8162,18 +8157,15 @@ impl WaylandBackend {
     /// one display to the next, instead of stopping at the edge of the screen it started
     /// on. `x` and `y` are relative to `owner`'s output. False when the id is taken, the
     /// owner is unknown or itself a view, or the rectangle leaves the owner's output.
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (id, owner, x, y, width, height))]
-    fn create_view(
+    pub fn create_view(
         &self,
-        py: Python<'_>,
         id: u32,
         owner: u32,
         x: i32,
         y: i32,
         width: i32,
         height: i32,
-    ) -> PyResult<bool> {
+    ) -> Result<bool, Error> {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
         self.send(ThreadCommand::CreateView {
             id,
@@ -8184,15 +8176,504 @@ impl WaylandBackend {
             height,
             reply: reply_tx,
         })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create view: {}",
-                e
-            ))
-        })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
+        .map_err(|e| Error::Compositor(format!("Failed to create view: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
             .unwrap_or(false))
+    }
+
+    /// Resize a screen's output in place, keeping its position: the desk the displays cut
+    /// out of it are laid over. False for a view, an unknown id, or a size that would leave
+    /// one of the screen's views outside it.
+    pub fn resize_output(
+        &self,
+        id: u32,
+        width: i32,
+        height: i32,
+        scale: f64,
+    ) -> Result<bool, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
+        self.send(ThreadCommand::ResizeOutput {
+            id,
+            width,
+            height,
+            scale,
+            reply: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to resize output: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false))
+    }
+
+    /// Destroy a secondary output: its capture ends cleanly and its windows relocate to the
+    /// primary output. False for the primary (id 0) or an unknown id.
+    pub fn destroy_output(&self, id: u32) -> Result<bool, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
+        self.send(ThreadCommand::DestroyOutput {
+            id,
+            reply: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to destroy output: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false))
+    }
+
+    /// Move an existing output (the primary, id 0, included) to layout offset `(x, y)`;
+    /// its windows, absolute input injection, and cursor compositing follow. False for an
+    /// unknown id or a destination overlapping a live output. Capture reconfigures
+    /// (`start_capture` on an existing output) resize without this validation, so a
+    /// multi-step relayout must stay overlap-free at every step by caller ordering.
+    pub fn reposition_output(&self, id: u32, x: i32, y: i32) -> Result<bool, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
+        self.send(ThreadCommand::RepositionOutput {
+            id,
+            x,
+            y,
+            reply: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to reposition output: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false))
+    }
+
+    /// Every live output as `(id, x, y, width, height, scale, capturing)` — width/height in
+    /// physical pixels, `(x, y)` the layout offset.
+    pub fn list_outputs(&self) -> Result<Vec<OutputDesc>, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.send(ThreadCommand::ListOutputs { reply: reply_tx })
+            .map_err(|e| Error::Compositor(format!("Failed to list outputs: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default())
+    }
+
+    /// How many displays this backend can back with real content: -1 when
+    /// self-compositing (outputs are created on demand, no fixed bound), otherwise the
+    /// host compositor's output count. Host-capture mode reports -1 until the first
+    /// capture start establishes the host session; 0 when the backend is unresponsive.
+    pub fn output_capacity(&self) -> Result<i64, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<i64>();
+        self.send(ThreadCommand::OutputCapacity { reply: reply_tx })
+            .map_err(|e| Error::Compositor(format!("Failed to query output capacity: {e}")))?;
+        Ok(reply_rx.recv_timeout(Duration::from_secs(2)).unwrap_or(0))
+    }
+
+    /// Move the window with the given id onto output `output_id`, fullscreened at that
+    /// output's logical size. False for an unknown window or output id.
+    pub fn move_window_to_output(&self, window_id: u32, output_id: u32) -> Result<bool, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
+        self.send(ThreadCommand::MoveWindowToOutput {
+            window_id,
+            output_id,
+            reply: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to move window: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false))
+    }
+
+    /// Every mapped window as `(window_id, title, app_id, output_id, waiting)`. A waiting
+    /// window is tagged for that output but mapped clear of every one of them, holding its
+    /// size until an output exists for it — a nested session's spare screens.
+    pub fn list_windows(&self) -> Result<Vec<WindowDesc>, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.send(ThreadCommand::ListWindows { reply: reply_tx })
+            .map_err(|e| Error::Compositor(format!("Failed to list windows: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default())
+    }
+
+    /// Recreate the cursor theme at `size` pixels — no restart: subsequent named-cursor
+    /// callbacks and the burned-in cursor overlay render at the new size. False for a
+    /// non-positive size.
+    pub fn set_cursor_size(&self, size: i32) -> Result<bool, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
+        self.send(ThreadCommand::SetCursorSize {
+            size,
+            reply: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to set cursor size: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false))
+    }
+
+    /// Compositor-side clipboard offer: serve one payload per `(mime, data)` entry, so a
+    /// client pasting rich text takes the markup and one pasting into a plain field takes
+    /// the text the source itself wrote, instead of both taking whichever flavor was
+    /// picked for them.
+    pub fn set_clipboard(&self, entries: Vec<(String, Vec<u8>)>) -> Result<(), Error> {
+        self.send(ThreadCommand::SetClipboard { entries })
+            .map_err(|e| Error::Compositor(format!("Failed to set clipboard: {e}")))?;
+        Ok(())
+    }
+
+    pub fn inject_key(&self, scancode: u32, state: u32) -> Result<(), Error> {
+        self.send(ThreadCommand::KeyboardKey { scancode, state })
+            .map_err(|e| Error::Compositor(format!("Failed to inject key: {e}")))?;
+        Ok(())
+    }
+
+    /// Inject an ordered run of `(keycode, state)` events as one message, so a paste
+    /// costs one channel send and one wake instead of one per event.
+    pub fn inject_keys(&self, events: Vec<(u32, u32)>) -> Result<(), Error> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        self.send(ThreadCommand::KeyboardKeys { events })
+            .map_err(|e| Error::Compositor(format!("Failed to inject keys: {e}")))?;
+        Ok(())
+    }
+
+    /// Swap the seat keyboard's xkb keymap (XKB_KEYMAP_FORMAT_TEXT_V1 text). The caller
+    /// owns keysym-to-keycode policy: define keycodes here, then press them via
+    /// `inject_key`. Ordered with key events on the one compositor channel.
+    /// Bind explicit `(keycode, keysym)` pairs onto the current base keymap in ONE swap.
+    ///
+    /// The caller owns the assignment — which keysym goes to which keycode, and when to
+    /// recycle one — because that tracks layouts and user reports. This end only assembles
+    /// the xkb text and delivers it, reusing the installed base rather than recompiling a
+    /// re-supplied one. False when no base keymap is installed yet.
+    pub fn set_keymap_overlay(&self, binds: Vec<(u32, u32)>) -> Result<(), Error> {
+        self.send(ThreadCommand::SetKeymapOverlay { binds })
+            .map_err(|e| Error::Compositor(format!("Failed to set overlay: {e}")))?;
+        Ok(())
+    }
+
+    pub fn set_keymap_string(&self, text: String) -> Result<(), Error> {
+        self.send(ThreadCommand::SetKeymapString(text))
+            .map_err(|e| Error::Compositor(format!("Failed to set keymap: {e}")))?;
+        Ok(())
+    }
+
+    /// Return the active xkb keymap as an XKB_KEYMAP_FORMAT_TEXT_V1 string so a consumer can
+    /// build a reverse keysym->keycode map from the identical keymap.
+    ///
+    /// The GIL is released while awaiting the reply, because the Wayland thread can call back into
+    /// Python and would otherwise deadlock; the wait is bounded so a stall cannot hang the caller,
+    /// and an empty string is returned when the keymap cannot be read in time.
+    pub fn get_xkb_keymap_string(&self) -> Result<String, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<String>();
+        self.send(ThreadCommand::GetXkbKeymap { reply: reply_tx })
+            .map_err(|e| Error::Compositor(format!("Failed to request keymap: {e}")))?;
+        let result = reply_rx.recv_timeout(Duration::from_secs(2));
+        match result {
+            Ok(s) => Ok(s),
+            Err(_) => Ok(String::new()),
+        }
+    }
+
+    /// Move the pointer to a point in physical union-layout coordinates. Returns the
+    /// move's number (`pointer_location`).
+    pub fn inject_mouse_move(&self, x: f64, y: f64) -> Result<u64, Error> {
+        let motion = self.motions.fetch_add(1, Ordering::Relaxed) + 1;
+        self.send(ThreadCommand::PointerMotion { x, y, motion })
+            .map_err(|e| Error::Compositor(format!("Failed to inject motion: {e}")))?;
+        Ok(motion)
+    }
+
+    /// Move the pointer by a delta. On the seat this is an absolute move plus a
+    /// `zwp_relative_pointer_v1` event; a nested KWin session, which forwards no
+    /// delta from its host seat, receives it through its `org_kde_kwin_fake_input`
+    /// device on the app compositor socket named by `set_app_wayland_display`. Returns the
+    /// move's number (`pointer_location`).
+    pub fn inject_relative_mouse_move(&self, dx: f64, dy: f64) -> Result<u64, Error> {
+        let motion = self.motions.fetch_add(1, Ordering::Relaxed) + 1;
+        self.send(ThreadCommand::PointerRelativeMotion { dx, dy, motion })
+            .map_err(|e| Error::Compositor(format!("Failed to inject relative motion: {e}")))?;
+        Ok(motion)
+    }
+
+    pub fn inject_mouse_button(&self, btn: u32, state: u32) -> Result<(), Error> {
+        self.send(ThreadCommand::PointerButton { btn, state })
+            .map_err(|e| Error::Compositor(format!("Failed to inject button: {e}")))?;
+        Ok(())
+    }
+
+    pub fn inject_mouse_scroll(&self, x: f64, y: f64) -> Result<(), Error> {
+        self.send(ThreadCommand::PointerAxis { x, y })
+            .map_err(|e| Error::Compositor(format!("Failed to inject axis: {e}")))?;
+        Ok(())
+    }
+
+    /// Scroll by a finger's travel of (dx, dy) physical pixels, the way a touchpad does:
+    /// fractional, with no wheel steps, until `inject_finger_scroll_end`.
+    pub fn inject_finger_scroll(&self, dx: f64, dy: f64) -> Result<(), Error> {
+        self.send(ThreadCommand::PointerScroll { dx, dy })
+            .map_err(|e| Error::Compositor(format!("Failed to inject finger scroll: {e}")))?;
+        Ok(())
+    }
+
+    /// End a finger's scroll: the axis stop a toolkit starts its kinetic scroll on.
+    pub fn inject_finger_scroll_end(&self) -> Result<(), Error> {
+        self.send(ThreadCommand::PointerScrollEnd)
+            .map_err(|e| Error::Compositor(format!("Failed to end finger scroll: {e}")))?;
+        Ok(())
+    }
+
+    pub fn set_cursor_rendering(&self, enabled: bool) -> Result<(), Error> {
+        self.send(ThreadCommand::UpdateCursorConfig {
+            render_on_framebuffer: enabled,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to set cursor config: {e}")))?;
+        Ok(())
+    }
+
+    /// Forces an IDR/keyframe on the next captured frame so a (re)connecting client
+    /// or a decoder reset can resume immediately. With the default infinite GOP this
+    /// is the only recovery path, so every consumer that can lose decoder state must
+    /// call it. No-op cost on the JPEG/software path (keyframes are N/A).
+    pub fn request_idr_frame(&self, display_id: u32) -> Result<(), Error> {
+        self.send(ThreadCommand::RequestIdr { display_id })
+            .map_err(|e| Error::Compositor(format!("Failed to request IDR: {e}")))?;
+        Ok(())
+    }
+
+    /// A client lost frame `frame_id` of the given display's capture, or its sender withheld it to
+    /// hold the stream to a rate (`withheld`): the frames after it stop predicting from it, so the
+    /// next one decodes there without a keyframe. An encoder that cannot leave a frame out codes a
+    /// keyframe instead.
+    pub fn invalidate_reference(
+        &self,
+        frame_id: u16,
+        display_id: u32,
+        withheld: bool,
+    ) -> Result<(), Error> {
+        self.send(ThreadCommand::InvalidateReference {
+            display_id,
+            frame_id,
+            withheld,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to invalidate reference: {e}")))
+    }
+
+    /// Every client holds frame `frame_id` of one display's capture, or where not `held` was
+    /// sent it, so a session keeping long-term references pins the newest anchor they all hold
+    /// and predicts its anchors from a frame they were all sent: each client recovers on its own
+    /// from a loss of any depth, without a keyframe.
+    pub fn acknowledge_reference(
+        &self,
+        frame_id: u16,
+        display_id: u32,
+        held: bool,
+    ) -> Result<(), Error> {
+        self.send(ThreadCommand::AcknowledgeReference {
+            display_id,
+            frame_id,
+            held,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to acknowledge reference: {e}")))
+    }
+
+    /// Apply a live bitrate (kbps) / VBV (kb) / framerate change to the given display's
+    /// running capture.
+    pub fn update_rate(
+        &self,
+        bitrate_kbps: Option<i32>,
+        vbv_multiplier: Option<f64>,
+        fps: Option<f64>,
+        display_id: u32,
+    ) -> Result<(), Error> {
+        self.send(ThreadCommand::UpdateRate {
+            display_id,
+            bitrate_kbps,
+            vbv_multiplier,
+            fps,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to update rate: {e}")))?;
+        Ok(())
+    }
+
+    /// Set the seat's BASE xkb layout from RMLVO names at runtime (empty strings select the
+    /// xkbcommon defaults). Returns whether the layout compiled and was applied; overlay binds
+    /// rebuild on top with their keycodes unchanged.
+    pub fn set_xkb_layout(
+        &self,
+        layout: String,
+        variant: String,
+        options: String,
+        model: String,
+        rules: String,
+    ) -> Result<bool, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
+        self.send(ThreadCommand::SetXkbLayout {
+            rules,
+            model,
+            layout,
+            variant,
+            options,
+            reply: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to set layout: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false))
+    }
+
+    /// Debug/verification readback of the seat keyboard: `(pressed_keycodes, modifier_mask)`
+    /// with mask bits 1 ctrl, 2 shift, 4 alt, 8 logo, 16 caps, 32 num, 64 altgr, 128 level5.
+    pub fn get_keyboard_state(&self) -> Result<(Vec<u32>, u32), Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<(Vec<u32>, u32)>();
+        self.send(ThreadCommand::GetKeyboardState { reply: reply_tx })
+            .map_err(|e| Error::Compositor(format!("Failed to read keyboard state: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default())
+    }
+
+    /// The capture geometry actually live on the given display: `(width, height, scale)` in
+    /// physical pixels, or `None` when the compositor did not answer in time. Reflects any
+    /// degrade a `start_capture` performed (H.264 even-masking, GBM allocation failure keeping
+    /// the previous mode, a host that kept its own mode), and the command channel is FIFO, so
+    /// calling this after `start_capture` returns what that start realized. A host-capture
+    /// start answers once the host has ruled on the requested mode (the compositor thread
+    /// keeps serving input meanwhile), so a slow-but-live start reads its real size instead
+    /// of being reported as a timeout; the `None` a genuine timeout returns lets the caller
+    /// treat the geometry as unknown, not as "nothing to reconcile", which a `(0, 0, 0.0)`
+    /// sentinel could not.
+    pub fn get_realized_geometry(&self, display_id: u32) -> Result<Option<(i32, i32, f64)>, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<(i32, i32, f64)>();
+        self.send(ThreadCommand::CuGetInfo {
+            display_id,
+            resp: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to read geometry: {e}")))?;
+        Ok(reply_rx.recv_timeout(GEOMETRY_BARRIER_TIMEOUT).ok())
+    }
+
+    /// Lifecycle of `display_id`'s capture as `(state, last_error)`: `state` is `"running"`
+    /// (pipeline live), `"failed"` (start left no live pipeline), or `"idle"` (never started
+    /// / stopped clean); `last_error` is the reason a start failed, or a caveat a live
+    /// capture came up with (host connect refused -> local compositing, a hardware encoder
+    /// that fell back to CPU, a refused resize). Read straight from the recorded outcome, so
+    /// pair it with a prior `get_realized_geometry` when the ordering after a start matters.
+    pub fn capture_state(&self, display_id: u32) -> (String, Option<String>) {
+        wayland_capture_state(display_id)
+    }
+}
+
+/// The Python handle to the compositor: `WaylandBackend` in Python, one method per
+/// `Compositor` method, each called with the GIL released.
+#[pyclass(name = "WaylandBackend")]
+struct PyWaylandBackend(Arc<Compositor>);
+
+#[pymethods]
+impl PyWaylandBackend {
+    /// Construct the backend and spawn the long-lived compositor thread, handing it the
+    /// strongest scheduling edge (nice -15) because it drives the calloop, input dispatch, the render
+    /// loop, and — on the zero-copy path — the encode itself, all on this single thread, so any
+    /// scheduling starvation here surfaces directly as dropped or late frames.
+    #[new]
+    #[pyo3(signature = (width, height, dri_node, auto_gpu_selected = false, cursor_size = -1))]
+    fn new(
+        width: i32,
+        height: i32,
+        dri_node: String,
+        auto_gpu_selected: bool,
+        cursor_size: i32,
+    ) -> Self {
+        Self(Arc::new(Compositor::new(
+            width,
+            height,
+            dri_node,
+            auto_gpu_selected,
+            cursor_size,
+        )))
+    }
+
+    /// Where the compositor's pointer is as of its thread's last pass, as `(x, y, scale,
+    /// motion)`: physical union-layout coordinates (where `inject_mouse_move` puts it), the
+    /// scale of the output under it, by which a relative move's pixels travel physically,
+    /// and the number of the last move applied (what `inject_mouse_move` and
+    /// `inject_relative_mouse_move` return), so a caller can tell which of its moves the
+    /// position includes. An app's warp is included too, since the position is read back
+    /// rather than summed from what was injected. None before the first pass and under host
+    /// capture, whose pointer is the host's. Never waits on the compositor.
+    fn pointer_location(&self, py: Python<'_>) -> Option<(f64, f64, f64, u64)> {
+        let c = self.0.clone();
+        py.detach(move || c.pointer_location())
+    }
+
+    /// Begin a capture with the given frame callback and settings. The target display is
+    /// the settings' `display_id` attribute (absent = 0, the primary); each display id runs
+    /// at most one capture, independent of every other display's.
+    ///
+    /// Issuing the start also clears the interpreter-teardown gate: starting from Python proves the
+    /// interpreter is live again after a manual atexit sweep.
+    fn start_capture(
+        &self,
+        py: Python<'_>,
+        callback: Py<PyAny>,
+        settings: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let settings = extract_settings(settings)?;
+        let sink: Arc<dyn crate::sink::FrameSink> = Arc::new(PyFrameSink::new(callback));
+        let c = self.0.clone();
+        py.detach(move || c.start_capture(sink, settings))
+            .map_err(PyErr::from)
+    }
+
+    /// Stop the capture bound to `display_id` (default: the primary display).
+    #[pyo3(signature = (display_id = 0))]
+    fn stop_capture(&self, py: Python<'_>, display_id: u32) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.stop_capture(display_id))
+            .map_err(PyErr::from)
+    }
+
+    /// Create an additional output (`WxH` physical pixels at fractional `scale`) mapped into
+    /// the layout at offset `(x, y)`; `id` is the display key used by every per-display API.
+    /// False when the id is taken, the geometry/scale is invalid, the rectangle overlaps a
+    /// live output, or the GPU render target cannot be allocated. Capture reconfigures
+    /// (`start_capture` on an existing output) resize without this validation, so a
+    /// multi-step relayout must stay overlap-free at every step by caller ordering.
+    #[pyo3(signature = (id, width, height, x = 0, y = 0, scale = 1.0))]
+    // The parameter list is the Python signature; grouping it would change the ABI.
+    #[allow(clippy::too_many_arguments)]
+    fn create_output(
+        &self,
+        py: Python<'_>,
+        id: u32,
+        width: i32,
+        height: i32,
+        x: i32,
+        y: i32,
+        scale: f64,
+    ) -> PyResult<bool> {
+        let c = self.0.clone();
+        py.detach(move || c.create_output(id, width, height, x, y, scale))
+            .map_err(PyErr::from)
+    }
+
+    /// Add a display over a rectangle of an existing output, capturing that rectangle
+    /// without publishing a screen of its own.
+    ///
+    /// The session then sees one screen where the client sees several, which is what a
+    /// window drag needs: a pointer grab stays inside the one surface as it crosses from
+    /// one display to the next, instead of stopping at the edge of the screen it started
+    /// on. `x` and `y` are relative to `owner`'s output. False when the id is taken, the
+    /// owner is unknown or itself a view, or the rectangle leaves the owner's output.
+    #[pyo3(signature = (id, owner, x, y, width, height))]
+    // The parameter list is the Python signature; grouping it would change the ABI.
+    #[allow(clippy::too_many_arguments)]
+    fn create_view(
+        &self,
+        py: Python<'_>,
+        id: u32,
+        owner: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> PyResult<bool> {
+        let c = self.0.clone();
+        py.detach(move || c.create_view(id, owner, x, y, width, height))
+            .map_err(PyErr::from)
     }
 
     /// Resize a screen's output in place, keeping its position: the desk the displays cut
@@ -8207,42 +8688,16 @@ impl WaylandBackend {
         height: i32,
         scale: f64,
     ) -> PyResult<bool> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
-        self.send(ThreadCommand::ResizeOutput {
-            id,
-            width,
-            height,
-            scale,
-            reply: reply_tx,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to resize output: {}",
-                e
-            ))
-        })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or(false))
+        let c = self.0.clone();
+        py.detach(move || c.resize_output(id, width, height, scale))
+            .map_err(PyErr::from)
     }
 
     /// Destroy a secondary output: its capture ends cleanly and its windows relocate to the
     /// primary output. False for the primary (id 0) or an unknown id.
     fn destroy_output(&self, py: Python<'_>, id: u32) -> PyResult<bool> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
-        self.send(ThreadCommand::DestroyOutput {
-            id,
-            reply: reply_tx,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to destroy output: {}",
-                e
-            ))
-        })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or(false))
+        let c = self.0.clone();
+        py.detach(move || c.destroy_output(id)).map_err(PyErr::from)
     }
 
     /// Move an existing output (the primary, id 0, included) to layout offset `(x, y)`;
@@ -8251,38 +8706,16 @@ impl WaylandBackend {
     /// (`start_capture` on an existing output) resize without this validation, so a
     /// multi-step relayout must stay overlap-free at every step by caller ordering.
     fn reposition_output(&self, py: Python<'_>, id: u32, x: i32, y: i32) -> PyResult<bool> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
-        self.send(ThreadCommand::RepositionOutput {
-            id,
-            x,
-            y,
-            reply: reply_tx,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to reposition output: {}",
-                e
-            ))
-        })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or(false))
+        let c = self.0.clone();
+        py.detach(move || c.reposition_output(id, x, y))
+            .map_err(PyErr::from)
     }
 
     /// Every live output as `(id, x, y, width, height, scale, capturing)` — width/height in
     /// physical pixels, `(x, y)` the layout offset.
     fn list_outputs(&self, py: Python<'_>) -> PyResult<Vec<OutputDesc>> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        self.send(ThreadCommand::ListOutputs { reply: reply_tx })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to list outputs: {}",
-                    e
-                ))
-            })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or_default())
+        let c = self.0.clone();
+        py.detach(move || c.list_outputs()).map_err(PyErr::from)
     }
 
     /// How many displays this backend can back with real content: -1 when
@@ -8290,17 +8723,8 @@ impl WaylandBackend {
     /// host compositor's output count. Host-capture mode reports -1 until the first
     /// capture start establishes the host session; 0 when the backend is unresponsive.
     fn output_capacity(&self, py: Python<'_>) -> PyResult<i64> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<i64>();
-        self.send(ThreadCommand::OutputCapacity { reply: reply_tx })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to query output capacity: {}",
-                    e
-                ))
-            })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or(0))
+        let c = self.0.clone();
+        py.detach(move || c.output_capacity()).map_err(PyErr::from)
     }
 
     /// Move the window with the given id onto output `output_id`, fullscreened at that
@@ -8311,119 +8735,73 @@ impl WaylandBackend {
         window_id: u32,
         output_id: u32,
     ) -> PyResult<bool> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
-        self.send(ThreadCommand::MoveWindowToOutput {
-            window_id,
-            output_id,
-            reply: reply_tx,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to move window: {}",
-                e
-            ))
-        })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or(false))
+        let c = self.0.clone();
+        py.detach(move || c.move_window_to_output(window_id, output_id))
+            .map_err(PyErr::from)
     }
 
     /// Every mapped window as `(window_id, title, app_id, output_id, waiting)`. A waiting
     /// window is tagged for that output but mapped clear of every one of them, holding its
     /// size until an output exists for it — a nested session's spare screens.
     fn list_windows(&self, py: Python<'_>) -> PyResult<Vec<WindowDesc>> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        self.send(ThreadCommand::ListWindows { reply: reply_tx })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to list windows: {}",
-                    e
-                ))
-            })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or_default())
+        let c = self.0.clone();
+        py.detach(move || c.list_windows()).map_err(PyErr::from)
     }
 
     /// cb(msg_type: str, png: bytes, hot_x: int, hot_y: int); `None` withdraws it.
-    fn set_cursor_callback(&self, callback: Option<Py<PyAny>>) -> PyResult<()> {
-        self.set_cursor_sink(callback.map(|cb| Arc::new(PyCursorSink::new(cb)) as _))
-            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
+    fn set_cursor_callback(&self, py: Python<'_>, callback: Option<Py<PyAny>>) -> PyResult<()> {
+        let sink = callback.map(|cb| Arc::new(PyCursorSink::new(cb)) as _);
+        let c = self.0.clone();
+        py.detach(move || c.set_cursor_sink(sink))
+            .map_err(PyErr::from)
     }
 
-    fn clear_cursor_callback(&self) -> PyResult<()> {
-        self.set_cursor_callback(None)
+    fn clear_cursor_callback(&self, py: Python<'_>) -> PyResult<()> {
+        self.set_cursor_callback(py, None)
     }
 
     /// Recreate the cursor theme at `size` pixels — no restart: subsequent named-cursor
     /// callbacks and the burned-in cursor overlay render at the new size. False for a
     /// non-positive size.
     fn set_cursor_size(&self, py: Python<'_>, size: i32) -> PyResult<bool> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
-        self.send(ThreadCommand::SetCursorSize {
-            size,
-            reply: reply_tx,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to set cursor size: {}",
-                e
-            ))
-        })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or(false))
+        let c = self.0.clone();
+        py.detach(move || c.set_cursor_size(size))
+            .map_err(PyErr::from)
     }
 
     /// cb(entries: list[tuple[str, bytes]]) fires when a client app copies to the clipboard,
     /// with the flavors of the copy: the picture, or the markup and the text beneath it, and a
     /// password manager's hint beside a secret; a client clearing the clipboard fires it with
     /// no entries.
-    fn set_clipboard_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
-        self.set_clipboard_sink(Arc::new(PyClipboardSink::new(callback)))
-            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
+    fn set_clipboard_callback(&self, py: Python<'_>, callback: Py<PyAny>) -> PyResult<()> {
+        let sink: Arc<dyn crate::sink::ClipboardSink> = Arc::new(PyClipboardSink::new(callback));
+        let c = self.0.clone();
+        py.detach(move || c.set_clipboard_sink(sink))
+            .map_err(PyErr::from)
     }
 
     /// Compositor-side clipboard offer: serve one payload per `(mime, data)` entry, so a
     /// client pasting rich text takes the markup and one pasting into a plain field takes
     /// the text the source itself wrote, instead of both taking whichever flavor was
     /// picked for them.
-    fn set_clipboard(&self, entries: Vec<(String, Vec<u8>)>) -> PyResult<()> {
-        self.send(ThreadCommand::SetClipboard { entries })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to set clipboard: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+    fn set_clipboard(&self, py: Python<'_>, entries: Vec<(String, Vec<u8>)>) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.set_clipboard(entries))
+            .map_err(PyErr::from)
     }
 
-    fn inject_key(&self, scancode: u32, state: u32) -> PyResult<()> {
-        self.send(ThreadCommand::KeyboardKey { scancode, state })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to inject key: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+    fn inject_key(&self, py: Python<'_>, scancode: u32, state: u32) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.inject_key(scancode, state))
+            .map_err(PyErr::from)
     }
 
     /// Inject an ordered run of `(keycode, state)` events as one message, so a paste
     /// costs one channel send and one wake instead of one per event.
-    fn inject_keys(&self, events: Vec<(u32, u32)>) -> PyResult<()> {
-        if events.is_empty() {
-            return Ok(());
-        }
-        self.send(ThreadCommand::KeyboardKeys { events })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to inject keys: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+    fn inject_keys(&self, py: Python<'_>, events: Vec<(u32, u32)>) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.inject_keys(events))
+            .map_err(PyErr::from)
     }
 
     /// Swap the seat keyboard's xkb keymap (XKB_KEYMAP_FORMAT_TEXT_V1 text). The caller
@@ -8435,26 +8813,16 @@ impl WaylandBackend {
     /// recycle one — because that tracks layouts and user reports. This end only assembles
     /// the xkb text and delivers it, reusing the installed base rather than recompiling a
     /// re-supplied one. False when no base keymap is installed yet.
-    fn set_keymap_overlay(&self, binds: Vec<(u32, u32)>) -> PyResult<()> {
-        self.send(ThreadCommand::SetKeymapOverlay { binds })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to set overlay: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+    fn set_keymap_overlay(&self, py: Python<'_>, binds: Vec<(u32, u32)>) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.set_keymap_overlay(binds))
+            .map_err(PyErr::from)
     }
 
-    fn set_keymap_string(&self, text: String) -> PyResult<()> {
-        self.send(ThreadCommand::SetKeymapString(text))
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to set keymap: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+    fn set_keymap_string(&self, py: Python<'_>, text: String) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.set_keymap_string(text))
+            .map_err(PyErr::from)
     }
 
     /// Return the active xkb keymap as an XKB_KEYMAP_FORMAT_TEXT_V1 string so a consumer can
@@ -8464,33 +8832,17 @@ impl WaylandBackend {
     /// Python and would otherwise deadlock; the wait is bounded so a stall cannot hang the caller,
     /// and an empty string is returned when the keymap cannot be read in time.
     fn get_xkb_keymap_string(&self, py: Python<'_>) -> PyResult<String> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<String>();
-        self.send(ThreadCommand::GetXkbKeymap { reply: reply_tx })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to request keymap: {}",
-                    e
-                ))
-            })?;
-        let result = py.detach(move || reply_rx.recv_timeout(Duration::from_secs(2)));
-        match result {
-            Ok(s) => Ok(s),
-            Err(_) => Ok(String::new()),
-        }
+        let c = self.0.clone();
+        py.detach(move || c.get_xkb_keymap_string())
+            .map_err(PyErr::from)
     }
 
     /// Move the pointer to a point in physical union-layout coordinates. Returns the
     /// move's number (`pointer_location`).
-    fn inject_mouse_move(&self, x: f64, y: f64) -> PyResult<u64> {
-        let motion = self.motions.fetch_add(1, Ordering::Relaxed) + 1;
-        self.send(ThreadCommand::PointerMotion { x, y, motion })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to inject motion: {}",
-                    e
-                ))
-            })?;
-        Ok(motion)
+    fn inject_mouse_move(&self, py: Python<'_>, x: f64, y: f64) -> PyResult<u64> {
+        let c = self.0.clone();
+        py.detach(move || c.inject_mouse_move(x, y))
+            .map_err(PyErr::from)
     }
 
     /// Move the pointer by a delta. On the seat this is an absolute move plus a
@@ -8498,75 +8850,43 @@ impl WaylandBackend {
     /// delta from its host seat, receives it through its `org_kde_kwin_fake_input`
     /// device on the app compositor socket named by `set_app_wayland_display`. Returns the
     /// move's number (`pointer_location`).
-    fn inject_relative_mouse_move(&self, dx: f64, dy: f64) -> PyResult<u64> {
-        let motion = self.motions.fetch_add(1, Ordering::Relaxed) + 1;
-        self.send(ThreadCommand::PointerRelativeMotion { dx, dy, motion })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to inject relative motion: {}",
-                    e
-                ))
-            })?;
-        Ok(motion)
+    fn inject_relative_mouse_move(&self, py: Python<'_>, dx: f64, dy: f64) -> PyResult<u64> {
+        let c = self.0.clone();
+        py.detach(move || c.inject_relative_mouse_move(dx, dy))
+            .map_err(PyErr::from)
     }
 
-    fn inject_mouse_button(&self, btn: u32, state: u32) -> PyResult<()> {
-        self.send(ThreadCommand::PointerButton { btn, state })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to inject button: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+    fn inject_mouse_button(&self, py: Python<'_>, btn: u32, state: u32) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.inject_mouse_button(btn, state))
+            .map_err(PyErr::from)
     }
 
-    fn inject_mouse_scroll(&self, x: f64, y: f64) -> PyResult<()> {
-        self.send(ThreadCommand::PointerAxis { x, y })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to inject axis: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+    fn inject_mouse_scroll(&self, py: Python<'_>, x: f64, y: f64) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.inject_mouse_scroll(x, y))
+            .map_err(PyErr::from)
     }
 
     /// Scroll by a finger's travel of (dx, dy) physical pixels, the way a touchpad does:
     /// fractional, with no wheel steps, until `inject_finger_scroll_end`.
-    fn inject_finger_scroll(&self, dx: f64, dy: f64) -> PyResult<()> {
-        self.send(ThreadCommand::PointerScroll { dx, dy })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to inject finger scroll: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+    fn inject_finger_scroll(&self, py: Python<'_>, dx: f64, dy: f64) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.inject_finger_scroll(dx, dy))
+            .map_err(PyErr::from)
     }
 
     /// End a finger's scroll: the axis stop a toolkit starts its kinetic scroll on.
-    fn inject_finger_scroll_end(&self) -> PyResult<()> {
-        self.send(ThreadCommand::PointerScrollEnd).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to end finger scroll: {}",
-                e
-            ))
-        })?;
-        Ok(())
+    fn inject_finger_scroll_end(&self, py: Python<'_>) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.inject_finger_scroll_end())
+            .map_err(PyErr::from)
     }
 
-    fn set_cursor_rendering(&self, enabled: bool) -> PyResult<()> {
-        self.send(ThreadCommand::UpdateCursorConfig {
-            render_on_framebuffer: enabled,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to set cursor config: {}",
-                e
-            ))
-        })?;
-        Ok(())
+    fn set_cursor_rendering(&self, py: Python<'_>, enabled: bool) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.set_cursor_rendering(enabled))
+            .map_err(PyErr::from)
     }
 
     /// Forces an IDR/keyframe on the next captured frame so a (re)connecting client
@@ -8574,15 +8894,10 @@ impl WaylandBackend {
     /// is the only recovery path, so every consumer that can lose decoder state must
     /// call it. No-op cost on the JPEG/software path (keyframes are N/A).
     #[pyo3(signature = (display_id = 0))]
-    fn request_idr_frame(&self, display_id: u32) -> PyResult<()> {
-        self.send(ThreadCommand::RequestIdr { display_id })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to request IDR: {}",
-                    e
-                ))
-            })?;
-        Ok(())
+    fn request_idr_frame(&self, py: Python<'_>, display_id: u32) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.request_idr_frame(display_id))
+            .map_err(PyErr::from)
     }
 
     /// A client lost frame `frame_id` of the given display's capture, or its sender withheld it to
@@ -8590,18 +8905,16 @@ impl WaylandBackend {
     /// next one decodes there without a keyframe. An encoder that cannot leave a frame out codes a
     /// keyframe instead.
     #[pyo3(signature = (frame_id, display_id = 0, withheld = false))]
-    fn invalidate_reference(&self, frame_id: u16, display_id: u32, withheld: bool) -> PyResult<()> {
-        self.send(ThreadCommand::InvalidateReference {
-            display_id,
-            frame_id,
-            withheld,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to invalidate reference: {}",
-                e
-            ))
-        })
+    fn invalidate_reference(
+        &self,
+        py: Python<'_>,
+        frame_id: u16,
+        display_id: u32,
+        withheld: bool,
+    ) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.invalidate_reference(frame_id, display_id, withheld))
+            .map_err(PyErr::from)
     }
 
     /// Every client holds frame `frame_id` of one display's capture, or where not `held` was
@@ -8609,18 +8922,16 @@ impl WaylandBackend {
     /// and predicts its anchors from a frame they were all sent: each client recovers on its own
     /// from a loss of any depth, without a keyframe.
     #[pyo3(signature = (frame_id, display_id = 0, held = true))]
-    fn acknowledge_reference(&self, frame_id: u16, display_id: u32, held: bool) -> PyResult<()> {
-        self.send(ThreadCommand::AcknowledgeReference {
-            display_id,
-            frame_id,
-            held,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to acknowledge reference: {}",
-                e
-            ))
-        })
+    fn acknowledge_reference(
+        &self,
+        py: Python<'_>,
+        frame_id: u16,
+        display_id: u32,
+        held: bool,
+    ) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.acknowledge_reference(frame_id, display_id, held))
+            .map_err(PyErr::from)
     }
 
     /// Apply a live bitrate (kbps) / VBV (kb) / framerate change to the given display's
@@ -8628,24 +8939,15 @@ impl WaylandBackend {
     #[pyo3(signature = (bitrate_kbps = None, vbv_multiplier = None, fps = None, display_id = 0))]
     fn update_rate(
         &self,
+        py: Python<'_>,
         bitrate_kbps: Option<i32>,
         vbv_multiplier: Option<f64>,
         fps: Option<f64>,
         display_id: u32,
     ) -> PyResult<()> {
-        self.send(ThreadCommand::UpdateRate {
-            display_id,
-            bitrate_kbps,
-            vbv_multiplier,
-            fps,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to update rate: {}",
-                e
-            ))
-        })?;
-        Ok(())
+        let c = self.0.clone();
+        py.detach(move || c.update_rate(bitrate_kbps, vbv_multiplier, fps, display_id))
+            .map_err(PyErr::from)
     }
 
     /// Set the seat's BASE xkb layout from RMLVO names at runtime (empty strings select the
@@ -8661,40 +8963,17 @@ impl WaylandBackend {
         model: String,
         rules: String,
     ) -> PyResult<bool> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
-        self.send(ThreadCommand::SetXkbLayout {
-            rules,
-            model,
-            layout,
-            variant,
-            options,
-            reply: reply_tx,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to set layout: {}",
-                e
-            ))
-        })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or(false))
+        let c = self.0.clone();
+        py.detach(move || c.set_xkb_layout(layout, variant, options, model, rules))
+            .map_err(PyErr::from)
     }
 
     /// Debug/verification readback of the seat keyboard: `(pressed_keycodes, modifier_mask)`
     /// with mask bits 1 ctrl, 2 shift, 4 alt, 8 logo, 16 caps, 32 num, 64 altgr, 128 level5.
     fn get_keyboard_state(&self, py: Python<'_>) -> PyResult<(Vec<u32>, u32)> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<(Vec<u32>, u32)>();
-        self.send(ThreadCommand::GetKeyboardState { reply: reply_tx })
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to read keyboard state: {}",
-                    e
-                ))
-            })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(Duration::from_secs(2)))
-            .unwrap_or_default())
+        let c = self.0.clone();
+        py.detach(move || c.get_keyboard_state())
+            .map_err(PyErr::from)
     }
 
     /// The capture geometry actually live on the given display: `(width, height, scale)` in
@@ -8713,20 +8992,9 @@ impl WaylandBackend {
         py: Python<'_>,
         display_id: u32,
     ) -> PyResult<Option<(i32, i32, f64)>> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<(i32, i32, f64)>();
-        self.send(ThreadCommand::CuGetInfo {
-            display_id,
-            resp: reply_tx,
-        })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to read geometry: {}",
-                e
-            ))
-        })?;
-        Ok(py
-            .detach(move || reply_rx.recv_timeout(GEOMETRY_BARRIER_TIMEOUT))
-            .ok())
+        let c = self.0.clone();
+        py.detach(move || c.get_realized_geometry(display_id))
+            .map_err(PyErr::from)
     }
 
     /// Lifecycle of `display_id`'s capture as `(state, last_error)`: `state` is `"running"`
@@ -8736,8 +9004,9 @@ impl WaylandBackend {
     /// that fell back to CPU, a refused resize). Read straight from the recorded outcome, so
     /// pair it with a prior `get_realized_geometry` when the ordering after a start matters.
     #[pyo3(signature = (display_id = 0))]
-    fn capture_state(&self, display_id: u32) -> (String, Option<String>) {
-        wayland_capture_state(display_id)
+    fn capture_state(&self, py: Python<'_>, display_id: u32) -> (String, Option<String>) {
+        let c = self.0.clone();
+        py.detach(move || c.capture_state(display_id))
     }
 }
 
@@ -8766,19 +9035,14 @@ fn wayland_capture_state(display_id: u32) -> (String, Option<String>) {
     (state.to_string(), last_error)
 }
 
-impl WaylandBackend {
-    fn update_tunables(&self, display_id: u32, t: LiveTunables) -> PyResult<()> {
+impl Compositor {
+    /// Retune the live per-frame knobs of `display_id`'s capture without restarting it.
+    pub fn update_tunables(&self, display_id: u32, t: LiveTunables) -> Result<(), Error> {
         self.send(ThreadCommand::UpdateTunables {
             display_id,
             tunables: t,
         })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to update tunables: {}",
-                e
-            ))
-        })?;
-        Ok(())
+        .map_err(|e| Error::Compositor(format!("Failed to update tunables: {e}")))
     }
 }
 
@@ -8998,7 +9262,7 @@ impl PyCaptureSettings {
 }
 
 /// Process-wide Wayland backend: input and capture share ONE compositor (constructed lazily).
-static WAYLAND_BACKEND: OnceLock<Mutex<Option<Py<WaylandBackend>>>> = OnceLock::new();
+static WAYLAND_BACKEND: OnceLock<Mutex<Option<Arc<Compositor>>>> = OnceLock::new();
 /// The compositor's auto-picked socket name (e.g. "wayland-1"), published by the compositor
 /// thread once its listening socket exists. `ListeningSocketSource::new_auto` binds the first
 /// FREE wayland-N, which need not match any configured index — consumers must read the real
@@ -9244,7 +9508,6 @@ pub(crate) fn boost_thread_priority(nice: libc::c_int) {
 
 /// Forward a live rate change to the shared Wayland backend (no-op if none is running).
 fn wayland_update_rate(
-    py: Python<'_>,
     display_id: u32,
     bitrate_kbps: Option<i32>,
     vbv_multiplier: Option<f64>,
@@ -9253,20 +9516,17 @@ fn wayland_update_rate(
     if let Some(slot) = WAYLAND_BACKEND.get()
         && let Some(be) = slot.lock().unwrap().as_ref()
     {
-        let _ = be
-            .bind(py)
-            .borrow()
-            .update_rate(bitrate_kbps, vbv_multiplier, fps, display_id);
+        let _ = be.update_rate(bitrate_kbps, vbv_multiplier, fps, display_id);
     }
 }
 
 /// Forward the rate a display's path carries to the shared Wayland backend (no-op if none is
 /// running).
-fn wayland_update_link_rate(py: Python<'_>, display_id: u32, link_kbps: i32) {
+fn wayland_update_link_rate(display_id: u32, link_kbps: i32) {
     if let Some(slot) = WAYLAND_BACKEND.get()
         && let Some(be) = slot.lock().unwrap().as_ref()
     {
-        let _ = be.bind(py).borrow().send(ThreadCommand::UpdateLinkRate {
+        let _ = be.send(ThreadCommand::UpdateLinkRate {
             display_id,
             link_kbps,
         });
@@ -9274,11 +9534,11 @@ fn wayland_update_link_rate(py: Python<'_>, display_id: u32, link_kbps: i32) {
 }
 
 /// Forward live per-frame tunables to the shared Wayland backend (no-op if none is running).
-fn wayland_update_tunables(py: Python<'_>, display_id: u32, t: LiveTunables) {
+fn wayland_update_tunables(display_id: u32, t: LiveTunables) {
     if let Some(slot) = WAYLAND_BACKEND.get()
         && let Some(be) = slot.lock().unwrap().as_ref()
     {
-        let _ = be.bind(py).borrow().update_tunables(display_id, t);
+        let _ = be.update_tunables(display_id, t);
     }
 }
 
@@ -9291,14 +9551,13 @@ fn wayland_update_tunables(py: Python<'_>, display_id: u32, t: LiveTunables) {
 /// encoder node (so a caller that sets only one node still renders on that GPU); empty selects the
 /// software renderer.
 fn ensure_wayland_backend(
-    py: Python<'_>,
     width: i32,
     height: i32,
     explicit_node: String,
     auto_gpu: String,
     fallback_node: String,
     cursor_size: i32,
-) -> PyResult<Py<WaylandBackend>> {
+) -> Result<Arc<Compositor>, Error> {
     let slot = WAYLAND_BACKEND.get_or_init(|| Mutex::new(None));
     let mut g = slot.lock().unwrap();
     if g.is_none() {
@@ -9321,25 +9580,28 @@ fn ensure_wayland_backend(
             }
         }
         let node = node.unwrap_or(fallback_node);
-        let be = Py::new(
-            py,
-            WaylandBackend::new(width, height, node, auto_gpu_selected, cursor_size),
-        )?;
+        let be = Arc::new(Compositor::new(
+            width,
+            height,
+            node,
+            auto_gpu_selected,
+            cursor_size,
+        ));
         if let Some(cb) = PENDING_CURSOR_CALLBACK.lock().unwrap().take() {
-            let _ = be.bind(py).borrow().set_cursor_sink(Some(cb));
+            let _ = be.set_cursor_sink(Some(cb));
         }
         *g = Some(be);
     }
-    Ok(g.as_ref().unwrap().clone_ref(py))
+    Ok(g.as_ref().unwrap().clone())
 }
 
 /// The live Wayland backend, if any — never creates one. The pre-capture entry points
 /// (input injection, cursor/config setters) use this so they can't lock in a backend
 /// with a placeholder render node.
-fn wayland_backend_running(py: Python<'_>) -> Option<Py<WaylandBackend>> {
+fn wayland_backend_running() -> Option<Arc<Compositor>> {
     let slot = WAYLAND_BACKEND.get()?;
     let g = slot.lock().unwrap();
-    g.as_ref().map(|b| b.clone_ref(py))
+    g.as_ref().cloned()
 }
 
 /// Mutable per-capture state behind `ScreenCapture`'s mutex: the active backend, the live
@@ -9405,10 +9667,32 @@ impl ScState {
 /// Unified capture handle exposed to Python. Drives the X11 capture directly or delegates to the
 /// shared Wayland backend, chosen at `start_capture` time. Exposes start_capture / stop_capture /
 /// request_idr_frame / update_* / is_capturing, plus the Wayland input-injection methods.
-#[pyclass]
-struct ScreenCapture {
+/// What a capture streams and how it got there (`ScreenCapture::stream_info`): the report
+/// with the encoder's GPU named, and the compositor's renderer where the capture runs on
+/// Wayland.
+#[derive(Clone, Debug)]
+pub struct StreamInfo {
+    pub info: report::StreamInfo,
+    pub renderer: Option<report::Renderer>,
+}
+
+/// A capture's counters (`ScreenCapture::stream_stats`): the totals since it started and the
+/// extremes since the previous read.
+#[derive(Clone, Copy, Debug)]
+pub struct StreamStats {
+    pub totals: report::StreamTotals,
+    pub peaks: report::StreamPeaks,
+}
+
+pub struct ScreenCapture {
     id: u64,
     inner: Mutex<ScState>,
+}
+
+impl Default for ScreenCapture {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ScreenCapture {
@@ -9419,11 +9703,10 @@ impl ScreenCapture {
     /// Both slots outlive the capture that set them, so they carry the latest live
     /// registration (`CURSOR_REGISTRATIONS`): `None` withdraws this capture's own, releasing
     /// what it holds and restoring the one registered before it.
-    fn set_cursor_sink(
+    pub fn set_cursor_sink(
         &self,
-        py: Python<'_>,
         sink: Option<Arc<dyn crate::sink::CursorSink>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let sink = {
             let mut regs = CURSOR_REGISTRATIONS.lock().unwrap();
             regs.retain(|(id, _)| *id != self.id);
@@ -9436,7 +9719,7 @@ impl ScreenCapture {
         let slot = WAYLAND_BACKEND.get_or_init(|| Mutex::new(None));
         let g = slot.lock().unwrap();
         match g.as_ref() {
-            Some(be) => be.bind(py).borrow().set_cursor_sink(sink),
+            Some(be) => be.set_cursor_sink(sink),
             None => {
                 *PENDING_CURSOR_CALLBACK.lock().unwrap() = sink;
                 Ok(())
@@ -9446,7 +9729,7 @@ impl ScreenCapture {
 
     /// Hand what a client said of a frame to the capture: the X11 controls, drained ahead of the
     /// next encode, or the shared Wayland backend.
-    fn hand_report(&self, py: Python<'_>, report: encoders::reference::ReferenceReport) {
+    fn hand_report(&self, report: encoders::reference::ReferenceReport) {
         use encoders::reference::ReferenceReport;
         let (backend, controls, did) = {
             let st = self.inner.lock().unwrap();
@@ -9462,7 +9745,6 @@ impl ScreenCapture {
                 if let Some(slot) = WAYLAND_BACKEND.get()
                     && let Some(be) = slot.lock().unwrap().as_ref()
                 {
-                    let be = be.bind(py).borrow();
                     let _ = match report {
                         ReferenceReport::Lost(frame_id) => {
                             be.invalidate_reference(frame_id, did, false)
@@ -9493,7 +9775,7 @@ impl ScreenCapture {
     /// GIL across the joins would deadlock. A re-entrant stop arriving on the capture, encode, or
     /// deliver thread cannot join itself, so it detaches and lets the threads exit on the stop flag.
     /// An X11 capture still starting is only signaled: its start joins it and publishes nothing.
-    fn stop_internal(&self, py: Python<'_>) -> PyResult<()> {
+    fn stop_internal(&self) -> Result<(), Error> {
         let (handle, deliver_handle, same_thread, backend, controls, wl_display, cursor_ref) = {
             let mut st = self.inner.lock().unwrap();
             if let Some(c) = &st.controls {
@@ -9539,7 +9821,7 @@ impl ScreenCapture {
             live_x11().lock().unwrap().retain(|x| !Arc::ptr_eq(x, c));
         }
         if cursor_ref {
-            py.detach(crate::x11::cursor::release);
+            crate::x11::cursor::release();
         }
         if backend == 2 {
             let did = wl_display;
@@ -9556,7 +9838,7 @@ impl ScreenCapture {
                 && let Some(slot) = WAYLAND_BACKEND.get()
                 && let Some(be) = slot.lock().unwrap().as_ref()
             {
-                let _ = be.bind(py).borrow().stop_capture(did);
+                let _ = be.stop_capture(did);
             }
         } else {
             if same_thread {
@@ -9564,7 +9846,7 @@ impl ScreenCapture {
                 drop(handle);
                 drop(deliver_handle);
             } else {
-                py.detach(|| {
+                {
                     if let Some(h) = handle {
                         join_within(h, "capture");
                     }
@@ -9573,7 +9855,7 @@ impl ScreenCapture {
                     if let Some(h) = deliver_handle {
                         join_within(h, "delivery");
                     }
-                });
+                };
             }
         }
         Ok(())
@@ -9596,10 +9878,8 @@ impl ScreenCapture {
     }
 }
 
-#[pymethods]
 impl ScreenCapture {
-    #[new]
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             id: NEXT_CAPTURE_ID.fetch_add(1, Ordering::Relaxed),
             inner: Mutex::new(ScState {
@@ -9619,28 +9899,743 @@ impl ScreenCapture {
         }
     }
 
-    /// Begin capture: `callback(frame)` is invoked per encoded stripe with a `StripeFrame`.
+    /// The codec this capture streams, by name, once its pipeline has been built: the
+    /// requested one, or the one the selection ladder demoted it to when no encoder could
+    /// serve the request. None before the first frame or after a stop.
+    pub fn active_codec(&self) -> Result<Option<String>, Error> {
+        let (backend, controls, wl_display) = {
+            let st = self.inner.lock().unwrap();
+            (st.backend, st.controls.clone(), st.wl_display)
+        };
+        let id = match backend {
+            1 => controls.map_or(u32::MAX, |c| c.codec.load(Ordering::Relaxed)),
+            2 => {
+                wayland_active_codec()
+                    .lock()
+                    .unwrap()
+                    .get(&wl_display)
+                    .copied()
+            }
+            .unwrap_or(u32::MAX),
+            _ => u32::MAX,
+        };
+        Ok(Codec::from_id(id).map(|c| c.name().to_string()))
+    }
+
+    /// What this capture streams and how it got there, or None before a start and after a
+    /// stop: `backend` (`x11`, `wayland`), `capture` (the path: `NvFBC`, `DRI3`, `XShm`,
+    /// `dmabuf`, `readback`), `zero_copy` and the `capture_reason` a faster path was declined
+    /// for, `zero_copy_available` (whether the display server offered the encoder a zero-copy
+    /// path at all), `encoder` (`NVENC`, `VAAPI`, or the software library), `hardware` and the
+    /// `encoder_reason` it is not, `codec`, `fullcolor`, `striped`, and for a hardware session
+    /// its `gpu`, kernel `driver`, and `encode_node`. A Wayland capture adds how its compositor
+    /// renders: `renderer` (`gl`, `pixman`), `render_node`, `render_gpu`, `renderer_reason`.
+    /// The first read of a VA-API session brings a GL context up once to name its GPU, so a
+    /// caller with an event loop reads this off it.
+    pub fn stream_info(&self) -> Option<StreamInfo> {
+        let report = self.report()?;
+        let (info, renderer) = {
+            let mut info = report.info();
+            let renderer = (info.backend == "wayland").then(report::renderer);
+            if info.hardware && info.gpu.is_empty() {
+                info.gpu = match &renderer {
+                    Some(r) if render_node_index(&r.node) == Some(info.encode_node) => {
+                        r.gpu.clone()
+                    }
+                    _ => node_gpu_name(info.encode_node),
+                };
+            }
+            (info, renderer)
+        };
+        Some(StreamInfo { info, renderer })
+    }
+
+    /// Cumulative counters of this capture since it started, or None without one: `frames`
+    /// and `bytes` delivered, and the nanoseconds those frames spent encoding (`encode_ns`)
+    /// and from capture to the end of the encode (`pipeline_ns`). A caller differences two
+    /// reads; a restart begins again from zero. Beside them, the extremes since the previous
+    /// read, which each read starts again: `pipeline_min_ns` and `pipeline_max_ns`, zero where
+    /// no frame was timed, and `frame_max_bytes`, the largest frame.
+    pub fn stream_stats(&self) -> Option<StreamStats> {
+        let report = self.report()?;
+        let totals = report.totals();
+        let peaks = report.take_peaks();
+        Some(StreamStats { totals, peaks })
+    }
+
+    pub fn stop_capture(&self) -> Result<(), Error> {
+        self.stop_internal()
+    }
+
+    pub fn request_idr_frame(&self) -> Result<(), Error> {
+        let (backend, controls, did) = {
+            let st = self.inner.lock().unwrap();
+            (st.backend, st.x11_controls(), st.wl_display)
+        };
+        match backend {
+            0 | 1 => {
+                if let Some(c) = controls {
+                    c.force_idr.store(true, Ordering::Relaxed);
+                }
+            }
+            2 => {
+                if let Some(slot) = WAYLAND_BACKEND.get()
+                    && let Some(be) = slot.lock().unwrap().as_ref()
+                {
+                    let _ = be.request_idr_frame(did);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// A client lost frame `frame_id`, or its sender withheld it to hold the stream to a rate
+    /// (`withheld`): the frames after it stop predicting from it, so the next one decodes there
+    /// without a keyframe. An encoder that cannot leave a frame out of its predictions codes a
+    /// keyframe instead. Non-blocking, like `request_idr_frame`.
+    pub fn invalidate_reference(&self, frame_id: u16, withheld: bool) -> Result<(), Error> {
+        use encoders::reference::ReferenceReport;
+        let report = if withheld {
+            ReferenceReport::Withheld(frame_id)
+        } else {
+            ReferenceReport::Lost(frame_id)
+        };
+        self.hand_report(report);
+        Ok(())
+    }
+
+    /// Every client holds frame `frame_id`, or where not `held` was sent it (and may yet lose
+    /// it): a session keeping long-term references pins the newest anchor they all hold and
+    /// predicts its anchors from a frame they were all sent, so each client recovers on its own
+    /// from a loss of any depth, without a keyframe. Non-blocking, like `invalidate_reference`.
+    pub fn acknowledge_reference(&self, frame_id: u16, held: bool) -> Result<(), Error> {
+        use encoders::reference::ReferenceReport;
+        let report = if held {
+            ReferenceReport::Held(frame_id)
+        } else {
+            ReferenceReport::Sent(frame_id)
+        };
+        self.hand_report(report);
+        Ok(())
+    }
+
+    /// Apply a live target-bitrate (kbps) change to the running capture.
     ///
-    /// The backend is chosen from the settings (`want_wayland`). A **Wayland** start delegates to
-    /// the shared backend, distinguishing the compositor RENDER node from the ENCODER node and
-    /// resolving an AUTO_GPU request; restarting this instance's own live Wayland capture skips the
-    /// stop so the calloop can reconfigure the running session in place — keeping a compatible NVENC
-    /// session alive — instead of destroying it and forcing a full rebuild; it publishes the
-    /// display id with the GIL held since the command, so no frame reaches Python before a
-    /// control request can find the capture. An **X11** start resolves AUTO_GPU to an encoder
-    /// device when none was chosen explicitly, then spawns the capture thread (which internally
-    /// spawns the encode+deliver thread). Its first frames can reach `callback` before it returns,
-    /// so the control methods reach the capture from the moment its threads spawn (`starting`).
-    /// The per-frame delivery closure makes one GIL acquisition per frame with all stripes
-    /// batched, and a failed start surfaces as a `PyErr` rather than a silent,
-    /// forever-"capturing" state.
-    fn start_capture(
+    /// On the X11 path the dirty flag is Release-published after the payload store, so the encode
+    /// thread's Acquire read can never observe the flag set against a stale bitrate.
+    pub fn update_video_bitrate(&self, kbps: i32) -> Result<(), Error> {
+        let (backend, controls, did) = {
+            let st = self.inner.lock().unwrap();
+            (st.backend, st.x11_controls(), st.wl_display)
+        };
+        match backend {
+            0 | 1 => {
+                if let Some(c) = &controls {
+                    c.bitrate_kbps.store(kbps, Ordering::Relaxed);
+                    c.rate_dirty.store(true, Ordering::Release);
+                }
+            }
+            2 => wayland_update_rate(did, Some(kbps), None, None),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Apply the rate (kbps) the path the stream crosses carries, as the transport measures it, which
+    /// a still screen's constant-rate cleanup may run at; 0 where the transport has no measure,
+    /// which keeps the cleanup to the stream's rate.
+    pub fn update_link_rate(&self, kbps: i32) -> Result<(), Error> {
+        let (backend, controls, did) = {
+            let st = self.inner.lock().unwrap();
+            (st.backend, st.x11_controls(), st.wl_display)
+        };
+        match backend {
+            0 | 1 => {
+                if let Some(c) = &controls {
+                    c.link_kbps.store(kbps, Ordering::Relaxed);
+                }
+            }
+            2 => wayland_update_link_rate(did, kbps),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn update_framerate(&self, fps: f64) -> Result<(), Error> {
+        let (backend, controls, did) = {
+            let st = self.inner.lock().unwrap();
+            (st.backend, st.x11_controls(), st.wl_display)
+        };
+        match backend {
+            0 | 1 => {
+                if let Some(c) = &controls {
+                    c.fps_bits.store(fps.max(1.0).to_bits(), Ordering::Relaxed);
+                    c.rate_dirty.store(true, Ordering::Release);
+                    crate::x11::follow_frame_rate();
+                }
+            }
+            2 => wayland_update_rate(did, None, None, Some(fps)),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Live CBR VBV change, as a multiple of one frame's bit budget (<= 0 = policy default).
+    pub fn update_vbv_multiplier(&self, multiplier: f64) -> Result<(), Error> {
+        let (backend, controls, did) = {
+            let st = self.inner.lock().unwrap();
+            (st.backend, st.x11_controls(), st.wl_display)
+        };
+        match backend {
+            0 | 1 => {
+                if let Some(c) = &controls {
+                    c.vbv_mult_milli
+                        .store((multiplier * 1000.0).round() as i32, Ordering::Relaxed);
+                    c.rate_dirty.store(true, Ordering::Release);
+                }
+            }
+            2 => wayland_update_rate(did, None, Some(multiplier), None),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Move/resize the live X11 capture region (root-relative). The capture loop drains
+    /// in-flight frames, re-targets its surfaces, and the encoder follows in place where
+    /// it can (NVENC reconfigure / stripe re-derive) -- no capture restart. `width`/
+    /// `height` <= 0 mean "to the root edge". On Wayland the output IS the capture
+    /// region: restart the capture with new dimensions instead (in-place there too).
+    pub fn update_capture_region(
         &self,
-        py: Python<'_>,
-        callback: Py<PyAny>,
-        settings: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let rs = extract_settings(settings)?;
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<(), Error> {
+        let controls = {
+            let st = self.inner.lock().unwrap();
+            if st.backend == 2 {
+                return Err(Error::Capture("update_capture_region is X11-only; on Wayland restart the capture with new dimensions".into()));
+            }
+            st.x11_controls()
+        };
+        if let Some(c) = &controls {
+            *c.region.lock().unwrap() = (x.max(0), y.max(0), width, height);
+            c.region_dirty.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    pub fn is_capturing(&self) -> bool {
+        let st = self.inner.lock().unwrap();
+        match st.backend {
+            1 => st
+                .controls
+                .as_ref()
+                .map(|c| !c.stop.load(Ordering::Relaxed))
+                .unwrap_or(false),
+            2 => {
+                wayland_owners().lock().unwrap().get(&st.wl_display) == Some(&self.id)
+                    && wayland_alive().lock().unwrap().contains(&st.wl_display)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn inject_key(&self, scancode: u32, state: u32) -> Result<(), Error> {
+        wayland_backend_running().map_or(Ok(()), |be| be.inject_key(scancode, state))
+    }
+
+    /// Inject an ordered run of `(keycode, state)` events in one message.
+    pub fn inject_keys(&self, events: Vec<(u32, u32)>) -> Result<(), Error> {
+        wayland_backend_running().map_or(Ok(()), |be| be.inject_keys(events))
+    }
+
+    pub fn set_keymap_string(&self, text: String) -> Result<(), Error> {
+        wayland_backend_running().map_or(Ok(()), |be| be.set_keymap_string(text))
+    }
+
+    /// Bind explicit `(keycode, keysym)` pairs onto the current base keymap in one swap;
+    /// false when no backend runs or no base keymap is installed. See the backend method
+    /// for the split of responsibility.
+    pub fn set_keymap_overlay(&self, binds: Vec<(u32, u32)>) -> Result<(), Error> {
+        wayland_backend_running().map_or(Ok(()), |be| be.set_keymap_overlay(binds))
+    }
+
+    /// Compositor apps run under (a nested labwc/kwin session pixelflux captures),
+    /// the target for Computer-Use text injection and, under KWin, for relative
+    /// pointer motion through its fake-input device; selkies resolves it and hands
+    /// it over. Empty clears it. Stored process-wide since the CU server is per-process.
+    pub fn set_app_wayland_display(&self, display: String) {
+        crate::computer_use::set_app_wayland_display(if display.is_empty() {
+            None
+        } else {
+            Some(display)
+        });
+    }
+
+    /// Type `text` through `display`'s zwp_virtual_keyboard_manager_v1 as a one-shot
+    /// client: selkies' text-injection path, targeting whichever compositor the apps
+    /// live under (the nested session's, or pixelflux's own in a direct session).
+    /// Blocking; releases the GIL for the duration. Raises
+    /// [`VirtualKeyboardUnavailable`] when the compositor lacks the protocol.
+    pub fn type_text_wayland(&self, display: String, text: String) -> Result<(), Error> {
+        {
+            let path = crate::wayland::wlclient::socket_path(&display)
+                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
+            crate::wayland::vkclient::type_text_to(&path, &text)
+        }
+        .map_err(|e: String| {
+            if e.contains("zwp_virtual_keyboard_manager_v1") {
+                Error::Unavailable(e)
+            } else {
+                Error::Capture(e)
+            }
+        })
+    }
+
+    /// Tap `keysyms` in order through `display`'s virtual keyboard, verbatim: the
+    /// caller owns which keysym spells which character (selkies' policy layer);
+    /// this owns delivery. Same one-shot client and errors as `type_text_wayland`.
+    pub fn type_keysyms_wayland(&self, display: String, keysyms: Vec<u32>) -> Result<(), Error> {
+        {
+            let path = crate::wayland::wlclient::socket_path(&display)
+                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
+            crate::wayland::vkclient::type_keysyms_to(&path, &keysyms)
+        }
+        .map_err(|e: String| {
+            if e.contains("zwp_virtual_keyboard_manager_v1") {
+                Error::Unavailable(e)
+            } else {
+                Error::Capture(e)
+            }
+        })
+    }
+
+    /// Scale the app compositor's `index`-th screen, so its applications draw
+    /// larger while the capture keeps its full resolution. False when that
+    /// compositor manages no outputs for clients (KWin), whose scale follows
+    /// the capture output's instead.
+    pub fn set_app_output_scale(
+        &self,
+        display: String,
+        scale: f64,
+        index: usize,
+    ) -> Result<bool, Error> {
+        {
+            let path = crate::wayland::wlclient::socket_path(&display)
+                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
+            crate::wayland::outclient::set_output_scale(&path, index, scale)
+        }
+        .map(|outcome| matches!(outcome, crate::wayland::outclient::ScaleOutcome::Applied))
+        .map_err(Error::Capture)
+    }
+
+    /// Give the app compositor's `index`-th screen this mode and scale in one
+    /// configuration, so the session lays its desktop out once. Setting them
+    /// separately exposes a geometry that never exists — the pre-connect mode at
+    /// the new scale — and a client that does not lay out again keeps it.
+    /// False = that compositor manages no outputs for clients: a nested KWin
+    /// accepts a scale over its own output management and then ignores it, its
+    /// screens taking their scale from the host window's preferred fractional
+    /// scale, which is the capture output's.
+    pub fn set_app_screen_geometry(
+        &self,
+        display: String,
+        width: i32,
+        height: i32,
+        scale: f64,
+        index: usize,
+    ) -> Result<bool, Error> {
+        {
+            let path = crate::wayland::wlclient::socket_path(&display)
+                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
+            crate::wayland::outclient::set_screen_geometry(&path, index, (width, height), scale)
+        }
+        .map(|outcome| matches!(outcome, crate::wayland::outclient::ScaleOutcome::Applied))
+        .map_err(Error::Capture)
+    }
+
+    /// Lay the app compositor's screens out at `rects` — `(x, y, width, height)`
+    /// per screen in screen order — so the session arranges its desktop the way
+    /// the capture outputs were placed rather than by its own default rule.
+    /// A fallback ladder: `zwlr_output_management_v1` first, then KWin's
+    /// `kde_output_management_v2` (positions only there — a nested KWin
+    /// screen's size follows its host window). Returns how many were
+    /// positioned; 0 = that compositor manages no outputs for clients.
+    pub fn set_app_screen_layout(
+        &self,
+        display: String,
+        rects: Vec<(i32, i32, i32, i32)>,
+    ) -> Result<usize, Error> {
+        {
+            let path = crate::wayland::wlclient::socket_path(&display)
+                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
+            let placed = crate::wayland::outclient::set_screen_layout(&path, rects.clone())?;
+            if placed == 0 {
+                crate::wayland::kdeclient::set_screen_layout(&path, rects)
+            } else {
+                Ok(placed)
+            }
+        }
+        .map_err(Error::Capture)
+    }
+
+    /// The app compositor's enabled screens as `(name, x, y, width, height)` in
+    /// screen order, which is what it did with a layout and a mode rather than
+    /// what it was asked for — the readback `set_app_screen_geometry` has no
+    /// other way to be checked against. The same ladder as
+    /// `set_app_screen_layout` (zwlr, then KWin's output devices). Empty =
+    /// that compositor manages no outputs for clients.
+    pub fn list_app_screens(
+        &self,
+        display: String,
+    ) -> Result<Vec<crate::wayland::AppScreen>, Error> {
+        {
+            let path = crate::wayland::wlclient::socket_path(&display)
+                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
+            let screens = crate::wayland::outclient::list_screens(&path)?;
+            if screens.is_empty() {
+                crate::wayland::kdeclient::list_screens(&path)
+            } else {
+                Ok(screens)
+            }
+        }
+        .map_err(Error::Capture)
+    }
+
+    /// Whether the app compositor serves KWin's `zkde_screencast_unstable_v1`
+    /// virtual outputs -- the rung selkies offers a second display on when the
+    /// session serves no control socket. A registry read that touches no
+    /// screen: whether the compositor registers the screen it grows is proven
+    /// when a display asks for one (`add_app_screen` refuses one that does not).
+    pub fn app_screen_control_offered(&self, display: String) -> Result<bool, Error> {
+        {
+            let path = crate::wayland::wlclient::socket_path(&display)
+                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
+            crate::wayland::kdeclient::screen_control_offered(&path)
+        }
+        .map_err(Error::Capture)
+    }
+
+    /// Grow a screen named `name` on the app compositor, held open until
+    /// `remove_app_screen`. The name is what `list_app_screens` reports and
+    /// removal addresses; `width`/`height`/`scale` only seed the screen, whose
+    /// size follows the capture output that adopts its host window.
+    pub fn add_app_screen(
+        &self,
+        display: String,
+        name: String,
+        width: i32,
+        height: i32,
+        scale: f64,
+    ) -> Result<(), Error> {
+        {
+            let path = crate::wayland::wlclient::socket_path(&display)
+                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
+            crate::wayland::kdeclient::add_screen(&path, &name, (width, height), scale)
+        }
+        .map_err(Error::Capture)
+    }
+
+    /// Remove a screen `add_app_screen` grew; the compositor's own
+    /// output-destroy path returns its windows to the primary. False when no
+    /// such screen is held.
+    pub fn remove_app_screen(&self, name: String) -> Result<bool, Error> {
+        Ok(crate::wayland::kdeclient::remove_screen(&name))
+    }
+
+    /// Hold the app compositor's screens past the first `keep` at a small size,
+    /// so a session that opened more screens than there are capture outputs does
+    /// not lay its desktop out across one nobody sees. Returns how many were
+    /// resized (0 = that compositor manages no outputs for clients).
+    pub fn hold_spare_app_screens(
+        &self,
+        display: String,
+        keep: usize,
+        width: i32,
+        height: i32,
+    ) -> Result<usize, Error> {
+        {
+            let path = crate::wayland::wlclient::socket_path(&display)
+                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
+            crate::wayland::outclient::hold_spare_screens(&path, keep, (width, height))
+        }
+        .map_err(Error::Capture)
+    }
+
+    /// Mimes the app compositor's current selection offers (empty = nothing copied).
+    pub fn clipboard_types_app(&self, display: String) -> Result<Vec<String>, Error> {
+        (crate::wayland::dcclient::list_types(&app_socket_path(&display)?)).map_err(Error::Capture)
+    }
+
+    /// The app compositor selection's payload for `mime`, or None when nothing is
+    /// copied or the selection does not offer that mime.
+    pub fn clipboard_read_app(
+        &self,
+        display: String,
+        mime: String,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let data = (crate::wayland::dcclient::read(&app_socket_path(&display)?, &mime))
+            .map_err(Error::Capture)?;
+        Ok(data)
+    }
+
+    /// Take the app compositor's selection, serving `entries` (mime, bytes) to
+    /// every paster from a background thread until another client copies.
+    pub fn clipboard_write_app(
+        &self,
+        display: String,
+        entries: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), Error> {
+        (crate::wayland::dcclient::write(&app_socket_path(&display)?, entries))
+            .map_err(Error::Capture)
+    }
+
+    /// The mimes the selection `clipboard_write_app` last took has served to pasters,
+    /// in order, once it has served more than `after` of them or `timeout_s` has
+    /// passed (at most a minute).
+    pub fn clipboard_served_app(&self, after: usize, timeout_s: f64) -> Vec<String> {
+        let timeout = Duration::from_secs_f64(if timeout_s.is_finite() {
+            timeout_s.clamp(0.0, 60.0)
+        } else {
+            0.0
+        });
+        crate::wayland::dcclient::served(after, timeout)
+    }
+
+    /// Drop the app compositor's selection.
+    pub fn clipboard_clear_app(&self, display: String) -> Result<(), Error> {
+        (crate::wayland::dcclient::clear(&app_socket_path(&display)?)).map_err(Error::Capture)
+    }
+
+    /// Stop the selection watch for `display` (no-op without one).
+    pub fn clipboard_unwatch_app(&self, display: String) {
+        if let Ok(path) = app_socket_path(&display) {
+            crate::wayland::dcclient::unwatch(&path);
+        }
+    }
+
+    /// The move's number (`pointer_location`), or None without a running compositor.
+    pub fn inject_mouse_move(&self, x: f64, y: f64) -> Result<Option<u64>, Error> {
+        wayland_backend_running().map_or(Ok(None), |be| be.inject_mouse_move(x, y).map(Some))
+    }
+
+    /// The move's number (`pointer_location`), or None without a running compositor.
+    pub fn inject_relative_mouse_move(&self, dx: f64, dy: f64) -> Result<Option<u64>, Error> {
+        wayland_backend_running().map_or(Ok(None), |be| {
+            be.inject_relative_mouse_move(dx, dy).map(Some)
+        })
+    }
+
+    pub fn inject_mouse_button(&self, btn: u32, state: u32) -> Result<(), Error> {
+        wayland_backend_running().map_or(Ok(()), |be| be.inject_mouse_button(btn, state))
+    }
+
+    pub fn inject_mouse_scroll(&self, x: f64, y: f64) -> Result<(), Error> {
+        wayland_backend_running().map_or(Ok(()), |be| be.inject_mouse_scroll(x, y))
+    }
+
+    /// `WaylandBackend.inject_finger_scroll`; nothing without a running compositor.
+    pub fn inject_finger_scroll(&self, dx: f64, dy: f64) -> Result<(), Error> {
+        wayland_backend_running().map_or(Ok(()), |be| be.inject_finger_scroll(dx, dy))
+    }
+
+    /// `WaylandBackend.inject_finger_scroll_end`; nothing without a running compositor.
+    pub fn inject_finger_scroll_end(&self) -> Result<(), Error> {
+        wayland_backend_running().map_or(Ok(()), |be| be.inject_finger_scroll_end())
+    }
+
+    /// Where the Wayland compositor's pointer is, as `(x, y, scale, motion)`
+    /// (`WaylandBackend.pointer_location`), or None without a running compositor, before its
+    /// first pass, or under host capture. An X11 session reads its pointer from the X server.
+    pub fn pointer_location(&self) -> Option<(f64, f64, f64, u64)> {
+        wayland_backend_running().and_then(|be| be.pointer_location())
+    }
+
+    /// Toggle compositing the cursor into captured frames (the alternative to the
+    /// out-of-band cursor callback): the X11 grab re-reads the flag per frame, Wayland
+    /// forwards to the compositor.
+    pub fn set_cursor_rendering(&self, enabled: bool) -> Result<(), Error> {
+        let controls = self.inner.lock().unwrap().x11_controls();
+        if let Some(c) = &controls {
+            c.capture_cursor.store(enabled, Ordering::Relaxed);
+            return Ok(());
+        }
+        wayland_backend_running().map_or(Ok(()), |be| be.set_cursor_rendering(enabled))
+    }
+
+    pub fn get_xkb_keymap_string(&self) -> Result<String, Error> {
+        wayland_backend_running().map_or(Ok(String::new()), |be| be.get_xkb_keymap_string())
+    }
+
+    /// Compositor-side clipboard offer: serve one payload per `(mime, data)` entry.
+    pub fn set_clipboard(&self, entries: Vec<(String, Vec<u8>)>) -> Result<(), Error> {
+        match wayland_backend_running() {
+            Some(be) => be.set_clipboard(entries),
+            None => Err(Error::Capture("wayland backend not running".into())),
+        }
+    }
+
+    /// Set the seat's BASE xkb layout from RMLVO names; false when no backend runs or the
+    /// layout fails to compile.
+    pub fn set_xkb_layout(
+        &self,
+        layout: String,
+        variant: String,
+        options: String,
+        model: String,
+        rules: String,
+    ) -> Result<bool, Error> {
+        wayland_backend_running().map_or(Ok(false), |be| {
+            be.set_xkb_layout(layout, variant, options, model, rules)
+        })
+    }
+
+    /// Seat keyboard readback: `(pressed_keycodes, modifier_mask)`; empty when no backend runs.
+    pub fn get_keyboard_state(&self) -> Result<(Vec<u32>, u32), Error> {
+        wayland_backend_running().map_or(Ok((Vec::new(), 0)), |be| be.get_keyboard_state())
+    }
+
+    /// The capture geometry actually live on the given display `(width, height, scale)`;
+    /// `None` when no Wayland backend runs or the compositor did not answer in time (a
+    /// timeout is distinct from a real answer so the caller treats it as unknown rather than
+    /// "nothing to reconcile"). X11 has no compositor to read back and returns `None`.
+    pub fn get_realized_geometry(&self, display_id: u32) -> Result<Option<(i32, i32, f64)>, Error> {
+        wayland_backend_running().map_or(Ok(None), |be| be.get_realized_geometry(display_id))
+    }
+
+    /// Lifecycle of this capture as `(state, last_error)`: `state` is `"running"`, `"failed"`,
+    /// or `"idle"`; `last_error` gives the reason a start failed, or a caveat a live capture
+    /// came up with (encoder fell back to CPU, host connect refused, a refused resize). The
+    /// Wayland outcome is recorded by the compositor thread; the X11 outcome is the capture
+    /// thread's own exit error. `display_id` selects a Wayland output; X11 ignores it.
+    pub fn capture_state(&self, display_id: u32) -> (String, Option<String>) {
+        let (backend, running, err) = {
+            let st = self.inner.lock().unwrap();
+            let running = st
+                .controls
+                .as_ref()
+                .map(|c| !c.stop.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            let err = st
+                .err
+                .as_ref()
+                .and_then(|e| e.lock().ok().and_then(|g| g.clone()));
+            (st.backend, running, err)
+        };
+        match backend {
+            1 => {
+                let state = if running {
+                    "running"
+                } else if err.is_some() {
+                    "failed"
+                } else {
+                    "idle"
+                };
+                (state.to_string(), err)
+            }
+            2 => wayland_capture_state(display_id),
+            _ => ("idle".to_string(), None),
+        }
+    }
+
+    /// Create an additional Wayland output (see `WaylandBackend.create_output`); false when
+    /// no backend runs.
+    pub fn create_output(
+        &self,
+        id: u32,
+        width: i32,
+        height: i32,
+        x: i32,
+        y: i32,
+        scale: f64,
+    ) -> Result<bool, Error> {
+        wayland_backend_running().map_or(Ok(false), |be| {
+            be.create_output(id, width, height, x, y, scale)
+        })
+    }
+
+    /// Add a display over a rectangle of an existing Wayland output (see
+    /// `WaylandBackend.create_view`); false when no backend runs.
+    pub fn create_view(
+        &self,
+        id: u32,
+        owner: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<bool, Error> {
+        wayland_backend_running().map_or(Ok(false), |be| {
+            be.create_view(id, owner, x, y, width, height)
+        })
+    }
+
+    /// Resize a Wayland screen's output in place (see `WaylandBackend.resize_output`);
+    /// false when no backend runs.
+    pub fn resize_output(
+        &self,
+        id: u32,
+        width: i32,
+        height: i32,
+        scale: f64,
+    ) -> Result<bool, Error> {
+        wayland_backend_running().map_or(Ok(false), |be| be.resize_output(id, width, height, scale))
+    }
+
+    /// Destroy a secondary Wayland output; false when no backend runs.
+    pub fn destroy_output(&self, id: u32) -> Result<bool, Error> {
+        wayland_backend_running().map_or(Ok(false), |be| be.destroy_output(id))
+    }
+
+    /// Move a Wayland output (the primary included) to layout offset `(x, y)`; false when
+    /// no backend runs or the id is unknown.
+    pub fn reposition_output(&self, id: u32, x: i32, y: i32) -> Result<bool, Error> {
+        wayland_backend_running().map_or(Ok(false), |be| be.reposition_output(id, x, y))
+    }
+
+    /// Recreate the Wayland cursor theme at `size` pixels (named-cursor callbacks and the
+    /// burned-in overlay); false when no backend runs or the size is non-positive.
+    pub fn set_cursor_size(&self, size: i32) -> Result<bool, Error> {
+        wayland_backend_running().map_or(Ok(false), |be| be.set_cursor_size(size))
+    }
+
+    /// Every live Wayland output as `(id, x, y, width, height, scale, capturing)`; empty
+    /// when no backend runs.
+    pub fn list_outputs(&self) -> Result<Vec<OutputDesc>, Error> {
+        wayland_backend_running().map_or(Ok(Vec::new()), |be| be.list_outputs())
+    }
+
+    /// Display capacity (see `WaylandBackend.output_capacity`); -1 when no backend runs.
+    pub fn output_capacity(&self) -> Result<i64, Error> {
+        wayland_backend_running().map_or(Ok(-1), |be| be.output_capacity())
+    }
+
+    /// Move a window onto an output (fullscreened there); false when no backend runs.
+    pub fn move_window_to_output(&self, window_id: u32, output_id: u32) -> Result<bool, Error> {
+        wayland_backend_running().map_or(Ok(false), |be| {
+            be.move_window_to_output(window_id, output_id)
+        })
+    }
+
+    /// Every mapped window as `(window_id, title, app_id, output_id, waiting)`; empty when
+    /// no backend runs.
+    pub fn list_windows(&self) -> Result<Vec<WindowDesc>, Error> {
+        wayland_backend_running().map_or(Ok(Vec::new()), |be| be.list_windows())
+    }
+
+    /// Begin a capture delivering every frame to `sink`, on the backend `settings` select
+    /// (`CaptureSettings::wants_wayland`): the shared compositor's display `display_id`, or
+    /// an X11 capture of this instance's own. A start on a Wayland display this instance
+    /// already captures reconfigures it in place; any other start stops what ran before.
+    pub fn start_capture(
+        &self,
+        sink: Arc<dyn crate::sink::FrameSink>,
+        settings: CaptureSettings,
+    ) -> Result<(), Error> {
+        let rs = settings;
         let display_id = rs.display_id;
         let wants_wayland = rs.wants_wayland();
         let live_wayland_restart = wants_wayland
@@ -9651,12 +10646,11 @@ impl ScreenCapture {
             && wayland_owners().lock().unwrap().get(&display_id) == Some(&self.id)
             && wayland_alive().lock().unwrap().contains(&display_id);
         if !live_wayland_restart {
-            self.stop_internal(py)?;
+            self.stop_internal()?;
         }
 
         if wants_wayland {
             let be = ensure_wayland_backend(
-                py,
                 rs.width,
                 rs.height,
                 rs.render_node_path.clone(),
@@ -9664,7 +10658,7 @@ impl ScreenCapture {
                 rs.encode_node_path.clone(),
                 rs.cursor_size,
             )?;
-            be.bind(py).borrow().start_capture(callback, settings)?;
+            be.start_capture(sink, rs)?;
             wayland_owners().lock().unwrap().insert(display_id, self.id);
             {
                 let mut st = self.inner.lock().unwrap();
@@ -9709,7 +10703,7 @@ impl ScreenCapture {
         }
         let c2 = controls.clone();
         let c3 = controls.clone();
-        let cb: Arc<dyn crate::sink::FrameSink> = Arc::new(PyFrameSink::new(callback));
+        let cb = sink;
         let err_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let err_slot2 = err_slot.clone();
 
@@ -9755,11 +10749,11 @@ impl ScreenCapture {
             // so the atexit sweep may finalize the interpreter without racing that drop.
             c3.finished.store(true, Ordering::Release);
         });
-        let (tid, etid_res, etid_rx) = py.detach(move || {
+        let (tid, etid_res, etid_rx) = {
             let tid = tid_rx.recv().ok();
             let etid_res = etid_rx.recv_timeout(std::time::Duration::from_secs(2));
             (tid, etid_res, etid_rx)
-        });
+        };
         let mut late_etid_rx = None;
         let etid = match etid_res {
             Ok(id) => Some(id),
@@ -9784,7 +10778,7 @@ impl ScreenCapture {
                     .ok()
                     .and_then(|g| g.clone())
                     .unwrap_or_else(|| "X11 capture thread exited during start".to_string());
-                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(msg));
+                return Err(Error::Capture(msg));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 // Slow pre-spawn X11 setup: the id will still arrive on this
@@ -9805,10 +10799,10 @@ impl ScreenCapture {
                 .lock()
                 .unwrap()
                 .retain(|x| !Arc::ptr_eq(x, &controls));
-            py.detach(|| {
+            {
                 join_within(handle, "capture");
                 join_within(deliver_handle, "delivery");
-            });
+            };
             return Ok(());
         }
         st.starting = None;
@@ -9829,28 +10823,98 @@ impl ScreenCapture {
         Ok(())
     }
 
+    /// Retune the live per-frame knobs (`LiveTunables::from_settings`) of a running capture
+    /// without restarting it.
+    pub fn update_tunables(&self, settings: &CaptureSettings) -> Result<(), Error> {
+        let rs = settings;
+        let t = LiveTunables::from_settings(rs);
+        let (backend, controls, did) = {
+            let st = self.inner.lock().unwrap();
+            (st.backend, st.x11_controls(), st.wl_display)
+        };
+        match backend {
+            0 | 1 => {
+                if let Some(c) = &controls {
+                    c.capture_cursor.store(t.capture_cursor, Ordering::Relaxed);
+                    *c.tunables.lock().unwrap() = Some(t);
+                    c.tunables_dirty.store(true, Ordering::Release);
+                    crate::x11::cursor::set_size_cap(rs.cursor_size_cap);
+                }
+            }
+            2 => wayland_update_tunables(did, t),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Register the consumer of what client applications copy to the compositor's clipboard.
+    pub fn set_clipboard_sink(
+        &self,
+        sink: Arc<dyn crate::sink::ClipboardSink>,
+    ) -> Result<(), Error> {
+        match wayland_backend_running() {
+            Some(be) => be.set_clipboard_sink(sink),
+            None => Err(Error::Compositor("wayland backend not running".into())),
+        }
+    }
+
+    /// Report every selection change of the application compositor `display` to `watch`,
+    /// from a thread of its own; a second watch on the same display replaces the first.
+    pub fn clipboard_watch_app(
+        &self,
+        display: String,
+        watch: Arc<dyn crate::sink::SelectionWatch>,
+    ) -> Result<(), Error> {
+        crate::wayland::dcclient::watch(&app_socket_path(&display)?, watch).map_err(Error::Capture)
+    }
+}
+
+/// The Python handle to a capture: `ScreenCapture` in Python, one method per
+/// `ScreenCapture` method, each called with the GIL released.
+#[pyclass(name = "ScreenCapture")]
+struct PyScreenCapture(Arc<ScreenCapture>);
+
+#[pymethods]
+impl PyScreenCapture {
+    #[new]
+    fn new() -> Self {
+        Self(Arc::new(ScreenCapture::new()))
+    }
+
+    /// Begin capture: `callback(frame)` is invoked per encoded stripe with a `StripeFrame`.
+    ///
+    /// The backend is chosen from the settings (`want_wayland`). A **Wayland** start delegates to
+    /// the shared backend, distinguishing the compositor RENDER node from the ENCODER node and
+    /// resolving an AUTO_GPU request; restarting this instance's own live Wayland capture skips the
+    /// stop so the calloop can reconfigure the running session in place — keeping a compatible NVENC
+    /// session alive — instead of destroying it and forcing a full rebuild; it publishes the
+    /// display id with the GIL held since the command, so no frame reaches Python before a
+    /// control request can find the capture. An **X11** start resolves AUTO_GPU to an encoder
+    /// device when none was chosen explicitly, then spawns the capture thread (which internally
+    /// spawns the encode+deliver thread). Its first frames can reach `callback` before it returns,
+    /// so the control methods reach the capture from the moment its threads spawn (`starting`).
+    /// The per-frame delivery closure makes one GIL acquisition per frame with all stripes
+    /// batched, and a failed start surfaces as a `PyErr` rather than a silent,
+    /// forever-"capturing" state.
+    fn start_capture(
+        &self,
+        py: Python<'_>,
+        callback: Py<PyAny>,
+        settings: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let settings = extract_settings(settings)?;
+        let sink: Arc<dyn crate::sink::FrameSink> = Arc::new(PyFrameSink::new(callback));
+        let c = self.0.clone();
+        py.detach(move || c.start_capture(sink, settings))
+            .map_err(PyErr::from)
+    }
+
     /// The codec this capture streams, by name, once its pipeline has been built: the
     /// requested one, or the one the selection ladder demoted it to when no encoder could
     /// serve the request. None before the first frame or after a stop.
     fn active_codec(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        let (backend, controls, wl_display) = {
-            let st = self.inner.lock().unwrap();
-            (st.backend, st.controls.clone(), st.wl_display)
-        };
-        let id = match backend {
-            1 => controls.map_or(u32::MAX, |c| c.codec.load(Ordering::Relaxed)),
-            2 => py
-                .detach(|| {
-                    wayland_active_codec()
-                        .lock()
-                        .unwrap()
-                        .get(&wl_display)
-                        .copied()
-                })
-                .unwrap_or(u32::MAX),
-            _ => u32::MAX,
-        };
-        Ok(Codec::from_id(id).map(|c| c.name().to_string()))
+        let c = self.0.clone();
+        py.detach(move || c.active_codec()).map_err(PyErr::from)
     }
 
     /// What this capture streams and how it got there, or None before a start and after a
@@ -9864,22 +10928,10 @@ impl ScreenCapture {
     /// The first read of a VA-API session brings a GL context up once to name its GPU, so a
     /// caller with an event loop reads this off it.
     fn stream_info(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let Some(report) = self.report() else {
+        let c = self.0.clone();
+        let Some(StreamInfo { info, renderer }) = py.detach(move || c.stream_info()) else {
             return Ok(None);
         };
-        let (info, renderer) = py.detach(|| {
-            let mut info = report.info();
-            let renderer = (info.backend == "wayland").then(report::renderer);
-            if info.hardware && info.gpu.is_empty() {
-                info.gpu = match &renderer {
-                    Some(r) if render_node_index(&r.node) == Some(info.encode_node) => {
-                        r.gpu.clone()
-                    }
-                    _ => node_gpu_name(info.encode_node),
-                };
-            }
-            (info, renderer)
-        });
         let d = pyo3::types::PyDict::new(py);
         d.set_item("backend", info.backend)?;
         d.set_item("capture", info.capture)?;
@@ -9918,11 +10970,10 @@ impl ScreenCapture {
     /// read, which each read starts again: `pipeline_min_ns` and `pipeline_max_ns`, zero where
     /// no frame was timed, and `frame_max_bytes`, the largest frame.
     fn stream_stats(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let Some(report) = self.report() else {
+        let c = self.0.clone();
+        let Some(StreamStats { totals, peaks }) = py.detach(move || c.stream_stats()) else {
             return Ok(None);
         };
-        let totals = report.totals();
-        let peaks = report.take_peaks();
         let d = pyo3::types::PyDict::new(py);
         d.set_item("frames", totals.frames)?;
         d.set_item("bytes", totals.bytes)?;
@@ -9935,30 +10986,14 @@ impl ScreenCapture {
     }
 
     fn stop_capture(&self, py: Python<'_>) -> PyResult<()> {
-        self.stop_internal(py)
+        let c = self.0.clone();
+        py.detach(move || c.stop_capture()).map_err(PyErr::from)
     }
 
     fn request_idr_frame(&self, py: Python<'_>) -> PyResult<()> {
-        let (backend, controls, did) = {
-            let st = self.inner.lock().unwrap();
-            (st.backend, st.x11_controls(), st.wl_display)
-        };
-        match backend {
-            0 | 1 => {
-                if let Some(c) = controls {
-                    c.force_idr.store(true, Ordering::Relaxed);
-                }
-            }
-            2 => {
-                if let Some(slot) = WAYLAND_BACKEND.get()
-                    && let Some(be) = slot.lock().unwrap().as_ref()
-                {
-                    let _ = be.bind(py).borrow().request_idr_frame(did);
-                }
-            }
-            _ => {}
-        }
-        Ok(())
+        let c = self.0.clone();
+        py.detach(move || c.request_idr_frame())
+            .map_err(PyErr::from)
     }
 
     /// A client lost frame `frame_id`, or its sender withheld it to hold the stream to a rate
@@ -9967,14 +11002,9 @@ impl ScreenCapture {
     /// keyframe instead. Non-blocking, like `request_idr_frame`.
     #[pyo3(signature = (frame_id, withheld = false))]
     fn invalidate_reference(&self, py: Python<'_>, frame_id: u16, withheld: bool) -> PyResult<()> {
-        use encoders::reference::ReferenceReport;
-        let report = if withheld {
-            ReferenceReport::Withheld(frame_id)
-        } else {
-            ReferenceReport::Lost(frame_id)
-        };
-        self.hand_report(py, report);
-        Ok(())
+        let c = self.0.clone();
+        py.detach(move || c.invalidate_reference(frame_id, withheld))
+            .map_err(PyErr::from)
     }
 
     /// Every client holds frame `frame_id`, or where not `held` was sent it (and may yet lose
@@ -9983,14 +11013,9 @@ impl ScreenCapture {
     /// from a loss of any depth, without a keyframe. Non-blocking, like `invalidate_reference`.
     #[pyo3(signature = (frame_id, held = true))]
     fn acknowledge_reference(&self, py: Python<'_>, frame_id: u16, held: bool) -> PyResult<()> {
-        use encoders::reference::ReferenceReport;
-        let report = if held {
-            ReferenceReport::Held(frame_id)
-        } else {
-            ReferenceReport::Sent(frame_id)
-        };
-        self.hand_report(py, report);
-        Ok(())
+        let c = self.0.clone();
+        py.detach(move || c.acknowledge_reference(frame_id, held))
+            .map_err(PyErr::from)
     }
 
     /// Apply a live target-bitrate (kbps) change to the running capture.
@@ -9998,105 +11023,41 @@ impl ScreenCapture {
     /// On the X11 path the dirty flag is Release-published after the payload store, so the encode
     /// thread's Acquire read can never observe the flag set against a stale bitrate.
     fn update_video_bitrate(&self, py: Python<'_>, kbps: i32) -> PyResult<()> {
-        let (backend, controls, did) = {
-            let st = self.inner.lock().unwrap();
-            (st.backend, st.x11_controls(), st.wl_display)
-        };
-        match backend {
-            0 | 1 => {
-                if let Some(c) = &controls {
-                    c.bitrate_kbps.store(kbps, Ordering::Relaxed);
-                    c.rate_dirty.store(true, Ordering::Release);
-                }
-            }
-            2 => wayland_update_rate(py, did, Some(kbps), None, None),
-            _ => {}
-        }
-        Ok(())
+        let c = self.0.clone();
+        py.detach(move || c.update_video_bitrate(kbps))
+            .map_err(PyErr::from)
     }
 
     /// Apply the rate (kbps) the path the stream crosses carries, as the transport measures it, which
     /// a still screen's constant-rate cleanup may run at; 0 where the transport has no measure,
     /// which keeps the cleanup to the stream's rate.
     fn update_link_rate(&self, py: Python<'_>, kbps: i32) -> PyResult<()> {
-        let (backend, controls, did) = {
-            let st = self.inner.lock().unwrap();
-            (st.backend, st.x11_controls(), st.wl_display)
-        };
-        match backend {
-            0 | 1 => {
-                if let Some(c) = &controls {
-                    c.link_kbps.store(kbps, Ordering::Relaxed);
-                }
-            }
-            2 => wayland_update_link_rate(py, did, kbps),
-            _ => {}
-        }
-        Ok(())
+        let c = self.0.clone();
+        py.detach(move || c.update_link_rate(kbps))
+            .map_err(PyErr::from)
     }
 
     fn update_framerate(&self, py: Python<'_>, fps: f64) -> PyResult<()> {
-        let (backend, controls, did) = {
-            let st = self.inner.lock().unwrap();
-            (st.backend, st.x11_controls(), st.wl_display)
-        };
-        match backend {
-            0 | 1 => {
-                if let Some(c) = &controls {
-                    c.fps_bits.store(fps.max(1.0).to_bits(), Ordering::Relaxed);
-                    c.rate_dirty.store(true, Ordering::Release);
-                    py.detach(crate::x11::follow_frame_rate);
-                }
-            }
-            2 => wayland_update_rate(py, did, None, None, Some(fps)),
-            _ => {}
-        }
-        Ok(())
+        let c = self.0.clone();
+        py.detach(move || c.update_framerate(fps))
+            .map_err(PyErr::from)
     }
 
     /// Live CBR VBV change, as a multiple of one frame's bit budget (<= 0 = policy default).
     fn update_vbv_multiplier(&self, py: Python<'_>, multiplier: f64) -> PyResult<()> {
-        let (backend, controls, did) = {
-            let st = self.inner.lock().unwrap();
-            (st.backend, st.x11_controls(), st.wl_display)
-        };
-        match backend {
-            0 | 1 => {
-                if let Some(c) = &controls {
-                    c.vbv_mult_milli
-                        .store((multiplier * 1000.0).round() as i32, Ordering::Relaxed);
-                    c.rate_dirty.store(true, Ordering::Release);
-                }
-            }
-            2 => wayland_update_rate(py, did, None, Some(multiplier), None),
-            _ => {}
-        }
-        Ok(())
+        let c = self.0.clone();
+        py.detach(move || c.update_vbv_multiplier(multiplier))
+            .map_err(PyErr::from)
     }
 
     /// Apply the live-tunable subset of `settings` (quality, paint-over, streaming mode,
     /// cursor overlay, keyframe interval) to the running capture -- no restart, no encoder
     /// re-init. Structural changes (encoder, chroma, RC mode, device) still need a restart.
     fn update_tunables(&self, py: Python<'_>, settings: &Bound<'_, PyAny>) -> PyResult<()> {
-        let rs = extract_settings(settings)?;
-        let t = LiveTunables::from_settings(&rs);
-        let (backend, controls, did) = {
-            let st = self.inner.lock().unwrap();
-            (st.backend, st.x11_controls(), st.wl_display)
-        };
-        match backend {
-            0 | 1 => {
-                if let Some(c) = &controls {
-                    c.capture_cursor.store(t.capture_cursor, Ordering::Relaxed);
-                    *c.tunables.lock().unwrap() = Some(t);
-                    c.tunables_dirty.store(true, Ordering::Release);
-                    crate::x11::cursor::set_size_cap(rs.cursor_size_cap);
-                }
-            }
-            2 => wayland_update_tunables(py, did, t),
-            _ => {}
-        }
-        Ok(())
+        let settings = extract_settings(settings)?;
+        let c = self.0.clone();
+        py.detach(move || c.update_tunables(&settings))
+            .map_err(PyErr::from)
     }
 
     /// Move/resize the live X11 capture region (root-relative). The capture loop drains
@@ -10104,90 +11065,73 @@ impl ScreenCapture {
     /// it can (NVENC reconfigure / stripe re-derive) -- no capture restart. `width`/
     /// `height` <= 0 mean "to the root edge". On Wayland the output IS the capture
     /// region: restart the capture with new dimensions instead (in-place there too).
-    fn update_capture_region(&self, x: i32, y: i32, width: i32, height: i32) -> PyResult<()> {
-        let controls = {
-            let st = self.inner.lock().unwrap();
-            if st.backend == 2 {
-                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "update_capture_region is X11-only; on Wayland restart the capture with new dimensions",
-                ));
-            }
-            st.x11_controls()
-        };
-        if let Some(c) = &controls {
-            *c.region.lock().unwrap() = (x.max(0), y.max(0), width, height);
-            c.region_dirty.store(true, Ordering::Release);
-        }
-        Ok(())
+    fn update_capture_region(
+        &self,
+        py: Python<'_>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> PyResult<()> {
+        let c = self.0.clone();
+        py.detach(move || c.update_capture_region(x, y, width, height))
+            .map_err(PyErr::from)
     }
 
     #[getter]
-    fn is_capturing(&self) -> bool {
-        let st = self.inner.lock().unwrap();
-        match st.backend {
-            1 => st
-                .controls
-                .as_ref()
-                .map(|c| !c.stop.load(Ordering::Relaxed))
-                .unwrap_or(false),
-            2 => {
-                wayland_owners().lock().unwrap().get(&st.wl_display) == Some(&self.id)
-                    && wayland_alive().lock().unwrap().contains(&st.wl_display)
-            }
-            _ => false,
-        }
+    fn is_capturing(&self, py: Python<'_>) -> bool {
+        let c = self.0.clone();
+        py.detach(move || c.is_capturing())
     }
 
     fn inject_key(&self, py: Python<'_>, scancode: u32, state: u32) -> PyResult<()> {
-        wayland_backend_running(py).map_or(Ok(()), |be| {
-            be.bind(py).borrow().inject_key(scancode, state)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.inject_key(scancode, state))
+            .map_err(PyErr::from)
     }
+
     /// Inject an ordered run of `(keycode, state)` events in one message.
     fn inject_keys(&self, py: Python<'_>, events: Vec<(u32, u32)>) -> PyResult<()> {
-        wayland_backend_running(py).map_or(Ok(()), |be| be.bind(py).borrow().inject_keys(events))
+        let c = self.0.clone();
+        py.detach(move || c.inject_keys(events))
+            .map_err(PyErr::from)
     }
+
     fn set_keymap_string(&self, py: Python<'_>, text: String) -> PyResult<()> {
-        wayland_backend_running(py)
-            .map_or(Ok(()), |be| be.bind(py).borrow().set_keymap_string(text))
+        let c = self.0.clone();
+        py.detach(move || c.set_keymap_string(text))
+            .map_err(PyErr::from)
     }
+
     /// Bind explicit `(keycode, keysym)` pairs onto the current base keymap in one swap;
     /// false when no backend runs or no base keymap is installed. See the backend method
     /// for the split of responsibility.
     fn set_keymap_overlay(&self, py: Python<'_>, binds: Vec<(u32, u32)>) -> PyResult<()> {
-        wayland_backend_running(py)
-            .map_or(Ok(()), |be| be.bind(py).borrow().set_keymap_overlay(binds))
+        let c = self.0.clone();
+        py.detach(move || c.set_keymap_overlay(binds))
+            .map_err(PyErr::from)
     }
+
     /// Compositor apps run under (a nested labwc/kwin session pixelflux captures),
     /// the target for Computer-Use text injection and, under KWin, for relative
     /// pointer motion through its fake-input device; selkies resolves it and hands
     /// it over. Empty clears it. Stored process-wide since the CU server is per-process.
-    fn set_app_wayland_display(&self, display: String) {
-        crate::computer_use::set_app_wayland_display(if display.is_empty() {
-            None
-        } else {
-            Some(display)
-        });
+    fn set_app_wayland_display(&self, py: Python<'_>, display: String) {
+        let c = self.0.clone();
+        py.detach(move || c.set_app_wayland_display(display))
     }
+
     /// Type `text` through `display`'s zwp_virtual_keyboard_manager_v1 as a one-shot
     /// client: selkies' text-injection path, targeting whichever compositor the apps
     /// live under (the nested session's, or pixelflux's own in a direct session).
     /// Blocking; releases the GIL for the duration. Raises
     /// [`VirtualKeyboardUnavailable`] when the compositor lacks the protocol.
     fn type_text_wayland(&self, py: Python<'_>, display: String, text: String) -> PyResult<()> {
-        py.detach(move || {
-            let path = crate::wayland::wlclient::socket_path(&display)
-                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::vkclient::type_text_to(&path, &text)
-        })
-        .map_err(|e: String| {
-            if e.contains("zwp_virtual_keyboard_manager_v1") {
-                VirtualKeyboardUnavailable::new_err(e)
-            } else {
-                pyo3::exceptions::PyRuntimeError::new_err(e)
-            }
-        })
+        let c = self.0.clone();
+        py.detach(move || c.type_text_wayland(display, text))
+            .map_err(PyErr::from)
     }
+
     /// Tap `keysyms` in order through `display`'s virtual keyboard, verbatim: the
     /// caller owns which keysym spells which character (selkies' policy layer);
     /// this owns delivery. Same one-shot client and errors as `type_text_wayland`.
@@ -10197,19 +11141,11 @@ impl ScreenCapture {
         display: String,
         keysyms: Vec<u32>,
     ) -> PyResult<()> {
-        py.detach(move || {
-            let path = crate::wayland::wlclient::socket_path(&display)
-                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::vkclient::type_keysyms_to(&path, &keysyms)
-        })
-        .map_err(|e: String| {
-            if e.contains("zwp_virtual_keyboard_manager_v1") {
-                VirtualKeyboardUnavailable::new_err(e)
-            } else {
-                pyo3::exceptions::PyRuntimeError::new_err(e)
-            }
-        })
+        let c = self.0.clone();
+        py.detach(move || c.type_keysyms_wayland(display, keysyms))
+            .map_err(PyErr::from)
     }
+
     /// Scale the app compositor's `index`-th screen, so its applications draw
     /// larger while the capture keeps its full resolution. False when that
     /// compositor manages no outputs for clients (KWin), whose scale follows
@@ -10222,14 +11158,11 @@ impl ScreenCapture {
         scale: f64,
         index: usize,
     ) -> PyResult<bool> {
-        py.detach(move || {
-            let path = crate::wayland::wlclient::socket_path(&display)
-                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::outclient::set_output_scale(&path, index, scale)
-        })
-        .map(|outcome| matches!(outcome, crate::wayland::outclient::ScaleOutcome::Applied))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.set_app_output_scale(display, scale, index))
+            .map_err(PyErr::from)
     }
+
     /// Give the app compositor's `index`-th screen this mode and scale in one
     /// configuration, so the session lays its desktop out once. Setting them
     /// separately exposes a geometry that never exists — the pre-connect mode at
@@ -10248,14 +11181,11 @@ impl ScreenCapture {
         scale: f64,
         index: usize,
     ) -> PyResult<bool> {
-        py.detach(move || {
-            let path = crate::wayland::wlclient::socket_path(&display)
-                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::outclient::set_screen_geometry(&path, index, (width, height), scale)
-        })
-        .map(|outcome| matches!(outcome, crate::wayland::outclient::ScaleOutcome::Applied))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.set_app_screen_geometry(display, width, height, scale, index))
+            .map_err(PyErr::from)
     }
+
     /// Lay the app compositor's screens out at `rects` — `(x, y, width, height)`
     /// per screen in screen order — so the session arranges its desktop the way
     /// the capture outputs were placed rather than by its own default rule.
@@ -10269,18 +11199,11 @@ impl ScreenCapture {
         display: String,
         rects: Vec<(i32, i32, i32, i32)>,
     ) -> PyResult<usize> {
-        py.detach(move || {
-            let path = crate::wayland::wlclient::socket_path(&display)
-                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            let placed = crate::wayland::outclient::set_screen_layout(&path, rects.clone())?;
-            if placed == 0 {
-                crate::wayland::kdeclient::set_screen_layout(&path, rects)
-            } else {
-                Ok(placed)
-            }
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.set_app_screen_layout(display, rects))
+            .map_err(PyErr::from)
     }
+
     /// The app compositor's enabled screens as `(name, x, y, width, height)` in
     /// screen order, which is what it did with a layout and a mode rather than
     /// what it was asked for — the readback `set_app_screen_geometry` has no
@@ -10292,31 +11215,22 @@ impl ScreenCapture {
         py: Python<'_>,
         display: String,
     ) -> PyResult<Vec<crate::wayland::AppScreen>> {
-        py.detach(move || {
-            let path = crate::wayland::wlclient::socket_path(&display)
-                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            let screens = crate::wayland::outclient::list_screens(&path)?;
-            if screens.is_empty() {
-                crate::wayland::kdeclient::list_screens(&path)
-            } else {
-                Ok(screens)
-            }
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.list_app_screens(display))
+            .map_err(PyErr::from)
     }
+
     /// Whether the app compositor serves KWin's `zkde_screencast_unstable_v1`
     /// virtual outputs -- the rung selkies offers a second display on when the
     /// session serves no control socket. A registry read that touches no
     /// screen: whether the compositor registers the screen it grows is proven
     /// when a display asks for one (`add_app_screen` refuses one that does not).
     fn app_screen_control_offered(&self, py: Python<'_>, display: String) -> PyResult<bool> {
-        py.detach(move || {
-            let path = crate::wayland::wlclient::socket_path(&display)
-                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::kdeclient::screen_control_offered(&path)
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.app_screen_control_offered(display))
+            .map_err(PyErr::from)
     }
+
     /// Grow a screen named `name` on the app compositor, held open until
     /// `remove_app_screen`. The name is what `list_app_screens` reports and
     /// removal addresses; `width`/`height`/`scale` only seed the screen, whose
@@ -10331,19 +11245,20 @@ impl ScreenCapture {
         height: i32,
         scale: f64,
     ) -> PyResult<()> {
-        py.detach(move || {
-            let path = crate::wayland::wlclient::socket_path(&display)
-                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::kdeclient::add_screen(&path, &name, (width, height), scale)
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.add_app_screen(display, name, width, height, scale))
+            .map_err(PyErr::from)
     }
+
     /// Remove a screen `add_app_screen` grew; the compositor's own
     /// output-destroy path returns its windows to the primary. False when no
     /// such screen is held.
     fn remove_app_screen(&self, py: Python<'_>, name: String) -> PyResult<bool> {
-        Ok(py.detach(move || crate::wayland::kdeclient::remove_screen(&name)))
+        let c = self.0.clone();
+        py.detach(move || c.remove_app_screen(name))
+            .map_err(PyErr::from)
     }
+
     /// Hold the app compositor's screens past the first `keep` at a small size,
     /// so a session that opened more screens than there are capture outputs does
     /// not lay its desktop out across one nobody sees. Returns how many were
@@ -10356,18 +11271,18 @@ impl ScreenCapture {
         width: i32,
         height: i32,
     ) -> PyResult<usize> {
-        py.detach(move || {
-            let path = crate::wayland::wlclient::socket_path(&display)
-                .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::outclient::hold_spare_screens(&path, keep, (width, height))
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.hold_spare_app_screens(display, keep, width, height))
+            .map_err(PyErr::from)
     }
+
     /// Mimes the app compositor's current selection offers (empty = nothing copied).
     fn clipboard_types_app(&self, py: Python<'_>, display: String) -> PyResult<Vec<String>> {
-        py.detach(move || crate::wayland::dcclient::list_types(&app_socket_path(&display)?))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.clipboard_types_app(display))
+            .map_err(PyErr::from)
     }
+
     /// The app compositor selection's payload for `mime`, or None when nothing is
     /// copied or the selection does not offer that mime.
     fn clipboard_read_app(
@@ -10376,11 +11291,13 @@ impl ScreenCapture {
         display: String,
         mime: String,
     ) -> PyResult<Option<Py<pyo3::types::PyBytes>>> {
+        let c = self.0.clone();
         let data = py
-            .detach(move || crate::wayland::dcclient::read(&app_socket_path(&display)?, &mime))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            .detach(move || c.clipboard_read_app(display, mime))
+            .map_err(PyErr::from)?;
         Ok(data.map(|d| pyo3::types::PyBytes::new(py, &d).unbind()))
     }
+
     /// Take the app compositor's selection, serving `entries` (mime, bytes) to
     /// every paster from a background thread until another client copies.
     fn clipboard_write_app(
@@ -10389,25 +11306,26 @@ impl ScreenCapture {
         display: String,
         entries: Vec<(String, Vec<u8>)>,
     ) -> PyResult<()> {
-        py.detach(move || crate::wayland::dcclient::write(&app_socket_path(&display)?, entries))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.clipboard_write_app(display, entries))
+            .map_err(PyErr::from)
     }
+
     /// The mimes the selection `clipboard_write_app` last took has served to pasters,
     /// in order, once it has served more than `after` of them or `timeout_s` has
     /// passed (at most a minute).
     fn clipboard_served_app(&self, py: Python<'_>, after: usize, timeout_s: f64) -> Vec<String> {
-        let timeout = Duration::from_secs_f64(if timeout_s.is_finite() {
-            timeout_s.clamp(0.0, 60.0)
-        } else {
-            0.0
-        });
-        py.detach(move || crate::wayland::dcclient::served(after, timeout))
+        let c = self.0.clone();
+        py.detach(move || c.clipboard_served_app(after, timeout_s))
     }
+
     /// Drop the app compositor's selection.
     fn clipboard_clear_app(&self, py: Python<'_>, display: String) -> PyResult<()> {
-        py.detach(move || crate::wayland::dcclient::clear(&app_socket_path(&display)?))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.clipboard_clear_app(display))
+            .map_err(PyErr::from)
     }
+
     /// Invoke `callback(mimes: list[str])` from a background thread on every
     /// selection change in the app compositor (including the one current at call
     /// time), with no mimes for a cleared selection. A second watch for the same
@@ -10419,22 +11337,24 @@ impl ScreenCapture {
         callback: Py<PyAny>,
     ) -> PyResult<()> {
         let watch: Arc<dyn crate::sink::SelectionWatch> = Arc::new(PySelectionWatch::new(callback));
-        py.detach(move || crate::wayland::dcclient::watch(&app_socket_path(&display)?, watch))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let c = self.0.clone();
+        py.detach(move || c.clipboard_watch_app(display, watch))
+            .map_err(PyErr::from)
     }
+
     /// Stop the selection watch for `display` (no-op without one).
     fn clipboard_unwatch_app(&self, py: Python<'_>, display: String) {
-        let _ = py.detach(move || {
-            crate::wayland::dcclient::unwatch(&app_socket_path(&display)?);
-            Ok::<(), String>(())
-        });
+        let c = self.0.clone();
+        py.detach(move || c.clipboard_unwatch_app(display))
     }
+
     /// The move's number (`pointer_location`), or None without a running compositor.
     fn inject_mouse_move(&self, py: Python<'_>, x: f64, y: f64) -> PyResult<Option<u64>> {
-        wayland_backend_running(py).map_or(Ok(None), |be| {
-            be.bind(py).borrow().inject_mouse_move(x, y).map(Some)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.inject_mouse_move(x, y))
+            .map_err(PyErr::from)
     }
+
     /// The move's number (`pointer_location`), or None without a running compositor.
     fn inject_relative_mouse_move(
         &self,
@@ -10442,60 +11362,63 @@ impl ScreenCapture {
         dx: f64,
         dy: f64,
     ) -> PyResult<Option<u64>> {
-        wayland_backend_running(py).map_or(Ok(None), |be| {
-            be.bind(py)
-                .borrow()
-                .inject_relative_mouse_move(dx, dy)
-                .map(Some)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.inject_relative_mouse_move(dx, dy))
+            .map_err(PyErr::from)
     }
+
     fn inject_mouse_button(&self, py: Python<'_>, btn: u32, state: u32) -> PyResult<()> {
-        wayland_backend_running(py).map_or(Ok(()), |be| {
-            be.bind(py).borrow().inject_mouse_button(btn, state)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.inject_mouse_button(btn, state))
+            .map_err(PyErr::from)
     }
+
     fn inject_mouse_scroll(&self, py: Python<'_>, x: f64, y: f64) -> PyResult<()> {
-        wayland_backend_running(py)
-            .map_or(Ok(()), |be| be.bind(py).borrow().inject_mouse_scroll(x, y))
+        let c = self.0.clone();
+        py.detach(move || c.inject_mouse_scroll(x, y))
+            .map_err(PyErr::from)
     }
+
     /// `WaylandBackend.inject_finger_scroll`; nothing without a running compositor.
     fn inject_finger_scroll(&self, py: Python<'_>, dx: f64, dy: f64) -> PyResult<()> {
-        wayland_backend_running(py).map_or(Ok(()), |be| {
-            be.bind(py).borrow().inject_finger_scroll(dx, dy)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.inject_finger_scroll(dx, dy))
+            .map_err(PyErr::from)
     }
+
     /// `WaylandBackend.inject_finger_scroll_end`; nothing without a running compositor.
     fn inject_finger_scroll_end(&self, py: Python<'_>) -> PyResult<()> {
-        wayland_backend_running(py)
-            .map_or(Ok(()), |be| be.bind(py).borrow().inject_finger_scroll_end())
+        let c = self.0.clone();
+        py.detach(move || c.inject_finger_scroll_end())
+            .map_err(PyErr::from)
     }
+
     /// Where the Wayland compositor's pointer is, as `(x, y, scale, motion)`
     /// (`WaylandBackend.pointer_location`), or None without a running compositor, before its
     /// first pass, or under host capture before its first cursor meta or where the host paints
     /// its cursor into the frames. An X11 session reads its pointer from the X server.
     fn pointer_location(&self, py: Python<'_>) -> Option<(f64, f64, f64, u64)> {
-        wayland_backend_running(py).and_then(|be| be.bind(py).borrow().pointer_location())
+        let c = self.0.clone();
+        py.detach(move || c.pointer_location())
     }
+
     /// Toggle compositing the cursor into captured frames (the alternative to the
     /// out-of-band cursor callback): the X11 grab re-reads the flag per frame, Wayland
     /// forwards to the compositor.
     fn set_cursor_rendering(&self, py: Python<'_>, enabled: bool) -> PyResult<()> {
-        let controls = self.inner.lock().unwrap().x11_controls();
-        if let Some(c) = &controls {
-            c.capture_cursor.store(enabled, Ordering::Relaxed);
-            return Ok(());
-        }
-        wayland_backend_running(py).map_or(Ok(()), |be| {
-            be.bind(py).borrow().set_cursor_rendering(enabled)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.set_cursor_rendering(enabled))
+            .map_err(PyErr::from)
     }
+
     /// `cb(msg_type: str, png: bytes, hot_x: int, hot_y: int)` for whichever backend runs,
     /// the X11 cursor monitor re-delivering the current cursor to a late registration;
     /// `None` withdraws this capture's own (`set_cursor_sink`).
     fn set_cursor_callback(&self, py: Python<'_>, callback: Option<Py<PyAny>>) -> PyResult<()> {
-        let callback = callback.map(|cb| Arc::new(PyCursorSink::new(cb)) as _);
-        self.set_cursor_sink(py, callback)
-            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
+        let sink = callback.map(|cb| Arc::new(PyCursorSink::new(cb)) as _);
+        let c = self.0.clone();
+        py.detach(move || c.set_cursor_sink(sink))
+            .map_err(PyErr::from)
     }
 
     /// Withdraw this capture's cursor callback, releasing what it holds; another capture's
@@ -10506,35 +11429,29 @@ impl ScreenCapture {
     }
 
     fn get_xkb_keymap_string(&self, py: Python<'_>) -> PyResult<String> {
-        wayland_backend_running(py).map_or(Ok(String::new()), |be| {
-            be.bind(py).borrow().get_xkb_keymap_string(py)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.get_xkb_keymap_string())
+            .map_err(PyErr::from)
     }
+
     /// cb(entries: list[tuple[str, bytes]]) fires when a client app copies to the clipboard,
     /// with the flavors of the copy: the picture, or the markup and the text beneath it, and a
     /// password manager's hint beside a secret; a client clearing the clipboard fires it with
     /// no entries.
     fn set_clipboard_callback(&self, py: Python<'_>, callback: Py<PyAny>) -> PyResult<()> {
-        match wayland_backend_running(py) {
-            Some(be) => be
-                .bind(py)
-                .borrow()
-                .set_clipboard_sink(Arc::new(PyClipboardSink::new(callback)))
-                .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>),
-            None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "wayland backend not running",
-            )),
-        }
+        let sink: Arc<dyn crate::sink::ClipboardSink> = Arc::new(PyClipboardSink::new(callback));
+        let c = self.0.clone();
+        py.detach(move || c.set_clipboard_sink(sink))
+            .map_err(PyErr::from)
     }
+
     /// Compositor-side clipboard offer: serve one payload per `(mime, data)` entry.
     fn set_clipboard(&self, py: Python<'_>, entries: Vec<(String, Vec<u8>)>) -> PyResult<()> {
-        match wayland_backend_running(py) {
-            Some(be) => be.bind(py).borrow().set_clipboard(entries),
-            None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "wayland backend not running",
-            )),
-        }
+        let c = self.0.clone();
+        py.detach(move || c.set_clipboard(entries))
+            .map_err(PyErr::from)
     }
+
     /// Set the seat's BASE xkb layout from RMLVO names; false when no backend runs or the
     /// layout fails to compile.
     #[pyo3(signature = (layout, variant = String::new(), options = String::new(), model = String::new(), rules = String::new()))]
@@ -10547,18 +11464,18 @@ impl ScreenCapture {
         model: String,
         rules: String,
     ) -> PyResult<bool> {
-        wayland_backend_running(py).map_or(Ok(false), |be| {
-            be.bind(py)
-                .borrow()
-                .set_xkb_layout(py, layout, variant, options, model, rules)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.set_xkb_layout(layout, variant, options, model, rules))
+            .map_err(PyErr::from)
     }
+
     /// Seat keyboard readback: `(pressed_keycodes, modifier_mask)`; empty when no backend runs.
     fn get_keyboard_state(&self, py: Python<'_>) -> PyResult<(Vec<u32>, u32)> {
-        wayland_backend_running(py).map_or(Ok((Vec::new(), 0)), |be| {
-            be.bind(py).borrow().get_keyboard_state(py)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.get_keyboard_state())
+            .map_err(PyErr::from)
     }
+
     /// The capture geometry actually live on the given display `(width, height, scale)`;
     /// `None` when no Wayland backend runs or the compositor did not answer in time (a
     /// timeout is distinct from a real answer so the caller treats it as unknown rather than
@@ -10569,50 +11486,27 @@ impl ScreenCapture {
         py: Python<'_>,
         display_id: u32,
     ) -> PyResult<Option<(i32, i32, f64)>> {
-        wayland_backend_running(py).map_or(Ok(None), |be| {
-            be.bind(py).borrow().get_realized_geometry(py, display_id)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.get_realized_geometry(display_id))
+            .map_err(PyErr::from)
     }
+
     /// Lifecycle of this capture as `(state, last_error)`: `state` is `"running"`, `"failed"`,
     /// or `"idle"`; `last_error` gives the reason a start failed, or a caveat a live capture
     /// came up with (encoder fell back to CPU, host connect refused, a refused resize). The
     /// Wayland outcome is recorded by the compositor thread; the X11 outcome is the capture
     /// thread's own exit error. `display_id` selects a Wayland output; X11 ignores it.
     #[pyo3(signature = (display_id = 0))]
-    fn capture_state(&self, display_id: u32) -> (String, Option<String>) {
-        let (backend, running, err) = {
-            let st = self.inner.lock().unwrap();
-            let running = st
-                .controls
-                .as_ref()
-                .map(|c| !c.stop.load(Ordering::Relaxed))
-                .unwrap_or(false);
-            let err = st
-                .err
-                .as_ref()
-                .and_then(|e| e.lock().ok().and_then(|g| g.clone()));
-            (st.backend, running, err)
-        };
-        match backend {
-            1 => {
-                let state = if running {
-                    "running"
-                } else if err.is_some() {
-                    "failed"
-                } else {
-                    "idle"
-                };
-                (state.to_string(), err)
-            }
-            2 => wayland_capture_state(display_id),
-            _ => ("idle".to_string(), None),
-        }
+    fn capture_state(&self, py: Python<'_>, display_id: u32) -> (String, Option<String>) {
+        let c = self.0.clone();
+        py.detach(move || c.capture_state(display_id))
     }
+
     /// Create an additional Wayland output (see `WaylandBackend.create_output`); false when
     /// no backend runs.
+    #[pyo3(signature = (id, width, height, x = 0, y = 0, scale = 1.0))]
     // The parameter list is the Python signature; grouping it would change the ABI.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (id, width, height, x = 0, y = 0, scale = 1.0))]
     fn create_output(
         &self,
         py: Python<'_>,
@@ -10623,16 +11517,16 @@ impl ScreenCapture {
         y: i32,
         scale: f64,
     ) -> PyResult<bool> {
-        wayland_backend_running(py).map_or(Ok(false), |be| {
-            be.bind(py)
-                .borrow()
-                .create_output(py, id, width, height, x, y, scale)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.create_output(id, width, height, x, y, scale))
+            .map_err(PyErr::from)
     }
+
     /// Add a display over a rectangle of an existing Wayland output (see
     /// `WaylandBackend.create_view`); false when no backend runs.
-    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (id, owner, x, y, width, height))]
+    // The parameter list is the Python signature; grouping it would change the ABI.
+    #[allow(clippy::too_many_arguments)]
     fn create_view(
         &self,
         py: Python<'_>,
@@ -10643,12 +11537,11 @@ impl ScreenCapture {
         width: i32,
         height: i32,
     ) -> PyResult<bool> {
-        wayland_backend_running(py).map_or(Ok(false), |be| {
-            be.bind(py)
-                .borrow()
-                .create_view(py, id, owner, x, y, width, height)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.create_view(id, owner, x, y, width, height))
+            .map_err(PyErr::from)
     }
+
     /// Resize a Wayland screen's output in place (see `WaylandBackend.resize_output`);
     /// false when no backend runs.
     #[pyo3(signature = (id, width, height, scale = 1.0))]
@@ -10660,41 +11553,46 @@ impl ScreenCapture {
         height: i32,
         scale: f64,
     ) -> PyResult<bool> {
-        wayland_backend_running(py).map_or(Ok(false), |be| {
-            be.bind(py)
-                .borrow()
-                .resize_output(py, id, width, height, scale)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.resize_output(id, width, height, scale))
+            .map_err(PyErr::from)
     }
+
     /// Destroy a secondary Wayland output; false when no backend runs.
     fn destroy_output(&self, py: Python<'_>, id: u32) -> PyResult<bool> {
-        wayland_backend_running(py)
-            .map_or(Ok(false), |be| be.bind(py).borrow().destroy_output(py, id))
+        let c = self.0.clone();
+        py.detach(move || c.destroy_output(id)).map_err(PyErr::from)
     }
+
     /// Move a Wayland output (the primary included) to layout offset `(x, y)`; false when
     /// no backend runs or the id is unknown.
     fn reposition_output(&self, py: Python<'_>, id: u32, x: i32, y: i32) -> PyResult<bool> {
-        wayland_backend_running(py).map_or(Ok(false), |be| {
-            be.bind(py).borrow().reposition_output(py, id, x, y)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.reposition_output(id, x, y))
+            .map_err(PyErr::from)
     }
+
     /// Recreate the Wayland cursor theme at `size` pixels (named-cursor callbacks and the
     /// burned-in overlay); false when no backend runs or the size is non-positive.
     fn set_cursor_size(&self, py: Python<'_>, size: i32) -> PyResult<bool> {
-        wayland_backend_running(py).map_or(Ok(false), |be| {
-            be.bind(py).borrow().set_cursor_size(py, size)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.set_cursor_size(size))
+            .map_err(PyErr::from)
     }
+
     /// Every live Wayland output as `(id, x, y, width, height, scale, capturing)`; empty
     /// when no backend runs.
     fn list_outputs(&self, py: Python<'_>) -> PyResult<Vec<OutputDesc>> {
-        wayland_backend_running(py)
-            .map_or(Ok(Vec::new()), |be| be.bind(py).borrow().list_outputs(py))
+        let c = self.0.clone();
+        py.detach(move || c.list_outputs()).map_err(PyErr::from)
     }
+
     /// Display capacity (see `WaylandBackend.output_capacity`); -1 when no backend runs.
     fn output_capacity(&self, py: Python<'_>) -> PyResult<i64> {
-        wayland_backend_running(py).map_or(Ok(-1), |be| be.bind(py).borrow().output_capacity(py))
+        let c = self.0.clone();
+        py.detach(move || c.output_capacity()).map_err(PyErr::from)
     }
+
     /// Move a window onto an output (fullscreened there); false when no backend runs.
     fn move_window_to_output(
         &self,
@@ -10702,17 +11600,16 @@ impl ScreenCapture {
         window_id: u32,
         output_id: u32,
     ) -> PyResult<bool> {
-        wayland_backend_running(py).map_or(Ok(false), |be| {
-            be.bind(py)
-                .borrow()
-                .move_window_to_output(py, window_id, output_id)
-        })
+        let c = self.0.clone();
+        py.detach(move || c.move_window_to_output(window_id, output_id))
+            .map_err(PyErr::from)
     }
+
     /// Every mapped window as `(window_id, title, app_id, output_id, waiting)`; empty when
     /// no backend runs.
     fn list_windows(&self, py: Python<'_>) -> PyResult<Vec<WindowDesc>> {
-        wayland_backend_running(py)
-            .map_or(Ok(Vec::new()), |be| be.bind(py).borrow().list_windows(py))
+        let c = self.0.clone();
+        py.detach(move || c.list_windows()).map_err(PyErr::from)
     }
 }
 
@@ -10744,9 +11641,7 @@ impl Drop for ScreenCapture {
                     && let Some(slot) = WAYLAND_BACKEND.get()
                     && let Some(be) = slot.lock().unwrap().as_ref()
                 {
-                    Python::attach(|py| {
-                        let _ = be.bind(py).borrow().stop_capture(did);
-                    });
+                    let _ = be.stop_capture(did);
                 }
             }
             // Pair the cursor-monitor acquire from start_capture: a dropped
@@ -10865,7 +11760,6 @@ fn ensure_wayland_display(
     cursor_size: i32,
 ) -> PyResult<String> {
     ensure_wayland_backend(
-        py,
         width,
         height,
         render_node,
@@ -11012,7 +11906,7 @@ fn probe_hardware(
 /// compositor thread has been started (this never creates one).
 #[pyfunction]
 fn get_wayland_display_name(py: Python<'_>) -> Option<String> {
-    wayland_backend_running(py)?;
+    wayland_backend_running()?;
     py.detach(|| wait_socket_name(Duration::from_secs(2)))
 }
 
@@ -11058,9 +11952,8 @@ fn _stop_all_captures(py: Python<'_>) {
     // the Barrier times out into the unsafe exit.
     let be = WAYLAND_BACKEND
         .get()
-        .and_then(|slot| slot.lock().unwrap().as_ref().map(|b| b.clone_ref(py)));
+        .and_then(|slot| slot.lock().unwrap().as_ref().cloned());
     if let Some(be) = be {
-        let be = be.bind(py).borrow();
         let mut displays: Vec<u32> = wayland_alive().lock().unwrap().iter().copied().collect();
         if !displays.contains(&0) {
             displays.push(0);
@@ -11136,10 +12029,10 @@ fn pixelflux(m: &Bound<'_, PyModule>) -> PyResult<()> {
     if std::env::var_os("SVT_LOG").is_none() {
         unsafe { std::env::set_var("SVT_LOG", "1") };
     }
-    m.add_class::<WaylandBackend>()?;
+    m.add_class::<PyWaylandBackend>()?;
     m.add_class::<StripeFrame>()?;
     m.add_class::<PyCaptureSettings>()?;
-    m.add_class::<ScreenCapture>()?;
+    m.add_class::<PyScreenCapture>()?;
     m.add_class::<webcam::VirtualCamera>()?;
     m.add_class::<webcam::VirtualCameraSettings>()?;
     // The software encoder of each video codec this build runs on this machine, by codec name:
