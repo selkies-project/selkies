@@ -450,6 +450,7 @@ export function createLocalClipboardSender({
                 const localSig = await clipboardSync.localSig(payload, mime);
                 const changed = clipboardSync.noteLocal(localSig);
                 if (!changed || explicitHasPrecedence()) return;
+                if (res.kind !== 'image' && clipboardSync.echoes(res.text)) return;
                 let skipped = null;
                 await sendClipboardData(payload, mime, (reason, code) => { skipped = code || reason; });
                 if (skipped === 'clipboardSkipNotConnected' || skipped === 'clipboardSkipSendFailed') {
@@ -1112,6 +1113,8 @@ export function clipboardPreviewMessage(text, secret = false) {
  *     clipboard held, once this page emptied the local clipboard.
  * @property {(s: string) => void} forgetLocal Forgets that the local
  *     clipboard held `s`, where its push never left, so the next read sends it.
+ * @property {(text: string|undefined) => boolean} echoes Whether a local read's
+ *     text is the value last synced in either direction, come back in another form.
  * @property {(text?: string, blob?: Blob, mime?: string, bytes?: Uint8Array) => void} resolveServer
  *     Caches fresh server data and settles pending requests.
  * @property {() => Promise<void>} captureLocalImageSig Records the browser's
@@ -1149,6 +1152,18 @@ export function clipboardPreviewMessage(text, secret = false) {
  * @param {() => boolean} [hooks.canRead] Local-to-server direction enabled.
  * @returns {ClipboardSync}
  */
+/**
+ * Text as the session and the browser both mean it: line ends are LF.
+ * Chromium on Windows keeps plain text with CRLF line ends whatever was
+ * written, so the session's own text reads back from the local clipboard
+ * with its line ends changed, which must not read as a copy.
+ * @param {string} text
+ * @returns {string}
+ */
+export function sameLines(text) {
+    return text.replace(/\r\n?/g, '\n');
+}
+
 export function createClipboardSync({ sendRequest, digestBytes, isChromium = true, canRead = () => true }) {
     let lastText = '';
     let lastBlob = null;
@@ -1156,10 +1171,14 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
     let lastSyncedSig = null;
     let lastReencodeSig = null;
     let lastLocalSig = null;
+    // The text of the value last synced, either way, when it is known: a local read whose text is that is
+    // the same value come back in the engine's own form (its markup rewrapped, an image beside it), no copy.
+    let lastSyncedText = null;
     let pending = [];
-    function noteSynced(s) {
+    function noteSynced(s, text = null) {
         lastSyncedSig = s;
         lastReencodeSig = null;
+        lastSyncedText = typeof text === 'string' && text ? sameLines(text) : null;
     }
 
     function hashBytes(h, u8) {
@@ -1177,9 +1196,10 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      */
     function sigOf(data, mime) {
         if (typeof data === 'string') {
+            const text = sameLines(data);
             let h = 5381;
-            for (let i = 0; i < data.length; i++) h = ((h << 5) + h + data.charCodeAt(i)) | 0;
-            return { full: `t:${data.length}:${h}`, legacy: null };
+            for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+            return { full: `t:${text.length}:${h}`, legacy: null };
         }
         if (data && data.__clipDigest) {
             const dm = mime || '';
@@ -1218,7 +1238,18 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
 
     /** Records content as synced; called on transfer success. */
     function markSynced(data, mime) {
-        noteSynced(sig(data, mime));
+        noteSynced(sig(data, mime), typeof data === 'string' ? data : null);
+    }
+
+    /**
+     * Whether text read from the local clipboard is the value last synced,
+     * come back in another form: what the session sent, or what this page
+     * sent it, so sending it would only take the session's clipboard from
+     * its owner (a file manager's cut is the owner's alone).
+     * @param {string|undefined} text The read's plain text.
+     */
+    function echoes(text) {
+        return typeof text === 'string' && !!text && lastSyncedText !== null && sameLines(text) === lastSyncedText;
     }
 
     /**
@@ -1281,7 +1312,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * computes for the same data.
      */
     function resolveServer(text, blob, mime, bytes) {
-        if (typeof text === 'string') { lastText = text; noteSynced(sig(text)); }
+        if (typeof text === 'string') { lastText = text; noteSynced(sig(text), text); }
         if (blob) { lastBlob = blob; noteSynced(sig(bytes != null ? bytes : blob, mime || blob.type)); }
         if (mime) { lastMime = mime; }
         if (pending.length === 0) return;
@@ -1423,6 +1454,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
         request,
         copyViaExecCommand,
         get lastText() { return lastText; },
+        echoes,
         get lastBlob() { return lastBlob; },
         get lastMime() { return lastMime; },
     };
@@ -1690,6 +1722,7 @@ export function createClipboardGestures({
         }
         const sending = content.then(async ([data, mime]) => {
             if (!clipboardSync.noteLocal(await clipboardSync.localSig(data, mime))) return;
+            if (typeof data === 'string' && clipboardSync.echoes(data)) return;
             await sendClipboardData(data, mime);
         }).catch((err) => console.warn(`Paste could not reach the session: ${err && err.name}`));
         pasteSendInFlight = sending;

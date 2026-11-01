@@ -218,6 +218,61 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
     check('a push the policy declined is not chased', sent.length === 0, JSON.stringify(sent));
 }
 
+// The session's own copy read back in the browser's form is no copy. Chromium on Windows keeps
+// plain text with CRLF line ends, and markup comes back rewrapped; sent, either would take the
+// session's clipboard from its owner (a file manager's cut becomes text, and its paste offers to
+// save the text as a file).
+{
+    const { sender: s, sent, clipboardSync } = sender();
+    const paths = 'file:///home/u/report.odt\nfile:///home/u/notes.txt';
+    clipboardSync.resolveServer(paths);
+    clipboardSync.noteLocal(clipboardSync.sig(paths));
+    clipboard.text = paths.replace(/\n/g, '\r\n');
+    await s.readAndSend();
+    check("the session's text read back with CRLF line ends is not sent", sent.length === 0, JSON.stringify(sent));
+    clipboard.text = 'file:///home/u/other.txt\r\nfile:///home/u/more.txt';
+    await s.readAndSend();
+    check('a different copy with CRLF line ends is', sent.length === 1, JSON.stringify(sent));
+    clipboard.text = 'what the user copied before';
+}
+{
+    const sent = [];
+    const clipboardSync = createClipboardSync({ sendRequest: () => {} });
+    const s = createLocalClipboardSender({
+        isChromium: true, isSharedMode: () => false, canSync: () => true, canRead: () => true,
+        binaryEnabled: () => true, clipboardSync,
+        sendClipboardData: async (data, mime) => { sent.push({ mime }); clipboardSync.markSynced(data, mime); },
+    });
+    const item = (html, text) => [{
+        types: ['text/html', 'text/plain'],
+        getType: async (t) => new Blob([t === 'text/html' ? html : text], { type: t }),
+    }];
+    const savedRead = navigator.clipboard.read;
+    navigator.clipboard.read = async () => item("<meta charset='utf-8'><p>from <b>the session</b></p>", 'from the session');
+    // As the landing of a formatted copy leaves it: the server's text synced, the local form unknown.
+    clipboardSync.resolveServer('from the session', null, 'application/x-selkies-clipboard-flavours', { __clipDigest: true, byteLength: 40, hash: 7 });
+    clipboardSync.noteLocal(null);
+    await s.readAndSend();
+    check("the session's formatted copy read back rewrapped is not sent", sent.length === 0, JSON.stringify(sent));
+    navigator.clipboard.read = async () => item('<p>copied in the browser</p>', 'copied in the browser');
+    await s.readAndSend();
+    check('a formatted copy made in the browser is', sent.length === 1, JSON.stringify(sent));
+    navigator.clipboard.read = savedRead;
+}
+{
+    // The session sent A, this page then sent B: copying A again in the browser is a copy.
+    const { sender: s, sent, clipboardSync } = sender();
+    clipboardSync.resolveServer('value A');
+    clipboardSync.noteLocal(clipboardSync.sig('value A'));
+    clipboard.text = 'value B';
+    await s.readAndSend();
+    clipboard.text = 'value A';
+    await s.readAndSend();
+    check('copying again what the session sent before a newer value is sent',
+          sent.length === 2 && sent[1].data === 'value A', JSON.stringify(sent));
+    clipboard.text = 'what the user copied before';
+}
+
 Date.now = realNow;
 console.log(`[clip-precedence] ${failed === 0 ? 'all checks passed' : failed + ' failed'}`);
 process.exit(failed === 0 ? 0 : 1);

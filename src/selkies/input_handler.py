@@ -2222,6 +2222,12 @@ class SecretText(str):
         return "SecretText(<hidden>)" if self else "SecretText('')"
 
 
+def _same_lines(text: bytes) -> bytes:
+    """Text with LF line ends and no trailing line end: the form two clipboards
+    holding the same text agree on, whatever line ends each keeps."""
+    return text.replace(b"\r\n", b"\n").replace(b"\r", b"\n").rstrip(b"\n")
+
+
 def clipboard_secret_hint(value: Optional[bytes]) -> bool:
     """Whether a hint target's value marks its copy secret."""
     return bool(value) and bytes(value).strip(b"\0 \t\r\n") == b"secret"
@@ -4539,6 +4545,8 @@ class WebRTCInput:
             and write_clipboard: content this server just wrote is never
             re-broadcast (client/server echo loop), and the baseline survives
             client reconnects so nothing is resent unchanged.
+        _clipboard_last_mime: The baseline's type, which says where its plain
+            text is (`_echoes_session_clipboard`).
         _app_watch_failure, _app_clip_read_failure: Last (display, error) the
             app-compositor selection watch / read failed with, so a persistent
             failure is reported once, not per tick.
@@ -4589,6 +4597,8 @@ class WebRTCInput:
     # The PNG still being made for a client's image (`write_clipboard`), which a
     # paste waits for (`_paste_waits_for_png`); none until a write starts one.
     _png_beside: Optional[asyncio.Task] = None
+    # The clipboard baseline's type (`_echoes_session_clipboard`); set per instance once the baseline is.
+    _clipboard_last_mime: Optional[str] = None
 
     def __init__(
         self,
@@ -8045,6 +8055,38 @@ class WebRTCInput:
             logger_webrtc_input.warning(f"Error reading clipboard with xclip: {e}", exc_info=True)
             return None, None
 
+    def _echoes_session_clipboard(self, data: Union[str, bytes], mime_type: str,
+                                  flavours: Optional[List[Tuple[str, bytes]]]) -> bool:
+        """Whether a client's push carries nothing but the session clipboard's
+        own plain text, its line ends aside. The browser hands the session's
+        copy back in its own form (Chromium on Windows keeps text with CRLF
+        line ends, markup comes back rewrapped), and writing that would take
+        the clipboard from its owner with less than it offered: a file
+        manager's cut, a URI list marked as a cut beside its paths as text,
+        would become the text, and its paste would offer to save the text as a
+        file instead of moving the files. A secret is always written, for the
+        hint it carries."""
+        if isinstance(data, SecretText):
+            return False
+        if flavours:
+            text = next((payload for m, payload in flavours if m == "text/plain"), None)
+        else:
+            text = data if mime_type == "text/plain" else None
+        base, base_mime = self._clipboard_last_bytes, self._clipboard_last_mime
+        if text is None or base is None:
+            return False
+        if base_mime == CLIPBOARD_FLAVOURS_MIME:
+            try:
+                base = next((payload for m, payload in clipboard_flavours(base) if m == "text/plain"), None)
+            except ValueError:
+                return False
+        elif base_mime != "text/plain":
+            return False
+        if base is None:
+            return False
+        pushed = text if isinstance(text, bytes) else text.encode("utf-8")
+        return _same_lines(pushed) == _same_lines(base)
+
     async def write_clipboard(self, data: Union[str, bytes],
                               mime_type: str = "text/plain",
                               flavours: Optional[List[Tuple[str, bytes]]] = None) -> bool:
@@ -8067,9 +8109,17 @@ class WebRTCInput:
         taking longer is offered as it came at once, and the PNG joins it
         when ready unless something newer took the clipboard meanwhile.
 
+        A client's push of what the session clipboard already holds, its plain
+        text the same but for line ends, is that clipboard come back from the
+        browser in the browser's form (`_echoes_session_clipboard`) and leaves
+        it to its owner.
+
         Returns:
             True when the clipboard was set (an empty payload is a no-op True).
         """
+        if self._echoes_session_clipboard(data, mime_type, flavours):
+            logger_webrtc_input.debug("A client sent back what the session clipboard holds; left to its owner.")
+            return True
         if flavours is None and data and isinstance(data, bytes) \
                 and mime_type.startswith("image/") and mime_type != "image/png":
             conversion = asyncio.ensure_future(
@@ -8127,6 +8177,7 @@ class WebRTCInput:
             return True
         input_bytes = data if isinstance(data, bytes) else data.encode('utf-8')
         self._clipboard_last_bytes = input_bytes
+        self._clipboard_last_mime = mime_type
         self._clipboard_self_write = input_bytes
         # A newer copy than the image whose PNG is being made: a paste no longer waits for that PNG.
         if self._png_beside is not None and self._png_beside is not asyncio.current_task():
@@ -8605,6 +8656,7 @@ class WebRTCInput:
                             recopied or curr_data_bytes != self._clipboard_last_bytes):
                         logger_webrtc_input.debug(f"Clipboard changed. Sending content ({curr_mime})")
                         self._clipboard_last_bytes = curr_data_bytes
+                        self._clipboard_last_mime = curr_mime
                         secret_out = isinstance(curr_data, SecretText) and bool(curr_data)
                         self._spawn_task(self.on_clipboard_read(curr_data, curr_mime),
                                          name="ClipboardBroadcast")
