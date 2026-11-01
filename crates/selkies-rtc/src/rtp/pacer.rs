@@ -852,7 +852,7 @@ impl Pacer {
     /// Stop the pacer: nothing is accepted or released after.
     pub fn close(&mut self) {
         self.stopped = true;
-        log::info!(target: "webrtc", "pacer closed: {:?}", self.snapshot());
+        log::debug!(target: "webrtc", "pacer closed: {:?}", self.snapshot());
     }
 
     /// Periodic counter deltas, at debug: one line per pacer per interval for as long as the

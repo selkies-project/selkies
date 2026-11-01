@@ -135,6 +135,14 @@ impl PeerSocket {
         }
     }
 
+    /// Queue a ping carrying `data`, written behind everything sent so far; its pong measures
+    /// the round trip (`PeerRegistry::set_on_pong`).
+    pub fn ping_with(&self, data: Vec<u8>) {
+        if !self.is_closed() {
+            let _ = self.tx.send(Outbound::Ping(data));
+        }
+    }
+
     /// Queue the answer to a ping.
     pub fn pong(&self, data: Vec<u8>) {
         if !self.is_closed() {

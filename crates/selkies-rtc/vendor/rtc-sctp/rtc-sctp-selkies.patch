@@ -363,7 +363,7 @@ index df2b65a..7138ec3 100644
      assert_eq!(Duration::from_millis(90), a.rtt());
  }
 diff --git a/src/association/timer.rs b/src/association/timer.rs
-index e95b620..cf316f6 100644
+index e95b620..01bfd07 100644
 --- a/src/association/timer.rs
 +++ b/src/association/timer.rs
 @@ -1,6 +1,8 @@
@@ -376,7 +376,7 @@ index e95b620..cf316f6 100644
  const MAX_INIT_RETRANS: usize = 8;
  const PATH_MAX_RETRANS: usize = 5;
  const NO_MAX_RETRANS: usize = usize::MAX;
-@@ -168,7 +170,11 @@ impl TimerTable {
+@@ -168,8 +170,16 @@ impl TimerTable {
  // RFC 9260 §16 recommends a one-second initial RTO.  This value is used by
  // both T1-init and T1-cookie before an RTT measurement is available.
  const RTO_INITIAL: u64 = 1000; // msec
@@ -387,8 +387,70 @@ index e95b620..cf316f6 100644
 +// not sent spurious retransmissions.
 +const RTO_MIN: u64 = 400; // msec
  const RTO_MAX: u64 = 60000; // msec
++/// The most a T3 expiry doubles the RTO to, unless the measured path's RTO stands above it. Input
++/// shares this association, so a repair stays near a flat retransmission rather than lagging for a
++/// minute after an outage; the congestion window is what protects the path.
++const RTO_BACKOFF_CAP: u64 = 1000; // msec
  const RTO_ALPHA: u64 = 1;
  const RTO_BETA: u64 = 2;
+ const RTO_BASE: u64 = 8;
+@@ -221,10 +231,13 @@ impl RtoManager {
+         self.rto
+     }
+ 
+-    /// RFC 9260 6.3.3 E2: retain backoff until a new RTT measurement updates RTO.
++    /// RFC 9260 6.3.3 E2: retain backoff until a new RTT measurement updates RTO, held to
++    /// `RTO_BACKOFF_CAP` or the RTO the path last measured, whichever is larger.
+     pub(crate) fn backoff(&mut self) {
+         if !self.no_update {
+-            self.rto = self.rto.saturating_mul(2).min(RTO_MAX);
++            let measured = (self.srtt + (4.0 * self.rttvar) as u64).min(RTO_MAX);
++            let cap = RTO_BACKOFF_CAP.max(measured);
++            self.rto = self.rto.saturating_mul(2).min(cap).max(self.rto.min(cap));
+         }
+     }
+ 
+@@ -269,12 +282,23 @@ mod tests {
+         rto.set_rto(1000, true);
+         rto.backoff();
+         assert_eq!(1000, rto.get_rto());
+-        rto.set_rto(1000, false);
++        rto.set_rto(400, false);
+         rto.backoff();
+-        assert_eq!(2000, rto.get_rto());
+-        rto.set_rto(RTO_MAX - 1, false);
++        assert_eq!(800, rto.get_rto());
+         rto.backoff();
+-        assert_eq!(RTO_MAX, rto.get_rto());
++        assert_eq!(RTO_BACKOFF_CAP, rto.get_rto());
++        rto.backoff();
++        assert_eq!(RTO_BACKOFF_CAP, rto.get_rto());
++    }
++
++    #[test]
++    fn rto_backoff_keeps_a_longer_measured_rto() {
++        let mut rto = RtoManager::new();
++        rto.set_new_rtt(2000);
++        let measured = rto.get_rto();
++        assert!(measured > RTO_BACKOFF_CAP);
++        rto.backoff();
++        assert_eq!(measured, rto.get_rto());
+     }
+ 
+     #[test]
+diff --git a/src/association/timer_deadline_test.rs b/src/association/timer_deadline_test.rs
+index 5ea308b..0eec170 100644
+--- a/src/association/timer_deadline_test.rs
++++ b/src/association/timer_deadline_test.rs
+@@ -139,7 +139,7 @@ fn due_t3_survives_forward_only_sack_and_same_instant_is_idempotent() -> Result<
+     let first_timeout = a.timers.get(Timer::T3RTX).unwrap();
+     a.handle_timeout(first_timeout);
+     assert_eq!(a.stats.get_num_t3timeouts(), 1);
+-    assert_eq!(a.rto_mgr.get_rto(), 2000);
++    assert_eq!(a.rto_mgr.get_rto(), 1000, "a T3 backoff holds at its cap");
+     assert_eq!(a.inflight_queue.get_num_bytes(), 0);
+     assert_eq!(a.inflight_queue.len(), 1);
+     assert!(a.inflight_queue.get(first).unwrap().abandoned());
 diff --git a/src/chunk/chunk_abort.rs b/src/chunk/chunk_abort.rs
 index a86f999..8229c79 100644
 --- a/src/chunk/chunk_abort.rs
@@ -523,9 +585,18 @@ index 58eec59..c03132d 100644
      pair.drive();
  
 diff --git a/src/endpoint/mod.rs b/src/endpoint/mod.rs
-index a22c139..659646f 100644
+index a22c139..4336b24 100644
 --- a/src/endpoint/mod.rs
 +++ b/src/endpoint/mod.rs
+@@ -24,7 +24,7 @@ use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
+ use shared::{EcnCodepoint, TransportContext, TransportMessage, TransportProtocol};
+ 
+ use bytes::Bytes;
+-use log::{debug, trace, warn};
++use log::{debug, trace};
+ use slab::Slab;
+ use thiserror::Error;
+ 
 @@ -135,8 +135,10 @@ impl Endpoint {
          } else {
              //TODO: improve INIT handling for DoS attack
@@ -539,6 +610,15 @@ index a22c139..659646f 100644
                  } else {
                      None
                  }
+@@ -218,7 +220,7 @@ impl Endpoint {
+         let server_config = if let Some(server_config) = self.server_config.as_ref() {
+             server_config
+         } else {
+-            warn!("refusing first packet due to empty server_config");
++            debug!("refusing first packet due to empty server_config");
+             return None;
+         };
+ 
 @@ -272,6 +274,7 @@ impl Endpoint {
          server_config: Option<Arc<ServerConfig>>,
          transport_config: Arc<TransportConfig>,

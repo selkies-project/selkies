@@ -932,7 +932,7 @@ impl RtpSender {
     /// A frame predicting from one this peer was never sent: nothing but a key frame decodes
     /// here, and one is asked for.
     fn undecodable(&mut self, frame_id: u16, reference: Option<u16>) {
-        log::info!(
+        log::debug!(
             target: "webrtc",
             "{} sender {}: frame {} predicts from {:?}, which this peer was not sent; asking for a key frame",
             self.kind.as_str(), self.ssrc, frame_id, reference

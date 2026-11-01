@@ -116,7 +116,11 @@ fn packetize_stap_a(nals: &[Bytes], i: usize, out: &mut Vec<Payload>) -> usize {
     let mut payload = Vec::new();
     let mut counter = 0;
     let mut j = i;
-    while j < nals.len() && !nals[j].is_empty() && nals[j].len() <= available && counter < 9 {
+    while j < nals.len()
+        && !nals[j].is_empty()
+        && LENGTH_FIELD_SIZE + nals[j].len() <= available
+        && counter < 9
+    {
         let nalu = &nals[j];
         stap_header |= nalu[0] & 0x80;
         let nri = nalu[0] & 0x60;
@@ -312,5 +316,22 @@ mod tests {
         // the parameter sets alone and sends the slice separately.
         assert_eq!(ours.len(), 1);
         assert_eq!(theirs.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod aggregation_tests {
+    use super::*;
+
+    /// A NAL that fits the aggregate with no room for its length field goes alone, whichever side
+    /// of the boundary it falls on: a real encoder's frames land there.
+    #[test]
+    fn a_nal_at_the_aggregates_edge_stays_within_a_packet() {
+        for extra in 0..4 {
+            let size = PACKET_MAX - STAP_A_HEADER_SIZE - extra;
+            let nal = Bytes::from(vec![0x41; size]);
+            let out = packetize(&[nal.clone(), Bytes::from_static(&[0x41, 0x80])]);
+            assert!(out.iter().all(|p| p.len() <= PACKET_MAX), "{size}");
+        }
     }
 }

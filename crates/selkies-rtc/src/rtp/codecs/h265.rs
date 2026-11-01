@@ -75,7 +75,7 @@ fn packetize_ap(nals: &[Bytes], i: usize, out: &mut Vec<Payload>) -> usize {
     let mut j = i;
     while j < nals.len()
         && nals[j].len() >= NAL_HEADER_SIZE
-        && nals[j].len() <= available
+        && LENGTH_FIELD_SIZE + nals[j].len() <= available
         && counter < 9
     {
         let nalu = &nals[j];
@@ -157,6 +157,23 @@ pub fn depayload(payload: &Bytes) -> Result<Bytes, PackError> {
         return Err(PackError("NAL unit type is not supported"));
     }
     Ok(Bytes::from(out))
+}
+
+#[cfg(test)]
+mod aggregation_tests {
+    use super::*;
+
+    /// A NAL that fits the aggregate with no room for its length field goes alone, whichever side
+    /// of the boundary it falls on.
+    #[test]
+    fn a_nal_at_the_aggregates_edge_stays_within_a_packet() {
+        for extra in 0..4 {
+            let size = PACKET_MAX - AP_HEADER_SIZE - extra;
+            let nal = Bytes::from(vec![0x26; size]);
+            let out = packetize(&[nal.clone(), Bytes::from_static(&[0x02, 0x01, 0x80])]);
+            assert!(out.iter().all(|p| p.len() <= PACKET_MAX), "{size}");
+        }
+    }
 }
 
 #[cfg(test)]

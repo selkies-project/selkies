@@ -6,7 +6,7 @@
 # as path dependencies while the three trees are developed side by side.
 [workspace]
 resolver = "3"
-members = ["crates/selkies"]
+members = ["crates/selkies", "crates/selkies-rtc"]
 # The sibling checkouts keep their own workspaces, locks, and profiles: each is released on
 # its own, and a build run from inside one must resolve against its own Cargo.lock.
 exclude = ["pixelflux", "pcmflux"]
@@ -29,3 +29,18 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# rtc-sctp carries the Selkies SCTP fixes until they land upstream
+# (crates/selkies-rtc/vendor/rtc-sctp/rtc-sctp-selkies.patch).
+[patch.crates-io]
+rtc-sctp = { path = "crates/selkies-rtc/vendor/rtc-sctp" }
+
+# Optimized enough to time and to drive a browser with, and rebuilt in seconds rather than the
+# minutes fat LTO takes; numbers quoted anywhere come from `release`.
+[profile.iterate]
+inherits = "release"
+opt-level = 2
+lto = false
+codegen-units = 256
+incremental = true
+strip = false

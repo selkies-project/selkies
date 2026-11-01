@@ -176,6 +176,10 @@ const RTO_INITIAL: u64 = 1000; // msec
 // not sent spurious retransmissions.
 const RTO_MIN: u64 = 400; // msec
 const RTO_MAX: u64 = 60000; // msec
+/// The most a T3 expiry doubles the RTO to, unless the measured path's RTO stands above it. Input
+/// shares this association, so a repair stays near a flat retransmission rather than lagging for a
+/// minute after an outage; the congestion window is what protects the path.
+const RTO_BACKOFF_CAP: u64 = 1000; // msec
 const RTO_ALPHA: u64 = 1;
 const RTO_BETA: u64 = 2;
 const RTO_BASE: u64 = 8;
@@ -227,10 +231,13 @@ impl RtoManager {
         self.rto
     }
 
-    /// RFC 9260 6.3.3 E2: retain backoff until a new RTT measurement updates RTO.
+    /// RFC 9260 6.3.3 E2: retain backoff until a new RTT measurement updates RTO, held to
+    /// `RTO_BACKOFF_CAP` or the RTO the path last measured, whichever is larger.
     pub(crate) fn backoff(&mut self) {
         if !self.no_update {
-            self.rto = self.rto.saturating_mul(2).min(RTO_MAX);
+            let measured = (self.srtt + (4.0 * self.rttvar) as u64).min(RTO_MAX);
+            let cap = RTO_BACKOFF_CAP.max(measured);
+            self.rto = self.rto.saturating_mul(2).min(cap).max(self.rto.min(cap));
         }
     }
 
@@ -275,12 +282,23 @@ mod tests {
         rto.set_rto(1000, true);
         rto.backoff();
         assert_eq!(1000, rto.get_rto());
-        rto.set_rto(1000, false);
+        rto.set_rto(400, false);
         rto.backoff();
-        assert_eq!(2000, rto.get_rto());
-        rto.set_rto(RTO_MAX - 1, false);
+        assert_eq!(800, rto.get_rto());
         rto.backoff();
-        assert_eq!(RTO_MAX, rto.get_rto());
+        assert_eq!(RTO_BACKOFF_CAP, rto.get_rto());
+        rto.backoff();
+        assert_eq!(RTO_BACKOFF_CAP, rto.get_rto());
+    }
+
+    #[test]
+    fn rto_backoff_keeps_a_longer_measured_rto() {
+        let mut rto = RtoManager::new();
+        rto.set_new_rtt(2000);
+        let measured = rto.get_rto();
+        assert!(measured > RTO_BACKOFF_CAP);
+        rto.backoff();
+        assert_eq!(measured, rto.get_rto());
     }
 
     #[test]

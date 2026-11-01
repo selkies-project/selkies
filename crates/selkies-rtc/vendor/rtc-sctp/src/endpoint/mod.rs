@@ -24,7 +24,7 @@ use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
 use shared::{EcnCodepoint, TransportContext, TransportMessage, TransportProtocol};
 
 use bytes::Bytes;
-use log::{debug, trace, warn};
+use log::{debug, trace};
 use slab::Slab;
 use thiserror::Error;
 
@@ -220,7 +220,7 @@ impl Endpoint {
         let server_config = if let Some(server_config) = self.server_config.as_ref() {
             server_config
         } else {
-            warn!("refusing first packet due to empty server_config");
+            debug!("refusing first packet due to empty server_config");
             return None;
         };
 
