@@ -88,6 +88,9 @@ mod red;
 
 use red::RED_MAX_DISTANCE;
 
+/// The crate version compiled in, for a host that names the capture stack it links.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Returns the calling thread's OS tid (`gettid` syscall) so a stop/start issued from
 /// inside the sink can detect it is on one of the run's own threads and avoid self-joining.
 #[inline]
