@@ -1508,8 +1508,8 @@ impl WebRtcService {
         let (old_w, old_h, region) = pipeline.geometry();
         if (old_w, old_h) != (w, h) {
             pipeline.set_geometry(w, h, region);
-            info!(target: "webrtc", "Display '{display}' realized {w}x{h} (asked {old_w}x{old_h})");
         }
+        info!(target: "webrtc", "Wayland realized geometry for '{display}': {w}x{h} (asked {old_w}x{old_h})");
         self.engine
             .send_remote_resolution(&format!("{w}x{h}"), display);
         Some((w, h))
