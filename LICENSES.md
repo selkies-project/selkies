@@ -218,7 +218,7 @@ table below.
 | pastey | 0.1.1 | MIT OR Apache-2.0 | permissive | both |  |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | permissive | both |  |
 | piper | 0.2.5 | MIT OR Apache-2.0 | permissive | both |  |
-| pixelflux | 2.2.1 | MPL-2.0 | permissive (file-level copyleft) | both | repository LICENSE; Cargo.toml has no license field |
+| pixelflux | 2.2.2 | MPL-2.0 | permissive (file-level copyleft) | both | repository LICENSE; Cargo.toml has no license field |
 | pixman | 0.2.1 | MIT | permissive | both |  |
 | pixman-sys | 0.1.0 | MIT | permissive | both | libpixman-1 (MIT, permissive) |
 | png | 0.18.1 | MIT OR Apache-2.0 | permissive | both |  |

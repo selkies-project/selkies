@@ -1,6 +1,6 @@
 [package]
 name = "pixelflux"
-version = "2.2.1"
+version = "2.2.2"
 edition = "2024"
 # let-chains (stable in edition 2024 since 1.88) are the newest language feature used.
 rust-version = "1.89"
