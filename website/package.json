@@ -33,10 +33,14 @@
     "@types/node": "^26.6.6",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
+    "minimatch": "^11.0.1",
     "postcss": "^8.5.32",
     "tailwindcss": "^4.3.3",
     "typedoc": "^0.28.20",
     "typedoc-plugin-markdown": "^4.14.1",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
   }
 }

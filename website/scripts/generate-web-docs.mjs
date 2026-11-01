@@ -18,7 +18,19 @@
 import * as fs from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Minimatch } from 'minimatch';
 import { Application, TSConfigReader } from 'typedoc';
+
+// TypeDoc 0.28 walks its entry points with Minimatch#matchOne, which minimatch
+// 11 dropped; 11.0.1 is the first release without GHSA-g3hv-75wg-m249, so the
+// website overrides TypeDoc's minimatch to it. TypeDoc asks whether any row of
+// the pattern partially matches a directory's path segments, which a partial
+// match of the joined path answers, as its own file test joins them.
+if (typeof Minimatch.prototype.matchOne !== 'function') {
+  Minimatch.prototype.matchOne = function matchOne(file, _pattern, partial) {
+    return this.match(Array.isArray(file) ? file.join('/') : file, partial);
+  };
+}
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = join(root, '..');
