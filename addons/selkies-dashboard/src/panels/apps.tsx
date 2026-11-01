@@ -377,7 +377,11 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                                 const held = !commandsAvailable || !!running;
                                                 const spin = (action: string) =>
                                                     running === action ? <Loader2 className="animate-spin" /> : null;
-                                                return isAppInstalled(selectedApp.name) ? (
+                                                // A running install or removal keeps the buttons it was started from,
+                                                // the pressed one spinning, though the stored list already moved.
+                                                const installed = running === 'install' ? false
+                                                    : running === 'remove' ? true : isAppInstalled(selectedApp.name);
+                                                return installed ? (
                                                     <>
                                                         <Button
                                                             variant="default"
