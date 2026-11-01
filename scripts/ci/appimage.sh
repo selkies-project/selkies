@@ -248,14 +248,14 @@ system_xcb="$(first_present_if /etc/nv_tegra_release \
 # after them: a bundled session bus names its build machine's paths. `resize`
 # and `gpu-probe` act on a display already up, so they start nothing either.
 case "${1:-}" in
-    session|selkies-session)
+    session)
         shift
         export PATH="${HOST_PATH}:${HERE}/usr/libexec/selkies-session:${ENV_BIN}"
         [ -z "${system_xcb}" ] || export SELKIES_PRELOAD="${system_xcb}"
         exec "${ENV_BIN}/selkies" session "$@"
         ;;
-    resize|gpu-probe|selkies-resize|selkies-gpu-probe)
-        command="${1#selkies-}"
+    resize|gpu-probe)
+        command="$1"
         shift
         exec "${ENV_BIN}/selkies" "${command}" "$@"
         ;;

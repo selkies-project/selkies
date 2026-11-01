@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""`selkies <command>` runs the tools that also install as `selkies-<command>`.
+"""`selkies <command>` runs every tool, and `selkies` is the one console script.
 
-A packaging that carries only the `selkies` executable reaches every tool
-through it, so each command must run the very function its console script
-runs, see its own arguments under its own name, and leave anything else to the
-server, whose --help lists the commands.
+Every packaging reaches each tool through the `selkies` executable (the
+`selkies-<command>` scripts went in 2.2.0), so each command must name a
+function its module defines, see its own arguments under its own name, and
+leave anything else to the server, whose --help lists the commands.
 """
+import ast
 import os
 import re
 import subprocess
@@ -37,12 +38,14 @@ def selkies(*args: str) -> subprocess.CompletedProcess:
 
 def main() -> bool:
     text = open(os.path.join(REPO, "pyproject.toml"), encoding="utf-8").read()
-    scripts = dict(re.findall(r'^(selkies-[\w-]+) = "([\w.]+:\w+)"$', text, re.M))
+    table = text.split("[project.scripts]", 1)[1].split("\n[", 1)[0]
+    scripts = dict(re.findall(r'^([\w-]+) = "([\w.]+:\w+)"$', table, re.M))
+    check("selkies is the one console script", scripts == {"selkies": "selkies.__main__:main"}, scripts)
     for name, (module, function, _) in COMMANDS.items():
-        check(f"selkies {name} runs what selkies-{name} runs", scripts.get(f"selkies-{name}") == f"{module}:{function}",
-              scripts.get(f"selkies-{name}"))
-    check("every selkies-* console script has its command", set(scripts) == {f"selkies-{n}" for n in COMMANDS},
-          sorted(scripts))
+        path = os.path.join(SRC, *module.split(".")) + ".py"
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        check(f"selkies {name} runs a function {module} defines", function in defined, f"{module}:{function}")
 
     run = selkies("session", "--help")
     check("selkies session takes its own arguments, under its own name",
