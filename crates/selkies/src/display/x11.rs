@@ -101,6 +101,19 @@ pub(crate) fn set_applied_dpi(dpi: i32) {
     *APPLIED_DPI.lock().unwrap_or_else(|e| e.into_inner()) = Some(dpi);
 }
 
+/// The current size's physical size in an `RRGetScreenInfo` reply, read off its bytes: the reply's
+/// `nInfo` counts the words of its rate lists where x11rb's parser takes it for a count of lists,
+/// so a server listing more than one rate per size fails that parse with the connection.
+fn current_screen_mm(reply: &[u8]) -> Option<(u32, u32)> {
+    let word = |at: usize| Some(u16::from_ne_bytes([*reply.get(at)?, *reply.get(at + 1)?]));
+    let (count, current) = (word(20)?, word(22)?);
+    if current >= count {
+        return None;
+    }
+    let size = 32 + usize::from(current) * 8;
+    Some((u32::from(word(size + 4)?), u32::from(word(size + 6)?)))
+}
+
 /// The physical size RandR is told for `pixels` at the applied density (96 when none).
 fn millimeters(pixels: i32) -> u32 {
     let dpi = applied_dpi().unwrap_or(96) as f64;
@@ -816,9 +829,8 @@ impl X11 {
         let (w, h) = self.root_size()?;
         let mm_w = ((w as f64 * 25.4 / dpi as f64).round() as u32).max(1);
         let mm_h = ((h as f64 * 25.4 / dpi as f64).round() as u32).max(1);
-        let info = self.conn.randr_get_screen_info(self.root)?.reply()?;
-        let current = info.sizes.get(info.size_id as usize);
-        if current.is_some_and(|s| (s.mwidth as u32, s.mheight as u32) == (mm_w, mm_h)) {
+        let info = self.conn.randr_get_screen_info(self.root)?.raw_reply()?;
+        if current_screen_mm(info.as_ref()) == Some((mm_w, mm_h)) {
             set_applied_dpi(dpi);
             return Ok(());
         }
@@ -1605,6 +1617,24 @@ pub fn seat_desktop_windows() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_current_physical_size_is_read_past_any_rate_lists() {
+        let mut reply = vec![0u8; 32];
+        reply[20..22].copy_from_slice(&2u16.to_ne_bytes());
+        reply[22..24].copy_from_slice(&1u16.to_ne_bytes());
+        // Two rates per size: more words of rates than x11rb's parser allows for.
+        reply[28..30].copy_from_slice(&8u16.to_ne_bytes());
+        for (w, h, mm_w, mm_h) in [(640u16, 480u16, 170u16, 127u16), (1920, 1080, 508, 286)] {
+            for field in [w, h, mm_w, mm_h] {
+                reply.extend_from_slice(&field.to_ne_bytes());
+            }
+        }
+        assert_eq!(current_screen_mm(&reply), Some((508, 286)));
+        reply[22..24].copy_from_slice(&2u16.to_ne_bytes());
+        assert_eq!(current_screen_mm(&reply), None, "no current size");
+        assert_eq!(current_screen_mm(&reply[..20]), None, "a short reply");
+    }
 
     /// Resize the harness display and read the realized geometry back, then restore it.
     #[test]

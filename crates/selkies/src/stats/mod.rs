@@ -41,6 +41,8 @@
 
 pub mod gpu_probe;
 mod gpu_probe_helpers;
+#[cfg(feature = "frame-log")]
+pub mod frame_log;
 pub mod metrics;
 pub mod resources;
 mod send_timer;

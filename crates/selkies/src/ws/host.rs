@@ -165,6 +165,8 @@ pub struct LayoutOutcome {
     pub restart: Vec<String>,
     /// Whether the primary moved back to the origin, its live capture restarted.
     pub reanchored: bool,
+    /// The capture scale the session left for each output created.
+    pub scales: HashMap<String, f64>,
 }
 
 /// Display plumbing: RandR, the compositor's outputs, DPI, and cursor sizing, every call an
@@ -215,13 +217,14 @@ pub trait Display: Send + Sync {
         primary_scale: f64,
     ) -> LayoutOutcome;
 
-    /// Wayland: the second half, once the primary's capture start sized its screen: create
-    /// each laid-out secondary's output at its rectangle and its scale in `scales`
+    /// Wayland: the second half, once the primary's capture start sized its screen: grow each
+    /// laid-out secondary's session screen and create its output at its rectangle, at the DPI in
+    /// `dpis`, the scale the session leaves returned in `LayoutOutcome::scales`
     /// (`_create_wayland_outputs`).
     async fn wayland_layout_after_primary(
         &self,
         layouts: &mut Layouts,
-        scales: &HashMap<String, f64>,
+        dpis: &HashMap<String, String>,
     ) -> LayoutOutcome;
 
     /// Wayland: size the primary's screen (output 0), growing only where `grow_only`.
@@ -232,6 +235,10 @@ pub trait Display: Send + Sync {
 
     /// Wayland: destroy a dropped secondary's compositor output.
     async fn wayland_destroy_output(&self, display_id: &str);
+
+    /// Wayland: retire the session screens of displays no longer in `secondaries`, after a
+    /// display was dropped outside a layout pass.
+    async fn retire_session_screens(&self, secondaries: &[String]);
 
     /// Wayland: have the compositor reload its theme cursor at `size`.
     async fn wayland_set_cursor_size(&self, size: i32) -> bool;
@@ -253,7 +260,7 @@ pub trait Display: Send + Sync {
     /// it cannot; the answer the session-screen ladder last read.
     fn session_screen_capability(&self) -> (bool, String);
 
-    /// Nested Wayland: re-probe the session compositor's control socket for that answer.
+    /// Nested Wayland: re-probe what backs a second display for that answer.
     async fn probe_session_screen_capability(&self) -> (bool, String);
 
     /// Wayland: arrange the session's screens by the layout, later.

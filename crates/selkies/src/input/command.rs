@@ -547,6 +547,85 @@ mod tests {
         );
     }
 
+    /// The session bus is adopted from a real dbus-daemon's session, never from our own launched
+    /// children.
+    #[test]
+    #[ignore = "needs dbus-run-session"]
+    fn a_launch_adopts_the_desktops_session_bus() {
+        use std::os::unix::process::CommandExt;
+        let display = format!(":{}", 60000 + std::process::id() % 5000);
+        let mut session = std::process::Command::new("dbus-run-session")
+            .args(["--", "sleep", "30"])
+            .env("DISPLAY", &display)
+            .env("XDG_CURRENT_DESKTOP", "MATE")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("dbus-run-session runs");
+        let group = nix::unistd::Pid::from_raw(session.id() as i32);
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let mut adopted = HashMap::new();
+        while adopted.is_empty() && Instant::now() < deadline {
+            adopted = session_environment(Some(&display), None);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let bus = adopted
+            .get("DBUS_SESSION_BUS_ADDRESS")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            bus.starts_with("unix:"),
+            "session bus found from the desktop's process: {adopted:?}"
+        );
+        assert_eq!(
+            adopted.get("XDG_CURRENT_DESKTOP").map(String::as_str),
+            Some("MATE"),
+            "desktop identity adopted with it"
+        );
+
+        let on_x11 = AppSession {
+            x11_display: Some(display.clone()),
+            wayland_display: None,
+            kind: "x11",
+        };
+        let mut cache = SessionEnvCache::default();
+        let launch = cache.launch_env(&on_x11, "");
+        assert_eq!(launch.get("DISPLAY"), Some(&display));
+        assert!(!launch.contains_key("WAYLAND_DISPLAY"));
+        assert_eq!(
+            launch.get("XDG_SESSION_TYPE").map(String::as_str),
+            Some("x11")
+        );
+        assert_eq!(
+            launch.get("DBUS_SESSION_BUS_ADDRESS"),
+            Some(&bus),
+            "the launch carries the adopted bus"
+        );
+        assert_eq!(
+            cache
+                .launch_env(&on_x11, "")
+                .get("DBUS_SESSION_BUS_ADDRESS"),
+            Some(&bus),
+            "adoption is cached while the bus answers"
+        );
+        assert_eq!(cache.adopted.len(), 1);
+
+        nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL).expect("our group");
+        let _ = session.wait();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!dbus_address_live(&bus), "a dead bus is not kept");
+        let mut fresh = SessionEnvCache::default();
+        let launch = fresh.launch_env(&on_x11, "");
+        assert_ne!(
+            launch.get("DBUS_SESSION_BUS_ADDRESS"),
+            Some(&bus),
+            "no session process: nothing adopted, the server's environment stays"
+        );
+    }
+
     #[test]
     fn dbus_addresses() {
         assert!(

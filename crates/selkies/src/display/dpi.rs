@@ -596,16 +596,21 @@ pub async fn desktop_dpi() -> Option<i32> {
 /// page gave it, and either way the one in effect is what a page's DPI is then compared
 /// against. Unity on a fresh home writes nothing.
 pub async fn restore_dpi(configured: i32, locked: bool) -> i32 {
-    let current = desktop_dpi().await;
+    let (target, apply) = restore_plan(desktop_dpi().await, configured, locked);
+    if apply {
+        set_dpi(target).await;
+    }
+    target
+}
+
+/// The density startup settles at, and whether it has to be written.
+fn restore_plan(current: Option<i32>, configured: i32, locked: bool) -> (i32, bool) {
     let target = if locked {
         configured
     } else {
         current.unwrap_or(configured)
     };
-    if target != 96 || !matches!(current, None | Some(96)) {
-        set_dpi(target).await;
-    }
-    target
+    (target, target != 96 || !matches!(current, None | Some(96)))
 }
 
 /// Set the X11 display DPI using DE-specific methods (see the module docblock). Returns
@@ -743,6 +748,9 @@ pub async fn set_cursor_size(size: i32) -> bool {
     warn!(target: "display", "No supported tool found/worked to set cursor size.");
     false
 }
+
+#[cfg(test)]
+mod session_density;
 
 #[cfg(test)]
 mod tests {

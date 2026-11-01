@@ -117,11 +117,19 @@ impl Num {
     }
 
     fn min(self, other: Num) -> Num {
-        if self.as_f64() <= other.as_f64() { self } else { other }
+        if self.as_f64() <= other.as_f64() {
+            self
+        } else {
+            other
+        }
     }
 
     fn max(self, other: Num) -> Num {
-        if self.as_f64() >= other.as_f64() { self } else { other }
+        if self.as_f64() >= other.as_f64() {
+            self
+        } else {
+            other
+        }
     }
 }
 
@@ -183,7 +191,12 @@ pub fn parse_bool(value: Option<&str>, default: bool) -> bool {
     match value.map(str::trim) {
         None | Some("") => default,
         Some(text) => matches!(
-            text.split('|').next().unwrap_or("").trim().to_lowercase().as_str(),
+            text.split('|')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_lowercase()
+                .as_str(),
             "true" | "1"
         ),
     }
@@ -225,15 +238,34 @@ pub const CPU_ONLY_ENCODERS: &[&str] = &["jpeg", "h264enc-striped"];
 /// What a display streams with, as `SETTINGS` carries it: a controller beside the display's
 /// owner changes these by its user's pick alone.
 pub const STREAM_SETTINGS: &[&str] = &[
-    "encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit", "video_streaming_mode",
-    "jpeg_quality", "paint_over_jpeg_quality", "use_paint_over_quality", "video_paintover_crf",
-    "video_paintover_burst_frames", "video_bitrate", "rate_control_mode", "use_cpu",
-    "cpu_encode_threading", "audio_bitrate",
+    "encoder",
+    "framerate",
+    "video_crf",
+    "video_fullcolor",
+    "video_10bit",
+    "video_streaming_mode",
+    "jpeg_quality",
+    "paint_over_jpeg_quality",
+    "use_paint_over_quality",
+    "video_paintover_crf",
+    "video_paintover_burst_frames",
+    "video_bitrate",
+    "rate_control_mode",
+    "use_cpu",
+    "cpu_encode_threading",
+    "audio_bitrate",
 ];
 /// The fallback ladder, one order on both transports: the full-frame codecs by the measured
 /// time per frame of their software encoders, then striped H.264, and JPEG last.
-pub const ENCODER_LADDER: &[&str] =
-    &["h264enc", "av1enc", "vp8enc", "h265enc", "vp9enc", "h264enc-striped", "jpeg"];
+pub const ENCODER_LADDER: &[&str] = &[
+    "h264enc",
+    "av1enc",
+    "vp8enc",
+    "h265enc",
+    "vp9enc",
+    "h264enc-striped",
+    "jpeg",
+];
 /// The full-frame codecs by compression efficiency, the order a host with an engine for
 /// them takes them in.
 pub const HARDWARE_LADDER: &[&str] = &["av1enc", "h265enc", "vp9enc", "h264enc", "vp8enc"];
@@ -503,8 +535,10 @@ fn scan_args(args: &[String]) -> (HashMap<&'static str, String>, Vec<String>) {
         let spelled = flag.trim_start_matches("--").replace('-', "_");
         let exact = DEFINITIONS.iter().find(|d| d.name == spelled);
         let def = exact.or_else(|| {
-            let candidates: Vec<&SettingDef> =
-                DEFINITIONS.iter().filter(|d| d.name.starts_with(&spelled)).collect();
+            let candidates: Vec<&SettingDef> = DEFINITIONS
+                .iter()
+                .filter(|d| d.name.starts_with(&spelled))
+                .collect();
             (candidates.len() == 1).then(|| candidates[0])
         });
         let Some(def) = def else {
@@ -625,7 +659,9 @@ impl Settings {
                         Value::List(items(def.default))
                     });
                 }
-                if def.kind == Kind::List && matches!(raw.trim().to_lowercase().as_str(), "" | "none") {
+                if def.kind == Kind::List
+                    && matches!(raw.trim().to_lowercase().as_str(), "" | "none")
+                {
                     self.allowed.insert(def.name, Vec::new());
                     return Ok(Value::List(Vec::new()));
                 }
@@ -643,7 +679,11 @@ impl Settings {
                             .unwrap_or(item)
                     })
                     .collect();
-                let valid: Vec<String> = user.iter().filter(|i| master.contains(i)).cloned().collect();
+                let valid: Vec<String> = user
+                    .iter()
+                    .filter(|i| master.contains(i))
+                    .cloned()
+                    .collect();
                 if def.kind == Kind::Enum
                     && let Some((lo, hi)) = def.value_range
                     && user.len() == 1
@@ -652,7 +692,11 @@ impl Settings {
                     && n <= hi
                 {
                     // '128000.0' must not reach int consumers.
-                    let text = if n == n.trunc() { format!("{}", n as i64) } else { user[0].clone() };
+                    let text = if n == n.trunc() {
+                        format!("{}", n as i64)
+                    } else {
+                        user[0].clone()
+                    };
                     return Ok(Value::Str(text));
                 }
                 if !valid.is_empty() {
@@ -667,10 +711,17 @@ impl Settings {
                 if !user.is_empty() {
                     warn!(target: "settings", "Invalid value(s) '{raw}' for {}; keeping the full allowed set with the system default.", def.name);
                 }
-                let defaults: Vec<String> =
-                    items(def.default).into_iter().filter(|i| master.contains(i)).collect();
+                let defaults: Vec<String> = items(def.default)
+                    .into_iter()
+                    .filter(|i| master.contains(i))
+                    .collect();
                 Ok(if def.kind == Kind::Enum {
-                    Value::Str(defaults.first().cloned().unwrap_or_else(|| def.default.to_string()))
+                    Value::Str(
+                        defaults
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| def.default.to_string()),
+                    )
                 } else {
                     Value::List(defaults)
                 })
@@ -694,7 +745,11 @@ impl Settings {
                         def.name, Num::of(orig), def.min.map(|v| Num::of(v).to_string()).unwrap_or("None".into()),
                         def.max.map(|v| Num::of(v).to_string()).unwrap_or("None".into()), Num::of(n));
                 }
-                Ok(if def.kind == Kind::Int { Value::Int(n as i64) } else { Value::Float(n) })
+                Ok(if def.kind == Kind::Int {
+                    Value::Int(n as i64)
+                } else {
+                    Value::Float(n)
+                })
             }
             Kind::Str => Ok(Value::Str(raw.to_string())),
             Kind::Range => {
@@ -739,12 +794,20 @@ impl Settings {
     /// sentinel, so a templated launcher emitting `--manual-width 0` must not lock the display
     /// to 1024x768.
     fn resolve_manual_resolution(&mut self) {
-        let width_overridden = self.overridden.contains("manual_width") && self.int_value("manual_width") > 0;
-        let height_overridden = self.overridden.contains("manual_height") && self.int_value("manual_height") > 0;
+        let width_overridden =
+            self.overridden.contains("manual_width") && self.int_value("manual_width") > 0;
+        let height_overridden =
+            self.overridden.contains("manual_height") && self.int_value("manual_height") > 0;
         let manual = self.bool_setting("manual_resolution").on;
         if width_overridden || height_overridden || manual {
             info!(target: "settings", "A manual resolution setting was activated; locking to manual mode.");
-            self.values.insert("manual_resolution", Value::Bool(BoolSetting { on: true, locked: true }));
+            self.values.insert(
+                "manual_resolution",
+                Value::Bool(BoolSetting {
+                    on: true,
+                    locked: true,
+                }),
+            );
             if self.int_value("manual_width") <= 0 {
                 self.values.insert("manual_width", Value::Int(1024));
                 info!(target: "settings", "Manual width not set or invalid, defaulting to 1024.");
@@ -763,8 +826,19 @@ impl Settings {
     /// normalized, the TURN username defaulted, and a public listener as the both-family
     /// wildcard address.
     fn post_process(&mut self) {
-        let subfolder = self.str_value("subfolder").trim().trim_matches('/').to_string();
-        self.set_str("subfolder", if subfolder.is_empty() { String::new() } else { format!("/{subfolder}") });
+        let subfolder = self
+            .str_value("subfolder")
+            .trim()
+            .trim_matches('/')
+            .to_string();
+        self.set_str(
+            "subfolder",
+            if subfolder.is_empty() {
+                String::new()
+            } else {
+                format!("/{subfolder}")
+            },
+        );
 
         let mode = self.str_value("mode").trim().to_lowercase();
         if mode != "websockets" && mode != "webrtc" {
@@ -777,7 +851,9 @@ impl Settings {
         self.apply_webrtc_encoder_filter();
 
         if !self.bool_setting("enable_rate_control").on {
-            if self.overridden.contains("rate_control_mode") && self.str_value("rate_control_mode") != "crf" {
+            if self.overridden.contains("rate_control_mode")
+                && self.str_value("rate_control_mode") != "crf"
+            {
                 warn!(target: "settings", "Ignoring rate_control_mode={}: enable_rate_control is false, so the encoder runs CRF.", self.str_value("rate_control_mode"));
             }
             self.set_str("rate_control_mode", "crf".into());
@@ -789,10 +865,19 @@ impl Settings {
         if !self.bool_setting("audio_enabled").on && self.bool_setting("microphone_enabled").on {
             warn!(target: "settings", "Microphone support requires audio to be enabled. Disabling microphone support.");
             let locked = self.bool_setting("microphone_enabled").locked;
-            self.values.insert("microphone_enabled", Value::Bool(BoolSetting { on: false, locked }));
+            self.values.insert(
+                "microphone_enabled",
+                Value::Bool(BoolSetting { on: false, locked }),
+            );
         }
 
-        let clip = self.str_value("enable_clipboard").split('|').next().unwrap_or("").trim().to_lowercase();
+        let clip = self
+            .str_value("enable_clipboard")
+            .split('|')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
         if !matches!(clip.as_str(), "true" | "false" | "in" | "out") {
             warn!(target: "settings", "Invalid enable_clipboard value {:?}; using 'true'.", self.str_value("enable_clipboard"));
             self.set_str("enable_clipboard", "true".into());
@@ -804,7 +889,11 @@ impl Settings {
             let raw = self.str_value(name).to_string();
             let mode = raw.split('|').next().unwrap_or("").trim().to_lowercase();
             // The bool spellings these settings once took are still read.
-            let mode = match mode.as_str() { "1" => "true".to_string(), "0" => "false".to_string(), _ => mode };
+            let mode = match mode.as_str() {
+                "1" => "true".to_string(),
+                "0" => "false".to_string(),
+                _ => mode,
+            };
             if !matches!(mode.as_str(), "true" | "false" | "demand") {
                 warn!(target: "settings", "Invalid {name} value {raw:?}; using 'false'.");
                 self.set_str(name, "false".into());
@@ -840,13 +929,17 @@ impl Settings {
     /// Replace a bool setting's value, keeping its lock.
     pub fn set_bool(&mut self, name: &'static str, on: bool) {
         let locked = self.bool_setting(name).locked;
-        self.values.insert(name, Value::Bool(BoolSetting { on, locked }));
+        self.values
+            .insert(name, Value::Bool(BoolSetting { on, locked }));
     }
 
     pub(crate) fn bool_setting(&self, name: &str) -> BoolSetting {
         match self.values.get(name) {
             Some(Value::Bool(b)) => *b,
-            _ => BoolSetting { on: false, locked: false },
+            _ => BoolSetting {
+                on: false,
+                locked: false,
+            },
         }
     }
 
@@ -925,7 +1018,10 @@ impl Settings {
         let software = software_encoders();
         let sw_fullcolor = software_fullcolor();
         let sw_formats = software_formats();
-        let ten_bit = |backend: Option<&str>, formats: &HashMap<&'static str, Vec<String>>, codec: &str| -> Option<TenBit> {
+        let ten_bit = |backend: Option<&str>,
+                       formats: &HashMap<&'static str, Vec<String>>,
+                       codec: &str|
+         -> Option<TenBit> {
             backend?;
             let listed = formats.get(codec).cloned().unwrap_or_default();
             Some(TenBit {
@@ -987,14 +1083,21 @@ impl Settings {
         let served = backends.get(codec_for_encoder(&canonical_encoder(encoder)))?;
         let carried = |table: &Option<TenBit>, side_fullcolor: Option<bool>| -> Option<bool> {
             let t = table.as_ref()?;
-            Some(if fullcolor && side_fullcolor == Some(true) { t.chroma_444 } else { t.chroma_420 })
+            Some(if fullcolor && side_fullcolor == Some(true) {
+                t.chroma_444
+            } else {
+                t.chroma_420
+            })
         };
         let software = carried(&served.ten_bit.software, served.fullcolor.software);
         let hardware = carried(&served.ten_bit.hardware, served.fullcolor.hardware);
         if use_cpu || CPU_ONLY_ENCODERS.contains(&encoder) || served.hardware.is_none() {
             return software;
         }
-        if fullcolor && served.fullcolor.hardware == Some(false) && served.fullcolor.software == Some(true) {
+        if fullcolor
+            && served.fullcolor.hardware == Some(false)
+            && served.fullcolor.software == Some(true)
+        {
             return software;
         }
         match hardware {
@@ -1026,13 +1129,24 @@ impl Settings {
         } else if CPU_ONLY_ENCODERS.contains(&encoder) {
             2
         } else {
-            let hw = self
-                .encoder_backends()
-                .and_then(|b| b.get(codec_for_encoder(encoder)).and_then(|s| s.hardware.clone()));
+            let hw = self.encoder_backends().and_then(|b| {
+                b.get(codec_for_encoder(encoder))
+                    .and_then(|s| s.hardware.clone())
+            });
             if hw.is_some() { 0 } else { 1 }
         };
-        let order = if group == 0 { HARDWARE_LADDER } else { ENCODER_LADDER };
-        (group, order.iter().position(|e| *e == encoder).unwrap_or(order.len()))
+        let order = if group == 0 {
+            HARDWARE_LADDER
+        } else {
+            ENCODER_LADDER
+        };
+        (
+            group,
+            order
+                .iter()
+                .position(|e| *e == encoder)
+                .unwrap_or(order.len()),
+        )
     }
 
     /// Learn once, at startup, which encoders this host serves, and narrow the encoder menu
@@ -1048,10 +1162,16 @@ impl Settings {
             .operator_encoder_allowed
             .clone()
             .unwrap_or_else(|| self.enum_allowed("encoder"));
-        let mut served: Vec<String> =
-            operator_allowed.iter().filter(|e| self.encoder_served(e)).cloned().collect();
-        let dropped: Vec<String> =
-            operator_allowed.iter().filter(|e| !served.contains(e)).cloned().collect();
+        let mut served: Vec<String> = operator_allowed
+            .iter()
+            .filter(|e| self.encoder_served(e))
+            .cloned()
+            .collect();
+        let dropped: Vec<String> = operator_allowed
+            .iter()
+            .filter(|e| !served.contains(e))
+            .cloned()
+            .collect();
         if served.is_empty() {
             served = ENCODER_CODECS
                 .iter()
@@ -1194,14 +1314,17 @@ impl Settings {
         let Ok(numeric) = value.parse::<f64>() else {
             return allowed;
         };
-        let Ok(numbers) = allowed.iter().map(|a| a.parse::<f64>()).collect::<Result<Vec<_>, _>>() else {
+        let Ok(numbers) = allowed
+            .iter()
+            .map(|a| a.parse::<f64>())
+            .collect::<Result<Vec<_>, _>>()
+        else {
             return allowed;
         };
         if !(lo <= numeric && numeric <= hi) {
             return allowed;
         }
-        let mut merged: Vec<(f64, String)> =
-            numbers.into_iter().zip(allowed).collect();
+        let mut merged: Vec<(f64, String)> = numbers.into_iter().zip(allowed).collect();
         merged.push((numeric, value.to_string()));
         merged.sort_by(|a, b| a.0.total_cmp(&b.0));
         merged.into_iter().map(|(_, item)| item).collect()
@@ -1248,8 +1371,14 @@ impl Settings {
                 }
                 Kind::Enum => {
                     if self.allowed.contains_key(def.name) {
-                        let v = match value { Value::Str(s) => s.clone(), other => other.to_json().to_string() };
-                        entry.insert("allowed".into(), json!(self.published_enum_allowed(def, &v)));
+                        let v = match value {
+                            Value::Str(s) => s.clone(),
+                            other => other.to_json().to_string(),
+                        };
+                        entry.insert(
+                            "allowed".into(),
+                            json!(self.published_enum_allowed(def, &v)),
+                        );
                     }
                 }
                 Kind::List => {
@@ -1262,20 +1391,35 @@ impl Settings {
             out.insert(def.name.to_string(), Json::Object(entry));
         }
         let clip = self.str_value("enable_clipboard");
-        out.insert("clipboard_enabled".into(), json!({"value": clip != "false"}));
-        out.insert("clipboard_in_enabled".into(), json!({"value": clip == "true" || clip == "in"}));
-        out.insert("clipboard_out_enabled".into(), json!({"value": clip == "true" || clip == "out"}));
+        out.insert(
+            "clipboard_enabled".into(),
+            json!({"value": clip != "false"}),
+        );
+        out.insert(
+            "clipboard_in_enabled".into(),
+            json!({"value": clip == "true" || clip == "in"}),
+        );
+        out.insert(
+            "clipboard_out_enabled".into(),
+            json!({"value": clip == "true" || clip == "out"}),
+        );
         for pipeline in ["microphone", "webcam"] {
             let mode = self.str_value(&format!("{pipeline}_on_start")).to_string();
             if let Some(Json::Object(entry)) = out.get_mut(&format!("{pipeline}_on_start")) {
                 entry.insert("value".into(), json!(mode == "true"));
             }
-            out.insert(format!("{pipeline}_on_demand"), json!({"value": mode == "demand"}));
+            out.insert(
+                format!("{pipeline}_on_demand"),
+                json!({"value": mode == "demand"}),
+            );
         }
         if let Some(backends) = self.encoder_backends() {
             out.insert("encoder_backends".into(), json!({"value": backends}));
         }
-        out.insert("apps_local_repo".into(), json!({"value": !self.apps_repo_path().is_empty()}));
+        out.insert(
+            "apps_local_repo".into(),
+            json!({"value": !self.apps_repo_path().is_empty()}),
+        );
         out
     }
 
@@ -1291,6 +1435,7 @@ impl Settings {
             folder.to_string()
         };
         std::path::absolute(&expanded)
+            .map(|p| p.components().collect::<std::path::PathBuf>())
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or(expanded)
     }
@@ -1301,13 +1446,25 @@ impl Settings {
     /// enum outside `allowed` falls back to the server's own value, never to `allowed[0]`.
     /// A `None` client value resolves to the server value or default for the type; an
     /// unknown name yields `None`.
-    pub fn sanitize_client_setting(&self, name: &str, client_value: Option<&Json>, target: &str) -> Option<Json> {
+    pub fn sanitize_client_setting(
+        &self,
+        name: &str,
+        client_value: Option<&Json>,
+        target: &str,
+    ) -> Option<Json> {
         let def = definition(name)?;
         let server = self.values.get(name)?;
         let Some(client) = client_value else {
             return Some(match (def.kind, server) {
                 (Kind::Range, Value::Range(lo, hi)) => {
-                    if lo == hi { json!(lo) } else { self.default_value.get(name).map(|d| json!(d)).unwrap_or(Json::Null) }
+                    if lo == hi {
+                        json!(lo)
+                    } else {
+                        self.default_value
+                            .get(name)
+                            .map(|d| json!(d))
+                            .unwrap_or(Json::Null)
+                    }
                 }
                 (Kind::Bool, Value::Bool(b)) => json!(b.on),
                 (_, other) => other.to_json(),
@@ -1316,7 +1473,13 @@ impl Settings {
         let as_text = |v: &Json| -> String {
             match v {
                 Json::String(s) => s.clone(),
-                Json::Bool(b) => if *b { "True".into() } else { "False".into() },
+                Json::Bool(b) => {
+                    if *b {
+                        "True".into()
+                    } else {
+                        "False".into()
+                    }
+                }
                 other => other.to_string(),
             }
         };
@@ -1329,11 +1492,20 @@ impl Settings {
             }
         };
         let fallback = || -> Json {
-            self.default_value.get(name).map(|d| json!(d)).unwrap_or_else(|| json!(def.default))
+            self.default_value
+                .get(name)
+                .map(|d| json!(d))
+                .unwrap_or_else(|| match def.kind {
+                    Kind::Int => def.default.parse::<i64>().map_or(Json::Null, |n| json!(n)),
+                    Kind::Float => def.default.parse::<f64>().map_or(Json::Null, |n| json!(n)),
+                    _ => json!(def.default),
+                })
         };
         match (def.kind, server) {
             (Kind::Range, Value::Range(lo, hi)) => {
-                let Some(n) = as_number(client).filter(|n| n.is_finite()) else { return Some(fallback()); };
+                let Some(n) = as_number(client).filter(|n| n.is_finite()) else {
+                    return Some(fallback());
+                };
                 let numeric = Num::of(n);
                 let sanitized = lo.max(numeric.min(*hi));
                 if sanitized != numeric {
@@ -1347,10 +1519,14 @@ impl Settings {
                 if name == "encoder" {
                     text = canonical_encoder(&text);
                 }
-                if allowed.iter().any(|a| *a == text) {
+                if allowed.contains(&text) {
                     return Some(json!(text));
                 }
-                let server_default = if server_value.is_empty() { def.default.to_string() } else { server_value.clone() };
+                let server_default = if server_value.is_empty() {
+                    def.default.to_string()
+                } else {
+                    server_value.clone()
+                };
                 if text == server_default {
                     return Some(json!(server_default));
                 }
@@ -1358,7 +1534,9 @@ impl Settings {
                 Some(json!(server_default))
             }
             (Kind::Int | Kind::Float, _) => {
-                let Some(n) = as_number(client).filter(|n| n.is_finite()) else { return Some(fallback()); };
+                let Some(n) = as_number(client).filter(|n| n.is_finite()) else {
+                    return Some(fallback());
+                };
                 let sanitized = if def.kind == Kind::Int { n.trunc() } else { n };
                 let lo = def.min.unwrap_or(INT_SETTING_DEFAULT_MIN);
                 let hi = def.max.unwrap_or(INT_SETTING_DEFAULT_MAX);
@@ -1366,7 +1544,11 @@ impl Settings {
                 if clamped != sanitized {
                     warn!(target: target, "Client value for '{name}' ({}) was clamped to {} (bounds: {}-{}).", as_text(client), Num::of(clamped), Num::of(lo), Num::of(hi));
                 }
-                Some(if def.kind == Kind::Int { json!(clamped as i64) } else { json!(clamped) })
+                Some(if def.kind == Kind::Int {
+                    json!(clamped as i64)
+                } else {
+                    json!(clamped)
+                })
             }
             (Kind::Bool, Value::Bool(b)) => {
                 let client_bool = matches!(as_text(client).to_lowercase().as_str(), "true" | "1");
@@ -1384,7 +1566,9 @@ impl Settings {
 
     /// The `--help` text: every setting with its flags, environment names, and help.
     pub fn help_text(epilog: &str) -> String {
-        let mut out = String::from("usage: selkies [options]\n\nSelkies WebSocket Streaming Server\n\noptions:\n");
+        let mut out = String::from(
+            "usage: selkies [options]\n\nSelkies WebSocket Streaming Server\n\noptions:\n",
+        );
         for def in DEFINITIONS {
             let mut flags = format!("--{}", def.name.replace('_', "-"));
             if def.name.contains('_') {
@@ -1420,7 +1604,8 @@ fn split_span(token: &str) -> Option<(&str, &str)> {
 
 /// A range setting's built-in span.
 fn default_span(def: &SettingDef) -> Result<(Num, Num), String> {
-    let (a, b) = split_span(def.default).ok_or_else(|| format!("default {:?} is no span", def.default))?;
+    let (a, b) =
+        split_span(def.default).ok_or_else(|| format!("default {:?} is no span", def.default))?;
     let (lo, hi) = (Num::parse(a)?, Num::parse(b)?);
     Ok((lo.min(hi), lo.max(hi)))
 }
@@ -1448,8 +1633,10 @@ mod tests {
 
     fn parse(args: &[&str], env: &[(&str, &str)]) -> Settings {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let env_map: HashMap<String, String> =
-            env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let env_map: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         Settings::parse(&args, &|k| env_map.get(k).cloned())
     }
 
@@ -1467,7 +1654,10 @@ mod tests {
 
     #[test]
     fn precedence_cli_over_env_over_fallback() {
-        let s = parse(&["--port", "9000"], &[("SELKIES_PORT", "9100"), ("CUSTOM_WS_PORT", "9200")]);
+        let s = parse(
+            &["--port", "9000"],
+            &[("SELKIES_PORT", "9100"), ("CUSTOM_WS_PORT", "9200")],
+        );
         assert_eq!(s.port(), 9000);
         let s = parse(&[], &[("SELKIES_PORT", "9100"), ("CUSTOM_WS_PORT", "9200")]);
         assert_eq!(s.port(), 9100);
@@ -1482,7 +1672,13 @@ mod tests {
         assert!(s.public().on);
         assert_eq!(s.addr(), "0.0.0.0,::");
         let s = parse(&["--enable_resize=false|locked"], &[]);
-        assert_eq!(s.enable_resize(), BoolSetting { on: false, locked: true });
+        assert_eq!(
+            s.enable_resize(),
+            BoolSetting {
+                on: false,
+                locked: true
+            }
+        );
         let s = parse(&[], &[("SELKIES_ENABLE_RESIZE", "TRUE")]);
         assert!(s.enable_resize().on);
     }
@@ -1492,7 +1688,10 @@ mod tests {
         let s = parse(&["--bogus-flag", "1", "--port="], &[]);
         assert_eq!(s.port(), 8080);
         assert!(!s.was_provided("port"));
-        assert_eq!(s.unknown_args, vec!["--bogus-flag".to_string(), "1".to_string()]);
+        assert_eq!(
+            s.unknown_args,
+            vec!["--bogus-flag".to_string(), "1".to_string()]
+        );
     }
 
     #[test]
@@ -1545,13 +1744,30 @@ mod tests {
         let s = parse(&["--manual-width", "0"], &[]);
         assert!(!s.manual_resolution().on);
         let s = parse(&["--manual-width", "1280"], &[]);
-        assert_eq!(s.manual_resolution(), BoolSetting { on: true, locked: true });
+        assert_eq!(
+            s.manual_resolution(),
+            BoolSetting {
+                on: true,
+                locked: true
+            }
+        );
         assert_eq!(s.manual_height(), 768);
     }
 
     #[test]
     fn post_processing_rules() {
-        let s = parse(&["--subfolder", "desk/", "--mode", "WebRTC", "--enable-rate-control=false", "--rate-control-mode", "cbr"], &[]);
+        let s = parse(
+            &[
+                "--subfolder",
+                "desk/",
+                "--mode",
+                "WebRTC",
+                "--enable-rate-control=false",
+                "--rate-control-mode",
+                "cbr",
+            ],
+            &[],
+        );
         assert_eq!(s.subfolder(), "/desk");
         assert_eq!(s.mode(), "webrtc");
         assert_eq!(s.rate_control_mode(), "crf");
@@ -1566,12 +1782,30 @@ mod tests {
     #[test]
     fn sanitizer_clamps_and_respects_locks() {
         let s = parse(&["--enable-resize=true|locked"], &[]);
-        assert_eq!(s.sanitize_client_setting("framerate", Some(&json!(1000)), "ws"), Some(json!(240)));
-        assert_eq!(s.sanitize_client_setting("framerate", Some(&json!(59.94)), "ws"), Some(json!(59.94)));
-        assert_eq!(s.sanitize_client_setting("enable_resize", Some(&json!(false)), "ws"), Some(json!(true)));
-        assert_eq!(s.sanitize_client_setting("encoder", Some(&json!("bogus")), "ws"), Some(json!("h264enc")));
-        assert_eq!(s.sanitize_client_setting("framerate", None, "ws"), Some(json!(60)));
-        assert_eq!(s.sanitize_client_setting("no_such_setting", None, "ws"), None);
+        assert_eq!(
+            s.sanitize_client_setting("framerate", Some(&json!(1000)), "ws"),
+            Some(json!(240))
+        );
+        assert_eq!(
+            s.sanitize_client_setting("framerate", Some(&json!(59.94)), "ws"),
+            Some(json!(59.94))
+        );
+        assert_eq!(
+            s.sanitize_client_setting("enable_resize", Some(&json!(false)), "ws"),
+            Some(json!(true))
+        );
+        assert_eq!(
+            s.sanitize_client_setting("encoder", Some(&json!("bogus")), "ws"),
+            Some(json!("h264enc"))
+        );
+        assert_eq!(
+            s.sanitize_client_setting("framerate", None, "ws"),
+            Some(json!(60))
+        );
+        assert_eq!(
+            s.sanitize_client_setting("no_such_setting", None, "ws"),
+            None
+        );
     }
 
     #[test]
