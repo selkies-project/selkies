@@ -1,0 +1,31 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# The Rust Selkies: one workspace, the server crate under crates/, and the capture stack
+# as path dependencies while the three trees are developed side by side.
+[workspace]
+resolver = "3"
+members = ["crates/selkies"]
+# The sibling checkouts keep their own workspaces, locks, and profiles: each is released on
+# its own, and a build run from inside one must resolve against its own Cargo.lock.
+exclude = ["pixelflux", "pcmflux"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MPL-2.0"
+repository = "https://github.com/selkies-project/selkies"
+
+[workspace.dependencies]
+# The capture stack, pinned by the build like the Python package pins its wheels: a path
+# while the trees sit beside each other, a version before anything is released.
+pixelflux = { path = "pixelflux/pixelflux", default-features = false, features = ["gpl"] }
+pcmflux = { path = "pcmflux/pcmflux", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
