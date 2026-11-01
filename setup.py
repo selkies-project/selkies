@@ -37,7 +37,7 @@ setup(
             "pcmflux",
             "pcmflux/Cargo.toml",
             binding=Binding.PyO3,
-            features=["extension-module"],
+            features=["python", "extension-module"],
             debug=False,
             strip=Strip.All,
             # `--locked`: a wheel carries the crate versions Cargo.lock names, and a
