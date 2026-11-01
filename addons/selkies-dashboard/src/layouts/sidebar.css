@@ -521,12 +521,15 @@
   font-variant-numeric: tabular-nums;
 }
 .stream-rows { display: flex; flex-direction: column; gap: 6px; padding-right: 26px; }
-.stream-row { display: grid; grid-template-columns: 14px 1fr; gap: 6px; align-items: start; }
+/* A row reads as one text: its mark hangs in the margin, its name runs into its value, and its detail and
+   reason are lines of their own under them. */
+.stream-row { position: relative; padding-left: 20px; overflow-wrap: anywhere; }
+.stream-row > .stream-status-icon { position: absolute; top: 0; left: 0; }
 .stream-status-icon { margin-top: 1px; fill: var(--sk-text-muted); }
 .stream-status-icon.good { fill: var(--stat-good); }
 .stream-status-icon.warn { fill: var(--stat-warn); }
 .stream-row-label { margin-right: 3px; color: var(--sk-text-muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; }
-.stream-row-text { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.stream-row-detail, .stream-row-reason { display: block; }
 .stream-row-value { font-weight: 600; }
 .stream-row-detail { color: var(--sk-text-muted); }
 .stream-row-reason { margin-top: 2px; padding-left: 6px; border-left: 2px solid var(--stat-warn); color: var(--sk-text-muted); }

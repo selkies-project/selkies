@@ -8,11 +8,11 @@
  * The wish layout: a floating toolbar along the top edge, dragged by its
  * handle and slid up behind the edge by its last button (Ctrl+Shift+M and
  * gaming mode slide it up too), leaving a tab to bring it back. The toolbox
- * button opens the overflow menu: the stream switches, the apps catalog,
- * then the occasional panels each in a submenu (clipboard, printing,
- * sharing, shortcuts), the file manager, a second screen, and a footer with
- * the branding and the appearance toggles. The settings hang under the bar
- * as a card of tabs; the gamepads float as a panel beside it; the soft keys
+ * button opens the overflow menu: the stream switches, then the catalog's
+ * panels (`catalog.tsx`) each in a submenu, or as the item that opens its
+ * dialog, a second screen, and a footer with the branding and the appearance
+ * toggles. The settings hang under the bar as a card of tabs; a panel that
+ * floats has a button of its own and a panel beside the bar; the soft keys
  * sit at the bottom left on a touch client.
  *
  * Reads `toggleDashboard` from the core and posts `sidebarVisibilityChanged`
@@ -20,25 +20,21 @@
  * @module
  */
 import * as React from "react";
-import { ChevronDown, ChevronUp, Clipboard as ClipboardIcon, Crosshair, FileText, Gamepad2, Gauge, Hand, Joystick, Keyboard, LayoutGrid,
-  Maximize, Mic, Monitor, Printer, ScreenShare, Settings2, Share2, Touchpad, ToolCase, Volume2, Webcam, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Crosshair, Gamepad2, Gauge, Hand, Keyboard, Maximize, ScreenShare, Settings2, Touchpad, ToolCase, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { Menu, MenuCheckboxItem, MenuItem, MenuPopup, MenuSeparator, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger } from "@/components/ui/menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SelkiesLogo } from "@/components/logo";
 import { LayoutToggle, ThemeToggle } from "@/panels/appearance";
-import { Clipboard } from "@/panels/clipboard";
+import { PANELS, STREAMS, usePanelContext } from "@/panels/catalog";
 import { Clip } from "@/panels/controls";
 import { FloatingPanel } from "@/panels/floating-panel";
-import { fractionOf, place, useElementSize, useViewport } from "@/panels/anchor";
-import { GamepadControls } from "@/panels/gamepads";
-import { Printing } from "@/panels/printing";
-import { SettingsCard } from "@/panels/settings";
-import { Sharing } from "@/panels/sharing";
-import { ShortcutsMenu } from "@/panels/shortcuts";
+import { place, useAnchorDrag, useElementSize, useViewport } from "@/panels/anchor";
+import { SettingsCard } from "@/panels/settings-card";
 import { SoftKeys } from "@/panels/soft-keys";
 import { PROJECT_URL, useDashboard } from "@/state/dashboard";
+import { onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
 
 /** Height of the toolbar in pixels, which sliding it up by hides it exactly. */
@@ -70,8 +66,12 @@ function StreamSwitch({ checked, onToggle, label, children }: { checked: boolean
 /** The bar, its menu, and the panels hanging from it. */
 export default function ToolbarLayout() {
   const d = useDashboard();
+  const ctx = usePanelContext();
   const [settingsOpen, setSettingsOpen] = React.useState(false);
-  const [gamepadsOpen, setGamepadsOpen] = React.useState(false);
+  // The floating panels open, by catalog id.
+  const [floating, setFloating] = React.useState<Record<string, boolean>>({});
+  const toggleFloating = (id: string) => setFloating((open) => ({ ...open, [id]: !open[id] }));
+  const floatingOpen = Object.values(floating).some(Boolean);
   // The overflow menu is controlled so its open state survives the submenu
   // swaps; closing it folds the submenus with it.
   const [menuOpen, setMenuOpen] = React.useState(false);
@@ -81,13 +81,12 @@ export default function ToolbarLayout() {
   // at the top until dragged: a resize, or a group joining the bar, keeps it
   // in proportion rather than letting it run off the edge.
   const [anchor, setAnchor] = React.useState({ x: 0.5, y: 0 });
-  const [dragging, setDragging] = React.useState(false);
   const barRef = React.useRef<HTMLDivElement>(null);
   const viewport = useViewport();
   const barSize = useElementSize(barRef, { width: 400, height: TOOLBAR_HEIGHT });
   const position = place(anchor, viewport, barSize);
+  const drag = useAnchorDrag(setAnchor, viewport, barSize);
   const panelRef = React.useRef<HTMLDivElement>(null);
-  const dragStart = React.useRef({ x: 0, y: 0 });
   const { reportChromeOpen } = d;
 
   const fold = React.useCallback(() => {
@@ -96,45 +95,29 @@ export default function ToolbarLayout() {
   }, []);
 
   React.useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
+    const offMessages = onCoreMessage((message) => {
       // Ctrl+Shift+M, owned by the core: the bar slides up or back down.
-      if (event.data?.type === "toggleDashboard") {
+      if (message.type === "toggleDashboard") {
         fold();
         setCollapsed((value) => !value);
       }
       // Gaming mode holds the pointer and keyboard: the bar slides up and leaves its tab.
-      if (event.data?.type === "gamingModeUpdate" && event.data.active) {
+      if (message.type === "gamingModeUpdate" && message.active) {
         fold();
         setCollapsed(true);
       }
-    };
+    });
     const onFullscreen = () => { if (document.fullscreenElement) setSettingsOpen(false); };
-    window.addEventListener("message", onMessage);
     document.addEventListener("fullscreenchange", onFullscreen);
     return () => {
-      window.removeEventListener("message", onMessage);
+      offMessages();
       document.removeEventListener("fullscreenchange", onFullscreen);
     };
   }, [fold]);
 
   React.useEffect(() => {
-    reportChromeOpen(settingsOpen || gamepadsOpen || d.statsOpen);
-  }, [settingsOpen, gamepadsOpen, d.statsOpen, reportChromeOpen]);
-
-  React.useEffect(() => {
-    if (!dragging) return undefined;
-    const move = (event: PointerEvent) => {
-      setAnchor(fractionOf({ x: event.clientX - dragStart.current.x, y: event.clientY - dragStart.current.y }, viewport, barSize));
-    };
-    const up = () => setDragging(false);
-    document.addEventListener("pointermove", move);
-    document.addEventListener("pointerup", up);
-    return () => {
-      document.removeEventListener("pointermove", move);
-      document.removeEventListener("pointerup", up);
-    };
-  }, [dragging, viewport, barSize]);
+    reportChromeOpen(settingsOpen || floatingOpen || d.statsOpen);
+  }, [settingsOpen, floatingOpen, d.statsOpen, reportChromeOpen]);
 
   // An outside click closes the settings; a Base UI popup is a body child,
   // so a click in one still belongs to the panel's controls.
@@ -164,10 +147,10 @@ export default function ToolbarLayout() {
 
   const r = d.renderable;
   const primary = !d.isSecondaryDisplay;
-  const streams = primary && r.coreButtons && (r.videoToggle || r.audioToggle || r.microphoneToggle || r.webcamToggle);
-  const filesAllowed = primary && r.files && (r.fileUpload || r.fileDownload);
-  const menuAvailable = streams || (primary && (r.apps || r.clipboard || filesAllowed || d.printJobCount > 0 || r.sharing || r.secondScreen)) || r.shortcuts;
-  const gamepadsAvailable = primary && ((r.coreButtons && r.gamepadToggle) || r.gamepads);
+  const streams = primary && r.coreButtons ? STREAMS.filter((stream) => !stream.input && stream.allowed(r)) : [];
+  const menuPanels = PANELS.filter((panel) => panel.kind === "panel" && !panel.floats && panel.shown(ctx, "menu"));
+  const floats = PANELS.filter((panel) => panel.floats && panel.shown(ctx, "float"));
+  const menuAvailable = streams.length > 0 || menuPanels.length > 0 || (primary && r.secondScreen);
 
   return (
     <>
@@ -188,41 +171,25 @@ export default function ToolbarLayout() {
                 <TooltipContent>{t('topMenu.menu')}</TooltipContent>
               </Tooltip>
               <MenuPopup align="start" sideOffset={15}>
-                {streams && (
+                {streams.length > 0 && (
                   <>
-                    {r.videoToggle && <StreamSwitch checked={d.video} onToggle={d.toggleVideo} label={t('topMenu.videoStream')}><Monitor /></StreamSwitch>}
-                    {r.audioToggle && <StreamSwitch checked={d.audio} onToggle={d.toggleAudio} label={t('topMenu.audioStream')}><Volume2 /></StreamSwitch>}
-                    {r.microphoneToggle && <StreamSwitch checked={d.microphone} onToggle={d.toggleMicrophone} label={t('topMenu.microphone')}><Mic /></StreamSwitch>}
-                    {r.webcamToggle && <StreamSwitch checked={d.webcam} onToggle={d.toggleWebcam} label={t('topMenu.webcam')}><Webcam /></StreamSwitch>}
+                    {streams.map((stream) => (
+                      <StreamSwitch key={stream.id} checked={stream.on(d)} onToggle={() => stream.toggle(d)} label={t(stream.label)}><stream.icon /></StreamSwitch>
+                    ))}
                     <MenuSeparator />
                   </>
                 )}
-                {primary && r.apps && <MenuItem onClick={() => d.openDialog("apps")} title={t('sections.apps.title')}><LayoutGrid /><Clip>{t('sections.apps.title')}</Clip></MenuItem>}
-                {primary && r.clipboard && (
-                  <MenuSub>
-                    <MenuSubTrigger title={t('sections.clipboard.title')}><ClipboardIcon /><Clip>{t('sections.clipboard.title')}</Clip></MenuSubTrigger>
-                    <MenuSubPopup className="w-[340px] max-w-[calc(100vw-1rem)]"><Clipboard /></MenuSubPopup>
-                  </MenuSub>
-                )}
-                {filesAllowed && <MenuItem onClick={() => d.openDialog("files")} title={t('sections.files.title')}><FileText /><Clip>{t('sections.files.title')}</Clip></MenuItem>}
-                {primary && d.printJobCount > 0 && (
-                  <MenuSub>
-                    <MenuSubTrigger title={t('sections.printing.title')}><Printer /><Clip>{t('sections.printing.title')}</Clip></MenuSubTrigger>
-                    <MenuSubPopup><Printing /></MenuSubPopup>
-                  </MenuSub>
-                )}
-                {primary && r.sharing && (
-                  <MenuSub>
-                    <MenuSubTrigger title={t('sections.sharing.title')}><Share2 /><Clip>{t('sections.sharing.title')}</Clip></MenuSubTrigger>
-                    <MenuSubPopup><Sharing show /></MenuSubPopup>
-                  </MenuSub>
-                )}
-                {r.shortcuts && (
-                  <MenuSub>
-                    <MenuSubTrigger title={t('sections.shortcuts.title')}><Keyboard /><Clip>{t('sections.shortcuts.title')}</Clip></MenuSubTrigger>
-                    <MenuSubPopup><ShortcutsMenu /></MenuSubPopup>
-                  </MenuSub>
-                )}
+                {menuPanels.map((panel) => {
+                  const { icon: Icon, Body, dialog } = panel;
+                  const title = t(panel.title);
+                  if (dialog) return <MenuItem key={panel.id} onClick={() => d.openDialog(dialog)} title={title}>{Icon && <Icon />}<Clip>{title}</Clip></MenuItem>;
+                  return (
+                    <MenuSub key={panel.id}>
+                      <MenuSubTrigger title={title}>{Icon && <Icon />}<Clip>{title}</Clip></MenuSubTrigger>
+                      <MenuSubPopup className={panel.menuClass}>{Body && <Body place="menu" />}</MenuSubPopup>
+                    </MenuSub>
+                  );
+                })}
                 {primary && r.secondScreen && (
                   <>
                     <MenuSeparator />
@@ -243,7 +210,9 @@ export default function ToolbarLayout() {
 
           <ButtonGroup>
             <Tool label={t('topMenu.settings')} active={settingsOpen} className="settings-button" onClick={() => { setMenuOpen(false); setSettingsOpen((open) => !open); }}><Settings2 className="size-4" /></Tool>
-            {gamepadsAvailable && <Tool label={t('sections.gamepads.title')} active={gamepadsOpen} onClick={() => setGamepadsOpen((open) => !open)}><Joystick className="size-4" /></Tool>}
+            {floats.map(({ id, title, icon: Icon }) => (
+              <Tool key={id} label={t(title)} active={!!floating[id]} onClick={() => toggleFloating(id)}>{Icon && <Icon className="size-4" />}</Tool>
+            ))}
             {primary && r.stats && <Tool label={t('topMenu.systemMonitoring')} active={d.statsOpen} onClick={() => d.setStatsOpen(!d.statsOpen)}><Gauge className="size-4" /></Tool>}
             {r.fullscreen && <Tool label={t('topMenu.toggleFullscreen')} className="fullscreen-button" onClick={d.toggleFullscreen}><Maximize className="size-4" /></Tool>}
           </ButtonGroup>
@@ -261,12 +230,7 @@ export default function ToolbarLayout() {
           )}
 
           <Button variant="secondary" size="icon-xs" className="cursor-grab touch-none select-none active:cursor-grabbing" aria-label={t('topMenu.dragHandle')} title={t('topMenu.dragHandle')}
-            onPointerDown={(event) => {
-              // Captured: a pointer that outruns the bar lands on the stream, where the core adopts the held button.
-              event.currentTarget.setPointerCapture(event.pointerId);
-              setDragging(true);
-              dragStart.current = { x: event.clientX - position.x, y: event.clientY - position.y };
-            }}>
+            onPointerDown={(event) => drag.begin(event, position)}>
             <Hand className="size-4" />
           </Button>
           <Tool label={t('topMenu.hideToolbar')} onClick={() => { fold(); setCollapsed(true); }}><ChevronUp className="size-4" /></Tool>
@@ -287,17 +251,17 @@ export default function ToolbarLayout() {
         </div>
       )}
 
-      {gamepadsOpen && (
-        <FloatingPanel initial={{ x: 1, y: 0.06 }}>
+      {floats.filter(({ id }) => floating[id]).map(({ id, title, Body }) => (
+        <FloatingPanel key={id} initial={{ x: 1, y: 0.06 }}>
           <div className="flex min-h-0 w-[300px] flex-col rounded-lg border bg-background text-xs shadow-lg">
             <div data-drag-handle className="flex cursor-grab items-center justify-between px-3 py-2 select-none active:cursor-grabbing">
-              <h3 className="pointer-events-none text-sm font-semibold">{t('sections.gamepads.title')}</h3>
-              <Button variant="ghost" size="icon-xs" onClick={() => setGamepadsOpen(false)} aria-label={t('common.close')} title={t('common.close')}><X className="size-3" /></Button>
+              <h3 className="pointer-events-none text-sm font-semibold">{t(title)}</h3>
+              <Button variant="ghost" size="icon-xs" onClick={() => toggleFloating(id)} aria-label={t('common.close')} title={t('common.close')}><X className="size-3" /></Button>
             </div>
-            <div className="min-h-0 cursor-default overflow-y-auto border-t px-3 py-3"><GamepadControls showInput /></div>
+            <div className="min-h-0 cursor-default overflow-y-auto border-t px-3 py-3">{Body && <Body place="float" />}</div>
           </div>
         </FloatingPanel>
-      )}
+      ))}
 
       {d.isTouch && (r.softButtons || r.trackpad) && (
         <div className="fixed bottom-4 left-4 z-[2040] rounded-lg border bg-card p-2 shadow-lg animate-in fade-in slide-in-from-bottom-2" style={{ maxWidth: "calc(100vw - 2rem)", maxHeight: "calc(100dvh - 2rem)" }}>

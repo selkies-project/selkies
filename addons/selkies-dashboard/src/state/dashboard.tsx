@@ -31,7 +31,7 @@ import { fragmentWithSessionToken } from "../../../selkies-web-core/lib/page-url
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.js";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard,
-  isMobileClient, isSecondaryDisplay, isViewerUrlMode, type Renderable, type ServerSettings } from "@/utils";
+  isMobileClient, isSecondaryDisplay, isViewerUrlMode, onCoreMessage, type Renderable, type ServerSettings } from "@/utils";
 import { LAYOUTS, layoutById, resolveLayout, storeLayout, type LayoutSpec } from "@/layouts";
 
 export { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS };
@@ -248,10 +248,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   React.useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
-      const message = event.data;
-      if (typeof message !== "object" || message === null) return;
+    const offMessages = onCoreMessage((message) => {
       switch (message.type) {
         case "serverSettings":
           setServerSettings(message.payload);
@@ -284,12 +281,11 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
           setIsGamingMode(!!message.active);
           break;
       }
-    };
+    });
     const countPrintJobs = () => setPrintJobCount(getPrintJobs().length);
-    window.addEventListener("message", onMessage);
     window.addEventListener("printJobsChanged", countPrintJobs);
     return () => {
-      window.removeEventListener("message", onMessage);
+      offMessages();
       window.removeEventListener("printJobsChanged", countPrintJobs);
     };
   }, [hideTouchGamepad, toggleTouchGamepad]);

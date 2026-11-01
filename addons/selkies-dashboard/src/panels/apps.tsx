@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 import { Check, ChevronLeft, CircleAlert, Download, Info, Loader2, Play, RotateCw, Search, SearchX, Trash2, X } from "lucide-react";
 import * as yaml from "js-yaml";
 import { t } from "@/i18n";
-import { getLastServerSettings } from "@/utils";
+import { getLastServerSettings, onCoreMessage } from "@/utils";
 import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import {
     APP_COMMAND_STATE_EVENT,
@@ -162,16 +162,9 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         return () => window.removeEventListener(INSTALLED_APPS_ROLLBACK_EVENT, onRollback);
     }, []);
 
-    useEffect(() => {
-        const handleWindowMessage = (event: MessageEvent) => {
-            if (event.origin !== window.location.origin) return;
-            const message = event.data;
-            if (typeof message !== 'object' || message === null) return;
-            if (message.type === 'serverSettings') setServerSettings(message.payload);
-        };
-        window.addEventListener('message', handleWindowMessage);
-        return () => window.removeEventListener('message', handleWindowMessage);
-    }, []);
+    useEffect(() => onCoreMessage((message) => {
+        if (message.type === 'serverSettings') setServerSettings(message.payload);
+    }), []);
     const commandsKnown = serverSettings != null;
     const commandsAvailable = serverSettings?.command_enabled?.value === true;
 
@@ -185,17 +178,13 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         adopt(installedFromServer);
         const onServerList = (event: Event) =>
             setInstalledApps((event as CustomEvent).detail?.apps || []);
-        const onWindowMessage = (event: MessageEvent) => {
-            if (event.origin !== window.location.origin) return;
-            const message = event.data;
-            if (typeof message !== 'object' || message === null) return;
-            if (message.type === 'appsInstalled') adopt(message.apps);
-        };
         window.addEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
-        window.addEventListener('message', onWindowMessage);
+        const offMessages = onCoreMessage((message) => {
+            if (message.type === 'appsInstalled') adopt(message.apps);
+        });
         return () => {
             window.removeEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
-            window.removeEventListener('message', onWindowMessage);
+            offMessages();
         };
     }, [installedFromServer]);
 

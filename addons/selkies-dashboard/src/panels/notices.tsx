@@ -27,7 +27,7 @@ import { Printer, TriangleAlert, CircleCheck, Info, OctagonX, Loader2 } from "lu
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/ui/theme-provider";
 import { useDashboard } from "@/state/dashboard";
-import { computeRenderableSettings, getLastServerSettings, isMobileClient, isViewerUrlMode } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, isMobileClient, isViewerUrlMode, onCoreMessage } from "@/utils";
 import { resolveFailedAppCommand } from "../../../selkies-web-core/lib/app-commands.js";
 import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.js";
 import { STATS_EVENT } from "../../../selkies-web-core/lib/stream-stats.js";
@@ -61,10 +61,7 @@ export function Toaster() {
 export function Notices() {
   useEffect(() => {
     let viewer = isViewerUrlMode;
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
-      const message = event.data;
-      if (typeof message !== 'object' || message === null) return;
+    return onCoreMessage((message) => {
       if (message.type === "clientRoleUpdate") {
         viewer = message.role === "viewer";
         return;
@@ -120,9 +117,7 @@ export function Notices() {
         const codeMsg = codeKey ? t(codeKey, { detail: errMsg }) : null;
         toast.warning((codeMsg && codeMsg !== codeKey) ? codeMsg : (errMsg || t('notifications.unknownError')), { id: fileName });
       }
-    };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+    });
   }, []);
   return null;
 }

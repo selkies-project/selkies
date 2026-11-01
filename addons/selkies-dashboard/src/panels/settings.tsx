@@ -5,29 +5,25 @@
  */
 
 /**
- * The video, audio, and screen settings as panels: each reads the one
- * `useStreamSettings` instance `state/settings-context` holds, so a layout paints them
- * where it likes (three sections of a sidebar, three tabs of a card) and a
- * switch between layouts keeps every value and every pending push. A control
- * renders only while the server's constraints leave something to change
- * (`show`), and a panel none of whose controls is shown renders nothing.
- * The toolbar's card draws each tab as a `SectionAccordion` (Video: Format and
- * Performance; Audio: Quality and Devices; Resolution: Display and
- * Resolution) in which the first visible card starts open and a card with no
- * shown control is left out.
+ * The video, audio, and screen settings as cards (Video: Format and
+ * Performance; Audio: Quality and Devices; Screen: Display and Resolution),
+ * which the panel catalog (`catalog.tsx`) groups into panels: each reads the
+ * one `useStreamSettings` instance `state/settings-context` holds, so a
+ * layout paints them where it likes (three sections of a sidebar, three tabs
+ * of a card, `settings-card.tsx`) and a switch between layouts keeps every
+ * value and every pending push. A control renders only while the server's
+ * constraints leave something to change (`show`), and a card none of whose
+ * controls is shown renders nothing.
  * @module
  */
 import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { hint } from "@/utils";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Field, NativeSelect, RangeSlider, SwitchRow, Clip } from "@/panels/controls";
-import { SectionAccordion, SectionItem } from "@/panels/section-accordion";
 import { useDashboard } from "@/state/dashboard";
 import { RESOLUTION_PRESETS, STREAMING_MODES, WEBCAM_ENCODER_OPTIONS, canPlayEncoder, displayLabel, framerateLabel } from "@/state/settings";
-import { useSettings, useSettingsPanels } from "@/state/settings-context";
+import { useSettings } from "@/state/settings-context";
 import { t, tl } from "@/i18n";
 
 /** Enlarges a native range on coarse pointers, where a finger is the thumb. */
@@ -195,16 +191,6 @@ export function AudioDeviceSettings() {
   );
 }
 
-/** The audio controls as one list: the bitrate, then the device pickers. */
-export function AudioSettings() {
-  return (
-    <>
-      <AudioQualitySettings />
-      <AudioDeviceSettings />
-    </>
-  );
-}
-
 /** The display's own switches: anti-aliasing, cursors, pointer motion, HiDPI, alignment, and the UI scaling. */
 export function DisplaySettings() {
   const s = useSettings();
@@ -284,98 +270,5 @@ export function ResolutionSettings() {
         <Clip>{tl('sections.screen.scaleLocallyLabel')}: {t(s.scaleLocally ? 'sections.screen.scaleLocallyOn' : 'sections.screen.scaleLocallyOff')}</Clip>
       </Button>
     </>
-  );
-}
-
-/** The video controls as one list: the format first, then the performance. */
-export function VideoSettings() {
-  return (
-    <div className="space-y-3">
-      <FormatSettings />
-      <PerformanceSettings />
-    </div>
-  );
-}
-
-/** The screen controls as one list: the display's switches, then the resolution. */
-export function ScreenSettings() {
-  return (
-    <div className="space-y-3">
-      <DisplaySettings />
-      <ResolutionSettings />
-    </div>
-  );
-}
-
-/** One card of a tab's accordion: its value, its translated title, and its controls. */
-interface SettingsSection {
-  /** Identifies the card to the accordion. */
-  value: string;
-  /** Whether any control of the card is shown; a card with none is not rendered. */
-  shown: boolean;
-  /** The card's heading, already translated. */
-  title: string;
-  /** The card's controls. */
-  content: React.ReactNode;
-}
-
-/**
- * The cards of one tab as a `SectionAccordion`, the first visible card open.
- * @param props The cards, in order.
- * @returns The accordion, or nothing when no card is shown.
- */
-function SettingsSections({ sections }: { sections: SettingsSection[] }) {
-  const visible = sections.filter((section) => section.shown);
-  if (visible.length === 0) return null;
-  return (
-    <SectionAccordion defaultValue={[visible[0].value]}>
-      {visible.map((section) => (
-        <SectionItem key={section.value} value={section.value} title={section.title}>{section.content}</SectionItem>
-      ))}
-    </SectionAccordion>
-  );
-}
-
-/** The settings as a card of tabs, one per panel, each an accordion of cards, which the toolbar layout hangs under its bar. */
-export function SettingsCard() {
-  const panels = useSettingsPanels();
-  const s = useSettings();
-  const tabs = [
-    {
-      value: "video", shown: panels.video, label: t('settingsTabs.video'),
-      content: <SettingsSections sections={[
-        { value: "format", shown: panels.format, title: t('settingsSections.format'), content: <FormatSettings /> },
-        { value: "performance", shown: panels.performance, title: t('settingsSections.performance'), content: <PerformanceSettings /> },
-      ]} />,
-    },
-    {
-      value: "audio", shown: panels.audio, label: t('settingsTabs.audio'),
-      content: <SettingsSections sections={[
-        { value: "quality", shown: s.show.audioBitrate, title: t('settingsSections.quality'), content: <AudioQualitySettings /> },
-        { value: "devices", shown: true, title: t('settingsSections.devices'), content: <AudioDeviceSettings /> },
-      ]} />,
-    },
-    {
-      value: "resolution", shown: panels.screen, label: t('settingsTabs.resolution'),
-      content: <SettingsSections sections={[
-        { value: "display", shown: true, title: t('settingsSections.display'), content: <DisplaySettings /> },
-        { value: "resolution", shown: true, title: t('settingsSections.resolution'), content: <ResolutionSettings /> },
-      ]} />,
-    },
-  ].filter((tab) => tab.shown);
-  if (tabs.length === 0) return null;
-  return (
-    <Card className="w-[272px] max-w-[calc(100vw-1rem)] gap-1 py-1">
-      <Tabs defaultValue={tabs[0].value} className="w-full px-1">
-        <TabsList className="w-full">
-          {tabs.map((tab) => <TabsTrigger key={tab.value} value={tab.value}>{tab.label}</TabsTrigger>)}
-        </TabsList>
-        {tabs.map((tab) => (
-          <TabsContent key={tab.value} value={tab.value}>
-            <CardContent className="max-h-[calc(100dvh-8rem)] overflow-x-hidden overflow-y-auto px-0 pb-2">{tab.content}</CardContent>
-          </TabsContent>
-        ))}
-      </Tabs>
-    </Card>
   );
 }

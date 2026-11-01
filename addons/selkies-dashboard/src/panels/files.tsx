@@ -6,7 +6,7 @@
 
 import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { computeRenderableSettings, getLastServerSettings, isViewerUrlMode } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, isViewerUrlMode, onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
 import { FileManager } from "@/panels/file-manager";
 
@@ -38,21 +38,11 @@ export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
         computeRenderableSettings(getLastServerSettings())
     );
 
-    useEffect(() => {
-        const handleWindowMessage = (event: MessageEvent) => {
-            if (event.origin !== window.location.origin) return;
-            const message = event.data;
-
-            if (typeof message !== 'object' || message === null) return;
-
-            if (message.type === 'serverSettings') {
-                setRenderableSettings(computeRenderableSettings(message.payload));
-            }
-        };
-
-        window.addEventListener('message', handleWindowMessage);
-        return () => window.removeEventListener('message', handleWindowMessage);
-    }, []);
+    useEffect(() => onCoreMessage((message) => {
+        if (message.type === 'serverSettings') {
+            setRenderableSettings(computeRenderableSettings(message.payload));
+        }
+    }), []);
 
     const canUpload = (renderableSettings.fileUpload ?? true) && !isViewerUrlMode;
     const allowDownload = (renderableSettings.fileDownload ?? true) && !isViewerUrlMode;
