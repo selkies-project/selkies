@@ -7,10 +7,14 @@ rust-version = "1.89"
 
 [lib]
 name = "pixelflux"
-crate-type = ["cdylib"]
+# The Rust library a host links, and the Python extension module when the `python` feature
+# is on: the same crate serves both, so the Python classes are wrappers over the Rust API.
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.30.1", features = ["extension-module"] }
+# The Python bridge (src/python.rs) and nothing else; `python` turns it on, and the wheel
+# build adds `extension-module` so the module links no libpython of its own.
+pyo3 = { version = "0.30.1", optional = true }
 wayland-server = { version = "0.31.10", features = ["dlopen"] }
 wayland-protocols = { version = "0.32", features = ["server", "client", "staging"] }
 wayland-client = "0.31"
@@ -71,6 +75,12 @@ features = ["cuda"]
 
 [features]
 default = ["gpl"]
+## The Python bridge: `import pixelflux` over the Rust API. Off, the crate is a Rust library
+## with no interpreter in its build.
+python = ["dep:pyo3"]
+## The wheel's module: `python` with pyo3 linking against the importing interpreter rather
+## than a libpython of its own. Tests of the `python` feature run without it.
+extension-module = ["python", "pyo3/extension-module"]
 ## GPL-licensed components: libx264 (GPL-2.0+) as the software H.264 encoder and x265
 ## (GPL-2.0+) as the software HEVC encoder. Wins over `openh264` whenever both are enabled.
 gpl = ["dep:x264-sys", "codec-sys/x265"]

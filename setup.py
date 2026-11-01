@@ -72,6 +72,7 @@ setup(
             # `--locked`: a wheel carries the crate versions Cargo.lock names, and a
             # manifest that has outrun the lock fails the build rather than silently
             # resolving past it.
+            features=["python", "extension-module"],
             args=["--locked", *([] if _enable_gpl else ["--no-default-features", "--features", "openh264"])],
         )
     ],

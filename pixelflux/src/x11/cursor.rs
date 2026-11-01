@@ -144,7 +144,7 @@ pub fn release() {
     }
 }
 
-/// Consumer teardown: drop the sink and signal the thread without joining — `PY_SHUTDOWN`
+/// Consumer teardown: drop the sink and signal the thread without joining — `SHUTDOWN`
 /// already gates it off the consumer, and a normal capture stop reaps it via `release`.
 pub fn shutdown() {
     *CALLBACK.lock().unwrap() = None;
@@ -318,7 +318,7 @@ fn deliver(payload: Option<&Payload>) {
         Some(p) => p,
         None => return,
     };
-    if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
+    if crate::SHUTDOWN.load(Ordering::Relaxed) {
         return;
     }
     let cb = CALLBACK.lock().unwrap().clone();

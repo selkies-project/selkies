@@ -662,7 +662,7 @@ fn watch_loop(
                 .as_ref()
                 .and_then(|o| state.offer_mimes.get(&o.id()).cloned())
                 .unwrap_or_default();
-            if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
+            if crate::SHUTDOWN.load(Ordering::Relaxed) {
                 break;
             }
             callback.mimes(mimes);

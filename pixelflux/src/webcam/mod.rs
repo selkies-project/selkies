@@ -12,8 +12,8 @@
 //! - a PipeWire `Video/Source` node where a daemon is reachable, see [`pipewire`] — for
 //!   PipeWire-native consumers and the `pipewire-v4l2` wrapper.
 //!
-//! Nothing on the hot path holds the GIL beyond copying the encoded bytes out of the Python buffer,
-//! and no worker thread ever calls back into Python.
+//! Nothing on the hot path copies more than the encoded bytes into a pooled buffer, and no
+//! worker thread ever calls back into the consumer.
 
 pub mod convert;
 pub mod decode;
@@ -28,10 +28,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use crate::Error;
 
 use convert::{DeviceFormat, Normalizer, Orientation, orient_i420};
 use decode::{Codec, DecodeError, Decoder, new_decoder, sniff_keyframe};
@@ -41,49 +38,36 @@ use server::Server;
 use v4l2out::V4l2Output;
 
 /// Configuration for [`VirtualCamera::start`].
-#[pyclass(dict)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VirtualCameraSettings {
     /// Unix socket the interposer connects to.
-    #[pyo3(get, set)]
     pub socket_path: String,
     /// Advertised frame size; incoming frames are scaled and letterboxed to fit.
-    #[pyo3(get, set)]
     pub width: u32,
-    #[pyo3(get, set)]
     pub height: u32,
     /// Advertised frame rate as a fraction.
-    #[pyo3(get, set)]
     pub fps_num: u32,
-    #[pyo3(get, set)]
     pub fps_den: u32,
     /// Raw device pixel format: "I420", "NV12", or "YUYV".
-    #[pyo3(get, set)]
     /// Device pixel format: "I420" (the default; the browsers' preference), "NV12", "YUYV",
     /// or "MJPEG" — a compressed device that carries an MJPEG uplink's frames as received
     /// (no decode, one copy) and re-encodes only frames that must be fitted into the device
     /// size or arrive in another codec.
     pub pixel_format: String,
     /// Ring slots (2..4); more slots tolerate slower readers.
-    #[pyo3(get, set)]
     pub slots: u32,
     /// Encoded frames buffered ahead of the decoder before the oldest is dropped.
-    #[pyo3(get, set)]
     pub queue_depth: u32,
     /// v4l2loopback output device: "" for none, "auto" to use the first one found, or a path.
-    #[pyo3(get, set)]
     pub device_path: String,
     /// Also publish the camera as a PipeWire `Video/Source` node when a daemon is reachable.
-    #[pyo3(get, set)]
     pub pipewire: bool,
     /// PipeWire node name (the description shown to users is fixed).
-    #[pyo3(get, set)]
     pub pipewire_node_name: String,
 }
 
-#[pymethods]
-impl VirtualCameraSettings {
-    #[new]
-    fn new() -> Self {
+impl Default for VirtualCameraSettings {
+    fn default() -> Self {
         VirtualCameraSettings {
             socket_path: format!("{}/selkies_webcam0.sock", crate::webcam::socket_dir()),
             width: 1280,
@@ -240,8 +224,7 @@ struct Running {
     pipewire: bool,
 }
 
-/// A virtual camera fed with encoded frames from Python.
-#[pyclass]
+/// A virtual camera fed with encoded frames by the consumer.
 pub struct VirtualCamera {
     running: Mutex<Option<Running>>,
     stats: Arc<Stats>,
@@ -522,26 +505,24 @@ fn worker(cfg: WorkerConfig) {
     }
 }
 
-#[pymethods]
-impl VirtualCamera {
-    #[classattr]
-    const CODEC_MJPEG: u32 = Codec::Jpeg.id();
-    #[classattr]
-    const CODEC_H264: u32 = Codec::H264.id();
-    #[classattr]
-    const CODEC_VP8: u32 = Codec::Vp8.id();
-    #[classattr]
-    const CODEC_VP9: u32 = Codec::Vp9.id();
-    #[classattr]
-    const CODEC_AV1: u32 = Codec::Av1.id();
-    #[classattr]
-    const CODEC_HEVC: u32 = Codec::H265.id();
-    /// `push()` result bit: the decoder needs a keyframe from the client to resume.
-    #[classattr]
-    const KEYFRAME_WANTED: u32 = 1;
+impl Default for VirtualCamera {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    #[new]
-    fn new() -> Self {
+impl VirtualCamera {
+    /// The codec ids `push` takes, as the client names a frame's codec on the wire.
+    pub const CODEC_MJPEG: u32 = Codec::Jpeg.id();
+    pub const CODEC_H264: u32 = Codec::H264.id();
+    pub const CODEC_VP8: u32 = Codec::Vp8.id();
+    pub const CODEC_VP9: u32 = Codec::Vp9.id();
+    pub const CODEC_AV1: u32 = Codec::Av1.id();
+    pub const CODEC_HEVC: u32 = Codec::H265.id();
+    /// `push()` result bit: the decoder needs a keyframe from the client to resume.
+    pub const KEYFRAME_WANTED: u32 = 1;
+
+    pub fn new() -> Self {
         VirtualCamera {
             running: Mutex::new(None),
             stats: Arc::new(Stats::default()),
@@ -550,9 +531,9 @@ impl VirtualCamera {
 
     /// Bind the socket, allocate the ring, open the kernel device if configured, and start the
     /// decoder thread. Restarting a running camera stops it first.
-    fn start(&self, py: Python<'_>, settings: &VirtualCameraSettings) -> PyResult<()> {
+    pub fn start(&self, settings: &VirtualCameraSettings) -> Result<(), Error> {
         let fourcc = parse_pixel_format(&settings.pixel_format).ok_or_else(|| {
-            PyValueError::new_err(format!(
+            Error::Settings(format!(
                 "unsupported pixel_format '{}'",
                 settings.pixel_format
             ))
@@ -562,10 +543,10 @@ impl VirtualCamera {
             || settings.width > 8192
             || settings.height > 8192
         {
-            return Err(PyValueError::new_err("width/height out of range"));
+            return Err(Error::Settings("width/height out of range".into()));
         }
         if settings.fps_num == 0 || settings.fps_den == 0 {
-            return Err(PyValueError::new_err("fps_num/fps_den must be positive"));
+            return Err(Error::Settings("fps_num/fps_den must be positive".into()));
         }
         let fmt = RingFormat::for_fourcc(
             fourcc,
@@ -574,7 +555,7 @@ impl VirtualCamera {
             settings.fps_num,
             settings.fps_den,
         )
-        .ok_or_else(|| PyValueError::new_err("unsupported pixel_format"))?;
+        .ok_or_else(|| Error::Settings("unsupported pixel_format".into()))?;
         let socket_path = settings.socket_path.clone();
         let slots = settings.slots;
         let queue_depth = settings.queue_depth.max(1) as usize;
@@ -583,9 +564,9 @@ impl VirtualCamera {
         let pipewire_node_name = settings.pipewire_node_name.trim().to_string();
         let stats = self.stats.clone();
 
-        self.stop(py);
+        self.stop();
 
-        let started = py.detach(move || -> Result<Running, String> {
+        let started = (move || -> Result<Running, String> {
             let ring =
                 Ring::new(fmt, slots).map_err(|e| format!("ring allocation failed: {}", e))?;
             let server = Arc::new(
@@ -659,60 +640,51 @@ impl VirtualCamera {
                 format: fmt,
                 pipewire: pipewire_on,
             })
-        });
+        })();
         match started {
             Ok(r) => {
                 *self.running.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
                 Ok(())
             }
-            Err(e) => Err(PyRuntimeError::new_err(e)),
+            Err(e) => Err(Error::Capture(e)),
         }
     }
 
-    /// Hand one encoded frame to the decoder. `data` is any buffer-protocol object; the encoded
-    /// payload starts at `offset`. `rotation` (clockwise degrees: 0, 90, 180, or 270) and `flip`
+    /// Hand one encoded frame to the decoder. `data` is the encoded payload; empty data pushes
+    /// nothing and only reports. `rotation` (clockwise degrees: 0, 90, 180, or 270) and `flip`
     /// (a horizontal mirror applied after the rotation) carry the frame's upright transform when
     /// the client's encoder left it as metadata instead of baking it into the pixels; the decoded
     /// picture is oriented before it is fitted. Returns a bit set (`KEYFRAME_WANTED`) the caller
-    /// relays to the client. Raises when the camera is not running, the codec id is unknown, or the
+    /// relays to the client. Fails when the camera is not running, the codec id is unknown, or the
     /// rotation is not a quarter turn.
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (data, codec, keyframe = false, offset = 0, rotation = 0, flip = false))]
-    #[allow(clippy::too_many_arguments)]
-    fn push(
+    pub fn push(
         &self,
-        py: Python<'_>,
-        data: PyBuffer<u8>,
+        data: &[u8],
         codec: u32,
         keyframe: bool,
-        offset: usize,
         rotation: u32,
         flip: bool,
-    ) -> PyResult<u32> {
+    ) -> Result<u32, Error> {
         let codec = Codec::from_id(codec)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown codec id {}", codec)))?;
+            .ok_or_else(|| Error::Settings(format!("unknown codec id {}", codec)))?;
         if !rotation.is_multiple_of(90) || rotation >= 360 {
-            return Err(PyValueError::new_err("rotation must be 0, 90, 180, or 270"));
+            return Err(Error::Settings(
+                "rotation must be 0, 90, 180, or 270".into(),
+            ));
         }
         let orientation = Orientation {
             quarter_turns: (rotation / 90) as u8,
             hflip: flip,
         };
-        if !data.is_c_contiguous() {
-            return Err(PyValueError::new_err("frame buffer must be contiguous"));
-        }
         let guard = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let running = guard
             .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("virtual camera is not running"))?;
-        let total = data.len_bytes();
-        if offset >= total {
+            .ok_or_else(|| Error::Capture("virtual camera is not running".into()))?;
+        if data.is_empty() {
             return Ok(running.keyframe_wanted.swap(false, Ordering::Relaxed) as u32);
         }
-        let bytes = unsafe { std::slice::from_raw_parts(data.buf_ptr() as *const u8, total) };
-        let mut buf = running.pool.take(total - offset);
-        buf.extend_from_slice(&bytes[offset..]);
-        let _ = py;
+        let mut buf = running.pool.take(data.len());
+        buf.extend_from_slice(data);
         self.stats.pushed.fetch_add(1, Ordering::Relaxed);
         self.stats
             .input_codec
@@ -734,25 +706,22 @@ impl VirtualCamera {
     }
 
     /// Stop the decoder thread, close every interposer client, and remove the socket.
-    fn stop(&self, py: Python<'_>) {
+    pub fn stop(&self) {
         let running = self
             .running
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some(mut r) = running {
-            py.detach(move || {
-                r.queue.close();
-                if let Some(t) = r.thread.take() {
-                    let _ = t.join();
-                }
-                drop(r.server);
-            });
+            r.queue.close();
+            if let Some(t) = r.thread.take() {
+                let _ = t.join();
+            }
+            drop(r.server);
         }
     }
 
-    #[getter]
-    fn is_running(&self) -> bool {
+    pub fn is_running(&self) -> bool {
         self.running
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -760,8 +729,7 @@ impl VirtualCamera {
     }
 
     /// Interposer clients that completed the handshake.
-    #[getter]
-    fn clients(&self) -> usize {
+    pub fn clients(&self) -> usize {
         self.running
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -770,8 +738,7 @@ impl VirtualCamera {
             .unwrap_or(0)
     }
 
-    #[getter]
-    fn socket_path(&self) -> Option<String> {
+    pub fn socket_path(&self) -> Option<String> {
         self.running
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -780,8 +747,7 @@ impl VirtualCamera {
     }
 
     /// Kernel device currently mirrored, or "" when none is in use.
-    #[getter]
-    fn device_path(&self) -> String {
+    pub fn device_path(&self) -> String {
         self.running
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -796,113 +762,75 @@ impl VirtualCamera {
     }
 
     /// Counters and the negotiated geometry.
-    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let d = PyDict::new(py);
+    pub fn stats(&self) -> CameraStats {
         let s = &self.stats;
-        d.set_item("pushed", s.pushed.load(Ordering::Relaxed))?;
-        d.set_item("decoded", s.decoded.load(Ordering::Relaxed))?;
-        d.set_item("published", s.published.load(Ordering::Relaxed))?;
-        d.set_item("passthrough", s.passthrough.load(Ordering::Relaxed))?;
-        d.set_item("dropped", s.dropped.load(Ordering::Relaxed))?;
-        d.set_item("skipped", s.skipped.load(Ordering::Relaxed))?;
-        d.set_item("errors", s.errors.load(Ordering::Relaxed))?;
-        d.set_item("input_width", s.input_width.load(Ordering::Relaxed))?;
-        d.set_item("input_height", s.input_height.load(Ordering::Relaxed))?;
-        d.set_item("input_rotation", s.input_rotation.load(Ordering::Relaxed))?;
-        let codec = s.input_codec.load(Ordering::Relaxed);
-        d.set_item(
-            "input_codec",
-            Codec::from_id(codec).map(|c| c.name()).unwrap_or(""),
-        )?;
         let guard = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(r) = guard.as_ref() {
-            d.set_item("clients", r.server.client_count())?;
-            d.set_item("width", r.format.width)?;
-            d.set_item("height", r.format.height)?;
-            d.set_item("fps_num", r.format.fps_num)?;
-            d.set_item("fps_den", r.format.fps_den)?;
-            d.set_item("pixel_format", v4l2out::fourcc_str(r.format.fourcc))?;
-            d.set_item("socket_path", r.server.path())?;
-            d.set_item(
-                "device_path",
-                r.device_path
+        CameraStats {
+            pushed: s.pushed.load(Ordering::Relaxed),
+            decoded: s.decoded.load(Ordering::Relaxed),
+            published: s.published.load(Ordering::Relaxed),
+            passthrough: s.passthrough.load(Ordering::Relaxed),
+            dropped: s.dropped.load(Ordering::Relaxed),
+            skipped: s.skipped.load(Ordering::Relaxed),
+            errors: s.errors.load(Ordering::Relaxed),
+            input_width: s.input_width.load(Ordering::Relaxed),
+            input_height: s.input_height.load(Ordering::Relaxed),
+            input_rotation: s.input_rotation.load(Ordering::Relaxed),
+            input_codec: Codec::from_id(s.input_codec.load(Ordering::Relaxed))
+                .map(|c| c.name())
+                .unwrap_or(""),
+            running: guard.as_ref().map(|r| CameraRunning {
+                clients: r.server.client_count(),
+                width: r.format.width,
+                height: r.format.height,
+                fps_num: r.format.fps_num,
+                fps_den: r.format.fps_den,
+                pixel_format: v4l2out::fourcc_str(r.format.fourcc),
+                socket_path: r.server.path().to_string(),
+                device_path: r
+                    .device_path
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone(),
-            )?;
-            d.set_item("pipewire", r.pipewire)?;
-            d.set_item(
-                "pipewire_streaming",
-                s.pipewire_streaming.load(Ordering::Relaxed),
-            )?;
-        } else {
-            d.set_item("clients", 0)?;
+                pipewire: r.pipewire,
+                pipewire_streaming: s.pipewire_streaming.load(Ordering::Relaxed),
+            }),
         }
-        Ok(d)
     }
+}
 
-    /// Byte layout of the shared-memory ring and the on-connect config struct, for the interposer
-    /// ABI tests.
-    #[staticmethod]
-    fn shm_layout<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let d = PyDict::new(py);
-        d.set_item("magic", ring::SHM_MAGIC)?;
-        d.set_item("version", ring::SHM_VERSION)?;
-        d.set_item("ctrl_offset", ring::CTRL_OFFSET)?;
-        d.set_item("ctrl_stride", ring::CTRL_STRIDE)?;
-        d.set_item("data_offset", ring::DATA_OFFSET)?;
-        d.set_item("max_slots", ring::MAX_SLOTS)?;
-        d.set_item("config_size", ring::CONFIG_SIZE)?;
-        d.set_item(
-            "config_fields",
-            [
-                "magic",
-                "version",
-                "width",
-                "height",
-                "fourcc",
-                "fps_num",
-                "fps_den",
-                "n_slots",
-                "slot_size",
-                "data_offset",
-                "ctrl_offset",
-                "ctrl_stride",
-                "bytesperline",
-                "sizeimage",
-            ],
-        )?;
-        d.set_item(
-            "header_fields",
-            [
-                "magic",
-                "version",
-                "width",
-                "height",
-                "fourcc",
-                "fps_num",
-                "fps_den",
-                "n_slots",
-                "slot_size",
-                "data_offset",
-                "bytesperline",
-                "sizeimage",
-                "latest_slot",
-                "_pad",
-            ],
-        )?;
-        d.set_item("header_latest_frame_seq_offset", 56)?;
-        d.set_item(
-            "ctrl_fields",
-            [
-                ("seq", 0, 4),
-                ("bytesused", 4, 4),
-                ("frame_seq", 8, 8),
-                ("ts_ns", 16, 8),
-            ],
-        )?;
-        Ok(d)
-    }
+/// What `VirtualCamera::stats` reports: the counters since the camera was created, what the
+/// client last sent, and the running camera's geometry and sinks where one runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CameraStats {
+    pub pushed: u64,
+    pub decoded: u64,
+    pub published: u64,
+    pub passthrough: u64,
+    pub dropped: u64,
+    pub skipped: u64,
+    pub errors: u64,
+    pub input_width: u32,
+    pub input_height: u32,
+    pub input_rotation: u32,
+    /// The codec of the last frame pushed, empty before the first.
+    pub input_codec: &'static str,
+    pub running: Option<CameraRunning>,
+}
+
+/// The running camera's negotiated format and sinks (`CameraStats::running`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CameraRunning {
+    pub clients: usize,
+    pub width: u32,
+    pub height: u32,
+    pub fps_num: u32,
+    pub fps_den: u32,
+    pub pixel_format: String,
+    pub socket_path: String,
+    pub device_path: String,
+    pub pipewire: bool,
+    pub pipewire_streaming: bool,
 }
 
 impl Drop for VirtualCamera {

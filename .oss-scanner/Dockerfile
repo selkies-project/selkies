@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY . /src
 WORKDIR /src
 
-RUN cargo test --manifest-path pixelflux/Cargo.toml --no-run
+RUN cargo test --manifest-path pixelflux/Cargo.toml --no-run \
+    && cargo test --manifest-path pixelflux/Cargo.toml --features python --no-run
 ENV CARGO_NET_OFFLINE=true
 RUN cargo test --manifest-path pixelflux/Cargo.toml || echo "WARNING: cargo test reported failures"
+RUN cargo test --manifest-path pixelflux/Cargo.toml --features python || echo "WARNING: cargo test (python) reported failures"

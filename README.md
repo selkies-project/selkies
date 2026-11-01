@@ -6,13 +6,13 @@
 
 **A performant pixel delivery pipeline for diverse sources, blending flexible and high-performance modern encoding formats.**
 
-This module provides a Python interface to a high-performance capture library supporting both **X11** and **Wayland** environments. It captures pixel data, detects changes, and encodes modified stripes into JPEG or H.264.
+pixelflux is a high-performance capture library for both **X11** and **Wayland** environments, a Rust crate with a Python extension module built on it (the `python` feature, which the wheel turns on). It captures pixel data, detects changes, and encodes modified stripes into JPEG or H.264.
 
 It encodes JPEG, H.264, H.265, VP8, VP9, and AV1. Every video codec runs on NVIDIA's NVENC (H.264, H.265, AV1) or on VA-API for Intel/AMD GPUs (all five) where the GPU carries it, H.264, H.265, and AV1 additionally on a Jetson's Tegra encoder through the vendor V4L2 interface, and otherwise on the software encoder the build resolves for it: x264 or, in a GPL-free build, the BSD-licensed OpenH264 for H.264; x265 or kvazaar for H.265; libvpx for VP8 and VP9; SVT-AV1 for AV1. JPEG and H.264 can be cut into stripes encoded in parallel; the other codecs stream whole frames. **About "zero copy":** the Wayland GPU path is truly zero-copy (dmabuf frames flow GBM → encoder without touching system RAM), and so are the X11 paths that encode on the GPU: DRI3 has the X server blit the screen into GPU buffers the hardware encoder reads in place, on any server drawing on the encode GPU (NVIDIA's included), and on an NVIDIA server DRI3 cannot serve, NvFBC has the driver composite the screen straight into video memory registered with NVENC in place, so a frame is never read, written, or copied by the CPU. Every other X11 session copies **exactly once**: the X server renders each frame into a shared-memory surface (`XShmGetImage`); the encoder threads then read that mapped surface **in place** and pass the encoded bytes to Python through the buffer protocol without any further copies.
 
 ## Installation
 
-pixelflux is a single self-contained **Rust** extension compiled during installation. Both the X11 and Wayland backends, all encoders, and the Python API live in it. (`libjpeg-turbo` — and, in a GPL-free build, `openh264` — C sources are vendored and built by their Rust `-sys` crates, so `cmake` and `nasm` are required, but no system copies of those libraries are used.)
+pixelflux is a single self-contained **Rust** crate compiled during installation. Both the X11 and Wayland backends, all encoders, the Rust API, and the Python bridge over it live in it. (`libjpeg-turbo` — and, in a GPL-free build, `openh264` — C sources are vendored and built by their Rust `-sys` crates, so `cmake` and `nasm` are required, but no system copies of those libraries are used.)
 
 ### 1. Prerequisites
 
@@ -440,6 +440,36 @@ GPU, so a caller with an event loop makes the call off it.
 `encode_ns`, `pipeline_ns` from capture to the end of the encode), which a caller differences
 into a rate. They are relaxed atomics tallied once per delivered frame and read only on the
 call, so a capture nobody inspects pays nothing for them.
+
+### Rust API
+
+The Python classes are thin wrappers over the crate's public Rust API, which a Rust program uses directly with no interpreter in its build (`pixelflux = { version = "...", default-features = ... }` with the `gpl` or `openh264` feature and without `python`). The same types stand behind both bridges: `CaptureSettings` (every field of the Python class, with `wants_wayland` deciding the backend), `ScreenCapture`, `Compositor` (what `ensure_wayland_display` brings up, the Python `WaylandBackend`), `webcam::VirtualCamera`, and the module functions by their Python names. Frames, cursor images, and clipboard contents arrive through the `sink` traits, each of which a closure implements, on the same threads and with the same one-batch-in-flight handoff the Python callback has.
+
+```rust
+use std::sync::Arc;
+use pixelflux::encoders::Codec;
+use pixelflux::sink::Frame;
+use pixelflux::{CaptureSettings, ScreenCapture};
+
+let mut settings = CaptureSettings::default();
+settings.width = 1920;
+settings.height = 1080;
+settings.codec = Codec::H264;
+settings.video_fullframe = true;
+let capture = ScreenCapture::new();
+capture.start_capture(
+    Arc::new(|frames: Vec<Frame>| {
+        for frame in frames {
+            // frame.as_bytes() shares the encoder's buffer; frame.frame_id, frame.timing,
+            // and frame.reference_frame_id() carry what the Python attributes do.
+            send(frame.as_bytes());
+        }
+    }),
+    settings,
+)?;
+```
+
+`cargo doc --no-deps` renders the reference; every `Error` names the part that refused (settings, capture, compositor, or a capability the session lacks).
 
 ## Zero-Copy Pipeline (Wayland)
 
@@ -874,7 +904,7 @@ asked for.
 
 ## Development
 
-`AGENTS.md` carries the conventions and the invariants of this tree, for contributors and coding agents alike. The crate builds in two configurations, `cargo test --lib` (the default `gpl` feature, libx264) and `cargo test --lib --no-default-features --features openh264`, and both are expected to pass. The `#[ignore]`d `gpu_` tests run on an NVIDIA GPU with `cargo test gpu_ -- --ignored --nocapture --test-threads=1`, the `gpu_dmabuf_` ones need a render node, and the `gpu_bench_` ones print measurements. `pip wheel . --no-deps` builds the extension the way the released wheels are built (`PIXELFLUX_ENABLE_GPL=0` for the OpenH264 build), and that wheel installed into a [selkies](https://github.com/selkies-project/selkies) checkout set up as its development documentation describes puts the change under the end-to-end suites. The `.devcontainer` installs the native dependencies the build needs.
+`AGENTS.md` carries the conventions and the invariants of this tree, for contributors and coding agents alike. The crate builds in three configurations, `cargo test --lib` (the default `gpl` feature, libx264, no Python), `cargo test --lib --features python` (the Python bridge), and `cargo test --lib --no-default-features --features openh264`, and all are expected to pass. The `#[ignore]`d `gpu_` tests run on an NVIDIA GPU with `cargo test gpu_ -- --ignored --nocapture --test-threads=1`, the `gpu_dmabuf_` ones need a render node, and the `gpu_bench_` ones print measurements. `pip wheel . --no-deps` builds the extension the way the released wheels are built (`PIXELFLUX_ENABLE_GPL=0` for the OpenH264 build), and that wheel installed into a [selkies](https://github.com/selkies-project/selkies) checkout set up as its development documentation describes puts the change under the end-to-end suites. The `.devcontainer` installs the native dependencies the build needs.
 
 Releases are cut by running the [Release](https://github.com/selkies-project/pixelflux/actions/workflows/release.yml) workflow from the Actions tab, **Run workflow** with **Use workflow from** on `main` and the tag, or by pushing the tag. A run releases the commit it started from: a new tag is created on it once the checks pass, and a tag that already exists has to be on it, so an earlier commit's tag is released by a run started from that tag. The `latest` input decides the "Latest" badge: `auto` gives it to a release and not to a pre-release, `never` holds it back for a fix to an older series, and `always` gives it to a pre-release as well. The tag is the version the wheels carry, a PEP 440 one such as `2.1.0` or `2.1.0rc1`, and its notes are `release-notes/<tag>.md`, or for a pre-release the notes of the release it leads to. The `pypi` input decides whether the wheels go to PyPI as well: `auto` publishes a release designated as the latest and no pre-release.
 

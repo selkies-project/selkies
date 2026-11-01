@@ -1880,13 +1880,13 @@ impl AppState {
     /// (a large transfer from a slow source still delivers), while one that goes silent for 10 s
     /// without closing its fd is dropped so each clipboard change cannot leak a pinned thread +
     /// pipe. Deliveries leave in the order they were staged: one that a later copy or clear
-    /// overtook is dropped (`clipboard_generation`). The `PY_SHUTDOWN` checks keep this off a
+    /// overtook is dropped (`clipboard_generation`). The `SHUTDOWN` checks keep this off a
     /// consumer that is gone.
     pub(crate) fn process_pending_clipboard_read(&mut self) {
         let Some(mimes) = self.pending_clipboard_read.take() else {
             return;
         };
-        if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
+        if crate::SHUTDOWN.load(Ordering::Relaxed) {
             return;
         }
         let Some(cb) = self.clipboard_callback.clone() else {
@@ -1918,7 +1918,7 @@ impl AppState {
                 .into_iter()
                 .filter_map(|(mime, reader)| read_selection(reader).map(|bytes| (mime, bytes)))
                 .collect();
-            if (entries.is_empty() && !cleared) || crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
+            if (entries.is_empty() && !cleared) || crate::SHUTDOWN.load(Ordering::Relaxed) {
                 return;
             }
             if generations.load(Ordering::Relaxed) != generation {
@@ -2334,7 +2334,7 @@ impl SelectionHandler for AppState {
         // Recorded even with no callback armed, so SetClipboardCallback can re-stage a
         // read of a copy made while nobody was listening.
         self.current_selection_mimes = chosen.clone();
-        if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
+        if crate::SHUTDOWN.load(Ordering::Relaxed) {
             return;
         }
         if self.clipboard_callback.is_none() {

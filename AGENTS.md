@@ -13,9 +13,19 @@ explanation. The code commenting should reflect the current state of the codebas
 to an LLM bot or developer. Write American English -- color, behavior, center, initialize, canceled -- except
 where a name belongs to something upstream, such as a Wayland `Cancelled` event or an NVENC `colourMatrix` field.
 
+pixelflux is a Rust library first and a Python extension module second: `src/python.rs`, behind the `python`
+feature, is the one place that names PyO3, and every class there wraps a public Rust type (`CaptureSettings`,
+`ScreenCapture`, `Compositor`, `webcam::VirtualCamera`) or a public function, converting its arguments, calling
+with the GIL released, and mapping `Error` to the exception Python raised before. Frames, cursor images, and
+clipboard contents reach a consumer through the `sink` traits; the Python callbacks are sink implementations.
+A capability a Rust consumer needs is added to the Rust API and then wrapped, never the other way around, and
+nothing in Python-facing code is reachable only from Python. setup.py builds the wheel with `--features
+python,extension-module`; `cargo build` alone links no interpreter.
+
 Empirical testing is possible for everything here, including implementation, auditing, validation, and verification,
-and every change is validated before it is reported. `cargo test --lib` in both feature configurations and
-`pre-commit run --all-files` (rustfmt, clippy, ruff, and codespell) are the floor;
+and every change is validated before it is reported. `cargo test --lib` in every feature configuration (the default,
+`--features python`, and `--no-default-features --features openh264`) and
+`pre-commit run --all-files` (rustfmt, clippy in both the default and `python` configurations, ruff, and codespell) are the floor;
 the `#[ignore]`d `gpu_` tests need an NVIDIA GPU (`cargo test gpu_ -- --ignored --nocapture --test-threads=1`,
 serially, since concurrent session builds fault in the driver), the `gpu_dmabuf_` ones a render node as well, and the
 `gpu_bench_` ones print measurements to quote rather than assert. The VA-API surface probe (`vpp_sw_formats`)

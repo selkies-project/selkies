@@ -62,7 +62,7 @@ pub enum CursorJob {
 
 /// Spawn the cursor delivery worker; returns its job channel. The worker owns its own
 /// theme handle, the PNG cache, and the sink until one replaces or withdraws it (like the
-/// compositor thread itself); `PY_SHUTDOWN` gates every call into it.
+/// compositor thread itself); `SHUTDOWN` gates every call into it.
 pub fn spawn_cursor_worker(cursor_size: i32, size_cap: i32) -> std::sync::mpsc::Sender<CursorJob> {
     let (tx, rx) = std::sync::mpsc::channel::<CursorJob>();
     let _ = std::thread::Builder::new()
@@ -127,7 +127,7 @@ pub fn spawn_cursor_worker(cursor_size: i32, size_cap: i32) -> std::sync::mpsc::
                 if data.is_empty() && msg_type != "hide" {
                     continue;
                 }
-                if crate::PY_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                if crate::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                     continue;
                 }
                 if let Some(cb) = &callback {

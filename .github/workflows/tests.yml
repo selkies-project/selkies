@@ -81,11 +81,16 @@ jobs:
 
       - name: cargo test
         # Tests needing a GPU, a render node, or an encoder device mark themselves
-        # ignored, which is what a runner carrying none of them runs.
-        run: cargo test --manifest-path pixelflux/Cargo.toml
+        # ignored, which is what a runner carrying none of them runs. The crate is
+        # tested as the Rust library it is by default and with the Python bridge on.
+        run: |
+          cargo test --manifest-path pixelflux/Cargo.toml
+          cargo test --manifest-path pixelflux/Cargo.toml --features python
 
       - name: cargo clippy
-        run: cargo clippy --manifest-path pixelflux/Cargo.toml --all-targets -- -D warnings
+        run: |
+          cargo clippy --manifest-path pixelflux/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path pixelflux/Cargo.toml --all-targets --features python -- -D warnings
 
   pre-commit:
     name: pre-commit

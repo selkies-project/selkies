@@ -38,3 +38,9 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+      - id: clippy-python
+        name: clippy (python feature)
+        entry: cargo clippy --manifest-path pixelflux/Cargo.toml --all-targets --features python -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
