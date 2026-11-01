@@ -34,6 +34,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { onCoreMessage } from "@/utils"
 
 import {
   sessionAuthHeaders,
@@ -206,17 +207,11 @@ export function FileManager({
   }, [cwd, load])
 
   // An upload that ends shows in the listing without a manual refresh.
-  React.useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return
-      const message = event.data
-      if (message?.type === "fileUpload" && message.payload?.status === "end") {
-        refresh().catch((e: any) => setError(e?.message || String(e)))
-      }
+  React.useEffect(() => onCoreMessage((message) => {
+    if (message.type === "fileUpload" && message.payload?.status === "end") {
+      refresh().catch((e: any) => setError(e?.message || String(e)))
     }
-    window.addEventListener("message", onMessage)
-    return () => window.removeEventListener("message", onMessage)
-  }, [refresh])
+  }), [refresh])
 
   /** Shows the directory at `path`, fetching its listing the first time. */
   const navigateTo = React.useCallback(

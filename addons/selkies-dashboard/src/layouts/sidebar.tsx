@@ -21,22 +21,18 @@
  * @module
  */
 import * as React from "react";
-import { ChevronDown, ChevronUp, Crosshair, FileUp, FolderOpen, Gamepad2, Keyboard, LayoutGrid, Maximize, Mic, Monitor, Touchpad, Volume2, Webcam } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ChevronDown, ChevronUp, Crosshair, Keyboard, Maximize, Touchpad } from "lucide-react";
 import { SelkiesLogo } from "@/components/logo";
 import { LayoutToggle, ThemePill } from "@/panels/appearance";
 import { fractionOf, place, useViewport } from "@/panels/anchor";
-import { Clipboard } from "@/panels/clipboard";
-import { SwitchRow, Clip } from "@/panels/controls";
-import { GamepadControls } from "@/panels/gamepads";
-import { Printing } from "@/panels/printing";
-import { AudioSettings, ScreenSettings, VideoSettings } from "@/panels/settings";
-import { Sharing } from "@/panels/sharing";
-import { ShortcutsMenu } from "@/panels/shortcuts";
+import { PANELS, STREAMS, shownCards, usePanelContext, type PanelSpec } from "@/panels/catalog";
+import { CardList } from "@/panels/catalog-bodies";
+import { SwitchRow } from "@/panels/controls";
 import { SoftKeys } from "@/panels/soft-keys";
 import { StatsSection } from "@/panels/stats-section";
 import { PROJECT_URL, useDashboard } from "@/state/dashboard";
-import { useSettings, useSettingsPanels } from "@/state/settings-context";
+import { useSettings } from "@/state/settings-context";
+import { onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
 import "./sidebar.css";
 
@@ -77,7 +73,7 @@ function Section({ id, title, open, onToggle, children }: SectionProps) {
 /** The drawer, its handle, and the sections. */
 export default function SidebarLayout() {
   const d = useDashboard();
-  const panels = useSettingsPanels();
+  const ctx = usePanelContext();
   const settings = useSettings();
   const [open, setOpen] = React.useState(false);
   const [sections, setSections] = React.useState<Record<string, boolean>>({});
@@ -91,17 +87,15 @@ export default function SidebarLayout() {
   const { reportChromeOpen } = d;
 
   React.useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
-      if (event.data?.type === "toggleDashboard") setOpen((shown) => !shown);
-    };
+    const offMessages = onCoreMessage((message) => {
+      if (message.type === "toggleDashboard") setOpen((shown) => !shown);
+    });
     // Entering fullscreen (button, gaming mode, Ctrl+Shift+F, or browser UI)
     // folds the drawer so the user lands in the session.
     const onFullscreen = () => { if (document.fullscreenElement) setOpen(false); };
-    window.addEventListener("message", onMessage);
     document.addEventListener("fullscreenchange", onFullscreen);
     return () => {
-      window.removeEventListener("message", onMessage);
+      offMessages();
       document.removeEventListener("fullscreenchange", onFullscreen);
     };
   }, []);
@@ -127,14 +121,26 @@ export default function SidebarLayout() {
   };
 
   const toggleSection = (name: string) => setSections((state) => ({ ...state, [name]: !state[name] }));
-  const section = (name: string, id: string, title: string, body: React.ReactNode) => (
-    <Section id={id} title={title} open={!!sections[name]} onToggle={() => toggleSection(name)}>{body}</Section>
-  );
+  // What each panel of the catalog draws in its section: a settings panel its
+  // cards one after the other, the stats the strip's switch over the section's
+  // own view, any other its body.
+  const sectionBody = (panel: PanelSpec) => {
+    if (panel.kind === "settings") return <CardList cards={shownCards(panel, ctx)} />;
+    if (panel.kind === "stats") {
+      return (
+        <>
+          <SwitchRow id="statsStripToggle" label={t("sections.stats.stripLabel")} checked={d.statsOpen} onToggle={() => d.setStatsOpen(!d.statsOpen)} />
+          <StatsSection active={shown && !!sections.stats} framerate={settings.framerate} />
+        </>
+      );
+    }
+    const Body = panel.Body;
+    return Body ? <Body place="section" /> : null;
+  };
 
   const showCoreButtons = !d.isSecondaryDisplay && d.renderable.coreButtons;
   const showKeyboardTile = d.isTouch && d.renderable.softButtons;
   const showTrackpadTile = d.isTouch && d.renderable.trackpad;
-  const primary = !d.isSecondaryDisplay;
   const handleLabel = t(shown ? "topMenu.hideToolbar" : "topMenu.showToolbar");
 
   return (
@@ -170,21 +176,11 @@ export default function SidebarLayout() {
 
         {(showCoreButtons || showKeyboardTile || showTrackpadTile) && (
           <div className="sidebar-action-buttons">
-            {showCoreButtons && d.renderable.videoToggle && (
-              <Tile active={d.video} label={t(d.video ? "buttons.videoStreamDisableTitle" : "buttons.videoStreamEnableTitle")} onClick={d.toggleVideo}><Monitor /></Tile>
-            )}
-            {showCoreButtons && d.renderable.audioToggle && (
-              <Tile active={d.audio} label={t(d.audio ? "buttons.audioStreamDisableTitle" : "buttons.audioStreamEnableTitle")} onClick={d.toggleAudio}><Volume2 /></Tile>
-            )}
-            {showCoreButtons && d.renderable.microphoneToggle && (
-              <Tile active={d.microphone} label={t(d.microphone ? "buttons.microphoneDisableTitle" : "buttons.microphoneEnableTitle")} onClick={d.toggleMicrophone}><Mic /></Tile>
-            )}
-            {showCoreButtons && d.renderable.webcamToggle && (
-              <Tile active={d.webcam} label={t(d.webcam ? "buttons.webcamDisableTitle" : "buttons.webcamEnableTitle")} onClick={d.toggleWebcam}><Webcam /></Tile>
-            )}
-            {showCoreButtons && d.renderable.gamepadToggle && (
-              <Tile active={d.gamepad} label={t(d.gamepad ? "buttons.gamepadDisableTitle" : "buttons.gamepadEnableTitle")} onClick={d.toggleGamepad}><Gamepad2 /></Tile>
-            )}
+            {showCoreButtons && STREAMS.filter((stream) => stream.allowed(d.renderable)).map((stream) => (
+              <Tile key={stream.id} active={stream.on(d)} label={t(stream.on(d) ? stream.disable : stream.enable)} onClick={() => stream.toggle(d)}>
+                <stream.icon />
+              </Tile>
+            ))}
             {showKeyboardTile && (
               <Tile active={d.keyboardButton} className="keyboard-toggle-button" label={t("keyboardButtonToggleTitle")} onClick={d.toggleKeyboardButton}><Keyboard /></Tile>
             )}
@@ -198,37 +194,11 @@ export default function SidebarLayout() {
           <SoftKeys showTrackpad={false} showKeyboardButton={false} />
         </div>
 
-        {panels.video && section("video", "settings-content", t("sections.video.title"), <VideoSettings />)}
-        {panels.screen && section("screen", "screen-settings-content", t("sections.screen.title"), <ScreenSettings />)}
-        {panels.audio && section("audio", "audio-settings-content", t("sections.audio.title"), <AudioSettings />)}
-        {primary && d.renderable.stats && section("stats", "stats-content", t("sections.stats.title"), (
-          <>
-            <SwitchRow id="statsStripToggle" label={t("sections.stats.stripLabel")} checked={d.statsOpen} onToggle={() => d.setStatsOpen(!d.statsOpen)} />
-            <StatsSection active={shown && !!sections.stats} framerate={settings.framerate} />
-          </>
+        {PANELS.filter((panel) => panel.shown(ctx, "section")).map((panel) => (
+          <Section key={panel.id} id={panel.contentId} title={t(panel.title)} open={!!sections[panel.id]} onToggle={() => toggleSection(panel.id)}>
+            {sectionBody(panel)}
+          </Section>
         ))}
-        {primary && d.renderable.clipboard && section("clipboard", "clipboard-content", t("sections.clipboard.title"), <Clipboard />)}
-        {primary && d.renderable.files && (d.renderable.fileUpload || d.renderable.fileDownload) && section("files", "files-content", t("sections.files.title"), (
-          <div className="files-actions">
-            {d.renderable.fileUpload && (
-              <Button variant="outline" className="min-w-0" title={t("sections.files.uploadButton")} onClick={() => window.dispatchEvent(new CustomEvent("requestFileUpload"))}>
-                <FileUp /><Clip>{t("sections.files.uploadButton")}</Clip>
-              </Button>
-            )}
-            {d.renderable.fileDownload && (
-              <Button variant="outline" className="min-w-0" title={t("sections.files.downloadButtonTitle")} onClick={() => d.openDialog("files")}>
-                <FolderOpen /><Clip>{t("sections.files.downloadButtonTitle")}</Clip>
-              </Button>
-            )}
-          </div>
-        ))}
-        {primary && d.printJobCount > 0 && section("printing", "printing-content", t("sections.printing.title"), <Printing />)}
-        {primary && d.renderable.apps && section("apps", "apps-content", t("sections.apps.title"), (
-          <Button variant="outline" className="w-full min-w-0" title={t("sections.apps.openButton")} onClick={() => d.openDialog("apps")}><LayoutGrid /><Clip>{t("sections.apps.openButton")}</Clip></Button>
-        ))}
-        {primary && d.renderable.sharing && section("sharing", "sharing-content", t("sections.sharing.title"), <Sharing show showUrl />)}
-        {primary && d.renderable.gamepads && section("gamepads", "gamepads-content", t("sections.gamepads.title"), <GamepadControls rumbleButton />)}
-        {d.renderable.shortcuts && section("shortcuts", "shortcuts-content", t("sections.shortcuts.title"), <ShortcutsMenu />)}
       </aside>
     </>
   );

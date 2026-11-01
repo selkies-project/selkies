@@ -22,7 +22,7 @@ import { Keyboard, Vibrate } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SwitchRow, Clip } from "@/panels/controls";
 import { useDashboard } from "@/state/dashboard";
-import { getPrefixedKey, isMobileClient } from "@/utils";
+import { getPrefixedKey, isMobileClient, onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
 
 /** Button value above which a button is drawn as pressed. */
@@ -82,24 +82,17 @@ function GamepadVisualizer({ state, index }: { state: PadState; index: number })
 function GamepadPreview() {
   const { touchGamepad } = useDashboard();
   const [pads, setPads] = React.useState<Record<string, PadState>>({});
-  React.useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
-      const message = event.data;
-      if (typeof message !== "object" || message === null) return;
-      if (message.type !== "gamepadButtonUpdate" && message.type !== "gamepadAxisUpdate") return;
-      const index = message.gamepadIndex;
-      if (index === undefined || index === null) return;
-      setPads((previous) => {
-        const pad: PadState = { buttons: { ...(previous[index]?.buttons || {}) }, axes: { ...(previous[index]?.axes || {}) } };
-        if (message.type === "gamepadButtonUpdate") pad.buttons[message.buttonIndex] = message.value || 0;
-        else pad.axes[message.axisIndex] = Math.max(-1, Math.min(1, message.value || 0));
-        return { ...previous, [index]: pad };
-      });
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, []);
+  React.useEffect(() => onCoreMessage((message) => {
+    if (message.type !== "gamepadButtonUpdate" && message.type !== "gamepadAxisUpdate") return;
+    const index = message.gamepadIndex;
+    if (index === undefined || index === null) return;
+    setPads((previous) => {
+      const pad: PadState = { buttons: { ...(previous[index]?.buttons || {}) }, axes: { ...(previous[index]?.axes || {}) } };
+      if (message.type === "gamepadButtonUpdate") pad.buttons[message.buttonIndex] = message.value || 0;
+      else pad.axes[message.axisIndex] = Math.max(-1, Math.min(1, message.value || 0));
+      return { ...previous, [index]: pad };
+    });
+  }), []);
   if (isMobileClient && touchGamepad) {
     return <p className="text-xs text-muted-foreground">{t('sections.gamepads.physicalHiddenForTouch')}</p>;
   }

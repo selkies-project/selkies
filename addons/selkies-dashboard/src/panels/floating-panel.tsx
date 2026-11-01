@@ -14,7 +14,7 @@
  */
 import * as React from "react";
 import { getPrefixedKey } from "@/utils";
-import { type Fraction, fractionOf, isFraction, place, useElementSize, useViewport } from "@/panels/anchor";
+import { type Fraction, isFraction, place, useAnchorDrag, useElementSize, useViewport } from "@/panels/anchor";
 
 const MARGIN = 16;
 
@@ -41,37 +41,15 @@ export function FloatingPanel({ initial, storageKey, className, children }: Floa
   const viewport = useViewport();
   const size = useElementSize(ref, { width: 300, height: 200 });
   const position = place(anchor, viewport, size, MARGIN);
-  const [dragging, setDragging] = React.useState(false);
-  const start = React.useRef({ x: 0, y: 0 });
-  const last = React.useRef<Fraction | null>(null);
+  const { dragging, begin } = useAnchorDrag(setAnchor, viewport, size, MARGIN, (last) => {
+    if (storageKey && last) localStorage.setItem(getPrefixedKey(storageKey), JSON.stringify(last));
+  });
 
   const onPointerDown = (event: React.PointerEvent) => {
     const target = event.target as HTMLElement;
     if (!target.closest("[data-drag-handle]") || target.closest("button, input, select, a")) return;
-    // Captured: a pointer that outruns the panel lands on the stream, where the core adopts the held button.
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setDragging(true);
-    start.current = { x: event.clientX - position.x, y: event.clientY - position.y };
+    begin(event, position);
   };
-
-  React.useEffect(() => {
-    if (!dragging) return undefined;
-    const move = (event: PointerEvent) => {
-      const next = fractionOf({ x: event.clientX - start.current.x, y: event.clientY - start.current.y }, viewport, size, MARGIN);
-      last.current = next;
-      setAnchor(next);
-    };
-    const up = () => {
-      setDragging(false);
-      if (storageKey && last.current) localStorage.setItem(getPrefixedKey(storageKey), JSON.stringify(last.current));
-    };
-    document.addEventListener("pointermove", move);
-    document.addEventListener("pointerup", up);
-    return () => {
-      document.removeEventListener("pointermove", move);
-      document.removeEventListener("pointerup", up);
-    };
-  }, [dragging, storageKey, viewport, size]);
 
   // The entrance animation keeps the kit's default length: a duration utility
   // would also set a transition on every property, and a drag would then

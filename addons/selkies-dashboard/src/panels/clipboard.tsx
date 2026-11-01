@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { SwitchRow, Clip } from "@/panels/controls";
-import { computeRenderableSettings, getLastClipboardContent, getLastServerSettings, getPrefixedKey } from "@/utils";
+import { computeRenderableSettings, getLastClipboardContent, getLastServerSettings, getPrefixedKey, onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
 
 /**
@@ -118,41 +118,31 @@ export function Clipboard() {
 		);
 	};
 
-	useEffect(() => {
-		const handleWindowMessage = (event: MessageEvent) => {
-			if (event.origin !== window.location.origin) return;
-			const message = event.data;
-
-			if (typeof message !== 'object' || message === null) return;
-
-			if (message.type === 'clipboardContentUpdate') {
-				if (typeof message.text === 'string') {
-					setDashboardClipboardContent(message.text);
-					setClipboardTruncated(message.truncated === true);
-					setClipboardSecret(message.secret === true);
-				}
+	useEffect(() => onCoreMessage((message) => {
+		if (message.type === 'clipboardContentUpdate') {
+			if (typeof message.text === 'string') {
+				setDashboardClipboardContent(message.text);
+				setClipboardTruncated(message.truncated === true);
+				setClipboardSecret(message.secret === true);
 			}
+		}
 
-			if (message.type === 'serverSettings') {
-				const payload = message.payload;
-				setRenderableSettings(computeRenderableSettings(payload));
-				const s = payload?.enable_binary_clipboard;
-				if (s) {
-					const saved = localStorage.getItem(getPrefixedKey('enable_binary_clipboard'));
-					const final = s.locked ? s.value : (saved !== null ? saved === 'true' : s.value);
-					setEnableBinaryClipboard(final);
-				}
-				const seamless = payload?.clipboard_seamless;
-				if (seamless) {
-					setClipboardSeamless(seamless.locked ? seamless.value
-						: storedBool('clipboard_seamless', seamless.value));
-				}
+		if (message.type === 'serverSettings') {
+			const payload = message.payload;
+			setRenderableSettings(computeRenderableSettings(payload));
+			const s = payload?.enable_binary_clipboard;
+			if (s) {
+				const saved = localStorage.getItem(getPrefixedKey('enable_binary_clipboard'));
+				const final = s.locked ? s.value : (saved !== null ? saved === 'true' : s.value);
+				setEnableBinaryClipboard(final);
 			}
-		};
-
-		window.addEventListener('message', handleWindowMessage);
-		return () => window.removeEventListener('message', handleWindowMessage);
-	}, []);
+			const seamless = payload?.clipboard_seamless;
+			if (seamless) {
+				setClipboardSeamless(seamless.locked ? seamless.value
+					: storedBool('clipboard_seamless', seamless.value));
+			}
+		}
+	}), []);
 
 	const handleClipboardChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
 		setDashboardClipboardContent(event.target.value);

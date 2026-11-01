@@ -80,3 +80,48 @@ export function isFraction(value: unknown): value is Fraction {
   const v = value as Fraction | null;
   return !!v && Number.isFinite(v.x) && Number.isFinite(v.y) && v.x >= 0 && v.x <= 1 && v.y >= 0 && v.y <= 1;
 }
+
+/**
+ * Drags an element placed by a fraction. `begin`, from a pointer down,
+ * captures the pointer (one that outruns the element lands on the stream,
+ * where the core adopts the held button) and keeps its offset from
+ * `position`; every move then places the element at the pointer less that
+ * offset, and the release ends the drag, handing `onEnd` the last place.
+ * @param setAnchor Takes each new place.
+ * @param viewport The window's size.
+ * @param size The element's size.
+ * @param margin Pixels kept in from each edge.
+ * @param onEnd Called on release with the place the drag left, or null where it never moved.
+ */
+export function useAnchorDrag(setAnchor: (fraction: Fraction) => void, viewport: Size, size: Size, margin = 0,
+  onEnd?: (last: Fraction | null) => void) {
+  const [dragging, setDragging] = React.useState(false);
+  const start = React.useRef<Point>({ x: 0, y: 0 });
+  const last = React.useRef<Fraction | null>(null);
+  const ended = React.useRef(onEnd);
+  React.useEffect(() => { ended.current = onEnd; });
+  React.useEffect(() => {
+    if (!dragging) return undefined;
+    const move = (event: PointerEvent) => {
+      last.current = fractionOf({ x: event.clientX - start.current.x, y: event.clientY - start.current.y }, viewport, size, margin);
+      setAnchor(last.current);
+    };
+    const up = () => {
+      setDragging(false);
+      ended.current?.(last.current);
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+    return () => {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+    };
+  }, [dragging, viewport, size, margin, setAnchor]);
+  const begin = (event: React.PointerEvent, position: Point) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    start.current = { x: event.clientX - position.x, y: event.clientY - position.y };
+    last.current = null;
+    setDragging(true);
+  };
+  return { dragging, begin };
+}

@@ -46,7 +46,7 @@ import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     tenBitStream, CPU_ENCODE_THREADING_SPEC, cpuEncodeThreadingApplies,
     RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import { getPrefixedKey, computeRenderableSettings, getLastServerSettings,
-    getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay, type ServerSettings } from "@/utils";
+    getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay, onCoreMessage, type ServerSettings } from "@/utils";
 import { t } from "@/i18n";
 
 export { displayLabel, canPlayEncoder, framerateLabel };
@@ -435,27 +435,20 @@ export function useStreamSettings() {
     const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
     const [isLoadingAudioDevices, setIsLoadingAudioDevices] = useState(false);
 
-    useEffect(() => {
-        const handleMessage = (event: MessageEvent) => {
-            if (event.origin !== window.location.origin) return;
-            const message = event.data;
-            if (typeof message !== "object" || message === null) return;
-            if (message.type === "serverSettings") setServerSettings(message.payload);
-            if (message.type === "effectiveCursorState" && typeof message.value === "boolean") setEffectiveCursor(message.value);
-            if (message.type === "displayRefresh" && Number.isFinite(message.rate)) setDisplayRate(message.rate);
-            // The core's derived pick; a stored pick is the user's and stays.
-            if (message.type === "scalingDpiFollowed" && typeof message.value === "number" && readStored("scaling_dpi") === null) {
-                setSelectedDpi(message.value);
-            }
-            // Echo of this dashboard's own pick: the picker shows what the core was told.
-            if (message.type === "audioDeviceSelected" && message.deviceId) {
-                if (message.context === "input") setSelectedInputDeviceId(message.deviceId);
-                else if (message.context === "output") setSelectedOutputDeviceId(message.deviceId);
-            }
-        };
-        window.addEventListener("message", handleMessage);
-        return () => window.removeEventListener("message", handleMessage);
-    }, []);
+    useEffect(() => onCoreMessage((message) => {
+        if (message.type === "serverSettings") setServerSettings(message.payload);
+        if (message.type === "effectiveCursorState" && typeof message.value === "boolean") setEffectiveCursor(message.value);
+        if (message.type === "displayRefresh" && Number.isFinite(message.rate)) setDisplayRate(message.rate);
+        // The core's derived pick; a stored pick is the user's and stays.
+        if (message.type === "scalingDpiFollowed" && typeof message.value === "number" && readStored("scaling_dpi") === null) {
+            setSelectedDpi(message.value);
+        }
+        // Echo of this dashboard's own pick: the picker shows what the core was told.
+        if (message.type === "audioDeviceSelected" && message.deviceId) {
+            if (message.context === "input") setSelectedInputDeviceId(message.deviceId);
+            else if (message.context === "output") setSelectedOutputDeviceId(message.deviceId);
+        }
+    }), []);
 
     // Seeding and re-clamping write state rather than deriving in render:
     // every value stays editable afterwards, so recomputing would discard edits.

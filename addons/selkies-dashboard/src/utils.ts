@@ -95,16 +95,31 @@ export interface PrintJob { name: string; url: string }
 /** The server clipboard preview; a secret arrives as the flag alone, never its text. */
 export interface ClipboardPreview { text: string; truncated: boolean; secret: boolean }
 
+/** A message the core posts to the page's window (or the page to itself): an object with a `type`. */
+export type CoreMessage = Record<string, any>;
+
+/**
+ * Hands `handler` every message the core posts to this window: from this
+ * origin, and an object, which is what every message of the core's is.
+ * @returns The unsubscribe, for an effect's cleanup.
+ */
+export function onCoreMessage(handler: (message: CoreMessage) => void): () => void {
+  const listener = (event: MessageEvent) => {
+    if (event.origin !== window.location.origin) return;
+    const message = event.data;
+    if (typeof message === 'object' && message !== null) handler(message);
+  };
+  window.addEventListener('message', listener);
+  return () => window.removeEventListener('message', listener);
+}
+
 let lastServerSettings: ServerSettings | null = null;
 let lastClipboardContent: ClipboardPreview | null = null;
 let printJobs: PrintJob[] = [];
 let lastEffectiveCursorState: boolean | null = null;
 const lastAudioDevices: { input: string | null; output: string | null } = { input: null, output: null };
 if (typeof window !== 'undefined') {
-  window.addEventListener('message', (event: MessageEvent) => {
-    if (event.origin !== window.location.origin) return;
-    const message = event.data;
-    if (typeof message !== 'object' || message === null) return;
+  onCoreMessage((message) => {
     if (message.type === 'serverSettings') {
       lastServerSettings = message.payload;
     } else if (message.type === 'clipboardContentUpdate' && typeof message.text === 'string') {

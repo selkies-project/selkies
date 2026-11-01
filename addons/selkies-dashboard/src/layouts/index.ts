@@ -7,9 +7,10 @@
 /**
  * The layouts: how the one set of panels is arranged over the stream. A
  * layout is a component that reads `useDashboard` and `useSettings` and
- * decides where each panel is painted; the panels themselves know nothing of
- * it. Adding a layout is one entry here, the server's `ui_layout` enum, and
- * its name in the dictionary (`layout.<id>`).
+ * decides where each panel is painted, and the stats it lays over the stream;
+ * the panels themselves know nothing of it. Adding a layout is one entry
+ * here, the server's `ui_layout` enum, and its name in the dictionary
+ * (`layout.<id>`).
  *
  * Which layout a page shows: the pick stored under the prefixed `ui_layout`
  * key, else what the server names in `ui_layout` (its `/api/status` probe
@@ -19,6 +20,8 @@
  */
 import * as React from "react";
 import { Columns2, PanelTop } from "lucide-react";
+import { FloatingStats } from "@/panels/stats";
+import { StreamStrip } from "@/panels/stats-section";
 import { getPrefixedKey } from "@/utils";
 
 /** One layout of the registry. */
@@ -31,6 +34,8 @@ export interface LayoutSpec {
   icon: React.ComponentType<{ className?: string }>;
   /** The component that arranges the panels. */
   component: React.LazyExoticComponent<React.ComponentType>;
+  /** What the stats switch lays over the stream. */
+  stats: React.ComponentType;
 }
 
 /** Every layout, in the order the toggle cycles them. */
@@ -40,12 +45,14 @@ export const LAYOUTS: LayoutSpec[] = [
     labelKey: "layout.default",
     icon: Columns2,
     component: React.lazy(() => import("./sidebar")),
+    stats: StreamStrip,
   },
   {
     id: "wish",
     labelKey: "layout.wish",
     icon: PanelTop,
     component: React.lazy(() => import("./toolbar")),
+    stats: FloatingStats,
   },
 ];
 
