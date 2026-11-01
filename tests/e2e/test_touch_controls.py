@@ -215,6 +215,15 @@ RECT_JS = """(sel) => {
 }"""
 
 
+VK_LABEL = "Virtual Keyboard"
+# navigator.virtualKeyboard's show and hide, counted (the engine's own keyboard is the OS's, not the page's).
+VK_SPY = """() => { const vk = navigator.virtualKeyboard; window.__vk = { shown: 0, hidden: 0 };
+  if (vk) { vk.show = () => { window.__vk.shown++; }; vk.hide = () => { window.__vk.hidden++; }; } }"""
+VK_READ = """() => { const f = document.getElementById('keyboard-input-assist');
+  return { ...window.__vk, api: !!navigator.virtualKeyboard, focused: document.activeElement === f,
+           policy: f && f.getAttribute('virtualkeyboardpolicy') }; }"""
+
+
 def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None:
     """A tablet's attached keyboard keeps the system's on-screen one down, so
     the button that pops it goes once a key only a keyboard has is pressed,
@@ -257,6 +266,27 @@ def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None
                     close_sidebar(page)
                 res.check(f"{tag}: the dashboard's own keyboard control brings it back",
                           button.count() > 0 and button.first.is_visible())
+                # Each button that raises the keyboard asks the engine for it outright where it has the
+                # VirtualKeyboard API (Chromium on Windows leaves it down for a field focused by script, and
+                # always with a keyboard attached), with the hidden field focused under the manual policy.
+                raisers = [("the floating keyboard button", "[data-virtual-keyboard-button]")]
+                if dashboard == "wish":
+                    raisers.append(("the soft keys' keyboard button", f'[data-soft-keys] button[aria-label="{VK_LABEL}"]'))
+                for name, selector in raisers:
+                    if dashboard == "wish" and "soft keys" in name and not page.locator(selector).count():
+                        page.locator(".soft-keys-button").first.click()
+                        time.sleep(0.5)
+                    page.evaluate(VK_SPY)
+                    page.locator(selector).first.click()
+                    time.sleep(0.5)
+                    got = page.evaluate(VK_READ)
+                    # An engine without the API raises it on the focus alone.
+                    asked = got["shown"] >= 1 and got["policy"] == "manual" if got["api"] else True
+                    res.check(f"{tag}: {name} raises the on-screen keyboard", got["focused"] and asked, got)
+                    page.evaluate("document.activeElement && document.activeElement.blur()")
+                    time.sleep(0.3)
+                    if got["api"]:
+                        res.check(f"{tag}: and the field leaving focus lowers it", page.evaluate(VK_READ)["hidden"] >= 1)
             finally:
                 C.close_browser(browser)
     finally:

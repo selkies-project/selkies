@@ -149,18 +149,21 @@ const subscribeCoarsePointer = (onChange: () => void) => {
 const isCoarsePointer = () => coarsePointer?.matches ?? false;
 
 /**
- * The button that asks the core to show the virtual keyboard, while the
- * primary pointer is coarse (a phone, a tablet, a convertible in its tablet
- * posture), no keyboard is attached, and the keyboard toggle has not hidden it.
+ * The button that asks the core to show the virtual keyboard on a touch client
+ * (a coarse primary pointer: a phone, a tablet, a convertible in its tablet
+ * posture; or a touch seen) with no keyboard attached, unless the keyboard
+ * toggle has hidden it.
  */
 export function VirtualKeyboardButton() {
   const d = useDashboard();
   const coarse = React.useSyncExternalStore(subscribeCoarsePointer, isCoarsePointer);
-  if (!d.keyboardButton || !coarse || !d.gamepad || d.isSecondaryDisplay || d.isViewer || !d.renderable.chrome || !d.renderable.gamepads) return null;
+  // Gated as the toggle that hides it is (the keyboard button's own setting, a touch client), not on the gamepads.
+  if (!d.keyboardButton || !(coarse || d.isTouch) || d.isSecondaryDisplay || d.isViewer || !d.renderable.chrome
+    || !d.renderable.keyboardButton) return null;
   return (
     <Button variant="default" size="icon" className="virtual-keyboard-button fixed right-4 bottom-4 z-[2050]" data-virtual-keyboard-button=""
       aria-label={t("topMenu.virtualKeyboard")} title={t("topMenu.virtualKeyboard")}
-      onClick={() => window.postMessage({ type: 'showVirtualKeyboard' }, window.location.origin)}>
+      onClick={d.showVirtualKeyboard}>
       <Keyboard className="size-4" />
     </Button>
   );

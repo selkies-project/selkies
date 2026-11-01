@@ -339,23 +339,11 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
    * releasing it again on the next touch of the interaction overlay. An
    * attached keyboard is no longer assumed, so the floating button comes back.
    */
+  // Asked for, the on-screen keyboard is the core's to raise (lib/virtual-keyboard.js), in the same tap: an attached
+  // keyboard is no longer assumed, so the floating button comes back.
   const showVirtualKeyboard = React.useCallback(() => {
     keyboardWatch.reset();
-    const assist = document.getElementById("keyboard-input-assist") as HTMLInputElement | null;
-    const overlay = document.getElementById("overlayInput");
-    if (!assist) {
-      console.error("Could not find #keyboard-input-assist element to focus.");
-      return;
-    }
-    assist.removeAttribute("aria-hidden");
-    assist.value = "";
-    assist.focus();
-    overlay?.addEventListener("touchstart", () => {
-      if (document.activeElement === assist) {
-        assist.blur();
-        assist.setAttribute("aria-hidden", "true");
-      }
-    }, { once: true, passive: true });
+    window.postMessage({ type: "showVirtualKeyboard" }, window.location.origin);
   }, []);
 
   /** Toggles a held modifier soft key; the core's synthetic-key mode is raised while any is held. */

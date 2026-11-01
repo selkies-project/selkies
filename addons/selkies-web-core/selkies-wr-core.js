@@ -95,6 +95,7 @@ import { urlFragmentKeyword } from './lib/page-url.js';
 import { titleFromSettings } from './lib/page-title.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canDecodeTenBit, tenBitFormat, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers, rememberCcStart, forgetCcStart } from './lib/util.js';
+import { keyboardAssist, showVirtualKeyboard } from './lib/virtual-keyboard.js';
 import { codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
@@ -2194,20 +2195,9 @@ export default function webrtc() {
 				}
 				break;
 			case 'showVirtualKeyboard': {
-				// Focusing the off-screen assist input opens the mobile soft keyboard; the next
-				// touch of the stream blurs it.
+				// The stream's next touch lowers it again (lib/virtual-keyboard.js).
 				if (isSharedMode) { break; }
-				const kbdAssistInput = document.getElementById('keyboard-input-assist');
-				const mainInteractionOverlay = document.getElementById('overlayInput');
-				if (kbdAssistInput) {
-					kbdAssistInput.value = '';
-					kbdAssistInput.focus();
-					if (mainInteractionOverlay) {
-						mainInteractionOverlay.addEventListener('touchstart', () => {
-							if (document.activeElement === kbdAssistInput) { kbdAssistInput.blur(); }
-						}, { once: true, passive: true });
-					}
-				}
+				showVirtualKeyboard(document.getElementById('overlayInput'));
 				break;
 			}
 			case 'setAntiAliasing':
@@ -3039,27 +3029,7 @@ export default function webrtc() {
 			videoContainer.appendChild(overlayInput);
 			appDiv.appendChild(videoContainer);
 
-			if (!document.getElementById('keyboard-input-assist')) {
-				const keyboardInputAssist = document.createElement('input');
-				keyboardInputAssist.type = 'search';
-				keyboardInputAssist.id = 'keyboard-input-assist';
-				keyboardInputAssist.style.position = 'absolute';
-				keyboardInputAssist.style.left = '-9999px';
-				keyboardInputAssist.style.top = '-9999px';
-				keyboardInputAssist.style.width = '1px';
-				keyboardInputAssist.style.height = '1px';
-				keyboardInputAssist.style.opacity = '0';
-				keyboardInputAssist.style.border = '0';
-				keyboardInputAssist.style.padding = '0';
-				keyboardInputAssist.style.caretColor = 'transparent';
-				keyboardInputAssist.setAttribute('aria-hidden', 'true');
-				keyboardInputAssist.setAttribute('autocomplete', 'off');
-				keyboardInputAssist.setAttribute('autocorrect', 'off');
-				keyboardInputAssist.setAttribute('autocapitalize', 'off');
-				keyboardInputAssist.setAttribute('spellcheck', 'false');
-				document.body.appendChild(keyboardInputAssist);
-				console.log("Dynamically added #keyboard-input-assist element.");
-			}
+			keyboardAssist();
 			appName = "webrtc"
 			debug = getBoolParam('debug', false);
 			turnSwitch = getBoolParam('turn_switch', false);

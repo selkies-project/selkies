@@ -131,6 +131,7 @@ import { titleFromSettings } from './lib/page-title.js';
 import { storageKeyForServerKey, resolveSpec, tenBitStream, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { CRASH_SAFE_SETTINGS, holdKeys, holdDisplaySettings, releaseHeldSettings, restoreHeldPicks } from './lib/held-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, canDecodeTenBit, tenBitDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers, rememberCcStart, recalledCcStart, forgetCcStart } from './lib/util.js';
+import { keyboardAssist, showVirtualKeyboard } from './lib/virtual-keyboard.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS,
@@ -4291,27 +4292,7 @@ const initializeUI = () => {
   document.body.appendChild(hiddenFileInput);
   hiddenFileInput.addEventListener('change', handleFileInputChange);
 
-  if (!document.getElementById('keyboard-input-assist')) {
-    const keyboardInputAssist = document.createElement('input');
-    keyboardInputAssist.type = 'search';
-    keyboardInputAssist.id = 'keyboard-input-assist';
-    keyboardInputAssist.style.position = 'absolute';
-    keyboardInputAssist.style.left = '-9999px';
-    keyboardInputAssist.style.top = '-9999px';
-    keyboardInputAssist.style.width = '1px';
-    keyboardInputAssist.style.height = '1px';
-    keyboardInputAssist.style.opacity = '0';
-    keyboardInputAssist.style.border = '0';
-    keyboardInputAssist.style.padding = '0';
-    keyboardInputAssist.style.caretColor = 'transparent';
-    keyboardInputAssist.setAttribute('aria-hidden', 'true');
-    keyboardInputAssist.setAttribute('autocomplete', 'off');
-    keyboardInputAssist.setAttribute('autocorrect', 'off');
-    keyboardInputAssist.setAttribute('autocapitalize', 'off');
-    keyboardInputAssist.setAttribute('spellcheck', 'false');
-    document.body.appendChild(keyboardInputAssist);
-    console.log("Dynamically added #keyboard-input-assist element.");
-  }
+  keyboardAssist();
   appDiv.appendChild(videoContainer);
   updateStatusDisplay();
   playButtonElement.addEventListener('click', playStream);
@@ -5413,25 +5394,7 @@ function receiveMessage(event) {
         console.log("Shared mode: showVirtualKeyboard message ignored.");
         break;
       }
-      console.log("Received 'showVirtualKeyboard' message.");
-      const kbdAssistInput = document.getElementById('keyboard-input-assist');
-      const mainInteractionOverlay = document.getElementById('overlayInput');
-      if (kbdAssistInput) {
-        kbdAssistInput.value = '';
-        kbdAssistInput.focus();
-        console.log("Focused #keyboard-input-assist element.");
-        mainInteractionOverlay.addEventListener(
-          "touchstart",
-          () => {
-            if (document.activeElement === kbdAssistInput) {
-              kbdAssistInput.blur();
-            }
-          }, {
-            once: true,
-            passive: true
-          }
-        );
-      } else {
+      if (!showVirtualKeyboard(document.getElementById('overlayInput'))) {
         console.error("Could not find #keyboard-input-assist element to focus.");
       }
       break;
