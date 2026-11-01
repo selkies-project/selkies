@@ -346,7 +346,7 @@ export function FileManager({
             <nav aria-label={t("files.rootLabel")} className="flex min-w-0 flex-wrap items-center gap-1 text-sm font-medium">
               <button
                 type="button"
-                className="shrink-0 rounded px-1 py-0.5 hover:bg-muted"
+                className="shrink-0 rounded px-1 py-0.5 outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring"
                 onClick={() => navigateTo("")}
               >
                 {t("files.rootLabel")}
@@ -356,7 +356,7 @@ export function FileManager({
                   <span className="text-muted-foreground">/</span>
                   <button
                     type="button"
-                    className="min-w-0 truncate rounded px-1 py-0.5 hover:bg-muted"
+                    className="min-w-0 truncate rounded px-1 py-0.5 outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring"
                     onClick={() => navigateTo(pathParts.slice(0, index + 1).join("/"))}
                   >
                     {part}

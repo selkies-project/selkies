@@ -318,6 +318,14 @@
   font-size: 0.75rem;
 }
 .sidebar .mobile-key-button:hover { border-color: var(--sk-accent-border); }
+/* Keyboard focus on the buttons and switches the rules here restyle: they drop the components' own ring (a box
+   shadow, which the button rules below reset at a specificity a focus rule cannot outrank), so an outline in the
+   accent takes its place. */
+.sidebar [data-slot="button"]:focus-visible,
+.sidebar [data-slot="switch"]:focus-visible {
+  outline: 2px solid var(--sk-accent);
+  outline-offset: 2px;
+}
 .sidebar .mobile-key-button[data-variant="default"] {
   background-color: var(--sk-accent-soft);
   border-color: var(--sk-accent-border);

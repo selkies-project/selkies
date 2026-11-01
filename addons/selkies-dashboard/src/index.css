@@ -227,7 +227,9 @@
   opacity: 0.5;
 }
 .range-slider:focus-visible {
-  outline: none;
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 9999px;
 }
 .range-slider::-webkit-slider-runnable-track {
   height: 0.375rem;

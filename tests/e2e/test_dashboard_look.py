@@ -66,7 +66,7 @@ REST_JS = r"""
   for (const el of document.querySelectorAll(sel)) {
     const cs = getComputedStyle(el);
     window.__lookRest.set(el, { outline: cs.outlineStyle + cs.outlineWidth + cs.outlineColor, shadow: cs.boxShadow,
-                                border: cs.borderTopColor });
+                                border: cs.borderTopColor, focused: el.matches(':focus-visible') });
   }
 }
 """
@@ -226,7 +226,18 @@ AUDIT_JS = r"""
         if (ring) marks.push(ring.c);
       }
       if (parseFloat(cs.borderTopWidth) >= 1 && cs.borderTopColor !== rest.border) marks.push(rgba(cs.borderTopColor));
-      if (!marks.length) continue;
+      if (!marks.length) {
+        // A control the keyboard can reach that shows nothing when it has the focus has no indicator at all. A menu
+        // item is the exception: its menu highlights the item the focus is on (data-highlighted), which a forced
+        // :focus does not reach, and the open submenu's trigger is highlighted already. So is a control that has the
+        // focus at rest (a dialog's first, focused as it opens): its indicator is on in both looks.
+        if (el.tabIndex >= 0 && !rest.focused && !(el.getAttribute('role') || '').startsWith('menuitem')) {
+          const text = (el.getAttribute('aria-label') || el.textContent || el.id || el.tagName).trim().slice(0, 40);
+          out.push({ view, kind: 'focus ring', text, where: path(el), ratio: 0, need: 3, disabled: false,
+            fg: null, bg: surface.slice(0, 3).map(Math.round), note: 'no focus indicator' });
+        }
+        continue;
+      }
       const shown = marks.map((c) => over(c, surface));
       const best = shown.reduce((a, b) => (ratio(a, surface) >= ratio(b, surface) ? a : b));
       const text = (el.getAttribute('aria-label') || el.textContent || el.id || el.tagName).trim().slice(0, 40);
