@@ -2809,7 +2809,8 @@ fn start_capture_on_display(
         frame_counter: 0,
         pending_force_idr: false,
         needs_full_render: true,
-        pace: FramePace::default(),
+        pace: FramePace::windowed(),
+        change_pending: false,
         hw_error_streak: 0,
         hw_rebuilt: false,
     };
@@ -3649,6 +3650,30 @@ fn render_pass(state: &mut AppState, trigger: TickTrigger) -> bool {
 }
 
 /// One display's render tick, for a trigger that concerns that display alone.
+/// Render each capture a change waits on (`WlCapture::change_pending`: a client's commit,
+/// input, a host frame) once its period is open: a change takes its period's frame as it
+/// lands, the X11 captures' schedule, rather than waiting for the frame timer. A capture whose
+/// period a frame already took keeps waiting, and the timer wakes as the next one opens.
+fn serve_changes(state: &mut AppState) {
+    let now = Instant::now();
+    let open: Vec<u32> = state
+        .output_nodes
+        .iter()
+        .filter_map(|n| {
+            let cap = n.capture.as_ref()?;
+            (cap.change_pending && cap.pace.due(TickTrigger::Damage, capture_period(cap), now))
+                .then_some(n.id)
+        })
+        .collect();
+    if open.is_empty() {
+        return;
+    }
+    state.space.refresh();
+    for id in open {
+        render_display(state, id, TickTrigger::Damage);
+    }
+}
+
 fn render_display(state: &mut AppState, display_id: u32, trigger: TickTrigger) {
     let mut nodes = std::mem::take(&mut state.output_nodes);
     if let Some(node) = nodes.iter_mut().find(|n| n.id == display_id) {
@@ -3788,6 +3813,7 @@ fn render_node_tick(
         let period = capture_period(cap);
         let paced = FramePace::input_paced(state.input_interval, period);
         cap.pace.ticked(trigger, period, Instant::now(), paced);
+        cap.change_pending = false;
     }
 
     // The cursor is composited only on the output the pointer is on, at that output's
@@ -3930,6 +3956,7 @@ fn render_node_tick(
             && let Some(period) = period
         {
             cap.pace.ticked(trigger, period, now, false);
+            cap.change_pending = false;
         }
         if let Some(f) = new_frame {
             host.retain_frame(host_idx, f);
@@ -6959,6 +6986,12 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 && state.host.is_none()
                 && state.output_nodes.iter().any(|n| n.capture.is_some())
             {
+                // A capture whose period a frame already took shows the input when the next opens.
+                for node in &mut state.output_nodes {
+                    if let Some(cap) = node.capture.as_mut() {
+                        cap.change_pending = true;
+                    }
+                }
                 state.space.refresh();
                 render_pass(state, TickTrigger::Input);
             } else if !state.pending_screenshots.is_empty()
@@ -6989,6 +7022,15 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             else {
                 return;
             };
+            // A host frame landing in a period a frame already took waits for the next to open.
+            if let Some(cap) = state
+                .output_nodes
+                .iter_mut()
+                .find(|n| n.id == id)
+                .and_then(|n| n.capture.as_mut())
+            {
+                cap.change_pending = true;
+            }
             state.space.refresh();
             render_display(state, id, TickTrigger::HostFrame);
         })
@@ -7124,6 +7166,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             }
             state.frame_idle_long = false;
 
+            serve_changes(state);
             if render_pass(state, TickTrigger::Timer) {
                 return TimeoutAction::ToDuration(Duration::from_millis(1));
             }
@@ -7135,7 +7178,15 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 .output_nodes
                 .iter()
                 .filter_map(|n| n.capture.as_ref())
-                .map(|cap| cap.pace.next_due(capture_period(cap), now))
+                .map(|cap| {
+                    let period = capture_period(cap);
+                    let due = cap.pace.next_due(period, now);
+                    if cap.change_pending {
+                        due.min(cap.pace.pull_at(TickTrigger::Damage, period, now))
+                    } else {
+                        due
+                    }
+                })
                 .min()
                 .unwrap_or(loop_start_time + frame_period(state.settings.target_fps));
             let wait = next_due.saturating_duration_since(now);
@@ -7163,6 +7214,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
     crate::wayland::ficlient::arm(crate::computer_use::app_wayland_socket_path());
 
     let _ = event_loop.run(None, &mut state, |state| {
+        serve_changes(state);
         state.process_pending_clipboard_read();
         state.flush_pending_cursor();
         if state.host.is_none()

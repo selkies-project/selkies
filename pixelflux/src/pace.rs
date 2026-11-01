@@ -120,7 +120,8 @@ pub struct FramePace {
 }
 
 impl FramePace {
-    /// Pacing in windows, for a capture the X server's damage reports wake (XShm, DRI3): each
+    /// Pacing in windows, for a capture a change wakes (XShm and DRI3 on the X server's damage
+    /// reports, the compositor on a client's commit, input or a host frame): each
     /// period is a window holding one frame at most. A change takes its window's frame as it
     /// lands; a window no change took ends on the timer's frame. The rate never rises above the
     /// cadence, and a change is published at once unless a change already took its window, in
@@ -170,11 +171,21 @@ impl FramePace {
                 self.damage_paced(period, now);
             }
             self.last_tick = Some(now);
+            self.deferred_until = None;
         }
     }
 
     /// Whether a capture rendering every `period` is due a frame at `now`, given what asks.
+    /// Paced in windows, a change is due once its window is open and the timer at the open
+    /// window's end, give or take the timer's own lateness.
     pub fn due(&self, trigger: TickTrigger, period: Duration, now: Instant) -> bool {
+        if self.windowed {
+            return if trigger.pulls_forward() {
+                now >= self.pull_at(trigger, period, now)
+            } else {
+                now + period.mul_f64(1.0 - TIMER_TICK_MIN_FRACTION) >= self.next_due(period, now)
+            };
+        }
         let Some(last) = self.last_tick else {
             return true;
         };
@@ -364,8 +375,10 @@ impl FramePace {
     /// grace beyond that after an input frame the input paced.
     pub fn next_due(&self, period: Duration, now: Instant) -> Instant {
         if self.windowed {
-            // The end of the open window, where no change took it.
-            return self.window_end.map_or(now, |end| end + period);
+            // The end of the open window, where no change took it, unless a tick that published
+            // nothing held the timer off (`Self::defer`).
+            let due = self.window_end.map_or(now, |end| end + period);
+            return self.deferred_until.map_or(due, |held| held.max(due));
         }
         let due = self.last_tick.map_or(now, |last| {
             last + if self.last_paced {
@@ -505,6 +518,45 @@ mod pacing_tests {
         );
         pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 207), true);
         assert_eq!(pace.next_due(PERIOD, at(base, 207)), at(base, 240));
+    }
+
+    /// The compositor asks `due` rather than `pull_at`: paced in windows, a change is due as
+    /// its window opens and not before, and the timer at the open window's end.
+    #[test]
+    fn windowed_due_follows_the_windows() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.ticked(TickTrigger::Timer, PERIOD, base, false);
+        // The window after the timer's frame is open at once.
+        assert!(pace.due(TickTrigger::Damage, PERIOD, at(base, 3)));
+        assert!(pace.due(TickTrigger::Input, PERIOD, at(base, 3)));
+        assert!(!pace.due(TickTrigger::Timer, PERIOD, at(base, 3)));
+        // A change takes it; the next change waits for the next window to open, at 20 ms.
+        pace.ticked(TickTrigger::Damage, PERIOD, at(base, 3), false);
+        assert!(!pace.due(TickTrigger::Damage, PERIOD, at(base, 12)));
+        assert_eq!(
+            pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 12)),
+            at(base, 20)
+        );
+        assert!(pace.due(TickTrigger::Damage, PERIOD, at(base, 20)));
+        // The timer skips the window the change took and ends the next one, at 40 ms, a
+        // little early counting.
+        assert!(!pace.due(TickTrigger::Timer, PERIOD, at(base, 20)));
+        assert!(pace.due(TickTrigger::Timer, PERIOD, at(base, 39)));
+    }
+
+    /// A tick that published nothing holds the timer off in windows too (host capture with no
+    /// fresh frame), and the next frame lifts the hold.
+    #[test]
+    fn windowed_timer_keeps_a_deferral() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.ticked(TickTrigger::Timer, PERIOD, base, false);
+        pace.defer(at(base, 70));
+        assert_eq!(pace.next_due(PERIOD, at(base, 21)), at(base, 70));
+        assert!(!pace.due(TickTrigger::Timer, PERIOD, at(base, 40)));
+        pace.ticked(TickTrigger::HostFrame, PERIOD, at(base, 45), false);
+        assert_eq!(pace.next_due(PERIOD, at(base, 46)), at(base, 80));
     }
 
     /// The earliest pull and the pull gate agree, so a caller may wait for the one and skip

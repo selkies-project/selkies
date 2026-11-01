@@ -221,7 +221,12 @@ pub struct WlCapture {
     pub frame_counter: u16,
     pub pending_force_idr: bool,
     pub needs_full_render: bool,
+    /// One frame a period at most, a change taking its period's frame as it lands
+    /// (`FramePace::windowed`), as the X11 captures pace.
     pub pace: FramePace,
+    /// A change (a client's commit, input, a host frame) found its period's frame taken and
+    /// waits for the next period to open (`serve_changes`); any frame rendered clears it.
+    pub change_pending: bool,
     /// Consecutive zero-copy encode failures; reset by any frame that encodes cleanly.
     /// Reaching `HW_ERROR_RECOVERY_THRESHOLD` triggers recovery.
     pub hw_error_streak: u32,
@@ -1214,6 +1219,23 @@ impl CompositorHandler for AppState {
     ///      send one corrective configure. Finally give the new window keyboard focus so input lands
     ///      on it at once.
     fn commit(&mut self, surface: &WlSurface) {
+        // New content (a buffer or damage) on any surface but the cursor's, read before the
+        // renderer state takes it: the captures render it as it lands (`serve_changes`).
+        let new_content = with_states(surface, |states| {
+            states.role != Some("cursor_image") && {
+                let mut attrs = states.cached_state.get::<SurfaceAttributes>();
+                let current = attrs.current();
+                current.buffer.is_some() || !current.damage.is_empty()
+            }
+        });
+        // Under host capture the host's frames are what is captured, and they mark their own.
+        if new_content && self.host.is_none() {
+            for node in &mut self.output_nodes {
+                if let Some(cap) = node.capture.as_mut() {
+                    cap.change_pending = true;
+                }
+            }
+        }
         smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
         // A popup created without a parent, as a layer surface's always is, joins its parent's
         // popups when it maps.
