@@ -61,7 +61,7 @@ export function GamepadsBody({ place }: { place: PanelPlace }) {
 /** A settings panel's cards one after the other, as a section lists them. */
 export function CardList({ cards }: { cards: PanelCard[] }) {
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-(--stack-gap)">
       {cards.map(({ value, Body }) => <Body key={value} />)}
     </div>
   );

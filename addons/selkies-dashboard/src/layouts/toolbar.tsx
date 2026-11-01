@@ -12,15 +12,16 @@
  * panels (`catalog.tsx`) each in a submenu, or as the item that opens its
  * dialog, a second screen, and a footer with the branding and the appearance
  * toggles. The settings hang under the bar as a card of tabs; a panel that
- * floats has a button of its own and a panel beside the bar; the soft keys
- * sit at the bottom left on a touch client.
+ * floats has a button of its own and a panel beside the bar; on a touch
+ * client the soft keys open at the bottom left from a button of the bar,
+ * hidden until it is pressed and while the bar is slid up.
  *
  * Reads `toggleDashboard` from the core and posts `sidebarVisibilityChanged`
  * as its panels open and close.
  * @module
  */
 import * as React from "react";
-import { ChevronDown, ChevronUp, Crosshair, Gamepad2, Gauge, Hand, Keyboard, Maximize, ScreenShare, Settings2, Touchpad, ToolCase, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Command, Crosshair, Gamepad2, Gauge, Hand, Keyboard, Maximize, ScreenShare, Settings2, Touchpad, ToolCase, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { Menu, MenuCheckboxItem, MenuItem, MenuPopup, MenuSeparator, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger } from "@/components/ui/menu";
@@ -33,6 +34,7 @@ import { FloatingPanel } from "@/panels/floating-panel";
 import { place, useAnchorDrag, useElementSize, useViewport } from "@/panels/anchor";
 import { SettingsCard } from "@/panels/settings-card";
 import { SoftKeys } from "@/panels/soft-keys";
+import { CiteLink } from "@/panels/shortcuts";
 import { PROJECT_URL, useDashboard } from "@/state/dashboard";
 import { onCoreMessage } from "@/utils";
 import { t } from "@/i18n";
@@ -77,6 +79,8 @@ export default function ToolbarLayout() {
   const [menuOpen, setMenuOpen] = React.useState(false);
   // Slid up behind the top edge of the window, leaving a tab to bring it back.
   const [collapsed, setCollapsed] = React.useState(false);
+  // The soft keys' panel, shut until its button opens it.
+  const [softKeysOpen, setSoftKeysOpen] = React.useState(false);
   // The bar's place as a fraction of the room the window leaves it, centered
   // at the top until dragged: a resize, or a group joining the bar, keeps it
   // in proportion rather than letting it run off the edge.
@@ -151,15 +155,18 @@ export default function ToolbarLayout() {
   const menuPanels = PANELS.filter((panel) => panel.kind === "panel" && !panel.floats && panel.shown(ctx, "menu"));
   const floats = PANELS.filter((panel) => panel.floats && panel.shown(ctx, "float"));
   const menuAvailable = streams.length > 0 || menuPanels.length > 0 || (primary && r.secondScreen);
+  // The keys, or where only the trackpad is allowed, its speed while it is on.
+  const softKeys = d.isTouch && (r.softButtons || (r.trackpad && d.trackpad));
 
   return (
     <>
       <div ref={barRef} className="toolbar fixed left-0 z-[2000] w-fit max-w-[100vw] rounded-lg border bg-background shadow-lg"
         style={{ transform: `translate(${position.x}px, ${position.y}px)`, top: collapsed ? -(TOOLBAR_HEIGHT + position.y) : 0, transition: "top 300ms" }}>
-        {/* Tighter on a phone, where the touch buttons join the bar: 320 pixels hold it. */}
+        {/* Tighter on a phone, where the touch buttons join the bar: 320 pixels hold it, the logo left
+            to the menu's footer there. */}
         <div className="flex items-center gap-1 px-1 py-2 sm:gap-1.5 sm:px-2">
           {d.uiShowLogo && (
-            <a href={PROJECT_URL} target="_blank" rel="noopener noreferrer" aria-label={d.uiTitle} title={d.uiTitle} className="flex items-center pr-1 transition-colors hover:text-primary">
+            <a href={PROJECT_URL} target="_blank" rel="noopener noreferrer" aria-label={d.uiTitle} title={d.uiTitle} className="flex items-center pr-1 transition-colors hover:text-primary max-sm:hidden">
               <SelkiesLogo width={20} height={20} />
             </a>
           )}
@@ -204,6 +211,7 @@ export default function ToolbarLayout() {
                   </a>
                   <span className="ms-auto flex items-center gap-1"><LayoutToggle /><ThemeToggle /></span>
                 </div>
+                {r.shortcuts && <div className="px-2 pb-1.5"><CiteLink /></div>}
               </MenuPopup>
             </Menu>
           )}
@@ -226,6 +234,7 @@ export default function ToolbarLayout() {
               {primary && <Tool label={t('topMenu.touchGamepad')} active={d.touchGamepad} onClick={d.toggleTouchGamepad}><Gamepad2 className="size-4" /></Tool>}
               {r.trackpad && <Tool label={t('trackpadModeTitle')} active={d.trackpad} className="trackpad-mode-button" onClick={d.toggleTrackpad}><Touchpad className="size-4" /></Tool>}
               {r.keyboardButton && <Tool label={t('keyboardButtonToggleTitle')} active={d.keyboardButton} className="keyboard-toggle-button" onClick={d.toggleKeyboardButton}><Keyboard className="size-4" /></Tool>}
+              {softKeys && <Tool label={t('keyPalette.title')} active={softKeysOpen} className="soft-keys-button" onClick={() => setSoftKeysOpen((open) => !open)}><Command className="size-4" /></Tool>}
             </ButtonGroup>
           )}
 
@@ -263,9 +272,11 @@ export default function ToolbarLayout() {
         </FloatingPanel>
       ))}
 
-      {d.isTouch && (r.softButtons || r.trackpad) && (
-        <div className="fixed bottom-4 left-4 z-[2040] rounded-lg border bg-card p-2 shadow-lg animate-in fade-in slide-in-from-bottom-2" style={{ maxWidth: "calc(100vw - 2rem)", maxHeight: "calc(100dvh - 2rem)" }}>
-          <SoftKeys />
+      {softKeys && softKeysOpen && !collapsed && (
+        // A flex column, so the palette inside shrinks and scrolls rather than pushing the keys off the screen;
+        // its height leaves the bar above it in view.
+        <div className="fixed bottom-4 left-4 z-[2040] flex flex-col rounded-lg border bg-card p-2 shadow-lg animate-in fade-in slide-in-from-bottom-2" style={{ maxWidth: "calc(100vw - 2rem)", maxHeight: "calc(100dvh - 5rem)" }}>
+          <SoftKeys showTrackpad={false} />
         </div>
       )}
     </>

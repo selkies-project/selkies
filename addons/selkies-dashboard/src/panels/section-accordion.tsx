@@ -21,7 +21,8 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 const GROUP = "gap-1 overflow-visible rounded-none border-0";
 const CARD = "rounded-lg border";
 const HEADER = "items-center px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:no-underline";
-const BODY = "space-y-4 border-t px-3 pt-3";
+// The body pads as much under its last row as above its first; a paragraph in it takes the stack's gap, not a margin.
+const BODY = "flex flex-col gap-(--stack-gap) border-t px-3 py-3 [&_p:not(:last-child)]:mb-0";
 
 /**
  * The accordion that holds `SectionItem` cards, one open at a time unless the

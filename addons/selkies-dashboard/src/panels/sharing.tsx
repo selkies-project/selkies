@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Badge } from "@/components/ui/badge";
 import { Check, Copy, Info } from "lucide-react";
@@ -59,6 +59,11 @@ interface SharingProps {
  * Renders the link cards, a notice when the admin disabled sharing, or
  * nothing while `show` is false.
  */
+/** A URL that may wrap only between its parts: after a slash, dot or colon, or before its fragment or query. */
+function breakable(url: string): ReactNode[] {
+	return url.split(/(?<=[/.:])|(?=[#?&])/).flatMap((part, i) => (i ? [<wbr key={i} />, part] : [part]));
+}
+
 export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 	const [copiedId, setCopiedId] = useState<string | null>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
@@ -128,11 +133,11 @@ export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 
 	return (
 		<div className="flex w-full flex-col gap-0.5 p-2">
-			<div className="flex items-center justify-between px-2 py-1">
-				<span className="text-xs font-medium text-muted-foreground">{t('sharing.shareLinksTitle')}</span>
+			<div className="sharing-header flex items-center justify-between gap-2 px-2 py-1">
+				<span className="min-w-0 text-xs font-medium text-muted-foreground">{t('sharing.shareLinksTitle')}</span>
 				<Tooltip>
 					<TooltipTrigger
-						render={<span className="inline-block cursor-help" />}
+						render={<span className="sharing-info inline-flex shrink-0 cursor-help justify-center" />}
 					>
 						<Info className="h-4 w-4 text-muted-foreground" />
 					</TooltipTrigger>
@@ -155,7 +160,7 @@ export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 							<div key={link.id} className="sharing-link-item">
 								<span className="text-sm font-semibold">{link.label}</span>
 								<div className="mt-1 flex items-center justify-between gap-2">
-									<a className="sharing-link min-w-0" href={fullUrl} target="_blank" rel="noopener noreferrer">{fullUrl}</a>
+									<a className="sharing-link min-w-0" href={fullUrl} target="_blank" rel="noopener noreferrer">{breakable(fullUrl)}</a>
 									{copyButton}
 								</div>
 							</div>

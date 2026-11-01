@@ -120,7 +120,7 @@ export function GamepadControls({ showInput = false, rumbleButton = false }: Gam
     window.postMessage({ type: "setGamepadRumble", value: next }, window.location.origin);
   };
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-(--stack-gap)">
       {showInput && d.renderable.coreButtons && d.renderable.gamepadToggle && <SwitchRow id="gamepadInputToggle" label={t('topMenu.gamepadInput')} checked={d.gamepad} onToggle={d.toggleGamepad} />}
       {d.renderable.gamepads && (
         <>

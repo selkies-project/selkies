@@ -215,7 +215,7 @@ export function Clipboard() {
 	};
 
 	return (
-		<div className="flex w-full flex-col gap-1.5 p-2">
+		<div className="flex w-full flex-col gap-(--stack-gap) p-2">
 			{(renderableSettings.clipboardUp ?? true) && (
 				<SwitchRow id="clipboardUpToggle" label={t('sections.clipboard.upLabel')} title={t('sections.clipboard.upDetails')}
 					checked={clipboardUp} onToggle={() => toggleClientSetting("clipboard_in_enabled", !clipboardUp, setClipboardUp)} />
@@ -233,6 +233,7 @@ export function Clipboard() {
 					checked={enableBinaryClipboard} onToggle={handleBinaryClipboardToggle} />
 			)}
 
+			<div className="flex flex-col gap-(--field-gap)">
 			<Label htmlFor="dashboardClipboardTextarea" className="text-sm font-medium">{t('sections.clipboard.title')}</Label>
 			<Textarea
 				id="dashboardClipboardTextarea"
@@ -244,6 +245,7 @@ export function Clipboard() {
 				placeholder={t('clipboard.inputPlaceholder')}
 				className="allow-native-input resize-none bg-background/95 overflow-y-auto max-h-[96px] text-sm"
 			/>
+			</div>
 
 			{clipboardSecret && (
 				<div className="flex flex-col gap-1.5">
@@ -257,12 +259,13 @@ export function Clipboard() {
 			{/* Image writes need the binary clipboard: the server drops them otherwise. */}
 			{(renderableSettings.binaryClipboard ?? true) && enableBinaryClipboard && (
 			<div className="flex flex-col gap-2">
-				<div className="flex gap-2">
+				{/* Clear goes on a line of its own under Upload when an image is held, rather than halving it. */}
+				<div className="flex flex-col gap-2">
 					<Button
 						variant="outline"
 						size="sm"
 						onClick={handleImageButtonClick}
-						className="min-w-0 flex-1"
+						className="min-w-0 w-full"
 						title={t('clipboard.uploadImage')}
 					>
 						<Clip>{t('clipboard.uploadImage')}</Clip>
@@ -272,7 +275,7 @@ export function Clipboard() {
 							variant="outline"
 							size="sm"
 							onClick={handleClearImage}
-							className="min-w-0 flex-1"
+							className="min-w-0 w-full"
 							title={t('clipboard.clearImage')}
 						>
 							<Clip>{t('clipboard.clearImage')}</Clip>

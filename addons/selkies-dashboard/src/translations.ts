@@ -23,6 +23,7 @@ const en: Dictionary = {
     trackpadModeTitle: "Trackpad Mode",
     trackpadSpeedLabel: "Trackpad speed",
     keyPalette: {
+        title: "Soft keys",
         more: "More keys",
         less: "Fewer keys",
         add: "Add",
@@ -365,6 +366,7 @@ const es: Dictionary = {
     trackpadModeTitle: "Modo Trackpad",
     trackpadSpeedLabel: "Velocidad del trackpad",
     keyPalette: {
+        title: "Teclas en pantalla",
         more: "Más teclas",
         less: "Menos teclas",
         add: "Añadir",
@@ -707,6 +709,7 @@ const zh_cn: Dictionary = {
     trackpadModeTitle: "触控板模式",
     trackpadSpeedLabel: "触控板速度",
     keyPalette: {
+        title: "屏幕按键",
         more: "更多按键",
         less: "收起按键",
         add: "添加",
@@ -1049,6 +1052,7 @@ const zh_tw: Dictionary = {
     trackpadModeTitle: "觸控板模式",
     trackpadSpeedLabel: "觸控板速度",
     keyPalette: {
+        title: "螢幕按鍵",
         more: "更多按鍵",
         less: "收起按鍵",
         add: "新增",
@@ -1391,6 +1395,7 @@ const hi: Dictionary = {
     trackpadModeTitle: "ट्रैकपैड मोड",
     trackpadSpeedLabel: "ट्रैकपैड गति",
     keyPalette: {
+        title: "स्क्रीन कुंजियाँ",
         more: "और कुंजियाँ",
         less: "कम कुंजियाँ",
         add: "जोड़ें",
@@ -1733,6 +1738,7 @@ const pt: Dictionary = {
     trackpadModeTitle: "Modo Trackpad",
     trackpadSpeedLabel: "Velocidade do trackpad",
     keyPalette: {
+        title: "Teclas na tela",
         more: "Mais teclas",
         less: "Menos teclas",
         add: "Adicionar",
@@ -2075,6 +2081,7 @@ const fr: Dictionary = {
     trackpadModeTitle: "Mode Trackpad",
     trackpadSpeedLabel: "Vitesse du pavé tactile",
     keyPalette: {
+        title: "Touches à l’écran",
         more: "Plus de touches",
         less: "Moins de touches",
         add: "Ajouter",
@@ -2417,6 +2424,7 @@ const ru: Dictionary = {
     trackpadModeTitle: "Режим трекпада",
     trackpadSpeedLabel: "Скорость трекпада",
     keyPalette: {
+        title: "Экранные клавиши",
         more: "Ещё клавиши",
         less: "Меньше клавиш",
         add: "Добавить",
@@ -2759,6 +2767,7 @@ const de: Dictionary = {
     trackpadModeTitle: "Trackpad-Modus",
     trackpadSpeedLabel: "Trackpad-Geschwindigkeit",
     keyPalette: {
+        title: "Bildschirmtasten",
         more: "Mehr Tasten",
         less: "Weniger Tasten",
         add: "Hinzufügen",
@@ -3101,6 +3110,7 @@ const tr: Dictionary = {
     trackpadModeTitle: "Dokunmatik Yüzey Modu",
     trackpadSpeedLabel: "Dokunmatik yüzey hızı",
     keyPalette: {
+        title: "Ekran tuşları",
         more: "Daha fazla tuş",
         less: "Daha az tuş",
         add: "Ekle",
@@ -3443,6 +3453,7 @@ const it: Dictionary = {
     trackpadModeTitle: "Modalità Trackpad",
     trackpadSpeedLabel: "Velocità del trackpad",
     keyPalette: {
+        title: "Tasti a schermo",
         more: "Altri tasti",
         less: "Meno tasti",
         add: "Aggiungi",
@@ -3785,6 +3796,7 @@ const nl: Dictionary = {
     trackpadModeTitle: "Trackpad-modus",
     trackpadSpeedLabel: "Trackpadsnelheid",
     keyPalette: {
+        title: "Schermtoetsen",
         more: "Meer toetsen",
         less: "Minder toetsen",
         add: "Toevoegen",
@@ -4127,6 +4139,7 @@ const ar: Dictionary = {
     trackpadModeTitle: "وضع لوحة اللمس",
     trackpadSpeedLabel: "سرعة لوحة اللمس",
     keyPalette: {
+        title: "مفاتيح الشاشة",
         more: "مزيد من المفاتيح",
         less: "مفاتيح أقل",
         add: "إضافة",
@@ -4469,6 +4482,7 @@ const ko: Dictionary = {
     trackpadModeTitle: "트랙패드 모드",
     trackpadSpeedLabel: "트랙패드 속도",
     keyPalette: {
+        title: "화면 키",
         more: "더 많은 키",
         less: "키 줄이기",
         add: "추가",
@@ -4811,6 +4825,7 @@ const ja: Dictionary = {
     trackpadModeTitle: "トラックパッドモード",
     trackpadSpeedLabel: "トラックパッドの速度",
     keyPalette: {
+        title: "画面キー",
         more: "その他のキー",
         less: "キーを隠す",
         add: "追加",
@@ -5153,6 +5168,7 @@ const vi: Dictionary = {
     trackpadModeTitle: "Chế độ Bàn di chuột",
     trackpadSpeedLabel: "Tốc độ bàn di chuột",
     keyPalette: {
+        title: "Phím trên màn hình",
         more: "Thêm phím",
         less: "Bớt phím",
         add: "Thêm",
@@ -5495,6 +5511,7 @@ const th: Dictionary = {
     trackpadModeTitle: "โหมดแทร็คแพด",
     trackpadSpeedLabel: "ความเร็วแทร็คแพด",
     keyPalette: {
+        title: "ปุ่มบนหน้าจอ",
         more: "ปุ่มเพิ่มเติม",
         less: "ซ่อนปุ่ม",
         add: "เพิ่ม",
@@ -5837,6 +5854,7 @@ const fil: Dictionary = {
     trackpadModeTitle: "Modo ng Trackpad",
     trackpadSpeedLabel: "Bilis ng trackpad",
     keyPalette: {
+        title: "Mga key sa screen",
         more: "Iba pang key",
         less: "Mas kaunting key",
         add: "Idagdag",
@@ -6179,6 +6197,7 @@ const da: Dictionary = {
     trackpadModeTitle: "Trackpad-tilstand",
     trackpadSpeedLabel: "Trackpad-hastighed",
     keyPalette: {
+        title: "Skærmtaster",
         more: "Flere taster",
         less: "Færre taster",
         add: "Tilføj",

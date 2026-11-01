@@ -58,8 +58,10 @@
 /* Both themes carry the palette the classic dashboard uses, in shadcn's token
    names so every component follows: layered slate surfaces (page, card,
    popover are three distinct steps), the logo's magenta as the accent, and
-   borders solid enough to read as edges rather than a wash of the surface.
-   Text colors are picked against the surface they land on — a filled button's
+   borders solid enough to read as edges rather than a wash of the surface:
+   a field's edge (`input`) reads 3:1 against the surface it sits on, as the
+   sidebar's does, and a slider's empty track (`range-track`) shows where it
+   runs. Text colors are picked against the surface they land on — a filled button's
    pink is lighter than the accent, because near-black text sits on it. */
 :root {
   --radius: 0.625rem;
@@ -72,15 +74,16 @@
   --primary: #b83280;
   --primary-foreground: #ffffff;
   --primary-text: #b83280;
-  --secondary: oklch(0.97 0 0);
+  --secondary: #eceef3;
   --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
+  --muted: #eceef3;
   --muted-foreground: oklch(0.52 0 0);
-  --accent: oklch(0.97 0 0);
+  --accent: #eceef3;
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.55 0.235 27.3);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
+  --border: #d5d9e2;
+  --input: #7a8496;
+  --range-track: #8a92a2;
   --ring: #d5499a;
   --chart-1: #d5499a;
   --chart-2: #7967c5;
@@ -114,7 +117,7 @@
   --popover-foreground: oklch(0.985 0 0);
   --primary: #db5ba7;
   --primary-foreground: oklch(0.145 0 0);
-  --primary-text: #ef7dbf;
+  --primary-text: #f9a8d4;
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.269 0 0);
@@ -123,7 +126,8 @@
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
+  --input: #6e7b94;
+  --range-track: #6e7b94;
   --ring: #db5ba7;
   --chart-1: #db5ba7;
   --chart-2: #9085e9;
@@ -224,12 +228,12 @@
 .range-slider::-webkit-slider-runnable-track {
   height: 0.375rem;
   border-radius: 9999px;
-  background: linear-gradient(to right, var(--primary) var(--range-fill, 0%), var(--muted) var(--range-fill, 0%));
+  background: linear-gradient(to right, var(--primary) var(--range-fill, 0%), var(--range-track) var(--range-fill, 0%));
 }
 .range-slider::-moz-range-track {
   height: 0.375rem;
   border-radius: 9999px;
-  background: var(--muted);
+  background: var(--range-track);
 }
 .range-slider::-moz-range-progress {
   height: 0.375rem;
@@ -279,6 +283,16 @@ select option,
 select optgroup {
   background-color: var(--popover);
   color: var(--popover-foreground);
+}
+
+/* One rhythm for every panel: the gap between the rows of a stack, and from a
+   label to its control. A menu packs its rows tighter; the sidebar sets its own. */
+:root {
+  --stack-gap: 1rem;
+  --field-gap: 0.375rem;
+}
+[role="menu"] {
+  --stack-gap: 0.75rem;
 }
 
 /* The gamepad preview draws raw SVG, so it names the shades the kit's
@@ -374,16 +388,16 @@ select optgroup {
   border-top-color: color-mix(in oklab, var(--primary) 35%, var(--border));
 }
 
-/* A switch's knob, on or off, takes the text color of the theme: white in the
-   dark theme and black in the light one. It covers the kit's switch and the
-   knob of a menu item in its switch variant, a bare span in the checked or
-   unchecked indicator. Unlayered, so it beats the kit's
+/* A switch's knob is white, on or off and in either theme, as the sidebar's
+   is: on the accent when on, on the input gray when off. It covers the kit's
+   switch and the knob of a menu item in its switch variant, a bare span in
+   the checked or unchecked indicator. Unlayered, so it beats the kit's
    `dark:data-checked:bg-primary-foreground` and the menu's `bg-background`,
    which are near-black in the dark theme and sink into the track. */
 [data-slot="switch-thumb"],
 [data-slot="menu-checkbox-item"] [data-checked] > span,
 [data-slot="menu-checkbox-item"] [data-unchecked] > span {
-  background-color: var(--foreground);
+  background-color: #ffffff;
 }
 
 /* An off switch is outlined in the muted text color, so its track reads

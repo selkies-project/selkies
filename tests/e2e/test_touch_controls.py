@@ -75,10 +75,21 @@ def touch_once(page: Any, engine: str) -> None:
     time.sleep(0.8)
 
 
+def open_soft_keys(page: Any, dashboard: str) -> None:
+    """The toolbar layout keeps its soft keys shut until the bar's button opens them."""
+    if dashboard != "wish" or page.locator("[data-soft-keys]").count():
+        return
+    button = page.locator(".soft-keys-button").first
+    if button.count():
+        button.click()
+        time.sleep(0.6)
+
+
 def open_palette(page: Any, dashboard: str) -> bool:
     if dashboard == "default" and not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
         page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
         time.sleep(0.8)
+    open_soft_keys(page, dashboard)
     toggle = page.locator(".key-palette-toggle").first
     if not toggle.count():
         return False
@@ -330,6 +341,7 @@ def in_reach(page: Any, dashboard: str, trackpad: bool) -> tuple:
     set_trackpad(page, dashboard, trackpad)
     if dashboard == "default":
         open_sidebar(page)
+    open_soft_keys(page, dashboard)
     toggle = page.locator(".key-palette-toggle").first
     steps = []
     try:
@@ -448,6 +460,7 @@ def speed_block(res: "H.Results", dashboard: str, mode: str, engine: str = "chro
                 res.check(f"{tag}: a fast one moves it further", fast >= 1.8 * slow, f"{fast} px for 100")
                 if dashboard == "default":
                     open_sidebar(page)
+                open_soft_keys(page, dashboard)
                 picker = page.locator("#trackpadSpeedSelect").first
                 offered = picker.count() > 0
                 res.check(f"{tag}: the dashboard offers the trackpad speed in trackpad mode", offered)

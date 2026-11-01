@@ -117,6 +117,9 @@
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   font-size: 14px;
   line-height: 1.5;
+  /* The panels' rhythm in this skin: the gap between the rows of a stack, and from a label to its control. */
+  --stack-gap: 14px;
+  --field-gap: 6px;
   transform: translateX(-100%);
   transition: transform 0.3s ease-in-out, box-shadow 0.3s ease-in-out;
   scrollbar-width: thin;
@@ -270,8 +273,7 @@
   padding-bottom: 16px;
   border-bottom: 1px solid var(--sk-border-soft);
 }
-.sidebar .mobile-key-button,
-.sidebar .key-palette-toggle {
+.sidebar .mobile-key-button {
   flex: 1 1 auto;
   min-height: var(--soft-key-h);
   padding: 0.375rem 0.5rem;
@@ -283,7 +285,19 @@
   font-weight: 600;
   box-shadow: none;
 }
-.sidebar .key-palette-toggle { flex: 0 0 auto; }
+/* The palette's expander is a disclosure, not a key: no key face, the accent's text, and its chevron. */
+.sidebar .key-palette-toggle {
+  flex: 0 0 auto;
+  min-height: var(--soft-key-h);
+  padding: 0.375rem 0.25rem;
+  border: 0;
+  background: none;
+  color: var(--sk-accent-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  box-shadow: none;
+}
+.sidebar .key-palette-toggle:hover { background: none; color: var(--sk-accent-text-strong); text-decoration: underline; text-underline-offset: 3px; }
 /* A palette grid cell is only a few rem wide: the padding and size that suit a full-width key clip "Home" and "PgUp". */
 .sidebar .mobile-key-button.palette-grid-key {
   min-width: 0;
@@ -291,8 +305,7 @@
   font-size: 0.75rem;
 }
 .sidebar .mobile-key-button:hover { border-color: var(--sk-accent-border); }
-.sidebar .mobile-key-button[data-variant="default"],
-.sidebar .key-palette-toggle[aria-expanded="true"] {
+.sidebar .mobile-key-button[data-variant="default"] {
   background-color: var(--sk-accent-soft);
   border-color: var(--sk-accent-border);
   color: var(--sk-accent-text);
@@ -339,18 +352,17 @@
 .sidebar .clip { overflow: visible; white-space: normal; text-overflow: clip; overflow-wrap: anywhere; hyphens: auto; }
 .sidebar-section-header[aria-expanded="true"] h3 { color: var(--sk-accent-text); }
 .sidebar-section-header svg { flex-shrink: 0; width: 16px; height: 16px; margin-left: 10px; color: var(--sk-text-muted); }
-.sidebar-section-content { padding: 4px 14px 14px; }
+.sidebar-section-content { display: flex; flex-direction: column; gap: var(--stack-gap); padding: 4px 14px 14px; }
 /* The panels pad themselves for the toolbar's popups; the section already does. */
-.sidebar-section-content > * { padding-left: 0; padding-right: 0; padding-top: 0; }
+.sidebar-section-content > * { padding: 0; }
 :is(.sidebar h3, .sidebar label):is(:lang(ar), :lang(hi), :lang(ja), :lang(ko), :lang(th), :lang(zh)) {
   letter-spacing: normal;
   font-size: 14px;
 }
 
 /* --- The shared controls, in this skin --- */
-.sidebar .setting-item { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.sidebar .setting-item { display: flex; flex-direction: column; gap: var(--field-gap); }
 .sidebar .setting-item.toggle-item { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
-.sidebar .setting-item:last-child { margin-bottom: 4px; }
 .sidebar .setting-item > label,
 .sidebar label[data-slot="label"] {
   font-size: 13px;
@@ -411,9 +423,9 @@
 .sidebar .range-slider { height: 20px; }
 .sidebar .range-slider::-webkit-slider-runnable-track {
   height: 6px;
-  background: linear-gradient(to right, var(--sk-accent) var(--range-fill, 0%), var(--sk-surface-inset) var(--range-fill, 0%));
+  background: linear-gradient(to right, var(--sk-accent) var(--range-fill, 0%), var(--sk-border-strong) var(--range-fill, 0%));
 }
-.sidebar .range-slider::-moz-range-track { height: 6px; background: var(--sk-surface-inset); }
+.sidebar .range-slider::-moz-range-track { height: 6px; background: var(--sk-border-strong); }
 .sidebar .range-slider::-moz-range-progress { height: 6px; background: var(--sk-accent); }
 .sidebar .range-slider::-webkit-slider-thumb {
   width: 16px;
@@ -491,24 +503,29 @@
   color: var(--sk-text-muted);
 }
 .sidebar .copy-button:hover { border-color: var(--sk-accent-border); color: var(--sk-accent-text); }
-.sidebar .files-actions { display: flex; flex-direction: column; gap: 8px; }
+.sidebar .files-actions { display: flex; flex-direction: column; gap: var(--stack-gap); }
 /* Set and Reset side by side, each wrapping its label, with the local scaling switch under them. */
 .sidebar .resolution-actions > [data-slot="button"] { padding: 6px 8px; line-height: 1.25; }
 .sidebar .resolution-size > .setting-item { flex: 1 1 0; min-width: 0; }
-/* The shortcuts as a tight list: smaller keys, each chord wrapping onto its own line where it must. */
-.sidebar #shortcuts-content > div { gap: 10px; }
-.sidebar #shortcuts-content > div > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; padding: 0; }
-.sidebar #shortcuts-content > div > div > span { font-size: 13px; }
-.sidebar #shortcuts-content [data-slot="kbd"] { font-size: 11px; padding: 1px 5px; }
-.sidebar #shortcuts-content [data-slot="kbd-group"] { flex-wrap: wrap; justify-content: flex-end; gap: 2px; }
-.sidebar .sharing-link-item { padding: 8px 0; border-bottom: 1px solid var(--sk-border-soft); }
-.sidebar .sharing-link-item:last-child { border-bottom: none; }
+/* The shortcuts centered, each chord over what it does, wrapping onto a second line where it must. */
+.sidebar .shortcut-item { flex-direction: column-reverse; justify-content: center; gap: var(--field-gap); text-align: center; }
+.sidebar .shortcut-item > span { font-size: 13px; }
+.sidebar .shortcut-item [data-slot="kbd"] { font-size: 11px; padding: 1px 5px; }
+.sidebar .shortcut-item [data-slot="kbd-group"] { flex-wrap: wrap; justify-content: center; gap: 2px; }
+/* The links' caption sits on the list's edges, its mark centered over the copy buttons. */
+.sidebar .sharing-header { padding: 0; }
+.sidebar .sharing-header > span:first-child { font-size: 13px; }
+.sidebar .sharing-info { width: 30px; }
+.sidebar .sharing-link-item { padding: 7px 0; border-bottom: 1px solid var(--sk-border-soft); }
+.sidebar .sharing-link-item:last-child { border-bottom: none; padding-bottom: 0; }
 .sidebar .sharing-link {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   color: var(--sk-violet);
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
+/* The citation at the drawer's foot, under the last section. */
+.sidebar-footer { padding: 16px 0 2px; text-align: center; }
 .sidebar .muted { color: var(--sk-text-muted); }
 .sidebar a.cite-link { color: var(--sk-violet); text-decoration: underline; text-underline-offset: 2px; font-size: 12px; }
 .sidebar [data-slot="kbd"] { background-color: var(--sk-surface-inset); border: 1px solid var(--sk-border-soft); color: var(--sk-text); }

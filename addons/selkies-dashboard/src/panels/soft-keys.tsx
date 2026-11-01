@@ -9,13 +9,14 @@
  * phone keyboard lacks, the key palette with the user's own chords, the
  * trackpad switch with its speed, and the button that pops the system's
  * on-screen keyboard. Shown from the first touch the session sees; the
- * layout decides where the bar sits. The palette opens above the keys and
- * scrolls within what the viewport leaves, so the keys stay in reach on a
- * phone in either orientation.
+ * layout decides where the bar sits. The palette opens toward the room there
+ * is, above the keys in a panel at the bottom of the screen and below them in
+ * a drawer that scrolls, and scrolls within what the viewport leaves, so its
+ * toggle and the keys stay in reach on a phone in either orientation.
  * @module
  */
 import * as React from "react";
-import { Keyboard, Touchpad } from "lucide-react";
+import { ChevronDown, ChevronUp, Keyboard, Touchpad } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/panels/controls";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, useDashboard } from "@/state/dashboard";
@@ -34,10 +35,12 @@ interface SoftKeysProps {
   showTrackpad?: boolean;
   /** Draws the button that pops the on-screen keyboard; off where the layout has one. */
   showKeyboardButton?: boolean;
+  /** Where the palette opens: above the keys (a panel at the screen's foot) or below them (a drawer). */
+  palette?: "above" | "below";
 }
 
 /** The modifier row and the palette, the trackpad controls beside them. */
-export function SoftKeys({ showTrackpad: trackpadButton = true, showKeyboardButton = true }: SoftKeysProps) {
+export function SoftKeys({ showTrackpad: trackpadButton = true, showKeyboardButton = true, palette = "above" }: SoftKeysProps) {
   const d = useDashboard();
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   const [draft, setDraft] = React.useState("");
@@ -53,8 +56,9 @@ export function SoftKeys({ showTrackpad: trackpadButton = true, showKeyboardButt
     if (added) setDraft("");
   };
 
+  const below = palette === "below";
   return (
-    <div data-soft-keys className="flex min-h-0 flex-col gap-2 [--soft-key-h:2.5rem]">
+    <div data-soft-keys className={`flex min-h-0 gap-2 [--soft-key-h:2.5rem] ${below ? "flex-col-reverse" : "flex-col"}`}>
       {showKeys && paletteOpen && (
         <div className="key-palette flex min-h-0 max-w-[22rem] flex-col gap-2 overflow-y-auto">
           <div className="grid grid-cols-[repeat(auto-fill,minmax(2.5rem,1fr))] gap-1">
@@ -77,7 +81,7 @@ export function SoftKeys({ showTrackpad: trackpadButton = true, showKeyboardButt
             ))}
           </div>
           <form className="flex gap-1" onSubmit={addChord}>
-            <input type="text" className="key-palette-input allow-native-input min-w-0 flex-1 h-(--soft-key-h) rounded border bg-background px-3 text-base placeholder:text-muted-foreground"
+            <input type="text" className="key-palette-input allow-native-input min-w-0 flex-1 h-(--soft-key-h) rounded border border-input bg-background px-3 text-base placeholder:text-muted-foreground"
               value={draft} onChange={(event) => { setDraft(event.target.value); setRefused(false); }}
               placeholder={t('keyPalette.addPlaceholder')} aria-label={t('keyPalette.addPlaceholder')}
               autoCapitalize="off" autoCorrect="off" spellCheck={false} />
@@ -111,9 +115,12 @@ export function SoftKeys({ showTrackpad: trackpadButton = true, showKeyboardButt
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {showKeys && (
-            <Key active={paletteOpen} className="key-palette-toggle" aria-expanded={paletteOpen} onClick={() => setPaletteOpen((open) => !open)}>
+            // A disclosure, not a key: no key face, the accent's text, and a chevron toward where the palette opens.
+            <Button variant="ghost" size="sm" className="key-palette-toggle h-(--soft-key-h) gap-1 px-2 text-(--primary-text)" aria-expanded={paletteOpen}
+              onMouseDown={(event) => event.preventDefault()} onClick={() => setPaletteOpen((open) => !open)}>
+              {paletteOpen === below ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
               {paletteOpen ? t('keyPalette.less') : t('keyPalette.more')}
-            </Key>
+            </Button>
           )}
           {showTrackpad && d.trackpad && (
             <label className="flex items-center gap-1 text-xs">

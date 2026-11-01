@@ -372,7 +372,8 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     """Gaming mode stays reachable on a touch client, and by its chord.
 
     The header carries the fullscreen and gaming-mode pair on every client;
-    the trackpad toggle joins the keyboard tile in the action-button row, and
+    the trackpad toggle joins the keyboard tile in the action-button row (in
+    Wish the bar's touch group, with no second one in the soft keys), and
     appears only once touch is seen. The Ctrl+Shift+X chord is the core's own,
     so it works whatever the dashboard shows.
     """
@@ -385,8 +386,8 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     else:
         present = lambda: page.evaluate("""() => ({
             gaming: !!document.querySelector('button:has(svg.lucide-crosshair)'),
-            trackpad: !!document.querySelector('.fixed.bottom-4 button:has(svg.lucide-touchpad)'),
-            headerTrackpad: !!document.querySelector('[data-slot="tooltip-trigger"] button:has(svg.lucide-touchpad)'),
+            trackpad: !!document.querySelector('.toolbar button.trackpad-mode-button'),
+            headerTrackpad: !!document.querySelector('.fixed.bottom-4 button:has(svg.lucide-touchpad)'),
         })""")
     before = present()
     page.evaluate("window.dispatchEvent(new TouchEvent('touchstart', {bubbles: true}))")
@@ -459,7 +460,8 @@ def sidebar_layout_check(page, res: "H.Results") -> None:
         widths: r.map(x => Math.round(x.width * 10) / 10),
         rows: [...new Set(r.map(x => Math.round(x.top)))].length,
         keyRow: [...document.querySelectorAll('.sidebar-mobile-key-actions .mobile-key-button:not(.key-palette-toggle)')].length,
-        keyRowIcons: document.querySelectorAll('.sidebar-mobile-key-actions svg').length,
+        // The palette's disclosure carries a chevron; every other icon would be an icon button in the key row.
+        keyRowIcons: [...document.querySelectorAll('.sidebar-mobile-key-actions svg')].filter((s) => !s.closest('.key-palette-toggle')).length,
       };
     }""")
     uniform = (tiles["n"] == 7 and tiles["rows"] == 2
@@ -1878,10 +1880,24 @@ def layout_block() -> "H.Results":
             page = ctx.new_page()
             page.goto(H.BASE_URL, wait_until="load")
             wait_chunk(page, 40)
+            page.touchscreen.tap(PHONE["width"] // 2, PHONE["height"] // 2)
+            time.sleep(0.5)
+            keys = page.locator('.soft-keys-button').first
+            res.check("wish: a touch client's soft keys start shut, their button in the bar",
+                      keys.count() == 1 and not page.locator('[data-soft-keys]').count(),
+                      (keys.count(), page.locator('[data-soft-keys]').count()))
+            if keys.count():
+                keys.click()
             time.sleep(1.0)
+            res.check("wish: the button opens the soft keys", page.locator('[data-soft-keys]').count() == 1,
+                      page.locator('[data-soft-keys]').count())
             reach = page.evaluate("""() => Math.max(...[...document.querySelectorAll('#dashboard-root button')]
               .filter((b) => b.offsetParent).map((b) => b.getBoundingClientRect().right))""")
             res.check("wish: the toolbar and the soft keys fit a 320-pixel phone", reach <= PHONE["width"], reach)
+            page.locator('button[aria-label="Hide toolbar"]').first.click()
+            time.sleep(0.8)
+            res.check("wish: the soft keys go with the bar when it slides up", not page.locator('[data-soft-keys]').count(),
+                      page.locator('[data-soft-keys]').count())
             browser.close()
     finally:
         H.server_stop()

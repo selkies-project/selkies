@@ -11,9 +11,9 @@ import { computeRenderableSettings, getLastServerSettings, getPrefixedKey } from
 import { t } from "@/i18n";
 
 /**
- * The keyboard shortcuts: the core-owned chords as
- * dense rows of keys, the switch that hands them to the session instead, and
- * the citation link.
+ * The keyboard shortcuts: the core-owned chords as dense rows of keys and the
+ * switch that hands them to the session instead; and the citation link the
+ * layouts put at their foot.
  * @module
  */
 
@@ -24,6 +24,16 @@ const shortcuts = [
 	{ label: t('sections.shortcuts.toggleGamepad'), combo: "Ctrl + Shift + G" },
 	{ label: t('sections.shortcuts.pointerLock'), combo: "Ctrl + Shift + Left Click" },
 ];
+
+/** The link to the paper to cite, for the foot of a layout. */
+export function CiteLink({ className }: { className?: string }) {
+	return (
+		<a className={`cite-link text-xs font-semibold text-(--primary-text) underline underline-offset-2 ${className ?? ""}`}
+			target="_blank" rel="noopener noreferrer" href="https://docs.selkies.io/citation/">
+			{t('sections.shortcuts.citeNotice')}{" ↗"}
+		</a>
+	);
+}
 
 /** Renders the switch and the shortcut list. */
 export function ShortcutsMenu() {
@@ -42,15 +52,13 @@ export function ShortcutsMenu() {
 			window.location.origin);
 	};
 	return (
-		<div className="flex w-full flex-col gap-1 p-2">
+		<div className="shortcuts flex w-full flex-col gap-(--stack-gap) p-2">
 			{(renderableSettings.keyboardShortcuts ?? true) && (
-				<div className="px-2 py-1">
-					<SwitchRow id="keyboardShortcutsToggle" label={t('sections.shortcuts.enabledLabel')} title={t('sections.shortcuts.enabledDetails')}
-						checked={enabled} onToggle={toggle} />
-				</div>
+				<SwitchRow id="keyboardShortcutsToggle" label={t('sections.shortcuts.enabledLabel')} title={t('sections.shortcuts.enabledDetails')}
+					checked={enabled} onToggle={toggle} />
 			)}
 			{shortcuts.map((s, i) => (
-				<div key={i} className="flex items-center justify-between gap-3 px-2 py-1">
+				<div key={i} className="shortcut-item flex items-center justify-between gap-3">
 					<span className="text-sm text-foreground">{s.label}</span>
 					<KbdGroup>
 						{s.combo.split(' + ').map((key, j) => (
@@ -62,14 +70,6 @@ export function ShortcutsMenu() {
 					</KbdGroup>
 				</div>
 			))}
-			<a
-				className="px-2 py-1 text-xs text-violet-600 hover:text-violet-800 dark:text-violet-400 dark:hover:text-violet-300"
-				target="_blank"
-				rel="noopener noreferrer"
-				href="https://docs.selkies.io/citation/"
-			>
-				<b>{t('sections.shortcuts.citeNotice')}{" ↗"}</b>
-			</a>
 		</div>
 	);
 };

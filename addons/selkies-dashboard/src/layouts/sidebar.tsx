@@ -29,6 +29,7 @@ import { PANELS, STREAMS, shownCards, usePanelContext, type PanelSpec } from "@/
 import { CardList } from "@/panels/catalog-bodies";
 import { SwitchRow } from "@/panels/controls";
 import { SoftKeys } from "@/panels/soft-keys";
+import { CiteLink } from "@/panels/shortcuts";
 import { StatsSection } from "@/panels/stats-section";
 import { PROJECT_URL, useDashboard } from "@/state/dashboard";
 import { useSettings } from "@/state/settings-context";
@@ -192,7 +193,7 @@ export default function SidebarLayout() {
         )}
 
         <div className="sidebar-mobile-key-actions">
-          <SoftKeys showTrackpad={false} showKeyboardButton={false} />
+          <SoftKeys showTrackpad={false} showKeyboardButton={false} palette="below" />
         </div>
 
         {PANELS.filter((panel) => panel.shown(ctx, "section")).map((panel) => (
@@ -200,6 +201,8 @@ export default function SidebarLayout() {
             {sectionBody(panel)}
           </Section>
         ))}
+
+        {d.renderable.shortcuts && <footer className="sidebar-footer"><CiteLink /></footer>}
       </aside>
     </>
   );

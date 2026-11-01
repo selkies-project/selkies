@@ -58,7 +58,7 @@ export function SettingsCard() {
         </TabsList>
         {tabs.map((tab) => (
           <TabsContent key={tab.id} value={tab.id}>
-            <CardContent className="max-h-[calc(100dvh-8rem)] overflow-x-hidden overflow-y-auto px-0 pb-2">
+            <CardContent className="max-h-[calc(100dvh-8rem)] overflow-x-hidden overflow-y-auto px-0 pb-0">
               <CardAccordion cards={shownCards(tab, ctx)} />
             </CardContent>
           </TabsContent>

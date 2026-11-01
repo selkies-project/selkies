@@ -211,6 +211,10 @@ def settings_block(dashboard: str) -> "H.Results":
                     page.goto(H.BASE_URL, wait_until="load")
                     C.wait_ws_video(page, timeout=45)
                     page.evaluate(FORCE_POOR)
+                    # The soft keys open from the bar's button; shut, there is nothing to overlap.
+                    keys = page.locator('.soft-keys-button').first
+                    if keys.count():
+                        keys.click()
                     time.sleep(1.0)
                     overlap = page.evaluate(OVERLAP)
                     res.check(f"a touch phone ({name}) shows the mark clear of the soft keys",

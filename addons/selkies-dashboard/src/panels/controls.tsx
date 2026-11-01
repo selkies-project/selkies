@@ -62,7 +62,7 @@ interface FieldProps {
 /** A label above its control. */
 export function Field({ htmlFor, label, title, className, children }: FieldProps) {
   return (
-    <div className={cn("setting-item space-y-1.5", className)}>
+    <div className={cn("setting-item flex flex-col gap-(--field-gap)", className)}>
       <Label htmlFor={htmlFor} title={hint(label, title)} className="min-w-0"><Clip>{label}</Clip></Label>
       {children}
     </div>
@@ -92,7 +92,7 @@ export function NativeSelect({ options, onValueChange, placeholder, className, .
         {...props}
         onChange={(event) => onValueChange(event.target.value)}
         className={cn(
-          "h-7 w-full cursor-pointer appearance-none truncate rounded-md border border-border bg-background pr-7 pl-2 text-xs text-foreground shadow-xs outline-none",
+          "h-7 w-full cursor-pointer appearance-none truncate rounded-md border border-input bg-background pr-7 pl-2 text-xs text-foreground shadow-xs outline-none",
           "hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50",
           "dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
           className,

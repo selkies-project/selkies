@@ -10,7 +10,8 @@
 // Light surfaces take a deeper pink so white text clears 4.5:1; dark surfaces a
 // lighter one under near-black text. Text drawn in the accent itself takes
 // `primary-text`, which clears 4.5:1 on the surfaces it sits on in either theme
-// (the dark theme's `primary` reads 3.9:1 on a tab list).
+// (the dark theme's `primary` reads 3.9:1 on a tab list; its text is the
+// sidebar's dark accent text, which reads 4.5:1 on an active tab too).
 //
 // RULES are the open and active states of accordions, tabs, and separators, the
 // knob of a switch and the outline of one that is off, and the accent on the
@@ -36,7 +37,7 @@ const ACCENT = {
   '.dark': {
     '--primary': '#db5ba7',
     '--primary-foreground': 'oklch(0.145 0 0)',
-    '--primary-text': '#ef7dbf',
+    '--primary-text': '#f9a8d4',
     '--ring': '#db5ba7',
     '--chart-1': '#db5ba7',
     '--chart-2': '#9085e9',
@@ -79,16 +80,16 @@ const RULES = `${RULES_START}
   border-top-color: color-mix(in oklab, var(--primary) 35%, var(--border));
 }
 
-/* A switch's knob, on or off, takes the text color of the theme: white in the
-   dark theme and black in the light one. It covers the kit's switch and the
-   knob of a menu item in its switch variant, a bare span in the checked or
-   unchecked indicator. Unlayered, so it beats the kit's
+/* A switch's knob is white, on or off and in either theme, as the sidebar's
+   is: on the accent when on, on the input gray when off. It covers the kit's
+   switch and the knob of a menu item in its switch variant, a bare span in
+   the checked or unchecked indicator. Unlayered, so it beats the kit's
    \`dark:data-checked:bg-primary-foreground\` and the menu's \`bg-background\`,
    which are near-black in the dark theme and sink into the track. */
 [data-slot="switch-thumb"],
 [data-slot="menu-checkbox-item"] [data-checked] > span,
 [data-slot="menu-checkbox-item"] [data-unchecked] > span {
-  background-color: var(--foreground);
+  background-color: #ffffff;
 }
 
 /* An off switch is outlined in the muted text color, so its track reads
