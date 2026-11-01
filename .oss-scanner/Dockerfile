@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends cmake build-ess
 COPY . /src
 WORKDIR /src
 
-RUN cargo test --manifest-path pcmflux/Cargo.toml --no-run
+RUN cargo test --manifest-path pcmflux/Cargo.toml --no-run \
+    && cargo test --manifest-path pcmflux/Cargo.toml --features python --no-run
 ENV CARGO_NET_OFFLINE=true
 RUN cargo test --manifest-path pcmflux/Cargo.toml || echo "WARNING: cargo test reported failures"
+RUN cargo test --manifest-path pcmflux/Cargo.toml --features python || echo "WARNING: cargo test reported failures"

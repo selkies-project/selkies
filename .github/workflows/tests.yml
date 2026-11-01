@@ -72,11 +72,17 @@ jobs:
           components: clippy
 
       - name: cargo test
-        # No sound server runs on a runner; the tests that need one are ignored.
-        run: cargo test --manifest-path pcmflux/Cargo.toml
+        # No sound server runs on a runner; the tests that need one are ignored. Without
+        # features the crate is the Rust library alone and links no interpreter; with
+        # `python` the test binary adds the Python bridge against the runner's interpreter.
+        run: |
+          cargo test --manifest-path pcmflux/Cargo.toml
+          cargo test --manifest-path pcmflux/Cargo.toml --features python
 
       - name: cargo clippy
-        run: cargo clippy --manifest-path pcmflux/Cargo.toml --all-targets -- -D warnings
+        run: |
+          cargo clippy --manifest-path pcmflux/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path pcmflux/Cargo.toml --all-targets --features python -- -D warnings
 
   pre-commit:
     name: pre-commit
