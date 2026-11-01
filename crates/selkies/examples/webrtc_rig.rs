@@ -119,6 +119,7 @@ async fn main() -> Result<(), String> {
         dispatcher,
         clipboard,
         gamepads,
+        devices: Arc::default(),
         screens,
         stop: tokio::sync::Notify::new(),
     }));

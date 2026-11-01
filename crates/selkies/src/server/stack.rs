@@ -284,16 +284,27 @@ impl host::Supervisor for TransportSupervisor {
     }
 }
 
-/// The files routes' view of the active transport's sessions.
-pub struct WsSessions(pub Arc<WsService>);
+/// The files routes' view of the active transport's sessions, whichever the supervisor runs.
+pub struct ActiveSessions {
+    pub modes: Arc<ModeSupervisor>,
+    pub ws: Arc<WsService>,
+    pub rtc: Arc<crate::webrtc::wiring::RtcSessions>,
+}
 
-impl SessionDirectory for WsSessions {
+impl SessionDirectory for ActiveSessions {
     fn uplink_sessions(&self) -> Vec<crate::files::pacing::UplinkSession> {
-        self.0.uplink_sessions()
+        match crate::http::Supervisor::current_mode(&*self.modes).as_deref() {
+            Some("webrtc") => self.rtc.uplink_sessions(),
+            _ => self.ws.uplink_sessions(),
+        }
     }
 
     fn announce_print_document(&self, name: &str, size_bytes: u64) {
-        let service = self.0.clone();
+        if crate::http::Supervisor::current_mode(&*self.modes).as_deref() == Some("webrtc") {
+            self.rtc.announce_print_document(name, size_bytes);
+            return;
+        }
+        let service = self.ws.clone();
         let name = name.to_string();
         tokio::spawn(async move { service.announce_print_document(&name, size_bytes).await });
     }
