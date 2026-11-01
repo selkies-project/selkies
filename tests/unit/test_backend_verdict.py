@@ -100,13 +100,7 @@ def run(stub: str = "exit 1", env: Optional[dict] = None,
             fh.write("set -e\n" + entrypoint_blocks(*blocks) + "\n" + tail + "\n")
         out = subprocess.run(
             ["bash", script], capture_output=True, text=True, timeout=120,
-            env=dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"],
-                     GALLIUM_DRIVER="", MESA_LOADER_DRIVER_OVERRIDE="", LIBGL_KOPPER_DRI2="",
-                     __GLX_VENDOR_LIBRARY_NAME="",
-                     SELKIES_GPU_DRIVER="", SELKIES_GPU_RENDER_NODE="",
-                     SELKIES_GPU_PRESENT="", SELKIES_GPU_ACCELERATED="",
-                     SELKIES_GPU_GL_VENDOR="", SELKIES_GPU_EGL_X11="",
-                     SELKIES_GPU_MESA_DRIVER="", SELKIES_GPU_VULKAN_PRESENTS="",
+            env=dict(H.without_session_settings(os.environ), PATH=tmp + os.pathsep + os.environ["PATH"],
                      **(env or {})))
         lines = [ln for ln in out.stdout.strip().splitlines() if ln]
         return {"state": lines[-1] if lines else "", "said": out.stdout, "rc": out.returncode}

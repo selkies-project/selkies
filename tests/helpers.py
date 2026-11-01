@@ -65,6 +65,16 @@ _bounds = threading.local()
 # while its block still ran would read as an empty clipboard, which is a
 # passing check away from a real one.
 SELECTION_SERVE_MAX_S = 600.0
+# What a Selkies session hands its own processes: the toggles and GPU facts the
+# entrypoint reads and the GL loader settings it derives from them. A suite that
+# runs the entrypoint's blocks starts without them, or a run inside a Selkies
+# desktop tests that desktop's settings instead of the case it names.
+SESSION_SETTINGS = re.compile(r"(SELKIES_|PIXELFLUX_|GALLIUM_|MESA_|LIBGL_|__GLX_|__EGL_)|DISABLE_ZINK$")
+
+
+def without_session_settings(environ) -> Dict[str, str]:
+    """`environ` without a Selkies session's own settings (`SESSION_SETTINGS`)."""
+    return {k: v for k, v in environ.items() if not SESSION_SETTINGS.match(k)}
 
 
 @contextlib.contextmanager

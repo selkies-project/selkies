@@ -21,7 +21,9 @@ ENTRYPOINT = os.path.join(REPO, "addons", "base", "container-entrypoint.sh")
 # copy under test stops here and never hands over to s6 or touches /etc/service.
 STOP_AT = "# Derive the service set from the environment toggles"
 
+sys.path.insert(0, TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
+import helpers as H  # noqa: E402
 
 passed = failed = 0
 
@@ -95,10 +97,9 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
         os.chmod(script, 0o755)
 
         runtime = os.path.join(tmp, "runtime")
-        child = dict(os.environ)
         # Cleared so what comes back was set by the entrypoint, not inherited.
-        for name in ("SELKIES_WAYLAND", "PIXELFLUX_WAYLAND", "DISPLAY",
-                     "XDG_SESSION_TYPE", "GDK_BACKEND", "MOZ_ENABLE_WAYLAND"):
+        child = H.without_session_settings(os.environ)
+        for name in ("DISPLAY", "XDG_SESSION_TYPE", "GDK_BACKEND", "MOZ_ENABLE_WAYLAND"):
             child.pop(name, None)
         child.update(env or {})
         child["XDG_RUNTIME_DIR"] = runtime
