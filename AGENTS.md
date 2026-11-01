@@ -14,12 +14,18 @@ to an LLM bot or developer. Write American English -- color, behavior, center, i
 where a name belongs to something upstream, such as a Wayland `Cancelled` event or an NVENC `colourMatrix` field.
 
 Empirical testing is possible for everything here, including implementation, auditing, validation, and verification,
-and every change is validated before it is reported. `cargo test --lib` and `pre-commit run --all-files`
-(rustfmt, clippy, ruff, and codespell) are the floor, and
-`cargo test --release bench_emit_assembly -- --ignored --nocapture` prints the assembly measurement to quote rather
-than assert. The test binary links the interpreter because pyo3's `extension-module` is a crate feature the Python
-build alone asks for (`features` on the `RustExtension` in `setup.py`); putting it back on the pyo3 dependency itself
-would leave `cargo test` unable to link. The crate's `Cargo.toml` is the one place the version lives: `setup.py` reads it, spelling a semver
+and every change is validated before it is reported. The crate under `pcmflux/` is a Rust library (`rlib` and
+`cdylib`) whose public API (`AudioCapture`, `AudioPlayback`, the settings, `AudioFrame`, `AudioSink`, `Error`,
+`State`, `stop_all`) is everything in `src/lib.rs`; its `python` feature adds `src/python.rs`, the `pcmflux`
+extension module as thin wrappers over that API, and nothing in `lib.rs` names PyO3. Both configurations are tested on
+every change: `cargo test --lib` and `cargo clippy --all-targets -- -D warnings` without features (no interpreter is
+linked), the same two with `--features python`, and `pre-commit run --all-files` (rustfmt, both clippy configurations,
+ruff, and codespell) are the floor, and `cargo test --release bench_emit_assembly -- --ignored --nocapture` prints the
+assembly measurement to quote rather than assert. The test binary with `--features python` links the interpreter
+because pyo3's `extension-module` is a crate feature the Python build alone asks for (`features` on the `RustExtension`
+in `setup.py`); folding it into `python` would leave that test binary unable to link. Behavior is decided by the
+Python bridge: a default, a validation message, a timing, a buffer size, or a framing is the same through both
+bridges, and the Python side is the one the end-to-end suites measure. The crate's `Cargo.toml` is the one place the version lives: `setup.py` reads it, spelling a semver
 pre-release the PEP 440 way (`2.1.0-rc.1` is `2.1.0rc1` to pip), and the release workflow stamps the tag into the
 manifest and the lock, so a build ahead of a release carries the series version and a release the tag's. End to end, a change is a wheel (`pip wheel . --no-deps`) installed into a
 selkies sandbox as the Agentic Development section of that repository's `docs/development.md` describes, driven by its audio suites over
