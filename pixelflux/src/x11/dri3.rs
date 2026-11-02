@@ -1253,6 +1253,9 @@ where
             }
         }
 
+        if gpu.enc().take_lost_cleanup() {
+            state.lost_frame();
+        }
         let quality = EncoderQuality::of(gpu.enc());
         let decision = decide_hw_fullframe(
             &mut state,

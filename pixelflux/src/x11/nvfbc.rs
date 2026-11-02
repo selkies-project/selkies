@@ -1157,6 +1157,9 @@ where
         } else {
             hash(&mut gpu.encoder, &mut hashes)
         };
+        if gpu.encoder.take_lost_cleanup() {
+            state.lost_frame();
+        }
         let mut decision = decide_hw_fullframe(
             &mut state,
             &gpu.settings,
