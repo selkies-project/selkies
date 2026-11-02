@@ -518,12 +518,15 @@ struct CachedDmaBuf {
     tex: CUtexObject,
 }
 
+/// External input registrations an encoder keeps at once (`register_external_input`).
+pub(crate) const EXTERNAL_INPUTS: usize = 3;
+
 /// An input surface the session does not own: a device pointer produced by another component on
 /// the same CUDA context — the NvFBC capture buffer — registered and mapped with NVENC in place
 /// so the encoder reads the captured frame where it was composited.
 ///
-/// The registration is kept for as long as the pointer and geometry hold, because a capture
-/// source hands back the same buffer every frame; it is released and rebuilt when any of them
+/// The registration is kept for as long as the geometry holds, because a capture source hands
+/// back the same buffer, or the same few in turn, every frame; it is released when the geometry
 /// changes, and always before the component that owns the memory tears it down.
 #[derive(Clone, Copy)]
 struct ExternalInput {
@@ -1778,7 +1781,7 @@ pub struct NvencEncoder {
     bitstream_buffers: Vec<NV_ENC_OUTPUT_PTR>,
     current_buffer_idx: usize,
     dmabuf_cache: HashMap<i32, CachedDmaBuf>,
-    external_input: Option<ExternalInput>,
+    external_inputs: Vec<ExternalInput>,
     pinned_hosts: HashMap<usize, usize>,
     cuda: Arc<CudaFunctions>,
     /// The EGL entry points a dmabuf import takes, loaded for a session given an EGL display.
@@ -1847,7 +1850,7 @@ impl Drop for NvencEncoder {
         unsafe {
             let _ = (self.cuda.cuCtxPushCurrent_v2)(self.cuda_context);
 
-            self.unmap_external_input();
+            self.unmap_external_inputs();
             if let Some(csc) = self.csc.take() {
                 csc.release(&self.cuda, &self.nvenc_funcs, self.encoder_session);
             }
@@ -2863,7 +2866,7 @@ impl NvencEncoder {
                 bitstream_buffers,
                 current_buffer_idx: 0,
                 dmabuf_cache: HashMap::new(),
-                external_input: None,
+                external_inputs: Vec::new(),
                 pinned_hosts: HashMap::new(),
                 cuda,
                 egl,
@@ -3280,7 +3283,7 @@ impl NvencEncoder {
 
         unsafe {
             let _ = (self.cuda.cuCtxPushCurrent_v2)(self.cuda_context);
-            self.unmap_external_input();
+            self.unmap_external_inputs();
             if let Some(csc) = self.csc.take() {
                 csc.release(&self.cuda, &self.nvenc_funcs, self.encoder_session);
             }
@@ -4818,49 +4821,63 @@ impl NvencEncoder {
     /// registration outliving its buffer leaves the driver holding a mapping of freed video
     /// memory.
     pub fn release_external_input(&mut self) {
-        if self.external_input.is_none() {
+        if self.external_inputs.is_empty() {
             return;
         }
         unsafe {
             let _ = (self.cuda.cuCtxPushCurrent_v2)(self.cuda_context);
-            self.unmap_external_input();
+            self.unmap_external_inputs();
             let _ = (self.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
         }
     }
 
-    /// Unmap and unregister the external input, with the CUDA context already current.
-    unsafe fn unmap_external_input(&mut self) {
-        if let Some(ext) = self.external_input.take() {
-            (self.nvenc_funcs.nvEncUnmapInputResource.unwrap())(self.encoder_session, ext.mapped);
-            (self.nvenc_funcs.nvEncUnregisterResource.unwrap())(
-                self.encoder_session,
-                ext.registered,
-            );
+    /// Unmap and unregister every external input, with the CUDA context already current.
+    unsafe fn unmap_external_inputs(&mut self) {
+        for ext in std::mem::take(&mut self.external_inputs) {
+            unsafe { self.unmap_one_input(ext) };
         }
+    }
+
+    unsafe fn unmap_one_input(&self, ext: ExternalInput) {
+        (self.nvenc_funcs.nvEncUnmapInputResource.unwrap())(self.encoder_session, ext.mapped);
+        (self.nvenc_funcs.nvEncUnregisterResource.unwrap())(self.encoder_session, ext.registered);
     }
 
     /// The mapped NVENC input for an externally-owned device pointer, registering it in place the
     /// first time and reusing that registration for every later frame from the same buffer.
     ///
-    /// A capture source hands back one buffer for as long as its geometry holds, so the register
-    /// and map cost is paid once per session rather than per frame; a pointer, pitch, or geometry
-    /// that changes releases the old registration and builds a new one.
+    /// A capture source hands back one buffer, or a few in turn (NvFBC alternates between two on
+    /// recent drivers), for as long as its geometry holds, so the register and map cost is paid
+    /// once per buffer rather than per frame. Up to `EXTERNAL_INPUTS` stay registered; a pitch,
+    /// format or geometry that changes releases the registrations made for the old one.
     unsafe fn register_external_input(
         &mut self,
         device_ptr: CUdeviceptr,
         pitch: usize,
         format: NV_ENC_BUFFER_FORMAT,
     ) -> Result<NV_ENC_INPUT_PTR, String> {
-        if let Some(ext) = self.external_input
-            && ext.device_ptr == device_ptr
-            && ext.pitch == pitch
-            && ext.format == format
-            && ext.width == self.width
-            && ext.height == self.height
+        let (width, height) = (self.width, self.height);
+        let fits = |e: &ExternalInput| {
+            e.pitch == pitch && e.format == format && e.width == width && e.height == height
+        };
+        if let Some(ext) = self
+            .external_inputs
+            .iter()
+            .find(|e| e.device_ptr == device_ptr && fits(e))
         {
             return Ok(ext.mapped);
         }
-        self.unmap_external_input();
+        let (kept, stale): (Vec<_>, Vec<_>) = std::mem::take(&mut self.external_inputs)
+            .into_iter()
+            .partition(fits);
+        self.external_inputs = kept;
+        for ext in stale {
+            unsafe { self.unmap_one_input(ext) };
+        }
+        if self.external_inputs.len() >= EXTERNAL_INPUTS {
+            let oldest = self.external_inputs.remove(0);
+            unsafe { self.unmap_one_input(oldest) };
+        }
         let mut reg_res = NV_ENC_REGISTER_RESOURCE {
             version: sv(NvStruct::RegisterResource),
             resourceType: NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
@@ -4897,7 +4914,7 @@ impl NvencEncoder {
                 "failed to map the captured frame as an NVENC input ({st:?})"
             ));
         }
-        self.external_input = Some(ExternalInput {
+        self.external_inputs.push(ExternalInput {
             device_ptr,
             pitch,
             width: self.width,

@@ -16,9 +16,9 @@
 //!
 //! Three properties follow from that, and the module is built around keeping all three:
 //!
-//! 1. **Zero copy.** The device pointer is stable for as long as the geometry is, so it is
-//!    registered and mapped once (`NvencEncoder::encode_cuda_pitch`) and every later frame reuses
-//!    that registration.
+//! 1. **Zero copy.** The device pointers are stable for as long as the geometry is (recent drivers
+//!    alternate between two), so each is registered and mapped once
+//!    (`NvencEncoder::encode_cuda_pitch`) and every later frame from it reuses that registration.
 //! 2. **Lowest latency.** The session runs in push model — the driver generates a frame when an
 //!    application damages the screen rather than on a sampling timer — and each grab is issued
 //!    with `NOWAIT_IF_NEW_FRAME_READY`, so a frame that already exists is taken immediately and
@@ -1793,10 +1793,10 @@ mod gpu_tests {
     /// color that was painted.
     ///
     /// The zero-copy property is asserted rather than assumed, three ways: the driver reports it
-    /// needed no post-processing pass (the native BGRA request means no conversion copy), every
-    /// grab hands back the *same* device pointer (so the encoder's registration is made once and
-    /// reused instead of per frame), and repainting the root changes the decoded color, which it
-    /// could not if the encoder were reading a stale copy. Ignored by default.
+    /// needed no post-processing pass (the native BGRA request means no conversion copy), the
+    /// grabs hand back no more buffers than the encoder keeps registered (so each registration is
+    /// made once and reused instead of per frame), and repainting the root changes the decoded
+    /// color, which it could not if the encoder were reading a stale copy. Ignored by default.
     #[test]
     #[ignore]
     fn gpu_nvfbc_zero_copy_encodes_the_painted_root() {
@@ -1877,15 +1877,18 @@ mod gpu_tests {
             );
         }
 
+        let mut buffers = pointers.clone();
+        buffers.sort_unstable();
+        buffers.dedup();
         assert!(
-            pointers.windows(2).all(|w| w[0] == w[1]),
-            "the capture buffer moved between frames, so the registration cannot be reused: {pointers:?}"
+            buffers.len() <= crate::encoders::nvenc::EXTERNAL_INPUTS,
+            "the capture used more buffers than the encoder keeps registered: {pointers:x?}"
         );
         println!(
-            "captured {}x{} into one device pointer {:#x} across {} frames, no post-processing pass",
+            "captured {}x{} into {} device buffers {buffers:x?} across {} frames, no post-processing pass",
             gpu.encoder.width(),
             gpu.encoder.height(),
-            pointers[0],
+            buffers.len(),
             pointers.len()
         );
     }
