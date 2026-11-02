@@ -153,14 +153,16 @@ impl FramePace {
 
     /// A tick paced in windows: a timer tick ends the open window whether it sent a frame or
     /// not, which keeps the windows on the timer's schedule; a change's frame closes the window
-    /// it lands in, and a change not sent leaves it open. A timer tick that came late (a busy
-    /// capture or compositor thread) still ends the window it was due for, so the next opens on
-    /// schedule and the rate holds: moving the grid to the late tick gave up the time it was late
-    /// by, every time, and a loaded session streamed below its rate. Only windows that passed
-    /// whole without a tick are given up.
+    /// it lands in, and a change not sent leaves it open. A tick that came late (a busy capture
+    /// or compositor thread, an encode that ran long) still ends the window it was due for, so
+    /// the next opens on schedule and the rate holds: moving the grid to the late tick gave up
+    /// the time it was late by, every time, and a loaded session streamed below its rate. A
+    /// change taken less than a window after the open window's timer was due ends that window
+    /// too, or a screen changing a little slower than the cadence lost a window to each encode
+    /// that ran past a period. Only windows that passed whole without a tick are given up.
     fn window_tick(&mut self, trigger: TickTrigger, period: Duration, now: Instant, sent: bool) {
+        let scheduled = self.next_due(period, now);
         if trigger == TickTrigger::Timer {
-            let scheduled = self.next_due(period, now);
             self.window_end = Some(if now <= scheduled {
                 scheduled
             } else {
@@ -168,7 +170,13 @@ impl FramePace {
                     + period * ((now - scheduled).as_nanos() / period.as_nanos().max(1)) as u32
             });
         } else if sent {
-            self.window_end = Some(self.window_closed_by(period, now));
+            self.window_end = Some(
+                if self.window_end.is_some() && now > scheduled && now < scheduled + period {
+                    scheduled
+                } else {
+                    self.window_closed_by(period, now)
+                },
+            );
         }
         if sent {
             if trigger == TickTrigger::Damage {
@@ -706,6 +714,45 @@ mod pacing_tests {
                 "{frames} frames at up to {max_late} late"
             );
         }
+    }
+
+    /// A screen changing a little slower than the cadence, captured by a loop whose encode now
+    /// and then runs past a period: a change taken after the open window's timer was due ends
+    /// that window, as a late timer tick does, so 1000 periods still send 1000 frames (closing
+    /// the window it landed in gave up the overdue one, 924 frames here).
+    #[test]
+    fn a_change_taken_late_keeps_the_rate() {
+        let base = Instant::now();
+        let end = base + PERIOD * 1000;
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
+        let (mut t, mut frames, mut taken, mut k) = (base, 1, base, 0u32);
+        let mut change = base;
+        while t < end {
+            // The loop's wait: a pending change once the window opens, else the timer.
+            let due = pace.next_due(PERIOD, t);
+            let start = t.max(pace.pull_at(TickTrigger::Damage, PERIOD, t).min(due));
+            while change <= taken {
+                change += PERIOD.mul_f64(1.3);
+            }
+            let (now, trigger) = if change <= due.max(start) {
+                (start.max(change), TickTrigger::Damage)
+            } else {
+                (due.max(t), TickTrigger::Timer)
+            };
+            if now > end {
+                break;
+            }
+            taken = now;
+            pace.record_tick(trigger, PERIOD, now, true);
+            frames += 1;
+            k += 1;
+            t = now + PERIOD.mul_f64(if k % 6 == 0 { 1.25 } else { 0.77 });
+        }
+        assert!(
+            (999..=1001).contains(&frames),
+            "{frames} frames in 1000 periods"
+        );
     }
 
     /// The earliest pull and the pull gate agree, so a caller may wait for the one and skip
