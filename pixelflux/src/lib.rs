@@ -3649,7 +3649,6 @@ fn render_pass(state: &mut AppState, trigger: TickTrigger) -> bool {
     any_pool_busy
 }
 
-/// One display's render tick, for a trigger that concerns that display alone.
 /// Render each capture a change waits on (`WlCapture::change_pending`: a client's commit,
 /// input, a host frame) once its period is open: a change takes its period's frame as it
 /// lands, the X11 captures' schedule, rather than waiting for the frame timer. A capture whose
@@ -3674,6 +3673,7 @@ fn serve_changes(state: &mut AppState) {
     }
 }
 
+/// One display's render tick, for a trigger that concerns that display alone.
 fn render_display(state: &mut AppState, display_id: u32, trigger: TickTrigger) {
     let mut nodes = std::mem::take(&mut state.output_nodes);
     if let Some(node) = nodes.iter_mut().find(|n| n.id == display_id) {
