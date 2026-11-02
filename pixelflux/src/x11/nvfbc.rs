@@ -1810,6 +1810,12 @@ mod gpu_tests {
             println!("the NvFBC path declined this session on this host; nothing to capture");
             return;
         };
+        // The session's first frame may predate the paint: the paint is made again once it runs.
+        let _ = gpu.nvfbc.grab(Duration::from_millis(200));
+        assert!(
+            paint_root(FIRST),
+            "the root was painted once, so a repaint must work"
+        );
         let mut dec = VideoDecoder::new(DecCodec::H264).expect("H.264 decoder");
         let mut pointers = Vec::new();
 
@@ -1940,6 +1946,12 @@ mod gpu_tests {
             }
             frames.load(Ordering::Relaxed) - before
         };
+        // A session can take over a second to open; the NvFBC path declining ends the thread.
+        let end = Instant::now() + Duration::from_secs(15);
+        while frames.load(Ordering::Relaxed) == 0 && !capture.is_finished() && Instant::now() < end
+        {
+            delivered_over(100);
+        }
         if capture.is_finished() {
             println!("the NvFBC path declined this host; nothing to capture");
             return;
@@ -1993,11 +2005,17 @@ mod gpu_tests {
                 })
             })
         };
-        std::thread::sleep(Duration::from_secs(1));
+        // A session can take over a second to open; the NvFBC path declining ends the thread.
+        let end = Instant::now() + Duration::from_secs(15);
+        while frames.load(Ordering::Relaxed) == 0 && !capture.is_finished() && Instant::now() < end
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         if capture.is_finished() {
             println!("the NvFBC path declined this host; nothing to capture");
             return;
         }
+        std::thread::sleep(Duration::from_millis(500));
         let before = frames.load(Ordering::Relaxed);
         std::thread::sleep(Duration::from_secs(3));
         let rate = (frames.load(Ordering::Relaxed) - before) as f64 / 3.0;
