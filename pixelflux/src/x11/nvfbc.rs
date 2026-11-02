@@ -54,7 +54,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use libloading::Library;
-use x11rb::protocol::xproto::ConnectionExt as XprotoExt;
+use x11rb::connection::Connection;
+use x11rb::protocol::Event;
+use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt as XprotoExt, EventMask};
+use x11rb::rust_connection::RustConnection;
 
 use super::Controls;
 use crate::RustCaptureSettings;
@@ -669,6 +672,42 @@ struct GpuCapture {
     screen: NVFBC_SIZE,
 }
 
+/// The X server's word that its root window changed size (a RandR resize), on a connection of
+/// our own: the capture polls it every frame without a round trip, where asking the driver
+/// (`NvFBCGetStatus`) took 15 ms a call on an NVIDIA Xorg, a frame and more at 240 fps.
+struct RootWatch {
+    conn: RustConnection,
+}
+
+impl RootWatch {
+    fn open() -> Option<Self> {
+        let (conn, screen) = x11rb::connect(None).ok()?;
+        let root = conn.setup().roots.get(screen)?.root;
+        conn.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+        )
+        .ok()?
+        .check()
+        .ok()?;
+        Some(Self { conn })
+    }
+
+    /// Whether the root was reconfigured since the last call, by the events queued meanwhile;
+    /// a lost connection counts as one, so the driver is asked again.
+    fn changed(&self) -> bool {
+        let mut changed = false;
+        loop {
+            match self.conn.poll_for_event() {
+                Ok(Some(Event::ConfigureNotify(_))) => changed = true,
+                Ok(Some(_)) => {}
+                Ok(None) => return changed,
+                Err(_) => return true,
+            }
+        }
+    }
+}
+
 /// How long the driver may take to answer whether it can capture this X server at all.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -973,6 +1012,7 @@ where
     let mut pending_force_idr = false;
     let mut next_frame = Instant::now();
     let mut geometry_check = GEOMETRY_POLL_FRAMES;
+    let root_watch = RootWatch::open();
     let mut grab_errors = 0u32;
     // No capture session runs: a rebuild the driver refused, or one a lost session or handle
     // asks for, which the geometry step below creates against the root as it is now.
@@ -1037,8 +1077,16 @@ where
             // An explicit live size pins the region; `<= 0` keeps following the framebuffer.
             gpu.request.auto_adjust_screen_capture_size = nw <= 0 || nh <= 0;
         }
-        geometry_check -= 1;
-        if geometry_check <= 0 {
+        // The root watch says when the root changes size; without one the driver is asked
+        // every GEOMETRY_POLL_FRAMES frames.
+        let ask_driver = match root_watch.as_ref() {
+            Some(watch) => watch.changed(),
+            None => {
+                geometry_check -= 1;
+                geometry_check <= 0
+            }
+        };
+        if ask_driver {
             geometry_check = GEOMETRY_POLL_FRAMES;
             if let Ok(status) = gpu.nvfbc.status() {
                 recheck_geometry |= status.screenSize != gpu.screen;
