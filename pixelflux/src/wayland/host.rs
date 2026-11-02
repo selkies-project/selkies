@@ -1572,18 +1572,8 @@ impl HostSession {
     /// Keep `frame` as `display_id`'s current content (releasing the one it
     /// replaces).
     pub fn retain_frame(&self, display_id: u32, frame: HostFrame) {
-        let Some(handle) = self
-            .output_index_for(display_id)
-            .and_then(|i| self.outputs.get(i))
-        else {
-            return;
-        };
-        let old = handle.retained.lock().unwrap().replace(frame);
-        if let Some(old) = old {
-            handle.send(ToHost::Release {
-                generation: old.generation,
-                slot: old.slot,
-            });
+        if let Some(old) = self.swap_retained(display_id, frame) {
+            self.release_frame(display_id, old);
         }
     }
 
@@ -1631,6 +1621,15 @@ impl HostSession {
                 slot: old.slot,
             });
         }
+    }
+
+    /// `retain_frame`, handing the frame it replaces to the caller instead of the host:
+    /// an encode in flight may still read it.
+    pub fn swap_retained(&self, display_id: u32, frame: HostFrame) -> Option<HostFrame> {
+        let handle = self
+            .output_index_for(display_id)
+            .and_then(|i| self.outputs.get(i))?;
+        handle.retained.lock().unwrap().replace(frame)
     }
 
     /// Run `f` with `display_id`'s retained (current-content) frame, if any.

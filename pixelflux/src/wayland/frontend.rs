@@ -143,9 +143,9 @@ use smithay::{
     },
 };
 
+use crate::RustCaptureSettings;
 use crate::encoders::FrameEncoder;
 use crate::encoders::overlay::OverlayState;
-use crate::{RustCaptureSettings, StripeState};
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
@@ -195,10 +195,21 @@ pub struct WlCapture {
     /// reconfigure the calloop performs on its own (a host that kept a different mode)
     /// can respawn delivery with the same consumer; `None` for a recorder-owned capture.
     pub callback: Option<Arc<Py<PyAny>>>,
-    /// Zero-copy GPU session (GLES render + same-GPU dmabuf encode), calloop-affine;
+    /// Zero-copy GPU session (GLES render + same-GPU dmabuf encode), driven by the encode
+    /// thread on `gpu_pool`'s targets and taken back by a restart (`crate::ZeroCopySession`);
     /// `None` whenever a readback path is active for this display.
-    pub video_encoder: Option<FrameEncoder>,
-    pub vaapi_state: StripeState,
+    pub zero_copy: Option<Arc<Mutex<Option<FrameEncoder>>>>,
+    /// The zero-copy session's render targets, handed between the calloop, which composites
+    /// into one, and the encode thread, which encodes it in place; `gpu_ring` owns them.
+    pub gpu_pool: Option<Arc<crate::WlFramePool<Dmabuf>>>,
+    pub gpu_ring: Vec<(BufferObject<()>, Dmabuf)>,
+    /// Host frames replaced while a frame in flight to the encode thread still reads them,
+    /// each with the count of recycled frames (`WlEncodeStats::recycled`) after which it is
+    /// free to go back to the host; `published` counts the frames handed over.
+    pub host_inflight: Vec<(u64, crate::wayland::host::HostFrame)>,
+    pub published: u64,
+    /// The frame count of the last publish that encodes the retained host frame.
+    pub host_retained_use: u64,
     pub recording_sink: Option<Arc<crate::recording_sink::RecordingSink>>,
     pub deliver_tx:
         Option<std::sync::mpsc::SyncSender<Vec<crate::encoders::software::EncodedStripe>>>,
@@ -206,8 +217,6 @@ pub struct WlCapture {
     /// Raised at teardown so the deliver thread stops calling into Python and
     /// only drains: its exit is then bounded by the one in-flight callback.
     pub deliver_discard: Option<Arc<AtomicBool>>,
-    pub pending_hw_delivery: Option<Vec<crate::encoders::software::EncodedStripe>>,
-    pub pending_hw_damage: bool,
     pub encode_pool: Option<Arc<crate::WlFramePool>>,
     pub encode_join: Option<std::thread::JoinHandle<Option<FrameEncoder>>>,
     pub encode_controls: Arc<crate::WlEncodeControls>,
@@ -231,13 +240,6 @@ pub struct WlCapture {
     pub callbacks_at: Option<Instant>,
     /// A boundary's frame callbacks wait for the render of a change still pending at it.
     pub callbacks_owed: bool,
-    /// Consecutive zero-copy encode failures; reset by any frame that encodes cleanly.
-    /// Reaching `HW_ERROR_RECOVERY_THRESHOLD` triggers recovery.
-    pub hw_error_streak: u32,
-    /// Whether the zero-copy session has already been rebuilt without a clean frame since.
-    /// Recovery rebuilds once and demotes to readback on the next streak, so a session that
-    /// constructs but never encodes cannot loop rebuilding forever.
-    pub hw_rebuilt: bool,
 }
 
 impl WlCapture {
@@ -247,7 +249,7 @@ impl WlCapture {
     /// setting both would leave one armed forever (the host-mode idle gate polls
     /// them every tick, so a stuck flag disables idle skipping for the session).
     pub fn request_idr(&mut self) {
-        if self.encode_pool.is_some() {
+        if self.pooled() {
             self.encode_controls
                 .force_idr
                 .store(true, Ordering::Relaxed);
@@ -258,9 +260,8 @@ impl WlCapture {
     }
 
     /// Leave frame `frame_id` and every frame after it out of the predictions, for a client that
-    /// lost it or a sender that withheld it (`withheld`): handed to the encode thread where one
-    /// runs, applied to the calloop's own session otherwise. An encoder that cannot codes a
-    /// keyframe instead.
+    /// lost it or a sender that withheld it (`withheld`): handed to the encode thread, which
+    /// applies it ahead of its next encode. An encoder that cannot codes a keyframe instead.
     pub fn invalidate_reference(&mut self, frame_id: u16, withheld: bool) {
         use crate::encoders::reference::ReferenceReport;
         self.take_report(if withheld {
@@ -282,18 +283,19 @@ impl WlCapture {
     }
 
     fn take_report(&mut self, report: crate::encoders::reference::ReferenceReport) {
-        self.vaapi_state.take_report(report);
-        if self.encode_pool.is_some() {
+        if self.pooled() {
             self.encode_controls
                 .reference_reports
                 .lock()
                 .unwrap()
                 .push(report);
-        } else if let Some(encoder) = self.video_encoder.as_mut()
-            && !encoder.take_report(report)
-        {
-            self.request_idr();
         }
+    }
+
+    /// Whether an encode thread runs this capture's encodes (a readback pool or the
+    /// zero-copy session's): every one does once its delivery is up.
+    pub fn pooled(&self) -> bool {
+        self.encode_pool.is_some() || self.gpu_pool.is_some()
     }
 }
 
