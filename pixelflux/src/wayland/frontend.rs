@@ -203,6 +203,8 @@ pub struct WlCapture {
     /// into one, and the encode thread, which encodes it in place; `gpu_ring` owns them.
     pub gpu_pool: Option<Arc<crate::WlFramePool<Dmabuf>>>,
     pub gpu_ring: Vec<(BufferObject<()>, Dmabuf)>,
+    /// A quiet host's GPU frame copied out of the stream's buffer (`detach_retained_gpu`).
+    pub host_still: Option<(BufferObject<()>, Dmabuf)>,
     /// Host frames replaced while a frame in flight to the encode thread still reads them,
     /// each with the count of recycled frames (`WlEncodeStats::recycled`) after which it is
     /// free to go back to the host; `published` counts the frames handed over.

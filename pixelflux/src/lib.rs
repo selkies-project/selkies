@@ -2218,6 +2218,7 @@ fn end_zero_copy(cap: &mut wayland::frontend::WlCapture) -> bool {
     pool.shutdown();
     cap.zero_copy = None;
     cap.gpu_ring.clear();
+    cap.host_still = None;
     true
 }
 
@@ -2238,6 +2239,68 @@ fn retain_host_frame(
             release_host_inflight(Some(host), cap, display_id, false);
         }
         _ => host.retain_frame(display_id, frame),
+    }
+}
+
+/// `HostSession::detach_retained` for a GPU frame, which only a zero-copy session takes: the
+/// renderer copies it into a buffer of the capture's own, which re-encodes then read, and the
+/// stream's buffer goes back once no frame in flight reads it.
+fn detach_retained_gpu(
+    renderer: Option<&mut GlesRenderer>,
+    gbm: Option<&RawGbmDevice<std::fs::File>>,
+    host: &wayland::host::HostSession,
+    cap: &mut wayland::frontend::WlCapture,
+    display_id: u32,
+    size: (i32, i32),
+) {
+    if !host.is_portal() || cap.gpu_pool.is_none() {
+        return;
+    }
+    // The copy an encode in flight may still read is not drawn over.
+    if cap.host_inflight.iter().any(|(_, f)| f.is_detached()) {
+        return;
+    }
+    let Some(src) = host.with_retained(display_id, |r| {
+        r.filter(|f| !f.is_detached() && (f.width, f.height) == size)
+            .and_then(|f| f.dmabuf.clone())
+    }) else {
+        return;
+    };
+    let (Some(renderer), Some(gbm)) = (renderer, gbm) else {
+        return;
+    };
+    let fits = |bo: &BufferObject<()>| (bo.width() as i32, bo.height() as i32) == size;
+    if !cap.host_still.as_ref().is_some_and(|(bo, _)| fits(bo)) {
+        cap.host_still = alloc_render_target(
+            gbm,
+            size.0.max(0) as u32,
+            size.1.max(0) as u32,
+            GbmFormat::Argb8888,
+        )
+        .ok()
+        .map(|bo| {
+            let dmabuf = create_dmabuf_from_bo(&bo);
+            (bo, dmabuf)
+        });
+    }
+    let Some((_, still)) = cap.host_still.as_mut() else {
+        return;
+    };
+    match compose_host_frame(renderer, None, &src, still, size) {
+        Ok(sync) if wait_render_fence(&sync, display_id) => {}
+        Ok(_) => return,
+        Err(e) => {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!("[HostCapture] a still frame could not be copied out of the stream: {e}");
+            }
+            return;
+        }
+    }
+    let still = still.clone();
+    if let Some(copy) = host.with_retained(display_id, |r| r.map(|f| f.detached_into(still))) {
+        retain_host_frame(host, Some(cap), display_id, copy);
     }
 }
 
@@ -3135,6 +3198,7 @@ fn start_capture_on_display(
         zero_copy: None,
         gpu_pool: None,
         gpu_ring: Vec::new(),
+        host_still: None,
         host_inflight: Vec::new(),
         published: 0,
         host_retained_use: 0,
@@ -3319,19 +3383,24 @@ fn draw_host_watermark(
     frame.finish().map_err(|e| format!("finish: {e:?}"))
 }
 
-/// Re-compose `src` (the retained host frame) plus the watermark into `target`:
-/// the path a moving watermark needs, since re-drawing over the same retained
-/// buffer would leave trails.
-fn compose_host_watermark(
+/// Re-compose `src` (the retained host frame) into `target`, with the watermark where `overlay`
+/// is given: the path a moving watermark needs, since re-drawing over the same retained buffer
+/// would leave trails.
+fn compose_host_frame(
     renderer: &mut GlesRenderer,
-    overlay: &crate::encoders::overlay::OverlayState,
+    overlay: Option<&crate::encoders::overlay::OverlayState>,
     src: &Dmabuf,
     target: &mut Dmabuf,
     size: (i32, i32),
 ) -> Result<SyncPoint, String> {
-    let elem = overlay
-        .get_watermark_element(renderer)
-        .ok_or("watermark element unavailable")?;
+    let elem = match overlay {
+        Some(overlay) => Some(
+            overlay
+                .get_watermark_element(renderer)
+                .ok_or("watermark element unavailable")?,
+        ),
+        None => None,
+    };
     let tex = renderer
         .import_dmabuf(src, None)
         .map_err(|e| format!("import: {e:?}"))?;
@@ -3356,10 +3425,12 @@ fn compose_host_watermark(
             &[],
         )
         .map_err(|e| format!("texture: {e:?}"))?;
-    let dst = elem.geometry(1.0.into());
-    let local = Rectangle::from_size(dst.size);
-    elem.draw(&mut frame, elem.src(), dst, &[local], &[], None)
-        .map_err(|e| format!("draw: {e:?}"))?;
+    if let Some(elem) = elem {
+        let dst = elem.geometry(1.0.into());
+        let local = Rectangle::from_size(dst.size);
+        elem.draw(&mut frame, elem.src(), dst, &[local], &[], None)
+            .map_err(|e| format!("draw: {e:?}"))?;
+    }
     frame.finish().map_err(|e| format!("finish: {e:?}"))
 }
 
@@ -4453,6 +4524,16 @@ fn render_node_tick(
         });
         if !have_new && host_quiet {
             host.detach_retained(host_idx);
+            if let Some(cap) = node.capture.as_mut() {
+                detach_retained_gpu(
+                    state.gles_renderer.as_mut(),
+                    state.gbm_device.as_ref(),
+                    &host,
+                    cap,
+                    host_idx,
+                    (width, height),
+                );
+            }
         }
         if !have_new
             && !want_idr_for_host
@@ -4563,9 +4644,9 @@ fn render_node_tick(
                         None => node.offscreen_buffer.as_mut().map(|(_, target)| target),
                     };
                     if let Some(target) = target {
-                        match compose_host_watermark(
+                        match compose_host_frame(
                             renderer,
-                            &node.overlay_state,
+                            Some(&node.overlay_state),
                             &src,
                             target,
                             (width, height),

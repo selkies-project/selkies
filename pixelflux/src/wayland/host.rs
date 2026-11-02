@@ -127,6 +127,28 @@ pub struct HostFrame {
     pub stamp_ns: i64,
 }
 
+impl HostFrame {
+    /// This frame as copied into `dmabuf`, a buffer of the capture's own: retained in its place,
+    /// it holds none of the stream's buffers (`HostSession::detach_retained`).
+    pub fn detached_into(&self, dmabuf: Dmabuf) -> HostFrame {
+        HostFrame {
+            generation: DETACHED,
+            slot: 0,
+            dmabuf: Some(dmabuf),
+            cpu: None,
+            width: self.width,
+            height: self.height,
+            damage: self.damage.clone(),
+            stamp_ns: self.stamp_ns,
+        }
+    }
+
+    /// Whether this is a copy that holds none of the stream's buffers.
+    pub fn is_detached(&self) -> bool {
+        self.generation == DETACHED
+    }
+}
+
 /// CLOCK_MONOTONIC in nanoseconds, the clock PipeWire stamps frames with.
 pub(crate) fn now_ns() -> i64 {
     let mut t = libc::timespec {
@@ -1538,6 +1560,12 @@ impl HostSession {
     /// False once the host connection is gone (the primary connection or the first
     /// output's capture ended): the owner drops the session and reports its captures as
     /// stopped, so they are rebuilt against a new connection instead of feeding a dead one.
+    /// Whether the frames come from a portal's stream, whose compositor drives it on buffers of
+    /// its own.
+    pub fn is_portal(&self) -> bool {
+        self.portal.is_some()
+    }
+
     pub fn alive(&self) -> bool {
         self.alive.load(Ordering::Relaxed) && !self.portal.as_ref().is_some_and(|c| c.dead())
     }
@@ -1580,7 +1608,7 @@ impl HostSession {
     /// Under portal capture, swap the software frame retained for `display_id` for a copy of its
     /// pixels and give the stream its buffer back: a compositor driving its stream (KWin) sends
     /// no cursor update while short of buffers, and a still screen would hold one for as long
-    /// as it stands.
+    /// as it stands. A GPU frame is copied on the GPU (`detach_retained_gpu`).
     pub fn detach_retained(&self, display_id: u32) {
         if self.portal.is_none() {
             return;
