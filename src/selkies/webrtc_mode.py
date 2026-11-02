@@ -75,8 +75,8 @@ from .settings import (settings, AppSettings, SETTING_DEFINITIONS, STREAM_SETTIN
 from types import SimpleNamespace
 from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .webrtc.pacer import CLEANUP_PACE_SHARE
-from .stream_server import (BaseStreamingService, CentralizedStreamServer, CongestionSteer, LinkAllowance, RateHold,
-                            start_kbps)
+from .stream_server import (BaseStreamingService, CentralizedStreamServer, CongestionSteer, LinkAllowance, PathProbe,
+                            RateHold, start_kbps)
 from .audio_control import AudioControl
 
 logger = logging.getLogger("webrtc")
@@ -162,6 +162,11 @@ PRIMARY_SIZE_WAIT_S = 2.0
 # pacer takes such a frame into its video queue whole (`RtpPacer.set_frame_floor`).
 CLEANUP_FRAME_S = 0.2
 CLEANUP_FRAME_OVERHEAD = 1.5
+# The congestion loop's tick, through which a display's padding (`PathProbe`) runs, and the step
+# its padding task writes in: the pacer admits padding only from its credit, which holds about
+# five milliseconds of its pace (`RtpPacer.padding_room`).
+PAD_TICK_S = 1.0
+PAD_STEP_S = 0.005
 
 def get_server_settings() -> Dict[str, Any]:
     """The server-settings payload every client is greeted with."""
@@ -221,6 +226,8 @@ class WebRTCService(BaseStreamingService):
             CBR target is steered with.
         _rate_holds: Each display's `RateHold`, which tells its controllers
             a steered rate that held.
+        _path_probes: Each display's `PathProbe`, and `_padding` the padding
+            it asked of the display's video senders (`_pad_display`).
         _wm_swap: Swaps heavy DEs, which tile poorly across the per-display
             regions, for a minimal Openbox once a secondary joins.
         _primary_stop_grace_task: The pending deferred primary-capture stop.
@@ -281,6 +288,8 @@ class WebRTCService(BaseStreamingService):
         self._congestion_steer: Dict[str, CongestionSteer] = {}
         self._rate_holds: Dict[str, RateHold] = {}
         self._link_allowances: Dict[str, LinkAllowance] = {}
+        self._path_probes: Dict[str, PathProbe] = {}
+        self._padding: Dict[str, Dict[str, Any]] = {}
         # The browser tab of each peer (its signaling HELLO), and per display the
         # tab whose controller owns it: a controller of another tab streams and
         # drives input beside it, and what would size or configure the display
@@ -2032,6 +2041,8 @@ class WebRTCService(BaseStreamingService):
         point."""
         self._congestion_steer.pop(display_id, None)
         self._link_allowances.pop(display_id, None)
+        self._path_probes.pop(display_id, None)
+        self._pad_display(display_id, [], 0.0, 0.0)
 
     async def _lay_out_for_owner(self, heir: str, display_id: str) -> None:
         """Apply what the controller that owns a display now held back, its size
@@ -3427,15 +3438,23 @@ class WebRTCService(BaseStreamingService):
         pacer_on = bool(settings.webrtc_pacer[0])
         logger.debug(f"WebRTC pacer setting: {'ON' if pacer_on else 'OFF'}.")
         while True:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(PAD_TICK_S)
             rtc_app = self.rtc_app
             if not rtc_app:
                 continue
             per_display: Dict[str, Dict[str, Any]] = {}
             by_owner: Dict[str, Dict[str, Any]] = {}
+            # The video senders a display's padding goes to: its owner's where it has one.
+            padded: Dict[str, List[Any]] = {}
+            padded_owner: Dict[str, List[Any]] = {}
             for peer_id, peer in rtc_app.peer_connections.items():
                 pc = peer.get("peer_conn")
                 did = peer.get("display_id", "primary") or "primary"
+                video = peer.get("video_sender")
+                if video is not None:
+                    padded.setdefault(did, []).append(video)
+                    if self._peer_owns_display(peer_id):
+                        padded_owner.setdefault(did, []).append(video)
                 if pacer_on:
                     try:
                         dtls = self._ensure_pacer(pc, peer, did, peer_id)
@@ -3455,7 +3474,7 @@ class WebRTCService(BaseStreamingService):
                 for buckets in ((per_display, by_owner) if self._peer_owns_display(peer_id) else (per_display,)):
                     bucket = buckets.setdefault(
                         did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0, "sent_bps": 0,
-                              "rooms": [], "paces": [], "transports": []})
+                              "padding_bps": 0, "rooms": [], "paces": [], "transports": []})
                     if window["goodput_bps"]:
                         bucket["goodputs"].append(window["goodput_bps"])
                     room = getattr(transport, "pacer_room_bps", lambda: None)()
@@ -3466,11 +3485,13 @@ class WebRTCService(BaseStreamingService):
                         bucket["paces"].append(CLEANUP_PACE_SHARE * pacer["pace_bps"])
                     bucket["transports"].append(transport)
                     bucket["sent_bps"] = max(bucket["sent_bps"], window["sent_bps"])
+                    bucket["padding_bps"] = max(bucket["padding_bps"], window.get("padding_bps", 0))
                     bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
                     if standing is not None:
                         bucket["queue_ms"] = max(bucket["queue_ms"] or 0.0, standing)
                         bucket["depth_ms"] = max(bucket["depth_ms"], window["queue_depth_ms"])
             per_display.update(by_owner)
+            padded.update(padded_owner)
             if self.metrics is not None:
                 self.metrics.set_bridge_drops(rtc_app.bridge_drops())
             for did, bucket in per_display.items():
@@ -3518,6 +3539,13 @@ class WebRTCService(BaseStreamingService):
                     floor = getattr(transport, "set_pacer_frame_floor", None)
                     if floor is not None:
                         floor(int(allowance * 1000 / 8 * CLEANUP_FRAME_S * CLEANUP_FRAME_OVERHEAD))
+                # A cut target over a still screen pads its stream to test the path (`PathProbe`). A
+                # trickle's window reads no queue (too few feedback packets): padding starts on it,
+                # and the queue the padded windows measure stops it.
+                pad = self._path_probes.setdefault(did, PathProbe()).rate_bps(
+                    target, ceiling, max(0.0, bucket["sent_bps"] - bucket["padding_bps"]),
+                    queue_s if queue_s is not None else 0.0, now < steer.hold_until, now)
+                self._pad_display(did, padded.get(did, []), pad, now + 2 * PAD_TICK_S)
                 held_kbps = self._rate_holds.setdefault(did, RateHold()).note(target, now)
                 if held_kbps is not None:
                     rtc_app.send_cc_rate(did, held_kbps)
@@ -3529,6 +3557,52 @@ class WebRTCService(BaseStreamingService):
                            f"queue {queue_ms or 0.0:.0f} ms)")
                     )
                     await pipeline.set_video_bitrate(target)
+            # A display that sent nothing this tick drained no feedback: an idle screen, which a
+            # cut target pads from (its path idle, no queue to read) as it pads a trickle.
+            for did, steer in list(self._congestion_steer.items()):
+                pipeline = self.display_pipelines.get(did)
+                if (did in per_display or not self.args.congestion_control or pipeline is None
+                        or getattr(pipeline, "rc_mode", None) != RateControlMode.CBR):
+                    continue
+                ceiling = max(lo_kbps, min(hi_kbps, float(self._display_setting(did, "video_bitrate") or hi_kbps)))
+                now = time.monotonic()
+                pad = self._path_probes.setdefault(did, PathProbe()).rate_bps(
+                    float(pipeline.video_bitrate), ceiling, 0.0, 0.0, now < steer.hold_until, now)
+                self._pad_display(did, padded.get(did, []), pad, now + 2 * PAD_TICK_S)
+
+    def _pad_display(self, display_id: str, senders: List[Any], bps: float, until: float) -> None:
+        """Pad a display's video `senders` at `bps` until `until` (`PathProbe`), each
+        sending its share through its own pacer (`RTCRtpSender.send_padding`), or stop
+        padding where `bps` is 0 or no sender is left."""
+        state = self._padding.get(display_id)
+        padding = bool(bps > 0 and senders)
+        if padding != bool(state is not None and state["bps"] > 0):
+            logger.debug(f"Congestion control[{display_id}]: " + (
+                f"probing the path at {bps / 1000:.0f} kbps of padding (a still screen under a cut target)"
+                if padding else "probe ended"))
+        if not padding:
+            if state is not None:
+                state["bps"] = 0.0
+            return
+        if state is None:
+            state = self._padding[display_id] = {"bps": 0.0, "until": 0.0, "senders": [], "task": None}
+        state.update(bps=bps, until=until, senders=list(senders))
+        if state["task"] is None or state["task"].done():
+            state["task"] = asyncio.create_task(self._run_padding(state), name=f"padding:{display_id}")
+
+    @staticmethod
+    async def _run_padding(state: Dict[str, Any]) -> None:
+        """Write a display's padding in PAD_STEP_S steps while its probe asks for it, to
+        the senders that stream (a paused page's takes none)."""
+        while state["bps"] > 0 and time.monotonic() < state["until"]:
+            step = int(state["bps"] * PAD_STEP_S / 8)
+            for sender in state["senders"]:
+                if getattr(sender, "_enabled", True):
+                    try:
+                        await sender.send_padding(step)
+                    except (ConnectionError, OSError):
+                        pass
+            await asyncio.sleep(PAD_STEP_S)
 
     async def start_components(self) -> None:
         """Start the background tasks: input/clipboard/cursor workers, the

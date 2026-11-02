@@ -90,6 +90,9 @@ V = TypeVar("V")
 TWCC_IDLE_US = 250_000
 # How long a sent packet waits in the transport-cc history for its feedback.
 TWCC_HISTORY_S = 2.0
+# What SRTP protection adds to a packet at most (an AEAD-GCM tag), which a padding packet's
+# admission (`padding_room`) counts before protecting it.
+SRTP_PADDING_OVERHEAD = 16
 # How long the transport-wide sequence numbers transport-cc reported received are kept
 # (`twcc_arrived`): a sender reads from them which frames its peer holds, and a peer on a
 # narrow link with a standing queue reports a packet seconds after it left.
@@ -1013,6 +1016,20 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self.__tx_packets += 1
         return sent
 
+    def padding_room(self, size: int) -> bool:
+        """Whether a padding packet of `size` bytes before protection goes out now
+        (`RtpPacer.padding_room`); never without a pacer to admit it."""
+        return self._pacer is not None and self._pacer.padding_room(size + SRTP_PADDING_OVERHEAD)
+
+    async def _send_padding_rtp(self, data: bytes) -> None:
+        """Protect and send one padding packet `padding_room` admitted."""
+        if self._state != State.CONNECTED or self._pacer is None:
+            return
+        data = self._tx_srtp.protect(data)
+        await self._pacer.send_padding(data)
+        self.__tx_bytes += len(data)
+        self.__tx_packets += 1
+
     def frame_end(self, twcc_seq: int, sink: Callable[..., None], *args: Any) -> None:
         """Call `sink(*args)` once the RTP packet with transport-wide sequence number
         `twcc_seq`, the last of its frame, is on the wire: past the pacer where one
@@ -1077,9 +1094,10 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         except ConnectionError:
             pass
 
-    def _twcc_next(self, size: int) -> int:
+    def _twcc_next(self, size: int, padding: bool = False) -> int:
         """Allocate the next transport-wide sequence number and record the packet's
-        size and send time for matching against the receiver's transport-cc feedback."""
+        size and send time for matching against the receiver's transport-cc feedback,
+        a `padding` packet's counted apart too (`take_twcc_window`'s `padding_bps`)."""
         seq = self._twcc_seq
         self._twcc_seq = (self._twcc_seq + 1) & 0xFFFF
         now = self._twcc_sent_at = time.monotonic()
@@ -1087,6 +1105,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_missing.pop(seq, None)
         self._twcc_history[seq] = (size, now)
         self._twcc_window["bytes_sent"] += size
+        if padding:
+            self._twcc_window["padding_sent"] += size
         # Bounded by age, not count: a retransmission storm allocates thousands
         # of numbers a second, and one let go before its feedback arrives would
         # read as wire loss. Insertion order is allocation order.
@@ -1309,7 +1329,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
     def _twcc_window_zero() -> dict:
         return {"received": 0, "lost": 0, "bytes_acked": 0,
                 "first_arrival": None, "first_bytes": 0, "last_arrival_us": None,
-                "delay_min": None, "delay_last": None, "feedback_mins": [], "bytes_sent": 0,
+                "delay_min": None, "delay_last": None, "feedback_mins": [], "bytes_sent": 0, "padding_sent": 0,
                 "opened": time.monotonic()}
 
     def take_twcc_window(self) -> Optional[dict]:
@@ -1353,7 +1373,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         growing one has grown into.
 
         Returns:
-            Loss, goodput and the rate sent over the drained interval, with the
+            Loss, goodput and the rate sent over the drained interval (and of it
+            the padding, `padding_bps`), with the
             standing queue, the queue still building (None unless the newest
             half of the interval stood past `TWCC_QUEUE_MS`), and the depth, in
             milliseconds (None without a delay measured or with too few
@@ -1374,6 +1395,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
                        if span_s > 0 else 0)
         sent_bps = (int(window["bytes_sent"] * 8 / (now - window["opened"]))
                     if now > window["opened"] else 0)
+        padding_bps = (int(window["padding_sent"] * 8 / (now - window["opened"]))
+                       if now > window["opened"] else 0)
         if window["delay_min"] is not None:
             mins = window["feedback_mins"]
             least = self._twcc_path_delay(
@@ -1396,6 +1419,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             "queue_rising_ms": rising_ms,
             "queue_depth_ms": depth_ms,
             "sent_bps": sent_bps,
+            "padding_bps": padding_bps,
         }
 
     def _twcc_path_delay(self, now: float, delay: float, loss: float,

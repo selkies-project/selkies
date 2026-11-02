@@ -289,11 +289,15 @@ def note_pong(ws: Any, data: Any) -> None:
     state["rtt_us"] = int((time.monotonic() - sent) * 1e6)
     state["seq"] += 1
     state["answered"] = max(state.get("answered", 0.0), sent)
+    answer = state.get("on_pong", {}).pop(bytes(data or b""), None)
+    if answer is not None:
+        answer(state["rtt_us"] / 1e6)
 
 
-async def ping_behind(ws: Any) -> None:
+async def ping_behind(ws: Any, on_pong: Optional[Callable[[float], None]] = None) -> None:
     """Ping `ws` behind everything written to it so far: its pong says all of that
-    reached the peer (`note_pong` keeps when the newest answered ping went out)."""
+    reached the peer (`note_pong` keeps when the newest answered ping went out),
+    and `on_pong`, where given, is called with its round trip in seconds."""
     state = _uplink_session_state(ws)
     payload = state["next_ping"].to_bytes(8, "big")
     state["next_ping"] += 1
@@ -301,6 +305,11 @@ async def ping_behind(ws: Any) -> None:
     pending[payload] = time.monotonic()
     while len(pending) > UplinkGauge._PENDING_MAX:
         pending.pop(next(iter(pending)))
+    answers = state.setdefault("on_pong", {})
+    if on_pong is not None:
+        answers[payload] = on_pong
+    for stale in [p for p in answers if p not in pending]:
+        del answers[stale]
     await ws.ping(payload)
 
 
@@ -572,6 +581,62 @@ class CongestionSteer:
         self.hold_until = self._drain_until + self.SETTLE_S
         return min(current, delivered_kbps * fraction)
 
+
+class PathProbe:
+    """Padding that lets a still screen's stream test its path once congestion
+    control has cut its target under the configured rate.
+
+    A tick whose stream offered under `CongestionSteer.APP_LIMITED` of the
+    target tests nothing of the path, so the steer raises it no further than
+    the capacity the path last showed: a desktop that sits still after a real
+    queue keeps the cut rate until its screen moves (#489). While the target
+    stands under the ceiling, the steer's hold is over and the stream itself
+    fills less than APP_LIMITED of the target, the transport pads it to the
+    target (`rate_bps`), so the path carries, or queues, the rate the steer
+    asks of it, and the steer climbs or backs off as it does on a moving
+    screen. A queue on a tick that followed padding ends the probe, the path
+    found: the next one waits QUIET_S, doubling to QUIET_MAX_S while probes
+    keep ending that way, and back to QUIET_S once a target reaches the
+    ceiling. A tick that measured no delay pads nothing.
+    """
+
+    QUIET_S = 15.0
+    QUIET_MAX_S = 240.0
+
+    def __init__(self) -> None:
+        self.padding = False
+        self.quiet_until = 0.0
+        self.quiet_s = self.QUIET_S
+
+    def rate_bps(self, target_kbps: float, ceiling_kbps: float, content_bps: Optional[float],
+                 queue_s: Optional[float], held: bool, now: float) -> float:
+        """The padding to send until the next tick, in bits per second.
+
+        Args:
+            target_kbps: The target the steer just set.
+            ceiling_kbps: The configured target.
+            content_bps: What the stream itself sent over the tick, padding left
+                out, or None when unmeasured (nothing pads then).
+            queue_s: The queue the tick read, as `CongestionSteer.target` takes it.
+            held: Whether the steer holds its target after a cut (its drain).
+            now: Monotonic time of the tick.
+        """
+        padded, self.padding = self.padding, False
+        if target_kbps >= ceiling_kbps:
+            self.quiet_s = self.QUIET_S
+            return 0.0
+        if queue_s:
+            if padded:
+                self.quiet_until = now + self.quiet_s
+                self.quiet_s = min(self.quiet_s * 2.0, self.QUIET_MAX_S)
+            return 0.0
+        if queue_s is None or content_bps is None or held or now < self.quiet_until:
+            return 0.0
+        target_bps = target_kbps * 1_000.0
+        if content_bps >= target_bps * CongestionSteer.APP_LIMITED:
+            return 0.0
+        self.padding = True
+        return target_bps - content_bps
 
 class LinkAllowance:
     """The rate (kbps) a display's still-screen cleanup may run at over its path, which pixelflux

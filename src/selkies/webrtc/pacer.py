@@ -254,7 +254,7 @@ class RtpPacer:
         self.stats = {
             "video_dropped": 0, "keyreqs": 0, "gop_resets": 0, "resyncs": 0,
             "idr_resurrects": 0, "timeout_resurrects": 0, "stale_resets": 0,
-            "paced_bytes": 0, "queue_max_bytes": 0, "fastpath_bytes": 0,
+            "paced_bytes": 0, "queue_max_bytes": 0, "fastpath_bytes": 0, "padding_bytes": 0,
         }
         self._stats_prev: dict = {}
         self._stats_timer: Optional[asyncio.TimerHandle] = None
@@ -628,6 +628,21 @@ class RtpPacer:
             self._poke.set()
         self._kick()
         return True
+
+    def padding_room(self, n: int) -> bool:
+        """Whether a padding packet of `n` bytes (`send_padding`) goes out now: nothing
+        queued, video flowing, and credit covering it. Padding never queues, so no frame
+        waits behind it here, and none is ever dropped for it."""
+        if self._stopped or self._bytes_queued or self._gop_dead:
+            return False
+        self._accrue()
+        return n <= self.credit
+
+    async def send_padding(self, data: bytes) -> None:
+        """Send a padding packet `padding_room` just admitted, on the video's credit."""
+        self.credit -= len(data)
+        self.stats["padding_bytes"] += len(data)
+        await self._send_now(data)
 
     def _stale_reset(self, deadline_s: float, tag: Optional[int] = None) -> None:
         """Latency-first GOP reset for queued video that outlived its usefulness."""
