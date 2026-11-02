@@ -2,7 +2,10 @@
 """Every Basic-auth rejection must carry a WWW-Authenticate challenge.
 
 Without one the browser renders the body as a page instead of re-prompting, so a
-mistyped password ends the session. The success path must not carry one.
+mistyped password ends the session. The success path must not carry one. Only a
+page load (or a client sending no Sec-Fetch-Mode) is challenged with the Basic
+scheme: a browser holds a background fetch open behind its login prompt, so those
+get one it never prompts for.
 """
 import asyncio
 import base64
@@ -68,17 +71,21 @@ async def _run() -> list[str]:
     failures = []
     try:
         for name, headers, expect_status in CASES:
-            response = await client.get("/", headers=headers)
-            challenge = response.headers.get("WWW-Authenticate")
-            if response.status != expect_status:
-                failures.append(f"{name}: status {response.status}, expected {expect_status}")
-                continue
-            if expect_status == 401 and not (challenge or "").startswith("Basic realm="):
-                failures.append(f"{name}: 401 without a Basic challenge ({challenge!r})")
-            elif expect_status == 200 and challenge is not None:
-                failures.append(f"{name}: authenticated request challenged ({challenge!r})")
-            else:
-                print(f"PASS  {name}: {response.status} {challenge!r}")
+            for mode in (None, "navigate", "cors", "no-cors", "same-origin", "websocket"):
+                sent = dict(headers, **({"Sec-Fetch-Mode": mode} if mode else {}))
+                response = await client.get("/", headers=sent)
+                challenge = response.headers.get("WWW-Authenticate")
+                label = f"{name}, Sec-Fetch-Mode {mode or 'absent'}"
+                scheme = "Basic" if mode in (None, "navigate") else "PageLogin"
+                if response.status != expect_status:
+                    failures.append(f"{label}: status {response.status}, expected {expect_status}")
+                    continue
+                if expect_status == 401 and not (challenge or "").startswith(f"{scheme} realm="):
+                    failures.append(f"{label}: 401 without a {scheme} challenge ({challenge!r})")
+                elif expect_status == 200 and challenge is not None:
+                    failures.append(f"{label}: authenticated request challenged ({challenge!r})")
+                else:
+                    print(f"PASS  {label}: {response.status} {challenge!r}")
     finally:
         await client.close()
     return failures

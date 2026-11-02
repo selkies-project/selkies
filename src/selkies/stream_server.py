@@ -2131,16 +2131,25 @@ class CentralizedStreamServer:
         )
 
     @staticmethod
-    def _basic_auth_challenge(text: str = "Invalid Credentials") -> web.Response:
+    def _basic_auth_challenge(
+        request: web.Request, text: str = "Invalid Credentials"
+    ) -> web.Response:
         """A 401 that re-opens the browser's login prompt.
 
         Wrong credentials carry the challenge too: without one the browser renders this
         body as a page instead of asking again, so a mistyped password ends the session.
+        Only a page load gets the Basic scheme: a browser holds a background request
+        (any `Sec-Fetch-Mode` but a navigation's) open behind its login prompt, which a
+        fullscreen session hides, so the page stalled. Answered at once, the web
+        client's 401 guard reloads the page and the prompt comes with the page itself.
+        A client that sends no `Sec-Fetch-Mode` gets the Basic scheme.
         """
+        mode = request.headers.get("Sec-Fetch-Mode")
+        scheme = "Basic" if mode in (None, "navigate", "nested-navigate") else "PageLogin"
         return web.Response(
             status=401,
             headers={
-                "WWW-Authenticate": f'Basic realm="{AUTH_REALM}", charset="UTF-8"'
+                "WWW-Authenticate": f'{scheme} realm="{AUTH_REALM}", charset="UTF-8"'
             },
             text=text,
         )
@@ -2400,11 +2409,11 @@ class CentralizedStreamServer:
                     "browser clients behind proxies).",
                     request.remote,
                 )
-            return self._basic_auth_challenge("Authorization Required")
+            return self._basic_auth_challenge(request, "Authorization Required")
         try:
             auth_decoded = self._b64_decode(auth_header[6:])
             if ":" not in auth_decoded:
-                return self._basic_auth_challenge()
+                return self._basic_auth_challenge(request)
             username, password = auth_decoded.split(":", 1)
             # Compare as UTF-8 bytes; hmac.compare_digest rejects non-ASCII str.
             user_ok = hmac.compare_digest(
@@ -2423,12 +2432,12 @@ class CentralizedStreamServer:
                 logger.warning(
                     f"Invalid credentials provided for user: {settings.basic_auth_user}"
                 )
-                return self._basic_auth_challenge()
+                return self._basic_auth_challenge(request)
             request["auth_role_ceiling"] = (
                 "viewer" if (viewonly_ok and not main_ok) else "controller"
             )
         except Exception:
-            return self._basic_auth_challenge()
+            return self._basic_auth_challenge(request)
         return await handler(request)
 
     def _require_configured_credentials(self) -> None:
