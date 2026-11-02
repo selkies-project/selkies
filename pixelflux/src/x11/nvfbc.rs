@@ -561,7 +561,12 @@ impl NvfbcSession {
             dwFlags: flags,
             pCUDADeviceBuffer: &mut device_ptr as *mut CUdeviceptr as *mut c_void,
             pFrameGrabInfo: &mut info,
-            dwTimeoutMs: timeout.as_millis().clamp(1, u32::MAX as u128) as u32,
+            // Rounded up: a grab that gave up ahead of its deadline would send the frame before
+            // again and leave a change landing in the time left to the next one.
+            dwTimeoutMs: timeout
+                .as_micros()
+                .div_ceil(1000)
+                .clamp(1, u32::MAX as u128) as u32,
         };
         let st = unsafe { (self.funcs.nvFBCToCudaGrabFrame.unwrap())(self.handle, &mut params) };
         if st != NVFBC_SUCCESS {
