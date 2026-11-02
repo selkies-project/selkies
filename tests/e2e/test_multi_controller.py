@@ -32,8 +32,14 @@ once the owner has sat unused a moment; the owner's user acting while that page
 is in use leaves it be, and takes it back once that page sat unused. Nobody is
 disconnected.
 
+The ``older`` block opens a page that cannot take the display (one from
+before the visibility hand-off, which leaves the server's PAGE_VISIBILITY
+unanswered) beside an owner whose hidden tab stopped the capture: the page
+gets the capture started again for it, while the hidden owner's own feed stays
+paused until it is shown.
+
 Usage: python3 tests/e2e/test_multi_controller.py
-    [websockets|webrtc|settings|settings-wr|nodisrupt|visible|visible-wr|inuse|inuse-wr|all]
+    [websockets|webrtc|settings|settings-wr|nodisrupt|visible|visible-wr|inuse|inuse-wr|older|all]
 """
 import json
 import os
@@ -141,9 +147,28 @@ STATE_JS = """(() => {
 })()""" % STORAGE_PREFIX_JS
 
 
-def open_page(pw, seed: dict, storage: dict = None, mode: str = "websockets") -> tuple:
-    """A controller page of its own browser context, with `seed` stored before its first load;
-    `(browser, page, console lines)`."""
+# A page from before the visibility hand-off: its socket on the page (`socket_worker=false`), the
+# server's PAGE_VISIBILITY never reaches its handler.
+OLDER_PAGE_JS = """(() => {
+  const WS = window.WebSocket;
+  const handler = Object.getOwnPropertyDescriptor(WS.prototype, 'onmessage');
+  window.WebSocket = function(...a) {
+    const s = a.length === 1 ? new WS(a[0]) : new WS(a[0], a[1]);
+    Object.defineProperty(s, 'onmessage', {
+      configurable: true,
+      get() { return handler.get.call(s); },
+      set(fn) { handler.set.call(s, fn ? (e) => { if (e.data !== 'PAGE_VISIBILITY') fn.call(s, e); } : fn); },
+    });
+    return s;
+  };
+  window.WebSocket.prototype = WS.prototype;
+  Object.setPrototypeOf(window.WebSocket, WS);
+})();"""
+
+
+def open_page(pw, seed: dict, storage: dict = None, mode: str = "websockets", older: bool = False) -> tuple:
+    """A controller page of its own browser context, with `seed` stored before its first load,
+    from before the visibility hand-off where `older`; `(browser, page, console lines)`."""
     browser = C.launch_browser(pw, "chromium")
     ctx = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                               device_scale_factor=1)
@@ -152,10 +177,12 @@ def open_page(pw, seed: dict, storage: dict = None, mode: str = "websockets") ->
     ctx.add_init_script(C.PAGE_TAP_JS + C.PC_TAP_JS)
     if seed:
         ctx.add_init_script(SEED_JS % (STORAGE_PREFIX_JS, json.dumps(seed)))
+    if older:
+        ctx.add_init_script(OLDER_PAGE_JS)
     page = ctx.new_page()
     lines = []
     page.on("console", lambda m: lines.append(m.text))
-    page.goto(H.BASE_URL + "/", wait_until="load")
+    page.goto(H.BASE_URL + ("/?socket_worker=false" if older else "/"), wait_until="load")
     return browser, page, lines
 
 
@@ -521,6 +548,38 @@ def run_nodisrupt(res: "H.Results") -> None:
         H.server_stop()
 
 
+def run_older(res: "H.Results") -> None:
+    H.server_start(mode="websockets")
+    picture = TENC.Picture(False)
+    try:
+        with sync_playwright() as pw:
+            owner_browser, owner, _ = open_page(pw, {})
+            res.check("older: the owner streams", video(owner, "websockets"))
+            hide(owner, True)
+            res.check("older: hidden with nobody beside it, it stops the stream",
+                      C.wait_log("Received STOP_VIDEO for 'primary'. Stopping stream.", timeout=10))
+            other_browser, other, _ = open_page(pw, {}, older=True)
+            res.check("older: a page that cannot take the display joins beside it",
+                      C.wait_log("joins 'primary' beside its owner", timeout=20))
+            picture.paint()
+            res.check("older: and gets the capture the hidden owner stopped",
+                      video(other, "websockets") and gained(other) > 0, frames(other))
+            before = frames(owner)
+            picture.clear()
+            picture.paint()
+            time.sleep(2.5)
+            res.check("older: while the hidden owner's own feed stays paused", frames(owner) == before,
+                      frames(owner) - before)
+            hide(owner, False)
+            time.sleep(1.5)
+            res.check("older: shown again, the owner's feed resumes", gained(owner) > 0)
+            other_browser.close()
+            owner_browser.close()
+    finally:
+        picture.clear()
+        H.server_stop()
+
+
 def main() -> int:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     res = H.Results(f"multi-controller-{which}")
@@ -541,6 +600,8 @@ def main() -> int:
         run_inuse(res, "websockets")
     if which in ("all", "inuse-wr"):
         run_inuse(res, "webrtc")
+    if which in ("all", "older"):
+        run_older(res)
     return 0 if res.summary() else 1
 
 

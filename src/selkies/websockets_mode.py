@@ -2329,6 +2329,29 @@ class DataStreamingServer(BaseStreamingService):
             return
         await self._hand_display_to(websocket, "went unused: the controller beside it in use")
 
+    def _capture_for_page_beside(self, websocket: Any) -> None:
+        """Start the primary capture a hidden owner stopped for a page that
+        joined beside it and is still there once the owner's hand-off had its
+        time (`_settle_display_owner`): an older page, or one without full
+        control, never takes the display, and would wait on the owner. The
+        owner's own feed stays paused until its START_VIDEO."""
+        async def _later() -> None:
+            await asyncio.sleep(self.HIDDEN_OWNER_HANDOFF_S + 0.5)
+            owner = (self.display_clients.get('primary') or {}).get('ws')
+            if (websocket.closed or websocket not in self.co_controllers.get('primary', ())
+                    or 'primary' in self.capture_instances or owner is None or owner.closed
+                    or not pipeline_starts_on('video', 'primary')):
+                return
+            self.video_paused_clients.add(owner)
+            data_logger.info("Starting the 'primary' capture its hidden owner stopped, for the page beside it.")
+            if await self._ensure_viewer_capture():
+                try:
+                    await websocket.send_str("PIPELINE_RESETTING primary")
+                except (ConnectionResetError, OSError, RuntimeError):
+                    pass
+                self._schedule_idr_for_display('primary')
+        _spawn_background_task(_later(), name="capture-for-page-beside")
+
     async def _hand_display_to(self, heir: Any, why: str) -> None:
         """Make `heir`, a controller beside the primary's owner, its owner: told
         `DISPLAY_OWNER primary`, it sends its settings and its size, which lay
@@ -5503,6 +5526,8 @@ class DataStreamingServer(BaseStreamingService):
                                     data_logger.info(
                                         f"Controller {remote_address} joins 'primary' beside its owner "
                                         f"(tab {(tab_id or 'none')[:8]}, the owner's {(owner_tab or 'none')[:8]}).")
+                                    if 'primary' not in self.capture_instances:
+                                        self._capture_for_page_beside(websocket)
                                     await self.broadcast_stream_resolution()
                                     try:
                                         await websocket.send_str("PIPELINE_RESETTING primary")
