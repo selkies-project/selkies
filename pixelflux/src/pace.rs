@@ -153,16 +153,20 @@ impl FramePace {
 
     /// A tick paced in windows: a timer tick ends the open window whether it sent a frame or
     /// not, which keeps the windows on the timer's schedule; a change's frame closes the window
-    /// it lands in, and a change not sent leaves it open.
+    /// it lands in, and a change not sent leaves it open. A timer tick that came late (a busy
+    /// capture or compositor thread) still ends the window it was due for, so the next opens on
+    /// schedule and the rate holds: moving the grid to the late tick gave up the time it was late
+    /// by, every time, and a loaded session streamed below its rate. Only windows that passed
+    /// whole without a tick are given up.
     fn window_tick(&mut self, trigger: TickTrigger, period: Duration, now: Instant, sent: bool) {
         if trigger == TickTrigger::Timer {
             let scheduled = self.next_due(period, now);
-            let off = if now > scheduled {
-                now - scheduled
+            self.window_end = Some(if now <= scheduled {
+                scheduled
             } else {
-                scheduled - now
-            };
-            self.window_end = Some(if off < period / 2 { scheduled } else { now });
+                scheduled
+                    + period * ((now - scheduled).as_nanos() / period.as_nanos().max(1)) as u32
+            });
         } else if sent {
             self.window_end = Some(self.window_closed_by(period, now));
         }
@@ -645,6 +649,36 @@ mod pacing_tests {
         pace.defer(at(base, 70));
         assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 20));
         assert_eq!(pace.next_wake(PERIOD, at(base, 21), false), at(base, 70));
+    }
+
+    /// A timer that fires late, as a busy capture or compositor thread makes it, still ends the
+    /// window it was due for: streaming, the frames sent in 1000 periods stay 1000 whether the
+    /// ticks come on time or up to 0.9 of a period late (moving the grid to each late tick lost
+    /// 9% of them at 0.6 and 23% at 0.9).
+    #[test]
+    fn late_timer_ticks_keep_the_rate() {
+        let base = Instant::now();
+        for max_late in [0.0, 0.3, 0.6, 0.9] {
+            let mut pace = FramePace::windowed();
+            pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
+            let (mut seed, mut frames) = (12345u64, 1);
+            loop {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let late = (seed >> 33) as f64 / (1u64 << 31) as f64 * max_late;
+                let at = pace.next_due(PERIOD, base) + PERIOD.mul_f64(late);
+                if at > base + PERIOD * 1000 {
+                    break;
+                }
+                pace.record_tick(TickTrigger::Timer, PERIOD, at, true);
+                frames += 1;
+            }
+            assert!(
+                (1000..=1001).contains(&frames),
+                "{frames} frames at up to {max_late} late"
+            );
+        }
     }
 
     /// The earliest pull and the pull gate agree, so a caller may wait for the one and skip
