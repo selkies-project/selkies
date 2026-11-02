@@ -2815,6 +2815,8 @@ fn start_capture_on_display(
         needs_full_render: true,
         pace: FramePace::windowed(),
         change_pending: false,
+        callbacks_at: None,
+        callbacks_owed: false,
         hw_error_streak: 0,
         hw_rebuilt: false,
     };
@@ -3642,10 +3644,15 @@ fn wait_render_fence(sync: &SyncPoint, display_id: u32) -> bool {
 /// busy. The nodes are taken out of the state so each per-output render can borrow the shared
 /// renderer/space alongside its own damage tracker and buffers.
 fn render_pass(state: &mut AppState, trigger: TickTrigger) -> bool {
+    let drivers: Vec<bool> = state
+        .output_nodes
+        .iter()
+        .map(|n| drives_screen(&state.output_nodes, n))
+        .collect();
     let mut nodes = std::mem::take(&mut state.output_nodes);
     let mut any_pool_busy = false;
-    for node in nodes.iter_mut() {
-        if render_node_tick(state, node, trigger) {
+    for (node, drives) in nodes.iter_mut().zip(drivers) {
+        if render_node_tick(state, node, trigger, drives) {
             any_pool_busy = true;
         }
     }
@@ -3677,23 +3684,103 @@ fn serve_changes(state: &mut AppState) {
     }
 }
 
+/// Answer the frame callbacks of each captured display's clients once a window, on its boundary:
+/// the vblank a display gives them. A change renders as it lands (`serve_changes`), but a
+/// client drawing on frame callbacks takes its clock from them; answered at each render
+/// instead, it drew on an uneven clock and below the frame rate (a browser at 240 fps). The
+/// frame timer wakes at every boundary while a display captures, and calls this each time.
+fn answer_frame_callbacks(state: &mut AppState) {
+    let now = Instant::now();
+    let time = state.clock.now();
+    for i in 0..state.output_nodes.len() {
+        let node = &state.output_nodes[i];
+        let Some(cap) = node.capture.as_ref() else {
+            continue;
+        };
+        if state
+            .host
+            .as_ref()
+            .is_some_and(|h| h.has_output_for(node.id))
+        {
+            continue;
+        }
+        let Some(opened) = cap.pace.window_opened(capture_period(cap), now) else {
+            continue;
+        };
+        if cap.callbacks_at.is_some_and(|at| at >= opened) {
+            continue;
+        }
+        // A client whose last commit is not rendered yet is answered once it is: asked to draw
+        // again meanwhile, it would draw frames a busy capture never shows.
+        let owed = cap.change_pending;
+        let output = node.output.clone();
+        if !owed && drives_screen(&state.output_nodes, node) {
+            for window in state.space.elements_for_output(&output) {
+                window.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+            }
+            for layer in layer_map_for_output(&output).layers() {
+                layer.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+            }
+        }
+        if let Some(cap) = state.output_nodes[i].capture.as_mut() {
+            cap.callbacks_at = Some(opened);
+            cap.callbacks_owed = owed;
+        }
+    }
+}
+
 /// One display's render tick, for a trigger that concerns that display alone.
 fn render_display(state: &mut AppState, display_id: u32, trigger: TickTrigger) {
+    let drives = state
+        .output_nodes
+        .iter()
+        .find(|n| n.id == display_id)
+        .is_some_and(|n| drives_screen(&state.output_nodes, n));
     let mut nodes = std::mem::take(&mut state.output_nodes);
     if let Some(node) = nodes.iter_mut().find(|n| n.id == display_id) {
-        render_node_tick(state, node, trigger);
+        render_node_tick(state, node, trigger, drives);
     }
     state.output_nodes = nodes;
+}
+
+/// Views share one output, so its clients are driven once a frame, by the fastest display
+/// capturing that screen (ties go to the lowest number) -- a client asked to draw once per
+/// view would render as many times a frame as there are displays over it, one asked by nobody
+/// (the screen itself is often captured by views alone) would freeze on the frame it first
+/// painted, and one driven by a slower sibling would stream stale frames on the faster display.
+fn drives_screen(
+    nodes: &[wayland::frontend::OutputNode],
+    node: &wayland::frontend::OutputNode,
+) -> bool {
+    let screen = node.owner.unwrap_or(node.id);
+    let fps = |n: &wayland::frontend::OutputNode| {
+        n.capture
+            .as_ref()
+            .map(|c| c.settings.target_fps)
+            .unwrap_or(0.0)
+    };
+    let own_fps = fps(node);
+    !nodes.iter().any(|n| {
+        n.owner.unwrap_or(n.id) == screen
+            && n.capture.is_some()
+            && (fps(n) > own_fps || (fps(n) == own_fps && n.id < node.id))
+    })
 }
 
 fn render_node_tick(
     state: &mut AppState,
     node: &mut wayland::frontend::OutputNode,
     trigger: TickTrigger,
+    drives_screen: bool,
 ) -> bool {
     state.pending_screenshots.prune(Instant::now());
     let take_screenshot = state.pending_screenshots.contains(node.id);
-    let copy_frame_wanted = state.copy_frame_pending_for(&node.output);
+    // Copy-capture clients take the whole screen, which only the screen itself composites.
+    let copy_frame_wanted = node.owner.is_none() && state.copy_frame_pending_for(&node.output);
     if node.capture.is_none() && !take_screenshot && !copy_frame_wanted {
         return false;
     }
@@ -4603,38 +4690,21 @@ fn render_node_tick(
     if render_success {
         node.target_seeded = true;
     }
-    // Views share one output, so its clients are driven once a frame, by the
-    // fastest display capturing that screen (ties go to the lowest number) -- a
-    // client asked to draw once per view would render as many times a frame as
-    // there are displays over it, one asked by nobody (the screen itself is often
-    // captured by views alone) would freeze on the frame it first painted, and one
-    // driven by a slower sibling would stream stale frames on the faster display.
-    let screen = node.owner.unwrap_or(node.id);
-    let own_fps = node
-        .capture
-        .as_ref()
-        .map(|c| c.settings.target_fps)
-        .unwrap_or(0.0);
-    let own_id = node.id;
-    let drives_screen = !state.output_nodes.iter().any(|n| {
-        let fps = n
-            .capture
-            .as_ref()
-            .map(|c| c.settings.target_fps)
-            .unwrap_or(0.0);
-        n.owner.unwrap_or(n.id) == screen
-            && n.capture.is_some()
-            && (fps > own_fps || (fps == own_fps && n.id < own_id))
-    });
+    // A captured display answers its clients' frame callbacks on its window boundaries
+    // (`answer_frame_callbacks`), or at the render a boundary waited for; host capture and an
+    // uncaptured output as they render.
+    let answer_now = node.capture.as_ref().is_none_or(|c| c.callbacks_owed) || host_mode;
     if render_success && drives_screen {
         let time = state.clock.now();
         // The composited frame is what the capture consumes, so this render is also the
         // presentation moment for wp_presentation feedback.
         let mut feedback = OutputPresentationFeedback::new(&output);
         for window in state.space.elements_for_output(&output) {
-            window.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+            if answer_now {
+                window.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+            }
             window.take_presentation_feedback(
                 &mut feedback,
                 |_, _| Some(output.clone()),
@@ -4646,14 +4716,19 @@ fn render_node_tick(
         // that never arrives leaves a client which draws on frame callbacks showing
         // whatever it painted first, for as long as the session lasts.
         for layer in layer_map_for_output(&output).layers() {
-            layer.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+            if answer_now {
+                layer.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+            }
             layer.take_presentation_feedback(
                 &mut feedback,
                 |_, _| Some(output.clone()),
                 |_, _| wp_presentation_feedback::Kind::empty(),
             );
+        }
+        if answer_now && let Some(cap) = node.capture.as_mut() {
+            cap.callbacks_owed = false;
         }
         send_cursor_frame(state, &output, time);
         let refresh = match node.capture.as_ref() {
@@ -4669,252 +4744,249 @@ fn render_node_tick(
             node.frame_seq,
             wp_presentation_feedback::Kind::Vsync,
         );
-
-        // Host mode renders nothing locally, so there is no composited buffer to
-        // serve capture clients from; their frames stay parked.
-        if !host_mode {
-            service_copy_frames(state, node, width, height, &damage_rects);
-        }
-
-        if !hold_frame && let Some(cap) = node.capture.as_mut() {
-            // A dead encode thread (panic, unexpected exit) cannot drain the pool;
-            // every publish would park the slot and each tick would silently skip
-            // while is_capturing still reports true. Rebuild the readback path in
-            // place, reusing a cleanly handed-back encoder session if any.
-            if cap.encode_join.as_ref().is_some_and(|j| j.is_finished()) {
-                let prior = cap.encode_join.take().and_then(|j| j.join().ok().flatten());
-                if let Some(pool) = cap.encode_pool.take() {
-                    pool.shutdown();
-                }
-                let s = &cap.settings;
-                let try_gpu = s.codec.is_video() && !(s.use_cpu || s.encode_node_index == -1);
-                eprintln!("[Wayland] encode thread died; rebuilding the readback path.");
-                // Host frames reach the pool as BGRA; only our own GLES readback produces RGBA.
-                bootstrap_readback_pool(
-                    cap,
-                    node.id,
-                    state.use_gpu && !host_mode,
-                    try_gpu,
-                    prior,
-                    None,
-                );
-                cap.request_idr();
+    }
+    // Host mode composites nothing locally, so capture clients' frames stay parked.
+    if render_success && !host_mode && copy_frame_wanted {
+        service_copy_frames(state, node, width, height, &damage_rects);
+    }
+    if render_success
+        && !hold_frame
+        && let Some(cap) = node.capture.as_mut()
+    {
+        // A dead encode thread (panic, unexpected exit) cannot drain the pool;
+        // every publish would park the slot and each tick would silently skip
+        // while is_capturing still reports true. Rebuild the readback path in
+        // place, reusing a cleanly handed-back encoder session if any.
+        if cap.encode_join.as_ref().is_some_and(|j| j.is_finished()) {
+            let prior = cap.encode_join.take().and_then(|j| j.join().ok().flatten());
+            if let Some(pool) = cap.encode_pool.take() {
+                pool.shutdown();
             }
-            if cap.encode_pool.is_some() {
-                if let Some((id, buf)) = pool_slot.take() {
-                    let frame = WlFrame {
-                        id,
-                        buf,
-                        frame_id: cap.frame_counter,
-                        damage: std::mem::take(&mut damage_rects),
-                        is_animated: node.overlay_state.is_animated(),
-                        captured_ns: new_stamp.unwrap_or(composite_ns),
-                    };
-                    if let Some(pool) = cap.encode_pool.as_ref() {
-                        pool.publish(frame);
-                    }
-                    cap.frame_counter = cap.frame_counter.wrapping_add(1);
-                }
-            } else if let Some(ref mut encoder) = cap.video_encoder {
-                // Deliver the parked frame (if any) first, WITHOUT blocking: this runs
-                // on the calloop thread, and a blocking send would freeze
-                // input/command/Wayland dispatch for as long as the Python consumer
-                // stalls. While a frame stays parked, no new frame is encoded — an
-                // encoded frame joins the H.264 reference chain and can never be
-                // dropped — and the tick's damage is latched so the pause never loses
-                // a change.
-                let slot_free = match cap.pending_hw_delivery.take() {
-                    None => true,
-                    Some(pending) => match cap.deliver_tx.as_ref() {
-                        None => true,
-                        Some(tx) => match tx.try_send(pending) {
-                            Ok(()) => true,
-                            Err(std::sync::mpsc::TrySendError::Full(p)) => {
-                                cap.pending_hw_delivery = Some(p);
-                                false
-                            }
-                            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => true,
-                        },
-                    },
+            let s = &cap.settings;
+            let try_gpu = s.codec.is_video() && !(s.use_cpu || s.encode_node_index == -1);
+            eprintln!("[Wayland] encode thread died; rebuilding the readback path.");
+            // Host frames reach the pool as BGRA; only our own GLES readback produces RGBA.
+            bootstrap_readback_pool(
+                cap,
+                node.id,
+                state.use_gpu && !host_mode,
+                try_gpu,
+                prior,
+                None,
+            );
+            cap.request_idr();
+        }
+        if cap.encode_pool.is_some() {
+            if let Some((id, buf)) = pool_slot.take() {
+                let frame = WlFrame {
+                    id,
+                    buf,
+                    frame_id: cap.frame_counter,
+                    damage: std::mem::take(&mut damage_rects),
+                    is_animated: node.overlay_state.is_animated(),
+                    captured_ns: new_stamp.unwrap_or(composite_ns),
                 };
-                if !slot_free {
-                    if !damage_rects.is_empty() {
-                        cap.pending_hw_damage = true;
+                if let Some(pool) = cap.encode_pool.as_ref() {
+                    pool.publish(frame);
+                }
+                cap.frame_counter = cap.frame_counter.wrapping_add(1);
+            }
+        } else if let Some(ref mut encoder) = cap.video_encoder {
+            // Deliver the parked frame (if any) first, WITHOUT blocking: this runs
+            // on the calloop thread, and a blocking send would freeze
+            // input/command/Wayland dispatch for as long as the Python consumer
+            // stalls. While a frame stays parked, no new frame is encoded — an
+            // encoded frame joins the H.264 reference chain and can never be
+            // dropped — and the tick's damage is latched so the pause never loses
+            // a change.
+            let slot_free = match cap.pending_hw_delivery.take() {
+                None => true,
+                Some(pending) => match cap.deliver_tx.as_ref() {
+                    None => true,
+                    Some(tx) => match tx.try_send(pending) {
+                        Ok(()) => true,
+                        Err(std::sync::mpsc::TrySendError::Full(p)) => {
+                            cap.pending_hw_delivery = Some(p);
+                            false
+                        }
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => true,
+                    },
+                },
+            };
+            if !slot_free {
+                if !damage_rects.is_empty() {
+                    cap.pending_hw_damage = true;
+                }
+            } else {
+                let is_animated = node.overlay_state.is_animated();
+                let damage = match crate::pipeline::Damage::of_rects(&damage_rects, width, height) {
+                    crate::pipeline::Damage::None if std::mem::take(&mut cap.pending_hw_damage) => {
+                        crate::pipeline::Damage::Unknown
                     }
-                } else {
-                    let is_animated = node.overlay_state.is_animated();
-                    let damage =
-                        match crate::pipeline::Damage::of_rects(&damage_rects, width, height) {
-                            crate::pipeline::Damage::None
-                                if std::mem::take(&mut cap.pending_hw_damage) =>
+                    damage => {
+                        cap.pending_hw_damage = false;
+                        damage
+                    }
+                };
+                let decision = crate::pipeline::decide_hw_fullframe(
+                    &mut cap.vaapi_state,
+                    &cap.settings,
+                    cap.frame_counter,
+                    damage,
+                    is_animated,
+                    requested_idr,
+                    crate::pipeline::EncoderQuality::of(encoder),
+                );
+                let mut send_frame = decision.send;
+                let force_idr = decision.force_idr;
+                let target_qp = decision.target_qp;
+
+                let mut frame_out = false;
+                if send_frame
+                    && let Some(sync) = render_sync.take()
+                    && !wait_render_fence(&sync, node.id)
+                {
+                    send_frame = false;
+                }
+                if send_frame {
+                    // Host-capture frames encode from the buffer the host blitted
+                    // into; otherwise from this display's own composited buffer.
+                    let enc_dmabuf: Option<Dmabuf> = host_enc_dmabuf
+                        .clone()
+                        .or_else(|| node.offscreen_buffer.as_ref().map(|(_, d)| d.clone()));
+                    let encode_start_ns = wayland::host::now_ns();
+                    decision.prepare(encoder);
+                    let result = match enc_dmabuf {
+                        Some(ref dmabuf) => encoder.encode_dmabuf(
+                            dmabuf,
+                            cap.frame_counter as u64,
+                            target_qp,
+                            force_idr,
+                        ),
+                        None => Err(
+                            "zero-copy encode requires an offscreen buffer (GPU context)"
+                                .to_string(),
+                        ),
+                    };
+
+                    if let Ok(data) = result {
+                        cap.hw_error_streak = 0;
+                        cap.hw_rebuilt = false;
+                        if !data.is_empty() {
+                            frame_out = true;
+                            if wayland::host::trace()
+                                && let Some(stamp) = new_stamp
                             {
-                                crate::pipeline::Damage::Unknown
+                                let age = (wayland::host::now_ns() - stamp) as f64 / 1e6;
+                                eprintln!(
+                                    "[HostTrace] output {} frame {} encoded +{age:.2}ms {}B",
+                                    node.id,
+                                    cap.frame_counter,
+                                    data.len()
+                                );
                             }
-                            damage => {
-                                cap.pending_hw_damage = false;
-                                damage
-                            }
-                        };
-                    let decision = crate::pipeline::decide_hw_fullframe(
-                        &mut cap.vaapi_state,
-                        &cap.settings,
-                        cap.frame_counter,
-                        damage,
-                        is_animated,
-                        requested_idr,
-                        crate::pipeline::EncoderQuality::of(encoder),
-                    );
-                    let mut send_frame = decision.send;
-                    let force_idr = decision.force_idr;
-                    let target_qp = decision.target_qp;
-
-                    let mut frame_out = false;
-                    if send_frame
-                        && let Some(sync) = render_sync.take()
-                        && !wait_render_fence(&sync, node.id)
-                    {
-                        send_frame = false;
-                    }
-                    if send_frame {
-                        // Host-capture frames encode from the buffer the host blitted
-                        // into; otherwise from this display's own composited buffer.
-                        let enc_dmabuf: Option<Dmabuf> = host_enc_dmabuf
-                            .clone()
-                            .or_else(|| node.offscreen_buffer.as_ref().map(|(_, d)| d.clone()));
-                        let encode_start_ns = wayland::host::now_ns();
-                        decision.prepare(encoder);
-                        let result = match enc_dmabuf {
-                            Some(ref dmabuf) => encoder.encode_dmabuf(
-                                dmabuf,
-                                cap.frame_counter as u64,
-                                target_qp,
-                                force_idr,
-                            ),
-                            None => Err(
-                                "zero-copy encode requires an offscreen buffer (GPU context)"
-                                    .to_string(),
-                            ),
-                        };
-
-                        if let Ok(data) = result {
-                            cap.hw_error_streak = 0;
-                            cap.hw_rebuilt = false;
-                            if !data.is_empty() {
-                                frame_out = true;
-                                if wayland::host::trace()
-                                    && let Some(stamp) = new_stamp
-                                {
-                                    let age = (wayland::host::now_ns() - stamp) as f64 / 1e6;
-                                    eprintln!(
-                                        "[HostTrace] output {} frame {} encoded +{age:.2}ms {}B",
-                                        node.id,
-                                        cap.frame_counter,
-                                        data.len()
-                                    );
+                            cap.encode_stats.frames.fetch_add(1, Ordering::Relaxed);
+                            cap.encode_stats.stripes.fetch_add(1, Ordering::Relaxed);
+                            if let Some(ref tx) = cap.deliver_tx {
+                                let stripes = vec![EncodedStripe {
+                                    data: Arc::new(data),
+                                    codec: cap.settings.codec,
+                                    stripe_y_start: 0,
+                                    stripe_height: height,
+                                    frame_id: cap.frame_counter as i32,
+                                    timing: FrameTiming {
+                                        capture_ns: new_stamp.unwrap_or(composite_ns),
+                                        encode_start_ns,
+                                        encode_end_ns: wayland::host::now_ns(),
+                                    },
+                                    reference: encoder.last_reference(),
+                                }];
+                                if let Some(ref socket) = cap.recording_sink {
+                                    socket.write_frame(&stripes, width, height);
                                 }
-                                cap.encode_stats.frames.fetch_add(1, Ordering::Relaxed);
-                                cap.encode_stats.stripes.fetch_add(1, Ordering::Relaxed);
-                                if let Some(ref tx) = cap.deliver_tx {
-                                    let stripes = vec![EncodedStripe {
-                                        data: Arc::new(data),
-                                        codec: cap.settings.codec,
-                                        stripe_y_start: 0,
-                                        stripe_height: height,
-                                        frame_id: cap.frame_counter as i32,
-                                        timing: FrameTiming {
-                                            capture_ns: new_stamp.unwrap_or(composite_ns),
-                                            encode_start_ns,
-                                            encode_end_ns: wayland::host::now_ns(),
-                                        },
-                                        reference: encoder.last_reference(),
-                                    }];
-                                    if let Some(ref socket) = cap.recording_sink {
-                                        socket.write_frame(&stripes, width, height);
+                                crate::recorder::wayland_tap(node.id, &stripes);
+                                // Non-blocking: a full slot parks the frame (delivered
+                                // ahead of any new encode above).
+                                match tx.try_send(stripes) {
+                                    Ok(()) => {}
+                                    Err(std::sync::mpsc::TrySendError::Full(s)) => {
+                                        cap.pending_hw_delivery = Some(s);
                                     }
-                                    crate::recorder::wayland_tap(node.id, &stripes);
-                                    // Non-blocking: a full slot parks the frame (delivered
-                                    // ahead of any new encode above).
-                                    match tx.try_send(stripes) {
-                                        Ok(()) => {}
-                                        Err(std::sync::mpsc::TrySendError::Full(s)) => {
-                                            cap.pending_hw_delivery = Some(s);
-                                        }
-                                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
-                                    }
+                                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
                                 }
-                            }
-                        } else if let Err(e) = result {
-                            eprintln!("[Wayland] HW encode error: {e}");
-                            cap.hw_error_streak = cap.hw_error_streak.saturating_add(1);
-                            if cap.hw_error_streak == HW_ERROR_RECOVERY_THRESHOLD {
-                                let _report = report::enter(&cap.report);
-                                // The zero-copy session persistently fails after having
-                                // worked (driver hiccup, CUDA pressure from a co-tenant):
-                                // rebuild the session once, else demote to the readback
-                                // path. Streaming black frames forever is not an option.
-                                // A session whose encodes keep failing still constructs, so
-                                // the rebuild only counts as recovery until the next streak;
-                                // otherwise the stream would rebuild in a loop and never demote.
-                                let rebuilt = if cap.hw_rebuilt {
-                                    None
-                                } else {
-                                    // The broken session is released before its replacement is
-                                    // opened: the failure it recovers from is usually device
-                                    // memory pressure, and holding both at once is what would
-                                    // make the rebuild fail too.
-                                    drop(cap.video_encoder.take());
-                                    rebuild_zerocopy_encoder(cap, state)
-                                };
-                                match rebuilt {
-                                    Some(enc) => {
-                                        cap.video_encoder = Some(enc);
-                                        cap.pending_force_idr = true;
-                                        cap.hw_rebuilt = true;
-                                        eprintln!(
-                                            "[Wayland] zero-copy HW encoder rebuilt after repeated encode errors."
-                                        );
-                                    }
-                                    None => {
-                                        eprintln!(
-                                            "[Wayland] zero-copy HW encoder unrecoverable; demoting to readback encode."
-                                        );
-                                        report::capture("readback", false);
-                                        report::capture_reason(
-                                            "the zero-copy encoder failed repeatedly and was given up",
-                                        );
-                                        cap.video_encoder = None;
-                                        cap.hw_rebuilt = false;
-                                        // Mirror the startup intent: readback still
-                                        // tries the GPU unless the operator opted out.
-                                        let s = &cap.settings;
-                                        let try_gpu = s.codec.is_video()
-                                            && !(s.use_cpu || s.encode_node_index == -1);
-                                        // Host frames reach the pool as BGRA; only our own
-                                        // GLES readback produces RGBA.
-                                        bootstrap_readback_pool(
-                                            cap,
-                                            node.id,
-                                            state.use_gpu && !host_mode,
-                                            try_gpu,
-                                            None,
-                                            None,
-                                        );
-                                        // The host has to switch to buffers the readback path
-                                        // can read back on the CPU.
-                                        if host_mode && let Some(h) = state.host.as_ref() {
-                                            h.set_buffer_type(node.id, false);
-                                        }
-                                    }
-                                }
-                                cap.hw_error_streak = 0;
                             }
                         }
+                    } else if let Err(e) = result {
+                        eprintln!("[Wayland] HW encode error: {e}");
+                        cap.hw_error_streak = cap.hw_error_streak.saturating_add(1);
+                        if cap.hw_error_streak == HW_ERROR_RECOVERY_THRESHOLD {
+                            let _report = report::enter(&cap.report);
+                            // The zero-copy session persistently fails after having
+                            // worked (driver hiccup, CUDA pressure from a co-tenant):
+                            // rebuild the session once, else demote to the readback
+                            // path. Streaming black frames forever is not an option.
+                            // A session whose encodes keep failing still constructs, so
+                            // the rebuild only counts as recovery until the next streak;
+                            // otherwise the stream would rebuild in a loop and never demote.
+                            let rebuilt = if cap.hw_rebuilt {
+                                None
+                            } else {
+                                // The broken session is released before its replacement is
+                                // opened: the failure it recovers from is usually device
+                                // memory pressure, and holding both at once is what would
+                                // make the rebuild fail too.
+                                drop(cap.video_encoder.take());
+                                rebuild_zerocopy_encoder(cap, state)
+                            };
+                            match rebuilt {
+                                Some(enc) => {
+                                    cap.video_encoder = Some(enc);
+                                    cap.pending_force_idr = true;
+                                    cap.hw_rebuilt = true;
+                                    eprintln!(
+                                        "[Wayland] zero-copy HW encoder rebuilt after repeated encode errors."
+                                    );
+                                }
+                                None => {
+                                    eprintln!(
+                                        "[Wayland] zero-copy HW encoder unrecoverable; demoting to readback encode."
+                                    );
+                                    report::capture("readback", false);
+                                    report::capture_reason(
+                                        "the zero-copy encoder failed repeatedly and was given up",
+                                    );
+                                    cap.video_encoder = None;
+                                    cap.hw_rebuilt = false;
+                                    // Mirror the startup intent: readback still
+                                    // tries the GPU unless the operator opted out.
+                                    let s = &cap.settings;
+                                    let try_gpu = s.codec.is_video()
+                                        && !(s.use_cpu || s.encode_node_index == -1);
+                                    // Host frames reach the pool as BGRA; only our own
+                                    // GLES readback produces RGBA.
+                                    bootstrap_readback_pool(
+                                        cap,
+                                        node.id,
+                                        state.use_gpu && !host_mode,
+                                        try_gpu,
+                                        None,
+                                        None,
+                                    );
+                                    // The host has to switch to buffers the readback path
+                                    // can read back on the CPU.
+                                    if host_mode && let Some(h) = state.host.as_ref() {
+                                        h.set_buffer_type(node.id, false);
+                                    }
+                                }
+                            }
+                            cap.hw_error_streak = 0;
+                        }
                     }
-                    // An unserved request stays armed: on an infinite GOP an IDR lost to an
-                    // encode error would never self-heal.
-                    cap.pending_force_idr = requested_idr && !frame_out;
-                    cap.frame_counter = cap.frame_counter.wrapping_add(1);
                 }
+                // An unserved request stays armed: on an infinite GOP an IDR lost to an
+                // encode error would never self-heal.
+                cap.pending_force_idr = requested_idr && !frame_out;
+                cap.frame_counter = cap.frame_counter.wrapping_add(1);
             }
         }
     }
@@ -7175,8 +7247,11 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             }
             state.frame_idle_long = false;
 
+            answer_frame_callbacks(state);
             serve_changes(state);
-            if render_pass(state, TickTrigger::Timer) {
+            let pool_busy = render_pass(state, TickTrigger::Timer);
+            answer_frame_callbacks(state);
+            if pool_busy {
                 return TimeoutAction::ToDuration(Duration::from_millis(1));
             }
             // The next fire is the earliest capture's due time, so a frame input pulled
@@ -7191,7 +7266,10 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 .min()
                 .unwrap_or(loop_start_time + frame_period(state.settings.target_fps));
             let wait = next_due.saturating_duration_since(now);
-            TimeoutAction::ToDuration(if wait.as_millis() < 1 { Duration::from_millis(1) } else { wait })
+            // A zero wait is a change no render could take yet (a busy encoder): retry shortly
+            // rather than spin. Shorter waits stand, a boundary being a fraction of a millisecond
+            // away at high frame rates.
+            TimeoutAction::ToDuration(if wait.is_zero() { Duration::from_millis(1) } else { wait })
         })
         .expect("Failed to init capture timer");
 

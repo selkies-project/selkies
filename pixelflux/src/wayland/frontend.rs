@@ -227,6 +227,10 @@ pub struct WlCapture {
     /// A change (a client's commit, input, a host frame) found its period's frame taken and
     /// waits for the next period to open (`serve_changes`); any frame rendered clears it.
     pub change_pending: bool,
+    /// The window boundary whose frame callbacks went out (`answer_frame_callbacks`).
+    pub callbacks_at: Option<Instant>,
+    /// A boundary's frame callbacks wait for the render of a change still pending at it.
+    pub callbacks_owed: bool,
     /// Consecutive zero-copy encode failures; reset by any frame that encodes cleanly.
     /// Reaching `HW_ERROR_RECOVERY_THRESHOLD` triggers recovery.
     pub hw_error_streak: u32,

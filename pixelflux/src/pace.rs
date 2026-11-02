@@ -394,6 +394,18 @@ impl FramePace {
         self.deferred_until.map_or(due, |held| held.max(due))
     }
 
+    /// Paced in windows, when the window `now` falls in opened: the boundary a display's vblank
+    /// would fall on. None before the first frame.
+    pub fn window_opened(&self, period: Duration, now: Instant) -> Option<Instant> {
+        let end = self.window_end?;
+        let p = period.as_nanos().max(1);
+        Some(if now >= end {
+            end + period * ((now - end).as_nanos() / p) as u32
+        } else {
+            end - period * (end - now).as_nanos().div_ceil(p) as u32
+        })
+    }
+
     /// When a frame timer armed at `now` next has to fire for this capture. It wakes for a window
     /// still to open whether or not a change waits on it yet: a change landing later has nothing
     /// else to wake it, since a client that draws on frame callbacks goes quiet after its commit.
@@ -633,6 +645,21 @@ mod pacing_tests {
                 "{frames} frames in two seconds at 50 fps, drawing {draws_us} us"
             );
         }
+    }
+
+    /// The window a moment falls in opened on the boundary before it, whichever frame closed the
+    /// last window: a timer's at the window's end or a change's as it landed.
+    #[test]
+    fn a_window_opens_on_its_boundary() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        assert_eq!(pace.window_opened(PERIOD, base), None);
+        pace.ticked(TickTrigger::Timer, PERIOD, base, false);
+        assert_eq!(pace.window_opened(PERIOD, at(base, 1)), Some(base));
+        pace.ticked(TickTrigger::Damage, PERIOD, at(base, 3), false);
+        assert_eq!(pace.window_opened(PERIOD, at(base, 4)), Some(base));
+        assert_eq!(pace.window_opened(PERIOD, at(base, 20)), Some(at(base, 20)));
+        assert_eq!(pace.window_opened(PERIOD, at(base, 45)), Some(at(base, 40)));
     }
 
     /// With nothing waiting the timer sleeps past a window already open to its end, so a still
