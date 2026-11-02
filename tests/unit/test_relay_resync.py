@@ -12,6 +12,9 @@ encoder never predicts past within a second.
 The encoder is told of each frame every page's relay wrote (`CommonFrames`), and an anchor
 it flags as predicting from such a frame goes to a page without room and ends its run. A
 frame predicting from one the page was not sent, however long ago, is held back.
+
+A queue other traffic keeps standing on a page's path, held VIDEO_RELAY_SETTLE_SECONDS,
+becomes the floor its lag is read from; one the relay drains within that span never does.
 """
 import os
 import sys
@@ -238,6 +241,44 @@ def main() -> int:
     state["answered"] = clock.t - 0.1
     check("a ping older than the newest one answered was lost, and stands for no queue", r._lag() == 0.0,
           r._lag())
+
+    # A queue other traffic keeps standing on a page's path, held VIDEO_RELAY_SETTLE_SECONDS, becomes its
+    # floor, so the relay stops reading it as the page's own lag; a lower round trip takes it back down, and
+    # a queue the relay drains within that span (its own, left frames) never settles.
+    def pongs(r, state, rtt_ms, seconds, step=0.25):
+        end = clock.t + seconds
+        while clock.t < end - 1e-9:
+            clock.t += step
+            state.update(seq=state["seq"] + 1, rtt_us=int(rtt_ms * 1000))
+            r._lag()
+
+    r, server, reports, sock = relay()
+    state = wm._uplink_session_state(r.ws)
+    state.update(seq=0, rtt_us=None, answered=0.0)
+    pongs(r, state, 145, 4)
+    check("the floor is the least round trip", abs(r.rtt_floor - 0.145) < 1e-6, r.rtt_floor)
+    pongs(r, state, 295, wm.VIDEO_RELAY_SETTLE_SECONDS * 0.6)
+    check("a standing queue held under the settle span stays a queue", r.settled_floor is None
+          and abs(r.rtt_floor - 0.145) < 1e-6, (r.settled_floor, r.rtt_floor))
+    pongs(r, state, 295, wm.VIDEO_RELAY_SETTLE_SECONDS)
+    check("held through it, it becomes the floor", r.settled_floor is not None and abs(r.rtt_floor - 0.295) < 1e-6,
+          (r.settled_floor, r.rtt_floor))
+    state["pending"][b"behind"] = clock.t - 0.35
+    state["answered"] = clock.t - 1.0
+    check("a ping unanswered as long as that path takes is no lag", r._lag() < wm.VIDEO_RELAY_LAG_SECONDS, r._lag())
+    del state["pending"][b"behind"]
+    pongs(r, state, 150, 1)
+    check("a lower round trip takes the floor back down", abs(r.rtt_floor - 0.150) < 1e-6, r.rtt_floor)
+
+    r, server, reports, sock = relay()
+    state = wm._uplink_session_state(r.ws)
+    state.update(seq=0, rtt_us=None, answered=0.0)
+    pongs(r, state, 145, 4)
+    for _ in range(4):
+        pongs(r, state, 400, 0.75)
+        pongs(r, state, 170, 0.75)
+    check("a queue drained within the span never settles", r.settled_floor is None
+          and abs(r.rtt_floor - 0.145) < 1e-6, (r.settled_floor, r.rtt_floor))
 
     # A run the encoder never predicts past falls back to a key frame.
     r, server, reports, sock = relay()

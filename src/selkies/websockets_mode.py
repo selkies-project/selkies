@@ -54,7 +54,7 @@ import socket
 import stat
 from collections import OrderedDict, deque
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple, Union
 
 try:
     import fcntl
@@ -265,6 +265,10 @@ VIDEO_RELAY_LOST_RECOVERY_SECONDS = 1.0
 VIDEO_RELAY_ROOM_FRAMES = 3
 VIDEO_RELAY_LAG_SECONDS = 0.1
 VIDEO_RELAY_PING_SECONDS = 0.05
+# A page's least round trip standing VIDEO_RELAY_LAG_SECONDS past its floor for this long is its path's, a
+# queue other traffic keeps standing or a longer route, as the owner's steer settles one (`_settle_path_floor`);
+# a queue of the page's own frames drains while the relay leaves frames out, and dips under that within it.
+VIDEO_RELAY_SETTLE_SECONDS = 3.0
 # Frames a run left out of a page may span before the encoder is told without
 # waiting for the page's room: the encoder predicts from the last eight
 # (REFERENCE_FRAMES in pixelflux), and the report lands a frame or two late.
@@ -1152,7 +1156,7 @@ class _VideoRelay:
                  '_next_sync_req', 'verdict', 'sent', 'lost_run', 'lost_since',
                  'lost_first', 'lost_told', 'since_key', 'numbered', 'written',
                  'marks', 'gauged', 'pinged', 'pongs', 'rtt_floor', 'anchored', 'tracked',
-                 'gated', 'lost_gated')
+                 'gated', 'lost_gated', 'settled_floor', 'recent_rtts')
 
     def __init__(self, server: "DataStreamingServer", display_id: str,
                  ws: web.WebSocketResponse, budget: int) -> None:
@@ -1181,6 +1185,8 @@ class _VideoRelay:
         self.pinged = 0.0
         self.pongs = 0
         self.rtt_floor: Optional[float] = None
+        self.settled_floor: Optional[float] = None
+        self.recent_rtts: Deque[Tuple[float, float]] = deque()
         self.anchored = False
         self.tracked = False
         self.gated = False
@@ -1341,7 +1347,24 @@ class _VideoRelay:
         now = time.monotonic()
         if state["seq"] != self.pongs and state["rtt_us"] is not None:
             self.pongs = state["seq"]
+            rtt = state["rtt_us"] / 1e6
             self.rtt_floor = _observe_rtt_floor(state, state["rtt_us"], now) / 1e6
+            recent = self.recent_rtts
+            recent.append((now, rtt))
+            while recent and now - recent[0][0] > VIDEO_RELAY_SETTLE_SECONDS:
+                recent.popleft()
+            if self.settled_floor is not None and rtt < self.settled_floor:
+                self.settled_floor = max(rtt, self.rtt_floor)
+            least = min(r for _, r in recent)
+            floor = max(self.rtt_floor, self.settled_floor or 0.0)
+            if (now - recent[0][0] >= VIDEO_RELAY_SETTLE_SECONDS * 0.9
+                    and least - floor >= VIDEO_RELAY_LAG_SECONDS):
+                data_logger.info(
+                    f"Video relay[{self.display_id}] for {client_permissions.get(self.ws, {}).get('remote_address')}: "
+                    f"round trip floor {floor * 1000:.0f} -> {least * 1000:.0f} ms (a queue on its path not its own)")
+                self.settled_floor = least
+        if self.settled_floor is not None and self.rtt_floor is not None:
+            self.rtt_floor = max(self.rtt_floor, self.settled_floor)
         if self.rtt_floor is None:
             return 0.0
         answered = state.get("answered", 0.0)
