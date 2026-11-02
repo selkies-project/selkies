@@ -36,7 +36,7 @@ function Chrome() {
   if (!d.renderable.chrome) return null;
   return (
     <>
-      <React.Suspense fallback={null}><Layout /></React.Suspense>
+      <Layout />
       <ScreenPlacement />
       <VirtualKeyboardButton />
       {d.statsOpen && !d.isSecondaryDisplay && d.renderable.stats && <Stats />}

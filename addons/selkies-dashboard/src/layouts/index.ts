@@ -23,6 +23,12 @@
  * key, else what the server names in `ui_layout` (its `/api/status` probe
  * before the stream connects, its settings payload after), else the first
  * entry. A single allowed value locks it and hides the toggle.
+ *
+ * Every layout is imported statically, never split into a lazy chunk. Every
+ * page paints a layout at once, so splitting saves nothing, and a split chunk
+ * imports the entry back: under a page URL carrying `user:pass@`, Chrome
+ * evaluates that entry a second time, which starts a second core that evicts
+ * the first as the same tab, and a failed chunk fetch unmounts the dashboard.
  * @module
  */
 import * as React from "react";
@@ -30,6 +36,8 @@ import { Columns2, PanelTop } from "lucide-react";
 import { FloatingStats } from "@/panels/stats";
 import { StreamStrip } from "@/panels/stats-section";
 import { getPrefixedKey } from "@/utils";
+import SidebarLayout from "./sidebar";
+import ToolbarLayout from "./toolbar";
 
 /** One layout of the registry. */
 export interface LayoutSpec {
@@ -40,7 +48,7 @@ export interface LayoutSpec {
   /** The mark the layout toggle draws for it. */
   icon: React.ComponentType<{ className?: string }>;
   /** The component that arranges the panels. */
-  component: React.LazyExoticComponent<React.ComponentType>;
+  component: React.ComponentType;
   /** What the stats switch lays over the stream. */
   stats: React.ComponentType;
 }
@@ -51,14 +59,14 @@ export const LAYOUTS: LayoutSpec[] = [
     id: "default",
     labelKey: "layout.default",
     icon: Columns2,
-    component: React.lazy(() => import("./sidebar")),
+    component: SidebarLayout,
     stats: StreamStrip,
   },
   {
     id: "wish",
     labelKey: "layout.wish",
     icon: PanelTop,
-    component: React.lazy(() => import("./toolbar")),
+    component: ToolbarLayout,
     stats: FloatingStats,
   },
 ];

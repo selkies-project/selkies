@@ -200,6 +200,7 @@ SUITES: list = [
     {"path": "unit/test_slider_stops.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_display_refresh.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_dpi_default_mirror.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_dashboard_no_lazy_chunks.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_dpi_verb_owner.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ebc_locked.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_v4l2_staging_layout.py", "tier": "unit", "timeout": 300},
