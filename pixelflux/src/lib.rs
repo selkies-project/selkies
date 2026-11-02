@@ -2051,6 +2051,7 @@ fn reap_dead_host(state: &mut AppState) {
         .pending_screenshots
         .fail_all("Host compositor connection lost");
     state.host = None;
+    *crate::wayland::pwcapture::HOST_POINTER.lock().unwrap() = None;
     state.host_mode_refusals.clear();
     // Nothing will answer the requests still in flight: their geometry readers get
     // what the outputs show now.
@@ -2452,6 +2453,9 @@ fn start_capture_on_display(
                     h.output_count()
                 );
                 state.host = Some(h);
+                // The host's pointer stands in for the compositor's from here on, None until
+                // its first cursor meta.
+                *crate::wayland::pwcapture::HOST_POINTER.lock().unwrap() = Some(None);
             }
             Err(e) => {
                 eprintln!(
@@ -6541,6 +6545,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             ThreadCommand::PointerMotion { x, y, motion } => {
                 state.motion_applied = state.motion_applied.max(motion);
                 if let Some(host) = state.host.as_ref() {
+                    crate::wayland::pwcapture::note_host_motion(motion);
                     host.pointer_motion_abs(x, y);
                     return;
                 }
@@ -6588,6 +6593,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             ThreadCommand::PointerRelativeMotion { dx, dy, motion } => {
                 state.motion_applied = state.motion_applied.max(motion);
                 if let Some(host) = state.host.as_ref() {
+                    crate::wayland::pwcapture::note_host_motion(motion);
                     host.pointer_motion_rel(dx, dy);
                     return;
                 }
@@ -7417,11 +7423,12 @@ impl WaylandBackend {
     /// and the number of the last move applied (what `inject_mouse_move` and
     /// `inject_relative_mouse_move` return), so a caller can tell which of its moves the
     /// position includes. An app's warp is included too, since the position is read back
-    /// rather than summed from what was injected. None before the first pass and under host
-    /// capture, whose pointer is the host's. Never waits on the compositor.
+    /// rather than summed from what was injected. None before the first pass and, under host
+    /// capture, before its first cursor meta or where the host paints its cursor into the
+    /// frames. Never waits on the compositor.
     fn pointer_location(&self) -> Option<(f64, f64, f64, u64)> {
-        self.pointer
-            .read()
+        let host = *crate::wayland::pwcapture::HOST_POINTER.lock().unwrap();
+        crate::wayland::pwcapture::prefer_host_pointer(host, || self.pointer.read())
             .map(|at| (at.x, at.y, at.scale, at.motion))
     }
 
@@ -9850,7 +9857,8 @@ impl ScreenCapture {
     }
     /// Where the Wayland compositor's pointer is, as `(x, y, scale, motion)`
     /// (`WaylandBackend.pointer_location`), or None without a running compositor, before its
-    /// first pass, or under host capture. An X11 session reads its pointer from the X server.
+    /// first pass, or under host capture before its first cursor meta or where the host paints
+    /// its cursor into the frames. An X11 session reads its pointer from the X server.
     fn pointer_location(&self, py: Python<'_>) -> Option<(f64, f64, f64, u64)> {
         wayland_backend_running(py).and_then(|be| be.bind(py).borrow().pointer_location())
     }

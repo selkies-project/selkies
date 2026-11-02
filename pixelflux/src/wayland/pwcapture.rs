@@ -160,6 +160,114 @@ pub struct StreamConfig {
     pub fps_milli: u32,
     /// The size the consumer expects (the preferred value of the size range).
     pub expect: (i32, i32),
+    /// Where the stream's cursor metas land in the union layout (`HOST_POINTER`). Not a
+    /// format matter: a change alone never renegotiates.
+    pub place: CursorPlace,
+}
+
+/// Where a stream's output sits for its cursor metas: the display's origin in the union layout
+/// and its capture size, as Selkies laid it out (`HostSession::set_layout`), and the output's
+/// logical size. A zero size is unknown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CursorPlace {
+    pub origin: (i32, i32),
+    pub size: (i32, i32),
+    pub logical: (i32, i32),
+}
+
+/// Host capture's pointer, for `WaylandBackend.pointer_location`: None without a host session;
+/// while one is attached, the newest cursor meta's position, or None before the first and
+/// where the host paints the cursor into its frames (no metas). The compositor's own
+/// `PointerShare` is not read meanwhile: it stops at its last pass before the host attached.
+/// Process-wide like the backend slot.
+pub static HOST_POINTER: Mutex<Option<Option<crate::wayland::frontend::PointerAt>>> =
+    Mutex::new(None);
+/// The motion numbers handed to the host session, each with when it was sent (CLOCK_MONOTONIC
+/// ns), newest last: a cursor meta claims the moves sent before its buffer was stamped
+/// (`motion_at`), so one from a frame captured ahead of the latest move does not claim it.
+static HOST_MOTIONS: Mutex<std::collections::VecDeque<(u64, i64)>> =
+    Mutex::new(std::collections::VecDeque::new());
+/// Sent moves remembered for `motion_at`: well over a frame's worth at any input rate.
+const HOST_MOTIONS_KEPT: usize = 256;
+
+/// Note motion number `motion` handed to the host session now.
+pub fn note_host_motion(motion: u64) {
+    let mut sent = HOST_MOTIONS.lock().unwrap();
+    if sent.back().is_some_and(|&(last, _)| last >= motion) {
+        return;
+    }
+    if sent.len() == HOST_MOTIONS_KEPT {
+        sent.pop_front();
+    }
+    sent.push_back((motion, now_ns()));
+}
+
+/// The newest motion number of `sent` handed over at or before `stamp`; 0 before any.
+fn motion_at(sent: &std::collections::VecDeque<(u64, i64)>, stamp: i64) -> u64 {
+    sent.iter()
+        .rev()
+        .find(|&&(_, at)| at <= stamp)
+        .map_or(0, |&(motion, _)| motion)
+}
+
+/// When a buffer was captured, for the moves its cursor meta claims: the compositor's stamp
+/// where it is plausible (no later than `arrival`, at most four periods older), else `arrival`.
+fn meta_stamp(pts: Option<i64>, arrival: i64, period_ns: i64) -> i64 {
+    pts.filter(|&pts| pts <= arrival && arrival - pts <= STAMP_MAX_AGE_PERIODS * period_ns)
+        .unwrap_or(arrival)
+}
+
+/// A cursor meta's position `(x, y)` in a stream negotiated at `stream` pixels as the pointer
+/// in the union layout: the display's origin plus the position scaled to its capture size,
+/// the inverse of the mapping absolute motion is injected through (`host::stream_point`).
+/// The scale is the output's capture pixels per logical pixel, what a relative pixel moves.
+pub(crate) fn host_pointer_at(
+    place: CursorPlace,
+    stream: (i32, i32),
+    x: i32,
+    y: i32,
+    motion: u64,
+) -> crate::wayland::frontend::PointerAt {
+    let ratio = |to: i32, from: i32| {
+        if to > 0 && from > 0 {
+            f64::from(to) / f64::from(from)
+        } else {
+            1.0
+        }
+    };
+    crate::wayland::frontend::PointerAt {
+        x: f64::from(place.origin.0) + f64::from(x) * ratio(place.size.0, stream.0),
+        y: f64::from(place.origin.1) + f64::from(y) * ratio(place.size.1, stream.1),
+        scale: ratio(place.size.0, place.logical.0),
+        motion,
+    }
+}
+
+/// The pointer `WaylandBackend.pointer_location` reports: under host capture (`Some`), host
+/// capture's alone, None included; otherwise the compositor's own.
+pub fn prefer_host_pointer<T>(
+    host: Option<Option<T>>,
+    share: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    match host {
+        Some(at) => at,
+        None => share(),
+    }
+}
+
+/// Publish a cursor meta's stream-pixel position to `HOST_POINTER` while a host session holds it,
+/// claiming the moves up to `motion`.
+fn publish_host_pointer(shared: &Shared, x: i32, y: i32, motion: u64) {
+    let place = shared.cfg.lock().unwrap().place;
+    let stream = shared
+        .negotiated
+        .lock()
+        .unwrap()
+        .map_or((0, 0), |n| (n.width, n.height));
+    let at = host_pointer_at(place, stream, x, y, motion);
+    if let Some(slot) = HOST_POINTER.lock().unwrap().as_mut() {
+        *slot = Some(at);
+    }
 }
 
 /// The fixated format of a stream.
@@ -315,6 +423,7 @@ fn negotiated_params(n: &Negotiated, dmabuf: bool) -> Vec<Vec<u8>> {
 fn renegotiates(cur: &StreamConfig, new: &StreamConfig, negotiated: bool) -> bool {
     let size_only = StreamConfig {
         expect: cur.expect,
+        place: cur.place,
         ..new.clone()
     } == *cur;
     !size_only || !negotiated
@@ -444,7 +553,7 @@ unsafe extern "C" fn on_remove_buffer(data: *mut c_void, b: *mut PwBuffer) {
 
 /// Read the cursor meta of a buffer: position, and a changed sprite forwarded to the cursor
 /// worker (an empty sprite hides it).
-unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta) {
+unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta, motion: u64) {
     if meta.size < std::mem::size_of::<SpaMetaCursor>() as u32 || meta.data.is_null() {
         return;
     }
@@ -456,6 +565,7 @@ unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta) {
         ((cursor.x as i64) << 32) | (cursor.y as u32 as i64),
         Ordering::Relaxed,
     );
+    publish_host_pointer(shared, cursor.x, cursor.y, motion);
     if cursor.bitmap_offset < std::mem::size_of::<SpaMetaCursor>() as u32
         || cursor.bitmap_offset + std::mem::size_of::<SpaMetaBitmap>() as u32 > meta.size
     {
@@ -704,6 +814,8 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
     };
     // Take everything queued: cursor-only buffers go straight back, and of several frames
     // only the newest is worth publishing.
+    let arrival = now_ns();
+    let period_ns = 1_000_000_000_000 / shared.cfg.lock().unwrap().fps_milli.max(1000) as i64;
     let mut newest: Option<ptr::NonNull<PwBuffer>> = None;
     loop {
         let b = unsafe { (shared.api.stream_dequeue_buffer)(stream) };
@@ -714,7 +826,9 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
         for i in 0..buf.n_metas as usize {
             let m = unsafe { &*buf.metas.add(i) };
             if m.type_ == SPA_META_CURSOR {
-                unsafe { read_cursor(shared, m) };
+                let stamp = meta_stamp(header_pts(buf), arrival, period_ns);
+                let motion = motion_at(&HOST_MOTIONS.lock().unwrap(), stamp);
+                unsafe { read_cursor(shared, m, motion) };
             }
         }
         let has_video = buf.n_datas > 0 && {
@@ -739,7 +853,6 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
     let generation = shared.generation.load(Ordering::Acquire);
     let pts = header_pts(buf);
     let arrival = now_ns();
-    let period_ns = 1_000_000_000_000 / shared.cfg.lock().unwrap().fps_milli.max(1000) as i64;
     let (stamp_ns, refusal) = shared
         .stamps
         .lock()
@@ -1029,6 +1142,90 @@ mod tests {
     const PERIOD: i64 = 16_683_333;
     const NOW: i64 = 5_000_000_000_000;
 
+    /// A cursor meta lands at the display's union-layout origin plus its stream position
+    /// scaled to the capture size, whatever the host's own layout; without known sizes it is
+    /// taken at scale one from the origin.
+    #[test]
+    fn a_cursor_meta_is_placed_in_the_union_layout() {
+        let place = CursorPlace {
+            origin: (1920, 0),
+            size: (4080, 2304),
+            logical: (2040, 1152),
+        };
+        let at = host_pointer_at(place, (4080, 2304), 3000, 1000, 7);
+        assert_eq!(
+            (at.x, at.y, at.scale, at.motion),
+            (1920.0 + 3000.0, 1000.0, 2.0, 7)
+        );
+        // A stream negotiated at the logical size.
+        let at = host_pointer_at(place, (2040, 1152), 1500, 500, 7);
+        assert_eq!((at.x, at.y), (1920.0 + 3000.0, 1000.0));
+        let at = host_pointer_at(
+            CursorPlace {
+                origin: (100, 200),
+                ..CursorPlace::default()
+            },
+            (0, 0),
+            10,
+            20,
+            0,
+        );
+        assert_eq!((at.x, at.y, at.scale), (110.0, 220.0, 1.0));
+    }
+
+    /// Under host capture the host pointer answers alone, None before its first cursor meta
+    /// included; the compositor's share is read only without a host session.
+    #[test]
+    fn the_host_pointer_answers_alone_under_host_capture() {
+        assert_eq!(
+            prefer_host_pointer(Some(Some(1)), || panic!("share read")),
+            Some(1)
+        );
+        assert_eq!(
+            prefer_host_pointer::<u8>(Some(None), || panic!("share read")),
+            None
+        );
+        assert_eq!(prefer_host_pointer(None, || Some(2)), Some(2));
+        assert_eq!(prefer_host_pointer::<u8>(None, || None), None);
+    }
+
+    /// A cursor meta claims the moves handed over by its buffer's stamp: none before the first,
+    /// the newest at or before the stamp, never one sent after it.
+    #[test]
+    fn a_cursor_meta_claims_the_moves_sent_before_its_stamp() {
+        let sent: std::collections::VecDeque<(u64, i64)> = [(3, 100), (4, 200), (7, 300)].into();
+        assert_eq!(motion_at(&sent, 99), 0);
+        assert_eq!(motion_at(&sent, 100), 3);
+        assert_eq!(motion_at(&sent, 250), 4);
+        assert_eq!(motion_at(&sent, 1000), 7);
+    }
+
+    /// The compositor's stamp stands where it is plausible; a stamp ahead of the arrival, or
+    /// older than four periods, gives way to the arrival.
+    #[test]
+    fn a_meta_is_stamped_by_its_buffer_where_plausible() {
+        let period = 4_000_000;
+        assert_eq!(meta_stamp(Some(9_000_000), 10_000_000, period), 9_000_000);
+        assert_eq!(meta_stamp(Some(11_000_000), 10_000_000, period), 10_000_000);
+        assert_eq!(meta_stamp(Some(1_000), 20_000_000, period), 20_000_000);
+        assert_eq!(meta_stamp(None, 10_000_000, period), 10_000_000);
+    }
+
+    /// Moving a display in the union layout re-places its cursor metas without renegotiating
+    /// the stream, which would drop the buffers in flight.
+    #[test]
+    fn a_new_place_alone_does_not_renegotiate() {
+        let cur = cfg(true);
+        let moved = StreamConfig {
+            place: CursorPlace {
+                origin: (1920, 0),
+                ..cur.place
+            },
+            ..cur.clone()
+        };
+        assert!(!renegotiates(&cur, &moved, true));
+    }
+
     /// A stamp a little before its frame's arrival, later than the last, is the capture
     /// instant; each refusal falls back to the arrival, which still advances past the last.
     #[test]
@@ -1106,6 +1303,11 @@ mod tests {
             ],
             fps_milli: 59_940,
             expect: (1920, 1080),
+            place: CursorPlace {
+                origin: (0, 0),
+                size: (1920, 1080),
+                logical: (1920, 1080),
+            },
         }
     }
 
