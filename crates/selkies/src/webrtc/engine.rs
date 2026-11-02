@@ -1994,6 +1994,26 @@ impl SenderHooks for VideoSenderHooks {
         self.hold(frame_id, keyframe, false);
     }
 
+    #[cfg(feature = "frame-log")]
+    fn on_frame_left(
+        &mut self,
+        timing: Option<selkies_rtc::rtp::FrameTiming>,
+        size: usize,
+        keyframe: bool,
+    ) {
+        if let Some(timing) = timing {
+            crate::stats::frame_log::record(crate::stats::frame_log::FrameRecord {
+                kind: "wr",
+                capture_ns: timing.capture_ns,
+                encode_start_ns: timing.encode_start_ns,
+                encode_end_ns: timing.encode_end_ns,
+                bytes: size,
+                rtp_packets: 0,
+                keyframe,
+            });
+        }
+    }
+
     fn on_frame_held(&mut self, frame_id: u16, keyframe: bool) {
         self.hold(frame_id, keyframe, true);
     }
