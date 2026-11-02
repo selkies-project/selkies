@@ -16,7 +16,7 @@
 //!
 //! The backend behind a control is injectable (a [`Connector`] for the connection, a
 //! [`PactlRunner`] for the subprocesses) so the provisioning logic and the never-cancel
-//! discipline are testable against a scripted server, as the Python suite tested them.
+//! discipline are testable against a scripted server.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -873,7 +873,7 @@ pub async fn ensure_capture_sink(audio_device_name: Option<&str>, client_name: &
 
 #[cfg(test)]
 pub(super) mod tests {
-    //! The control plane against a scripted server, as the Python suite checked it: the
+    //! The control plane against a scripted server: the
     //! provisioning operations for what they ask the server to do, and the `pactl` fallback
     //! against scripted command output. The never-cancel discipline belongs to the libpulse
     //! thread and is proven in `pulse.rs` against the real server.

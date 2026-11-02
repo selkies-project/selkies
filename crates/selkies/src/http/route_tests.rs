@@ -78,7 +78,7 @@ fn secure_config() -> HttpConfig {
     }
 }
 
-/// A stub of the server's route set behind the real gate, as the Python suite built it:
+/// A stub of the server's route set behind the real gate:
 /// the upload, switch, file, TURN, metrics, and WebSocket routes as stubs over the real
 /// status, health, and tokens routes.
 async fn stub_server(config: HttpConfig) -> (TestServer, AppState) {

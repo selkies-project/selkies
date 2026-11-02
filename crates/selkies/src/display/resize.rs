@@ -6,8 +6,7 @@
 
 //! The resize and layout entry points both transports call: native RandR first, on the
 //! retained connection off the runtime's workers, with the xrandr subprocess chain as the
-//! fallback each one degrades to when the native call fails, exactly where the Python
-//! server fell back. An extended desktop goes to the pluggable outputs where the server
+//! fallback each one degrades to when the native call fails. An extended desktop goes to the pluggable outputs where the server
 //! offers them (`apply_output_layout`) and to the RandR 1.5 logical monitors anywhere else
 //! (`monitors::apply_monitor_layout`).
 

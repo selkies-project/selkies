@@ -132,7 +132,11 @@ impl GamepadHost for WsGamepadHost {
     fn slot_authority(&self, conn: ConnId) -> SlotAuthority {
         let secure = !settings().master_token().is_empty();
         let Some(client) = self.0.client(conn) else {
-            return SlotAuthority { role: Role::Viewer, slot: None, secure };
+            return SlotAuthority {
+                role: Role::Viewer,
+                slot: None,
+                secure,
+            };
         };
         let perms = client.perms();
         let slot = match perms.token.as_deref() {
@@ -140,7 +144,11 @@ impl GamepadHost for WsGamepadHost {
             None => Some(perms.slot.clone()),
         };
         SlotAuthority {
-            role: if perms.is_viewer() { Role::Viewer } else { Role::Controller },
+            role: if perms.is_viewer() {
+                Role::Viewer
+            } else {
+                Role::Controller
+            },
             slot: slot.filter(|s| !s.is_null()),
             secure,
         }
@@ -188,7 +196,11 @@ impl PublishedDevices {
                 warn!(target: "input", "Published device {} could not be opened", spec.name);
                 continue;
             }
-            let slot = if spec.key == "keyboard" { &self.keyboard } else { &self.pointer };
+            let slot = if spec.key == "keyboard" {
+                &self.keyboard
+            } else {
+                &self.pointer
+            };
             let _ = slot.set(device);
         }
     }
@@ -197,7 +209,11 @@ impl PublishedDevices {
 impl VirtualDeviceSink for PublishedDevices {
     fn key(&self, evdev_code: u32, down: bool) {
         if let Some(device) = self.keyboard.get() {
-            device.emit(crate::gamepad::abi::EV_KEY, evdev_code as u16, i32::from(down));
+            device.emit(
+                crate::gamepad::abi::EV_KEY,
+                evdev_code as u16,
+                i32::from(down),
+            );
         }
     }
 
@@ -340,7 +356,9 @@ impl Recorders for SoundRecorders {
         };
         let device = settings().audio_device_name().to_string();
         self.0.block_on(async {
-            let provisioned = control.ensure_virtual_microphone(Some(&device), false).await;
+            let provisioned = control
+                .ensure_virtual_microphone(Some(&device), false)
+                .await;
             control.close().await;
             provisioned.0.is_some() || provisioned.1
         })

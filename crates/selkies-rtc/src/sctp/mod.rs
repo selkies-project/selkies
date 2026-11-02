@@ -15,7 +15,7 @@
 //! than the peer's `a=max-message-size` is refused rather than sent, and a bulk transfer
 //! paces itself on `buffered_amount` against `DATA_CHANNEL_BULK_HIGH_WATER`.
 //!
-//! Six behaviors of the Python association hold here through the vendored `rtc-sctp`
+//! Six behaviors hold here through the vendored `rtc-sctp`
 //! (`crates/selkies-rtc/vendor/rtc-sctp`, its diff against the published crate in
 //! `rtc-sctp-selkies.patch`), since none has a knob in the published crate:
 //!

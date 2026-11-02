@@ -4,10 +4,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The service and engine suites, each named for the Python suite it carries: real engines and
-//! real peers, which gather on this host and stop at their offer, over stand-ins for the display
-//! server and the captures, as the Python suites drive theirs with fakes. The browser's side is
-//! `build/webrtc-rig/`.
+//! The service and engine suites: real engines and real peers, which gather on this host and
+//! stop at their offer, over stand-ins for the display server and the captures. The browser's
+//! side is the suites under `tests/e2e`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};

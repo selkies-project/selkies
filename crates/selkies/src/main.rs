@@ -36,7 +36,10 @@ fn resize_tool(prog: &str, args: &[String]) -> i32 {
         return 2;
     };
     settings::install(Settings::parse(&[], &|name| std::env::var(name).ok()));
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
         return 1;
     };
     match runtime.block_on(selkies::display::resize_display(resolution, None, None)) {

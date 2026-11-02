@@ -12,7 +12,7 @@
 //! EGL, GL, X11, and Vulkan are loaded with `dlopen` at run time, never linked: the server
 //! runs on hosts with none of them, and which vendor's EGL answers is exactly what each
 //! helper is forced to by `__EGL_VENDOR_LIBRARY_FILENAMES`. The entry points are the few the
-//! Python probe called through ctypes, typed here as C function pointers.
+//! probes call, typed here as C function pointers.
 //!
 //! [`RealProbes`] is the [`ClientProbes`] implementation over those children, each with the
 //! client-side environment of [`CLIENT_ENV`] stripped so what the caller may already have

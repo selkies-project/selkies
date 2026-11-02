@@ -150,7 +150,7 @@ pub fn hello_page_size(value: Option<&Value>) -> Option<(u32, u32)> {
     Some((side(&items[0])?, side(&items[1])?))
 }
 
-/// JSON's truth as Python's `bool` reads it, which is what a strict-viewer claim was held to.
+/// JSON truthiness, which is what a strict-viewer claim is held to.
 fn truthy(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,

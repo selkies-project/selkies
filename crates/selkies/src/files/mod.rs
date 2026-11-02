@@ -62,8 +62,7 @@ pub use pacing::{
 
 use crate::settings::Settings;
 
-/// The settings the file routes read, snapshotted at startup the way the Python server read
-/// them from its settings object.
+/// The settings the file routes read, snapshotted at startup.
 #[derive(Clone, Debug, Default)]
 pub struct FilesConfig {
     /// `file_manager_path` as configured, `~` unexpanded.

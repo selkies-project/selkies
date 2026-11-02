@@ -6,9 +6,9 @@
 
 //! Per-frame send stamps for the comparison benchmark, only in a `frame-log` build.
 //!
-//! One line per frame handed to the controller, in the format the Python baseline's hook wrote,
+//! One line per frame handed to the controller,
 //! `kind now_ns capture_ns encode_start_ns encode_end_ns bytes rtp_packets keyframe`, stamped at
-//! the same two points: `ws` when a frame's bytes go to the socket and `wr` when its last RTP
+//! two points: `ws` when a frame's bytes go to the socket and `wr` when its last RTP
 //! packet leaves the pacer. Lines buffer in memory and a thread flushes them once a second, so
 //! the stamp costs the send path a lock and a push rather than a file write.
 
@@ -43,7 +43,11 @@ pub fn record(frame: FrameRecord) {
                 if batch.is_empty() {
                     continue;
                 }
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
                     let _ = file.write_all(batch.concat().as_bytes());
                 }
             }

@@ -8,9 +8,8 @@
 //! rewrites the offer takes on its way to the page.
 //!
 //! `rtc_sdp` is the syntax layer, parsing a description's lines and printing them back;
-//! this module is the semantic one the Python fork's `sdp.py` and `rtcpeerconnection.py`
-//! were. `SessionDescription::parse` lifts the lines into typed media sections the way the
-//! fork read them: a malformed attribute is skipped rather than refusing the whole offer, a
+//! this module is the semantic one. `SessionDescription::parse` lifts the lines into typed
+//! media sections: a malformed attribute is skipped rather than refusing the whole offer, a
 //! payload type outside 0-255 or in the forbidden 72-76 refuses it, and a section past
 //! `MAX_CODECS`, `MAX_SSRCS`, or `MAX_RTCP_FB` is refused at once, since the parse runs on
 //! the task every session shares on what a page sends over signaling; `MAX_REMOTE_SDP`

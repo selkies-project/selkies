@@ -40,9 +40,6 @@
 //! - `rtc_config`: the deployment's STUN and TURN servers and their credentials, from the
 //!   prioritized sources (Cloudflare, a config file, a TURN REST API, long-term and HMAC
 //!   credentials) to the `IceServer` list a peer is configured with.
-//!
-//! The specification is the vendored Python fork under `src/selkies/ice/` and
-//! `src/selkies/webrtc/rtcicetransport.py`.
 
 pub mod agent;
 pub mod candidate;

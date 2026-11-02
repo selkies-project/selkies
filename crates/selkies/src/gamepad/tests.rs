@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The gamepad checks the Python unit suites made, kept check for check: the uinput ABI
+//! The gamepad checks: the uinput ABI
 //! against the kernel headers (`test_uinput_abi`), the interposer struct layouts against
 //! the C compiler, the backend policy (`test_uinput_policy`), the slot gate
 //! (`test_gamepad_authority`), the force-feedback mix and the kernel requests

@@ -15,8 +15,8 @@
 //!   pcmflux source-output back onto its source, and list the virtual microphone's recorders for
 //!   capture demand. The operations run in-process over libpulse on a dedicated thread with a
 //!   mainloop of its own; the `pactl` subprocess backend engages only when that connection
-//!   cannot be made, and says so in one log line. The never-cancel discipline the Python control
-//!   plane owed its ctypes bindings is kept as the thread's contract: a pending operation is
+//!   cannot be made, and says so in one log line. The never-cancel discipline is the thread's
+//!   contract: a pending operation is
 //!   never canceled, a timeout abandons the connection instead and leaves the operation to end
 //!   through the disconnect, and a caller that gives up (its future dropped) leaves the thread
 //!   to finish the operation on its own, so the connection stays usable.

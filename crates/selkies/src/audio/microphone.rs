@@ -257,7 +257,7 @@ mod tests {
         assert!(
             std::env::var_os("PULSE_SERVER").is_some()
                 || std::env::var_os("XDG_RUNTIME_DIR").is_some(),
-            "a sound server is required: source build/baseline/env.sh"
+            "a sound server is required: set PULSE_SERVER"
         );
         let engine = AudioEngine::new(Framing::Headered);
         let mut uplink = MicrophoneUplink::new(engine, "test-peer");

@@ -39,8 +39,23 @@ const PACED_PREFIXES: &[&str] = &["webrtc.", "ice."];
 const PACKET_TARGETS: &[&str] = &["webrtc.rtp.sender", "webrtc.rtp.receiver", "webrtc.sctp"];
 /// The short names Selkies logs under; anything else is a third-party crate's.
 const OWN_TARGETS: &[&str] = &[
-    "main", "server", "ws", "webrtc", "signaling", "display", "input", "gamepad", "audio",
-    "printing", "webcam", "stats", "audit", "settings", "metrics", "capture_demand", "access",
+    "main",
+    "server",
+    "ws",
+    "webrtc",
+    "signaling",
+    "display",
+    "input",
+    "gamepad",
+    "audio",
+    "printing",
+    "webcam",
+    "stats",
+    "audit",
+    "settings",
+    "metrics",
+    "capture_demand",
+    "access",
     "ice",
 ];
 
@@ -201,7 +216,11 @@ mod tests {
         assert!(!enabled(&logger(false), "ws", Level::Debug));
         assert!(enabled(&logger(true), "ws", Level::Debug));
         assert!(enabled(&logger(true), "ice.agent", Level::Debug));
-        assert!(enabled(&logger(true), "selkies_rtc::rtp::pacer", Level::Debug));
+        assert!(enabled(
+            &logger(true),
+            "selkies_rtc::rtp::pacer",
+            Level::Debug
+        ));
         assert!(!enabled(&logger(true), "webrtc.sctp", Level::Debug));
     }
 

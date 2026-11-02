@@ -39,10 +39,10 @@
 //! the `/api/metrics` route renders ([`metrics`]), and the `selkies gpu-probe` command
 //! ([`gpu_probe`]).
 
-pub mod gpu_probe;
-mod gpu_probe_helpers;
 #[cfg(feature = "frame-log")]
 pub mod frame_log;
+pub mod gpu_probe;
+mod gpu_probe_helpers;
 pub mod metrics;
 pub mod resources;
 mod send_timer;
