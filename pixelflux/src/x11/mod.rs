@@ -12,10 +12,10 @@
 //! process already has mapped.
 //!
 //! This is the general path, and it works against any X server. Two zero-copy paths come first
-//! where they can serve the session: [`nvfbc`] on an NVIDIA X server has the driver composite the
-//! screen straight into video memory and registers that buffer with NVENC in place, and [`dri3`]
-//! on any server whose screen lives on the GPU has the server blit the root into dmabufs the
-//! hardware encoder reads in place. `run_capture` tries them in that order and falls back here
+//! where they can serve the session: [`dri3`] on any server whose screen lives on the GPU has the
+//! server blit the root into dmabufs the hardware encoder reads in place, and [`nvfbc`] on an
+//! NVIDIA X server has the driver composite the screen straight into video memory and registers
+//! that buffer with NVENC in place. `run_capture` tries them in that order and falls back here
 //! otherwise.
 //!
 //! `run_capture` splits the work across two threads because grabbing the next frame and encoding
@@ -1115,14 +1115,15 @@ pub fn follow_frame_rate() {
 
 /// Capture an X11 display until `stop` is set, on the best path this session can run.
 ///
-/// [`nvfbc::run_capture`] is tried first: where the NVIDIA driver offers framebuffer capture and
-/// the session encodes on NVENC, the screen is composited into video memory and encoded in place,
-/// so a frame reaches the bitstream without being copied once. [`dri3::run_capture`] is next: on a
-/// server whose screen lives on the GPU, the server blits the root into dmabufs this process
-/// allocated and the hardware session reads them in place. Each reports that it cannot serve the
-/// session — a codec its engine has no support for, software encoding, a watermark that has to be
-/// blended into host pixels, a server or device that does not qualify — and the capture then runs
-/// on the general XShm path below, which every X server supports. Whichever path runs, the
+/// [`dri3::run_capture`] is tried first: on a server whose screen lives on the GPU, the server
+/// blits the root into dmabufs this process allocated and the hardware session reads them in
+/// place. On an NVIDIA X server it reaches the encoder sooner than NvFBC and at a fraction of the
+/// CPU. [`nvfbc::run_capture`] is next, for an NVIDIA server DRI3 cannot serve (a driver without
+/// GBM): the driver composites the screen into video memory and NVENC encodes it in place. Each
+/// reports that it cannot serve the session — a codec its engine has no support for, software
+/// encoding, a watermark NvFBC would have to blend into host pixels, a server or device that does
+/// not qualify — and the capture then runs on the general XShm path below, which every X server
+/// supports. Whichever path runs, the
 /// capture's frame rate paces the server's fake vblank for as long as it does ([`VblankRate`]).
 ///
 /// Blocking; intended to run on a dedicated thread.
@@ -1137,7 +1138,7 @@ where
 {
     let _report = crate::report::enter(&controls.report);
     let _vblank = VblankClaim::new(&controls);
-    if let Some(result) = nvfbc::run_capture(
+    if let Some(result) = dri3::run_capture(
         settings.clone(),
         controls.clone(),
         encode_tid_tx.clone(),
@@ -1145,7 +1146,7 @@ where
     ) {
         return result;
     }
-    if let Some(result) = dri3::run_capture(
+    if let Some(result) = nvfbc::run_capture(
         settings.clone(),
         controls.clone(),
         encode_tid_tx.clone(),
