@@ -143,7 +143,8 @@ pub async fn run() -> Result<(), String> {
     use crate::webrtc::WebRtcService;
     use crate::webrtc::host::{PixelPipelines, ServerPlane, WebRtcDeps};
     use crate::webrtc::wiring::{
-        RtcClipboardHost, RtcClipboardPolicy, RtcInputHost, RtcPointerSink, RtcStreaming, ice_topology,
+        RtcClipboardHost, RtcClipboardPolicy, RtcInputHost, RtcPointerSink, RtcStreaming,
+        ice_topology,
     };
     use crate::ws::host::WsDeps;
     use crate::ws::{self, WsService, wiring};
@@ -158,11 +159,17 @@ pub async fn run() -> Result<(), String> {
         // directories selkies does however the settings were supplied.
         unsafe {
             std::env::set_var("SELKIES_JS_SOCKET_PATH", socket_dir(s.js_socket_path()));
-            std::env::set_var("SELKIES_WEBCAM_SOCKET_PATH", socket_dir(s.webcam_socket_path()));
+            std::env::set_var(
+                "SELKIES_WEBCAM_SOCKET_PATH",
+                socket_dir(s.webcam_socket_path()),
+            );
         }
         if !s.computer_use_bind().is_empty() {
             let token = s.computer_use_token();
-            if let Err(e) = pixelflux::start_computer_use(s.computer_use_bind(), (!token.is_empty()).then_some(token)) {
+            if let Err(e) = pixelflux::start_computer_use(
+                s.computer_use_bind(),
+                (!token.is_empty()).then_some(token),
+            ) {
                 warn!(target: "main", "Computer-Use server not started: {e}");
             }
         }
@@ -173,18 +180,28 @@ pub async fn run() -> Result<(), String> {
     if !is_wayland {
         let (dpi, locked, cursor) = {
             let s = settings();
-            (s.scaling_dpi().parse::<f64>().unwrap_or(96.0) as i32, s.was_provided("scaling_dpi"), s.cursor_size() as i32)
+            (
+                s.scaling_dpi().parse::<f64>().unwrap_or(96.0) as i32,
+                s.was_provided("scaling_dpi"),
+                s.cursor_size() as i32,
+            )
         };
         let startup_dpi = crate::display::dpi::restore_dpi(dpi, locked).await;
         if cursor > 0 {
-            crate::display::dpi::set_cursor_size(crate::display::cursor_size_for_dpi(startup_dpi as f64, cursor)).await;
+            crate::display::dpi::set_cursor_size(crate::display::cursor_size_for_dpi(
+                startup_dpi as f64,
+                cursor,
+            ))
+            .await;
         }
     }
 
     tokio::task::spawn_blocking(|| crate::settings::settings_mut().resolve_encoder_backends())
         .await
         .map_err(|e| e.to_string())?;
-    tokio::task::spawn_blocking(bring_up_wayland).await.map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(bring_up_wayland)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let cfg = HttpConfig::from_settings(&settings());
     http::audit::install(http::audit::AuditConfig {
@@ -207,14 +224,19 @@ pub async fn run() -> Result<(), String> {
         ),
     ]));
     let metrics = settings().enable_metrics_http().on.then(|| {
-        Arc::new(stack::ServerMetrics(Arc::new(crate::stats::metrics::Metrics::new(false))))
+        Arc::new(stack::ServerMetrics(Arc::new(
+            crate::stats::metrics::Metrics::new(false),
+        )))
     });
     let mut state = AppState::new(cfg, modes.clone()).with_static_root(static_root);
     if let Some(m) = &metrics {
         state = state.with_metrics(m.clone());
     }
 
-    let files_state = Arc::new(FilesState::new(FilesConfig::from_settings(&settings()), Hooks::default()));
+    let files_state = Arc::new(FilesState::new(
+        FilesConfig::from_settings(&settings()),
+        Hooks::default(),
+    ));
     let screens_backend = Arc::new(pixelflux::ScreenCapture::new());
     let screens = SessionScreens::new(
         is_wayland.then(|| screens_backend.clone() as Arc<dyn AppScreens>),
@@ -232,7 +254,9 @@ pub async fn run() -> Result<(), String> {
         clipboard: late_clipboard.clone(),
         display: Arc::new(wiring::ServerDisplay::new(screens.clone())),
         captures: Arc::new(wiring::Captures),
-        audio: Arc::new(wiring::EngineAudio(crate::audio::AudioEngine::new(crate::audio::Framing::Headered))),
+        audio: Arc::new(wiring::EngineAudio(crate::audio::AudioEngine::new(
+            crate::audio::Framing::Headered,
+        ))),
         webcam: Arc::new(wiring::SharedWebcam),
         stats: Arc::new(wiring::MonitorStats::default()),
         supervisor: transport_supervisor.clone(),
@@ -246,7 +270,10 @@ pub async fn run() -> Result<(), String> {
     let pointer = stack::WsPointerSink(service.clone().into());
     let dispatcher = Dispatcher::new(
         InputConfig::from_settings(),
-        Arc::new(wiring::WsInputHost { service: service.clone(), screens: screens.clone() }),
+        Arc::new(wiring::WsInputHost {
+            service: service.clone(),
+            screens: screens.clone(),
+        }),
         gamepads.clone() as Arc<dyn GamepadSink>,
         Arc::new(pointer),
         is_wayland.then(|| screens_backend.clone() as Arc<dyn WaylandSeat>),
@@ -285,16 +312,22 @@ pub async fn run() -> Result<(), String> {
         WebRtcDeps {
             tokens: Arc::new(state.tokens.clone()),
             clipboard: rtc_policy.clone(),
-            display: Arc::new(ServerPlane(Arc::new(wiring::ServerDisplay::new(rtc_screens.clone())))),
+            display: Arc::new(ServerPlane(Arc::new(wiring::ServerDisplay::new(
+                rtc_screens.clone(),
+            )))),
             pipelines: Arc::new(PixelPipelines {
                 captures: Arc::new(wiring::Captures),
             }),
-            audio: Some(Arc::new(crate::audio::AudioEngine::new(crate::audio::Framing::Raw))),
+            audio: Some(Arc::new(crate::audio::AudioEngine::new(
+                crate::audio::Framing::Raw,
+            ))),
             webcam: Arc::new(wiring::SharedWebcam),
             stats: Arc::new(wiring::MonitorStats::default()),
             supervisor: transport_supervisor.clone(),
             metrics: metrics.clone().map(|m| m as Arc<dyn ws::host::Metrics>),
-            rtc_metrics: metrics.clone().map(|m| Arc::new(m.0.clone()) as Arc<dyn crate::webrtc::host::RtcMetrics>),
+            rtc_metrics: metrics
+                .clone()
+                .map(|m| Arc::new(m.0.clone()) as Arc<dyn crate::webrtc::host::RtcMetrics>),
         },
         ice_topology(Vec::new())?,
     )?;
@@ -347,7 +380,9 @@ pub async fn run() -> Result<(), String> {
     if let Some(audit) = http::audit::current() {
         crate::webcam::demand::install_audit_sink(Arc::new(stack::DemandAudit(audit)));
     }
-    crate::webcam::demand::install_recorders(Arc::new(stack::SoundRecorders(tokio::runtime::Handle::current())));
+    crate::webcam::demand::install_recorders(Arc::new(stack::SoundRecorders(
+        tokio::runtime::Handle::current(),
+    )));
 
     let extra = vec![
         axum::Router::new().nest("/api", files::router(files_state.clone())),
@@ -361,18 +396,23 @@ pub async fn run() -> Result<(), String> {
     info!(target: "main", "{}", startup_summary());
     let mode = settings().mode().to_string();
     crate::http::Supervisor::switch_to_mode(&*modes, &mode).await?;
-    let server = Server::start(&state, router).await.map_err(|e| e.to_string())?;
+    let server = Server::start(&state, router)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut print_watcher = None;
     let mut print_queue = None;
     if settings().printing_enabled().on {
         let spool = files_state.print_spool().to_path_buf();
         let announce = files_state.clone();
-        match files::printing::SpoolWatcher::start(spool.clone(), Arc::new(move |name: &str, size: u64| {
-            if let Some(sessions) = announce.hooks().sessions {
-                sessions.announce_print_document(name, size);
-            }
-        })) {
+        match files::printing::SpoolWatcher::start(
+            spool.clone(),
+            Arc::new(move |name: &str, size: u64| {
+                if let Some(sessions) = announce.hooks().sessions {
+                    sessions.announce_print_document(name, size);
+                }
+            }),
+        ) {
             Ok(watcher) => {
                 files_state.set_print_watching(true);
                 let mut queue = files::printing::PrintQueue::new(spool);
@@ -380,7 +420,9 @@ pub async fn run() -> Result<(), String> {
                 print_queue = Some(queue);
                 print_watcher = Some(watcher);
             }
-            Err(e) => warn!(target: "printing", "Printing is off: the spool cannot be watched ({e})."),
+            Err(e) => {
+                warn!(target: "printing", "Printing is off: the spool cannot be watched ({e}).")
+            }
         }
     }
 

@@ -29,8 +29,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use super::listen::{ConnInfo, ipv6_loopback_redirect};
 use super::{AppState, WEB_CODE};
 
-/// The directory the bundled web client is read from while the Python and Rust servers share
-/// one tree: `SELKIES_WEB_BUNDLE` when set, else the Python package's data directory
+/// The directory the bundled web client is read from: `SELKIES_WEB_BUNDLE` when set, else
 /// `src/selkies/selkies_web` relative to this crate's manifest at build time. None when
 /// neither holds an `index.html`.
 pub fn bundle_dir() -> Option<PathBuf> {

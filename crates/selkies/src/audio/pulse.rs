@@ -511,7 +511,7 @@ fn run_op(ml: &mut Mainloop, ctx: &mut Context, op: Op, deadline: Instant) -> An
 
 #[cfg(test)]
 mod tests {
-    //! Against the sandbox's PipeWire (`. build/baseline/env.sh` exports `PULSE_SERVER`).
+    //! Against a real sound server, which `PULSE_SERVER` names.
 
     use super::*;
 
@@ -522,7 +522,7 @@ mod tests {
     #[tokio::test]
     async fn lists_and_defaults_answer_over_the_thread() {
         if !server_reachable() {
-            panic!("a sound server is required: source build/baseline/env.sh");
+            panic!("a sound server is required: set PULSE_SERVER");
         }
         let mut backend = PulseBackend::connect(
             "selkies-test-control".to_string(),
@@ -557,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn a_module_loads_and_unloads() {
         if !server_reachable() {
-            panic!("a sound server is required: source build/baseline/env.sh");
+            panic!("a sound server is required: set PULSE_SERVER");
         }
         let mut backend = PulseBackend::connect(
             "selkies-test-module".to_string(),

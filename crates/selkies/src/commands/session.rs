@@ -946,8 +946,7 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
     status
 }
 
-/// The server process jupyter-server-proxy starts a desktop with, as its Python entry
-/// returns it.
+/// The server process jupyter-server-proxy starts a desktop with.
 ///
 /// Jupyter authenticates the route and the proxy's Unix socket sits in a directory only this
 /// user reaches, so Selkies runs without its own login or TLS. The session follows the server

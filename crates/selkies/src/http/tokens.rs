@@ -476,7 +476,7 @@ mod tests {
             "lookup finds the provisioned entry"
         );
         assert!(
-            t.lookup("vie").is_none()
+            t.lookup("vi").is_none()
                 && t.lookup("no-such-token").is_none()
                 && t.lookup("").is_none(),
             "lookup rejects prefixes and empties"

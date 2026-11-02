@@ -8,7 +8,7 @@
 //! and disconnect, the token table, the metrics exposition, and the TURN configuration.
 //!
 //! Every route is written as `/api/<name>`; [`super::build`] nests them under the subfolder
-//! prefix. JSON bodies are capped at 1 MiB, the size the Python server's framework applied.
+//! prefix. JSON bodies are capped at 1 MiB.
 //! A view-only credential ([`Ceiling::is_viewer`]) is refused by every route that changes
 //! host or session state and may read everything the session shows anyway.
 

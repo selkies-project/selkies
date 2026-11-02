@@ -127,8 +127,7 @@ fn hat_of(client: u32) -> Option<(u8, i32)> {
 /// Sticks run -1.0 to 1.0, triggers 0.0 to 1.0, hats -1, 0, or 1. Triggers map onto the
 /// full stick range rather than 0 to 255: joydev and evdev consumers treat them as ordinary
 /// analog axes. A hat is -1/0/1 on evdev and full scale on joydev (`for_js`). The
-/// conversions truncate as the Python backend's `int()` did, and a hat rounds half to even
-/// as its `round()` did.
+/// conversions truncate toward zero, and a hat rounds half to even.
 pub fn normalize_axis_value(
     client_value: f64,
     is_trigger: bool,

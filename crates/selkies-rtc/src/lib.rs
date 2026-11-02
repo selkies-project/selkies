@@ -6,7 +6,7 @@
 
 //! The Selkies WebRTC stack over the `rtc-*` sans-IO crates.
 //!
-//! Each module owns one layer of the Python fork it replaces: `sctp` the SCTP association
+//! Each module owns one layer: `sctp` the SCTP association
 //! and the data channels over it, `sdp` the session descriptions Selkies builds and reads,
 //! `signaling` the JSON protocol a page speaks over its WebSocket before and beside the
 //! peer connection, `ice`, `dtls`, and `srtp` the path under them, and `transport` the handle

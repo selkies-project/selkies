@@ -721,7 +721,7 @@ mod tests {
             local: Some(SocketAddr::new(ip.parse().unwrap(), port)),
             remote: None,
             secure: false,
-        fd: None,
+            fd: None,
         }
     }
 

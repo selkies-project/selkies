@@ -661,7 +661,7 @@ mod tests {
     fn constant_time_compare() {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"ab"));
-        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"abx"));
         assert!(ct_eq(b"", b""));
         let mut padded = b"abc".to_vec();
         padded.resize(3 + 256, 0);

@@ -208,7 +208,7 @@ pub fn codecs(kind: MediaKind) -> Vec<Codec> {
     }
 }
 
-/// The header extensions offered for a kind, under the ids the Python stack used.
+/// The header extensions offered for a kind, under their fixed ids.
 pub fn header_extensions(kind: MediaKind) -> Vec<HeaderExtension> {
     match kind {
         MediaKind::Audio => vec![

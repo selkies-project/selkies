@@ -364,7 +364,7 @@ fn resolve_pair(cfg: &TlsConfig) -> Result<(PathBuf, Option<PathBuf>), TlsError>
 
 /// The server's TLS state, or none when HTTPS is disabled.
 ///
-/// TLS 1.2 is the floor, as for the Python server; clients are not asked for certificates;
+/// TLS 1.2 is the floor; clients are not asked for certificates;
 /// `http/1.1` is the one protocol offered, since the WebSocket upgrade rides HTTP/1.1.
 pub fn build(cfg: &TlsConfig) -> Result<Option<Tls>, TlsError> {
     if !cfg.enable_https {

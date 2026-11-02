@@ -246,9 +246,9 @@ mod tests {
         let nals = split_bitstream(&annex_b(&[&sps, &pps, &idr]));
         let payloads = packetize(&nals);
         assert_eq!(payloads.len(), 1 + 3);
-        let stap = payloads[0].to_bytes();
-        assert_eq!(stap[0] & 0x1F, NAL_TYPE_STAP_A);
-        assert_eq!(&stap[1..3], &5u16.to_be_bytes());
+        let aggregate = payloads[0].to_bytes();
+        assert_eq!(aggregate[0] & 0x1F, NAL_TYPE_STAP_A);
+        assert_eq!(&aggregate[1..3], &5u16.to_be_bytes());
         let sizes: Vec<usize> = payloads[1..].iter().map(|p| p.len()).collect();
         assert!(sizes.iter().all(|s| *s <= PACKET_MAX));
         assert_eq!(sizes.iter().sum::<usize>(), 2500 + 3 * FU_A_HEADER_SIZE);

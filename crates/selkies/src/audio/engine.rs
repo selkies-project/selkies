@@ -1077,7 +1077,7 @@ mod tests {
         install_test_settings();
         assert!(
             sound_server_present(),
-            "a sound server is required: source build/baseline/env.sh"
+            "a sound server is required: set PULSE_SERVER"
         );
         let engine = AudioEngine::new(Framing::Headered);
         engine.client_joined(7);
@@ -1135,7 +1135,7 @@ mod tests {
         install_test_settings();
         assert!(
             sound_server_present(),
-            "a sound server is required: source build/baseline/env.sh"
+            "a sound server is required: set PULSE_SERVER"
         );
         let engine = AudioEngine::new(Framing::Raw);
         let order = Arc::new(Mutex::new(Vec::new()));
