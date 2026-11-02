@@ -16,7 +16,10 @@ says nothing of the path, cuts nothing, the trickle measured, where the transpor
 counts delivery by acked frames, by what the stream sent of those frames rather
 than a burst the tick sent after them; and a clean tick of that trickle raises
 the target no further than the capacity the path showed, or not at all while
-the steer knows none; nor does a tick that measured no offer.
+the steer knows none; nor does a tick that measured no offer. A stall (a deep
+queue over a trickle of the target, or none delivered) is restored from on the
+second tick in a row back at the floor; a path that slowed is not, nor a
+restored target that queues again.
 """
 import os
 import sys
@@ -180,6 +183,191 @@ check("clean ticks that measured no offer raise the target no further than the c
 steer = CongestionSteer()
 got = steer.target(5000, TOP, BOTTOM, TRICKLE, 0.0, 0.0, queue_s=0.0)
 check("nor at all with none known", got == 5000, got)
+
+def settle(steer, cur, t, delivered=120_000.0, ceiling=None):
+    """Two clean ticks half a second apart from `t` (a restore wants the second); the target after them."""
+    cur = steer.target(cur, ceiling or CEILING, 135.0, delivered, 0.0, t, queue_s=0.0, offered_bps=delivered)
+    first = steer.restored
+    cur = steer.target(cur, ceiling or CEILING, 135.0, delivered, 0.0, t + 0.5, queue_s=0.0, offered_bps=delivered)
+    return cur, first
+
+
+# A stream the path carried (each case opens on clean ticks at its rate through CARRIED_S), then a stall: the desktop's 2026-11-02
+# cut, a tick the gate held and a 3.4 s queue over a trickle of the target.
+steer = CongestionSteer()
+steer.target(5774, CEILING, 135.0, 5_196_600.0, 0.0, -3.0, queue_s=0.0, offered_bps=5_774_000.0)
+steer.target(5774, CEILING, 135.0, 5_196_600.0, 0.0, -0.5, queue_s=0.0, offered_bps=5_774_000.0)
+cur = steer.target(5774, CEILING, 135.0, 0.0, 0.0, 0.0, queue_s=0.15)
+check("a queued tick with no delivery backs off", round(cur) == 4042, cur)
+cur = steer.target(cur, CEILING, 135.0, 269_000.0, 0.0, 2.0, queue_s=3.36)
+check("a deep queue over a trickle of the target cuts to the floor", round(cur) == 135, cur)
+got, first = settle(steer, cur, 3.0)
+check("the second tick back at the floor restores the rate the stall began at, the first waiting for the frames "
+      "the stall held", not first and round(got) == 5774 and steer.restored and steer.capacity_kbps is None,
+      (first, got, steer.capacity_kbps))
+got = steer.target(got, CEILING, 135.0, 120_000.0, 0.0, 4.0, queue_s=0.0, offered_bps=120_000.0)
+check("and restores once", round(got) == 5774 and not steer.restored, got)
+# The rig's hold seen on the quiet node: a clean tick, then the frames the hold kept, acked late and together.
+steer = CongestionSteer()
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=8_000_000.0)
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=8_000_000.0)
+cur = steer.target(8000, CEILING, 135.0, 0.0, 0.0, 0.0, queue_s=0.04)
+cur = steer.target(cur, CEILING, 135.0, 1_500_000.0, 0.0, 2.0, queue_s=0.0, offered_bps=None)
+check("the first clean tick after a hold restores nothing yet", round(cur) == 5600 and not steer.restored, cur)
+cur = steer.target(cur, CEILING, 135.0, 2_916_000.0, 0.0, 2.5, queue_s=2.2)
+check("the hold's frames arriving behind it are the stall's queue, which keeps the restore",
+      steer._restore_kbps == 8000, (cur, steer._restore_kbps))
+got = cur
+for t in (5.0, 6.0, 7.0, 8.0, 9.0, 10.0):
+    got = steer.target(got, CEILING, 135.0, 120_000.0, 0.0, t, queue_s=0.0, offered_bps=120_000.0)
+    if steer.restored:
+        break
+check("restored once they drained", round(got) == 8000 and steer.restored, got)
+
+steer = CongestionSteer()
+steer.target(5000, CEILING, FLOOR, 4_500_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=5_000_000.0)
+steer.target(5000, CEILING, FLOOR, 4_500_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=5_000_000.0)
+cur = steer.target(5000, CEILING, FLOOR, 2_000_000.0, 0.0, 0.0, queue_s=0.3)
+got = steer.target(cur, CEILING, FLOOR, 1_700_000.0, 0.0, 1.0, queue_s=0.0, offered_bps=1_700_000.0)
+check("a path that slowed (a shallow queue over its real delivery) restores nothing",
+      round(got) == 1700 and not steer.restored, got)
+steer = CongestionSteer()
+cur = steer.target(5000, CEILING, FLOOR, 2_000_000.0, 0.0, 0.0, queue_s=1.5)
+got, _ = settle(steer, cur, 6.0, 1_000_000.0)
+check("nor does a deep queue over a quarter or more of the target", round(got) < 2500 and not steer.restored, got)
+
+steer = CongestionSteer()
+steer.target(5000, CEILING, 135.0, 4_500_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=5_000_000.0)
+steer.target(5000, CEILING, 135.0, 4_500_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=5_000_000.0)
+cur = steer.target(5000, CEILING, 135.0, 300_000.0, 0.0, 0.0, queue_s=2.0)
+cur = steer.target(cur, CEILING, 135.0, 120_000.0, 0.0, 9.0, queue_s=0.4, offered_bps=150_000.0)
+got, _ = settle(steer, cur, 20.0)
+check("a stall followed by a queue over its real delivery restores nothing", round(got) < 1000, got)
+steer = CongestionSteer()
+steer.target(5000, CEILING, 135.0, 4_500_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=5_000_000.0)
+steer.target(5000, CEILING, 135.0, 4_500_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=5_000_000.0)
+cur = steer.target(5000, CEILING, 135.0, 300_000.0, 0.0, 0.0, queue_s=2.0)
+got = steer.target(cur, CEILING, 135.0, 120_000.0, 0.0, 1.0, queue_s=None)
+check("a tick that measured no delay restores nothing", round(got) == round(cur), got)
+got = steer.target(cur, CEILING, 135.0, 120_000.0, 0.0, 1.5, queue_s=0.0)
+got = steer.target(cur, CEILING, 135.0, 120_000.0, 0.3, 2.0, queue_s=0.0)
+check("nor does a lossy one", round(got) == round(cur), got)
+got = steer.target(cur, CEILING, 135.0, 120_000.0, 0.0, 3.0, queue_s=0.0)
+check("a clean one after them does", round(got) == 5000 and steer.restored, got)
+
+# The cut rig's stalls (rigs-2026-10-30/cut, 3.5 s holds over a 145 ms path): a deep queue straight after a clean
+# tick, however much the window delivered, and a gated tick with nothing delivered.
+steer = CongestionSteer()
+steer.target(8000, CEILING, 135.0, 6_000_000.0, 0.0, -2.5, queue_s=0.0, offered_bps=6_000_000.0)
+steer.target(8000, CEILING, 135.0, 6_000_000.0, 0.0, 0.0, queue_s=0.0, offered_bps=6_000_000.0)
+cur = steer.target(8000, CEILING, 135.0, 6_125_000.0, 0.0, 0.5, queue_s=1.2)
+got, _ = settle(steer, cur, 3.0, 200_000.0)
+check("a queue a second deep straight after a clean tick is a stall, restored when the floor is back",
+      round(got) == 8000 and steer.restored, got)
+steer = CongestionSteer()
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=8_000_000.0)
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=8_000_000.0)
+cur = steer.target(8000, CEILING, 135.0, 0.0, 0.0, 0.0, queue_s=0.1)
+got = steer.target(cur, CEILING, 135.0, 200_000.0, 0.0, 1.0, queue_s=0.0, offered_bps=200_000.0)
+check("a backoff with nothing delivered holds", round(got) == 5600, got)
+got = steer.target(got, CEILING, 135.0, 200_000.0, 0.0, 2.5, queue_s=0.0, offered_bps=200_000.0)
+check("and its target comes back on the clean ticks past the hold", round(got) == 8000 and steer.restored, got)
+steer = CongestionSteer()
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=8_000_000.0)
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=8_000_000.0)
+cur = steer.target(8000, CEILING, 135.0, 6_000_000.0, 0.0, 0.0, queue_s=0.05)
+for t in (0.5, 1.0, 1.5, 2.0):
+    cur = steer.target(cur, CEILING, 135.0, 6_000_000.0, 0.0, t, queue_s=0.3)
+cur = steer.target(cur, CEILING, 135.0, 6_000_000.0, 0.0, 2.5, queue_s=1.2)
+got, _ = settle(steer, cur, 6.0, 6_000_000.0)
+check("a deep queue reached through queued ticks over a real delivery is the path, not restored",
+      round(got) < 8000 and not steer.restored, got)
+# The hold that the rig's frame round trips smear: the tick before it already read a little of the queue.
+steer = CongestionSteer()
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=8_000_000.0)
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=8_000_000.0)
+steer.target(8000, CEILING, 135.0, 6_000_000.0, 0.0, 0.0, queue_s=0.17)
+cur = steer.target(8000, CEILING, 135.0, 6_263_000.0, 0.0, 2.5, queue_s=1.22)
+got, _ = settle(steer, cur, 4.0, 200_000.0)
+check("a queue that grew a second since the tick before is a stall too", round(got) == 8000 and steer.restored, got)
+steer = CongestionSteer()
+cur = steer.target(8000, CEILING, 135.0, 6_000_000.0, 0.0, 0.0, queue_s=1.2)
+got, _ = settle(steer, cur, 4.0, 6_000_000.0)
+check("a deep queue on the first tick that reads the delay, over most of the target, is not",
+      round(got) < 8000 and not steer.restored, got)
+
+# A path that did slow (the stall's trickle was its real rate): the restored target queues again, and the
+# backoff on it keeps nothing, so the queue's drain is not followed by another restore.
+steer = CongestionSteer()
+steer.target(5000, CEILING, 135.0, 4_500_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=5_000_000.0)
+steer.target(5000, CEILING, 135.0, 4_500_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=5_000_000.0)
+cur = steer.target(5000, CEILING, 135.0, 300_000.0, 0.0, 0.0, queue_s=2.0)
+cur, _ = settle(steer, cur, 1.0)
+check("the stall restores", round(cur) == 5000 and steer.restored, cur)
+cur = steer.target(cur, CEILING, 135.0, 300_000.0, 0.0, 2.0, queue_s=2.0)
+check("the restored target queueing over the slow path backs off", round(cur) < 300, cur)
+got = cur
+for t in (6.0, 7.0, 8.0, 9.0):
+    got = steer.target(got, CEILING, 135.0, 120_000.0, 0.0, t, queue_s=0.0, offered_bps=120_000.0)
+    if steer.restored:
+        break
+check("and its drain restores nothing", round(got) < 1000 and not steer.restored, got)
+steer = CongestionSteer()
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=8_000_000.0)
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=8_000_000.0)
+cur = steer.target(8000, CEILING, 135.0, 0.0, 0.0, 0.0, queue_s=0.1)
+cur, _ = settle(steer, cur, 2.5, 200_000.0)
+cur = steer.target(cur, CEILING, 135.0, 0.0, 0.0, 3.5, queue_s=0.1)
+got, _ = settle(steer, cur, 5.5, 200_000.0)
+check("nor a gated tick straight after a restore", round(got) == 5600 and not steer.restored, got)
+
+# The cut rig's desk switches its window every 5 s: past the hold, the switch's burst reads a shallow
+# queue over a path that delivers it at once.
+steer = CongestionSteer()
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=8_000_000.0)
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=8_000_000.0)
+cur = steer.target(8000, CEILING, 135.0, 0.0, 0.0, 0.0, queue_s=0.04)
+cur = steer.target(cur, CEILING, 135.0, 12_000_000.0, 0.0, 2.5, queue_s=0.15)
+check("a burst's shallow queue the path delivered past the stall's rate keeps the restore",
+      steer._restore_kbps == 8000, (cur, steer._restore_kbps))
+got, _ = settle(steer, cur, 6.0, 200_000.0)
+check("so the target comes back once the round trips are clean", round(got) == 8000, got)
+steer = CongestionSteer()
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=8_000_000.0)
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=8_000_000.0)
+cur = steer.target(8000, CEILING, 135.0, 0.0, 0.0, 0.0, queue_s=0.04)
+cur = steer.target(cur, CEILING, 135.0, 3_000_000.0, 0.0, 2.5, queue_s=0.15, offered_bps=3_500_000.0)
+got, _ = settle(steer, cur, 6.0, 200_000.0)
+check("one delivered under it is a path that slowed, and restores nothing", round(got) < 8000 and not steer.restored,
+      got)
+steer = CongestionSteer()
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -3.0, queue_s=0.0, offered_bps=8_000_000.0)
+steer.target(8000, CEILING, 135.0, 7_200_000.0, 0.0, -0.5, queue_s=0.0, offered_bps=8_000_000.0)
+cur = steer.target(8000, CEILING, 135.0, 0.0, 0.0, 0.0, queue_s=0.04)
+cur = steer.target(cur, CEILING, 135.0, 3_000_000.0, 0.0, 2.5, queue_s=0.15)
+got, _ = settle(steer, cur, 6.0, 200_000.0)
+check("nor does the gate's release, a tick whose offer went unmeasured, take it for one", round(got) == 8000
+      and steer.restored, got)
+
+# A session started over a path slower than its rate (the noise cell's 12000 kbps into 1.2 Mbit/s): its first
+# ticks are queues and gated ticks with nothing delivered, before any clean one, so there is no rate to go back to.
+steer = CongestionSteer()
+cur = steer.target(12000, CEILING * 2, 100.0, 0.0, 0.0, 0.0, queue_s=0.04)
+cur = steer.target(cur, CEILING * 2, 100.0, 1_200_000.0, 0.0, 2.5, queue_s=3.0)
+got = cur
+for t in (8.0, 8.5, 9.0):
+    got = steer.target(got, CEILING * 2, 100.0, 300_000.0, 0.0, t, queue_s=0.0, offered_bps=300_000.0)
+check("a session that starts over a path slower than its rate restores nothing once its first queue drains",
+      got < 2000 and not steer.restored and steer._restore_kbps is None, (got, steer._restore_kbps))
+steer = CongestionSteer()
+cur = steer.target(12000, CEILING * 2, 100.0, 900_000.0, 0.0, 0.0, queue_s=0.0, offered_bps=1_000_000.0)
+cur = steer.target(cur, CEILING * 2, 100.0, 0.0, 0.0, 0.5, queue_s=0.04)
+cur = steer.target(cur, CEILING * 2, 100.0, 1_200_000.0, 0.0, 3.0, queue_s=3.0)
+got = cur
+for t in (8.0, 8.5, 9.0):
+    got = steer.target(got, CEILING * 2, 100.0, 300_000.0, 0.0, t, queue_s=0.0, offered_bps=300_000.0)
+check("nor does one whose first tick read no queue before its start-up queue built (one tick carries no rate)",
+      got < 2000 and not steer.restored and steer._restore_kbps is None, (got, steer._restore_kbps))
 
 print(f"[congestion-steer] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

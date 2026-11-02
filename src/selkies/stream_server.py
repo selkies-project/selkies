@@ -382,6 +382,29 @@ class CongestionSteer:
     page fell behind rather than that the target fits. A raise also follows
     HEADROOM of the measured goodput where that is higher, never past the
     ceiling.
+
+    A stall is not a slower path, and interrupts a rate the path was carrying,
+    one in force through CARRIED_S of ticks that read no queue: before any there
+    is none to restore (a session started over a path slower than its rate). A
+    hold of seconds acks a window's frames late and together, a queue of
+    STALL_QUEUE_S or more over a delivery under STALL_DELIVERY of the target, or
+    one that grew by STALL_QUEUE_S since the last tick that read the delay (a
+    queue a slower path builds is read while still small), and a cut on it keeps
+    the target under what the stall let through, the capacity it showed, for as
+    long as the screen stays still. A backoff on such a tick keeps the target
+    the episode began at, before any backoff in the STALL_EPISODE_S ahead of it,
+    as far as that carried rate, and the second tick in a row after it that
+    reads no queue and no loss past LOSS restores that target and forgets the
+    capacity (the first can come while the frames the stall held are still on
+    their way, which the next one shows as the stall's queue); a backoff with no
+    delivery measured keeps its target too, restored the same way past its hold.
+    A queue the path delivered that target through, a window switch's burst on a
+    fast path, keeps it, and so does a tick whose offer went unmeasured (the
+    gate held it: what it delivered is the hold's release, not the path); one
+    under it is a path that did slow and drops it. A path that did slow also
+    shows a queue at the restored target: a backoff within STALL_EPISODE_S of a
+    restore keeps nothing, so it backs off on the path's real delivery as any
+    queue does, rather than restoring again each time the queue drains.
     """
 
     LOSS = 0.10
@@ -396,6 +419,10 @@ class CongestionSteer:
     SETTLE_S = 0.5
     APP_LIMITED = 0.5
     APP_LIMITED_DELIVERED = 0.8
+    STALL_QUEUE_S = 1.0
+    STALL_DELIVERY = 0.25
+    STALL_EPISODE_S = 5.0
+    CARRIED_S = 2.0
 
     def __init__(self) -> None:
         self.strikes = 0
@@ -404,6 +431,17 @@ class CongestionSteer:
         self._cruise_kbps: Optional[float] = None
         self._drain_until = 0.0
         self._tick_at: Optional[float] = None
+        self._restore_kbps: Optional[float] = None
+        self._backoff_from: Optional[Tuple[float, float]] = None
+        self._restore_after = 0.0
+        self._restored_at = float('-inf')
+        self._last_queue_s: Optional[float] = None
+        # The rate in force on the last tick that read no queue and no loss through CARRIED_S of such
+        # ticks (`_clean_since` the first of them): what a stall interrupts.
+        self._clean_kbps: Optional[float] = None
+        self._clean_since: Optional[float] = None
+        # Whether the last tick restored the target a stall cut (for the transports' log).
+        self.restored = False
 
     def target(self, current: float, ceiling: float, floor: float,
                goodput_bps: float, loss: float, now: float,
@@ -436,6 +474,28 @@ class CongestionSteer:
         """
         dt = 1.0 if self._tick_at is None else min(max(now - self._tick_at, 0.0), 2.0)
         self._tick_at = now
+        self.restored = False
+        last_queue_s = self._last_queue_s
+        if queue_s is not None:
+            self._last_queue_s = queue_s
+        clean_kbps = self._clean_kbps
+        if queue_s == 0 and loss <= self.LOSS:
+            if self._clean_since is None:
+                self._clean_since = now
+            if now - self._clean_since >= self.CARRIED_S:
+                self._clean_kbps = current
+        elif queue_s is not None or loss > self.LOSS:
+            self._clean_since = None
+        if (self._restore_kbps is not None and queue_s == 0 and last_queue_s == 0 and loss <= self.LOSS
+                and now >= self._restore_after):
+            restored = max(current, self._restore_kbps)
+            self._restore_kbps = self._cruise_kbps = self.capacity_kbps = None
+            self.hold_until = self._drain_until = now
+            self.strikes = 0
+            self.restored = restored > current
+            if self.restored:
+                self._restored_at = now
+            return max(floor, min(ceiling, restored))
         drained = (
             self._cruise_kbps is not None
             and now >= self._drain_until
@@ -455,7 +515,22 @@ class CongestionSteer:
                        and (goodput_bps <= 0 or sent_bps <= goodput_bps / self.APP_LIMITED_DELIVERED))
             if now >= self.hold_until and not limited:
                 capacity = max(goodput_bps, capacity_bps or 0.0)
+                grew = last_queue_s is not None and queue_s - last_queue_s >= self.STALL_QUEUE_S
+                stalled = (queue_s >= self.STALL_QUEUE_S and now - self._restored_at > self.STALL_EPISODE_S
+                           and (grew or capacity < current * 1_000 * self.STALL_DELIVERY))
+                began = self._backoff_from
+                if stalled or (capacity <= 0 and now - self._restored_at > self.STALL_EPISODE_S):
+                    earlier = began[0] if began and now - began[1] <= self.STALL_EPISODE_S else 0.0
+                    if self._restore_kbps is not None:
+                        self._restore_kbps = max(self._restore_kbps, current, earlier)
+                    elif clean_kbps is not None:
+                        self._restore_kbps = min(max(current, earlier), clean_kbps)
+                elif (self._restore_kbps is not None and offered_bps is not None
+                      and capacity < self._restore_kbps * 1_000):
+                    self._restore_kbps = None
+                self._backoff_from = (current, now)
                 current = self._queue_backoff(current, capacity / 1_000, queue_s, now)
+                self._restore_after = now if stalled else self.hold_until
             return max(floor, min(ceiling, current))
         if drained:
             self.strikes = 0

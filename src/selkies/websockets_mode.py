@@ -4187,11 +4187,12 @@ class DataStreamingServer(BaseStreamingService):
             _spawn_background_task(_broadcast_to_clients(
                 self.clients, f"CC_RATE {held_kbps}", watched=True, only=id(ws)))
         if rate != round(current):
-            (data_logger.info if rate < current else data_logger.debug)(
+            (data_logger.info if rate < current or steer.restored else data_logger.debug)(
                 f"Congestion control[{display_id}]: video bitrate {current:.0f} -> {rate} kbps "
-                f"(round trip {least_ms:.0f} ms over a {floor_ms:.0f} ms floor, "
-                f"{delivered_bps / 1000:.0f} kbps delivered, the server's loop "
-                f"{display_state.get('loop_late_ms', 0.0):.0f} ms late)")
+                + ("(round trips back at the floor after a stall: the rate before it)" if steer.restored else
+                   f"(round trip {least_ms:.0f} ms over a {floor_ms:.0f} ms floor, "
+                   f"{delivered_bps / 1000:.0f} kbps delivered, the server's loop "
+                   f"{display_state.get('loop_late_ms', 0.0):.0f} ms late)"))
             try:
                 module.update_video_bitrate(rate)
                 self._track_capture_settings(display_id, video_bitrate_kbps=rate)

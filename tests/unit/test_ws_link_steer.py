@@ -308,6 +308,24 @@ run(320.0, t, 0.5, delivered_kbps=3000.0, sent_kbps=0.0)
 check("a tick the gate held part of is not taken for a trickle: its queue backs off", module.rates == [2200],
       module.rates)
 
+# A hold of the whole stream (the cut rig's 3.5 s stalls): the gate shuts with nothing acked over a path that
+# carried a quarter of what was sent, which backs off with no delivery measured; the gate lifts on the frames
+# the hold kept, acked late with what came after them, a shallow queue over a delivery the hold diluted; then
+# a still screen's trickle at the floor. The rate the hold cut comes back on the first such tick.
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5)
+t = run(20.0, t, 0.5, delivered_kbps=1000.0)
+state["backpressure_enabled"] = False
+t = run(20.0, t, 2.5, acks=False)
+cut = server._video_bitrate_kbps(state)
+state["backpressure_enabled"] = True
+state["gate_moved_at"] = t + 0.1
+t = run(220.0, t, 0.5, delivered_kbps=1000.0)
+t = run(20.0, t, 3, sent_kbps=100.0)
+check("a hold's cut comes back once the round trips are at the floor again, the gate's release not taken for "
+      "a path that slowed", cut < 4000 and server._video_bitrate_kbps(state) == 4000, (cut, module.rates))
+
 state = fresh_state()
 module.rates.clear()
 t = run(2.0, 0.0, 5)

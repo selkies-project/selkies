@@ -3506,10 +3506,11 @@ class WebRTCService(BaseStreamingService):
                 if held_kbps is not None:
                     rtc_app.send_cc_rate(did, held_kbps)
                 if target != round(current):
-                    (logger.info if target < current else logger.debug)(
+                    (logger.info if target < current or steer.restored else logger.debug)(
                         f"Congestion control[{did}]: video bitrate {current:.0f} -> {target:.0f} kbps "
-                        f"(goodput {min(goodputs) / 1e3:.1f} kbps, loss {worst_loss:.1%}, "
-                        f"queue {queue_ms or 0.0:.0f} ms)"
+                        + ("(the queue gone after a stall: the rate before it)" if steer.restored else
+                           f"(goodput {min(goodputs) / 1e3:.1f} kbps, loss {worst_loss:.1%}, "
+                           f"queue {queue_ms or 0.0:.0f} ms)")
                     )
                     await pipeline.set_video_bitrate(target)
 
