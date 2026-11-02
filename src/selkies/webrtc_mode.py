@@ -1913,6 +1913,10 @@ class WebRTCService(BaseStreamingService):
         if shown:
             peer["page_hidden_at"] = None
             peer["page_shown_at"] = time.monotonic()
+            if peer.pop("paused_on_hand_off", False):
+                # Paused when the display left it, by the server and not by its own STOP_VIDEO, so
+                # no START_VIDEO comes.
+                await self.handle_video_consumer_active(conn_id, display_id, True)
         elif peer.get("page_hidden_at") is None:
             peer["page_hidden_at"] = time.monotonic()
         await self._settle_display_owner(display_id)
@@ -2008,6 +2012,16 @@ class WebRTCService(BaseStreamingService):
         self._forget_path(display_id)
         logger.info(f"The owner of '{display_id}' {why} owns the display now "
                     f"(tab {tab[:8]}, the old owner's {(owner or 'none')[:8]}).")
+        # The old owner's pages that reported themselves hidden pause, as over WebSockets: a page
+        # frozen on hide (a phone) never sends its STOP_VIDEO, and would keep receiving frames.
+        for pid, p in (self.rtc_app.peer_connections.items() if self.rtc_app else ()):
+            if (owner and self._peer_tabs.get(pid) == owner and (p.get("display_id") or "primary") == display_id
+                    and p.get("page_hidden_at") is not None and not p.get("video_paused", False)):
+                p["video_paused"] = True
+                p["paused_on_hand_off"] = True
+                sender = p.get("video_sender")
+                if sender is not None:
+                    sender._enabled = False
 
     def _forget_path(self, display_id: str) -> None:
         """Drop what a display's congestion control learned about the path of the
@@ -2101,6 +2115,8 @@ class WebRTCService(BaseStreamingService):
         if peer is None:
             return
         peer["video_paused"] = not active
+        if active:
+            peer.pop("paused_on_hand_off", None)
         sender = peer.get("video_sender")
         if sender is not None:
             # A disabled sender keeps draining its relay proxy but sends no RTP,

@@ -38,8 +38,12 @@ unanswered) beside an owner whose hidden tab stopped the capture: the page
 gets the capture started again for it, while the hidden owner's own feed stays
 paused until it is shown.
 
+The ``frozen-wr`` block hides an owner over WebRTC whose page never sends its
+STOP_VIDEO (a phone frozen on hide): once the display goes to the page in
+view, the old owner's feed pauses, and resumes when it is shown.
+
 Usage: python3 tests/e2e/test_multi_controller.py
-    [websockets|webrtc|settings|settings-wr|nodisrupt|visible|visible-wr|inuse|inuse-wr|older|all]
+    [websockets|webrtc|settings|settings-wr|nodisrupt|visible|visible-wr|inuse|inuse-wr|older|frozen-wr|all]
 """
 import json
 import os
@@ -166,9 +170,18 @@ OLDER_PAGE_JS = """(() => {
 })();"""
 
 
-def open_page(pw, seed: dict, storage: dict = None, mode: str = "websockets", older: bool = False) -> tuple:
+# A page frozen on hide: its STOP_VIDEO never leaves.
+FROZEN_PAGE_JS = """(() => {
+  const send = RTCDataChannel.prototype.send;
+  RTCDataChannel.prototype.send = function (d) { if (d === 'STOP_VIDEO') return; return send.call(this, d); };
+})();"""
+
+
+def open_page(pw, seed: dict, storage: dict = None, mode: str = "websockets", older: bool = False,
+              frozen: bool = False) -> tuple:
     """A controller page of its own browser context, with `seed` stored before its first load,
-    from before the visibility hand-off where `older`; `(browser, page, console lines)`."""
+    from before the visibility hand-off where `older`, one that never sends its STOP_VIDEO where
+    `frozen`; `(browser, page, console lines)`."""
     browser = C.launch_browser(pw, "chromium")
     ctx = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                               device_scale_factor=1)
@@ -179,6 +192,8 @@ def open_page(pw, seed: dict, storage: dict = None, mode: str = "websockets", ol
         ctx.add_init_script(SEED_JS % (STORAGE_PREFIX_JS, json.dumps(seed)))
     if older:
         ctx.add_init_script(OLDER_PAGE_JS)
+    if frozen:
+        ctx.add_init_script(FROZEN_PAGE_JS)
     page = ctx.new_page()
     lines = []
     page.on("console", lambda m: lines.append(m.text))
@@ -580,6 +595,46 @@ def run_older(res: "H.Results") -> None:
         H.server_stop()
 
 
+def wr_frames(page) -> int:
+    """The video frames the page's peer connections have received."""
+    return page.evaluate("""async () => {
+      let n = 0;
+      for (const pc of window.__pcs || []) {
+        (await pc.getStats()).forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'video') n += r.framesReceived || 0; });
+      }
+      return n;
+    }""")
+
+
+def run_frozen_wr(res: "H.Results") -> None:
+    H.server_start(mode="webrtc")
+    picture = TENC.Picture(False, live=True)
+    try:
+        with sync_playwright() as pw:
+            owner_browser, owner, _ = open_page(pw, {}, mode="webrtc", frozen=True)
+            res.check("frozen-wr: the owner streams", video(owner, "webrtc"))
+            other_browser, other, _ = open_page(pw, {}, mode="webrtc")
+            res.check("frozen-wr: a page of another tab streams beside it", video(other, "webrtc"))
+            picture.paint()
+            hide(owner, True)
+            res.check("frozen-wr: hidden with no STOP_VIDEO, the owner hands the display to the page in view",
+                      C.wait_log("owns the display now", timeout=15))
+            time.sleep(1.0)
+            before = wr_frames(owner)
+            time.sleep(2.5)
+            res.check("frozen-wr: and its own feed pauses", wr_frames(owner) - before <= 1, wr_frames(owner) - before)
+            hide(owner, False)
+            time.sleep(1.5)
+            before = wr_frames(owner)
+            time.sleep(2.5)
+            res.check("frozen-wr: shown again, its feed resumes", wr_frames(owner) > before, wr_frames(owner) - before)
+            other_browser.close()
+            owner_browser.close()
+    finally:
+        picture.clear()
+        H.server_stop()
+
+
 def main() -> int:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     res = H.Results(f"multi-controller-{which}")
@@ -602,6 +657,8 @@ def main() -> int:
         run_inuse(res, "webrtc")
     if which in ("all", "older"):
         run_older(res)
+    if which in ("all", "frozen-wr"):
+        run_frozen_wr(res)
     return 0 if res.summary() else 1
 
 
