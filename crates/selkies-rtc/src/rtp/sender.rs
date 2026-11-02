@@ -306,6 +306,9 @@ pub trait SenderHooks {
     fn on_frame_left_out(&mut self) {}
     /// A described frame's last packet left for the peer.
     fn on_frame_out(&mut self, _frame_id: u16, _keyframe: bool) {}
+
+    /// A frame's last packet left the pacer, for a measurement of the send path.
+    fn on_frame_left(&mut self, _timing: Option<FrameTiming>, _size: usize, _keyframe: bool) {}
     /// Transport-cc reported each of a frame's packets received and the frame it predicts
     /// from is held.
     fn on_frame_held(&mut self, _frame_id: u16, _keyframe: bool) {}
@@ -1172,6 +1175,7 @@ impl RtpSender {
         if let Some(frame_id) = end.frame_id {
             self.hooks.on_frame_out(frame_id, end.keyframe);
         }
+        self.hooks.on_frame_left(end.timing, end.size, end.keyframe);
         self.frame_left = Some((tag, at));
         while self
             .in_flight
