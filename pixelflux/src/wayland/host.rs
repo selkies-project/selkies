@@ -106,6 +106,10 @@ const KEYMAP_FORMAT_XKB_V1: u32 = 1;
 /// one being blitted by the compositor while the previous one is encoded.
 const SLOTS: usize = 2;
 
+/// The generation of a retained frame the session copied out of its buffer
+/// (`HostSession::detach_retained`): no capture's, so releasing it reaches no slot.
+const DETACHED: u64 = u64::MAX;
+
 /// A frame the compositor finished blitting, ready for the encoder.
 pub struct HostFrame {
     pub(crate) generation: u64,
@@ -1574,6 +1578,52 @@ impl HostSession {
         };
         let old = handle.retained.lock().unwrap().replace(frame);
         if let Some(old) = old {
+            handle.send(ToHost::Release {
+                generation: old.generation,
+                slot: old.slot,
+            });
+        }
+    }
+
+    /// Under portal capture, swap the software frame retained for `display_id` for a copy of its
+    /// pixels and give the stream its buffer back: a compositor driving its stream (KWin) sends
+    /// no cursor update while short of buffers, and a still screen would hold one for as long
+    /// as it stands.
+    pub fn detach_retained(&self, display_id: u32) {
+        if self.portal.is_none() {
+            return;
+        }
+        let Some(handle) = self
+            .output_index_for(display_id)
+            .and_then(|i| self.outputs.get(i))
+        else {
+            return;
+        };
+        let mut retained = handle.retained.lock().unwrap();
+        let Some(f) = retained.as_ref() else {
+            return;
+        };
+        let Some(cpu) = f.cpu.as_ref().filter(|_| f.generation != DETACHED) else {
+            return;
+        };
+        let mut bgra = vec![0u8; f.width.max(0) as usize * f.height.max(0) as usize * 4];
+        cpu.write_bgra(f.width, f.height, &mut bgra);
+        let copy = HostFrame {
+            generation: DETACHED,
+            slot: 0,
+            dmabuf: None,
+            cpu: Some(HostCpuFrame {
+                map: Arc::new(bgra),
+                offset: 0,
+                stride: f.width.max(0) as usize * 4,
+                format: wl_shm::Format::Argb8888 as u32,
+            }),
+            width: f.width,
+            height: f.height,
+            damage: f.damage.clone(),
+            stamp_ns: f.stamp_ns,
+        };
+        if let Some(old) = retained.replace(copy) {
             handle.send(ToHost::Release {
                 generation: old.generation,
                 slot: old.slot,

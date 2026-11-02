@@ -3925,6 +3925,9 @@ fn render_node_tick(
                 .since_last_tick(now)
                 .is_none_or(|since| since >= capture_period(cap).mul_f64(HOST_QUIET_PERIODS))
         });
+        if !have_new && host_quiet {
+            host.detach_retained(host_idx);
+        }
         if !have_new
             && !want_idr_for_host
             && !take_screenshot
