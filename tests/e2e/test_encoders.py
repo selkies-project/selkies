@@ -414,6 +414,10 @@ def block_striped(mode: str, wayland: bool, res: "H.Results", engine: str = "chr
 
 def block_cpu(mode: str, wayland: bool, res: "H.Results", engine: str = "chromium") -> None:
     tag = "cpu" if engine == "chromium" else "cpu " + engine
+    if mode == "webrtc" and engine == "firefox" and not C.openh264_version():
+        res.skip(f"{tag}: no OpenH264 GMP plugin in {C.FF_E2E_PROFILE}",
+                 "run tests/tools/fetch-openh264.sh to cover H.264 in Firefox")
+        return
     H.server_start(mode=mode, wayland=wayland,
                    extra_env={"SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true"})
     picture = Picture(wayland, live=mode == "webrtc")
