@@ -11,7 +11,7 @@
 # drift apart.
 set -eu
 
-test -f pyproject.toml
+test -f Cargo.toml
 
 # The dashboard carries its own ESLint and eslint.config.js.
 pkg=addons/selkies-dashboard
