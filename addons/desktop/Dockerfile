@@ -199,9 +199,8 @@ RUN set -eu; \
 # is checked, so an upstream file that no longer matches fails the build
 # rather than a session.
 RUN set -eu; \
-    icons="$(python3 -I -c 'import importlib.util as u; print(u.find_spec("selkies").submodule_search_locations[0])')/selkies_web"; \
     mkdir -pm755 /usr/share/selkies/www; \
-    cp "${icons}/icon-512.png" /usr/share/selkies/www/icon.png; \
+    cp /usr/local/share/selkies/web/icon-512.png /usr/share/selkies/www/icon.png; \
     if grep -q '^gtk-icon-theme-name' /etc/gtk-3.0/settings.ini; then \
         sed -i 's/^gtk-icon-theme-name.*/gtk-icon-theme-name = breeze/' /etc/gtk-3.0/settings.ini; \
     else \

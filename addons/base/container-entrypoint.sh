@@ -14,7 +14,7 @@
 
 set -e
 
-# A configured value as settings.py reads one: the field before any |suffix,
+# A configured value as the server's settings read one: the field before any |suffix,
 # trimmed of surrounding whitespace. Every reader has to agree on this rule or
 # the same deployment is configured two ways at once.
 setting_value() {
@@ -23,7 +23,7 @@ setting_value() {
   printf '%s' "${value%"${value##*[![:space:]]}"}"
 }
 
-# Mirrors settings.py parse_bool: "true" or "1", case-insensitively; anything
+# Mirrors the server's bool parsing (crates/selkies/src/settings): "true" or "1", case-insensitively; anything
 # else — a blank value included — is false.
 is_true() {
   local value
@@ -54,7 +54,7 @@ if [ -n "${PASSWD-}" ]; then
     echo "$(id -nu):${PASSWD}" | sudo-root chpasswd 2>/dev/null ||
     echo "selkies: cannot change the password of $(id -nu)" >&2
 fi
-# The login selkies resolves from these variables, in settings.py's order, is one
+# The login selkies resolves from these variables, in the server's order, is one
 # anybody knows while it is still the PASSWD this image publishes.
 if { [ -z "$(setting_value "${SELKIES_ENABLE_BASIC_AUTH-}")" ] || is_true "${SELKIES_ENABLE_BASIC_AUTH-}"; } &&
   [ "${SELKIES_BASIC_AUTH_PASSWORD-${PASSWORD-${PASSWD-}}}" = "mypasswd" ]; then
@@ -97,7 +97,7 @@ if [ ! -d /dev/input ]; then
   mkdir -pm1777 /dev/input || sudo-root mkdir -pm1777 /dev/input || echo 'Failed to create the /dev/input directory the joystick interposer lists into'
 fi
 
-# Backend switch, in settings.py's own order: SELKIES_WAYLAND first, the legacy
+# Backend switch, in the server's own order: SELKIES_WAYLAND first, the legacy
 # PIXELFLUX_WAYLAND after, and a set-but-blank variable counting as set. The
 # service set below would otherwise start an X11 session for a Wayland capture.
 if is_true "${SELKIES_WAYLAND-${PIXELFLUX_WAYLAND-false}}"; then
@@ -106,7 +106,7 @@ else
   export SELKIES_WAYLAND="false"
 fi
 
-# Transport mode, canonicalized the way settings.py reads its enum values, so
+# Transport mode, canonicalized the way the server reads its enum values, so
 # the service set below and selkies itself see the same choice. Left unset
 # when not configured: the settings default applies.
 SELKIES_MODE="$(setting_value "${SELKIES_MODE-}")"
@@ -253,8 +253,7 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
       SELKIES_WAYLAND_COMPOSITOR=none
     elif [ -n "${WAYLAND_DISPLAY-}" ] \
        && [ -S "${_wl_sock}" ] \
-       && python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close()' \
-            "${_wl_sock}" 2>/dev/null; then
+       && nc -Uz "${_wl_sock}" 2>/dev/null; then
       echo "Wayland compositor detected at ${_wl_sock}: capturing it directly"
       export SELKIES_WAYLAND_HOST_DISPLAY="${_wl_sock}"
       SELKIES_WAYLAND_COMPOSITOR=none

@@ -12,8 +12,7 @@
 //! back. The crate links both capture libraries directly as Rust, with no interpreter in
 //! the process, and `main.rs` is the `selkies` executable.
 //!
-//! The suites under `tests/` drive this server over its public interfaces, as they do the
-//! Python server under `src/selkies`.
+//! The suites under `tests/` drive this server over its public interfaces.
 
 pub mod audio;
 pub mod capture;

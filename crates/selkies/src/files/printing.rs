@@ -46,9 +46,9 @@ use super::{FilesState, RequestAuth, text};
 pub const SETTLE_SECONDS: f64 = 0.5;
 
 /// The queue's CUPS backend, written into the scheduler's private tree.
-const BACKEND: &[u8] = include_bytes!("../../../../src/selkies/cups/backend");
+const BACKEND: &[u8] = include_bytes!("../../assets/cups/backend");
 /// The queue's PPD, as shipped (A4).
-const PPD: &str = include_str!("../../../../src/selkies/cups/selkies.ppd");
+const PPD: &str = include_str!("../../assets/cups/selkies.ppd");
 
 /// The print spool: `configured` when set (`~` expanded), else `selkies/print` under the XDG
 /// state directory, as the server's other state is.

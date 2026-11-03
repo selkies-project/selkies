@@ -49,6 +49,17 @@ fn resize_tool(prog: &str, args: &[String]) -> i32 {
     0
 }
 
+/// `selkies manual-size [server arguments]`: the `WxH` a manual resolution locks the stream to,
+/// resolved from the arguments and environment the server would be started with, or nothing
+/// where none is set; the image's entrypoint presets the X display to it before the server starts.
+fn manual_size_tool(_prog: &str, args: &[String]) -> i32 {
+    let resolved = Settings::parse(args, &|name| std::env::var(name).ok());
+    if resolved.manual_resolution().on {
+        println!("{}x{}", resolved.manual_width(), resolved.manual_height());
+    }
+    0
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version") {
@@ -65,6 +76,7 @@ fn main() -> ExitCode {
     }
     selkies::commands::install_tool("gpu-probe", gpu_probe_tool);
     selkies::commands::install_tool("resize", resize_tool);
+    selkies::commands::install_tool("manual-size", manual_size_tool);
     if let Some(status) = selkies::commands::run(&std::env::args().collect::<Vec<_>>()) {
         return ExitCode::from(status.clamp(0, 255) as u8);
     }

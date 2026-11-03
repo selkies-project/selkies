@@ -39,6 +39,10 @@ pub const COMMANDS: &[Command] = &[
         summary: "resize the X display to WxH",
     },
     Command {
+        name: "manual-size",
+        summary: "print the WxH a manual resolution locks the stream to, given the server's arguments",
+    },
+    Command {
         name: "gpu-probe",
         summary: "report the GPU a session renders and encodes on",
     },

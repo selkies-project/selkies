@@ -30,17 +30,25 @@ use super::listen::{ConnInfo, ipv6_loopback_redirect};
 use super::{AppState, WEB_CODE};
 
 /// The directory the bundled web client is read from: `SELKIES_WEB_BUNDLE` when set, else
-/// `src/selkies/selkies_web` relative to this crate's manifest at build time. None when
-/// neither holds an `index.html`.
+/// `share/selkies/web` beside the directory the executable is installed in (the images'
+/// `/usr/local/bin` and `/usr/local/share/selkies/web`, an AppImage's `usr/bin` and
+/// `usr/share`), else `dist/web`, where `scripts/ci/build-web.sh` writes it, in the tree this
+/// crate was built from. None when none holds an `index.html`.
 pub fn bundle_dir() -> Option<PathBuf> {
     let configured = std::env::var("SELKIES_WEB_BUNDLE")
         .ok()
         .filter(|p| !p.trim().is_empty());
-    let dir = match configured {
-        Some(path) => PathBuf::from(path.trim()),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/selkies/selkies_web"),
-    };
-    dir.join("index.html").is_file().then_some(dir)
+    if let Some(path) = configured {
+        let dir = PathBuf::from(path.trim());
+        return dir.join("index.html").is_file().then_some(dir);
+    }
+    let installed = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("share/selkies/web")));
+    installed
+        .into_iter()
+        .chain([Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/web")])
+        .find(|dir| dir.join("index.html").is_file())
 }
 
 /// Resolve the directory the web client is served from: `web_root` when it holds an
