@@ -23,7 +23,6 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO, "src"))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 import core_lib as C  # noqa: E402
@@ -151,7 +150,6 @@ def main() -> H.Results:
     try:
         H.server_start(mode="websockets", wayland=False, extra_env={
             # The server imports this worktree rather than the editable install.
-            "PYTHONPATH": os.path.join(REPO, "src"),
             "SELKIES_AUDIT_WEBHOOK_URL": collector.url,
             "SELKIES_AUDIT_WEBHOOK_TOKEN": TOKEN,
             "SELKIES_AUDIT_WEBHOOK_TIMEOUT": str(TIMEOUT),
@@ -221,11 +219,10 @@ def main() -> H.Results:
         churn.start()
         try:
             H.server_start(mode="websockets", wayland=False, extra_env={
-                "PYTHONPATH": os.path.join(REPO, "src"), "SELKIES_FILE_MANAGER_PATH": files})
+                "SELKIES_FILE_MANAGER_PATH": files})
             quiet = asyncio.run(frames_while_pasting(8))
             collector.stall.set()
             H.server_start(mode="websockets", wayland=False, extra_env={
-                "PYTHONPATH": os.path.join(REPO, "src"),
                 "SELKIES_AUDIT_WEBHOOK_URL": collector.url,
                 "SELKIES_AUDIT_WEBHOOK_TIMEOUT": str(TIMEOUT),
                 "SELKIES_FILE_MANAGER_PATH": files})

@@ -69,7 +69,7 @@ def paint_regions(layout: dict):
     Returns the connection; the drawing outlives it, but keeping it open costs
     nothing and keeps the caller symmetric with the window-based helpers.
     """
-    from selkies.Xlib import display as xdisp
+    from Xlib import display as xdisp
 
     d = xdisp.Display(H.require_display())
     root = d.screen().root

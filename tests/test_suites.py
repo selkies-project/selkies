@@ -23,7 +23,7 @@ import helpers
 import suites
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
-PYTHON = os.environ.get("SELKIES_TEST_PYTHON", sys.executable)
+PYTHON = sys.executable
 
 CASES: list = [
     pytest.param(path, selector, timeout,

@@ -218,7 +218,7 @@ def resize_desktop(width: int, height: int) -> tuple:
     Returns:
         The root size realized.
     """
-    subprocess.run([H.PYTHON, "-m", "selkies.display_utils", f"{width}x{height}"],
+    subprocess.run([H.SERVER, "resize", f"{width}x{height}"],
                    env={**os.environ, "DISPLAY": H.require_display()},
                    capture_output=True, timeout=60)
     return H.x_root_size()

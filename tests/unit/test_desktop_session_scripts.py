@@ -154,7 +154,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # Xft resources reach a toolkit only at start, so on X11 the DPI ladder's reload
 # signal needs an XSETTINGS manager to signal, or running apps keep their density.
-ladder = open(os.path.join(REPO, "src", "selkies", "display_utils.py")).read()
+ladder = open(os.path.join(REPO, "crates", "selkies", "src", "display", "dpi.rs")).read()
 xsettingsd_service = os.path.join(BASE, "services", "xsettingsd", "run")
 check("the DPI ladder's XSETTINGS manager is a service",
       "xsettingsd" not in ladder or os.path.isfile(xsettingsd_service),

@@ -28,7 +28,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "perf"))
 import helpers as H  # noqa: E402
 import test_pacer as rig  # noqa: E402
-from selkies.webrtc.utils import uint16_gt, uint16_gte  # noqa: E402
+
+
+def uint16_gt(a: int, b: int) -> bool:
+    """Whether RTP sequence number `a` is after `b`, across the 16-bit wrap."""
+    return ((a < b) and ((b - a) > 0x8000)) or ((a > b) and ((a - b) < 0x8000))
+
+
+def uint16_gte(a: int, b: int) -> bool:
+    return a == b or uint16_gt(a, b)
 
 WIDTH, HEIGHT = 1280, 720
 PAINTER = os.path.join(H.TOOLS, "motion_scene.py")

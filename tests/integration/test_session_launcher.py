@@ -34,7 +34,7 @@ import websockets
 SETTINGS = {"displayId": "primary", "initialClientWidth": 1280, "initialClientHeight": 720,
             "manual_resolution": False, "framerate": 60, "encoder": "jpeg", "video_crf": 25,
             "video_bitrate": 6000, "audio_bitrate": 128000, "scaling_dpi": 96, "displayPosition": "right"}
-LAUNCHER = [H.PYTHON, "-m", "selkies.session"]
+LAUNCHER = [H.SERVER, "session"]
 
 
 def status(port: int, path: str = "/api/health") -> int:

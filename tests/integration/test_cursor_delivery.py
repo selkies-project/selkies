@@ -47,7 +47,7 @@ class CursorWindow:
     """
 
     def __init__(self):
-        from selkies.Xlib import X
+        from Xlib import X
         self.d = H.x_display()
         self.root = self.d.screen().root
         self.font = self.d.open_font("cursor")

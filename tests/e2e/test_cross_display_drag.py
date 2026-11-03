@@ -341,7 +341,7 @@ def managed_window_drag(res: "H.Results", mode: str, page: Any, seam: int,
         res.skip(f"[{mode}] a managed window follows the drag across the seam",
                  "no window manager or xdotool on PATH")
         return
-    from selkies.Xlib import X, display as x11_display
+    from Xlib import X, display as x11_display
 
     display_name = H.require_display()
     env = {**os.environ, "DISPLAY": display_name}

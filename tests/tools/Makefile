@@ -4,8 +4,8 @@
 #                     diverts the event writes to a file, so the kernel gamepad
 #                     path runs on hosts (CI included) with no uinput node
 #   uinput_abi_truth  prints the ioctl encodings and struct sizes the kernel
-#                     headers define, which tests/unit compares against the
-#                     constants in selkies.input_handler
+#                     headers define, which the server's gamepad tests
+#                     (crates/selkies/src/gamepad) compare against its constants
 #   v4l2probe         libc-only V4L2 capture client (enumerate, MMAP or read()
 #                     stream, pixel samples), run under the V4L2 interposer or
 #                     against a kernel device by the webcam tests

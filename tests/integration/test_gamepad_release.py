@@ -5,6 +5,7 @@ any layer — via the held-state heartbeat sweep."""
 import os
 import struct
 import sys
+import types
 import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
@@ -12,7 +13,10 @@ import core_lib as C
 import psutil
 from playwright.sync_api import sync_playwright
 sys.path.insert(0, H.SRC)
-import selkies.input_handler as ih
+# Linux input event codes (linux/input-event-codes.h), and the name of the standard pad the
+# server publishes.
+codes = types.SimpleNamespace(EV_KEY=0x01, BTN_A=0x130, BTN_Y=0x134,
+                              STANDARD_XPAD_CONFIG={"name": "Microsoft X-Box 360 pad"})
 
 PAD: str = H.pad_init_js()
 
@@ -62,11 +66,11 @@ for mode in ("websockets", "webrtc"):
                 while time.time() < deadline:
                     page.evaluate("window.__padPress(0, 1)")
                     time.sleep(0.4)
-                    if (ih.EV_KEY, ih.BTN_A, 1) in decode(STREAM):
+                    if (codes.EV_KEY, codes.BTN_A, 1) in decode(STREAM):
                         break
                 held = decode(STREAM)
                 tag = "" if death == "close" else " before kill"
-                res.check(f"{mode}: button held{tag}", (ih.EV_KEY, ih.BTN_A, 1) in held)
+                res.check(f"{mode}: button held{tag}", (codes.EV_KEY, codes.BTN_A, 1) in held)
                 if death == "close":
                     browser.close()
                 else:
@@ -77,7 +81,7 @@ for mode in ("websockets", "webrtc"):
                         pass
                 deadline = time.time() + 30
                 while time.time() < deadline:
-                    if (ih.EV_KEY, ih.BTN_A, 0) in decode(STREAM):
+                    if (codes.EV_KEY, codes.BTN_A, 0) in decode(STREAM):
                         break
                     time.sleep(1)
                 waited = round(time.time() - (deadline - 30), 1)
@@ -85,7 +89,7 @@ for mode in ("websockets", "webrtc"):
                          if death == "close" else
                          "held button released on ungraceful kill")
                 res.check(f"{mode}: {label}",
-                          (ih.EV_KEY, ih.BTN_A, 0) in decode(STREAM), f"after {waited}s")
+                          (codes.EV_KEY, codes.BTN_A, 0) in decode(STREAM), f"after {waited}s")
         finally:
             H.server_stop()
 sys.exit(0 if res.summary() else 1)

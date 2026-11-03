@@ -22,7 +22,6 @@ ENTRYPOINT = os.path.join(REPO, "addons", "base", "container-entrypoint.sh")
 STOP_AT = "# Derive the service set from the environment toggles"
 
 sys.path.insert(0, TESTS)
-sys.path.insert(0, os.path.join(REPO, "src"))
 import helpers as H  # noqa: E402
 
 passed = failed = 0

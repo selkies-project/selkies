@@ -126,7 +126,7 @@ class XWatcher:
     """
 
     def __init__(self) -> None:
-        from selkies.Xlib import display as xdisp, X
+        from Xlib import display as xdisp, X
         self.X = X
         self.d = xdisp.Display(H.require_display())
         scr = self.d.screen()

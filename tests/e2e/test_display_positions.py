@@ -129,7 +129,17 @@ async def drive(res: "H.Results") -> None:
     time: the server debounces reconnects, and a live position change is what a
     client does anyway.
     """
-    from selkies.display_utils import WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id
+    # The compositor's output ids, as the server assigns them: screen 0 for the primary's
+    # screen, N for 'displayN', 2 for a secondary name without usable digits.
+    WAYLAND_SCREEN_OUTPUT_ID = 0
+
+    def wayland_output_id(display_id):
+        if not display_id or display_id == "primary":
+            return 1
+        name = str(display_id)
+        digits = name[len(name.rstrip("0123456789")):]
+        n = int(digits) if 0 < len(digits) <= 9 else 2
+        return n if n >= 2 else 2
 
     uri = f"ws://localhost:{H.PORT}/api/websockets"
     async with websockets.connect(uri, max_size=None) as primary:

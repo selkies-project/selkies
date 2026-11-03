@@ -53,4 +53,4 @@ repos:
         args: [--check]
         language: script
         pass_filenames: false
-        files: ^(src/selkies/stream_server\.py|addons/selkies-web-core/nginx/.*\.html|scripts/generate-file-index\.py)$
+        files: ^(crates/selkies/src/files/index_html\.rs|addons/selkies-web-core/nginx/.*\.html|scripts/generate-file-index\.py)$

@@ -46,7 +46,7 @@ def silent_owner() -> Any:
     Returns:
         The connection; closing it releases the selection.
     """
-    from selkies.Xlib import display as xdisp, X
+    from Xlib import display as xdisp, X
     d = xdisp.Display(H.require_display())
     scr = d.screen()
     win = scr.root.create_window(0, 0, 1, 1, 0, scr.root_depth,
