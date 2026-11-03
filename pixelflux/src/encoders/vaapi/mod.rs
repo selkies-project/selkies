@@ -53,6 +53,7 @@ use super::codec::{
     Codec, Hardware, VIDEO_HEADER_LEN, av1_is_key, frame_type_from_key, h264_frame_type,
     h265_frame_type, push_video_header, vp8_is_key, vp9_is_key,
 };
+use super::dmabuf_identity::DmaBufIdentity;
 use super::frame_rate::FrameRate;
 use super::reference::{
     ANCHORS, Invalidation, REFERENCE_FRAMES, Reference, ReferenceReport, ReferenceSlots,
@@ -966,6 +967,9 @@ struct HostUpload {
     image: Option<VAImage>,
 }
 
+/// The dmabuf imports a zero-copy session keeps, past the few buffers any capture cycles.
+const DMABUF_IMPORTS: usize = 8;
+
 /// One VA-API encoder session, hardware, for one capture.
 pub struct VaapiEncoder {
     codec: Codec,
@@ -988,6 +992,9 @@ pub struct VaapiEncoder {
     /// The converted picture the encoder reads.
     converted: Vec<VASurfaceID>,
     host: Option<HostUpload>,
+    /// The surface over each dmabuf a zero-copy session encoded, by fd, oldest first, at most
+    /// `DMABUF_IMPORTS` (`dmabuf_surface`).
+    imports: Vec<(i32, DmaBufIdentity, VASurfaceID)>,
     coded: VABufferID,
     arm: Arm,
     references: Option<References>,
@@ -1056,6 +1063,7 @@ impl Drop for VaapiEncoder {
             let mut surfaces = self.recon.clone();
             surfaces.extend(&self.converted);
             surfaces.extend(self.host.iter().map(|h| h.surface));
+            surfaces.extend(self.imports.iter().map(|i| i.2));
             self.device.destroy_surfaces(&mut surfaces);
             if self.vpp_config != VA_INVALID_ID {
                 (api.vaDestroyConfig)(display, self.vpp_config);
@@ -1330,6 +1338,7 @@ impl VaapiEncoder {
             frame_count: 0,
             key_count: 0,
             surfaces_of: HashMap::new(),
+            imports: Vec::new(),
             last_reference: Reference::Untracked,
             rate,
             qp: codec.hardware_quantizer(device.hardware(), settings.video_crf),
@@ -2115,10 +2124,54 @@ impl VaapiEncoder {
         if self.input != Input::Dmabuf {
             return Err("this session takes host frames".into());
         }
-        let surface = self.import_dmabuf(dmabuf)?;
+        let surface = self.dmabuf_surface(dmabuf)?;
         let result = self.encode_surface(surface, frame_number, crf, force_idr);
-        self.device.destroy_surfaces(&mut [surface]);
+        if result.is_err() {
+            self.forget_import(surface);
+        }
         result
+    }
+
+    /// The VA surface over `dmabuf`, imported once and kept while its fd names the same buffer
+    /// (`DmaBufIdentity`). A capture cycles a few buffers, and a surface made anew each frame
+    /// costs the driver a fresh bind of the buffer into the GPU's address space on every
+    /// submission: on a discrete Arc at 1080p and 240 fps, a quarter of the capture thread's CPU
+    /// and 0.3 ms of each encode. The surface holds its own reference to the buffer, so a dropped
+    /// capture buffer is released once its entry is evicted or the session ends.
+    fn dmabuf_surface(&mut self, dmabuf: &Dmabuf) -> Result<VASurfaceID, String> {
+        let fd = dmabuf
+            .handles()
+            .next()
+            .map(|h| h.as_raw_fd())
+            .ok_or("the dmabuf carries no object")?;
+        let identity = DmaBufIdentity::probe(
+            fd,
+            u64::from(dmabuf.format().modifier),
+            dmabuf.width(),
+            dmabuf.height(),
+        );
+        if let Some(at) = self.imports.iter().position(|i| i.0 == fd) {
+            if self.imports[at].1 == identity {
+                return Ok(self.imports[at].2);
+            }
+            let (_, _, stale) = self.imports.remove(at);
+            self.device.destroy_surfaces(&mut [stale]);
+        }
+        let surface = self.import_dmabuf(dmabuf)?;
+        if self.imports.len() == DMABUF_IMPORTS {
+            let (_, _, oldest) = self.imports.remove(0);
+            self.device.destroy_surfaces(&mut [oldest]);
+        }
+        self.imports.push((fd, identity, surface));
+        Ok(surface)
+    }
+
+    /// Release the import behind `surface`, which a failed encode leaves in doubt.
+    fn forget_import(&mut self, surface: VASurfaceID) {
+        if let Some(at) = self.imports.iter().position(|i| i.2 == surface) {
+            self.imports.remove(at);
+            self.device.destroy_surfaces(&mut [surface]);
+        }
     }
 
     /// A VA surface over a dmabuf: through the PRIME 2 descriptor, which carries the format

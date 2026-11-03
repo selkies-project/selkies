@@ -14,6 +14,8 @@ pub mod bits;
 pub(crate) mod blit_semaphore;
 /// Codec identities, wire framing, quantizer domains, level ladders, bitstream reads.
 pub mod codec;
+/// The identity of a dmabuf behind an fd, for the sessions that keep an import of each buffer.
+pub(crate) mod dmabuf_identity;
 /// A frame rate as the fraction encoder parameters and bitstream timing take.
 pub mod frame_rate;
 /// Software HEVC: x265 with the `gpl` feature, kvazaar without it.
