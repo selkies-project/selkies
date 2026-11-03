@@ -2179,6 +2179,8 @@ class AppSettings:
             self.microphone_enabled = (False, self.microphone_enabled[1])
 
         mode = str(self.enable_clipboard).split("|")[0].strip().lower()
+        # The bool spellings every other switch takes, so "0" turns the clipboard off.
+        mode = {"1": "true", "0": "false"}.get(mode, mode)
         if mode not in ("true", "false", "in", "out"):
             logger.warning(
                 "Invalid enable_clipboard value %r; using 'true'.", self.enable_clipboard

@@ -158,6 +158,18 @@ out = subprocess.run(
              SELKIES_ENCODER="X264enc")).stdout.strip()
 check("the x264enc alias resolves however it is cased", out == "h264enc", out)
 
+# The clipboard policy is a string, but an operator who switches it off the way
+# every other switch is switched off has to get it off, not the default of both
+# directions.
+for value, want in (("0", "false"), ("1", "true"), ("0|locked", "false"),
+                    (" False ", "false"), ("out", "out")):
+    out = subprocess.run(
+        [sys.executable, "-c", "import selkies.settings as s; print(s.settings.enable_clipboard)"],
+        capture_output=True, text=True, timeout=120,
+        env=dict(os.environ, PYTHONPATH=os.path.join(REPO, "src"),
+                 SELKIES_ENABLE_CLIPBOARD=value)).stdout.strip()
+    check(f"a clipboard policy of {value!r} resolves to {want!r}", out == want, out)
+
 # Every route is built as prefix + "/api/...", so the prefix an operator types
 # has to reach the routes as the one spelling that composes. "/" is the root:
 # read literally it would make every route start with two slashes.
