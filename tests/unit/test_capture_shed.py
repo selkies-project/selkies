@@ -110,7 +110,7 @@ async def probed(over: int, passed: int) -> list:
     service._congestion_steer = {"primary": steer}
     service._path_probes, service._padding, service._rate_holds, service._link_allowances = \
         {"primary": probe}, {}, {}, {}
-    service._shed_fps, service._budget_counts = {}, {"primary": (0, 0)}
+    service._audio_sent, service._shed_fps, service._budget_counts = {}, {}, {"primary": (0, 0)}
     service._display_setting = lambda did, key: 6000
     service.display_pipelines = {"primary": pipeline}
     service._ensure_pacer = Mock()

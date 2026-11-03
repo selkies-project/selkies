@@ -84,6 +84,7 @@ class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
         service.args = SimpleNamespace(congestion_control=True)
         service._congestion_steer, service._rate_holds, service._link_allowances = {}, {}, {}
         service._path_probes, service._padding = {}, {}
+        service._audio_sent = {}
         if steer is not None:
             service._congestion_steer["primary"] = steer
         if before is not None:

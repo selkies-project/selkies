@@ -178,6 +178,12 @@ FPS_KEEP_SHARE = 0.1
 FPS_RISE = 1.25
 FPS_FLOOR = 2.0
 FPS_MIN_FRAMES = 4
+# Audio shares a peer's transport, and transport-cc counts its packets in what the path delivered: congestion control
+# steers the video by what is left of it (`_audio_bps`). While the video target is cut and a peer's audio takes more
+# than AUDIO_SHARE of the path's delivery, its RED redundancy drops a payload a tick, coming back one a tick once
+# the deeper stream would take under half that share, or the target is back at its ceiling (`_shed_red`): RED's
+# depth multiplies audio's rate, 128 kbit/s at a depth of two near 400 (#503).
+AUDIO_SHARE = 0.5
 PAD_STEP_S = 0.005
 
 def get_server_settings() -> Dict[str, Any]:
@@ -304,6 +310,8 @@ class WebRTCService(BaseStreamingService):
         # The capture rate congestion control shed to by display (`_shed_frames`), and the bridge's counts it read.
         self._shed_fps: Dict[str, float] = {}
         self._budget_counts: Dict[str, Tuple[int, int]] = {}
+        # Each peer's audio octets sent and when, at the last tick (`_audio_bps`).
+        self._audio_sent: Dict[str, Tuple[int, float]] = {}
         self._padding: Dict[str, Dict[str, Any]] = {}
         # The browser tab of each peer (its signaling HELLO), and per display the
         # tab whose controller owns it: a controller of another tab streams and
@@ -3464,6 +3472,8 @@ class WebRTCService(BaseStreamingService):
             padded_owner: Dict[str, List[Any]] = {}
             # Every peer's video sender, whose repairs the display's steered rate bounds.
             repairing: Dict[str, List[Any]] = {}
+            for gone in set(self._audio_sent) - set(rtc_app.peer_connections):
+                self._audio_sent.pop(gone, None)
             for peer_id, peer in rtc_app.peer_connections.items():
                 pc = peer.get("peer_conn")
                 did = peer.get("display_id", "primary") or "primary"
@@ -3482,8 +3492,11 @@ class WebRTCService(BaseStreamingService):
                         logger.exception("_ensure_pacer failed (display %s)", did)
                 transport = getattr(getattr(pc, "sctp", None), "transport", None)
                 window = transport.take_twcc_window() if transport is not None else None
+                audio_bps = self._audio_bps(peer_id, peer.get("audio_sender"))
                 if window is None:
                     continue
+                video_goodput = window["goodput_bps"] and max(
+                    1, window["goodput_bps"] - audio_bps * (1.0 - window["loss_fraction"]))
                 standing = None if window["queue_ms"] is None else max(
                     window["queue_ms"], window["queue_rising_ms"] or 0.0)
                 sender = peer.get("video_sender")
@@ -3492,9 +3505,11 @@ class WebRTCService(BaseStreamingService):
                 for buckets in ((per_display, by_owner) if self._peer_owns_display(peer_id) else (per_display,)):
                     bucket = buckets.setdefault(
                         did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0, "sent_bps": 0,
-                              "padding_bps": 0, "rooms": [], "paces": [], "transports": []})
-                    if window["goodput_bps"]:
-                        bucket["goodputs"].append(window["goodput_bps"])
+                              "padding_bps": 0, "rooms": [], "paces": [], "transports": [], "audio": []})
+                    if video_goodput:
+                        bucket["goodputs"].append(video_goodput)
+                    if audio_bps and window["goodput_bps"]:
+                        bucket["audio"].append((peer_id, peer.get("audio_sender"), audio_bps, window["goodput_bps"]))
                     room = getattr(transport, "pacer_room_bps", lambda: None)()
                     if room is not None:
                         bucket["rooms"].append(room)
@@ -3502,7 +3517,7 @@ class WebRTCService(BaseStreamingService):
                     if pacer:
                         bucket["paces"].append(CLEANUP_PACE_SHARE * pacer["pace_bps"])
                     bucket["transports"].append(transport)
-                    bucket["sent_bps"] = max(bucket["sent_bps"], window["sent_bps"])
+                    bucket["sent_bps"] = max(bucket["sent_bps"], max(0, window["sent_bps"] - audio_bps))
                     bucket["padding_bps"] = max(bucket["padding_bps"], window.get("padding_bps", 0))
                     bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
                     if standing is not None:
@@ -3542,6 +3557,8 @@ class WebRTCService(BaseStreamingService):
                 # loss alone on a path that never queued: only then do the capture rate and repairs answer it.
                 queued = steer.capacity_kbps is not None
                 crowded = self._shed_frames(did, pipeline, target, ceiling, queued)
+                for peer_id, sender, audio_bps, goodput_bps in bucket["audio"]:
+                    self._shed_red(peer_id, sender, audio_bps, goodput_bps, target < round(ceiling))
                 # What the path carries, through each peer's pacer, sets the rate a still
                 # screen's cleanup runs at; the bridge and the pacers take its frames whole. A
                 # pacer reads the path's capacity, not what cross traffic leaves of it: a target
@@ -3639,6 +3656,40 @@ class WebRTCService(BaseStreamingService):
                     + (f"{fps:.1f} fps ({over} of {total} frames over the {target} kbps budget)" if fps else
                        f"the configured {configured:g} fps again"))
         return crowded
+
+    def _audio_bps(self, peer_id: str, sender: Any) -> float:
+        """The payload bit/s a peer's audio `sender` sent since the last tick (its stats' bytesSent), 0 without one
+        or on its first tick."""
+        sent = getattr(sender, "sent_octets", None) if sender is not None else None
+        if sent is None:
+            self._audio_sent.pop(peer_id, None)
+            return 0.0
+        now = time.monotonic()
+        before = self._audio_sent.get(peer_id)
+        self._audio_sent[peer_id] = (sent[0], now)
+        if before is None or now <= before[1]:
+            return 0.0
+        return max(0.0, (sent[0] - before[0]) * 8 / (now - before[1]))
+
+    def _shed_red(self, peer_id: str, sender: Any, audio_bps: float, goodput_bps: float, cut: bool) -> None:
+        """Drop a payload of a peer's RED depth while the video target is `cut` and its audio takes more than
+        AUDIO_SHARE of `goodput_bps`, what the path delivered, and bring one back once the deeper stream would
+        take under half that share or the target is no longer cut (`RTCRtpSender.set_red_distance`)."""
+        depths = getattr(sender, "red_depth", None)
+        if not depths or not depths[1]:
+            return
+        depth, configured = depths
+        if cut and audio_bps > AUDIO_SHARE * goodput_bps:
+            shed = max(0, depth - 1)
+        elif not cut or audio_bps * (depth + 2) / (depth + 1) <= AUDIO_SHARE / 2 * goodput_bps:
+            shed = min(configured, depth + 1)
+        else:
+            return
+        if shed == depth:
+            return
+        sender.set_red_distance(None if shed == configured else shed)
+        logger.info(f"Congestion control: audio redundancy of peer {peer_id} at depth {shed} "
+                    f"({audio_bps / 1000:.0f} kbit/s of {goodput_bps / 1000:.0f} delivered)")
 
     def _pad_display(self, display_id: str, senders: List[Any], bps: float, until: float) -> None:
         """Pad a display's video `senders` at `bps` until `until` (`PathProbe`), each

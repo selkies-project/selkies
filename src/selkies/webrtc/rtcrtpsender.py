@@ -39,7 +39,7 @@ import traceback
 import uuid
 from collections import deque
 from collections.abc import Callable
-from typing import Any, Optional, Union
+from typing import Any, Optional, Tuple, Union
 
 
 from . import clock, rtp
@@ -687,6 +687,25 @@ class RTCRtpSender(AsyncIOEventEmitter):
             self._lost_at = None
         if self.on_frame_sent is not None:
             self.on_frame_sent(captured, size)
+
+    @property
+    def sent_octets(self) -> Tuple[int, int]:
+        """The payload octets and packets this sender sent (its stats' bytesSent and packetsSent)."""
+        return self.__octet_count, self.__packet_count
+
+    @property
+    def red_depth(self) -> Optional[Tuple[int, int]]:
+        """The prior payloads this sender's RED packets carry and the configured depth, or None where it sends
+        no RED."""
+        configured = getattr(self.__encoder, "configured", None)
+        return None if configured is None else (self.__encoder.distance, configured)
+
+    def set_red_distance(self, distance: Optional[int]) -> None:
+        """Carry `distance` prior payloads as RED redundancy, or the configured depth (None), where this
+        sender sends RED (`RedOpusEncoder.set_distance`)."""
+        set_distance = getattr(self.__encoder, "set_distance", None)
+        if set_distance is not None:
+            set_distance(distance)
 
     def set_repair_budget(self, bps: Optional[float], delivery_bps: Optional[float] = None) -> None:
         """Bound repairs to REPAIR_SHARE of `bps`, the rate congestion control steered the display to (None: no
