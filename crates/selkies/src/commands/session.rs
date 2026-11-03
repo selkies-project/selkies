@@ -911,7 +911,7 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
             session.x11(settings.render_dri())?;
             session.size_screen(&settings, run_resize);
         }
-        let (sid, entry) = Desktops::from_env().pick(options.session.as_deref(), wayland);
+        let (sid, entry) = Desktops::from_env().pick(options.session.as_deref(), wayland)?;
         if wayland {
             session.start_selkies(&command)?;
         }

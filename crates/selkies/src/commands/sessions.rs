@@ -284,7 +284,12 @@ impl Desktops {
     /// as a command. Unset, the desktop `XDG_CURRENT_DESKTOP` names, then the host's default,
     /// then one named after its own desktop, then the first installed. `("", {})` when
     /// nothing is installed.
-    pub fn pick(&self, wanted: Option<&str>, wayland: bool) -> (String, Entry) {
+    ///
+    /// # Errors
+    /// `wanted` names only the other backend's sessions and their desktop has none for this
+    /// one (Plasma 6.8 ships no X11 session): the message says which backend has it, where
+    /// running the name as a command would start a program that does not exist.
+    pub fn pick(&self, wanted: Option<&str>, wayland: bool) -> Result<(String, Entry), String> {
         let sessions = self.installed(wayland);
         let others = self.installed(!wayland);
         let hints: Vec<String> = match wanted {
@@ -308,21 +313,35 @@ impl Desktops {
             }
             if let Some(sid) = found.into_iter().next() {
                 let entry = sessions[&sid].clone();
-                return (sid, entry);
+                return Ok((sid, entry));
             }
         }
         if let Some(wanted) = wanted {
-            return (
+            let elsewhere = matching(&others, &[wanted]);
+            if !elsewhere.is_empty() {
+                let (have, other) = if wayland {
+                    ("Wayland", "X11")
+                } else {
+                    ("X11", "Wayland")
+                };
+                return Err(format!(
+                    "{wanted} names a {other} session here ({}), and its desktop has no {have} \
+                     session installed: start it with --wayland={}",
+                    elsewhere.join(", "),
+                    !wayland
+                ));
+            }
+            return Ok((
                 String::new(),
                 Entry::from([("Exec".to_string(), wanted.to_string())]),
-            );
+            ));
         }
         let mut ranked: Vec<&String> = sessions.keys().collect();
         ranked.sort_by_key(|sid| !desktop_names(&sessions[*sid]).contains(&sid.to_lowercase()));
-        match ranked.first() {
+        Ok(match ranked.first() {
             Some(sid) => ((*sid).clone(), sessions[*sid].clone()),
             None => (String::new(), Entry::new()),
-        }
+        })
     }
 }
 
@@ -374,6 +393,10 @@ mod tests {
             &entry("Plasma", "startplasma-wayland", "DesktopNames=KDE"),
         );
         write(
+            &system.join("wayland-sessions/sway.desktop"),
+            &entry("Sway", "sway", "DesktopNames=sway"),
+        );
+        write(
             &home.join("xsessions/xfce.desktop"),
             &entry("Xfce mine", "my-xfce", "DesktopNames=XFCE"),
         );
@@ -405,52 +428,67 @@ mod tests {
             x11["plasmax11"]["Exec"], "startplasma-x11",
             "keys come from the [Desktop Entry] group alone"
         );
-        assert_eq!(keys(&host.installed(true)), ["plasma"]);
+        assert_eq!(keys(&host.installed(true)), ["plasma", "sway"]);
     }
 
     #[test]
     fn a_session_is_picked_by_file_desktop_or_program() {
         let mut host = host(&scratch("pick"));
         assert_eq!(
-            host.pick(Some("plasmax11"), false).0,
+            host.pick(Some("plasmax11"), false).unwrap().0,
             "plasmax11",
             "by file name"
         );
         assert_eq!(
-            host.pick(Some("kde"), false).0,
+            host.pick(Some("kde"), false).unwrap().0,
             "plasmax11",
             "by desktop name, any case"
         );
         assert_eq!(
-            host.pick(Some("KDE"), true).0,
+            host.pick(Some("KDE"), true).unwrap().0,
             "plasma",
             "following the backend"
         );
         assert_eq!(
-            host.pick(Some("/usr/bin/my-xfce"), false).0,
+            host.pick(Some("/usr/bin/my-xfce"), false).unwrap().0,
             "xfce",
             "by the program it runs"
         );
         assert_eq!(
-            host.pick(Some("plasma"), false).0,
+            host.pick(Some("plasma"), false).unwrap().0,
             "plasmax11",
             "a name only the other backend carries stands for its desktop"
         );
-        assert_eq!(host.pick(Some("startplasma-x11"), true).0, "plasma");
+        assert_eq!(
+            host.pick(Some("startplasma-x11"), true).unwrap().0,
+            "plasma"
+        );
+        let refused = host.pick(Some("sway"), false).unwrap_err();
+        assert!(
+            refused.contains("sway names a Wayland session here (sway)")
+                && refused.contains("--wayland=true"),
+            "a name only the other backend carries, whose desktop has none here, is refused with the \
+             backend that has it, not run as a command: {refused}"
+        );
+        assert_eq!(
+            host.pick(Some("sway"), true).unwrap().0,
+            "sway",
+            "and found on that backend"
+        );
         let command = Entry::from([("Exec".to_string(), "firefox --kiosk".to_string())]);
         assert_eq!(
-            host.pick(Some("firefox --kiosk"), false),
+            host.pick(Some("firefox --kiosk"), false).unwrap(),
             (String::new(), command),
             "a name no file carries runs as a command"
         );
         let command = Entry::from([("Exec".to_string(), "my-xfce --x".to_string())]);
         assert_eq!(
-            host.pick(Some("my-xfce --x"), false),
+            host.pick(Some("my-xfce --x"), false).unwrap(),
             (String::new(), command),
             "a command line runs as given"
         );
         assert_eq!(
-            host.pick(None, false).0,
+            host.pick(None, false).unwrap().0,
             "xfce",
             "unset, a session named after its own desktop comes first"
         );
@@ -459,26 +497,26 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(
-            host.pick(None, false).0,
+            host.pick(None, false).unwrap().0,
             "plasmax11",
             "unset, the host's default"
         );
-        assert_eq!(host.pick(None, true).0, "plasma");
+        assert_eq!(host.pick(None, true).unwrap().0, "plasma");
         host.current_desktop = vec!["ubuntu".to_string(), "XFCE".to_string()];
         assert_eq!(
-            host.pick(None, false).0,
+            host.pick(None, false).unwrap().0,
             "xfce",
             "XDG_CURRENT_DESKTOP names the desktop ahead of the host's default"
         );
         assert_eq!(
-            host.pick(Some("KDE"), false).0,
+            host.pick(Some("KDE"), false).unwrap().0,
             "plasmax11",
             "--session outranks both"
         );
         host.configured.clear();
         host.current_desktop = vec!["GNOME".to_string()];
         assert_eq!(
-            host.pick(None, false).0,
+            host.pick(None, false).unwrap().0,
             "xfce",
             "a desktop none installed falls through"
         );
@@ -488,7 +526,7 @@ mod tests {
         };
         assert_eq!(
             empty.pick(None, true),
-            (String::new(), Entry::new()),
+            Ok((String::new(), Entry::new())),
             "nothing installed, nothing wanted"
         );
     }
