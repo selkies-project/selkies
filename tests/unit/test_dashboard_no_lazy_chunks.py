@@ -22,7 +22,8 @@ SRC = os.path.join(ROOT, "addons", "selkies-dashboard", "src")
 EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
 
 COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
-DYNAMIC_IMPORT = re.compile(r"(?<![\w$.])import\s*\((?![^)]*\)\s*\.)")
+# A type reference (`import("./x").Name`) is not a load; `.then`/`.catch`/`.finally` on one is.
+DYNAMIC_IMPORT = re.compile(r"(?<![\w$.])import\s*\((?![^)]*\)\s*\.(?!then\b|catch\b|finally\b))")
 LAZY = re.compile(r"(?<![\w$])(?:React\.)?lazy\s*\(")
 
 results = []

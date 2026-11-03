@@ -393,6 +393,7 @@ SUITES: list = [
     {"path": "e2e/test_regressions.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["matrix", "switch", "clipboard", "pacer"]},
     {"path": "e2e/test_auth_refresh.py", "tier": "e2e", "timeout": 300},
+    {"path": "e2e/test_credentials_in_url.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_subfolder.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_frame_ancestors.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_pointer_motion.py", "tier": "e2e", "timeout": 1800},
