@@ -8,6 +8,10 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <!-- A URL carrying user:pass@ keeps them in document.URL, where every relative fetch() throws and Chrome
+       and Safari run a module imported back by a chunk a second time. The browser holds the login, so the page
+       reloads at the same URL without them. -->
+  <script>(function () { var u = new URL(document.URL); if (u.username || u.password) { u.username = ''; u.password = ''; location.replace(u.href); } })();</script>
   <!-- Named here rather than left to the client script: an untitled document
        shows the URL in the tab until the bundle runs. -->
   <title>Selkies</title>

@@ -22,6 +22,8 @@ a slow disk never stalls streaming.
 import os
 import ssl
 import hmac
+import hashlib
+import secrets
 import errno
 import json
 import html
@@ -289,11 +291,15 @@ def note_pong(ws: Any, data: Any) -> None:
     state["rtt_us"] = int((time.monotonic() - sent) * 1e6)
     state["seq"] += 1
     state["answered"] = max(state.get("answered", 0.0), sent)
+    answer = state.get("on_pong", {}).pop(bytes(data or b""), None)
+    if answer is not None:
+        answer(state["rtt_us"] / 1e6)
 
 
-async def ping_behind(ws: Any) -> None:
+async def ping_behind(ws: Any, on_pong: Optional[Callable[[float], None]] = None) -> None:
     """Ping `ws` behind everything written to it so far: its pong says all of that
-    reached the peer (`note_pong` keeps when the newest answered ping went out)."""
+    reached the peer (`note_pong` keeps when the newest answered ping went out),
+    and `on_pong`, where given, is called with its round trip in seconds."""
     state = _uplink_session_state(ws)
     payload = state["next_ping"].to_bytes(8, "big")
     state["next_ping"] += 1
@@ -301,6 +307,11 @@ async def ping_behind(ws: Any) -> None:
     pending[payload] = time.monotonic()
     while len(pending) > UplinkGauge._PENDING_MAX:
         pending.pop(next(iter(pending)))
+    answers = state.setdefault("on_pong", {})
+    if on_pong is not None:
+        answers[payload] = on_pong
+    for stale in [p for p in answers if p not in pending]:
+        del answers[stale]
     await ws.ping(payload)
 
 
@@ -367,7 +378,11 @@ class CongestionSteer:
     A clean tick outside a hold raises the target, by STEP a second while what
     the path delivers is far from the last capacity it showed and by STEP_NEAR
     once it is within NEAR of it, where the next queue waits: probing there
-    slowly keeps the overshoot that finds it small. Delivered rates rather than
+    slowly keeps the overshoot that finds it small. A still screen the
+    transport padded up to the target (`PathProbe`, `probed`) has nothing to
+    show but the path, and climbs PROBE_STEP a second until the first queue
+    ends the probe: a cut desktop is back at its rate in seconds, at the cost of
+    the last tick's overshoot. Delivered rates rather than
     targets are compared, since an encoder need not emit what it is asked for
     (a CBR encoder with a small buffer runs under its target, and content it
     cannot compress that far runs over). A path that delivers clear past the
@@ -382,6 +397,29 @@ class CongestionSteer:
     page fell behind rather than that the target fits. A raise also follows
     HEADROOM of the measured goodput where that is higher, never past the
     ceiling.
+
+    A stall is not a slower path, and interrupts a rate the path was carrying,
+    one in force through CARRIED_S of ticks that read no queue: before any there
+    is none to restore (a session started over a path slower than its rate). A
+    hold of seconds acks a window's frames late and together, a queue of
+    STALL_QUEUE_S or more over a delivery under STALL_DELIVERY of the target, or
+    one that grew by STALL_QUEUE_S since the last tick that read the delay (a
+    queue a slower path builds is read while still small), and a cut on it keeps
+    the target under what the stall let through, the capacity it showed, for as
+    long as the screen stays still. A backoff on such a tick keeps the target
+    the episode began at, before any backoff in the STALL_EPISODE_S ahead of it,
+    as far as that carried rate, and the second tick in a row after it that
+    reads no queue and no loss past LOSS restores that target and forgets the
+    capacity (the first can come while the frames the stall held are still on
+    their way, which the next one shows as the stall's queue); a backoff with no
+    delivery measured keeps its target too, restored the same way past its hold.
+    A queue the path delivered that target through, a window switch's burst on a
+    fast path, keeps it, and so does a tick whose offer went unmeasured (the
+    gate held it: what it delivered is the hold's release, not the path); one
+    under it is a path that did slow and drops it. A path that did slow also
+    shows a queue at the restored target: a backoff within STALL_EPISODE_S of a
+    restore keeps nothing, so it backs off on the path's real delivery as any
+    queue does, rather than restoring again each time the queue drains.
     """
 
     LOSS = 0.10
@@ -389,6 +427,7 @@ class CongestionSteer:
     HOLD_S = 2.0
     STEP = 1.15
     STEP_NEAR = 1.05
+    PROBE_STEP = 1.3
     NEAR = 0.9
     HEADROOM = 0.85
     DRAIN_S = 1.0
@@ -396,6 +435,10 @@ class CongestionSteer:
     SETTLE_S = 0.5
     APP_LIMITED = 0.5
     APP_LIMITED_DELIVERED = 0.8
+    STALL_QUEUE_S = 1.0
+    STALL_DELIVERY = 0.25
+    STALL_EPISODE_S = 5.0
+    CARRIED_S = 2.0
 
     def __init__(self) -> None:
         self.strikes = 0
@@ -404,13 +447,24 @@ class CongestionSteer:
         self._cruise_kbps: Optional[float] = None
         self._drain_until = 0.0
         self._tick_at: Optional[float] = None
+        self._restore_kbps: Optional[float] = None
+        self._backoff_from: Optional[Tuple[float, float]] = None
+        self._restore_after = 0.0
+        self._restored_at = float('-inf')
+        self._last_queue_s: Optional[float] = None
+        # The rate in force on the last tick that read no queue and no loss through CARRIED_S of such
+        # ticks (`_clean_since` the first of them): what a stall interrupts.
+        self._clean_kbps: Optional[float] = None
+        self._clean_since: Optional[float] = None
+        # Whether the last tick restored the target a stall cut (for the transports' log).
+        self.restored = False
 
     def target(self, current: float, ceiling: float, floor: float,
                goodput_bps: float, loss: float, now: float,
                queue_s: Optional[float] = None,
                offered_bps: Optional[float] = None,
                acked_offered_bps: Optional[float] = None,
-               capacity_bps: Optional[float] = None) -> float:
+               capacity_bps: Optional[float] = None, probed: bool = False) -> float:
         """The next target in kbps for one tick.
 
         Args:
@@ -433,9 +487,34 @@ class CongestionSteer:
                 the transport measured it apart from goodput_bps (a burst over
                 a trickle, whose window's rate the trickle dilutes); the
                 backoff takes the higher.
+            probed: Whether the transport padded the tick's stream up to the
+                target (`PathProbe`): a clean tick it filled to half the target
+                or more raises the target PROBE_STEP a second.
         """
         dt = 1.0 if self._tick_at is None else min(max(now - self._tick_at, 0.0), 2.0)
         self._tick_at = now
+        self.restored = False
+        last_queue_s = self._last_queue_s
+        if queue_s is not None:
+            self._last_queue_s = queue_s
+        clean_kbps = self._clean_kbps
+        if queue_s == 0 and loss <= self.LOSS:
+            if self._clean_since is None:
+                self._clean_since = now
+            if now - self._clean_since >= self.CARRIED_S:
+                self._clean_kbps = current
+        elif queue_s is not None or loss > self.LOSS:
+            self._clean_since = None
+        if (self._restore_kbps is not None and queue_s == 0 and last_queue_s == 0 and loss <= self.LOSS
+                and now >= self._restore_after):
+            restored = max(current, self._restore_kbps)
+            self._restore_kbps = self._cruise_kbps = self.capacity_kbps = None
+            self.hold_until = self._drain_until = now
+            self.strikes = 0
+            self.restored = restored > current
+            if self.restored:
+                self._restored_at = now
+            return max(floor, min(ceiling, restored))
         drained = (
             self._cruise_kbps is not None
             and now >= self._drain_until
@@ -455,7 +534,22 @@ class CongestionSteer:
                        and (goodput_bps <= 0 or sent_bps <= goodput_bps / self.APP_LIMITED_DELIVERED))
             if now >= self.hold_until and not limited:
                 capacity = max(goodput_bps, capacity_bps or 0.0)
+                grew = last_queue_s is not None and queue_s - last_queue_s >= self.STALL_QUEUE_S
+                stalled = (queue_s >= self.STALL_QUEUE_S and now - self._restored_at > self.STALL_EPISODE_S
+                           and (grew or capacity < current * 1_000 * self.STALL_DELIVERY))
+                began = self._backoff_from
+                if stalled or (capacity <= 0 and now - self._restored_at > self.STALL_EPISODE_S):
+                    earlier = began[0] if began and now - began[1] <= self.STALL_EPISODE_S else 0.0
+                    if self._restore_kbps is not None:
+                        self._restore_kbps = max(self._restore_kbps, current, earlier)
+                    elif clean_kbps is not None:
+                        self._restore_kbps = min(max(current, earlier), clean_kbps)
+                elif (self._restore_kbps is not None and offered_bps is not None
+                      and capacity < self._restore_kbps * 1_000):
+                    self._restore_kbps = None
+                self._backoff_from = (current, now)
                 current = self._queue_backoff(current, capacity / 1_000, queue_s, now)
+                self._restore_after = now if stalled else self.hold_until
             return max(floor, min(ceiling, current))
         if drained:
             self.strikes = 0
@@ -480,7 +574,10 @@ class CongestionSteer:
             elif delivered >= capacity * self.NEAR:
                 step = self.STEP_NEAR
         raised = current * step ** dt
-        if offered_bps is None or offered_bps < current * 1_000 * self.APP_LIMITED:
+        filled = offered_bps is not None and offered_bps >= current * 1_000 * self.APP_LIMITED
+        if probed and filled:
+            raised = max(raised, current * self.PROBE_STEP ** dt)
+        if not filled:
             raised = min(raised, max(current, self.capacity_kbps or current))
         return max(floor, min(ceiling, max(raised, delivered * self.HEADROOM)))
 
@@ -497,6 +594,62 @@ class CongestionSteer:
         self.hold_until = self._drain_until + self.SETTLE_S
         return min(current, delivered_kbps * fraction)
 
+
+class PathProbe:
+    """Padding that lets a still screen's stream test its path once congestion
+    control has cut its target under the configured rate.
+
+    A tick whose stream offered under `CongestionSteer.APP_LIMITED` of the
+    target tests nothing of the path, so the steer raises it no further than
+    the capacity the path last showed: a desktop that sits still after a real
+    queue keeps the cut rate until its screen moves (#489). While the target
+    stands under the ceiling, the steer's hold is over and the stream itself
+    fills less than APP_LIMITED of the target, the transport pads it to the
+    target (`rate_bps`), so the path carries, or queues, the rate the steer
+    asks of it, and the steer climbs or backs off as it does on a moving
+    screen. A queue on a tick that followed padding ends the probe, the path
+    found: the next one waits QUIET_S, doubling to QUIET_MAX_S while probes
+    keep ending that way, and back to QUIET_S once a target reaches the
+    ceiling. A tick that measured no delay pads nothing.
+    """
+
+    QUIET_S = 15.0
+    QUIET_MAX_S = 240.0
+
+    def __init__(self) -> None:
+        self.padding = False
+        self.quiet_until = 0.0
+        self.quiet_s = self.QUIET_S
+
+    def rate_bps(self, target_kbps: float, ceiling_kbps: float, content_bps: Optional[float],
+                 queue_s: Optional[float], held: bool, now: float) -> float:
+        """The padding to send until the next tick, in bits per second.
+
+        Args:
+            target_kbps: The target the steer just set.
+            ceiling_kbps: The configured target.
+            content_bps: What the stream itself sent over the tick, padding left
+                out, or None when unmeasured (nothing pads then).
+            queue_s: The queue the tick read, as `CongestionSteer.target` takes it.
+            held: Whether the steer holds its target after a cut (its drain).
+            now: Monotonic time of the tick.
+        """
+        padded, self.padding = self.padding, False
+        if target_kbps >= ceiling_kbps:
+            self.quiet_s = self.QUIET_S
+            return 0.0
+        if queue_s:
+            if padded:
+                self.quiet_until = now + self.quiet_s
+                self.quiet_s = min(self.quiet_s * 2.0, self.QUIET_MAX_S)
+            return 0.0
+        if queue_s is None or content_bps is None or held or now < self.quiet_until:
+            return 0.0
+        target_bps = target_kbps * 1_000.0
+        if content_bps >= target_bps * CongestionSteer.APP_LIMITED:
+            return 0.0
+        self.padding = True
+        return target_bps - content_bps
 
 class LinkAllowance:
     """The rate (kbps) a display's still-screen cleanup may run at over its path, which pixelflux
@@ -1147,6 +1300,12 @@ WEBSOCKET_ROUTES: Tuple[str, ...] = ("/api/websockets", "/api/webrtc/signaling",
 # Mirror of the secure-mode session token for requests the client cannot put
 # a header on (the file-manager iframe and its download links).
 SESSION_TOKEN_COOKIE: str = "selkies_token"
+# What a Basic-authenticated page's WebSocket handshakes carry in place of the Basic credentials, which WebKit
+# attaches to its requests but not to a handshake (`_renew_socket_cookie`): good for SOCKET_COOKIE_S, signed with a
+# key of this process's, so a restart ends every one and the reconnect's probe (a plain GET) takes a new one.
+SOCKET_COOKIE: str = "selkies_socket"
+SOCKET_COOKIE_S: int = 86400
+_SOCKET_COOKIE_KEY: bytes = secrets.token_bytes(32)
 # Subprotocols of a handshake presenting its session token without a URL: the
 # one selected, and the prefix of the base64url token (``handshake_session_token``).
 SESSION_TOKEN_PROTOCOL: str = "selkies"
@@ -2131,16 +2290,25 @@ class CentralizedStreamServer:
         )
 
     @staticmethod
-    def _basic_auth_challenge(text: str = "Invalid Credentials") -> web.Response:
+    def _basic_auth_challenge(
+        request: web.Request, text: str = "Invalid Credentials"
+    ) -> web.Response:
         """A 401 that re-opens the browser's login prompt.
 
         Wrong credentials carry the challenge too: without one the browser renders this
         body as a page instead of asking again, so a mistyped password ends the session.
+        Only a page load gets the Basic scheme: a browser holds a background request
+        (any `Sec-Fetch-Mode` but a navigation's) open behind its login prompt, which a
+        fullscreen session hides, so the page stalled. Answered at once, the web
+        client's 401 guard reloads the page and the prompt comes with the page itself.
+        A client that sends no `Sec-Fetch-Mode` gets the Basic scheme.
         """
+        mode = request.headers.get("Sec-Fetch-Mode")
+        scheme = "Basic" if mode in (None, "navigate", "nested-navigate") else "PageLogin"
         return web.Response(
             status=401,
             headers={
-                "WWW-Authenticate": f'Basic realm="{AUTH_REALM}", charset="UTF-8"'
+                "WWW-Authenticate": f'{scheme} realm="{AUTH_REALM}", charset="UTF-8"'
             },
             text=text,
         )
@@ -2291,6 +2459,40 @@ class CentralizedStreamServer:
             response.force_close()
         return response
 
+    @staticmethod
+    def _socket_cookie_value(role: str, expires: int) -> str:
+        """The socket cookie for `role` ("controller" or "viewer") until `expires` (epoch seconds)."""
+        body = f"{role}.{expires}"
+        return f"{body}.{hmac.new(_SOCKET_COOKIE_KEY, body.encode(), hashlib.sha256).hexdigest()}"
+
+    @classmethod
+    def _socket_cookie_role(cls, request: web.Request) -> Optional[Tuple[str, int]]:
+        """The role a request's socket cookie grants and when it ends, or None for none, one past its time, or
+        one this process did not sign."""
+        value = request.cookies.get(SOCKET_COOKIE, "")
+        parts = value.split(".")
+        if len(parts) != 3 or parts[0] not in ("controller", "viewer") or not parts[1].isdigit():
+            return None
+        expires = int(parts[1])
+        if expires <= time.time() or not hmac.compare_digest(cls._socket_cookie_value(parts[0], expires), value):
+            return None
+        return parts[0], expires
+
+    @classmethod
+    def _renew_socket_cookie(cls, request: web.Request, response: web.StreamResponse, role: str) -> None:
+        """Answer a Basic-authenticated request with the socket cookie for its `role` where it carries none for
+        that role with more than half its time left: HttpOnly, SameSite=Strict, under the route prefix, Secure
+        over https. A page's load sets it for its first handshake, and the reconnect's probe for the next."""
+        held = cls._socket_cookie_role(request)
+        if held is not None and held[0] == role and held[1] - time.time() > SOCKET_COOKIE_S / 2:
+            return
+        expires = int(time.time()) + SOCKET_COOKIE_S
+        secure = request.secure or (
+            request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower() == "https")
+        response.set_cookie(
+            SOCKET_COOKIE, cls._socket_cookie_value(role, expires), max_age=SOCKET_COOKIE_S,
+            path=(request.app["settings"].subfolder or "") + "/", httponly=True, samesite="Strict", secure=secure)
+
     async def _authorize(
         self,
         request: web.Request,
@@ -2390,6 +2592,12 @@ class CentralizedStreamServer:
         if is_ws_handshake and settings.master_token:
             return await handler(request)
         if not auth_header or not auth_header.startswith("Basic "):
+            held = self._socket_cookie_role(request) if is_ws_handshake else None
+            if held is not None:
+                # WebKit attaches no Basic credentials to a handshake: the cookie the page's
+                # Basic-authenticated requests were answered with stands for them, at its role.
+                request["auth_role_ceiling"] = held[0]
+                return await handler(request)
             if is_ws_upgrade:
                 # A WS handshake gets no challenge/retry: without this log the
                 # rejection is invisible on both ends.
@@ -2400,11 +2608,11 @@ class CentralizedStreamServer:
                     "browser clients behind proxies).",
                     request.remote,
                 )
-            return self._basic_auth_challenge("Authorization Required")
+            return self._basic_auth_challenge(request, "Authorization Required")
         try:
             auth_decoded = self._b64_decode(auth_header[6:])
             if ":" not in auth_decoded:
-                return self._basic_auth_challenge()
+                return self._basic_auth_challenge(request)
             username, password = auth_decoded.split(":", 1)
             # Compare as UTF-8 bytes; hmac.compare_digest rejects non-ASCII str.
             user_ok = hmac.compare_digest(
@@ -2423,13 +2631,16 @@ class CentralizedStreamServer:
                 logger.warning(
                     f"Invalid credentials provided for user: {settings.basic_auth_user}"
                 )
-                return self._basic_auth_challenge()
+                return self._basic_auth_challenge(request)
             request["auth_role_ceiling"] = (
                 "viewer" if (viewonly_ok and not main_ok) else "controller"
             )
         except Exception:
-            return self._basic_auth_challenge()
-        return await handler(request)
+            return self._basic_auth_challenge(request)
+        response = await handler(request)
+        if not is_ws_upgrade and request.method in ("GET", "HEAD") and not response.prepared:
+            self._renew_socket_cookie(request, response, request["auth_role_ceiling"])
+        return response
 
     def _require_configured_credentials(self) -> None:
         """Refuse to serve a login that nobody chose a password for.

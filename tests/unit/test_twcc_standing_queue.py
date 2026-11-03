@@ -47,7 +47,7 @@ def tick(tr, delay_ms: float, sent_kbps: float = 8000.0, delivered_kbps: float =
         "bytes_acked": int(delivered_kbps * 125) + 1200,
         "first_arrival": (0, 0), "first_bytes": 1200, "last_arrival_us": 1_000_000,
         "delay_min": delay, "delay_last": delay, "feedback_mins": [delay] * feedbacks,
-        "bytes_sent": int(sent_kbps * 125), "opened": CLOCK[0] - 1.0,
+        "bytes_sent": int(sent_kbps * 125), "padding_sent": 0, "opened": CLOCK[0] - 1.0,
     }
     return tr.take_twcc_window()
 

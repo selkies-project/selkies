@@ -79,7 +79,7 @@ Independent of the mode: `--allowed-origins` (`SELKIES_ALLOWED_ORIGINS`) is the 
 
 ## Without a Master Token
 
-Nothing above applies but the origin check. The routes are open, or Basic-gated when `--enable-basic-auth` is on: the main password authenticates a controller and the optional `--basic-auth-viewonly-password` a viewer, which is refused everything a viewer token is: uploads, the file listing and downloads, printed documents, and mode switches. Bearer headers and the token cookie are ignored, and the roles a client can take are the [sharing links](usage.md#session-sharing) instead of provisioned tokens.
+Nothing above applies but the origin check. The routes are open, or Basic-gated when `--enable-basic-auth` is on: the main password authenticates a controller and the optional `--basic-auth-viewonly-password` a viewer, which is refused everything a viewer token is: uploads, the file listing and downloads, printed documents, and mode switches. Bearer headers and the token cookie are ignored, and the roles a client can take are the [sharing links](usage.md#session-sharing) instead of provisioned tokens. Every Basic-authenticated page load is answered with a `selkies_socket` cookie (HttpOnly, SameSite=Strict, signed for one day by this server process, carrying the login's role) that the streaming socket's handshake accepts in place of the Basic credentials, which WebKit browsers do not attach to a handshake; it authenticates nothing else, and a restart ends it, the page's reconnect taking a new one. A proxy that enforces its own Basic login in front of Selkies challenges the handshake before it arrives here.
 
 ## Reference Implementations
 

@@ -117,6 +117,7 @@ class TransportCallerTests(unittest.IsolatedAsyncioTestCase):
                 service.metrics = None
                 service.args = SimpleNamespace(congestion_control=True)
                 service._congestion_steer = {"primary": steer}
+                service._path_probes, service._padding = {}, {}
                 service._rate_holds = {}
                 service._link_allowances = {}
                 service._display_setting = lambda did, key: 6000

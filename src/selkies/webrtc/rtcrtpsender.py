@@ -151,6 +151,13 @@ RESYNC_DARK_S = 0.25
 RESYNC_ANCHOR_S = 0.25
 HELD_S = 8.0
 FRAME_NUMBERS_MEMORY = 4096
+# Padding resends the stream's last packets on its RTX stream (`send_padding`), as libwebrtc's
+# payload padding does: of those carrying PADDING_SOURCE_BYTES or more, the newest
+# PADDING_SOURCES, kept past the retransmission horizon, since a still screen sends none for long.
+PADDING_SOURCES = 4
+PADDING_SOURCE_BYTES = 900
+# Room left for a padding packet's RTP header and extensions over its payload.
+PADDING_HEADER_BYTES = 64
 # The shortest H.264 frame_num range, which every longer one is a multiple of.
 FRAME_NUM_WRAP = 16
 
@@ -323,6 +330,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__rtp_started = asyncio.Event()
         self.__rtp_task: Optional[asyncio.Future[None]] = None
         self.__rtp_history = RtpHistory()
+        self.__padding_source: deque = deque(maxlen=PADDING_SOURCES)
+        self.__padding_next = 0
         # The newest media sequence number sent when the pacer last abandoned a
         # GOP: a NACK for it or anything before names a packet the keyframe replaces.
         self.__last_sequence: Optional[int] = None
@@ -1062,6 +1071,33 @@ class RTCRtpSender(AsyncIOEventEmitter):
         return await self._send(packet.serialize(self.__rtp_header_extensions_map),
                                 packet.extensions.transport_sequence_number)
 
+    async def send_padding(self, budget: int) -> int:
+        """Resend the stream's last packets on its RTX stream, up to `budget` bytes, as the
+        padding a still screen's path probe measures the path with (`PathProbe`): each
+        numbered for transport-cc only once the pacer admits it (`padding_room`), so none
+        is ever read as lost, and none waits in the pacer ahead of a frame. A peer
+        discards them as duplicates. Nothing pads without RTX negotiated or a packet to
+        resend; the bytes sent."""
+        sources = self.__padding_source
+        if self.__rtx_payload_type is None or not sources or self.__kind != "video":
+            return 0
+        transport = self.transport
+        sent = 0
+        while sent < budget:
+            original = sources[self.__padding_next % len(sources)]
+            size = len(original.payload) + 2
+            if not transport.padding_room(size + PADDING_HEADER_BYTES):
+                break
+            self.__padding_next += 1
+            packet = wrap_rtx(original, payload_type=self.__rtx_payload_type,
+                              sequence_number=self.__rtx_sequence_number, ssrc=self._rtx_ssrc)
+            self.__rtx_sequence_number = uint16_add(self.__rtx_sequence_number, 1)
+            packet.extensions.transport_sequence_number = transport._twcc_next(len(packet.payload), padding=True)
+            data = packet.serialize(self.__rtp_header_extensions_map)
+            await transport._send_padding_rtp(data)
+            sent += len(data)
+        return sent
+
     async def _send(self, packet_bytes: bytes, twcc_seq: Optional[int] = None) -> bool:
         """Hand a packet to the transport. A video packet the pacer refuses was
         abandoned with its GOP, and every packet the history holds with it: NACKs
@@ -1218,6 +1254,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     self.__log_debug("> %s", packet)
                     self.__rtp_history.add(
                         packet, frame_time, enc_frame.dependency[0] if described is not None and descriptor else None)
+                    if self.__kind == "video" and len(packet.payload) >= PADDING_SOURCE_BYTES:
+                        self.__padding_source.append(packet)
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
                     outgoing.append((packet_bytes, packet.extensions.transport_sequence_number,
                                      packet.sequence_number, len(payload)))

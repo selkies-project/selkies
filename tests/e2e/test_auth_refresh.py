@@ -5,11 +5,11 @@ instead of reconnecting forever against rejected websockets. The reload comes
 from the core's same-origin 401 guard; the guard's loop-breaker caps how many
 reloads a broken credential can cause, so exactly one arrives here.
 
-A same-origin request that meets the challenge raises the credential prompt
-itself, and a headless engine has nobody to answer it, so the guard's probe
-would wait on it forever. The page therefore carries a password the server
-refuses: Playwright offers it once, then cancels the prompt, which is what a
-user who cannot log in does, and the 401 reaches the page."""
+The page's background requests get the 401 without the Basic scheme, so they
+fail at once; the reload's page load meets the challenge and raises the
+credential prompt, which a headless engine has nobody to answer. The page
+therefore carries a password the server refuses: Playwright offers it once,
+then cancels the prompt, which is what a user who cannot log in does."""
 import os
 import sys
 import time

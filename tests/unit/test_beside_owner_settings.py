@@ -189,6 +189,7 @@ async def run_webrtc_checks() -> None:
     service._display_owner_tabs = {"primary": "tab-a"}
     service._tab_used_at = {}
     service._congestion_steer, service._link_allowances = {}, {}
+    service._path_probes, service._padding = {}, {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     handled, updated = [], []
@@ -328,6 +329,7 @@ async def run_webrtc_stream_checks() -> None:
     service._display_owner_tabs = {"primary": "tab-a"}
     service._tab_used_at = {}
     service._congestion_steer, service._link_allowances = {}, {}
+    service._path_probes, service._padding = {}, {}
     service.RECONNECT_GRACE_S = 0
     replayed = []
 
@@ -424,8 +426,10 @@ async def run_webrtc_visibility_checks() -> None:
     service._display_owner_tabs = {"primary": "tab-a"}
     service._tab_used_at = {}
     service._congestion_steer, service._link_allowances = {}, {}
+    service._path_probes, service._padding = {}, {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
+    service.display_pipelines = {}
     service.HIDDEN_OWNER_HANDOFF_S = 0.05
     service._owner_settle_tasks = {}
     service.tasks = []
@@ -470,6 +474,8 @@ async def run_webrtc_visibility_checks() -> None:
     check("webrtc: the old owner is told what the display streams with",
           [ch for ch, kind, _ in service.rtc_app.sent if kind == "display_settings"] == [owner["data_channel"]],
           service.rtc_app.sent)
+    check("webrtc: and, hidden with its feed never paused, is paused by the hand-off",
+          owner.get("video_paused") and owner.get("paused_on_hand_off"), owner)
 
     handled.clear()
     await send("r,390x844", "o")
@@ -477,6 +483,7 @@ async def run_webrtc_visibility_checks() -> None:
           == "r,390x844", handled)
     await send("PAGE_SHOWN", "o")
     check("webrtc: shown again, it stays beside a visible owner", service._display_owner_tabs["primary"] == "tab-b")
+    check("webrtc: and its feed resumes", not owner.get("video_paused") and "paused_on_hand_off" not in owner, owner)
     await send("PAGE_HIDDEN", "j")
     joiner["page_hidden_at"] -= 1.0
     await service._settle_display_owner("primary")
@@ -574,6 +581,7 @@ async def run_webrtc_use_checks() -> None:
     service._display_owner_tabs = {"primary": "tab-a"}
     service._tab_used_at = {}
     service._congestion_steer, service._link_allowances = {}, {}
+    service._path_probes, service._padding = {}, {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     service.IDLE_OWNER_HANDOFF_S = 3.0
@@ -665,6 +673,7 @@ async def run_webrtc_congestion_checks() -> None:
         service.metrics = None
         service.args = SimpleNamespace(congestion_control=True)
         service._congestion_steer, service._rate_holds, service._link_allowances = {}, {}, {}
+        service._path_probes, service._padding = {}, {}
         service._display_setting = lambda did, key: 6000
         service.display_pipelines = {"primary": pipeline}
         service._display_owner_tabs = {"primary": owner} if owner else {}

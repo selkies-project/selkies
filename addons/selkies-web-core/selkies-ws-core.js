@@ -24,8 +24,9 @@
  * codec and frame kind, `u16 frame id`, `u16 stripe Y`, `u16 width`, `u16
  * height`, `u16` the id of the frame it predicts from -- its own id when it
  * predicts from nothing or the encoder does not say -- then the coded data),
- * and `0x05` a gzip-wrapped control text once the client
- * advertised `_gz,1`. From the
+ * `0x05` a gzip-wrapped control text once the client
+ * advertised `_gz,1`, and `0x07` padding, dropped unread, once it advertised
+ * `_pad,1` (the server probing a cut stream's path). From the
  * client: `0x02` microphone Opus, `0x06` webcam frames (startWebcamCapture),
  * and `0x05` gzipped large text once the server echoed `_gz,1`. Text messages
  * are control. The client sends `SETTINGS,{json}`, `r,WxH,displayId`,
@@ -6984,8 +6985,11 @@ self.onmessage = (e) => {
           return;
         }
       }
-      if (d instanceof ArrayBuffer) self.postMessage({ type: 'message', data: d, at }, [d]);
-      else self.postMessage({ type: 'message', data: d });
+      if (d instanceof ArrayBuffer) {
+        // Padding (0x07) is dropped here rather than handed to the page.
+        if (d.byteLength >= 1 && new Uint8Array(d, 0, 1)[0] === 0x07) return;
+        self.postMessage({ type: 'message', data: d, at }, [d]);
+      } else self.postMessage({ type: 'message', data: d });
     };
     return;
   }
@@ -7869,6 +7873,8 @@ class WorkerWebSocket {
     if (typeof DecompressionStream !== 'undefined') {
       try { websocket.send('_gz,1'); } catch (e) { /* handshake is best-effort */ }
     }
+    // Padding frames (0x07) are dropped unread, so the server may probe this path with them.
+    try { websocket.send('_pad,1'); } catch (e) { /* handshake is best-effort */ }
     window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
     if (!isSharedMode) {
       const settingsPrefix = `${storageAppName}_`;
@@ -8067,6 +8073,8 @@ class WorkerWebSocket {
       const arrayBuffer = event.data;
       const dataView = new DataView(arrayBuffer);
       if (arrayBuffer.byteLength < 1) return;
+      // The server's padding while it probes a cut stream's path (`_pad,1`) carries nothing.
+      if (dataView.getUint8(0) === 0x07) return;
       streamStats.noteBytes(arrayBuffer.byteLength);
       const dataTypeByte = dataView.getUint8(0);
       // When the socket's thread took the message, or failing that now.

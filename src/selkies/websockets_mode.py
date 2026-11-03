@@ -26,8 +26,9 @@ in-process pixelflux handle, never through forked tools.
 Wire framing: text frames carry the control verbs; binary frames are typed
 by their first byte — 0x01 Opus audio (pcmflux's native header, sent as-is),
 0x03 JPEG and 0x04 video stripes from pixelflux, 0x02 client mic PCM,
-`WS_OPCODE_WEBCAM` a webcam frame for the virtual camera, and 0x05 a gzip
-wrapped control text. A client that sends `_gz,1` can inflate gzip: control
+`WS_OPCODE_WEBCAM` a webcam frame for the virtual camera, 0x05 a gzip
+wrapped control text, and `WS_OPCODE_PADDING` padding toward a page that
+sent `_pad,1`, which drops it unread (`PathProbe`). A client that sends `_gz,1` can inflate gzip: control
 text at or above `WS_GZIP_MIN_BYTES` then goes out as 0x05 frames (small,
 latency-critical messages such as input stay raw), and the server echoes the
 verb so the client gzips its own large sends, which the handler inflates
@@ -54,7 +55,7 @@ import socket
 import stat
 from collections import OrderedDict, deque
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple, Union
 
 try:
     import fcntl
@@ -136,7 +137,7 @@ from .webcam import (
     webcam_uplink_allowed,
 )
 from .stream_server import (SESSION_TOKEN_PROTOCOL, BaseStreamingService, ConnectionVerdict, CongestionSteer,
-                            LinkAllowance, RateHold, TransferPacer, UplinkGauge, _observe_rtt_floor,
+                            LinkAllowance, PathProbe, RateHold, TransferPacer, UplinkGauge, _observe_rtt_floor,
                             _uplink_session_state, handshake_session_token, note_pong, ping_behind, start_kbps,
                             uplink_rtt_ms, socket_gauge)
 from .metrics import Metrics
@@ -210,6 +211,18 @@ LINK_GAP_S = 2 * BACKPRESSURE_CHECK_INTERVAL_S
 # so does one whose encoder cannot follow them down.
 LINK_PATH_WINDOWS = 3
 LINK_PATH_SENT = 0.5
+# Padding toward a display's owner while its target stands cut on a still screen (`PathProbe`): a
+# binary frame of this type the page drops unread, written by the owner's relay in chunks of
+# PAD_STEP_S of the probe's rate, so a frame the screen sends waits behind one at most, with a ping
+# behind the chunk every PAD_PING_S, whose pong acks the bytes sent through it. A tenth of a second
+# keeps the pings the uplink clock holds (`UplinkGauge._PENDING_MAX`) over two and a half seconds
+# of queue.
+WS_OPCODE_PADDING = 0x07
+PAD_STEP_S = 0.02
+PAD_PING_S = 0.1
+PAD_CHUNK_MIN = 1200
+PAD_CHUNK_MAX = 256 * 1024
+_PADDING = bytes([WS_OPCODE_PADDING]) + bytes(PAD_CHUNK_MAX - 1)
 MAX_UINT16_FRAME_ID = 65535
 FRAME_ID_SUSPICIOUS_GAP_THRESHOLD = (
     MAX_UINT16_FRAME_ID // 2
@@ -265,6 +278,10 @@ VIDEO_RELAY_LOST_RECOVERY_SECONDS = 1.0
 VIDEO_RELAY_ROOM_FRAMES = 3
 VIDEO_RELAY_LAG_SECONDS = 0.1
 VIDEO_RELAY_PING_SECONDS = 0.05
+# A page's least round trip standing VIDEO_RELAY_LAG_SECONDS past its floor for this long is its path's, a
+# queue other traffic keeps standing or a longer route, as the owner's steer settles one (`_settle_path_floor`);
+# a queue of the page's own frames drains while the relay leaves frames out, and dips under that within it.
+VIDEO_RELAY_SETTLE_SECONDS = 3.0
 # Frames a run left out of a page may span before the encoder is told without
 # waiting for the page's room: the encoder predicts from the last eight
 # (REFERENCE_FRAMES in pixelflux), and the report lands a frame or two late.
@@ -869,7 +886,7 @@ def _forget_path(display_state: dict) -> None:
     off on every tick. The steered rate stays as the starting point.
     """
     for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer', 'link_delivered_bps', 'link_carried',
-                'link_jitter_ms', 'link_allowance', 'link_path_stand'):
+                'link_jitter_ms', 'link_allowance', 'link_path_stand', 'link_probe'):
         display_state.pop(key, None)
 
 
@@ -1145,6 +1162,10 @@ class _VideoRelay:
             not own its display); `pinged` is when it last pinged, and
             `pongs` and `rtt_floor` the pong count and the round trip's floor
             it last read.
+        pad_bps: The padding the display's steer asks of this relay, its
+            owner's, until `pad_until` (`set_padding`); `pad_next` is when
+            its next chunk is due and `pad_pinged` when one last had a ping
+            behind it.
     """
 
     __slots__ = ('server', 'display_id', 'ws', 'budget', 'backlog',
@@ -1152,7 +1173,8 @@ class _VideoRelay:
                  '_next_sync_req', 'verdict', 'sent', 'lost_run', 'lost_since',
                  'lost_first', 'lost_told', 'since_key', 'numbered', 'written',
                  'marks', 'gauged', 'pinged', 'pongs', 'rtt_floor', 'anchored', 'tracked',
-                 'gated', 'lost_gated')
+                 'gated', 'lost_gated', 'settled_floor', 'recent_rtts', 'pad_bps', 'pad_until', 'pad_next',
+                 'pad_pinged')
 
     def __init__(self, server: "DataStreamingServer", display_id: str,
                  ws: web.WebSocketResponse, budget: int) -> None:
@@ -1181,10 +1203,16 @@ class _VideoRelay:
         self.pinged = 0.0
         self.pongs = 0
         self.rtt_floor: Optional[float] = None
+        self.settled_floor: Optional[float] = None
+        self.recent_rtts: Deque[Tuple[float, float]] = deque()
         self.anchored = False
         self.tracked = False
         self.gated = False
         self.lost_gated = False
+        self.pad_bps = 0.0
+        self.pad_until = 0.0
+        self.pad_next = 0.0
+        self.pad_pinged = 0.0
 
     def start(self) -> None:
         self._task = asyncio.create_task(
@@ -1341,7 +1369,24 @@ class _VideoRelay:
         now = time.monotonic()
         if state["seq"] != self.pongs and state["rtt_us"] is not None:
             self.pongs = state["seq"]
+            rtt = state["rtt_us"] / 1e6
             self.rtt_floor = _observe_rtt_floor(state, state["rtt_us"], now) / 1e6
+            recent = self.recent_rtts
+            recent.append((now, rtt))
+            while recent and now - recent[0][0] > VIDEO_RELAY_SETTLE_SECONDS:
+                recent.popleft()
+            if self.settled_floor is not None and rtt < self.settled_floor:
+                self.settled_floor = max(rtt, self.rtt_floor)
+            least = min(r for _, r in recent)
+            floor = max(self.rtt_floor, self.settled_floor or 0.0)
+            if (now - recent[0][0] >= VIDEO_RELAY_SETTLE_SECONDS * 0.9
+                    and least - floor >= VIDEO_RELAY_LAG_SECONDS):
+                data_logger.info(
+                    f"Video relay[{self.display_id}] for {client_permissions.get(self.ws, {}).get('remote_address')}: "
+                    f"round trip floor {floor * 1000:.0f} -> {least * 1000:.0f} ms (a queue on its path not its own)")
+                self.settled_floor = least
+        if self.settled_floor is not None and self.rtt_floor is not None:
+            self.rtt_floor = max(self.rtt_floor, self.settled_floor)
         if self.rtt_floor is None:
             return 0.0
         answered = state.get("answered", 0.0)
@@ -1500,15 +1545,70 @@ class _VideoRelay:
                 and (key or ((data[10] << 8) | data[11]) != frame_id)):
             self.server.common_frames_for(self.display_id, held).hold(self, frame_id, key)
 
+    def set_padding(self, bps: float, until: float) -> None:
+        """Pad this client's stream at `bps` until `until` (`PathProbe`), in chunks
+        written while no frame waits, or stop padding where `bps` is 0."""
+        start = bps > 0 and self.pad_bps <= 0
+        self.pad_bps, self.pad_until = max(0.0, bps), until
+        if start:
+            self.pad_next = time.monotonic()
+            self._wake.set()
+
+    def _padding_due(self, now: float) -> int:
+        """The bytes of the padding chunk due now, or 0."""
+        if self.pad_bps <= 0 or now >= self.pad_until or now < self.pad_next:
+            return 0
+        self.pad_next = max(self.pad_next + PAD_STEP_S, now - PAD_STEP_S)
+        return max(PAD_CHUNK_MIN, min(PAD_CHUNK_MAX, int(self.pad_bps * PAD_STEP_S / 8)))
+
+    async def _write_padding(self, size: int) -> None:
+        """Write one padding chunk to the display's owner, counted in what the display
+        sent (`sent_bytes`, and `pad_bytes` apart), with a ping behind it each
+        PAD_PING_S whose answer acks the bytes sent through it for the link steer
+        (`_note_round_trip`)."""
+        ds = self.server.display_clients.get(self.display_id)
+        if ds is None or ds.get('ws') is not self.ws or not ds.get('backpressure_enabled', True):
+            return
+        ds['sent_bytes'] = ds.get('sent_bytes', 0) + size
+        ds['pad_bytes'] = ds.get('pad_bytes', 0) + size
+        sent_bytes, ws = ds['sent_bytes'], self.ws
+
+        def answered(rtt_s: float) -> None:
+            if ds.get('ws') is ws and 0.0 <= rtt_s * 1000.0 <= RTT_SAMPLE_SANE_MAX_MS:
+                _note_round_trip(ds, rtt_s * 1000.0, sent_bytes, time.monotonic())
+
+        await _send_live(self.ws, memoryview(_PADDING)[:size], f"Padding for '{self.display_id}'")
+        now = time.monotonic()
+        # Pinged only with no frame awaiting its ack: the browser answers a ping at once and the
+        # page acks a frame on its own tick, so a ping behind an unacked frame would ack bytes past
+        # it first and the acked history would run out of order.
+        if now - self.pad_pinged >= PAD_PING_S and ds.get('unacked_since') is None:
+            self.pad_pinged = now
+            await ping_behind(self.ws, answered)
+
     async def _run(self) -> None:
-        """Drain the backlog onto the socket until stopped or the socket dies."""
+        """Drain the backlog onto the socket until stopped or the socket dies,
+        padding the stream (`set_padding`) while it holds no frame."""
         try:
             while True:
                 if self.stopped:
                     return
                 if not self.backlog:
+                    now = time.monotonic()
+                    pad = self._padding_due(now)
+                    if pad:
+                        try:
+                            await self._write_padding(pad)
+                        except (ConnectionResetError, OSError, RuntimeError):
+                            self.server.clients.discard(self.ws)
+                            return
+                        continue
                     self._wake.clear()
-                    await self._wake.wait()
+                    if self.pad_bps > 0 and now < self.pad_until:
+                        with contextlib.suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(self._wake.wait(), max(0.0, self.pad_next - now))
+                    else:
+                        await self._wake.wait()
                     continue
                 item = self.backlog.popleft()
                 data = item['data']
@@ -2328,6 +2428,29 @@ class DataStreamingServer(BaseStreamingService):
                 or not self._holds_full_control(websocket)):
             return
         await self._hand_display_to(websocket, "went unused: the controller beside it in use")
+
+    def _capture_for_page_beside(self, websocket: Any) -> None:
+        """Start the primary capture a hidden owner stopped for a page that
+        joined beside it and is still there once the owner's hand-off had its
+        time (`_settle_display_owner`): an older page, or one without full
+        control, never takes the display, and would wait on the owner. The
+        owner's own feed stays paused until its START_VIDEO."""
+        async def _later() -> None:
+            await asyncio.sleep(self.HIDDEN_OWNER_HANDOFF_S + 0.5)
+            owner = (self.display_clients.get('primary') or {}).get('ws')
+            if (websocket.closed or websocket not in self.co_controllers.get('primary', ())
+                    or 'primary' in self.capture_instances or owner is None or owner.closed
+                    or not pipeline_starts_on('video', 'primary')):
+                return
+            self.video_paused_clients.add(owner)
+            data_logger.info("Starting the 'primary' capture its hidden owner stopped, for the page beside it.")
+            if await self._ensure_viewer_capture():
+                try:
+                    await websocket.send_str("PIPELINE_RESETTING primary")
+                except (ConnectionResetError, OSError, RuntimeError):
+                    pass
+                self._schedule_idr_for_display('primary')
+        _spawn_background_task(_later(), name="capture-for-page-beside")
 
     async def _hand_display_to(self, heir: Any, why: str) -> None:
         """Make `heir`, a controller beside the primary's owner, its owner: told
@@ -4098,6 +4221,14 @@ class DataStreamingServer(BaseStreamingService):
         window = [a for a in display_state.get('link_acks', ()) if a[0] > last_tick]
         gated = not display_state.get('backpressure_enabled', True)
         if not window and (not gated or display_state.get('link_carried', True)):
+            # A screen that sends nothing acks nothing; with nothing in flight its path is
+            # idle, which a cut target may pad to test (`_probe_path`).
+            steer = display_state.get('link_steer')
+            if steer is not None and not gated and display_state.get('unacked_since') is None:
+                self._probe_path(display_id, display_state, now, last_tick, steer,
+                                 float(display_state.get('video_bitrate') or 0),
+                                 self._video_bitrate_kbps(display_state), 0.0,
+                                 (sent - sent_then) * 8 / (now - last_tick) if last_tick else None)
             return
         target = float(display_state.get('video_bitrate') or 0)
         module = self.capture_instances.get(display_id, {}).get('module')
@@ -4178,25 +4309,62 @@ class DataStreamingServer(BaseStreamingService):
         if offered_bps is not None and window and measured_bps is not None:
             display_state['link_carried'] = measured_bps >= LINK_CARRIED_SHARE * offered_bps
         steer = display_state.setdefault('link_steer', CongestionSteer())
+        probe = display_state.get('link_probe')
         rate = round(steer.target(current, target, float(lo_kbps), delivered_bps, 0.0, now, queue_s,
-                                  offered_bps, acked_offered_bps, capacity_bps))
+                                  offered_bps, acked_offered_bps, capacity_bps,
+                                  probed=probe is not None and probe.padding))
         display_state['link_kbps'] = rate
+        self._probe_path(display_id, display_state, now, last_tick, steer, target, rate, queue_s, offered_bps)
         held_kbps = display_state.setdefault('link_hold', RateHold()).note(rate, now)
         ws = display_state.get('ws')
         if held_kbps is not None and ws is not None:
             _spawn_background_task(_broadcast_to_clients(
                 self.clients, f"CC_RATE {held_kbps}", watched=True, only=id(ws)))
         if rate != round(current):
-            (data_logger.info if rate < current else data_logger.debug)(
+            (data_logger.info if rate < current or steer.restored else data_logger.debug)(
                 f"Congestion control[{display_id}]: video bitrate {current:.0f} -> {rate} kbps "
-                f"(round trip {least_ms:.0f} ms over a {floor_ms:.0f} ms floor, "
-                f"{delivered_bps / 1000:.0f} kbps delivered, the server's loop "
-                f"{display_state.get('loop_late_ms', 0.0):.0f} ms late)")
+                + ("(round trips back at the floor after a stall: the rate before it)" if steer.restored else
+                   f"(round trip {least_ms:.0f} ms over a {floor_ms:.0f} ms floor, "
+                   f"{delivered_bps / 1000:.0f} kbps delivered, the server's loop "
+                   f"{display_state.get('loop_late_ms', 0.0):.0f} ms late)"))
             try:
                 module.update_video_bitrate(rate)
                 self._track_capture_settings(display_id, video_bitrate_kbps=rate)
             except Exception as e:
                 data_logger.warning(f"Congestion control could not retarget '{display_id}' ({e}).")
+
+    def _probe_path(self, display_id: str, display_state: dict, now: float, last_tick: float,
+                    steer: CongestionSteer, ceiling: float, rate: float, queue_s: Optional[float],
+                    offered_bps: Optional[float]) -> None:
+        """Pad a display's stream toward its owner through the next tick where its
+        `PathProbe` asks it to, a page that announced `_pad,1` (`WS_OPCODE_PADDING`).
+
+        What the display sent over the tick, `offered_bps` (None where the gate held
+        any of it), is taken without the padding the relay wrote through it, so the
+        probe weighs the stream's own.
+        """
+        pad_sent = display_state.get('pad_bytes', 0)
+        pad_then = display_state.get('link_tick_pad', pad_sent)
+        display_state['link_tick_pad'] = pad_sent
+        span = now - last_tick if last_tick else 0.0
+        content_bps = None
+        if offered_bps is not None and span > 0:
+            content_bps = max(0.0, offered_bps - (pad_sent - pad_then) * 8 / span)
+        ws = display_state.get('ws')
+        if ws is None or not getattr(ws, '_ws_pad', False):
+            return
+        pad = display_state.setdefault('link_probe', PathProbe()).rate_bps(
+            rate, ceiling, content_bps, queue_s, now < steer.hold_until, now)
+        if not display_state.get('video_active', True) or ws in getattr(self, 'video_paused_clients', ()):
+            pad = 0.0
+        if (pad > 0) != (display_state.get('link_padding', 0.0) > 0):
+            data_logger.debug(f"Congestion control[{display_id}]: " + (
+                f"probing the path at {rate:.0f} kbps (a still screen under a cut target)" if pad > 0 else
+                f"probe ended at {rate:.0f} kbps" + (" (a queue)" if queue_s else "")))
+        display_state['link_padding'] = pad
+        relay = self.video_relay_groups.get(display_id, {}).get(ws)
+        if relay is not None:
+            relay.set_padding(pad, now + 2 * BACKPRESSURE_CHECK_INTERVAL_S)
 
     def _estimate_client_fps(self, display_state: dict, acked_id: int,
                              configured_fps: Union[int, float], now: float) -> float:
@@ -5417,6 +5585,10 @@ class DataStreamingServer(BaseStreamingService):
                         except Exception:
                             pass
                         continue
+                    if message == "_pad,1":
+                        # The page drops WS_OPCODE_PADDING frames unread: its stream may be padded.
+                        websocket._ws_pad = True
+                        continue
                     perms = client_permissions.get(websocket)
                     if perms and perms.get("role") == "viewer":
                         # Authority lists shared with the WebRTC gate: the collab extras
@@ -5502,6 +5674,8 @@ class DataStreamingServer(BaseStreamingService):
                                     data_logger.info(
                                         f"Controller {remote_address} joins 'primary' beside its owner "
                                         f"(tab {(tab_id or 'none')[:8]}, the owner's {(owner_tab or 'none')[:8]}).")
+                                    if 'primary' not in self.capture_instances:
+                                        self._capture_for_page_beside(websocket)
                                     await self.broadcast_stream_resolution()
                                     try:
                                         await websocket.send_str("PIPELINE_RESETTING primary")

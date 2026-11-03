@@ -105,6 +105,12 @@ def wait_settled_encoder(page: Any, timeout: float = 20) -> Optional[str]:
 def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: str,
                 probe: str, rtp_mime: str, res: "H.Results") -> None:
     tag = f"{engine} {encoder}"
+    # An H.265 stream Firefox declines moves to H.264, which it takes over RTP from OpenH264 alone.
+    if (mode == "webrtc" and engine == "firefox" and encoder in ("h264enc", "h265enc")
+            and not C.openh264_version()):
+        res.skip(f"{tag}: no OpenH264 GMP plugin in {C.FF_E2E_PROFILE}",
+                 "run tests/tools/fetch-openh264.sh to cover H.264 in Firefox")
+        return
     # Every stream declares the matrix it converts with -- BT.709, or BT.601 for
     # VP8, whose keyframe header carries a single bit that can name no other.
     # Two engines paint some streams with a matrix of their own, twenty levels

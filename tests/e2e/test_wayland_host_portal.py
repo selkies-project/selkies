@@ -55,6 +55,20 @@ SINK_JS = """() => {
   return null;
 }"""
 
+# Record the pointer echoes the page receives, and ask for them as trackpad mode does.
+ECHO_ON_JS = """() => {
+  const input = window.webrtcInput;
+  if (!input) return false;
+  if (!window.__echoes) {
+    window.__echoes = [];
+    const draw = input.onPointerEcho.bind(input);
+    input.onPointerEcho = (action) => { window.__echoes.push(action); return draw(action); };
+  }
+  input.send('_pointer_echo,1');
+  return true;
+}"""
+ECHO_LAST_JS = "() => (window.__echoes || []).slice(-1)[0] || null"
+
 
 def service_exec(name: str) -> str:
     """The executable behind a D-Bus service name, from its activation file, the way the bus
@@ -335,7 +349,8 @@ def wait_video(page, mode: str, timeout: float):
 def landing(page, obs, x: float, y: float, logical: tuple, mode: tuple) -> tuple:
     """Move the page's pointer to (x, y); where the session's client saw it last and where it should
     have: the stream pixel the page point shows, in the output's `logical` size. The page maps
-    by the stream's size once it has one, so that has to be the host's `mode` first."""
+    by the stream's size once it has one, so that has to be the host's `mode` first. Third, that
+    point in the stream's own pixels, where the server's pointer echo should put it."""
     deadline = time.time() + 10
     sink = page.evaluate(SINK_JS)
     while sink and sink["px"] and tuple(sink["px"]) != mode and time.time() < deadline:
@@ -347,9 +362,11 @@ def landing(page, obs, x: float, y: float, logical: tuple, mode: tuple) -> tuple
     seen = [l for l in obs.lines[mark:] if l.get("kind") in ("ptr_motion", "ptr_enter")]
     got = (round(seen[-1]["x"]), round(seen[-1]["y"])) if seen else None
     if not sink:
-        return got, None
+        return got, None, None
     want = ((x - sink["x"]) / sink["cssW"] * logical[0], (y - sink["y"]) / sink["cssH"] * logical[1])
-    return got, (round(want[0]), round(want[1]))
+    px = sink["px"] or mode
+    at = ((x - sink["x"]) / sink["cssW"] * px[0], (y - sink["y"]) / sink["cssH"] * px[1])
+    return got, (round(want[0]), round(want[1])), (round(at[0]), round(at[1]))
 
 
 def run(mode: str, scale: int = 1, desktop: str = "kde", eis: bool = True) -> "H.Results":
@@ -424,13 +441,30 @@ def run(mode: str, scale: int = 1, desktop: str = "kde", eis: bool = True) -> "H
                     res.check("with EIS refused, input goes through the portal's Notify methods",
                               path == "portal notify" and "portal offers no EIS socket" in H.server_log(),
                               H.server_log(tail=5))
+                # A trackpad page draws the pointer where the server echoes it: from the host's
+                # cursor metas under host capture, in the display's pixels.
+                echo_on = page.evaluate(ECHO_ON_JS)
                 for x, y in ((900, 500), (200, 120)):
-                    got, want = landing(page, obs, x, y, (mapped.get("w") or SIZE[0], mapped.get("h") or SIZE[1]),
-                                        rig.mode)
+                    got, want, at = landing(page, obs, x, y,
+                                            (mapped.get("w") or SIZE[0], mapped.get("h") or SIZE[1]), rig.mode)
                     res.check(f"the pointer lands where the page points ({x}, {y}), over {path}",
                               got is not None and want is not None
                               and abs(got[0] - want[0]) <= 2 and abs(got[1] - want[1]) <= 2,
                               f"at {got}, the page points at {want}")
+                    # The echo sent with the move may still carry the host's previous cursor meta;
+                    # the resting pointer is read again on the echo's own poll.
+                    deadline, echo, echoed = time.time() + 3, None, None
+                    while time.time() < deadline:
+                        echo = page.evaluate(ECHO_LAST_JS)
+                        parts = echo.split(",") if echo else []
+                        echoed = (round(float(parts[2])), round(float(parts[3]))) if len(parts) >= 6 else None
+                        if echoed and at and abs(echoed[0] - at[0]) <= 2 and abs(echoed[1] - at[1]) <= 2:
+                            break
+                        time.sleep(0.2)
+                    res.check(f"the pointer echo follows the host's pointer ({x}, {y})",
+                              echo_on and echoed is not None and at is not None
+                              and abs(echoed[0] - at[0]) <= 2 and abs(echoed[1] - at[1]) <= 2,
+                              f"echo {echo}, the page points at {at} in the stream's pixels")
                 res.check("a click reaches the session's client", obs.wait_for("ptr_button", timeout=8, state=1) is not None
                           and obs.wait_for("ptr_button", timeout=8, state=0) is not None, "")
                 res.check("a wheel notch reaches the session's client", obs.wait_for("ptr_axis", timeout=8) is not None, "")
