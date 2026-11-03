@@ -2688,3 +2688,183 @@ fn rtp_bench_150kb_frame() {
         },
     );
 }
+
+/// A key frame of `size` bytes whose last packet left under `tag` now, unacknowledged unless
+/// `acked`.
+fn key_on_wire(h: &mut Harness, tag: u16, size: usize, acked: bool) {
+    if !acked {
+        let at = h.clock;
+        h.tr.twcc.seed_sent(tag, 1200, at);
+    }
+    h.s.note_frame_end(
+        tag,
+        FrameEnd {
+            keyframe: true,
+            timing: None,
+            captured_ns: 0,
+            size,
+            frame_id: None,
+        },
+    );
+    h.s.frame_left(tag, h.clock);
+}
+
+fn plis(h: &Harness) -> usize {
+    h.rec.events().iter().filter(|e| *e == "pli").count()
+}
+
+fn pli(h: &mut Harness) {
+    let packet = RtcpPacket::Psfb(PsfbPacket {
+        fmt: RTCP_PSFB_PLI,
+        ssrc: 1,
+        media_ssrc: 2,
+        fci: vec![],
+    });
+    h.s.handle_rtcp(&packet, &mut h.tr, h.clock);
+}
+
+#[test]
+fn repairs_and_key_frame_requests_wait_on_a_full_path() {
+    const GONE: u16 = 9999;
+    let mut h = Harness::new(true, None, true, "video/H264");
+    h.s.history = RtpHistory::new();
+    for seq in 1..=20u16 {
+        let mut p = RtpPacket::new(96, seq, 0, 0);
+        p.payload = Payload::from(&[b'x'; 1000][..]);
+        h.s.history.add(p, 0.0, Some(10 + (seq - 1) / 5));
+    }
+    h.s.rtt = Some(0.1);
+    let now = h.clock;
+
+    assert!(
+        h.s.repair_room(10_000_000, false, now),
+        "unmeasured, a repair of any size fits"
+    );
+    for _ in 0..3 {
+        h.nack(&[GONE]);
+    }
+    assert_eq!(
+        plis(&h),
+        3,
+        "unmeasured, each NACK naming a packet gone asks for a key frame, as before"
+    );
+
+    h.s.set_repair_budget(Some(800_000.0), Some(1_000_000.0));
+    let room = 800_000.0 * REPAIR_SHARE / 8.0 * REPAIR_WINDOW_S;
+    assert!(
+        h.s.repair_room(room as usize, false, now) && !h.s.repair_room(1, false, now),
+        "measured, the budget holds REPAIR_WINDOW_S of REPAIR_SHARE of the steered rate"
+    );
+    h.s.repair_at -= 0.1;
+    let tick = room * 0.1 / REPAIR_WINDOW_S;
+    assert!(
+        h.s.repair_room((tick * 0.9) as usize, false, now)
+            && !h.s.repair_room((tick * 0.2) as usize, false, now),
+        "and refills at that rate"
+    );
+
+    h.tr.rtp.clear();
+    h.s.repair_bytes = 4500.0;
+    h.s.repair_at = now;
+    h.nack(&[1, 2, 3, 4]);
+    assert_eq!(
+        h.tr.seqs(),
+        vec![1, 1, 2, 2],
+        "a NACK's retransmissions stop at the budget, a first repair counting twice (it is sent twice)"
+    );
+    h.s.repair_bytes = room;
+    h.nack(&[3, 4]);
+    assert_eq!(
+        h.tr.seqs()[4..],
+        [3, 4, 4],
+        "and resume once it has room again; a packet the budget refused counted its NACK, so the next sends it once"
+    );
+    assert!(
+        h.rec.events().contains(&"lost_frame 10".to_string()),
+        "and names its frame lost"
+    );
+
+    h.rec.clear();
+    h.s.repair_bytes = room;
+    h.s.key_requested = None;
+    h.nack(&[GONE]);
+    h.nack(&[GONE]);
+    assert_eq!(
+        plis(&h),
+        1,
+        "measured, a NACK naming a packet gone asks once, and the next waits on the key frame asked"
+    );
+    h.s.key_requested = h.s.key_requested.map(|t| t - KEY_ASK_S - 0.001);
+    h.nack(&[GONE]);
+    assert_eq!(
+        plis(&h),
+        2,
+        "past KEY_ASK_S with no key frame out, it asks again"
+    );
+
+    key_on_wire(&mut h, 40, 70_000, false);
+    h.nack(&[GONE]);
+    assert_eq!(
+        plis(&h),
+        2,
+        "a key frame on the wire answers it: no request"
+    );
+    let travel = 0.1 + KEY_MARGIN_S + 70_000.0 * 8.0 / 1_000_000.0;
+    h.s.key_wire = Some((40, now - travel + 0.05, 70_000));
+    h.nack(&[GONE]);
+    assert_eq!(
+        plis(&h),
+        2,
+        "until its bytes' time at what the path delivers, the round trip and KEY_MARGIN_S"
+    );
+    h.s.key_wire = Some((40, now - travel - 0.05, 70_000));
+    h.nack(&[GONE]);
+    assert_eq!(plis(&h), 3, "past that it asks again");
+
+    key_on_wire(&mut h, 41, 70_000, true);
+    h.nack(&[GONE]);
+    assert_eq!(
+        plis(&h),
+        4,
+        "a key frame the peer acknowledged answers nothing new: it asks"
+    );
+
+    key_on_wire(&mut h, 42, 70_000, false);
+    pli(&mut h);
+    assert_eq!(
+        plis(&h),
+        4,
+        "a peer's PLI waits on a key frame on its way too (it repeats while one crosses a slow path)"
+    );
+
+    key_on_wire(&mut h, 43, 70_000, false);
+    h.s.pacer_resync(None, &mut h.tr, now);
+    h.nack(&[GONE]);
+    assert!(
+        plis(&h) == 5 && h.s.key_wire.is_none(),
+        "a pacer reset drops the key frame on its way: the next request asks"
+    );
+    key_on_wire(&mut h, 44, 70_000, false);
+    h.s.delivery_bps = None;
+    pli(&mut h);
+    assert_eq!(
+        plis(&h),
+        6,
+        "unmeasured, a peer's PLI is answered whatever is on its way, as before"
+    );
+
+    h.s.set_repair_budget(Some(800_000.0), Some(1_000_000.0));
+    h.s.repair_bytes = room * (FEC_RESERVE + 0.01);
+    h.s.repair_at = now;
+    assert!(
+        !h.s.repair_room((room * 0.02) as usize, true, now)
+            && h.s.repair_room((room * 0.02) as usize, false, now),
+        "FlexFEC leaves FEC_RESERVE of the budget to retransmissions"
+    );
+
+    h.s.set_repair_budget(None, None);
+    assert!(
+        h.s.repair_room(10_000_000, false, now),
+        "a budget lifted lets any repair through again"
+    );
+}
