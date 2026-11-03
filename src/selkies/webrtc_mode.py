@@ -3516,9 +3516,10 @@ class WebRTCService(BaseStreamingService):
                 # Goodput may lift the target, never drag it down (see docstring).
                 steer = self._congestion_steer.setdefault(did, CongestionSteer())
                 now = time.monotonic()
+                probe = self._path_probes.get(did)
                 target = round(steer.target(
                     current, ceiling, lo_kbps, min(goodputs), worst_loss, now, queue_s,
-                    bucket["sent_bps"]))
+                    bucket["sent_bps"], probed=probe is not None and probe.padding))
                 # What the path carries, through each peer's pacer, sets the rate a still
                 # screen's cleanup runs at; the bridge and the pacers take its frames whole. A
                 # pacer reads the path's capacity, not what cross traffic leaves of it: a target

@@ -4309,8 +4309,10 @@ class DataStreamingServer(BaseStreamingService):
         if offered_bps is not None and window and measured_bps is not None:
             display_state['link_carried'] = measured_bps >= LINK_CARRIED_SHARE * offered_bps
         steer = display_state.setdefault('link_steer', CongestionSteer())
+        probe = display_state.get('link_probe')
         rate = round(steer.target(current, target, float(lo_kbps), delivered_bps, 0.0, now, queue_s,
-                                  offered_bps, acked_offered_bps, capacity_bps))
+                                  offered_bps, acked_offered_bps, capacity_bps,
+                                  probed=probe is not None and probe.padding))
         display_state['link_kbps'] = rate
         self._probe_path(display_id, display_state, now, last_tick, steer, target, rate, queue_s, offered_bps)
         held_kbps = display_state.setdefault('link_hold', RateHold()).note(rate, now)

@@ -369,5 +369,35 @@ for t in (8.0, 8.5, 9.0):
 check("nor does one whose first tick read no queue before its start-up queue built (one tick carries no rate)",
       got < 2000 and not steer.restored and steer._restore_kbps is None, (got, steer._restore_kbps))
 
+# A still screen padded up to its target (PathProbe): a clean tick it filled climbs PROBE_STEP a second, so a cut
+# desktop is back at its rate in seconds; a tick the padding did not fill climbs as a trickle does.
+steer = CongestionSteer()
+got = steer.target(1000, CEILING, 135.0, 1_000_000.0, 0.0, 0.0, queue_s=0.0, offered_bps=1_000_000.0, probed=True)
+check("a clean probed tick filled to the target raises it PROBE_STEP a second", round(got) == 1300, got)
+steer = CongestionSteer()
+steer.target(1000, CEILING, 135.0, 1_000_000.0, 0.0, 0.0, queue_s=0.0, offered_bps=1_000_000.0)
+got = steer.target(1000, CEILING, 135.0, 1_000_000.0, 0.0, 0.5, queue_s=0.0, offered_bps=1_000_000.0)
+check("an unprobed one the step a second", round(got) == round(1000 * CongestionSteer.STEP ** 0.5), got)
+steer = CongestionSteer()
+steer.target(1000, CEILING, 135.0, 100_000.0, 0.0, 0.0, queue_s=0.0, offered_bps=100_000.0, probed=True)
+got = steer.target(1000, CEILING, 135.0, 100_000.0, 0.0, 0.5, queue_s=0.0, offered_bps=100_000.0, probed=True)
+check("a probed tick the padding did not fill holds as a trickle does", round(got) == 1000, got)
+
+
+def climb(tick_s: float, probed: bool) -> float:
+    """Seconds a clean, filled climb takes from an eighth of the ceiling to it, at ticks of tick_s."""
+    steer, cur, t = CongestionSteer(), CEILING / 8, 0.0
+    steer.target(cur, CEILING, 135.0, cur * 1000, 0.0, t, queue_s=0.0, offered_bps=cur * 1000, probed=probed)
+    while cur < CEILING and t < 60:
+        t += tick_s
+        cur = steer.target(cur, CEILING, 135.0, cur * 1000, 0.0, t, queue_s=0.0, offered_bps=cur * 1000,
+                           probed=probed)
+    return t
+
+
+got = [climb(0.5, True), climb(1.0, True), climb(0.5, False)]
+check("a probe climbs from an eighth of the rate to it in about 8 s, at either transport's tick, where a "
+      "filled stream's climb takes about 15", got[0] <= 8.5 and got[1] <= 9 and got[2] >= 14, got)
+
 print(f"[congestion-steer] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

@@ -376,7 +376,11 @@ class CongestionSteer:
     A clean tick outside a hold raises the target, by STEP a second while what
     the path delivers is far from the last capacity it showed and by STEP_NEAR
     once it is within NEAR of it, where the next queue waits: probing there
-    slowly keeps the overshoot that finds it small. Delivered rates rather than
+    slowly keeps the overshoot that finds it small. A still screen the
+    transport padded up to the target (`PathProbe`, `probed`) has nothing to
+    show but the path, and climbs PROBE_STEP a second until the first queue
+    ends the probe: a cut desktop is back at its rate in seconds, at the cost of
+    the last tick's overshoot. Delivered rates rather than
     targets are compared, since an encoder need not emit what it is asked for
     (a CBR encoder with a small buffer runs under its target, and content it
     cannot compress that far runs over). A path that delivers clear past the
@@ -421,6 +425,7 @@ class CongestionSteer:
     HOLD_S = 2.0
     STEP = 1.15
     STEP_NEAR = 1.05
+    PROBE_STEP = 1.3
     NEAR = 0.9
     HEADROOM = 0.85
     DRAIN_S = 1.0
@@ -457,7 +462,7 @@ class CongestionSteer:
                queue_s: Optional[float] = None,
                offered_bps: Optional[float] = None,
                acked_offered_bps: Optional[float] = None,
-               capacity_bps: Optional[float] = None) -> float:
+               capacity_bps: Optional[float] = None, probed: bool = False) -> float:
         """The next target in kbps for one tick.
 
         Args:
@@ -480,6 +485,9 @@ class CongestionSteer:
                 the transport measured it apart from goodput_bps (a burst over
                 a trickle, whose window's rate the trickle dilutes); the
                 backoff takes the higher.
+            probed: Whether the transport padded the tick's stream up to the
+                target (`PathProbe`): a clean tick it filled to half the target
+                or more raises the target PROBE_STEP a second.
         """
         dt = 1.0 if self._tick_at is None else min(max(now - self._tick_at, 0.0), 2.0)
         self._tick_at = now
@@ -564,7 +572,10 @@ class CongestionSteer:
             elif delivered >= capacity * self.NEAR:
                 step = self.STEP_NEAR
         raised = current * step ** dt
-        if offered_bps is None or offered_bps < current * 1_000 * self.APP_LIMITED:
+        filled = offered_bps is not None and offered_bps >= current * 1_000 * self.APP_LIMITED
+        if probed and filled:
+            raised = max(raised, current * self.PROBE_STEP ** dt)
+        if not filled:
             raised = min(raised, max(current, self.capacity_kbps or current))
         return max(floor, min(ceiling, max(raised, delivered * self.HEADROOM)))
 
