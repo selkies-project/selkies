@@ -29,6 +29,16 @@ import helpers as H  # noqa: E402
 res = H.Results("webrtc-gop-reset")
 
 
+
+def repairing_as_main(sender):
+    """Give a stand-in the sender's repair budget and key-frame gate, unmeasured (congestion control off): it
+    retransmits and asks for key frames as a sender did before either."""
+    sender._repair_bps = sender._delivery_bps = sender._key_wire = sender._key_asked = None
+    sender._repair_bytes = sender._repair_at = 0.0
+    for name in ("_repair_room", "_key_on_its_way", "_ask_key_frame"):
+        setattr(sender, name, getattr(RTCRtpSender, name).__get__(sender))
+    return sender
+
 def held_pacer(sent: list, keyreqs: list, send_now=None, dropped: Optional[list] = None) -> RtpPacer:
     """A pacer whose drain never runs, so what it holds is what send() decided."""
     async def record(data: bytes) -> None:
@@ -125,6 +135,7 @@ async def sender_repairs() -> None:
         transport=SimpleNamespace(_send_rtp=send_rtp, _twcc_next=lambda n: 7, _send_delay=lambda: 0.0),
         _emit_pli_event=lambda: events.append("pli"), emit=lambda name, *args: events.append((name,) + args),
         _resync_held=lambda: False, _past_repair=lambda lost: False)
+    repairing_as_main(sender)
     sender._retransmit = lambda packet: RTCRtpSender._retransmit(sender, packet)
     sender._send = lambda data, twcc_seq=None: RTCRtpSender._send(sender, data, twcc_seq)
     nack = lambda *lost: RtcpRtpfbPacket(fmt=RTCP_RTPFB_NACK, ssrc=1, media_ssrc=2, lost=list(lost))

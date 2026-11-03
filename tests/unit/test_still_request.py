@@ -33,6 +33,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 
 
+
+def repairing_as_main(sender):
+    """Give a stand-in the sender's repair budget and key-frame gate, unmeasured (congestion control off): it
+    retransmits and asks for key frames as a sender did before either."""
+    sender._repair_bps = sender._delivery_bps = sender._key_wire = sender._key_asked = None
+    sender._repair_bytes = sender._repair_at = 0.0
+    for name in ("_repair_room", "_key_on_its_way", "_ask_key_frame"):
+        setattr(sender, name, getattr(RTCRtpSender, name).__get__(sender))
+    return sender
+
 def sender(asks: list, sent: list) -> SimpleNamespace:
     """A sender whose newest frame, transport-wide number 40, left 0.4 s ago and was
     acknowledged, with no request before."""
@@ -43,7 +53,7 @@ def sender(asks: list, sent: list) -> SimpleNamespace:
                         _resync_held=lambda: False,
                         on_frame_sent=lambda *args: sent.append(args))
     s._still_request = lambda: RTCRtpSender._still_request(s)
-    return s
+    return repairing_as_main(s)
 
 
 def left(s: SimpleNamespace, seq: int, keyframe: bool = False, encoded: float = 0.0) -> None:

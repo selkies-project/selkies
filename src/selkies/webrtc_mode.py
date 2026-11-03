@@ -3447,12 +3447,15 @@ class WebRTCService(BaseStreamingService):
             # The video senders a display's padding goes to: its owner's where it has one.
             padded: Dict[str, List[Any]] = {}
             padded_owner: Dict[str, List[Any]] = {}
+            # Every peer's video sender, whose repairs the display's steered rate bounds.
+            repairing: Dict[str, List[Any]] = {}
             for peer_id, peer in rtc_app.peer_connections.items():
                 pc = peer.get("peer_conn")
                 did = peer.get("display_id", "primary") or "primary"
                 video = peer.get("video_sender")
                 if video is not None:
                     padded.setdefault(did, []).append(video)
+                    repairing.setdefault(did, []).append(video)
                     if self._peer_owns_display(peer_id):
                         padded_owner.setdefault(did, []).append(video)
                 if pacer_on:
@@ -3520,6 +3523,9 @@ class WebRTCService(BaseStreamingService):
                 target = round(steer.target(
                     current, ceiling, lo_kbps, min(goodputs), worst_loss, now, queue_s,
                     bucket["sent_bps"], probed=probe is not None and probe.padding))
+                # A target cut by a queue the path showed (the steer holds the capacity it measured), not by
+                # loss alone on a path that never queued: only then do repairs answer it.
+                queued = steer.capacity_kbps is not None
                 # What the path carries, through each peer's pacer, sets the rate a still
                 # screen's cleanup runs at; the bridge and the pacers take its frames whole. A
                 # pacer reads the path's capacity, not what cross traffic leaves of it: a target
@@ -3543,6 +3549,13 @@ class WebRTCService(BaseStreamingService):
                 # A cut target over a still screen pads its stream to test the path (`PathProbe`). A
                 # trickle's window reads no queue (too few feedback packets): padding starts on it,
                 # and the queue the padded windows measure stops it.
+                # Under a queue-measured cut repairs take no more than the rate steered to, so a path that
+                # loses because it is full is not sent more than it was asked to carry; where loss alone cut
+                # the target they are not bound, since the repairs a random loss asks for crowd nothing and the
+                # goodput they carry holds the target up (`RTCRtpSender.set_repair_budget`).
+                for sender in repairing.get(did, []):
+                    if hasattr(sender, "set_repair_budget"):
+                        sender.set_repair_budget(target * 1000 if queued else None, min(goodputs))
                 pad = self._path_probes.setdefault(did, PathProbe()).rate_bps(
                     target, ceiling, max(0.0, bucket["sent_bps"] - bucket["padding_bps"]),
                     queue_s if queue_s is not None else 0.0, now < steer.hold_until, now)

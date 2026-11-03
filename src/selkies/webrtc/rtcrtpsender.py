@@ -167,6 +167,20 @@ FEC_GROUP_PACKETS = 10
 # stood in for FEC_CLEAR_WINDOWS before them, so a queue's own overflow never counts.
 FEC_FULL_LOSS = 0.002
 FEC_CLEAR_WINDOWS = 3
+# Where congestion control bounds them (a target a queue cut), repairs (retransmissions and FlexFEC) take at most
+# REPAIR_SHARE of the rate it steered the display to, over REPAIR_WINDOW_S (libwebrtc's retransmission rate
+# limiter): a path that loses packets because it is full is sent no more than it was asked to carry
+# (`set_repair_budget`).
+REPAIR_SHARE = 1.0
+REPAIR_WINDOW_S = 0.5
+# The share of the repair budget FlexFEC leaves to retransmissions (`_repair_room`).
+FEC_RESERVE = 0.5
+# Where congestion control measures what the path delivers, a key frame asked of the encoder answers the requests
+# after it for KEY_ASK_S, and one on the wire until its last packet is acknowledged or has had the round trip,
+# KEY_MARGIN_S and the time its bytes take at that (at least KEY_FLOOR_BPS) (`_key_on_its_way`).
+KEY_ASK_S = 0.3
+KEY_FLOOR_BPS = 100_000
+KEY_MARGIN_S = 0.1
 
 
 def random_sequence_number() -> int:
@@ -367,6 +381,14 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # owed otherwise, in FEC_GROUP_PACKETS-ths (`_fec_repairs`).
         self._fec_full = False
         self._fec_credit = 0
+        # The repair budget (`set_repair_budget`): its rate (None: unbounded), the bytes it holds and when it was
+        # last filled; what the path delivers; the key frame last asked for and the one last on the wire.
+        self._repair_bps: Optional[float] = None
+        self._repair_bytes = 0.0
+        self._repair_at = 0.0
+        self._delivery_bps: Optional[float] = None
+        self._key_asked: Optional[float] = None
+        self._key_wire: Optional[tuple] = None
         self.__started = False
         self.__stats = RTCStatsReport()
         self.__transport = transport
@@ -586,6 +608,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     # A list runs oldest first, so one let go says nothing about the rest.
                     gone = True
                     continue
+                if not self._repair_room(len(sent.payload) * (2 if times == 1 else 1)):
+                    break
                 # A NACK after the first, sent once the retransmission and any FlexFEC
                 # repair of the packet had a round trip to reach the peer, says neither
                 # did: the frame is lost to it, and the encoder is told once so the frames
@@ -602,10 +626,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 if lost and self.__rtp_history.newly_lost(frame, time.time()):
                     self.emit("lost_frame", frame)
                     self._lost_at = time.monotonic()
-            if gone and not self._resync_held():
+            if gone and not self._resync_held() and not self._key_on_its_way():
                 # Gone from the history, or past repair, where no resync answers it: only a key
-                # frame brings the peer back.
-                self._emit_pli_event()
+                # frame brings the peer back, unless one is on its way.
+                self._ask_key_frame()
         elif isinstance(packet, RtcpXrPacket) and packet.rrtr is not None:
             self.__rrtrs.pop(packet.ssrc, None)
             if len(self.__rrtrs) >= RRTR_REPORTERS_MAX:
@@ -617,9 +641,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 self._confirm()
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt in (RTCP_PSFB_PLI, RTCP_PSFB_FIR):
             # A Full Intra Request (RFC 5104) asks what a PLI does: a key frame.
-            if not self._still_request() and not self._resync_held():
+            if not self._still_request() and not self._resync_held() and not self._key_on_its_way():
                 self._send_keyframe()
-                self._emit_pli_event()
+                self._ask_key_frame()
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_APP:
             try:
                 bitrate, ssrcs = unpack_remb_fci(packet.fci)
@@ -653,6 +677,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if frame_id is not None and self.on_frame_out is not None:
             self.on_frame_out(frame_id, keyframe)
         self._frame_left = (seq, time.monotonic())
+        if keyframe:
+            self._key_wire = (seq, self._frame_left[1], size)
+            self._key_asked = None
         while self.__in_flight and ((seq - self.__in_flight[0][0]) & 0xFFFF) < 0x8000:
             self.__in_flight.popleft()
         encoded = timing[1] / 1e9 if timing and len(timing) > 1 and timing[1] > 0 else 0.0
@@ -660,6 +687,53 @@ class RTCRtpSender(AsyncIOEventEmitter):
             self._lost_at = None
         if self.on_frame_sent is not None:
             self.on_frame_sent(captured, size)
+
+    def set_repair_budget(self, bps: Optional[float], delivery_bps: Optional[float] = None) -> None:
+        """Bound repairs to REPAIR_SHARE of `bps`, the rate congestion control steered the display to (None: no
+        bound), and time a key frame's way by `delivery_bps`, what the path delivers (`_key_on_its_way`)."""
+        self._repair_bps = None if bps is None else bps * REPAIR_SHARE
+        self._delivery_bps = delivery_bps
+
+    def _repair_room(self, size: int, proactive: bool = False) -> bool:
+        """Whether a repair of `size` bytes fits the budget, which it then takes. A `proactive` one (FlexFEC)
+        leaves FEC_RESERVE of the budget to the retransmissions a NACK asks for, which answer a loss that
+        happened."""
+        if not self._repair_bps:
+            return True
+        now = time.monotonic()
+        full = self._repair_bps / 8 * REPAIR_WINDOW_S
+        self._repair_bytes = min(full, self._repair_bytes + (now - self._repair_at) * self._repair_bps / 8)
+        self._repair_at = now
+        if self._repair_bytes - (full * FEC_RESERVE if proactive else 0.0) < size:
+            return False
+        self._repair_bytes -= size
+        return True
+
+    def _key_on_its_way(self) -> bool:
+        """Whether a key frame answers a request already, where congestion control measures what the path
+        delivers (`set_repair_budget`): one asked of the encoder KEY_ASK_S ago or less, or one on the wire whose
+        last packet is not acknowledged and which has had less than the round trip, KEY_MARGIN_S and its bytes'
+        time at what the path delivers. A NACK naming a packet gone from the
+        history, which every loss on a full path does, otherwise asked for a key frame of its own: four a second,
+        each overflowing the path again; a peer's PLI repeats while the key frame is still crossing a slow path.
+        A pacer reset drops what was on its way (`_pacer_resync`)."""
+        if not self._delivery_bps:
+            return False
+        now = time.monotonic()
+        if self._key_asked is not None and now - self._key_asked < KEY_ASK_S:
+            return True
+        if self._key_wire is None:
+            return False
+        seq, at, size = self._key_wire
+        if self.transport._twcc_acked(seq):
+            return False
+        travel = (self.__rtt or 0.0) + KEY_MARGIN_S + size * 8 / max(self._delivery_bps, KEY_FLOOR_BPS)
+        return now - at < travel
+
+    def _ask_key_frame(self) -> None:
+        """Ask the encoder for a key frame (`_emit_pli_event`), which answers the requests after it."""
+        self._key_asked = time.monotonic()
+        self._emit_pli_event()
 
     def _emit_pli_event(self):
         """
@@ -683,6 +757,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
         (a burst of loss on a software encoder's stream otherwise took one to
         two seconds to close).
         """
+        # Whatever key frame was on its way, the reset may have dropped: the next request asks again.
+        self._key_asked = None
+        self._key_wire = None
         if (first_tag is None or not self.__in_flight or self.selective is None
                 or not self.selective()
                 or not self.__rtp_header_extensions_map.has_dependency_descriptor()):
@@ -1269,7 +1346,11 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         )
                         if packet.marker or len(fec_group) == FEC_GROUP_PACKETS:
                             repairs = self._fec_repairs(len(fec_group))
+                            largest = max(len(p_) for p_ in fec_group)
                             for repair in range(repairs):
+                                if not self._repair_room(largest, proactive=True):
+                                    repairs = repair
+                                    break
                                 fec_bytes = build_flexfec_03(
                                     fec_group,
                                     fec_first_seq,

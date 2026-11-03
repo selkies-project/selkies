@@ -63,6 +63,16 @@ class Bits:
         return value if value < low else (value << 1) + self.read(1) - low
 
 
+
+def repairing_as_main(sender):
+    """Give a stand-in the sender's repair budget and key-frame gate, unmeasured (congestion control off): it
+    retransmits and asks for key frames as a sender did before either."""
+    sender._repair_bps = sender._delivery_bps = sender._key_wire = sender._key_asked = None
+    sender._repair_bytes = sender._repair_at = 0.0
+    for name in ("_repair_room", "_key_on_its_way", "_ask_key_frame"):
+        setattr(sender, name, getattr(RTCRtpSender, name).__get__(sender))
+    return sender
+
 def read_descriptor(raw: bytes, structure=None) -> dict:
     """The descriptor as libwebrtc's reader takes it: the mandatory fields, the
     extended ones when the value runs past three bytes, and the frame's
@@ -221,6 +231,7 @@ async def nacks() -> None:
                                _emit_pli_event=lambda: events.append("pli"), _resync_held=lambda: False,
                                _past_repair=lambda lost: False,
                                emit=lambda name, *args: events.append((name,) + args))
+    repairing_as_main(stand_in)
     nack = lambda *lost: RtcpRtpfbPacket(fmt=RTCP_RTPFB_NACK, ssrc=1, media_ssrc=2, lost=list(lost))
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(2, 3))
     res.check("a first NACK is answered with each packet twice and nothing else",
