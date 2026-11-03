@@ -704,7 +704,7 @@ impl WebRtcService {
                 .path_probes
                 .get(&did)
                 .is_some_and(|p| p.padding);
-            let (target, restored) = {
+            let (target, restored, queued) = {
                 let mut st = self.st.lock();
                 let steer = st.congestion.entry(did.clone()).or_default();
                 let target = steer
@@ -722,7 +722,10 @@ impl WebRtcService {
                         probed,
                     })
                     .round();
-                (target, steer.restored)
+                // A target cut by a queue the path showed (the steer holds the capacity it
+                // measured), not by loss alone on a path that never queued: only then do repairs
+                // answer it.
+                (target, steer.restored, steer.capacity_kbps.is_some())
             };
             // What the path carries, through each peer's pacer, sets the rate a still screen's
             // cleanup runs at. A pacer reads the path's capacity, not what cross traffic leaves of
@@ -754,6 +757,13 @@ impl WebRtcService {
                 peer.set_frame_floor(
                     (allowance * 1000.0 / 8.0 * CLEANUP_FRAME_S * CLEANUP_FRAME_OVERHEAD) as usize,
                 );
+            }
+            // Under a queue-measured cut repairs take no more than the rate steered to, so a path
+            // that loses because it is full is not sent more than it was asked to carry; where loss
+            // alone cut the target they are not bound, since the repairs a random loss asks for
+            // crowd nothing and the goodput they carry holds the target up.
+            for (_, peer) in padded.get(&did).map_or(&[][..], Vec::as_slice) {
+                peer.set_repair_budget(queued.then_some(target * 1000.0), Some(goodput));
             }
             // A cut target over a still screen pads its stream to test the path. A trickle's
             // window reads no queue (too few feedback packets): padding starts on it, and the queue

@@ -143,6 +143,21 @@ pub const FEC_GROUP_PACKETS: usize = 10;
 /// stood in for `FEC_CLEAR_WINDOWS` before them, so a queue's own overflow never counts.
 pub const FEC_FULL_LOSS: f64 = 0.002;
 pub const FEC_CLEAR_WINDOWS: u32 = 3;
+/// Where congestion control bounds them (a target a queue cut), repairs (retransmissions and
+/// FlexFEC) take at most `REPAIR_SHARE` of the rate it steered the display to, over
+/// `REPAIR_WINDOW_S` (libwebrtc's retransmission rate limiter): a path that loses packets because
+/// it is full is sent no more than it was asked to carry (`set_repair_budget`).
+pub const REPAIR_SHARE: f64 = 1.0;
+pub const REPAIR_WINDOW_S: f64 = 0.5;
+/// The share of the repair budget FlexFEC leaves to retransmissions (`repair_room`).
+pub const FEC_RESERVE: f64 = 0.5;
+/// Where congestion control measures what the path delivers, a key frame asked of the encoder
+/// answers the requests after it for `KEY_ASK_S`, and one on the wire until its last packet is
+/// acknowledged or has had the round trip, `KEY_MARGIN_S` and the time its bytes take at that (at
+/// least `KEY_FLOOR_BPS`) (`key_on_its_way`).
+pub const KEY_ASK_S: f64 = 0.3;
+pub const KEY_FLOOR_BPS: f64 = 100_000.0;
+pub const KEY_MARGIN_S: f64 = 0.1;
 const UNHELD_MAX: usize = 1024;
 const IN_FLIGHT_MAX: usize = 64;
 /// Padding resends the newest of the stream's packets carrying this much or more.
@@ -531,6 +546,15 @@ pub struct RtpSender {
     fec_clear: u32,
     fec_full: bool,
     fec_credit: usize,
+    /// The repair budget (`set_repair_budget`): its rate (None: unbounded), the bytes it holds
+    /// and when it was last filled; what the path delivers; the key frame last asked for and the
+    /// one last on the wire, as its last packet's transport-wide number, when it left, and its size.
+    repair_bps: Option<f64>,
+    repair_bytes: f64,
+    repair_at: f64,
+    delivery_bps: Option<f64>,
+    key_requested: Option<f64>,
+    key_wire: Option<(u16, f64, usize)>,
     started: bool,
     sequence_number: u16,
     timestamp_origin: u32,
@@ -609,6 +633,12 @@ impl RtpSender {
             fec_clear: 0,
             fec_full: false,
             fec_credit: 0,
+            repair_bps: None,
+            repair_bytes: 0.0,
+            repair_at: 0.0,
+            delivery_bps: None,
+            key_requested: None,
+            key_wire: None,
             started: false,
             sequence_number: random_sequence_number(),
             timestamp_origin: random32(),
@@ -1033,6 +1063,9 @@ impl RtpSender {
         transport: &mut dyn SenderTransport,
         now: f64,
     ) -> bool {
+        // Whatever key frame was on its way, the reset may have dropped: the next request asks again.
+        self.key_requested = None;
+        self.key_wire = None;
         let Some(first_tag) = first_tag else {
             return false;
         };
@@ -1246,6 +1279,65 @@ impl RtpSender {
     /// A frame's last packet left for the wire at `at`: the pacer's `FrameLeft` for a tag
     /// `frame_end` registered. One whose encode began after the peer last lost a frame
     /// predicts past it, as a key frame predicts from nothing.
+    /// Bound repairs to `REPAIR_SHARE` of `bps`, the rate congestion control steered the display
+    /// to (None: no bound), and time a key frame's way by `delivery_bps`, what the path delivers
+    /// (`key_on_its_way`).
+    pub fn set_repair_budget(&mut self, bps: Option<f64>, delivery_bps: Option<f64>) {
+        self.repair_bps = bps.map(|b| b * REPAIR_SHARE);
+        self.delivery_bps = delivery_bps;
+    }
+
+    /// Whether a repair of `size` bytes fits the budget, which it then takes. A `proactive` one
+    /// (FlexFEC) leaves `FEC_RESERVE` of the budget to the retransmissions a NACK asks for, which
+    /// answer a loss that happened.
+    fn repair_room(&mut self, size: usize, proactive: bool, now: f64) -> bool {
+        let Some(bps) = self.repair_bps.filter(|b| *b > 0.0) else {
+            return true;
+        };
+        let full = bps / 8.0 * REPAIR_WINDOW_S;
+        self.repair_bytes = full.min(self.repair_bytes + (now - self.repair_at) * bps / 8.0);
+        self.repair_at = now;
+        let reserve = if proactive { full * FEC_RESERVE } else { 0.0 };
+        if self.repair_bytes - reserve < size as f64 {
+            return false;
+        }
+        self.repair_bytes -= size as f64;
+        true
+    }
+
+    /// Whether a key frame answers a request already, where congestion control measures what the
+    /// path delivers (`set_repair_budget`): one asked of the encoder `KEY_ASK_S` ago or less, or one
+    /// on the wire whose last packet is not acknowledged and which has had less than the round
+    /// trip, `KEY_MARGIN_S` and its bytes' time at what the path delivers. A NACK naming a packet
+    /// gone from the history, which every loss on a full path does, otherwise asked for a key frame
+    /// of its own: four a second, each overflowing the path again; a peer's PLI repeats while the
+    /// key frame is still crossing a slow path. A pacer reset drops what was on its way
+    /// (`pacer_resync`).
+    fn key_on_its_way(&mut self, transport: &mut dyn SenderTransport, now: f64) -> bool {
+        let Some(delivery) = self.delivery_bps.filter(|d| *d > 0.0) else {
+            return false;
+        };
+        if self.key_requested.is_some_and(|at| now - at < KEY_ASK_S) {
+            return true;
+        }
+        let Some((seq, at, size)) = self.key_wire else {
+            return false;
+        };
+        if transport.twcc().acked(seq) {
+            return false;
+        }
+        let travel = self.rtt.unwrap_or(0.0)
+            + KEY_MARGIN_S
+            + size as f64 * 8.0 / delivery.max(KEY_FLOOR_BPS);
+        now - at < travel
+    }
+
+    /// Ask the encoder for a key frame, which answers the requests after it.
+    fn ask_key_frame(&mut self, now: f64) {
+        self.key_requested = Some(now);
+        self.hooks.pli();
+    }
+
     pub fn frame_left(&mut self, tag: u16, at: f64) {
         let Some(end) = self.forget_frame_end(tag) else {
             return;
@@ -1255,6 +1347,10 @@ impl RtpSender {
         }
         self.hooks.on_frame_left(end.timing, end.size, end.keyframe);
         self.frame_left = Some((tag, at));
+        if end.keyframe {
+            self.key_wire = Some((tag, at, end.size));
+            self.key_requested = None;
+        }
         while self
             .in_flight
             .front()
@@ -1620,7 +1716,7 @@ impl RtpSender {
                 self.map.zero_mutable(&mut normalized);
                 self.fec_group.push((normalized, packet.payload.clone()));
                 if last || self.fec_group.len() == FEC_GROUP_PACKETS {
-                    repairs = self.close_fec_group(fec_pt, timestamp, &mut protected);
+                    repairs = self.close_fec_group(fec_pt, timestamp, &mut protected, now);
                 }
             }
             outgoing.push(Built {
@@ -1747,11 +1843,22 @@ impl RtpSender {
         fec_pt: u8,
         timestamp: u32,
         protected: &mut Vec<(u16, usize)>,
+        now: f64,
     ) -> Vec<Vec<u8>> {
         let count = self.fec_group.len();
-        let repairs = self.fec_repairs(count);
+        let mut repairs = self.fec_repairs(count);
+        let largest = self
+            .fec_group
+            .iter()
+            .map(|(h, p)| h.len() + p.len())
+            .max()
+            .unwrap_or(0);
         let mut out = Vec::with_capacity(repairs);
         for repair in 0..repairs {
+            if !self.repair_room(largest, true, now) {
+                repairs = repair;
+                break;
+            }
             let header = RepairHeader {
                 first_sequence_number: self.fec_first_seq,
                 protected_ssrc: self.ssrc,
@@ -1827,6 +1934,13 @@ impl RtpSender {
                         continue;
                     };
                     let sent = sent.clone();
+                    if !self.repair_room(
+                        sent.payload.len() * if times == 1 { 2 } else { 1 },
+                        false,
+                        now,
+                    ) {
+                        break;
+                    }
                     // A NACK after the first, sent once the retransmission and any FlexFEC
                     // repair of the packet had a round trip to reach the peer, says neither
                     // did: the frame is lost to it.
@@ -1850,10 +1964,11 @@ impl RtpSender {
                         self.lost_at = Some(now);
                     }
                 }
-                if gone && !self.resync_held(transport, now) {
+                if gone && !self.resync_held(transport, now) && !self.key_on_its_way(transport, now)
+                {
                     // Gone from the history, or past repair, where no resync answers it: only
-                    // a key frame brings the peer back.
-                    self.hooks.pli();
+                    // a key frame brings the peer back, unless one is on its way.
+                    self.ask_key_frame(now);
                 }
             }
             RtcpPacket::Xr(xr) if xr.rrtr.is_some() => {
@@ -1883,8 +1998,11 @@ impl RtpSender {
             }
             RtcpPacket::Psfb(fb) if fb.fmt == RTCP_PSFB_PLI || fb.fmt == RTCP_PSFB_FIR => {
                 // A Full Intra Request (RFC 5104) asks what a PLI does: a key frame.
-                if !self.still_request(transport, now) && !self.resync_held(transport, now) {
-                    self.hooks.pli();
+                if !self.still_request(transport, now)
+                    && !self.resync_held(transport, now)
+                    && !self.key_on_its_way(transport, now)
+                {
+                    self.ask_key_frame(now);
                 }
             }
             RtcpPacket::Psfb(fb) if fb.fmt == RTCP_PSFB_APP => {

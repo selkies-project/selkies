@@ -167,6 +167,7 @@ enum Command {
     AudioFeed(RelayTrack<AudioSample>),
     EncoderBps(u64),
     FrameFloor(usize),
+    RepairBudget(Option<f64>, Option<f64>),
     Padding(f64, f64),
     RequestUplinkKeyframe,
     Tick(oneshot::Sender<PeerTick>),
@@ -592,6 +593,12 @@ impl Peer {
         let _ = self.commands.send(Command::FrameFloor(bytes));
     }
 
+    /// Bound the video sender's repairs to `bps` (None: unbounded) and time its key frames by
+    /// what the path delivers (`RtpSender::set_repair_budget`).
+    pub fn set_repair_budget(&self, bps: Option<f64>, delivery_bps: Option<f64>) {
+        let _ = self.commands.send(Command::RepairBudget(bps, delivery_bps));
+    }
+
     /// Pad the video stream at `bps` until `until` (`clock::monotonic`), or stop where `bps` is 0.
     pub fn set_padding(&self, bps: f64, until: f64) {
         let _ = self.commands.send(Command::Padding(bps, until));
@@ -859,6 +866,9 @@ impl Media {
                 if let Some(pacer) = self.paced.pacer() {
                     pacer.set_frame_floor(bytes);
                 }
+            }
+            Command::RepairBudget(bps, delivery_bps) => {
+                self.video.set_repair_budget(bps, delivery_bps);
             }
             Command::Padding(bps, until) => {
                 self.pad_bps = bps;
