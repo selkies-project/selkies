@@ -189,7 +189,7 @@ impl Arm {
         let s = &mut self.sequence;
         *s = unsafe { std::mem::zeroed() };
         s.seq_parameter_set_id = 0;
-        s.level_idc = self.level_idc as u8;
+        s.level_idc = self.level_idc.min(n.h264_driver_level) as u8;
         s.intra_period = i32::MAX as u32;
         s.intra_idr_period = i32::MAX as u32;
         s.ip_period = 1;

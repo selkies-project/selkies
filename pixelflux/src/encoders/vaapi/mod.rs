@@ -456,6 +456,21 @@ impl Device {
         self.vendor.contains("iHD")
     }
 
+    /// The highest H.264 `level_idc` the driver's sequence parameters may name
+    /// (`Negotiated::h264_driver_level`). iHD's level table ends at 5.2: above it its rate
+    /// control is handed a maximum frame size of 0 (`GetProfileLevelMaxFrameSize`), and every
+    /// constant-rate picture after the key frame comes out undecodable past its first rows a
+    /// slice (29 of 30 at 2160p and 75 fps on an Arc A750,
+    /// `vaapi_h264_constant_rate_decodes_above_level_5_2`), where a constant quantizer, which
+    /// runs no rate control, decodes clean. Told 5.2, its frame cap stays above any frame.
+    fn h264_driver_level(&self) -> u32 {
+        if self.vendor.contains("iHD") {
+            52
+        } else {
+            u32::MAX
+        }
+    }
+
     fn check(&self, status: VAStatus, what: &str) -> Result<(), String> {
         if status == VA_STATUS_SUCCESS as VAStatus {
             Ok(())
@@ -834,6 +849,9 @@ pub(super) struct Negotiated {
     /// from the slice's (Intel's full HEVC encoder), which the slice's quantizer then has to keep
     /// within the syntax's range (`h265::Arm::configure`).
     pub unit_qp_deltas: bool,
+    /// The highest H.264 level the driver is told (`Device::h264_driver_level`); the
+    /// packed SPS still declares the level the stream needs.
+    pub h264_driver_level: u32,
 }
 
 /// One frame as the codec arms see it: what it is, where its reconstruction and coded output
@@ -1296,6 +1314,7 @@ impl VaapiEncoder {
                     1
                 },
                 unit_qp_deltas,
+                h264_driver_level: device.h264_driver_level(),
             },
             fourcc,
             rt_format,
@@ -3160,5 +3179,83 @@ mod tests {
             dec.decode(&key).expect("the bounded key frame decodes"),
             "no picture"
         );
+    }
+
+    /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`): a constant-rate H.264
+    /// session at 2160p decodes close to its source at 60 fps, after a change to 75 fps, and
+    /// back, its SPS declaring the level each rate needs (5.2, 6.0, 5.2) whatever level the
+    /// driver is told (`h264_driver_level`). OpenH264, the decoder here, refuses an SPS above
+    /// 5.2, so the copy it decodes declares 5.2; the pictures are the encoder's.
+    #[test]
+    #[ignore]
+    fn vaapi_h264_constant_rate_decodes_above_level_5_2() {
+        use crate::webcam::decode::{Decoder as _, VideoDecoder};
+        let (w, h, tile_w, tile_h) = (3840usize, 2160usize, 1280usize, 720usize);
+        let mut settings = RustCaptureSettings {
+            width: w as i32,
+            height: h as i32,
+            codec: Codec::H264,
+            target_fps: 60.0,
+            video_cbr_mode: true,
+            video_bitrate_kbps: 39000,
+            omit_stripe_headers: true,
+            ..Default::default()
+        };
+        let mut enc = VaapiEncoder::new(&settings, Codec::H264, Input::Host { rgba: false })
+            .expect("a VA-API H.264 session");
+        let mut dec = VideoDecoder::new(Codec::H264).expect("decoder");
+        let mut phases = Vec::new();
+        for (phase, fps, level) in [(0usize, 60.0, 52u8), (1, 75.0, 60), (2, 60.0, 52)] {
+            if phase > 0 {
+                settings.target_fps = fps;
+                enc.reconfigure_rate(&settings).expect("reconfigure");
+            }
+            let (mut declared, mut failed, mut worst) = (None, 0, 0f64);
+            for t in phase * 30..phase * 30 + 30 {
+                let tile = moving_picture(t);
+                let src: Vec<u8> = (0..h)
+                    .flat_map(|y| {
+                        let row = &tile[(y % tile_h) * tile_w * 4..][..tile_w * 4];
+                        [row, row, row].concat()
+                    })
+                    .collect();
+                let out = enc
+                    .encode_host(&src, w * 4, false, t as u64, 25, t == 0)
+                    .expect("encode");
+                let sps = super::super::codec::annexb_nals(&out)
+                    .find(|n| n[0] & 0x1f == 7 && n.len() > 3)
+                    .map(|n| n.as_ptr() as usize - out.as_ptr() as usize + 3);
+                let mut fed = out.clone();
+                if let Some(at) = sps {
+                    declared = Some(out[at]);
+                    fed[at] = fed[at].min(52);
+                }
+                if !dec.decode(&fed).unwrap_or(false) {
+                    failed += 1;
+                    continue;
+                }
+                let p = dec.frame().unwrap();
+                let mut sum = 0f64;
+                for y in (0..h).step_by(4) {
+                    for x in (0..w).step_by(4) {
+                        let i = (y * w + x) * 4;
+                        let (b, g, r) = (src[i] as f64, src[i + 1] as f64, src[i + 2] as f64);
+                        let luma = 16.0 + (0.2126 * r + 0.7152 * g + 0.0722 * b) * 219.0 / 255.0;
+                        sum += (p.y[y * p.y_stride + x] as f64 - luma).abs();
+                    }
+                }
+                worst = worst.max(sum / ((h / 4) * (w / 4)) as f64);
+            }
+            println!(
+                "{} {fps} fps: level {declared:?}, {failed} frames undecodable, {worst:.1} on average from the source at worst",
+                enc.vendor()
+            );
+            phases.push((fps, level, declared, failed, worst));
+        }
+        for (fps, level, declared, failed, worst) in phases {
+            assert_eq!(declared, Some(level), "{fps} fps");
+            assert_eq!(failed, 0, "{fps} fps");
+            assert!(worst < 20.0, "{fps} fps: {worst} off the source");
+        }
     }
 }
