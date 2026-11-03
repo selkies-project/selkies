@@ -173,6 +173,7 @@ pub struct PacerStats {
     pub paced_bytes: u64,
     pub queue_max_bytes: u64,
     pub fastpath_bytes: u64,
+    pub padding_bytes: u64,
 }
 
 /// The counters with the pacer's current rates and queue.
@@ -579,6 +580,23 @@ impl Pacer {
         self.bytes_queued <= DC_LOW_WATER_BYTES
     }
 
+    /// Whether a padding packet of `n` bytes goes out now: nothing queued, video flowing, and
+    /// credit covering it. Padding never queues, so no frame waits behind it here, and none is
+    /// ever dropped for it.
+    pub fn padding_room(&mut self, n: usize, now: f64) -> bool {
+        if self.stopped || self.bytes_queued > 0 || self.gop_dead {
+            return false;
+        }
+        self.accrue(now);
+        n as f64 <= self.credit
+    }
+
+    /// Spend the credit of a padding packet of `n` bytes `padding_room` admitted.
+    pub fn take_padding(&mut self, n: usize) {
+        self.credit -= n as f64;
+        self.stats.padding_bytes += n as u64;
+    }
+
     fn accrue(&mut self, now: f64) {
         self.credit = self
             .debt_cap
@@ -967,6 +985,43 @@ mod tests {
 
     fn packet() -> Bytes {
         Bytes::from(vec![0x80u8; 1200])
+    }
+
+    #[test]
+    fn padding_leaves_on_the_videos_credit_only_with_nothing_queued() {
+        let now = 10.0;
+        let mut p = Pacer::new(ENCODER_BPS, now);
+        let credit = p.burst_bytes();
+        p.set_credit(credit, now);
+        assert!(
+            p.padding_room(1200, now),
+            "an idle pacer with credit admits padding"
+        );
+        p.take_padding(1200);
+        assert!(
+            p.stats().padding_bytes == 1200 && (p.credit - (credit - 1200.0)).abs() < 1e-6,
+            "which leaves on the video's credit, counted apart"
+        );
+        p.set_credit(0.0, now);
+        assert!(!p.padding_room(1200, now), "without credit it admits none");
+        p.send(packet(), Class::Video, Some(1), now);
+        p.set_credit(credit, now);
+        assert!(
+            p.bytes_queued() > 0 && !p.padding_room(100, now),
+            "nor with a frame queued, whatever its credit"
+        );
+        let mut p = Pacer::new(ENCODER_BPS, now);
+        p.set_credit(credit, now);
+        p.reset_for_test(now);
+        assert!(
+            p.gop_dead() && !p.padding_room(100, now),
+            "nor while its GOP is abandoned"
+        );
+        p.mark_gop_alive();
+        assert!(
+            p.padding_room(100, now),
+            "and admits it again once video flows"
+        );
     }
 
     fn drain_events(p: &mut Pacer) -> Vec<PacerEvent> {

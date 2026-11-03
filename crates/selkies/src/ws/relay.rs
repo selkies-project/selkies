@@ -37,6 +37,19 @@
 //! (`FRAME_ANCHOR`), which every page decodes: it goes to a page without room as a key frame
 //! does, unless the page is too far behind for one, and ends the page's run.
 //!
+//! The read of the page's queue moves its floor onto a least round trip that stood
+//! `VIDEO_RELAY_LAG_SECONDS` or more past it through `VIDEO_RELAY_SETTLE_SECONDS` of pongs (a
+//! queue other traffic keeps standing on the page's path, or a route onto a longer one), and a
+//! lower round trip takes it back down; a queue of the page's own drains within that span while
+//! the relay leaves its frames out, so it never settles there.
+//!
+//! The owner's relay also writes the padding its display's path probe asks for
+//! (`set_padding`): `0x07` chunks of `PAD_STEP_S` of the probe's rate, written only while no
+//! frame waits, so a frame waits behind one chunk at most, each counted in what the display
+//! sent (`RelayHost::note_padding`), with a ping behind a chunk every `PAD_PING_S` while no frame
+//! awaits its ack, whose pong acks the bytes sent through it for the steer. A tenth of a second
+//! keeps the pings the uplink clock holds (`PENDING_MAX`) over two and a half seconds of queue.
+//!
 //! Reference-chain safety is tracked per stripe row (the header's `stripe_y`): one capture
 //! frame can mix IDR and delta stripes, so after any drop a row's delta chunks stay gated
 //! until that row's own IDR arrives. JPEG chunks have no reference chain: never gated, and a
@@ -44,17 +57,20 @@
 //! waits for a key frame instead of decoding mid-GOP garbage.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use bytes::Bytes;
+use log::info;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use crate::core::DisplayId;
 use crate::display::capture::{CommonFrames, FRAME_ANCHOR, FRAME_NUM_WRAP, LOST_FRAME_MEMORY};
 use crate::ws::client::{Client, ClientId, Frame};
+use crate::ws::link::{DisplayLink, RTT_SAMPLE_SANE_MAX_MS};
 use crate::ws::now;
-use crate::ws::protocol::OPCODE_VIDEO;
+use crate::ws::protocol::{OPCODE_PADDING, OPCODE_VIDEO};
 use crate::ws::steer::ConnectionVerdict;
 
 /// Per-client video backlog bound as seconds of stream at the configured bitrate, floored so
@@ -74,6 +90,22 @@ pub const VIDEO_RELAY_LOST_RECOVERY_SECONDS: f64 = 1.0;
 pub const VIDEO_RELAY_ROOM_FRAMES: usize = 3;
 pub const VIDEO_RELAY_LAG_SECONDS: f64 = 0.1;
 pub const VIDEO_RELAY_PING_SECONDS: f64 = 0.05;
+/// How long a page's least round trip stands `VIDEO_RELAY_LAG_SECONDS` past its floor before it
+/// becomes the floor.
+pub const VIDEO_RELAY_SETTLE_SECONDS: f64 = 3.0;
+/// Padding: the stretch of the probe's rate one chunk carries, how often a chunk has a ping
+/// behind it, and the chunk's bounds in bytes.
+pub const PAD_STEP_S: f64 = 0.02;
+pub const PAD_PING_S: f64 = 0.1;
+pub const PAD_CHUNK_MIN: usize = 1200;
+pub const PAD_CHUNK_MAX: usize = 256 * 1024;
+
+/// The largest padding chunk; each chunk is a slice of it.
+static PADDING: LazyLock<Bytes> = LazyLock::new(|| {
+    let mut chunk = vec![0u8; PAD_CHUNK_MAX];
+    chunk[0] = OPCODE_PADDING;
+    Bytes::from(chunk)
+});
 /// Frames a run may span before the encoder is told without waiting for the page's room.
 pub const VIDEO_RELAY_REACH_FRAMES: u32 = 5;
 /// A page this far behind is too far to be answered without room: it waits for a key frame.
@@ -161,6 +193,17 @@ pub trait RelayHost: Send + Sync {
 
     /// The relay's drain task ended; the host forgets the relay where it still lists this one.
     fn relay_finished(&self, display_id: &str, relay: &Arc<VideoRelay>);
+
+    /// A padding chunk of `size` bytes is being written: counted in what the display sent
+    /// (`sent_bytes`, and `pad_bytes` apart), with the link it was counted in and the bytes
+    /// sent through it; `None`, and nothing written, where `client` no longer owns the display
+    /// or its gate is shut.
+    fn note_padding(
+        &self,
+        client: ClientId,
+        display_id: &str,
+        size: usize,
+    ) -> Option<(Arc<Mutex<DisplayLink>>, u64)>;
 }
 
 struct Inner {
@@ -184,13 +227,32 @@ struct Inner {
     pinged: f64,
     pongs: u64,
     rtt_floor: Option<f64>,
+    /// The least round trip that stood past the floor through the settle span, and the
+    /// round trips of that span, `(time, seconds)`.
+    settled_floor: Option<f64>,
+    recent_rtts: VecDeque<(f64, f64)>,
     anchored: bool,
     tracked: bool,
     gated: bool,
     lost_gated: bool,
+    /// The padding the display's steer asks of this relay, until `pad_until`; when the next
+    /// chunk is due, and when one last had a ping behind it.
+    pad_bps: f64,
+    pad_until: f64,
+    pad_next: f64,
+    pad_pinged: f64,
 }
 
 impl Inner {
+    /// The bytes of the padding chunk due at `now`, or none.
+    fn padding_due(&mut self, now: f64) -> Option<usize> {
+        if self.pad_bps <= 0.0 || now >= self.pad_until || now < self.pad_next {
+            return None;
+        }
+        self.pad_next = (self.pad_next + PAD_STEP_S).max(now - PAD_STEP_S);
+        Some(((self.pad_bps * PAD_STEP_S / 8.0) as usize).clamp(PAD_CHUNK_MIN, PAD_CHUNK_MAX))
+    }
+
     fn remember_sent(&mut self, frame_id: u16) {
         if self.sent_set.insert(frame_id) {
             self.sent.push_back(frame_id);
@@ -277,10 +339,16 @@ impl VideoRelay {
                 pinged: 0.0,
                 pongs: 0,
                 rtt_floor: None,
+                settled_floor: None,
+                recent_rtts: VecDeque::new(),
                 anchored: false,
                 tracked: false,
                 gated: false,
                 lost_gated: false,
+                pad_bps: 0.0,
+                pad_until: 0.0,
+                pad_next: 0.0,
+                pad_pinged: 0.0,
             }),
             wake: Notify::new(),
         })
@@ -491,7 +559,13 @@ impl VideoRelay {
             && let Some(rtt_us) = uplink.rtt_us
         {
             inner.pongs = uplink.seq;
-            inner.rtt_floor = Some(uplink.observe_floor(rtt_us, at) as f64 / 1e6);
+            let rtt = rtt_us as f64 / 1e6;
+            let floor = uplink.observe_floor(rtt_us, at) as f64 / 1e6;
+            inner.rtt_floor = Some(floor);
+            self.settle_floor(inner, rtt, floor, at);
+        }
+        if let (Some(settled), Some(floor)) = (inner.settled_floor, inner.rtt_floor) {
+            inner.rtt_floor = Some(floor.max(settled));
         }
         let Some(floor) = inner.rtt_floor else {
             return 0.0;
@@ -499,6 +573,31 @@ impl VideoRelay {
         match uplink.oldest_unanswered() {
             None => 0.0,
             Some(oldest) => (at - oldest - floor).max(0.0),
+        }
+    }
+
+    /// Fold a pong's round trip `rtt` into the settle span over the clock's `floor`, moving the
+    /// settled floor onto a least round trip that stood past it through the span, or down to a
+    /// lower round trip.
+    fn settle_floor(&self, inner: &mut Inner, rtt: f64, floor: f64, at: f64) {
+        let recent = &mut inner.recent_rtts;
+        recent.push_back((at, rtt));
+        while recent
+            .front()
+            .is_some_and(|(t, _)| at - t > VIDEO_RELAY_SETTLE_SECONDS)
+        {
+            recent.pop_front();
+        }
+        if inner.settled_floor.is_some_and(|settled| rtt < settled) {
+            inner.settled_floor = Some(rtt.max(floor));
+        }
+        let least = recent.iter().map(|(_, r)| *r).fold(f64::INFINITY, f64::min);
+        let current = floor.max(inner.settled_floor.unwrap_or(0.0));
+        let span = recent.front().map_or(0.0, |(t, _)| at - t);
+        if span >= VIDEO_RELAY_SETTLE_SECONDS * 0.9 && least - current >= VIDEO_RELAY_LAG_SECONDS {
+            info!(target: "ws", "Video relay[{}] for {}: round trip floor {:.0} -> {:.0} ms (a queue on its path not its own)",
+                self.display_id, self.client.remote, current * 1000.0, least * 1000.0);
+            inner.settled_floor = Some(least);
         }
     }
 
@@ -659,10 +758,78 @@ impl VideoRelay {
         self.leave_common();
     }
 
-    /// Drain the backlog onto the socket until stopped or the socket dies.
+    /// Pad this client's stream at `bps` until `until` (`PathProbe`), in chunks written while
+    /// no frame waits, or stop padding where `bps` is 0.
+    pub fn set_padding(&self, bps: f64, until: f64) {
+        let start = {
+            let mut inner = self.inner.lock();
+            let at = now();
+            let start = bps > 0.0 && (inner.pad_bps <= 0.0 || at >= inner.pad_until);
+            inner.pad_bps = bps.max(0.0);
+            inner.pad_until = until;
+            if start {
+                inner.pad_next = at;
+            }
+            start
+        };
+        if start {
+            self.wake.notify_one();
+        }
+    }
+
+    /// Write one padding chunk of `size` bytes to the display's owner, counted in what the
+    /// display sent, with a ping behind it each `PAD_PING_S` whose pong acks the bytes sent
+    /// through it for the steer. Pinged only with no frame awaiting its ack: the browser answers
+    /// a ping at once and the page acks a frame on its own tick, so a ping behind an unacked
+    /// frame would ack bytes past it first and the acked history would run out of order.
+    /// False where the socket died.
+    async fn write_padding(&self, size: usize) -> bool {
+        let Some((link, sent_bytes)) =
+            self.host
+                .note_padding(self.client.id, &self.display_id, size)
+        else {
+            return true;
+        };
+        let what = format!("Padding for '{}'", self.display_id);
+        if self
+            .client
+            .send_live(Frame::Binary(PADDING.slice(..size)), &what)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        let at = now();
+        let due = {
+            let mut inner = self.inner.lock();
+            let due = at - inner.pad_pinged >= PAD_PING_S;
+            if due && link.lock().unacked_since.is_none() {
+                inner.pad_pinged = at;
+                true
+            } else {
+                false
+            }
+        };
+        if due {
+            let (host, client, display_id) =
+                (self.host.clone(), self.client.id, self.display_id.clone());
+            self.client.ping_behind_answered(Box::new(move |rtt_s| {
+                let rtt_ms = rtt_s * 1000.0;
+                if host.owns_display(client, &display_id)
+                    && (0.0..=RTT_SAMPLE_SANE_MAX_MS).contains(&rtt_ms)
+                {
+                    link.lock().note_round_trip(rtt_ms, sent_bytes, now());
+                }
+            }));
+        }
+        true
+    }
+
+    /// Drain the backlog onto the socket until stopped or the socket dies, padding the stream
+    /// (`set_padding`) while it holds no frame.
     async fn run(self: Arc<Self>) {
         loop {
-            let item = {
+            let (item, pad, wait) = {
                 let mut inner = self.inner.lock();
                 if inner.stopped {
                     break;
@@ -676,13 +843,35 @@ impl VideoRelay {
                         while inner.marks.len() > LOST_FRAME_MEMORY {
                             inner.marks.pop_front();
                         }
-                        Some(item)
+                        (Some(item), None, None)
                     }
-                    None => None,
+                    None => {
+                        let at = now();
+                        let pad = inner.padding_due(at);
+                        let padding = inner.pad_bps > 0.0 && at < inner.pad_until;
+                        let wait = padding.then(|| (inner.pad_next - at).max(0.0));
+                        (None, pad, wait)
+                    }
                 }
             };
+            if let Some(size) = pad {
+                if !self.write_padding(size).await {
+                    self.host.socket_died(self.client.id);
+                    break;
+                }
+                continue;
+            }
             let Some(item) = item else {
-                self.wake.notified().await;
+                match wait {
+                    Some(wait) => {
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs_f64(wait),
+                            self.wake.notified(),
+                        )
+                        .await;
+                    }
+                    None => self.wake.notified().await,
+                }
                 continue;
             };
             // Stamped before the await and only for the display's owner: that is what the
@@ -755,6 +944,13 @@ impl VideoRelay {
     pub fn current_lag(&self) -> f64 {
         let mut inner = self.inner.lock();
         self.lag(&mut inner)
+    }
+
+    /// Test hook: the round trip floor the lag is read from, and the settled one in it.
+    #[cfg(test)]
+    pub(crate) fn floors(&self) -> (Option<f64>, Option<f64>) {
+        let inner = self.inner.lock();
+        (inner.rtt_floor, inner.settled_floor)
     }
 
     /// Test hook: the drain task hands the oldest `count` queued frames to the socket, which
@@ -940,6 +1136,15 @@ mod tests {
         }
 
         fn relay_finished(&self, _display_id: &str, _relay: &Arc<VideoRelay>) {}
+
+        fn note_padding(
+            &self,
+            _client: ClientId,
+            _display_id: &str,
+            _size: usize,
+        ) -> Option<(Arc<Mutex<DisplayLink>>, u64)> {
+            None
+        }
     }
 
     struct Rig {
@@ -1183,6 +1388,73 @@ mod tests {
             r.relay.current_lag(),
             0.0,
             "a ping older than the newest answered was lost"
+        );
+    }
+
+    /// A pong every `step` for `seconds` at `rtt_ms`, each read by the relay's lag.
+    fn pongs(r: &Rig, rtt_ms: f64, seconds: f64) {
+        let step = 0.25;
+        let mut left = seconds;
+        while left > 1e-9 {
+            advance(step);
+            left -= step;
+            {
+                let mut up = r.page.client.uplink.lock();
+                let (seq, answered) = (up.seq + 1, up.answered);
+                up.seed(seq, (rtt_ms * 1000.0) as i64, answered);
+            }
+            r.relay.current_lag();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_queue_other_traffic_keeps_standing_becomes_the_floor() {
+        reset_clock();
+        let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-6);
+        let r = rig(false, true, 100_000, None);
+        pongs(&r, 145.0, 4.0);
+        assert!(
+            close(r.relay.floors().0, 0.145),
+            "the floor is the least round trip"
+        );
+        pongs(&r, 295.0, VIDEO_RELAY_SETTLE_SECONDS * 0.6);
+        let (floor, settled) = r.relay.floors();
+        assert!(
+            settled.is_none() && close(floor, 0.145),
+            "a standing queue held under the settle span stays a queue: {floor:?} {settled:?}"
+        );
+        pongs(&r, 295.0, VIDEO_RELAY_SETTLE_SECONDS);
+        let (floor, settled) = r.relay.floors();
+        assert!(
+            settled.is_some() && close(floor, 0.295),
+            "held through it, it becomes the floor"
+        );
+        let behind = {
+            let mut up = r.page.client.uplink.lock();
+            up.answered = now() - 1.0;
+            up.pending_since(now() - 0.35)
+        };
+        assert!(
+            r.relay.current_lag() < VIDEO_RELAY_LAG_SECONDS,
+            "a ping unanswered as long as that path takes is no lag"
+        );
+        r.page.client.uplink.lock().forget(behind);
+        pongs(&r, 150.0, 1.0);
+        assert!(
+            close(r.relay.floors().0, 0.150),
+            "a lower round trip takes the floor back down"
+        );
+
+        let r = rig(false, true, 100_000, None);
+        pongs(&r, 145.0, 4.0);
+        for _ in 0..4 {
+            pongs(&r, 400.0, 0.75);
+            pongs(&r, 170.0, 0.75);
+        }
+        let (floor, settled) = r.relay.floors();
+        assert!(
+            settled.is_none() && close(floor, 0.145),
+            "a queue drained within the span never settles: {floor:?} {settled:?}"
         );
     }
 

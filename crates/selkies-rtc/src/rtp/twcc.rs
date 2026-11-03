@@ -193,6 +193,8 @@ pub struct WindowAcc {
     pub delay_last: Option<f64>,
     pub feedback_mins: Vec<f64>,
     pub bytes_sent: usize,
+    /// Of `bytes_sent`, the padding (`next_padding`).
+    pub padding_sent: usize,
     pub opened: f64,
 }
 
@@ -209,6 +211,7 @@ impl WindowAcc {
             delay_last: None,
             feedback_mins: Vec::new(),
             bytes_sent: 0,
+            padding_sent: 0,
             opened: now,
         }
     }
@@ -231,6 +234,8 @@ pub struct Window {
     /// How deep the queue is by the interval's end.
     pub queue_depth_ms: Option<f64>,
     pub sent_bps: u64,
+    /// Of `sent_bps`, the padding.
+    pub padding_bps: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -343,6 +348,13 @@ impl TwccSender {
     }
 
     /// Whether feedback reported the packet sent under `seq` received within `TWCC_ARRIVED_S`.
+    /// `next` for a padding packet, counted apart in the window too (`Window::padding_bps`).
+    pub fn next_padding(&mut self, size: usize, now: f64) -> u16 {
+        let seq = self.next(size, now);
+        self.window.padding_sent += size;
+        seq
+    }
+
     pub fn arrived(&self, seq: u16) -> bool {
         self.arrived.contains_key(&seq)
     }
@@ -632,11 +644,14 @@ impl TwccSender {
         } else {
             0
         };
-        let sent_bps = if now > window.opened {
-            (window.bytes_sent as f64 * 8.0 / (now - window.opened)) as u64
-        } else {
-            0
+        let rate = |bytes: usize| {
+            if now > window.opened {
+                (bytes as f64 * 8.0 / (now - window.opened)) as u64
+            } else {
+                0
+            }
         };
+        let (sent_bps, padding_bps) = (rate(window.bytes_sent), rate(window.padding_sent));
         let (mut queue_ms, mut rising_ms, mut depth_ms) = (None, None, None);
         if let Some(delay_min) = window.delay_min {
             let mins = &window.feedback_mins;
@@ -674,6 +689,7 @@ impl TwccSender {
             queue_rising_ms: rising_ms,
             queue_depth_ms: depth_ms,
             sent_bps,
+            padding_bps,
         })
     }
 
@@ -1308,6 +1324,24 @@ mod tests {
         fci
     }
 
+    #[test]
+    fn padding_is_counted_apart_in_the_window() {
+        let mut tr = TwccSender::new(0.0);
+        for _ in 0..10 {
+            tr.next(1000, 0.1);
+        }
+        for _ in 0..10 {
+            tr.next_padding(500, 0.2);
+        }
+        deliver(&mut tr, 0, 20, 0);
+        let window = tr.take_window(1.0).unwrap();
+        assert_eq!(
+            (window.sent_bps, window.padding_bps),
+            (120_000, 40_000),
+            "the window counts the padding it sent apart from all it sent"
+        );
+    }
+
     fn deliver(tr: &mut TwccSender, base_seq: u16, received: u16, lost: u16) {
         for i in 0..received + lost {
             tr.seed_sent(base_seq.wrapping_add(i), PACKET_BYTES, 0.0);
@@ -1748,6 +1782,7 @@ mod tests {
             delay_last: Some(delay),
             feedback_mins: vec![delay; feedbacks],
             bytes_sent: (sent_kbps * 125.0) as usize,
+            padding_sent: 0,
             opened: *clock - 1.0,
         });
         tr.take_window(*clock).unwrap()

@@ -62,7 +62,7 @@ use crate::ws::client::{
 use crate::ws::host::{CaptureHandle, DroppedDisplay, Input, WsDeps};
 use crate::ws::link::{
     BACKPRESSURE_ALLOWED_DESYNC_MS, BACKPRESSURE_CHECK_INTERVAL_S, DisplayLink, GateEffects,
-    SteerOutcome, SteerTarget, TickInput,
+    PadPermit, SteerOutcome, SteerTarget, TickInput,
 };
 use crate::ws::protocol::{
     BULK_DRAIN_TIMEOUT_S, ClientSettings, WS_BULK_BACKLOG_BYTES, WS_BULK_BACKLOG_POLL_S, fps_label,
@@ -2946,15 +2946,15 @@ impl WsService {
         at: f64,
         late_ms: f64,
     ) {
-        let (target, configured_fps, steered) = {
+        let (target, configured_fps, steered, video_active) = {
             let st = self.st.lock();
             let Some(d) = st.displays.get(display_id) else {
                 return;
             };
             let steered = settings().congestion_control().on && d.rate_control_mode == "cbr";
-            (d.video_bitrate, d.capture_fps(), steered)
+            (d.video_bitrate, d.capture_fps(), steered, d.video_active)
         };
-        let (capturing, capture, relay, client) = {
+        let (capturing, capture, relay, client, paused) = {
             let reg = self.reg.lock();
             let owner = reg.owners.get(display_id).copied();
             (
@@ -2962,8 +2962,14 @@ impl WsService {
                 reg.captures.get(display_id).cloned(),
                 owner.and_then(|o| reg.relays.get(display_id).and_then(|g| g.get(&o).cloned())),
                 owner.and_then(|o| reg.clients.get(&o).cloned()),
+                owner.is_some_and(|o| reg.video_paused.contains(&o)),
             )
         };
+        let pad = PadPermit {
+            announced: client.as_ref().is_some_and(|c| c.pad()),
+            streaming: video_active && !paused,
+        };
+        let padded = relay.clone();
         let input = TickInput {
             capturing,
             configured_fps,
@@ -2992,14 +2998,17 @@ impl WsService {
                     display_id,
                     at,
                     target,
-                    lo,
-                    hi,
+                    (lo, hi),
                     target_view.as_ref().map(|t| t as &dyn SteerTarget),
+                    pad,
                 )
             } else {
                 SteerOutcome::default()
             }
         };
+        if let (Some(bps), Some(relay)) = (outcome.pad_bps, padded) {
+            relay.set_padding(bps, at + 2.0 * self.timings.backpressure_check_s);
+        }
         if let Some(kbps) = outcome.applied_kbps {
             let kbps = kbps as i32;
             self.track_capture(display_id, |cs| cs.video_bitrate_kbps = kbps);
@@ -3189,6 +3198,40 @@ impl WsService {
             d.video_active = false;
         }
         self.stop_capture_for_display(PRIMARY_DISPLAY).await;
+    }
+
+    /// Start the primary capture a hidden owner stopped for a page that joined beside it and is
+    /// still there once the owner's hand-off had its time (`settle_display_owner`): an older page,
+    /// or one without full control, never takes the display, and would wait on the owner. The
+    /// owner's own feed stays paused until its `START_VIDEO`.
+    pub(crate) fn capture_for_page_beside(&self, page: Arc<Client>) {
+        let service = self.arc();
+        tokio::spawn(async move {
+            let wait = service.timings.hidden_owner_handoff_s + 0.5;
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+            let owner = {
+                let reg = service.reg.lock();
+                if page.closed() || !reg.is_beside(page.id) || reg.running.contains(PRIMARY_DISPLAY)
+                {
+                    return;
+                }
+                reg.owners
+                    .get(PRIMARY_DISPLAY)
+                    .and_then(|o| reg.clients.get(o).cloned())
+            };
+            let Some(owner) = owner.filter(|o| !o.closed()) else {
+                return;
+            };
+            if !settings().pipeline_starts_on("video", PRIMARY_DISPLAY, false) {
+                return;
+            }
+            service.reg.lock().video_paused.insert(owner.id);
+            info!(target: "ws", "Starting the 'primary' capture its hidden owner stopped, for the page beside it.");
+            if service.ensure_viewer_capture().await {
+                let _ = page.send_text("PIPELINE_RESETTING primary", true).await;
+                service.schedule_idr(PRIMARY_DISPLAY);
+            }
+        });
     }
 
     /// Start the primary capture for a shared viewer when no owner is connected: the desktop
@@ -4332,6 +4375,31 @@ impl RelayHost for WsService {
         {
             group.remove(&relay.client.id);
         }
+    }
+
+    fn note_padding(
+        &self,
+        client: ClientId,
+        display_id: &str,
+        size: usize,
+    ) -> Option<(Arc<Mutex<DisplayLink>>, u64)> {
+        let link = {
+            let reg = self.reg.lock();
+            if !reg.owns(client, display_id) {
+                return None;
+            }
+            reg.links.get(display_id).cloned()?
+        };
+        let sent_bytes = {
+            let mut state = link.lock();
+            if !state.backpressure_enabled {
+                return None;
+            }
+            state.sent_bytes += size as u64;
+            state.pad_bytes += size as u64;
+            state.sent_bytes
+        };
+        Some((link, sent_bytes))
     }
 }
 

@@ -586,6 +586,7 @@ impl WebRtcService {
             queue_ms: Option<f64>,
             depth_ms: f64,
             sent_bps: f64,
+            padding_bps: f64,
             rooms: Vec<f64>,
             paces: Vec<f64>,
             peers: Vec<Peer>,
@@ -602,6 +603,9 @@ impl WebRtcService {
         }
         let mut per_display: HashMap<String, Bucket> = HashMap::new();
         let mut by_owner: HashMap<String, Bucket> = HashMap::new();
+        // The peers a display's padding goes to: its owner where it has one.
+        let mut padded: HashMap<String, Vec<(String, Peer)>> = HashMap::new();
+        let mut padded_owner: HashMap<String, Vec<(String, Peer)>> = HashMap::new();
         for (peer_id, display, tick) in ticks {
             let handle = self
                 .engine
@@ -610,6 +614,17 @@ impl WebRtcService {
                 .get(&peer_id)
                 .map(|p| p.peer.clone());
             let Some(handle) = handle else { continue };
+            let owns = self.peer_owns(&peer_id);
+            padded
+                .entry(display.clone())
+                .or_default()
+                .push((peer_id.clone(), handle.clone()));
+            if owns {
+                padded_owner
+                    .entry(display.clone())
+                    .or_default()
+                    .push((peer_id.clone(), handle.clone()));
+            }
             if pacer_on {
                 let ceiling = self
                     .st
@@ -626,7 +641,6 @@ impl WebRtcService {
             let standing = window
                 .queue_ms
                 .map(|q| q.max(window.queue_rising_ms.unwrap_or(0.0)));
-            let owns = self.peer_owns(&peer_id);
             let note = |bucket: &mut Bucket| {
                 if window.goodput_bps > 0 {
                     bucket.goodputs.push(window.goodput_bps as f64);
@@ -639,6 +653,7 @@ impl WebRtcService {
                 }
                 bucket.peers.push(handle.clone());
                 bucket.sent_bps = bucket.sent_bps.max(window.sent_bps as f64);
+                bucket.padding_bps = bucket.padding_bps.max(window.padding_bps as f64);
                 bucket.worst_loss = bucket.worst_loss.max(window.loss_fraction);
                 if let Some(standing) = standing {
                     bucket.queue_ms = Some(bucket.queue_ms.unwrap_or(0.0).max(standing));
@@ -651,9 +666,11 @@ impl WebRtcService {
             }
         }
         per_display.extend(by_owner);
+        padded.extend(padded_owner);
         if !cc_on {
             return;
         }
+        let ticked: Vec<String> = per_display.keys().cloned().collect();
         for (did, bucket) in per_display {
             let Some(pipeline) = self.pipeline(&did) else {
                 continue;
@@ -681,11 +698,16 @@ impl WebRtcService {
                 }
             });
             let now = clock::monotonic();
-            let target = {
+            let probed = self
+                .st
+                .lock()
+                .path_probes
+                .get(&did)
+                .is_some_and(|p| p.padding);
+            let (target, restored) = {
                 let mut st = self.st.lock();
-                st.congestion
-                    .entry(did.clone())
-                    .or_default()
+                let steer = st.congestion.entry(did.clone()).or_default();
+                let target = steer
                     .target(SteerTick {
                         current,
                         ceiling,
@@ -697,8 +719,10 @@ impl WebRtcService {
                         offered_bps: Some(bucket.sent_bps),
                         acked_offered_bps: None,
                         capacity_bps: None,
+                        probed,
                     })
-                    .round()
+                    .round();
+                (target, steer.restored)
             };
             // What the path carries, through each peer's pacer, sets the rate a still screen's
             // cleanup runs at. A pacer reads the path's capacity, not what cross traffic leaves of
@@ -731,6 +755,17 @@ impl WebRtcService {
                     (allowance * 1000.0 / 8.0 * CLEANUP_FRAME_S * CLEANUP_FRAME_OVERHEAD) as usize,
                 );
             }
+            // A cut target over a still screen pads its stream to test the path. A trickle's
+            // window reads no queue (too few feedback packets): padding starts on it, and the queue
+            // the padded windows measure stops it.
+            let content = (bucket.sent_bps - bucket.padding_bps).max(0.0);
+            let pad = self.probe_rate(&did, target, ceiling, content, queue_s.unwrap_or(0.0), now);
+            self.pad_display(
+                &did,
+                padded.get(&did).map_or(&[][..], Vec::as_slice),
+                pad,
+                now + 2.0 * CONGESTION_TICK.as_secs_f64(),
+            );
             let held = self
                 .st
                 .lock()
@@ -742,13 +777,20 @@ impl WebRtcService {
                 self.engine.send_cc_rate(&did, held);
             }
             if target != current.round() {
+                let why = if restored {
+                    "the queue gone after a stall: the rate before it".to_string()
+                } else {
+                    format!(
+                        "goodput {:.1} kbps, loss {:.1}%, queue {:.0} ms",
+                        goodput / 1e3,
+                        bucket.worst_loss * 100.0,
+                        bucket.queue_ms.unwrap_or(0.0)
+                    )
+                };
                 let line = format!(
-                    "Congestion control[{did}]: video bitrate {current:.0} -> {target:.0} kbps (goodput {:.1} kbps, loss {:.1}%, queue {:.0} ms)",
-                    goodput / 1e3,
-                    bucket.worst_loss * 100.0,
-                    bucket.queue_ms.unwrap_or(0.0)
+                    "Congestion control[{did}]: video bitrate {current:.0} -> {target:.0} kbps ({why})"
                 );
-                if target < current {
+                if target < current || restored {
                     info!(target: "webrtc", "{line}");
                 } else {
                     debug!(target: "webrtc", "{line}");
@@ -756,5 +798,96 @@ impl WebRtcService {
                 pipeline.set_video_bitrate(target).await;
             }
         }
+        // A display that sent nothing this tick drained no feedback: an idle screen, which a cut
+        // target pads from (its path idle, no queue to read) as it pads a trickle.
+        let steered: Vec<String> = self.st.lock().congestion.keys().cloned().collect();
+        for did in steered.into_iter().filter(|d| !ticked.contains(d)) {
+            let Some(pipeline) = self.pipeline(&did).filter(|p| p.rc_mode() == "cbr") else {
+                continue;
+            };
+            let ceiling = self
+                .st
+                .lock()
+                .displays
+                .get(&did)
+                .map_or(hi, |d| d.video_bitrate)
+                .clamp(lo, hi);
+            let now = clock::monotonic();
+            let pad = self.probe_rate(&did, pipeline.video_bitrate(), ceiling, 0.0, 0.0, now);
+            self.pad_display(
+                &did,
+                padded.get(&did).map_or(&[][..], Vec::as_slice),
+                pad,
+                now + 2.0 * CONGESTION_TICK.as_secs_f64(),
+            );
+        }
+    }
+
+    /// The padding a display's `PathProbe` asks for after a tick that set `target` under `ceiling`
+    /// (kbps), the stream itself having sent `content_bps` over a queue of `queue_s`.
+    fn probe_rate(
+        &self,
+        display: &str,
+        target: f64,
+        ceiling: f64,
+        content_bps: f64,
+        queue_s: f64,
+        now: f64,
+    ) -> f64 {
+        let mut st = self.st.lock();
+        let held = st
+            .congestion
+            .get(display)
+            .is_some_and(|s| now < s.hold_until);
+        st.path_probes
+            .entry(display.to_string())
+            .or_default()
+            .rate_bps(target, ceiling, Some(content_bps), Some(queue_s), held, now)
+    }
+
+    /// Pad a display's `peers` at `bps` until `until`, each through its own pacer, or stop padding
+    /// where `bps` is 0 or no peer is left; a peer dropped from the list stops at once.
+    pub(crate) fn pad_display(
+        &self,
+        display: &str,
+        peers: &[(String, Peer)],
+        bps: f64,
+        until: f64,
+    ) {
+        let padding = bps > 0.0 && !peers.is_empty();
+        let was = self.st.lock().padded.remove(display).unwrap_or_default();
+        if padding != !was.is_empty() {
+            if padding {
+                debug!(target: "webrtc", "Congestion control[{display}]: probing the path at {:.0} kbps of padding (a still screen under a cut target)", bps / 1000.0);
+            } else {
+                debug!(target: "webrtc", "Congestion control[{display}]: probe ended");
+            }
+        }
+        for (id, peer) in &was {
+            if !padding || !peers.iter().any(|(p, _)| p == id) {
+                peer.set_padding(0.0, 0.0);
+            }
+        }
+        if padding {
+            for (_, peer) in peers {
+                peer.set_padding(bps, until);
+            }
+            self.st
+                .lock()
+                .padded
+                .insert(display.to_string(), peers.to_vec());
+        }
+    }
+
+    /// Drop what a display's congestion control learned about the path of the page it served, for
+    /// a page taking it over, and stop its padding. The steered rate stays as the starting point.
+    pub(crate) fn forget_path(&self, display: &str) {
+        {
+            let mut st = self.st.lock();
+            st.congestion.remove(display);
+            st.link_allowances.remove(display);
+            st.path_probes.remove(display);
+        }
+        self.pad_display(display, &[], 0.0, 0.0);
     }
 }

@@ -319,7 +319,7 @@ impl WebRtcService {
     }
 
     async fn take_page_visibility(&self, shown: bool, display: &str, peer: &str) {
-        {
+        let resume = {
             let mut peers = self.engine.peers.lock();
             let Some(entry) = peers.get_mut(peer) else {
                 return;
@@ -328,9 +328,16 @@ impl WebRtcService {
             if shown {
                 entry.page_hidden_at = Some(None);
                 entry.page_shown_at = now;
-            } else if !matches!(entry.page_hidden_at, Some(Some(_))) {
-                entry.page_hidden_at = Some(Some(now));
+                std::mem::take(&mut entry.paused_on_hand_off)
+            } else {
+                if !matches!(entry.page_hidden_at, Some(Some(_))) {
+                    entry.page_hidden_at = Some(Some(now));
+                }
+                false
             }
+        };
+        if resume {
+            self.handle_video_consumer_active(peer, display, true).await;
         }
         self.settle_display_owner(display).await;
     }
@@ -483,18 +490,43 @@ impl WebRtcService {
 
     /// Make the tab of `heir`, a controller beside a display's owner, the display's owner, and drop
     /// what the display's congestion control learned about the old page's path, for a page taking it
-    /// over. The steered rate stays as the starting point.
+    /// over. The steered rate stays as the starting point. The old owner's pages that reported
+    /// themselves hidden pause, as over WebSockets: a page frozen on hide (a phone) never sends its
+    /// `STOP_VIDEO`, and would keep receiving frames.
     fn seat_owner(&self, heir: &str, display: &str, why: &str) {
-        let mut st = self.st.lock();
-        let Some(tab) = st.peer_tabs.get(heir).and_then(Clone::clone) else {
-            return;
+        let (old, old_pages) = {
+            let mut st = self.st.lock();
+            let Some(tab) = st.peer_tabs.get(heir).and_then(Clone::clone) else {
+                return;
+            };
+            let old = st.owner_tabs.insert(display.to_string(), tab.clone());
+            st.tab_used_at.insert(tab.clone(), clock::monotonic());
+            let old_pages: Vec<String> = st
+                .peer_tabs
+                .iter()
+                .filter(|(_, t)| old.is_some() && **t == old)
+                .map(|(peer, _)| peer.clone())
+                .collect();
+            let shown = old.clone().unwrap_or_else(|| "none".into());
+            info!(target: "webrtc", "The owner of '{display}' {why} owns the display now (tab {}, the old owner's {}).", &tab[..tab.len().min(8)], &shown[..shown.len().min(8)]);
+            (old, old_pages)
         };
-        let old = st.owner_tabs.insert(display.to_string(), tab.clone());
-        st.tab_used_at.insert(tab.clone(), clock::monotonic());
-        st.congestion.remove(display);
-        st.link_allowances.remove(display);
-        let old = old.unwrap_or_else(|| "none".into());
-        info!(target: "webrtc", "The owner of '{display}' {why} owns the display now (tab {}, the old owner's {}).", &tab[..tab.len().min(8)], &old[..old.len().min(8)]);
+        self.forget_path(display);
+        if old.is_none() {
+            return;
+        }
+        let mut peers = self.engine.peers.lock();
+        for page in old_pages {
+            if let Some(entry) = peers.get_mut(&page)
+                && entry.display_id == display
+                && matches!(entry.page_hidden_at, Some(Some(_)))
+                && !entry.video_paused
+            {
+                entry.video_paused = true;
+                entry.paused_on_hand_off = true;
+                entry.peer.set_video_enabled(false);
+            }
+        }
     }
 
     async fn lay_out_for_owner(&self, heir: &str, display: &str) {

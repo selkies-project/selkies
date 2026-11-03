@@ -19,6 +19,10 @@ use super::pacer::{Class, Outgoing, Pacer, Verdict};
 use super::sender::{Datagram, SenderTransport};
 use super::twcc::TwccSender;
 
+/// What SRTP protection adds to a packet at most (an AEAD-GCM tag), which a padding packet's
+/// admission counts before protecting it.
+pub const SRTP_PADDING_OVERHEAD: usize = 16;
+
 /// The transport's send path could not take a packet.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -149,5 +153,22 @@ impl<S: PacketSink> SenderTransport for PacedTransport<S> {
 
     fn peer_heard_at(&self) -> f64 {
         self.sink.peer_heard_at()
+    }
+
+    fn padding_room(&mut self, size: usize, now: f64) -> bool {
+        self.pacer
+            .as_mut()
+            .is_some_and(|p| p.padding_room(size + SRTP_PADDING_OVERHEAD, now))
+    }
+
+    fn send_padding(&mut self, packet: Datagram<'_>, now: f64) {
+        let Some(pacer) = self.pacer.as_mut() else {
+            return;
+        };
+        pacer.take_padding(packet.len() + SRTP_PADDING_OVERHEAD);
+        if let Err(e) = self.sink.send_rtp(&packet.to_vec()) {
+            log::debug!(target: "webrtc", "padding send failed: {e}");
+            pacer.wire_failed(None, now);
+        }
     }
 }

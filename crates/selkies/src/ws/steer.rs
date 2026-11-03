@@ -31,6 +31,8 @@ pub struct SteerTick {
     pub acked_offered_bps: Option<f64>,
     /// What the path carried while the queue built, where measured apart.
     pub capacity_bps: Option<f64>,
+    /// Whether the transport padded the tick's stream up to the target ([`PathProbe`]).
+    pub probed: bool,
 }
 
 /// The steer of one display's CBR target over congestion ticks.
@@ -52,7 +54,24 @@ pub struct SteerTick {
 /// `HOLD_S`. A clean tick outside a hold raises by `STEP` a second far from the last capacity
 /// and by `STEP_NEAR` within `NEAR` of it; a path delivering clear past the capacity forgets
 /// it; a tick that offered under `APP_LIMITED`, or measured no offer, stops its step at the
-/// capacity (or the current target where none is known).
+/// capacity (or the current target where none is known). A still screen the transport padded
+/// up to the target ([`PathProbe`], `probed`) has nothing to show but the path, and climbs
+/// `PROBE_STEP` a second until the first queue ends the probe.
+///
+/// A stall is not a slower path, and interrupts a rate the path was carrying, one in force
+/// through `CARRIED_S` of ticks that read no queue: before any there is none to restore. A
+/// hold of seconds acks a window's frames late and together, a queue of `STALL_QUEUE_S` or
+/// more over a delivery under `STALL_DELIVERY` of the target, or one that grew by
+/// `STALL_QUEUE_S` since the last tick that read the delay (a queue a slower path builds is
+/// read while still small). A backoff on such a tick keeps the target the episode began at,
+/// before any backoff in the `STALL_EPISODE_S` ahead of it, as far as that carried rate, and
+/// the second tick in a row after it that reads no queue and no loss past `LOSS` restores that
+/// target and forgets the capacity (the first can come while the frames the stall held are
+/// still on their way); a backoff with no delivery measured keeps its target too, restored the
+/// same way past its hold. A queue the path delivered that target through keeps it, and so does
+/// a tick whose offer went unmeasured (the gate held it); one under it is a path that did slow
+/// and drops it. A backoff within `STALL_EPISODE_S` of a restore keeps nothing, so a path that
+/// did slow backs off on its real delivery rather than restoring each time the queue drains.
 #[derive(Clone, Debug, Default)]
 pub struct CongestionSteer {
     pub strikes: u32,
@@ -61,6 +80,22 @@ pub struct CongestionSteer {
     cruise_kbps: Option<f64>,
     drain_until: f64,
     tick_at: Option<f64>,
+    /// The target a stall cut, restored once round trips are back.
+    restore_kbps: Option<f64>,
+    /// The target and time of the last queue backoff.
+    backoff_from: Option<(f64, f64)>,
+    /// The earliest a restore may come.
+    restore_after: f64,
+    /// When the last restore came.
+    restored_at: Option<f64>,
+    /// The queue the last tick that measured delay read.
+    last_queue_s: Option<f64>,
+    /// The rate in force once ticks reading no queue and no loss have run `CARRIED_S`, from
+    /// `clean_since`: what a stall interrupts.
+    clean_kbps: Option<f64>,
+    clean_since: Option<f64>,
+    /// Whether the last tick restored the target a stall cut, for the transports' log.
+    pub restored: bool,
 }
 
 impl CongestionSteer {
@@ -76,6 +111,11 @@ impl CongestionSteer {
     pub const SETTLE_S: f64 = 0.5;
     pub const APP_LIMITED: f64 = 0.5;
     pub const APP_LIMITED_DELIVERED: f64 = 0.8;
+    pub const PROBE_STEP: f64 = 1.3;
+    pub const STALL_QUEUE_S: f64 = 1.0;
+    pub const STALL_DELIVERY: f64 = 0.25;
+    pub const STALL_EPISODE_S: f64 = 5.0;
+    pub const CARRIED_S: f64 = 2.0;
 
     /// The rate the steer cruises at once the drain ends, while one is pending.
     pub fn cruise_kbps(&self) -> Option<f64> {
@@ -100,12 +140,48 @@ impl CongestionSteer {
             offered_bps,
             acked_offered_bps,
             capacity_bps,
+            probed,
         } = tick;
         let dt = match self.tick_at {
             None => 1.0,
             Some(at) => (now - at).clamp(0.0, 2.0),
         };
         self.tick_at = Some(now);
+        self.restored = false;
+        let clamp = |v: f64| v.max(floor).min(ceiling);
+        let clean = |q: Option<f64>| q.is_some_and(|q| q <= 0.0);
+        let last_queue_s = self.last_queue_s;
+        if queue_s.is_some() {
+            self.last_queue_s = queue_s;
+        }
+        let clean_kbps = self.clean_kbps;
+        if clean(queue_s) && loss <= Self::LOSS {
+            let since = *self.clean_since.get_or_insert(now);
+            if now - since >= Self::CARRIED_S {
+                self.clean_kbps = Some(current);
+            }
+        } else if queue_s.is_some() || loss > Self::LOSS {
+            self.clean_since = None;
+        }
+        if let Some(restore) = self.restore_kbps
+            && clean(queue_s)
+            && clean(last_queue_s)
+            && loss <= Self::LOSS
+            && now >= self.restore_after
+        {
+            let restored = current.max(restore);
+            self.restore_kbps = None;
+            self.cruise_kbps = None;
+            self.capacity_kbps = None;
+            self.hold_until = now;
+            self.drain_until = now;
+            self.strikes = 0;
+            self.restored = restored > current;
+            if self.restored {
+                self.restored_at = Some(now);
+            }
+            return clamp(restored);
+        }
         let mut current = current;
         let queued = queue_s.is_some_and(|q| q > 0.0);
         let drained =
@@ -113,7 +189,6 @@ impl CongestionSteer {
         if drained {
             current = self.cruise_kbps.take().unwrap_or(current);
         }
-        let clamp = |v: f64| v.max(floor).min(ceiling);
         if let Some(queue) = queue_s.filter(|q| *q > 0.0) {
             self.strikes = 0;
             let sent_bps = match (offered_bps, acked_offered_bps) {
@@ -126,7 +201,32 @@ impl CongestionSteer {
             });
             if now >= self.hold_until && !limited {
                 let capacity = goodput_bps.max(capacity_bps.unwrap_or(0.0));
+                let episode_over = self
+                    .restored_at
+                    .is_none_or(|at| now - at > Self::STALL_EPISODE_S);
+                let grew = last_queue_s.is_some_and(|last| queue - last >= Self::STALL_QUEUE_S);
+                let stalled = queue >= Self::STALL_QUEUE_S
+                    && episode_over
+                    && (grew || capacity < current * 1_000.0 * Self::STALL_DELIVERY);
+                if stalled || (capacity <= 0.0 && episode_over) {
+                    let earlier = self
+                        .backoff_from
+                        .filter(|(_, at)| now - at <= Self::STALL_EPISODE_S)
+                        .map_or(0.0, |(from, _)| from);
+                    if let Some(restore) = self.restore_kbps {
+                        self.restore_kbps = Some(restore.max(current).max(earlier));
+                    } else if let Some(carried) = clean_kbps {
+                        self.restore_kbps = Some(current.max(earlier).min(carried));
+                    }
+                } else if self
+                    .restore_kbps
+                    .is_some_and(|restore| offered_bps.is_some() && capacity < restore * 1_000.0)
+                {
+                    self.restore_kbps = None;
+                }
+                self.backoff_from = Some((current, now));
                 current = self.queue_backoff(current, capacity / 1_000.0, queue, now);
+                self.restore_after = if stalled { now } else { self.hold_until };
             }
             return clamp(current);
         }
@@ -158,7 +258,11 @@ impl CongestionSteer {
             }
         }
         let mut raised = current * step.powf(dt);
-        if offered_bps.is_none_or(|o| o < current * 1_000.0 * Self::APP_LIMITED) {
+        let filled = offered_bps.is_some_and(|o| o >= current * 1_000.0 * Self::APP_LIMITED);
+        if probed && filled {
+            raised = raised.max(current * Self::PROBE_STEP.powf(dt));
+        }
+        if !filled {
             raised = raised.min(current.max(self.capacity_kbps.unwrap_or(current)));
         }
         clamp(raised.max(delivered * Self::HEADROOM))
@@ -177,6 +281,88 @@ impl CongestionSteer {
         self.cruise_kbps = Some(delivered_kbps * Self::HEADROOM);
         self.hold_until = self.drain_until + Self::SETTLE_S;
         current.min(delivered_kbps * fraction)
+    }
+}
+
+/// Padding that lets a still screen's stream test its path once congestion control has cut its
+/// target under the configured rate.
+///
+/// A tick whose stream offered under [`CongestionSteer::APP_LIMITED`] of the target tests
+/// nothing of the path, so the steer raises it no further than the capacity the path last
+/// showed: a desktop that sits still after a real queue keeps the cut rate until its screen
+/// moves. While the target stands under the ceiling, the steer's hold is over and the stream
+/// itself fills less than `APP_LIMITED` of the target, the transport pads it to the target
+/// ([`PathProbe::rate_bps`]), so the path carries, or queues, the rate the steer asks of it, and
+/// the steer climbs or backs off as on a moving screen. A queue on a tick that followed padding
+/// ends the probe, the path found: the next one waits `QUIET_S`, doubling to `QUIET_MAX_S`
+/// while probes keep ending that way, and back to `QUIET_S` once a target reaches the ceiling.
+/// A tick that measured no delay pads nothing.
+#[derive(Clone, Debug)]
+pub struct PathProbe {
+    /// Whether the last tick asked for padding.
+    pub padding: bool,
+    quiet_until: f64,
+    quiet_s: f64,
+}
+
+impl Default for PathProbe {
+    fn default() -> Self {
+        PathProbe {
+            padding: false,
+            quiet_until: 0.0,
+            quiet_s: Self::QUIET_S,
+        }
+    }
+}
+
+impl PathProbe {
+    pub const QUIET_S: f64 = 15.0;
+    pub const QUIET_MAX_S: f64 = 240.0;
+
+    /// The padding to send until the next tick, in bits per second.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_kbps` - The target the steer just set.
+    /// * `ceiling_kbps` - The configured target.
+    /// * `content_bps` - What the stream itself sent over the tick, padding left out; `None`
+    ///   unmeasured, which pads nothing.
+    /// * `queue_s` - The queue the tick read, as [`SteerTick::queue_s`].
+    /// * `held` - Whether the steer holds its target after a cut (its drain).
+    /// * `now` - The tick's monotonic time.
+    pub fn rate_bps(
+        &mut self,
+        target_kbps: f64,
+        ceiling_kbps: f64,
+        content_bps: Option<f64>,
+        queue_s: Option<f64>,
+        held: bool,
+        now: f64,
+    ) -> f64 {
+        let padded = std::mem::take(&mut self.padding);
+        if target_kbps >= ceiling_kbps {
+            self.quiet_s = Self::QUIET_S;
+            return 0.0;
+        }
+        if queue_s.is_some_and(|q| q > 0.0) {
+            if padded {
+                self.quiet_until = now + self.quiet_s;
+                self.quiet_s = (self.quiet_s * 2.0).min(Self::QUIET_MAX_S);
+            }
+            return 0.0;
+        }
+        let Some(content_bps) = content_bps else {
+            return 0.0;
+        };
+        if queue_s.is_none() || held || now < self.quiet_until {
+            return 0.0;
+        }
+        let target_bps = target_kbps * 1_000.0;
+        if content_bps >= target_bps * CongestionSteer::APP_LIMITED {
+            return 0.0;
+        }
+        self.padding = true;
+        target_bps - content_bps
     }
 }
 
@@ -386,6 +572,7 @@ pub(crate) mod tests {
             offered_bps,
             acked_offered_bps,
             capacity_bps,
+            probed: false,
         }
     }
 
@@ -1118,6 +1305,771 @@ pub(crate) mod tests {
         assert_eq!(
             verdicts(&[0.0, 1.0, 1.0], ConnectionVerdict::MIN_FRAMES - 1),
             vec![]
+        );
+    }
+
+    /// One tick of `steer` at the stall cases' floor: `(current, ceiling, goodput, loss, now)`,
+    /// the queue read, the offer measured, and whether padding filled it.
+    fn at(
+        steer: &mut CongestionSteer,
+        [current, ceiling, goodput, loss, now]: [f64; 5],
+        queue: Option<f64>,
+        offered: Option<f64>,
+        probed: bool,
+    ) -> f64 {
+        steer.target(SteerTick {
+            probed,
+            ..tick_of(
+                [current, ceiling, STALL_FLOOR, goodput, loss, now],
+                [queue, offered, None, None],
+            )
+        })
+    }
+
+    const STALL_FLOOR: f64 = 135.0;
+
+    /// Clean ticks at `rate` through `CARRIED_S` before 0: a stream the path carried.
+    fn carried(rate: f64, delivered: f64) -> CongestionSteer {
+        let mut steer = CongestionSteer::default();
+        for now in [-3.0, -0.5] {
+            at(
+                &mut steer,
+                [rate, CEILING, delivered, 0.0, now],
+                Some(0.0),
+                Some(rate * 1000.0),
+                false,
+            );
+        }
+        steer
+    }
+
+    /// Two clean ticks half a second apart from `t` (a restore wants the second): the target
+    /// after them, and whether the first restored.
+    fn settle(steer: &mut CongestionSteer, current: f64, t: f64, delivered: f64) -> (f64, bool) {
+        let current = at(
+            steer,
+            [current, CEILING, delivered, 0.0, t],
+            Some(0.0),
+            Some(delivered),
+            false,
+        );
+        let first = steer.restored;
+        let current = at(
+            steer,
+            [current, CEILING, delivered, 0.0, t + 0.5],
+            Some(0.0),
+            Some(delivered),
+            false,
+        );
+        (current, first)
+    }
+
+    /// Clean ticks at `times` until one restores; the target then.
+    fn until_restored(
+        steer: &mut CongestionSteer,
+        mut current: f64,
+        times: &[f64],
+        delivered: f64,
+    ) -> f64 {
+        for &t in times {
+            current = at(
+                steer,
+                [current, CEILING, delivered, 0.0, t],
+                Some(0.0),
+                Some(delivered),
+                false,
+            );
+            if steer.restored {
+                break;
+            }
+        }
+        current
+    }
+
+    #[test]
+    fn a_stall_restores_the_rate_before_it() {
+        let mut steer = CongestionSteer::default();
+        at(
+            &mut steer,
+            [5774.0, CEILING, 5_196_600.0, 0.0, -3.0],
+            Some(0.0),
+            Some(5_774_000.0),
+            false,
+        );
+        at(
+            &mut steer,
+            [5774.0, CEILING, 5_196_600.0, 0.0, -0.5],
+            Some(0.0),
+            Some(5_774_000.0),
+            false,
+        );
+        let cur = at(
+            &mut steer,
+            [5774.0, CEILING, 0.0, 0.0, 0.0],
+            Some(0.15),
+            None,
+            false,
+        );
+        assert_eq!(
+            cur.round(),
+            4042.0,
+            "a queued tick with no delivery backs off"
+        );
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 269_000.0, 0.0, 2.0],
+            Some(3.36),
+            None,
+            false,
+        );
+        assert_eq!(
+            cur.round(),
+            135.0,
+            "a deep queue over a trickle of the target cuts to the floor"
+        );
+        let (got, first) = settle(&mut steer, cur, 3.0, 120_000.0);
+        assert!(
+            !first && got.round() == 5774.0 && steer.restored && steer.capacity_kbps.is_none(),
+            "the second tick back at the floor restores the rate the stall began at: {first} {got}"
+        );
+        let got = at(
+            &mut steer,
+            [got, CEILING, 120_000.0, 0.0, 4.0],
+            Some(0.0),
+            Some(120_000.0),
+            false,
+        );
+        assert!(
+            got.round() == 5774.0 && !steer.restored,
+            "and restores once"
+        );
+
+        let mut steer = carried(8000.0, 7_200_000.0);
+        let cur = at(
+            &mut steer,
+            [8000.0, CEILING, 0.0, 0.0, 0.0],
+            Some(0.04),
+            None,
+            false,
+        );
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 1_500_000.0, 0.0, 2.0],
+            Some(0.0),
+            None,
+            false,
+        );
+        assert!(
+            cur.round() == 5600.0 && !steer.restored,
+            "the first clean tick after a hold restores nothing yet"
+        );
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 2_916_000.0, 0.0, 2.5],
+            Some(2.2),
+            None,
+            false,
+        );
+        assert_eq!(
+            steer.restore_kbps,
+            Some(8000.0),
+            "the hold's frames behind it are the stall's queue"
+        );
+        let got = until_restored(&mut steer, cur, &[5.0, 6.0, 7.0, 8.0, 9.0, 10.0], 120_000.0);
+        assert!(
+            got.round() == 8000.0 && steer.restored,
+            "restored once they drained: {got}"
+        );
+    }
+
+    #[test]
+    fn a_slower_path_restores_nothing() {
+        let mut steer = CongestionSteer::default();
+        for now in [-3.0, -0.5] {
+            steer.target(tick_of(
+                [5000.0, CEILING, FLOOR, 4_500_000.0, 0.0, now],
+                [Some(0.0), Some(5_000_000.0), None, None],
+            ));
+        }
+        let cur = steer.target(tick_of(
+            [5000.0, CEILING, FLOOR, 2_000_000.0, 0.0, 0.0],
+            [Some(0.3), None, None, None],
+        ));
+        let got = steer.target(tick_of(
+            [cur, CEILING, FLOOR, 1_700_000.0, 0.0, 1.0],
+            [Some(0.0), Some(1_700_000.0), None, None],
+        ));
+        assert!(
+            got.round() == 1700.0 && !steer.restored,
+            "a shallow queue over its real delivery: {got}"
+        );
+        let mut steer = CongestionSteer::default();
+        let cur = at(
+            &mut steer,
+            [5000.0, CEILING, 2_000_000.0, 0.0, 0.0],
+            Some(1.5),
+            None,
+            false,
+        );
+        let (got, _) = settle(&mut steer, cur, 6.0, 1_000_000.0);
+        assert!(
+            got < 2500.0 && !steer.restored,
+            "a deep queue over a quarter or more of the target: {got}"
+        );
+
+        let mut steer = carried(5000.0, 4_500_000.0);
+        let cur = at(
+            &mut steer,
+            [5000.0, CEILING, 300_000.0, 0.0, 0.0],
+            Some(2.0),
+            None,
+            false,
+        );
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 120_000.0, 0.0, 9.0],
+            Some(0.4),
+            Some(150_000.0),
+            false,
+        );
+        let (got, _) = settle(&mut steer, cur, 20.0, 120_000.0);
+        assert!(
+            got < 1000.0,
+            "a stall followed by a queue over its real delivery: {got}"
+        );
+
+        let mut steer = carried(5000.0, 4_500_000.0);
+        let cur = at(
+            &mut steer,
+            [5000.0, CEILING, 300_000.0, 0.0, 0.0],
+            Some(2.0),
+            None,
+            false,
+        );
+        let got = at(
+            &mut steer,
+            [cur, CEILING, 120_000.0, 0.0, 1.0],
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            got.round(),
+            cur.round(),
+            "a tick that measured no delay restores nothing"
+        );
+        at(
+            &mut steer,
+            [cur, CEILING, 120_000.0, 0.0, 1.5],
+            Some(0.0),
+            None,
+            false,
+        );
+        let got = at(
+            &mut steer,
+            [cur, CEILING, 120_000.0, 0.3, 2.0],
+            Some(0.0),
+            None,
+            false,
+        );
+        assert_eq!(got.round(), cur.round(), "nor does a lossy one");
+        let got = at(
+            &mut steer,
+            [cur, CEILING, 120_000.0, 0.0, 3.0],
+            Some(0.0),
+            None,
+            false,
+        );
+        assert!(
+            got.round() == 5000.0 && steer.restored,
+            "a clean one after them does: {got}"
+        );
+    }
+
+    #[test]
+    fn the_shapes_a_stall_takes() {
+        let mut steer = CongestionSteer::default();
+        at(
+            &mut steer,
+            [8000.0, CEILING, 6_000_000.0, 0.0, -2.5],
+            Some(0.0),
+            Some(6_000_000.0),
+            false,
+        );
+        at(
+            &mut steer,
+            [8000.0, CEILING, 6_000_000.0, 0.0, 0.0],
+            Some(0.0),
+            Some(6_000_000.0),
+            false,
+        );
+        let cur = at(
+            &mut steer,
+            [8000.0, CEILING, 6_125_000.0, 0.0, 0.5],
+            Some(1.2),
+            None,
+            false,
+        );
+        let (got, _) = settle(&mut steer, cur, 3.0, 200_000.0);
+        assert!(
+            got.round() == 8000.0 && steer.restored,
+            "a deep queue straight after a clean tick: {got}"
+        );
+
+        let mut steer = carried(8000.0, 7_200_000.0);
+        let cur = at(
+            &mut steer,
+            [8000.0, CEILING, 0.0, 0.0, 0.0],
+            Some(0.1),
+            None,
+            false,
+        );
+        let got = at(
+            &mut steer,
+            [cur, CEILING, 200_000.0, 0.0, 1.0],
+            Some(0.0),
+            Some(200_000.0),
+            false,
+        );
+        assert_eq!(
+            got.round(),
+            5600.0,
+            "a backoff with nothing delivered holds"
+        );
+        let got = at(
+            &mut steer,
+            [got, CEILING, 200_000.0, 0.0, 2.5],
+            Some(0.0),
+            Some(200_000.0),
+            false,
+        );
+        assert!(
+            got.round() == 8000.0 && steer.restored,
+            "and comes back past the hold: {got}"
+        );
+
+        let mut steer = carried(8000.0, 7_200_000.0);
+        let mut cur = at(
+            &mut steer,
+            [8000.0, CEILING, 6_000_000.0, 0.0, 0.0],
+            Some(0.05),
+            None,
+            false,
+        );
+        for t in [0.5, 1.0, 1.5, 2.0] {
+            cur = at(
+                &mut steer,
+                [cur, CEILING, 6_000_000.0, 0.0, t],
+                Some(0.3),
+                None,
+                false,
+            );
+        }
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 6_000_000.0, 0.0, 2.5],
+            Some(1.2),
+            None,
+            false,
+        );
+        let (got, _) = settle(&mut steer, cur, 6.0, 6_000_000.0);
+        assert!(
+            got < 8000.0 && !steer.restored,
+            "a deep queue reached through queued ticks is the path: {got}"
+        );
+
+        let mut steer = carried(8000.0, 7_200_000.0);
+        at(
+            &mut steer,
+            [8000.0, CEILING, 6_000_000.0, 0.0, 0.0],
+            Some(0.17),
+            None,
+            false,
+        );
+        let cur = at(
+            &mut steer,
+            [8000.0, CEILING, 6_263_000.0, 0.0, 2.5],
+            Some(1.22),
+            None,
+            false,
+        );
+        let (got, _) = settle(&mut steer, cur, 4.0, 200_000.0);
+        assert!(
+            got.round() == 8000.0 && steer.restored,
+            "a queue that grew a second since the tick before: {got}"
+        );
+        let mut steer = CongestionSteer::default();
+        let cur = at(
+            &mut steer,
+            [8000.0, CEILING, 6_000_000.0, 0.0, 0.0],
+            Some(1.2),
+            None,
+            false,
+        );
+        let (got, _) = settle(&mut steer, cur, 4.0, 6_000_000.0);
+        assert!(
+            got < 8000.0 && !steer.restored,
+            "a deep first queue over most of the target is not: {got}"
+        );
+    }
+
+    #[test]
+    fn a_restore_is_not_repeated_over_a_path_that_slowed() {
+        let mut steer = carried(5000.0, 4_500_000.0);
+        let cur = at(
+            &mut steer,
+            [5000.0, CEILING, 300_000.0, 0.0, 0.0],
+            Some(2.0),
+            None,
+            false,
+        );
+        let (cur, _) = settle(&mut steer, cur, 1.0, 120_000.0);
+        assert!(
+            cur.round() == 5000.0 && steer.restored,
+            "the stall restores: {cur}"
+        );
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 300_000.0, 0.0, 2.0],
+            Some(2.0),
+            None,
+            false,
+        );
+        assert!(
+            cur < 300.0,
+            "the restored target queueing over the slow path backs off: {cur}"
+        );
+        let got = until_restored(&mut steer, cur, &[6.0, 7.0, 8.0, 9.0], 120_000.0);
+        assert!(
+            got < 1000.0 && !steer.restored,
+            "and its drain restores nothing: {got}"
+        );
+
+        let mut steer = carried(8000.0, 7_200_000.0);
+        let cur = at(
+            &mut steer,
+            [8000.0, CEILING, 0.0, 0.0, 0.0],
+            Some(0.1),
+            None,
+            false,
+        );
+        let (cur, _) = settle(&mut steer, cur, 2.5, 200_000.0);
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 0.0, 0.0, 3.5],
+            Some(0.1),
+            None,
+            false,
+        );
+        let (got, _) = settle(&mut steer, cur, 5.5, 200_000.0);
+        assert!(
+            got.round() == 5600.0 && !steer.restored,
+            "nor a gated tick straight after a restore: {got}"
+        );
+    }
+
+    #[test]
+    fn a_burst_the_path_delivered_keeps_the_restore() {
+        let mut steer = carried(8000.0, 7_200_000.0);
+        let cur = at(
+            &mut steer,
+            [8000.0, CEILING, 0.0, 0.0, 0.0],
+            Some(0.04),
+            None,
+            false,
+        );
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 12_000_000.0, 0.0, 2.5],
+            Some(0.15),
+            None,
+            false,
+        );
+        assert_eq!(
+            steer.restore_kbps,
+            Some(8000.0),
+            "a burst's shallow queue the path delivered keeps it"
+        );
+        let (got, _) = settle(&mut steer, cur, 6.0, 200_000.0);
+        assert_eq!(
+            got.round(),
+            8000.0,
+            "so the target comes back once the round trips are clean"
+        );
+
+        let mut steer = carried(8000.0, 7_200_000.0);
+        let cur = at(
+            &mut steer,
+            [8000.0, CEILING, 0.0, 0.0, 0.0],
+            Some(0.04),
+            None,
+            false,
+        );
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 3_000_000.0, 0.0, 2.5],
+            Some(0.15),
+            Some(3_500_000.0),
+            false,
+        );
+        let (got, _) = settle(&mut steer, cur, 6.0, 200_000.0);
+        assert!(
+            got < 8000.0 && !steer.restored,
+            "one delivered under it is a path that slowed: {got}"
+        );
+
+        let mut steer = carried(8000.0, 7_200_000.0);
+        let cur = at(
+            &mut steer,
+            [8000.0, CEILING, 0.0, 0.0, 0.0],
+            Some(0.04),
+            None,
+            false,
+        );
+        let cur = at(
+            &mut steer,
+            [cur, CEILING, 3_000_000.0, 0.0, 2.5],
+            Some(0.15),
+            None,
+            false,
+        );
+        let (got, _) = settle(&mut steer, cur, 6.0, 200_000.0);
+        assert!(
+            got.round() == 8000.0 && steer.restored,
+            "the gate's release is not one: {got}"
+        );
+    }
+
+    #[test]
+    fn a_session_started_over_a_slower_path_has_nothing_to_restore() {
+        let ceiling = CEILING * 2.0;
+        let tick = |steer: &mut CongestionSteer,
+                    cur: f64,
+                    goodput: f64,
+                    now: f64,
+                    q: f64,
+                    offered: Option<f64>| {
+            steer.target(tick_of(
+                [cur, ceiling, 100.0, goodput, 0.0, now],
+                [Some(q), offered, None, None],
+            ))
+        };
+        let mut steer = CongestionSteer::default();
+        let cur = tick(&mut steer, 12000.0, 0.0, 0.0, 0.04, None);
+        let mut got = tick(&mut steer, cur, 1_200_000.0, 2.5, 3.0, None);
+        for t in [8.0, 8.5, 9.0] {
+            got = tick(&mut steer, got, 300_000.0, t, 0.0, Some(300_000.0));
+        }
+        assert!(
+            got < 2000.0 && !steer.restored && steer.restore_kbps.is_none(),
+            "{got}"
+        );
+        let mut steer = CongestionSteer::default();
+        let cur = tick(&mut steer, 12000.0, 900_000.0, 0.0, 0.0, Some(1_000_000.0));
+        let cur = tick(&mut steer, cur, 0.0, 0.5, 0.04, None);
+        let mut got = tick(&mut steer, cur, 1_200_000.0, 3.0, 3.0, None);
+        for t in [8.0, 8.5, 9.0] {
+            got = tick(&mut steer, got, 300_000.0, t, 0.0, Some(300_000.0));
+        }
+        assert!(
+            got < 2000.0 && !steer.restored && steer.restore_kbps.is_none(),
+            "one clean tick carries no rate: {got}"
+        );
+    }
+
+    #[test]
+    fn a_padded_still_screen_climbs_probe_step_a_second() {
+        let mut steer = CongestionSteer::default();
+        let got = at(
+            &mut steer,
+            [1000.0, CEILING, 1_000_000.0, 0.0, 0.0],
+            Some(0.0),
+            Some(1_000_000.0),
+            true,
+        );
+        assert_eq!(
+            got.round(),
+            1300.0,
+            "a clean probed tick filled to the target"
+        );
+        let mut steer = CongestionSteer::default();
+        at(
+            &mut steer,
+            [1000.0, CEILING, 1_000_000.0, 0.0, 0.0],
+            Some(0.0),
+            Some(1_000_000.0),
+            false,
+        );
+        let got = at(
+            &mut steer,
+            [1000.0, CEILING, 1_000_000.0, 0.0, 0.5],
+            Some(0.0),
+            Some(1_000_000.0),
+            false,
+        );
+        assert_eq!(
+            got.round(),
+            (1000.0 * CongestionSteer::STEP.powf(0.5)).round(),
+            "an unprobed one the step"
+        );
+        let mut steer = CongestionSteer::default();
+        at(
+            &mut steer,
+            [1000.0, CEILING, 100_000.0, 0.0, 0.0],
+            Some(0.0),
+            Some(100_000.0),
+            true,
+        );
+        let got = at(
+            &mut steer,
+            [1000.0, CEILING, 100_000.0, 0.0, 0.5],
+            Some(0.0),
+            Some(100_000.0),
+            true,
+        );
+        assert_eq!(
+            got.round(),
+            1000.0,
+            "a probed tick the padding did not fill holds as a trickle does"
+        );
+
+        let climb = |tick_s: f64, probed: bool| {
+            let (mut steer, mut cur, mut t) = (CongestionSteer::default(), CEILING / 8.0, 0.0);
+            at(
+                &mut steer,
+                [cur, CEILING, cur * 1000.0, 0.0, t],
+                Some(0.0),
+                Some(cur * 1000.0),
+                probed,
+            );
+            while cur < CEILING && t < 60.0 {
+                t += tick_s;
+                cur = at(
+                    &mut steer,
+                    [cur, CEILING, cur * 1000.0, 0.0, t],
+                    Some(0.0),
+                    Some(cur * 1000.0),
+                    probed,
+                );
+            }
+            t
+        };
+        let got = [climb(0.5, true), climb(1.0, true), climb(0.5, false)];
+        assert!(
+            got[0] <= 8.5 && got[1] <= 9.0 && got[2] >= 14.0,
+            "a probe climbs an eighth of the rate to it in about 8 s at either tick, a filled stream about 15: {got:?}"
+        );
+    }
+
+    #[test]
+    fn the_path_probe_pads_a_still_screen_under_a_cut_target() {
+        let mut probe = PathProbe::default();
+        assert_eq!(
+            probe.rate_bps(8000.0, CEILING, Some(100_000.0), Some(0.0), false, 0.0),
+            0.0,
+            "at the ceiling"
+        );
+        assert_eq!(
+            probe.rate_bps(2000.0, CEILING, Some(100_000.0), Some(0.0), true, 1.0),
+            0.0,
+            "held after a cut"
+        );
+        assert_eq!(
+            probe.rate_bps(2000.0, CEILING, Some(100_000.0), None, false, 2.0),
+            0.0,
+            "no delay measured"
+        );
+        assert_eq!(
+            probe.rate_bps(2000.0, CEILING, None, Some(0.0), false, 2.5),
+            0.0,
+            "an unknown offer"
+        );
+        assert_eq!(
+            probe.rate_bps(2000.0, CEILING, Some(1_200_000.0), Some(0.0), false, 3.0),
+            0.0,
+            "half filled"
+        );
+        assert_eq!(
+            probe.rate_bps(2000.0, CEILING, Some(100_000.0), Some(0.0), false, 3.5),
+            1_900_000.0,
+            "a still screen under a cut target pads up to the target"
+        );
+
+        let mut steer = CongestionSteer::default();
+        let cur = steer.target(tick_of(
+            [2000.0, CEILING, 100.0, 1_900_000.0, 0.0, 10.0],
+            [Some(0.0), Some(100_000.0), None, None],
+        ));
+        assert_eq!(
+            cur, 2000.0,
+            "unpadded, the steer climbs no further on that trickle"
+        );
+        let cur = steer.target(tick_of(
+            [cur, CEILING, 100.0, 2_000_000.0, 0.0, 11.0],
+            [Some(0.0), Some(2_000_000.0), None, None],
+        ));
+        assert!(cur > 2000.0, "padded to the target, it steps up: {cur}");
+
+        assert_eq!(
+            probe.rate_bps(2300.0, CEILING, Some(100_000.0), Some(0.3), false, 4.0),
+            0.0,
+            "a queue ends it"
+        );
+        assert_eq!(
+            probe.rate_bps(2000.0, CEILING, Some(100_000.0), Some(0.0), false, 10.0),
+            0.0
+        );
+        assert_eq!(
+            probe.quiet_until,
+            4.0 + PathProbe::QUIET_S,
+            "and quiets it for QUIET_S"
+        );
+        assert!(
+            probe.rate_bps(
+                2000.0,
+                CEILING,
+                Some(100_000.0),
+                Some(0.0),
+                false,
+                4.0 + PathProbe::QUIET_S
+            ) > 0.0
+        );
+        probe.rate_bps(2300.0, CEILING, Some(100_000.0), Some(0.3), false, 20.0);
+        assert_eq!(
+            probe.quiet_until,
+            20.0 + 2.0 * PathProbe::QUIET_S,
+            "a second ending in a queue, twice as long"
+        );
+        for i in 0..8 {
+            probe.padding = true;
+            probe.rate_bps(
+                2300.0,
+                CEILING,
+                Some(100_000.0),
+                Some(0.3),
+                false,
+                100.0 + f64::from(i),
+            );
+        }
+        assert_eq!(
+            probe.quiet_s,
+            PathProbe::QUIET_MAX_S,
+            "never past QUIET_MAX_S"
+        );
+        probe.rate_bps(8000.0, CEILING, Some(100_000.0), Some(0.0), false, 400.0);
+        assert_eq!(
+            probe.quiet_s,
+            PathProbe::QUIET_S,
+            "a target at the ceiling starts the quiet over"
+        );
+        let mut probe = PathProbe::default();
+        assert_eq!(
+            probe.rate_bps(2000.0, CEILING, Some(100_000.0), Some(0.4), false, 0.0),
+            0.0
+        );
+        assert_eq!(
+            probe.quiet_until, 0.0,
+            "a queue on a tick that followed no padding quiets nothing"
         );
     }
 }

@@ -11,7 +11,8 @@
 //! Text frames carry the control verbs. Binary frames are typed by their first byte:
 //! `0x01` Opus audio in pcmflux's native framing, `0x03` JPEG and `0x04` video stripes as
 //! pixelflux emits them (header and all), `0x02` a client's microphone Opus packet, `0x06` a
-//! webcam frame for the virtual camera, and `0x05` gzip-wrapped control text. A client that
+//! webcam frame for the virtual camera, `0x05` gzip-wrapped control text, and `0x07` padding
+//! toward a page that sent `_pad,1`, which drops it unread (`PathProbe`). A client that
 //! sends `_gz,1` can inflate gzip: control text at or above `WS_GZIP_MIN_BYTES` then goes out
 //! as `0x05` frames, small latency-critical messages stay raw, and the server echoes the verb
 //! so the client gzips its own large sends, which the handler inflates back into text before
@@ -34,6 +35,7 @@ pub const OPCODE_JPEG: u8 = 0x03;
 pub const OPCODE_VIDEO: u8 = 0x04;
 pub const OPCODE_GZIP: u8 = 0x05;
 pub const OPCODE_WEBCAM: u8 = 0x06;
+pub const OPCODE_PADDING: u8 = 0x07;
 
 /// Bytes of a `0x06` webcam frame ahead of its payload: opcode, codec, flags.
 pub const WEBCAM_HEADER_LEN: usize = 3;

@@ -16,7 +16,7 @@
 //! ping inside its read, so the loop needs no pong of its own; a pong reaches the loop, which
 //! feeds it to the uplink clock.
 //!
-//! Dispatch order: `_gz,1`; the viewer gate; `SETTINGS,`; `_stats,`;
+//! Dispatch order: `_gz,1` and `_pad,1`; the viewer gate; `SETTINGS,`; `_stats,`;
 //! `CLIENT_FRAME_ACK`; `START_VIDEO`; `PAGE_HIDDEN`/`PAGE_SHOWN`; `STOP_VIDEO`; `DECODE_PACE `;
 //! `LOST_FRAME `; `REQUEST_KEYFRAME`; `START_AUDIO`; `STOP_AUDIO`;
 //! `SET_NATIVE_CURSOR_RENDERING,`; then the gamepad slot gate, the secure-input gate, the
@@ -583,6 +583,11 @@ impl Connection {
             say(&self.client, "_gz,1").await;
             return Flow::Continue(());
         }
+        if message == "_pad,1" {
+            // The page drops `0x07` padding unread: its stream may be padded.
+            self.client.set_pad();
+            return Flow::Continue(());
+        }
         let perms = self.client.perms();
         if perms.is_viewer() {
             let collaborator = self.service.is_collaborator(perms.token.as_deref());
@@ -869,6 +874,9 @@ impl Connection {
         };
         info!(target: "ws", "Controller {} joins 'primary' beside its owner (tab {}, the owner's {}).",
             self.client.remote, short(&tab), short(&owner_tab));
+        if !service.reg.lock().running.contains(PRIMARY_DISPLAY) {
+            service.capture_for_page_beside(self.client.clone());
+        }
         service.broadcast_stream_resolution().await;
         say(&self.client, "PIPELINE_RESETTING primary").await;
         service.schedule_idr(PRIMARY_DISPLAY);
