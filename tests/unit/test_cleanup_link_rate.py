@@ -84,6 +84,7 @@ class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
         service.args = SimpleNamespace(congestion_control=True)
         service._congestion_steer, service._rate_holds, service._link_allowances = {}, {}, {}
         service._path_probes, service._padding = {}, {}
+        service._audio_sent = {}
         if steer is not None:
             service._congestion_steer["primary"] = steer
         if before is not None:
@@ -130,21 +131,21 @@ class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(floors, [0])
 
     async def test_a_target_backed_off_reads_as_no_room(self) -> None:
-        steer = SimpleNamespace(target=lambda *a, **k: 300.0, hold_until=0.0, restored=False)
+        steer = SimpleNamespace(target=lambda *a, **k: 300.0, hold_until=0.0, restored=False, capacity_kbps=None)
         links, budgets, floors = await self.tick(webrtc_mode.RateControlMode.CBR, (2_000_000,), steer)
         self.assertEqual((links, budgets, floors), ([0], [300 * 1000], [0]))
 
     async def test_a_target_backed_off_ends_an_allowance_with_no_reading(self) -> None:
         before = LinkAllowance()
         before.note(2_000_000, 12000)
-        steer = SimpleNamespace(target=lambda *a, **k: 300.0, hold_until=0.0, restored=False)
+        steer = SimpleNamespace(target=lambda *a, **k: 300.0, hold_until=0.0, restored=False, capacity_kbps=None)
         links, budgets, floors = await self.tick(webrtc_mode.RateControlMode.CBR, (None,), steer, before)
         self.assertEqual((links, budgets, floors), ([0], [300 * 1000], [0]))
 
     async def test_a_slower_pace_bounds_an_allowance_with_no_reading(self) -> None:
         before = LinkAllowance()
         before.note(16_000_000, 12000)
-        steer = SimpleNamespace(target=lambda *a, **k: 500.0, hold_until=0.0, restored=False)
+        steer = SimpleNamespace(target=lambda *a, **k: 500.0, hold_until=0.0, restored=False, capacity_kbps=None)
         links, budgets, _ = await self.tick(webrtc_mode.RateControlMode.CBR, (None,), steer, before, 1_250_000)
         bound = round(CLEANUP_PACE_SHARE * 1_250_000 * LinkAllowance.SHARE / 1000)
         self.assertEqual((links, budgets), ([bound], [bound / LinkAllowance.SHARE * 1000]),

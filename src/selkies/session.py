@@ -177,8 +177,10 @@ def pick_session(wanted: Optional[str], wayland: bool) -> Tuple[str, Dict[str, s
     `wanted` run as a command. Unset, the desktop XDG_CURRENT_DESKTOP names,
     then the host's default, then one named after its own desktop, then the
     first installed. A name only the other backend's sessions carry stands
-    for their desktop, as `plasma` does for KDE's Wayland session on Plasma 5.
-    `("", {})` when nothing is installed."""
+    for their desktop, as `plasma` does for KDE's Wayland session on Plasma 5;
+    where that desktop has no session for this backend (Plasma 6.8 ships none
+    for X11) it raises RuntimeError, where it ran the name as a command that
+    does not exist. `("", {})` when nothing is installed."""
     sessions, others = installed_sessions(wayland), installed_sessions(not wayland)
     hints = [wanted] if wanted else os.environ.get("XDG_CURRENT_DESKTOP", "").split(":") + configured_desktops()
     for hint in filter(None, hints):
@@ -187,6 +189,12 @@ def pick_session(wanted: Optional[str], wayland: bool) -> Tuple[str, Dict[str, s
         if found:
             return found[0], sessions[found[0]]
     if wanted:
+        elsewhere = matching(others, [wanted])
+        if elsewhere:
+            have, other = ("Wayland", "X11") if wayland else ("X11", "Wayland")
+            raise RuntimeError(
+                f"{wanted} names a {other} session here ({', '.join(elsewhere)}), and its desktop has no {have} "
+                f"session installed: start it with --wayland={'false' if wayland else 'true'}")
         return "", {"Exec": wanted}
     ranked = sorted(sessions, key=lambda sid: sid.lower() not in desktop_names(sessions[sid]))
     return (ranked[0], sessions[ranked[0]]) if ranked else ("", {})

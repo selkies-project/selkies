@@ -109,9 +109,17 @@ class RedOpusEncoder(Encoder):
             configured = audio_config.red_distance
             distance = DEFAULT_DISTANCE if configured is None else configured
         self.distance = max(0, min(MAX_DISTANCE, distance))
+        self.configured = self.distance
         self.history: "collections.deque[tuple[bytes, int]]" = collections.deque(
             maxlen=self.distance
         )
+
+    def set_distance(self, distance: Optional[int]) -> None:
+        """Carry `distance` prior payloads from the next packet on, or the configured depth again (None)."""
+        distance = self.configured if distance is None else max(0, min(MAX_DISTANCE, distance))
+        if distance != self.distance:
+            self.distance = distance
+            self.history = collections.deque(list(self.history)[-distance:] if distance else [], maxlen=distance)
 
     def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int, bool]:
         timestamp = convert_timebase(packet.pts, packet.time_base, TIME_BASE)

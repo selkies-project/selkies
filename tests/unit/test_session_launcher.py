@@ -67,6 +67,7 @@ def main() -> bool:
     write(f"{system}/xsessions/hidden.desktop", entry("Hidden", "hidden", "Hidden=true"))
     write(f"{system}/xsessions/notes.txt", "not a session")
     write(f"{system}/wayland-sessions/plasma.desktop", entry("Plasma", "startplasma-wayland", "DesktopNames=KDE"))
+    write(f"{system}/wayland-sessions/sway.desktop", entry("Sway", "sway", "DesktopNames=sway"))
     write(f"{home}/xsessions/xfce.desktop", entry("Xfce mine", "my-xfce", "DesktopNames=XFCE"))
     saved = with_env(XDG_DATA_HOME=home, XDG_DATA_DIRS=system, XDG_CURRENT_DESKTOP=None)
     # The host's own defaults stay out: each check names the ones it means
@@ -80,7 +81,8 @@ def main() -> bool:
               x11.get("xfce", {}).get("Exec") == "my-xfce", x11.get("xfce"))
         check("keys come from the [Desktop Entry] group alone",
               x11.get("plasmax11", {}).get("Exec") == "startplasma-x11")
-        check("Wayland sessions are the wayland-sessions files", sorted(session.installed_sessions(True)) == ["plasma"])
+        check("Wayland sessions are the wayland-sessions files",
+              sorted(session.installed_sessions(True)) == ["plasma", "sway"])
 
         check("a session by file name", session.pick_session("plasmax11", False)[0] == "plasmax11")
         check("a session by desktop name, any case, follows the backend",
@@ -89,6 +91,15 @@ def main() -> bool:
         check("a name only the other backend's sessions carry stands for their desktop",
               session.pick_session("plasma", False)[0] == "plasmax11"
               and session.pick_session("startplasma-x11", True)[0] == "plasma")
+        try:
+            session.pick_session("sway", False)
+            refused = ""
+        except RuntimeError as err:
+            refused = str(err)
+        check("a name only the other backend's sessions carry, whose desktop has none here, is refused with the "
+              "backend that has it (Plasma 6.8 ships no X11 session), not run as a command",
+              "sway names a Wayland session here (sway)" in refused and "--wayland=true" in refused, refused)
+        check("and found on that backend", session.pick_session("sway", True)[0] == "sway")
         check("a name no session file carries runs as a command",
               session.pick_session("firefox --kiosk", False) == ("", {"Exec": "firefox --kiosk"}))
         check("a command line runs as given, even one a session file runs",

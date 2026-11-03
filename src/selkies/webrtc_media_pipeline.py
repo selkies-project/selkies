@@ -522,6 +522,13 @@ class MediaPipelinePixel(MediaPipeline):
             self.capture_module.update_framerate(float(self.framerate))
             logger.info(f"Updated framerate to {fps_label(self.framerate)} fps")
 
+    def shed_framerate(self, fps: Optional[float]) -> None:
+        """Run the capture at `fps` under the configured rate, or back at the configured rate (None), leaving
+        the configured rate itself (`framerate`, which the display's modes follow) as it is."""
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
+        self.capture_module.update_framerate(float(fps if fps else self.framerate))
+
     async def dynamic_idr_frame(self) -> None:
         """Request an IDR frame from pixelflux; `idr_pending` holds until it is captured."""
         if not self._is_screen_capturing or self.capture_module is None:

@@ -190,6 +190,7 @@ async def run_webrtc_checks() -> None:
     service._tab_used_at = {}
     service._congestion_steer, service._link_allowances = {}, {}
     service._path_probes, service._padding = {}, {}
+    service._audio_sent = {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     handled, updated = [], []
@@ -330,6 +331,7 @@ async def run_webrtc_stream_checks() -> None:
     service._tab_used_at = {}
     service._congestion_steer, service._link_allowances = {}, {}
     service._path_probes, service._padding = {}, {}
+    service._audio_sent = {}
     service.RECONNECT_GRACE_S = 0
     replayed = []
 
@@ -427,6 +429,7 @@ async def run_webrtc_visibility_checks() -> None:
     service._tab_used_at = {}
     service._congestion_steer, service._link_allowances = {}, {}
     service._path_probes, service._padding = {}, {}
+    service._audio_sent = {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     service.display_pipelines = {}
@@ -582,6 +585,7 @@ async def run_webrtc_use_checks() -> None:
     service._tab_used_at = {}
     service._congestion_steer, service._link_allowances = {}, {}
     service._path_probes, service._padding = {}, {}
+    service._audio_sent = {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     service.IDLE_OWNER_HANDOFF_S = 3.0
@@ -674,6 +678,7 @@ async def run_webrtc_congestion_checks() -> None:
         service.args = SimpleNamespace(congestion_control=True)
         service._congestion_steer, service._rate_holds, service._link_allowances = {}, {}, {}
         service._path_probes, service._padding = {}, {}
+        service._audio_sent = {}
         service._display_setting = lambda did, key: 6000
         service.display_pipelines = {"primary": pipeline}
         service._display_owner_tabs = {"primary": owner} if owner else {}
