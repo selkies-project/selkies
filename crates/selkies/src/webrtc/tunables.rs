@@ -10,7 +10,7 @@
 //! range. Video keys apply to the sending display only, as each display's pipeline owns its running
 //! values; audio and the clipboard policy are stream-global whichever display asserts them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,6 +48,48 @@ const FPS_KEEP_SHARE: f64 = 0.1;
 const FPS_RISE: f64 = 1.25;
 const FPS_FLOOR: f64 = 2.0;
 const FPS_MIN_FRAMES: u64 = 4;
+/// Audio shares a peer's transport, and transport-cc counts its packets in what the path
+/// delivered: congestion control steers the video by what is left of it (`audio_rate`). While the
+/// video target is cut and a peer's audio takes more than `AUDIO_SHARE` of the path's delivery,
+/// its RED redundancy drops a payload a tick, coming back one a tick once the deeper stream would
+/// take under half that share, or the target is back at its ceiling (`red_step`): RED's depth
+/// multiplies audio's rate, 128 kbit/s at a depth of two near 400.
+const AUDIO_SHARE: f64 = 0.5;
+
+/// The payload bit/s a peer's audio sent since the last tick, from the octets it had sent then
+/// and when (`before`) and the octets it has sent `now`; 0 on its first tick.
+pub(crate) fn audio_rate(before: Option<(u64, f64)>, octets: u64, now: f64) -> f64 {
+    match before {
+        Some((sent, at)) if now > at => octets.saturating_sub(sent) as f64 * 8.0 / (now - at),
+        _ => 0.0,
+    }
+}
+
+/// A peer's RED depth for one tick: `Some` with the depth it changes to (`None` the configured
+/// one, `configured`), where it changes. While the video target is `cut` and the audio takes more
+/// than `AUDIO_SHARE` of `goodput_bps`, a payload drops; one comes back once the deeper stream
+/// would take under half that share or the target is no longer cut.
+pub(crate) fn red_step(
+    depth: usize,
+    configured: usize,
+    audio_bps: f64,
+    goodput_bps: f64,
+    cut: bool,
+) -> Option<Option<usize>> {
+    if configured == 0 {
+        return None;
+    }
+    let shed = if cut && audio_bps > AUDIO_SHARE * goodput_bps {
+        depth.saturating_sub(1)
+    } else if !cut
+        || audio_bps * (depth + 2) as f64 / (depth + 1) as f64 <= AUDIO_SHARE / 2.0 * goodput_bps
+    {
+        configured.min(depth + 1)
+    } else {
+        return None;
+    };
+    (shed != depth).then_some((shed != configured).then_some(shed))
+}
 
 /// One congestion tick's answer for a display's capture rate: whether its bridge dropped most of
 /// the tick's frames (`over` of `over + passed`) for the budget, whatever cut it, and the rate to
@@ -641,6 +683,15 @@ impl WebRtcService {
             rooms: Vec<f64>,
             paces: Vec<f64>,
             peers: Vec<Peer>,
+            audio: Vec<AudioShare>,
+        }
+        /// A peer's audio rate, what its path delivered, and its RED depth and configured depth.
+        struct AudioShare {
+            peer_id: String,
+            peer: Peer,
+            audio_bps: f64,
+            goodput_bps: f64,
+            depth: Option<(usize, usize)>,
         }
         let cc_on = self.policy.lock().congestion_control;
         let ticks = self.engine.peer_ticks().await;
@@ -657,6 +708,13 @@ impl WebRtcService {
         // The peers a display's padding goes to: its owner where it has one.
         let mut padded: HashMap<String, Vec<(String, Peer)>> = HashMap::new();
         let mut padded_owner: HashMap<String, Vec<(String, Peer)>> = HashMap::new();
+        {
+            let live: HashSet<&String> = ticks.iter().map(|(peer_id, ..)| peer_id).collect();
+            self.st
+                .lock()
+                .audio_sent
+                .retain(|peer_id, _| live.contains(peer_id));
+        }
         for (peer_id, display, tick) in ticks {
             let handle = self
                 .engine
@@ -686,15 +744,44 @@ impl WebRtcService {
                     .clamp(lo, hi);
                 handle.set_encoder_bps((ceiling * 1000.0) as u64);
             }
+            let audio_bps = {
+                let now = clock::monotonic();
+                let mut st = self.st.lock();
+                match tick.audio_octets {
+                    Some(octets) => audio_rate(
+                        st.audio_sent.insert(peer_id.clone(), (octets, now)),
+                        octets,
+                        now,
+                    ),
+                    None => {
+                        st.audio_sent.remove(&peer_id);
+                        0.0
+                    }
+                }
+            };
             let Some(window) = tick.window.clone() else {
                 continue;
+            };
+            let video_goodput = if window.goodput_bps > 0 {
+                (window.goodput_bps as f64 - audio_bps * (1.0 - window.loss_fraction)).max(1.0)
+            } else {
+                0.0
             };
             let standing = window
                 .queue_ms
                 .map(|q| q.max(window.queue_rising_ms.unwrap_or(0.0)));
             let note = |bucket: &mut Bucket| {
-                if window.goodput_bps > 0 {
-                    bucket.goodputs.push(window.goodput_bps as f64);
+                if video_goodput > 0.0 {
+                    bucket.goodputs.push(video_goodput);
+                }
+                if audio_bps > 0.0 && window.goodput_bps > 0 {
+                    bucket.audio.push(AudioShare {
+                        peer_id: peer_id.clone(),
+                        peer: handle.clone(),
+                        audio_bps,
+                        goodput_bps: window.goodput_bps as f64,
+                        depth: tick.red_depth,
+                    });
                 }
                 if let Some(room) = tick.room_bps {
                     bucket.rooms.push(room);
@@ -703,7 +790,9 @@ impl WebRtcService {
                     bucket.paces.push(CLEANUP_PACE_SHARE * pace as f64);
                 }
                 bucket.peers.push(handle.clone());
-                bucket.sent_bps = bucket.sent_bps.max(window.sent_bps as f64);
+                bucket.sent_bps = bucket
+                    .sent_bps
+                    .max((window.sent_bps as f64 - audio_bps).max(0.0));
                 bucket.padding_bps = bucket.padding_bps.max(window.padding_bps as f64);
                 bucket.worst_loss = bucket.worst_loss.max(window.loss_fraction);
                 if let Some(standing) = standing {
@@ -779,6 +868,24 @@ impl WebRtcService {
                 (target, steer.restored, steer.capacity_kbps.is_some())
             };
             let crowded = self.shed_frames(&did, pipeline.as_ref(), target, ceiling, queued);
+            let cut = target < ceiling.round();
+            for share in &bucket.audio {
+                let Some((depth, configured)) = share.depth else {
+                    continue;
+                };
+                let (peer_id, audio_bps, goodput_bps) =
+                    (&share.peer_id, share.audio_bps, share.goodput_bps);
+                if let Some(shed) = red_step(depth, configured, audio_bps, goodput_bps, cut) {
+                    share.peer.shed_red(shed);
+                    info!(
+                        target: "webrtc",
+                        "Congestion control: audio redundancy of peer {peer_id} at depth {} ({:.0} kbit/s of {:.0} delivered)",
+                        shed.unwrap_or(configured),
+                        audio_bps / 1000.0,
+                        goodput_bps / 1000.0
+                    );
+                }
+            }
             // What the path carries, through each peer's pacer, sets the rate a still screen's
             // cleanup runs at. A pacer reads the path's capacity, not what cross traffic leaves of
             // it: a target backed off under the display's ceiling reads as no room.
@@ -1107,6 +1214,83 @@ mod shed_tests {
             d.rates,
             [Some(10.0), None],
             "nor one of fewer than FPS_MIN_FRAMES frames"
+        );
+    }
+
+    #[test]
+    fn audio_is_read_from_the_octets_its_sender_sent() {
+        assert_eq!(
+            audio_rate(None, 50_000, 10.0),
+            0.0,
+            "a first tick reads no audio rate"
+        );
+        let rate = audio_rate(Some((0, 9.0)), 50_000, 10.0);
+        assert!(
+            399_000.0 < rate && rate <= 400_100.0,
+            "the next reads the octets sent over the time between them: {rate}"
+        );
+    }
+
+    #[test]
+    fn red_depth_follows_audio_share_of_a_cut_path() {
+        let (mut depth, configured) = (2usize, 2usize);
+        let mut shed = |audio: f64, goodput: f64, cut: bool| {
+            if let Some(to) = red_step(depth, configured, audio, goodput, cut) {
+                depth = to.unwrap_or(configured);
+            }
+            depth
+        };
+        assert_eq!(
+            shed(400_000.0, 500_000.0, true),
+            1,
+            "a cut target with audio over AUDIO_SHARE of the delivery drops a payload"
+        );
+        shed(270_000.0, 500_000.0, true);
+        assert_eq!(
+            shed(140_000.0, 500_000.0, true),
+            0,
+            "a tick at a time, to depth 0 at the least"
+        );
+        assert_eq!(shed(140_000.0, 500_000.0, true), 0, "it stays there");
+        assert_eq!(
+            shed(140_000.0, 1_000_000.0, true),
+            0,
+            "one where the deeper stream would take more than half AUDIO_SHARE holds"
+        );
+        assert_eq!(
+            shed(140_000.0, 1_200_000.0, true),
+            1,
+            "one where it would take less brings a payload back"
+        );
+        assert_eq!(
+            shed(270_000.0, 1_200_000.0, false),
+            2,
+            "a target no longer cut brings the configured depth back"
+        );
+        assert_eq!(
+            shed(400_000.0, 500_000.0, false),
+            2,
+            "and nothing drops it while it is not cut"
+        );
+        assert_eq!(
+            red_step(2, 2, 270_000.0, 1_200_000.0, false),
+            None,
+            "at the configured depth, uncut, nothing changes"
+        );
+        assert_eq!(
+            red_step(0, 0, 400_000.0, 500_000.0, true),
+            None,
+            "depth 0 configured: kept"
+        );
+        assert_eq!(
+            red_step(2, 2, 400_000.0, 500_000.0, true),
+            Some(Some(1)),
+            "a depth under the configured one is set as itself"
+        );
+        assert_eq!(
+            red_step(1, 2, 0.0, 1_000_000.0, false),
+            Some(None),
+            "and the configured one as None"
         );
     }
 

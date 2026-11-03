@@ -159,6 +159,8 @@ pub(crate) struct State {
     /// counts it read.
     pub shed_fps: HashMap<String, f64>,
     pub budget_counts: HashMap<String, (u64, u64)>,
+    /// Each peer's audio octets sent and when, at the last congestion tick (`audio_rate`).
+    pub audio_sent: HashMap<String, (u64, f64)>,
     pub padded: HashMap<String, Vec<(String, Peer)>>,
     pub invalidation_log: HashMap<(String, bool), (f64, u32)>,
     pub stop_grace: Option<JoinHandle<()>>,
@@ -251,6 +253,7 @@ impl WebRtcService {
                 path_probes: HashMap::new(),
                 shed_fps: HashMap::new(),
                 budget_counts: HashMap::new(),
+                audio_sent: HashMap::new(),
                 padded: HashMap::new(),
                 invalidation_log: HashMap::new(),
                 stop_grace: None,

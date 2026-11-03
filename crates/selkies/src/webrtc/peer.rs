@@ -145,6 +145,11 @@ pub struct PeerTick {
     pub pace_bps: Option<u64>,
     pub snapshot: Option<selkies_rtc::rtp::pacer::Snapshot>,
     pub rtt: Option<f64>,
+    /// The payload octets the audio sender has sent, None without one.
+    pub audio_octets: Option<u64>,
+    /// The prior payloads the audio sender's RED packets carry and the configured depth, None
+    /// where it sends no RED.
+    pub red_depth: Option<(usize, usize)>,
 }
 
 /// What an answer settled, for the service to act on.
@@ -164,6 +169,7 @@ enum Command {
     UplinkEnabled(Uplink, bool),
     SwitchCodec(String, oneshot::Sender<bool>),
     RedDistance(Option<usize>),
+    RedShed(Option<usize>),
     AudioFeed(RelayTrack<AudioSample>),
     EncoderBps(u64),
     FrameFloor(usize),
@@ -577,6 +583,12 @@ impl Peer {
         let _ = self.commands.send(Command::RedDistance(distance));
     }
 
+    /// Carry `distance` prior payloads in the running RED stream, or its configured depth
+    /// (None), from the next packet on (`RtpSender::shed_red_depth`).
+    pub fn shed_red(&self, distance: Option<usize>) {
+        let _ = self.commands.send(Command::RedShed(distance));
+    }
+
     /// Feed the audio sender from `feed`: the stereo companion for a page that took Opus in a
     /// surround session.
     pub fn set_audio_feed(&self, feed: RelayTrack<AudioSample>) {
@@ -855,6 +867,11 @@ impl Media {
                     audio.set_red_distance(distance);
                 }
             }
+            Command::RedShed(distance) => {
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.shed_red_depth(distance);
+                }
+            }
             Command::AudioFeed(feed) => self.audio_feed = Some(feed),
             Command::EncoderBps(bps) => {
                 let now = clock::monotonic();
@@ -905,12 +922,18 @@ impl Media {
                     ),
                     None => (None, None, None),
                 };
+                let (audio_octets, red_depth) = match self.audio.as_mut() {
+                    Some(audio) => (Some(audio.octet_count()), audio.red_depth()),
+                    None => (None, None),
+                };
                 let _ = reply.send(PeerTick {
                     window,
                     room_bps,
                     pace_bps,
                     snapshot,
                     rtt: self.video.rtt(),
+                    audio_octets,
+                    red_depth,
                 });
             }
             Command::Rtt(reply) => {

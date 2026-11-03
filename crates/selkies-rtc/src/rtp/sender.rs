@@ -746,6 +746,20 @@ impl RtpSender {
         self.enabled = enabled;
     }
 
+    /// The prior payloads this sender's RED packets carry and the configured depth, or None
+    /// where it sends no RED.
+    pub fn red_depth(&mut self) -> Option<(usize, usize)> {
+        self.packetizer.as_mut()?.red().map(|r| r.depth())
+    }
+
+    /// Carry `distance` prior payloads as RED redundancy from the next packet on, or the
+    /// configured depth (None), where this sender sends RED (`RedState::set_distance`).
+    pub fn shed_red_depth(&mut self, distance: Option<usize>) {
+        if let Some(red) = self.packetizer.as_mut().and_then(Packetizer::red) {
+            red.set_distance(distance);
+        }
+    }
+
     pub fn packet_count(&self) -> u64 {
         self.packet_count
     }

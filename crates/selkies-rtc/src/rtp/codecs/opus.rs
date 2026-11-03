@@ -70,16 +70,37 @@ pub fn red_block_payload_type(parameters: &BTreeMap<String, String>) -> u8 {
 pub struct RedState {
     block_pt: u8,
     distance: usize,
+    /// The depth the stream was negotiated with, which `set_distance(None)` restores.
+    configured: usize,
     history: VecDeque<(Bytes, u32)>,
 }
 
 impl RedState {
     pub fn new(block_pt: u8, distance: usize) -> Self {
+        let distance = distance.min(MAX_DISTANCE);
         Self {
             block_pt: block_pt & 0x7F,
-            distance: distance.min(MAX_DISTANCE),
+            distance,
+            configured: distance,
             history: VecDeque::with_capacity(MAX_DISTANCE + 1),
         }
+    }
+
+    /// Carry `distance` prior payloads from the next packet on, or the configured depth again
+    /// (None); a deeper stream refills from the packets sent after the change.
+    pub fn set_distance(&mut self, distance: Option<usize>) {
+        let distance = distance.map_or(self.configured, |d| d.min(MAX_DISTANCE));
+        if distance != self.distance {
+            self.distance = distance;
+            while self.history.len() > distance {
+                self.history.pop_front();
+            }
+        }
+    }
+
+    /// The prior payloads a packet carries now, and the configured depth.
+    pub fn depth(&self) -> (usize, usize) {
+        (self.distance, self.configured)
     }
 
     /// One RFC 2198 payload: redundant blocks (oldest first) then the primary.
@@ -126,6 +147,52 @@ fn build_red<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The blocks of one RED payload: the redundant ones, each behind a four-byte header with
+    /// the F bit set, then the primary.
+    fn blocks(red: &mut RedState, timestamp: u32) -> usize {
+        let payload = red.pack(&Bytes::from_static(b"pp"), timestamp).to_bytes();
+        let mut at = 0;
+        while payload[at] & 0x80 != 0 {
+            at += 4;
+        }
+        at / 4 + 1
+    }
+
+    #[test]
+    fn red_depth_changes_from_the_next_packet() {
+        let mut red = RedState::new(96, 2);
+        let mut ts = 0u32;
+        let mut next = |red: &mut RedState| {
+            ts += 960;
+            blocks(red, ts)
+        };
+        let run: Vec<usize> = (0..4).map(|_| next(&mut red)).collect();
+        assert_eq!(
+            run,
+            [1, 2, 3, 3],
+            "a stream of depth two carries two prior payloads once it has them"
+        );
+        red.set_distance(Some(0));
+        assert_eq!(
+            next(&mut red),
+            1,
+            "at depth 0 the next packet carries the primary alone"
+        );
+        red.set_distance(Some(1));
+        let run: Vec<usize> = (0..3).map(|_| next(&mut red)).collect();
+        assert_eq!(
+            run,
+            [1, 2, 2],
+            "a depth brought back refills from the packets sent after it"
+        );
+        red.set_distance(None);
+        let run: Vec<usize> = (0..3).map(|_| next(&mut red)).collect();
+        assert!(
+            red.depth() == (2, 2) && run == [2, 3, 3],
+            "None is the configured depth again: {run:?}"
+        );
+    }
 
     #[test]
     fn red_carries_the_frames_before_as_redundancy() {
