@@ -151,7 +151,7 @@ impl SocketLink for TcpLink {
     fn unsent_bytes(&self) -> Option<i64> {
         let mut unsent: libc::c_int = 0;
         // SAFETY: ioctl on a descriptor this connection owns, writing one int it was given.
-        let rc = unsafe { libc::ioctl(self.fd, SIOCOUTQNSD, &mut unsent as *mut libc::c_int) };
+        let rc = unsafe { libc::ioctl(self.fd, SIOCOUTQNSD as _, &mut unsent as *mut libc::c_int) };
         (rc == 0).then_some(unsent as i64)
     }
 
