@@ -36,12 +36,18 @@
 //! path's jitter) over the floor, or as `LINK_RISE_ACKS` round trips each longer than the last;
 //! a queue that outlasts the cuts it answers, sent well under what the path delivered, is a
 //! longer path's or other traffic's and becomes the floor (`settle_path_floor`).
+//!
+//! Once a queue has cut the target, a still screen's trickle tests nothing of the path, so a
+//! page that sent `_pad,1` is padded by its relay up to the target while the display's
+//! `PathProbe` asks for it (`probe_path`); a tick with no acks and nothing in flight is an idle
+//! path, padded the same way. The padding counts in what the display sent and, through a ping
+//! behind it, in what its path acked, and is taken back out of the stream's own offer.
 
 use std::collections::VecDeque;
 
 use log::{debug, info, warn};
 
-use crate::ws::steer::{CongestionSteer, LinkAllowance, RateHold, SteerTick};
+use crate::ws::steer::{CongestionSteer, LinkAllowance, PathProbe, RateHold, SteerTick};
 use crate::ws::uplink::FloorHistory;
 
 /// How much stream may stand queued past the path's own round trip before the gate stops a
@@ -178,6 +184,13 @@ pub struct DisplayLink {
     /// The rate congestion control holds the display at, under its target.
     pub link_kbps: Option<f64>,
     pub link_hold: RateHold,
+    /// The padding written to the owner (counted in `sent_bytes` too), and its count at the
+    /// last steer tick.
+    pub pad_bytes: u64,
+    pub link_tick_pad: Option<u64>,
+    pub link_probe: Option<PathProbe>,
+    /// The padding the probe last asked of the owner's relay, in bits per second.
+    pub link_padding: f64,
     /// What the gate did, as its log lines say it.
     pub gate_counts: GateCounts,
 }
@@ -362,6 +375,7 @@ impl DisplayLink {
         self.link_jitter_ms = None;
         self.link_allowance = None;
         self.link_path_stand = None;
+        self.link_probe = None;
     }
 
     /// Reset the frame-id state with the numbering (`PIPELINE_RESETTING`): a stale stamp
@@ -579,20 +593,31 @@ pub struct SteerOutcome {
     pub cc_rate: Option<i64>,
     /// The rate applied to the encoder, where it changed.
     pub applied_kbps: Option<i64>,
+    /// The padding the owner's relay writes until the tick after next, in bits per second;
+    /// `None` where the probe was not asked (the page never sent `_pad,1`).
+    pub pad_bps: Option<f64>,
+}
+
+/// Whether a display's owner may be padded: it sent `_pad,1`, and it streams (its video is
+/// neither stopped nor paused).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PadPermit {
+    pub announced: bool,
+    pub streaming: bool,
 }
 
 impl DisplayLink {
     /// Hold a CBR display to the rate its path carries, once per backpressure check:
     /// `target_kbps` is the display's `video_bitrate`, `(lo_kbps, hi_kbps)` the configured
-    /// range, `encoder` the capture's controls.
+    /// range, `encoder` the capture's controls, `pad` whether its owner may be padded.
     pub fn steer_bitrate_to_link(
         &mut self,
         display_id: &str,
         now: f64,
         target_kbps: f64,
-        lo_kbps: f64,
-        hi_kbps: f64,
+        (lo_kbps, hi_kbps): (f64, f64),
         encoder: Option<&dyn SteerTarget>,
+        pad: PadPermit,
     ) -> SteerOutcome {
         let last_tick = self.link_tick_at.unwrap_or(0.0);
         self.link_tick_at = Some(now);
@@ -607,7 +632,21 @@ impl DisplayLink {
             .collect();
         let gated = !self.backpressure_enabled;
         if window.is_empty() && (!gated || self.link_carried.unwrap_or(true)) {
-            return SteerOutcome::default();
+            // A screen that sends nothing acks nothing; with nothing in flight its path is
+            // idle, which a cut target may pad to test.
+            let mut outcome = SteerOutcome::default();
+            if self.link_steer.is_some() && !gated && self.unacked_since.is_none() {
+                let offered = (last_tick > 0.0)
+                    .then(|| sent.saturating_sub(sent_then) as f64 * 8.0 / (now - last_tick));
+                let tick = ProbeTick {
+                    ceiling: target_kbps,
+                    rate: self.video_bitrate_kbps(target_kbps),
+                    queue_s: Some(0.0),
+                    offered_bps: offered,
+                };
+                outcome.pad_bps = self.probe_path(display_id, now, last_tick, tick, pad);
+            }
+            return outcome;
         }
         let target = target_kbps;
         let Some(encoder) = encoder else {
@@ -780,6 +819,7 @@ impl DisplayLink {
         {
             self.link_carried = Some(measured >= LINK_CARRIED_SHARE * offered);
         }
+        let probed = self.link_probe.as_ref().is_some_and(|p| p.padding);
         let steer = self.link_steer.get_or_insert_with(CongestionSteer::default);
         let rate = steer
             .target(SteerTick {
@@ -793,21 +833,38 @@ impl DisplayLink {
                 offered_bps,
                 acked_offered_bps,
                 capacity_bps,
+                probed,
             })
             .round();
+        let restored = steer.restored;
         self.link_kbps = Some(rate);
+        let tick = ProbeTick {
+            ceiling: target,
+            rate,
+            queue_s: Some(queue_s),
+            offered_bps,
+        };
+        let pad_bps = self.probe_path(display_id, now, last_tick, tick, pad);
         let cc_rate = self.link_hold.note(rate, now);
         let mut outcome = SteerOutcome {
             cc_rate,
             applied_kbps: None,
+            pad_bps,
         };
         if rate != current.round() {
+            let why = if restored {
+                "round trips back at the floor after a stall: the rate before it".to_string()
+            } else {
+                format!(
+                    "round trip {least_ms:.0} ms over a {floor_ms:.0} ms floor, {:.0} kbps delivered, the server's loop {:.0} ms late",
+                    delivered_bps / 1000.0,
+                    self.loop_late_ms
+                )
+            };
             let line = format!(
-                "Congestion control[{display_id}]: video bitrate {current:.0} -> {rate:.0} kbps (round trip {least_ms:.0} ms over a {floor_ms:.0} ms floor, {:.0} kbps delivered, the server's loop {:.0} ms late)",
-                delivered_bps / 1000.0,
-                self.loop_late_ms
+                "Congestion control[{display_id}]: video bitrate {current:.0} -> {rate:.0} kbps ({why})"
             );
-            if rate < current {
+            if rate < current || restored {
                 info!(target: "ws", "{line}");
             } else {
                 debug!(target: "ws", "{line}");
@@ -820,6 +877,77 @@ impl DisplayLink {
             }
         }
         outcome
+    }
+}
+
+/// What one steer tick tells the path probe.
+struct ProbeTick {
+    /// The display's configured target, in kbps.
+    ceiling: f64,
+    /// The target the steer set, in kbps.
+    rate: f64,
+    /// The queue the tick read.
+    queue_s: Option<f64>,
+    /// What the display sent over the tick, padding included; `None` where the gate held any.
+    offered_bps: Option<f64>,
+}
+
+impl DisplayLink {
+    /// The padding a display's owner is to be written through the next tick, where its
+    /// `PathProbe` asks for it; `None` where the page never sent `_pad,1`.
+    ///
+    /// What the display sent over the tick is taken without the padding the relay wrote
+    /// through it, so the probe weighs the stream's own.
+    fn probe_path(
+        &mut self,
+        display_id: &str,
+        now: f64,
+        last_tick: f64,
+        tick: ProbeTick,
+        pad: PadPermit,
+    ) -> Option<f64> {
+        let ProbeTick {
+            ceiling,
+            rate,
+            queue_s,
+            offered_bps,
+        } = tick;
+        let pad_sent = self.pad_bytes;
+        let pad_then = self.link_tick_pad.unwrap_or(pad_sent);
+        self.link_tick_pad = Some(pad_sent);
+        let span = if last_tick > 0.0 {
+            now - last_tick
+        } else {
+            0.0
+        };
+        let content_bps = offered_bps
+            .filter(|_| span > 0.0)
+            .map(|offered| (offered - (pad_sent - pad_then) as f64 * 8.0 / span).max(0.0));
+        if !pad.announced {
+            return None;
+        }
+        let held = self.link_steer.as_ref().is_some_and(|s| now < s.hold_until);
+        let mut bps = self
+            .link_probe
+            .get_or_insert_with(PathProbe::default)
+            .rate_bps(rate, ceiling, content_bps, queue_s, held, now);
+        if !pad.streaming {
+            bps = 0.0;
+        }
+        if (bps > 0.0) != (self.link_padding > 0.0) {
+            if bps > 0.0 {
+                debug!(target: "ws", "Congestion control[{display_id}]: probing the path at {rate:.0} kbps (a still screen under a cut target)");
+            } else {
+                let why = if queue_s.is_some_and(|q| q > 0.0) {
+                    " (a queue)"
+                } else {
+                    ""
+                };
+                debug!(target: "ws", "Congestion control[{display_id}]: probe ended at {rate:.0} kbps{why}");
+            }
+        }
+        self.link_padding = bps;
+        Some(bps)
     }
 }
 
@@ -1661,6 +1789,7 @@ mod tests {
         state: DisplayLink,
         acked_bytes: f64,
         target: f64,
+        pad: PadPermit,
     }
 
     const LO: f64 = 100.0;
@@ -1673,6 +1802,7 @@ mod tests {
                 state: DisplayLink::new(),
                 acked_bytes: 0.0,
                 target: 4000.0,
+                pad: PadPermit::default(),
             }
         }
 
@@ -1692,8 +1822,14 @@ mod tests {
         }
 
         fn steer(&mut self, t: f64) -> SteerOutcome {
-            self.state
-                .steer_bitrate_to_link("display2", t, self.target, LO, HI, Some(&self.module))
+            self.state.steer_bitrate_to_link(
+                "display2",
+                t,
+                self.target,
+                (LO, HI),
+                Some(&self.module),
+                self.pad,
+            )
         }
 
         /// Ack every 50 ms (every `every` x 50 ms) at `rtt_ms` with the path delivering
@@ -1751,6 +1887,169 @@ mod tests {
                 },
             )
         }
+    }
+
+    /// A display's link and the owner's relay as far as padding goes: what the probe asked,
+    /// until when, and every ask.
+    struct Probed {
+        module: Module,
+        state: DisplayLink,
+        pad: PadPermit,
+        acked_bytes: f64,
+        pad_bps: f64,
+        pad_until: f64,
+        calls: Vec<f64>,
+    }
+
+    impl Probed {
+        fn new(announced: bool) -> Probed {
+            Probed {
+                module: Module::default(),
+                state: DisplayLink::new(),
+                pad: PadPermit {
+                    announced,
+                    streaming: true,
+                },
+                acked_bytes: 0.0,
+                pad_bps: 0.0,
+                pad_until: 0.0,
+                calls: Vec::new(),
+            }
+        }
+
+        fn current(&self) -> f64 {
+            self.state.video_bitrate_kbps(4000.0)
+        }
+
+        /// Every 50 ms the stream sends `sent_kbps` (by default the rate in force), the relay
+        /// the padding it was asked for, and the path delivers it all (or `path_kbps`) acked
+        /// at `rtt_ms`; the steer runs every half second.
+        fn run(
+            &mut self,
+            rtt_ms: f64,
+            start: f64,
+            seconds: f64,
+            sent_kbps: Option<f64>,
+            path_kbps: Option<f64>,
+        ) -> f64 {
+            let (mut t, step) = (start, 0.05);
+            while t < start + seconds - 1e-9 {
+                t = ((t + step) * 1000.0).round() / 1000.0;
+                let sending = sent_kbps.unwrap_or_else(|| self.current());
+                let pad = if t < self.pad_until {
+                    self.pad_bps / 1000.0
+                } else {
+                    0.0
+                };
+                self.state.sent_bytes += ((sending + pad) * 125.0 * step) as u64;
+                self.state.pad_bytes += (pad * 125.0 * step) as u64;
+                let delivered = path_kbps.map_or(sending + pad, |p| (sending + pad).min(p));
+                self.acked_bytes += delivered * 125.0 * step;
+                if sending + pad > 0.0 {
+                    self.state
+                        .note_round_trip(rtt_ms, self.acked_bytes as u64, t);
+                }
+                if ((t * 2.0) - (t * 2.0).round()).abs() < 1e-6 {
+                    let outcome = self.state.steer_bitrate_to_link(
+                        "display",
+                        t,
+                        4000.0,
+                        (LO, HI),
+                        Some(&self.module),
+                        self.pad,
+                    );
+                    if let Some(bps) = outcome.pad_bps {
+                        self.calls.push(bps);
+                        self.pad_bps = bps;
+                        self.pad_until = t + 2.0 * BACKPRESSURE_CHECK_INTERVAL_S;
+                    }
+                }
+            }
+            t
+        }
+
+        /// Five clean seconds over a path of `path_kbps`, then half a second of queue.
+        fn cut(&mut self, path_kbps: f64) -> f64 {
+            let t = self.run(20.0, 0.0, 5.0, None, Some(path_kbps));
+            self.run(320.0, t, 0.5, None, Some(path_kbps))
+        }
+    }
+
+    #[test]
+    fn a_still_screen_under_a_cut_target_is_padded_to_test_its_path() {
+        let mut p = Probed::new(true);
+        let t = p.cut(3000.0);
+        let cut = p.current();
+        assert!(cut < 3000.0, "a queue cuts the target: {cut}");
+        assert!(
+            !p.calls.is_empty() && p.calls.iter().all(|c| *c == 0.0),
+            "and nothing pads while the steer holds it: {:?}",
+            p.calls
+        );
+        let t = p.run(20.0, t, 2.0, Some(100.0), None);
+        assert!(
+            p.pad_bps > 0.0 && (p.pad_bps + 100_000.0 - p.current() * 1000.0).abs() < 50_000.0,
+            "past the hold, a still screen's trickle is padded up to the target: {} {}",
+            p.pad_bps,
+            p.current()
+        );
+        let t = p.run(20.0, t, 1.0, Some(100.0), None);
+        assert!(
+            p.current() > cut,
+            "the target climbs on what the padded path carries"
+        );
+        p.run(20.0, t, 12.0, Some(100.0), None);
+        assert_eq!(p.current(), 4000.0, "back to the ceiling");
+        assert_eq!(p.pad_bps, 0.0, "where the padding stops");
+
+        let mut p = Probed::new(true);
+        let t = p.cut(2500.0);
+        let t = p.run(20.0, t, 3.0, Some(100.0), Some(2500.0));
+        let before = p.current();
+        assert!(
+            p.pad_bps > 0.0,
+            "a path slower than the ceiling is padded too"
+        );
+        let t = p.run(200.0, t, 1.0, Some(100.0), Some(2500.0));
+        assert_eq!(
+            p.pad_bps, 0.0,
+            "its queue on a padded tick stops the padding"
+        );
+        assert!(p.current() < before, "and backs the target off");
+        let quiet_from = t;
+        let t = p.run(20.0, t, PathProbe::QUIET_S - 2.0, Some(100.0), Some(2500.0));
+        assert!(
+            p.pad_bps == 0.0 && t - quiet_from < PathProbe::QUIET_S,
+            "nothing pads again for QUIET_S"
+        );
+        p.run(20.0, t, 6.0, Some(100.0), Some(2500.0));
+        assert!(
+            p.calls.iter().rev().take(8).any(|c| *c > 0.0),
+            "after which a probe pads again: {:?}",
+            &p.calls[p.calls.len().saturating_sub(8)..]
+        );
+
+        let mut p = Probed::new(true);
+        let t = p.cut(3000.0);
+        p.run(20.0, t, 2.0, Some(0.0), None);
+        assert!(
+            p.pad_bps > 0.0,
+            "a screen that sends nothing, with nothing in flight, is padded too"
+        );
+
+        let mut p = Probed::new(false);
+        let t = p.cut(3000.0);
+        let cut = p.current();
+        p.run(20.0, t, 10.0, Some(100.0), None);
+        assert!(
+            p.calls.is_empty(),
+            "a page that never announced _pad,1 is never padded"
+        );
+        assert!(
+            cut < p.current() && p.current() <= 3000.0,
+            "its target climbs on the trickle no further than the capacity the path last showed: {cut} {}",
+            p.current()
+        );
     }
 
     #[test]
@@ -2540,7 +2839,14 @@ mod tests {
         state.link_steer = Some(steer);
         state.sent_bytes = 375_000;
         state.link_tick_sent = Some(0);
-        state.steer_bitrate_to_link("primary", 1.0, 6000.0, 1000.0, 12000.0, Some(&module));
+        state.steer_bitrate_to_link(
+            "primary",
+            1.0,
+            6000.0,
+            (1000.0, 12000.0),
+            Some(&module),
+            PadPermit::default(),
+        );
         assert_eq!(state.link_kbps, Some(4250.0));
         assert_eq!(module.rates.borrow().clone(), vec![4250]);
 
@@ -2569,7 +2875,14 @@ mod tests {
             .collect();
         state.link_jitter_ms = Some(0.0);
         state.link_steer = Some(steer);
-        state.steer_bitrate_to_link("primary", 32.0, 6000.0, 1000.0, 12000.0, Some(&module));
+        state.steer_bitrate_to_link(
+            "primary",
+            32.0,
+            6000.0,
+            (1000.0, 12000.0),
+            Some(&module),
+            PadPermit::default(),
+        );
         assert_eq!(state.link_kbps, Some(1407.0));
         assert!(module.rates.borrow().is_empty());
     }

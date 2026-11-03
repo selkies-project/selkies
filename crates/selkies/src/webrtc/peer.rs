@@ -17,6 +17,10 @@
 //! own task (`SctpTransport::spawn`), whose outgoing packets take the pacer's data class through
 //! the media task, ahead of queued video and behind audio and RTCP.
 //!
+//! A still screen's path probe pads the video stream (`set_padding`): the media task writes a step
+//! of the asked rate every `PAD_STEP_S` through `RtpSender::send_padding`, which the pacer admits
+//! only from its credit, holding about five milliseconds of its pace, with nothing queued.
+//!
 //! No peer shares a lock or a task with another: a frame being packed for one peer, on one tokio
 //! worker, stalls neither another peer's frames nor its input.
 
@@ -163,6 +167,7 @@ enum Command {
     AudioFeed(RelayTrack<AudioSample>),
     EncoderBps(u64),
     FrameFloor(usize),
+    Padding(f64, f64),
     RequestUplinkKeyframe,
     Tick(oneshot::Sender<PeerTick>),
     Rtt(oneshot::Sender<Option<f64>>),
@@ -333,6 +338,9 @@ enum Track {
     Webcam,
 }
 
+/// The step a peer's padding is written in.
+const PAD_STEP_S: f64 = 0.005;
+
 /// The queues the media task reads, made before it starts.
 struct MediaChannels {
     commands: mpsc::UnboundedReceiver<Command>,
@@ -371,6 +379,11 @@ struct Media {
     drain_at: Option<Instant>,
     report_at: Instant,
     remote_set: bool,
+    /// The padding asked of the video stream, in bits per second, until `pad_until`
+    /// (`clock::monotonic`), and when its next step is due.
+    pad_bps: f64,
+    pad_until: f64,
+    pad_at: Option<Instant>,
 }
 
 impl Peer {
@@ -472,6 +485,9 @@ impl Peer {
             state: PeerState::Connecting,
             drain_at: None,
             report_at: Instant::now() + Duration::from_millis(500),
+            pad_bps: 0.0,
+            pad_until: 0.0,
+            pad_at: None,
             remote_set: false,
         };
         let running = tokio::spawn(media.run(
@@ -574,6 +590,11 @@ impl Peer {
     /// The largest cleanup frame the pacer takes whole.
     pub fn set_frame_floor(&self, bytes: usize) {
         let _ = self.commands.send(Command::FrameFloor(bytes));
+    }
+
+    /// Pad the video stream at `bps` until `until` (`clock::monotonic`), or stop where `bps` is 0.
+    pub fn set_padding(&self, bps: f64, until: f64) {
+        let _ = self.commands.send(Command::Padding(bps, until));
     }
 
     /// Ask the page's camera for a key frame.
@@ -734,7 +755,8 @@ impl Media {
             let wake = self
                 .drain_at
                 .unwrap_or_else(|| Instant::now() + far)
-                .min(self.report_at);
+                .min(self.report_at)
+                .min(self.pad_at.unwrap_or_else(|| Instant::now() + far));
             tokio::select! {
                 biased;
                 command = commands.recv() => {
@@ -763,6 +785,9 @@ impl Media {
                     let now = Instant::now();
                     if self.report_at <= now {
                         self.send_reports();
+                    }
+                    if self.pad_at.is_some_and(|at| at <= now) {
+                        self.pad();
                     }
                 }
                 frame = self.video_feed.recv(), if self.dtls_connected => {
@@ -833,6 +858,15 @@ impl Media {
             Command::FrameFloor(bytes) => {
                 if let Some(pacer) = self.paced.pacer() {
                     pacer.set_frame_floor(bytes);
+                }
+            }
+            Command::Padding(bps, until) => {
+                self.pad_bps = bps;
+                self.pad_until = until;
+                if bps <= 0.0 {
+                    self.pad_at = None;
+                } else if self.pad_at.is_none() {
+                    self.pad_at = Some(Instant::now());
                 }
             }
             Command::RequestUplinkKeyframe => {
@@ -1181,6 +1215,20 @@ impl Media {
             }
         }
         self.report_at = Instant::now() + Duration::from_secs_f64(next);
+    }
+
+    /// Write one step of the padding asked, and schedule the next while it is asked.
+    fn pad(&mut self) {
+        let now = clock::monotonic();
+        if self.pad_bps <= 0.0 || now >= self.pad_until {
+            self.pad_at = None;
+            return;
+        }
+        if self.dtls_connected {
+            let step = (self.pad_bps * PAD_STEP_S / 8.0) as usize;
+            self.video.send_padding(step, &mut self.paced, now);
+        }
+        self.pad_at = Some(Instant::now() + Duration::from_secs_f64(PAD_STEP_S));
     }
 
     fn on_video(&mut self, frame: &EncodedFrame) {

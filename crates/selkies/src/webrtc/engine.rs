@@ -219,6 +219,9 @@ pub struct PeerEntry {
     pub fullcolor_codecs: Option<Vec<String>>,
     pub tenbit_codecs: Option<Vec<String>>,
     pub video_paused: bool,
+    /// Paused by the server when its display was handed to another page while it was hidden,
+    /// not by its own `STOP_VIDEO`: its showing resumes it, since no `START_VIDEO` comes.
+    pub paused_on_hand_off: bool,
     pub audio_paused: bool,
     pub has_audio: bool,
     pub audio_layout: Option<String>,
@@ -825,6 +828,7 @@ impl RtcEngine {
                 fullcolor_codecs,
                 tenbit_codecs,
                 video_paused,
+                paused_on_hand_off: false,
                 audio_paused,
                 has_audio,
                 audio_layout: None,

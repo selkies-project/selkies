@@ -74,6 +74,13 @@
 //! a peer holds is read from transport-cc (`confirm`). An H.264 peer without the descriptor
 //! is sent a skipped picture in place of each frame left out (`stand_in`).
 //!
+//! A still screen's path probe pads the video stream (`send_padding`) by resending its last
+//! packets on the RTX stream, as libwebrtc's payload padding does: of those carrying
+//! `PADDING_SOURCE_BYTES` or more, the newest `PADDING_SOURCES`, kept past the retransmission
+//! horizon since a still screen sends none for long. Each is numbered for transport-cc only
+//! once the pacer admits it from its credit with nothing queued, so none is read as lost and
+//! none waits ahead of a frame; the peer discards them as duplicates.
+//!
 //! The sender does no I/O and keeps no clock: every call takes `now`, packets leave through
 //! `SenderTransport`, and what the engine must learn arrives through `SenderHooks`.
 
@@ -138,6 +145,11 @@ pub const FEC_FULL_LOSS: f64 = 0.002;
 pub const FEC_CLEAR_WINDOWS: u32 = 3;
 const UNHELD_MAX: usize = 1024;
 const IN_FLIGHT_MAX: usize = 64;
+/// Padding resends the newest of the stream's packets carrying this much or more.
+pub const PADDING_SOURCES: usize = 4;
+pub const PADDING_SOURCE_BYTES: usize = 900;
+/// Room left for a padding packet's RTP header and extensions over its payload.
+pub const PADDING_HEADER_BYTES: usize = 64;
 
 /// The color signal a stream was converted with, as the ITU-T H.273 codes the RTP
 /// color-space header extension carries, for the two codecs whose bitstream cannot state
@@ -283,6 +295,15 @@ pub trait SenderTransport {
     fn send_delay(&mut self) -> f64 {
         self.pacer().map_or(0.0, |p| p.drain_s())
     }
+
+    /// Whether a padding packet of `size` bytes before protection goes out now; never without
+    /// a pacer to admit it.
+    fn padding_room(&mut self, _size: usize, _now: f64) -> bool {
+        false
+    }
+
+    /// Protect and send one padding packet `padding_room` admitted, on the pacer's credit.
+    fn send_padding(&mut self, _packet: Datagram<'_>, _now: f64) {}
 }
 
 /// What the engine learns from a sender and answers it. Every method has a default that
@@ -528,6 +549,9 @@ pub struct RtpSender {
     rtt: Option<f64>,
     rrtrs: Ordered<u32, (u32, i64)>,
     header_buf: Vec<u8>,
+    /// The packets padding resends (`send_padding`), and which goes next.
+    padding_sources: VecDeque<RtpPacket>,
+    padding_next: usize,
 }
 
 impl RtpSender {
@@ -603,7 +627,61 @@ impl RtpSender {
             rtt: None,
             rrtrs: Ordered::new(),
             header_buf: Vec::with_capacity(96),
+            padding_sources: VecDeque::with_capacity(PADDING_SOURCES),
+            padding_next: 0,
         }
+    }
+
+    /// Keep a video packet large enough to pad with, the newest `PADDING_SOURCES` alone.
+    fn keep_padding_source(&mut self, packet: &RtpPacket) {
+        if self.kind != Kind::Video || packet.payload.len() < PADDING_SOURCE_BYTES {
+            return;
+        }
+        if self.padding_sources.len() == PADDING_SOURCES {
+            self.padding_sources.pop_front();
+        }
+        self.padding_sources.push_back(packet.clone());
+    }
+
+    /// Resend the stream's last packets on its RTX stream, up to `budget` bytes, as the padding
+    /// a still screen's path probe measures the path with (the module docstring); the bytes
+    /// sent. Nothing pads without RTX negotiated, a packet to resend, or the sender enabled.
+    pub fn send_padding(
+        &mut self,
+        budget: usize,
+        transport: &mut dyn SenderTransport,
+        now: f64,
+    ) -> usize {
+        let Some(pt) = self.rtx_payload_type else {
+            return 0;
+        };
+        if self.kind != Kind::Video || !self.enabled || self.padding_sources.is_empty() {
+            return 0;
+        }
+        let mut sent = 0;
+        while sent < budget {
+            let original = &self.padding_sources[self.padding_next % self.padding_sources.len()];
+            let size = original.payload.len() + 2;
+            if !transport.padding_room(size + PADDING_HEADER_BYTES, now) {
+                break;
+            }
+            self.padding_next = self.padding_next.wrapping_add(1);
+            let mut packet = wrap_rtx(original, pt, self.rtx_sequence_number, self.rtx_ssrc);
+            self.rtx_sequence_number = self.rtx_sequence_number.wrapping_add(1);
+            let seq = transport.twcc().next_padding(packet.payload.len(), now);
+            packet.extensions.transport_sequence_number = Some(seq);
+            let mut header = std::mem::take(&mut self.header_buf);
+            header.clear();
+            packet.write_header(&self.map, &mut header);
+            let datagram = Datagram {
+                header: &header,
+                payload: packet.payload.pieces(),
+            };
+            sent += datagram.len();
+            transport.send_padding(datagram, now);
+            self.header_buf = header;
+        }
+        sent
     }
 
     pub fn kind(&self) -> Kind {
@@ -1552,6 +1630,7 @@ impl RtpSender {
                 media_seq: Some(media_seq),
                 size,
             });
+            self.keep_padding_source(&packet);
             self.history.add(packet, now, history_frame);
             outgoing.extend(repairs.into_iter().map(|repair| Built {
                 header: repair,

@@ -42,6 +42,9 @@ use crate::ws::uplink::{Gauge, Uplink};
 /// A connection's identity for the server's lifetime, never reused.
 pub type ClientId = u64;
 
+/// What a ping written behind a send does with its pong: called with the round trip in seconds.
+pub type PongAnswer = Box<dyn FnOnce(f64) + Send>;
+
 /// A socket whose peer takes nothing of what a send waits on for this long is dead and is
 /// aborted. Longer than the pauses a live path shows (a Wi-Fi roam, TCP backing its
 /// retransmission timer off, a tab the engine froze for a moment).
@@ -238,6 +241,9 @@ pub struct Client {
     perms: RwLock<Perms>,
     pub uplink: Mutex<Uplink>,
     gz: AtomicBool,
+    pad: AtomicBool,
+    /// The answers of the pings written by `ping_behind_answered`, by counter.
+    pong_answers: Mutex<Vec<(u64, PongAnswer)>>,
     tx: mpsc::UnboundedSender<Outgoing>,
     queued: AtomicUsize,
     closed: AtomicBool,
@@ -287,6 +293,8 @@ impl Client {
             perms: RwLock::new(perms),
             uplink: Mutex::new(Uplink::default()),
             gz: AtomicBool::new(false),
+            pad: AtomicBool::new(false),
+            pong_answers: Mutex::new(Vec::new()),
             tx,
             queued: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
@@ -329,6 +337,15 @@ impl Client {
 
     pub fn set_gz(&self) {
         self.gz.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the page sent `_pad,1` and drops `0x07` padding unread.
+    pub fn pad(&self) -> bool {
+        self.pad.load(Ordering::Relaxed)
+    }
+
+    pub fn set_pad(&self) {
+        self.pad.store(true, Ordering::Relaxed);
     }
 
     /// The page sent something (pings and pongs are the browser's own).
@@ -561,12 +578,40 @@ impl Client {
         counter
     }
 
-    /// Resolve a received pong against the ping clocks: each ignores the other's payloads.
+    /// `ping_behind`, with `answer` called with the pong's round trip; answers whose ping fell
+    /// out of the clock's pending set are dropped.
+    pub fn ping_behind_answered(&self, answer: PongAnswer) -> u64 {
+        let counter = self.ping_behind();
+        let uplink = self.uplink.lock();
+        let mut answers = self.pong_answers.lock();
+        answers.retain(|(c, _)| uplink.ping_outstanding(*c));
+        answers.push((counter, answer));
+        counter
+    }
+
+    /// Resolve a received pong against the ping clocks: each ignores the other's payloads. A
+    /// ping written with an answer has it called with the round trip.
     pub fn note_pong(&self, payload: &[u8]) -> bool {
         if let Some(clock) = self.transfer_clock.get() {
             clock.note_pong(payload);
         }
-        self.uplink.lock().note_pong(payload, now())
+        let (matched, rtt_us) = {
+            let mut uplink = self.uplink.lock();
+            (uplink.note_pong(payload, now()), uplink.rtt_us)
+        };
+        if !matched {
+            return false;
+        }
+        let counter = <[u8; 8]>::try_from(payload).map(u64::from_be_bytes);
+        let answer = counter.ok().and_then(|counter| {
+            let mut answers = self.pong_answers.lock();
+            let index = answers.iter().position(|(c, _)| *c == counter)?;
+            Some(answers.swap_remove(index).1)
+        });
+        if let (Some(answer), Some(rtt_us)) = (answer, rtt_us) {
+            answer(rtt_us as f64 / 1e6);
+        }
+        true
     }
 
     /// The ping clock a file transfer's uplink gauge reads over this socket.

@@ -52,11 +52,11 @@ use crate::settings::{STREAM_SETTINGS, settings};
 use crate::webrtc::channel::ChannelTx;
 use crate::webrtc::engine::{EngineHost, PeerRequest, PeerSnapshot, RtcEngine};
 use crate::webrtc::host::WebRtcDeps;
-use crate::webrtc::peer::AudioSample;
+use crate::webrtc::peer::{AudioSample, Peer};
 use crate::webrtc::pipeline::{MediaPipeline, PipelineConfig, PipelineHost};
 use crate::ws::host::Input;
 use crate::ws::state::{DisplayState, Seeds, display_settings, with_live_stream_settings};
-use crate::ws::steer::{CongestionSteer, LinkAllowance, RateHold, start_kbps};
+use crate::ws::steer::{CongestionSteer, LinkAllowance, PathProbe, RateHold, start_kbps};
 
 /// Seconds a first capture of the primary waits for its page's size (module docblock).
 pub const PRIMARY_SIZE_WAIT_S: f64 = 2.0;
@@ -153,6 +153,9 @@ pub(crate) struct State {
     pub congestion: HashMap<String, CongestionSteer>,
     pub rate_holds: HashMap<String, RateHold>,
     pub link_allowances: HashMap<String, LinkAllowance>,
+    /// Each display's `PathProbe`, and the peers its padding goes to, by peer id.
+    pub path_probes: HashMap<String, PathProbe>,
+    pub padded: HashMap<String, Vec<(String, Peer)>>,
     pub invalidation_log: HashMap<(String, bool), (f64, u32)>,
     pub stop_grace: Option<JoinHandle<()>>,
     pub peer_events: HashMap<String, mpsc::UnboundedSender<ClientEvent>>,
@@ -241,6 +244,8 @@ impl WebRtcService {
                 congestion: HashMap::new(),
                 rate_holds: HashMap::new(),
                 link_allowances: HashMap::new(),
+                path_probes: HashMap::new(),
+                padded: HashMap::new(),
                 invalidation_log: HashMap::new(),
                 stop_grace: None,
                 peer_events: HashMap::new(),
@@ -587,16 +592,20 @@ impl WebRtcService {
             && let Some(tab) = &tab
         {
             let tabs = self.display_tabs(display_id, Some(peer_id));
-            let mut st = self.st.lock();
-            let owner_elsewhere = st
-                .owner_tabs
-                .get(display_id)
-                .is_some_and(|owner| tabs.contains(owner));
-            if !owner_elsewhere {
-                st.owner_tabs.insert(display_id.to_string(), tab.clone());
-                st.tab_used_at.insert(tab.clone(), clock::monotonic());
-                st.congestion.remove(display_id);
-                st.link_allowances.remove(display_id);
+            let seated = {
+                let mut st = self.st.lock();
+                let owner_elsewhere = st
+                    .owner_tabs
+                    .get(display_id)
+                    .is_some_and(|owner| tabs.contains(owner));
+                if !owner_elsewhere {
+                    st.owner_tabs.insert(display_id.to_string(), tab.clone());
+                    st.tab_used_at.insert(tab.clone(), clock::monotonic());
+                }
+                !owner_elsewhere
+            };
+            if seated {
+                self.forget_path(display_id);
             }
         }
         if display_id != "primary" && client_type == ClientType::Controller {
@@ -1071,6 +1080,9 @@ impl WebRtcService {
                 return;
             };
             entry.video_paused = !active;
+            if active {
+                entry.paused_on_hand_off = false;
+            }
             entry.peer.set_video_enabled(active);
         }
         let Some(pipeline) = self.pipeline(display) else {

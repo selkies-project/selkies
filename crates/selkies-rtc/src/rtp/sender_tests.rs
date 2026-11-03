@@ -36,6 +36,9 @@ struct FakeTransport {
     backlog: (usize, f64, f64),
     real_backlog: bool,
     room: Option<usize>,
+    /// How many padding packets the pacer admits, and those it did.
+    pad_allow: usize,
+    padded: Vec<Vec<u8>>,
 }
 
 impl FakeTransport {
@@ -51,6 +54,8 @@ impl FakeTransport {
             backlog: (0, 0.0, f64::INFINITY),
             real_backlog: false,
             room: None,
+            pad_allow: 0,
+            padded: Vec::new(),
         }
     }
 
@@ -126,6 +131,16 @@ impl SenderTransport for FakeTransport {
 
     fn video_room(&mut self) -> Option<usize> {
         self.room
+    }
+
+    fn padding_room(&mut self, _size: usize, _now: f64) -> bool {
+        let admitted = self.pad_allow > 0;
+        self.pad_allow = self.pad_allow.saturating_sub(1);
+        admitted
+    }
+
+    fn send_padding(&mut self, packet: Datagram<'_>, _now: f64) {
+        self.padded.push(packet.to_vec());
     }
 }
 
@@ -799,6 +814,89 @@ fn a_retransmission_is_wrapped_as_rtx_under_its_own_transport_number() {
         .collect();
     assert_eq!(numbers.len(), 3, "each is a new packet on the wire");
     assert_eq!(s.packet_count(), 1, "the report counts media alone");
+}
+
+// ---- test_webrtc_padding: the sender's side
+
+#[test]
+fn padding_resends_the_newest_large_packets_on_the_rtx_stream() {
+    let source = |seq: u16| {
+        let mut p = RtpPacket::new(96, seq, 0, 11);
+        p.payload = Payload::from(vec![seq as u8; 1100]);
+        p
+    };
+    let mut s = RtpSender::new(Kind::Video, Box::new(NoHooks));
+    s.start(&parameters("video/H264", false)).unwrap();
+    s.set_ssrcs(11, 22, 33);
+    let mut tr = FakeTransport::new(1000.0);
+    tr.pad_allow = 3;
+    assert_eq!(
+        s.send_padding(100_000, &mut tr, 1000.0),
+        0,
+        "nothing pads before a packet was sent"
+    );
+    s.keep_padding_source(&payload_packet(999));
+    assert!(
+        s.padding_sources.is_empty(),
+        "a small packet is no padding source"
+    );
+    for seq in 0..(PADDING_SOURCES as u16 + 2) {
+        s.keep_padding_source(&source(1000 + seq));
+    }
+    assert!(
+        s.padding_sources.len() == PADDING_SOURCES && s.padding_sources[0].sequence_number == 1002,
+        "it keeps only the newest packets to pad with"
+    );
+    assert!(
+        s.send_padding(100_000, &mut tr, 1000.0) == 0 && tr.twcc.window().padding_sent == 0,
+        "nothing pads without RTX negotiated"
+    );
+
+    s.rtx_payload_type = Some(97);
+    let got = s.send_padding(100_000, &mut tr, 1000.0);
+    let map = s.header_extensions().clone();
+    let packets: Vec<RtpPacket> = tr
+        .padded
+        .iter()
+        .map(|d| RtpPacket::parse(&Bytes::from(d.clone()), &map).unwrap())
+        .collect();
+    assert!(
+        packets.len() == 3
+            && packets.iter().all(|p| p.payload_type == 97 && p.ssrc == 22)
+            && got == tr.padded.iter().map(Vec::len).sum::<usize>(),
+        "with RTX it resends its packets on the RTX stream while the pacer admits them: {} {got}",
+        packets.len()
+    );
+    let originals: Vec<u16> = packets
+        .iter()
+        .map(|p| u16::from_be_bytes([p.payload.to_bytes()[0], p.payload.to_bytes()[1]]))
+        .collect();
+    assert_eq!(
+        originals,
+        vec![1002, 1003, 1004],
+        "each carrying its original sequence number first"
+    );
+    assert!(
+        packets
+            .iter()
+            .all(|p| p.extensions.transport_sequence_number.is_some())
+            && tr.twcc.window().padding_sent == tr.twcc.window().bytes_sent
+            && tr.twcc.window().padding_sent > 0,
+        "numbered only once admitted, each as padding"
+    );
+    tr.pad_allow = 100;
+    let got = s.send_padding(2500, &mut tr, 1000.0);
+    assert!(
+        (2500..2500 + 1300).contains(&got),
+        "and stops at its budget: {got}"
+    );
+    s.set_enabled(false);
+    tr.pad_allow = 100;
+    assert_eq!(
+        s.send_padding(2500, &mut tr, 1000.0),
+        0,
+        "a paused page's sender pads nothing"
+    );
 }
 
 // ---- test_webrtc_gop_reset: the sender's repairs
