@@ -21,7 +21,7 @@ At runtime Selkies is a **single Python application**, the `selkies` wheel. The 
 | Component | What it is for | Documented at |
 | --- | --- | --- |
 | Base Container | The whole session with no desktop in it: display servers, audio, GPU wiring, s6, coTURN, and Selkies, to build a desktop on | [Base Container](base-image.md) |
-| Desktop Container | The reference LXQt desktop on the base, the quickest way to try Selkies | [Desktop Container](desktop-image.md) |
+| Desktop Container | The reference desktop, selkies-desktop, on the base, the quickest way to try Selkies | [Desktop Container](desktop-image.md) |
 | KDE Plasma desktops | `docker-selkies-egl-desktop` and `docker-selkies-glx-desktop`, full desktops with hardware acceleration in separate repositories | [KDE Plasma Desktops](kde-images.md) |
 | Input Interposer and fake-udev | Gamepads for a container's applications without kernel devices, and kernel gamepads where `/dev/uinput` is writable | [Gamepads](input-interposer.md) |
 | V4L2 Interposer | The browser's camera as a V4L2 device for the session's applications | [Webcam](v4l2-interposer.md) |

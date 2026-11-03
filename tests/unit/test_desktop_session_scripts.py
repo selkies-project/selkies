@@ -110,12 +110,9 @@ for path in PY_HELPERS:
                        capture_output=True, text=True)
     check(f"compile {rel}", r.returncode == 0, r.stderr.strip()[:200])
 
-# Two absences invisible until a desktop is in front of someone: no menu prefix
-# is an empty application menu, and a raised latency must reach the daemons.
+# An absence invisible until a desktop is in front of someone: a raised latency
+# must reach the daemons.
 entrypoint = open(os.path.join(BASE, "container-entrypoint.sh")).read()
-check("the shared environment carries the menu prefix",
-      "XDG_MENU_PREFIX" in entrypoint,
-      "container-entrypoint.sh")
 for service in ("pipewire", "pipewire-pulse", "wireplumber"):
     path = os.path.join(BASE, "services", service, "run")
     body = open(path).read()
@@ -162,13 +159,15 @@ xsettingsd_service = os.path.join(BASE, "services", "xsettingsd", "run")
 check("the DPI ladder's XSETTINGS manager is a service",
       "xsettingsd" not in ladder or os.path.isfile(xsettingsd_service),
       os.path.relpath(xsettingsd_service, REPO))
-# The platform theme is what carries the session's fonts and icons into Qt, and
-# it is the wrapper this service replaces that would otherwise export it.
-lxqt_run = open(os.path.join(DESKTOP, "services", "lxqt", "run")).read()
-for var in ("QT_QPA_PLATFORMTHEME", "QT_AUTO_SCREEN_SCALE_FACTOR"):
-    check(f"the session exports {var} on both backends",
-          len(re.findall(rf'^export {var}=', lxqt_run, re.M)) == 1,
-          "services/lxqt/run")
+# The entrypoint holds services down by name, and a name no service carries is
+# a toggle that silently does nothing: the desktop keeps starting under
+# START_DESKTOP=false, or the X11 window manager under Wayland.
+services = {os.path.basename(os.path.dirname(p))
+            for root in (BASE, DESKTOP)
+            for p in glob.glob(os.path.join(root, "services", "*", "run"))}
+for name in sorted(set(re.findall(r'^\s*drop_service ([A-Za-z0-9_-]+)\s*$', entrypoint, re.M))):
+    check(f"the entrypoint holds down a service that exists: {name}",
+          name in services, ", ".join(sorted(services)))
 
 SKIP_DIRS = {".git", "node_modules", "dist", "__pycache__", ".venv", "venv"}
 

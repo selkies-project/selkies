@@ -1,0 +1,13 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The image's desktop as a session, for what starts a desktop from its session
+# file, `selkies session` among them. Installed as both the X11 and the Wayland
+# session: selkies-desktop-session picks the window manager for the backend.
+[Desktop Entry]
+Type=Application
+Name=Selkies Desktop
+Comment=selkies-desktop over Openbox on X11 and over labwc on Wayland
+Exec=selkies-desktop-session
+TryExec=selkies-desktop

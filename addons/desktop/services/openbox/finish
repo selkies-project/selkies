@@ -1,0 +1,11 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Restart backoff. A service that cannot run on this base would otherwise be
+# respawned as fast as it exits, and each cycle leaks the resources its startup
+# claimed (a session bus, sockets, file descriptors) until the container runs
+# out and unrelated services -- the X server among them -- start failing. Losing
+# one service has to stay a local failure.
+sleep 2

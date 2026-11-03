@@ -3,7 +3,7 @@ title: Base Container
 description: The session with no desktop in it, how it starts, how it is laid out, how to run a checkout inside it, and how to build a desktop of your own on it.
 ---
 
-The [Base Container](https://github.com/selkies-project/selkies/tree/main/addons/base), `ghcr.io/selkies-project/selkies/base:main-${DISTRIB_FLAVOR}`, is the whole session apart from what it looks like: the display servers, the audio stack, the GPU wiring, the gamepad and webcam plumbing, service supervision, an embedded TURN server, and Selkies itself. The [Desktop Container](desktop-image.md) adds LXQt to it, and the [KDE Plasma desktops](kde-images.md) add Plasma; a desktop of your own is built the same way, and everything on this page applies to all of them unchanged.
+The [Base Container](https://github.com/selkies-project/selkies/tree/main/addons/base), `ghcr.io/selkies-project/selkies/base:main-${DISTRIB_FLAVOR}`, is the whole session apart from what it looks like: the display servers, the audio stack, the GPU wiring, the gamepad and webcam plumbing, service supervision, an embedded TURN server, and Selkies itself. The [Desktop Container](desktop-image.md) adds [selkies-desktop](https://github.com/selkies-project/selkies-desktop) to it, and the [KDE Plasma desktops](kde-images.md) add Plasma; a desktop of your own is built the same way, and everything on this page applies to all of them unchanged.
 
 ## What is in the image
 
@@ -31,7 +31,7 @@ The image is built for Ubuntu 26.04 and Debian Trixie, on `x86_64` and `aarch64`
 5. Sets the display (`DISPLAY=:20` on X11; the nested compositor's XWayland takes the first free number on Wayland), the PipeWire latency and the PulseAudio socket, and the print queue's socket.
 6. Computes the session environment, embedded coTURN defaults included: the address a browser outside the container would reach the TURN server on is asked of a public resolver, and the embedded server is only started when no external TURN server is configured well enough to be used (a REST service, or a host and port with credentials or a shared secret).
 7. Writes that environment to `${XDG_RUNTIME_DIR}/container-env`, which every service sources at start, since the services are siblings of the entrypoint rather than its children.
-8. Derives the service set from the toggles by holding services down (`/etc/service/<name>/down`) rather than deleting them, so a restarted container that keeps its filesystem can still change backend: the X11 framebuffer is parked on Wayland, the nested compositor on X11 or under `SELKIES_WAYLAND_COMPOSITOR=none`, the desktop session under `START_LXQT=false`, and coTURN when an external TURN server is configured.
+8. Derives the service set from the toggles by holding services down (`/etc/service/<name>/down`) rather than deleting them, so a restarted container that keeps its filesystem can still change backend: the X11 framebuffer is parked on Wayland, the nested compositor on X11 or under `SELKIES_WAYLAND_COMPOSITOR=none`, a desktop's X11 window manager (the `openbox` service) on Wayland, the desktop itself (the `desktop` service, and `openbox` with it) under `START_DESKTOP=false` or `SELKIES_WAYLAND_COMPOSITOR=none`, and coTURN when an external TURN server is configured.
 9. Hands over to `s6-svscan -t5000 /etc/service`.
 
 The services under `/etc/service` are, each a `run` script and a `finish` script:
@@ -76,7 +76,7 @@ The repository's [`docker-compose.yml`](https://github.com/selkies-project/selki
 
 ## Building a desktop on it
 
-Use the base as the `FROM` image and add only the desktop: its packages, its session defaults, and the s6 service its session needs, one `run` script under `/etc/service/<name>/`. [`addons/desktop/Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/desktop/Dockerfile) is the reference, adding LXQt, the browsers, and the proot-apps runner in that way, and the [KDE Plasma desktops](kde-images.md) are the same pattern in their own repositories. Keep the base's entrypoint and services as they are; a desktop that needs the entrypoint changed replaces the script alone, so it keeps up with the base's updates:
+Use the base as the `FROM` image and add only the desktop: its packages, its session defaults, and the s6 service its session needs, one `run` script under `/etc/service/<name>/`. [`addons/desktop/Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/desktop/Dockerfile) is the reference, adding selkies-desktop with Openbox for X11, the browsers, and the proot-apps runner in that way, and the [KDE Plasma desktops](kde-images.md) are the same pattern in their own repositories. Keep the base's entrypoint and services as they are; a desktop that needs the entrypoint changed replaces the script alone, so it keeps up with the base's updates:
 
 ```dockerfile
 ARG DISTRIB_FLAVOR=ubuntu26.04
