@@ -2118,10 +2118,69 @@ export class Input {
         this._altKeysymByCode.clear();
     }
 
-    /** Releases held keys when the page is hidden: throttled heartbeats in a background tab can exceed the server's stale-key window. */
+    /**
+     * Releases every held key and pointer button, and a trackpad tap's pending
+     * release. A press whose release goes to another tab or app (a tab switched
+     * mid-press, a touch the system took for a gesture) left the remote button
+     * down: every motion after it dragged, and the next press went to a button
+     * already down and did nothing, until a motion over the stream stated the
+     * buttons again.
+     */
+    releaseInput() {
+        this.resetKeyboard();
+        this._resetPointerState();
+    }
+
+    /**
+     * Forgets every touch and gesture in progress, a trackpad tap's pending
+     * release among them, and releases the buttons they or a press held.
+     */
+    _resetPointerState() {
+        if (this._activeTouches) this._activeTouches.clear();
+        this._activeTouchIdentifier = null;
+        this._isTwoFingerGesture = false;
+        this._twoFinger = null;
+        if (this._longPressTimer) {
+            clearTimeout(this._longPressTimer);
+            this._longPressTimer = null;
+            this._longPressTouchIdentifier = null;
+        }
+        clearTimeout(this._trackpadReleaseTimer);
+        this._trackpadReleaseTimer = null;
+        if (this._trackpadTouches) this._trackpadTouches.clear();
+        this._trackpadGestureMode = null;
+        if (this.buttonMask !== 0) {
+            this.buttonMask = 0;
+            this._sendMouseState();
+        }
+    }
+
+    /**
+     * Before a touch lands: forgets every touch still tracked that is no
+     * longer on the surface (`touches` of `event`) and, where there was one,
+     * the gesture and the button it held. A touch whose end went elsewhere (a
+     * tab switched, an edge swipe the system took) otherwise counted as a
+     * finger down from then on, every tap after it a second finger: a
+     * two-finger gesture that scrolled and never clicked.
+     * @param {Map} tracked The touches the handler tracks, by identifier.
+     * @param {TouchEvent} event
+     */
+    _forgetLiftedTouches(tracked, event) {
+        if (!tracked || !event.touches) return;
+        const down = new Set(Array.from(event.touches, (t) => t.identifier));
+        const changed = new Set(Array.from(event.changedTouches || [], (t) => t.identifier));
+        for (const id of tracked.keys()) {
+            if (!down.has(id) && !changed.has(id)) {
+                this._resetPointerState();
+                return;
+            }
+        }
+    }
+
+    /** Releases held input when the page is hidden: throttled heartbeats in a background tab can exceed the server's stale-key window, and a release goes to whatever the user switched to. */
     _onVisibilityChange() {
         if (document.visibilityState === 'hidden') {
-            this.resetKeyboard();
+            this.releaseInput();
         }
     }
 
@@ -3203,6 +3262,7 @@ export class Input {
         const changedTouches = event.changedTouches;
 
         if (type === 'touchstart') {
+            this._forgetLiftedTouches(this._trackpadTouches, event);
             for (const touch of changedTouches) {
                 this._trackpadTouches.set(touch.identifier, {
                     id: touch.identifier,
@@ -3982,25 +4042,7 @@ export class Input {
             this._stopPointerEcho();
         }
 
-        this._activeTouches.clear();
-        this._activeTouchIdentifier = null;
-        this._isTwoFingerGesture = false;
-        this._twoFinger = null;
-
-        if (this._longPressTimer) {
-            clearTimeout(this._longPressTimer);
-            this._longPressTimer = null;
-            this._longPressTouchIdentifier = null;
-        }
-        clearTimeout(this._trackpadReleaseTimer);
-        this._trackpadReleaseTimer = null;
-        this._trackpadTouches.clear();
-        this._trackpadGestureMode = null;
-
-        if (this.buttonMask !== 0) {
-            this.buttonMask = 0;
-            this._sendMouseState();
-        }
+        this._resetPointerState();
 
         if (this._trackpadMode) {
             this.element.style.setProperty('cursor', 'none', 'important');
@@ -4243,6 +4285,7 @@ export class Input {
         const TAP_THRESHOLD_DISTANCE_SQ_LOGICAL = this._TAP_THRESHOLD_DISTANCE_SQ;
 
         if (type === 'touchstart') {
+            this._forgetLiftedTouches(this._activeTouches, event);
             if (!this.use_browser_cursors) {
                 this.cursorDiv.style.display = 'block';
             }
@@ -5393,9 +5436,9 @@ export class Input {
         }
         this.listeners_context.push(addListener(window, 'keydown', this._handleKeyDown, this, true));
         this.listeners_context.push(addListener(window, 'keyup', this._handleKeyUp, this, true));
-        this.listeners_context.push(addListener(window, 'blur', this.resetKeyboard, this));
+        this.listeners_context.push(addListener(window, 'blur', this.releaseInput, this));
         this.listeners_context.push(addListener(document, 'visibilitychange', this._onVisibilityChange, this));
-        this.listeners_context.push(addListener(window, 'pagehide', this.resetKeyboard, this));
+        this.listeners_context.push(addListener(window, 'pagehide', this.releaseInput, this));
         // A frozen background tab stops the heartbeat, so keys are released first.
         this.listeners_context.push(addListener(document, 'freeze', this.resetKeyboard, this));
         this.listeners_context.push(addListener(this.keyboardInputAssist, 'input', this._handleMobileInput, this));

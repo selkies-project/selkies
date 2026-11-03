@@ -110,6 +110,7 @@ SUITES: list = [
     {"path": "unit/test_pointer_lock.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_app_commands.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_session_token.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_held_input_release.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_relative_motion.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_touch_gestures.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_key_palette.py", "tier": "unit", "timeout": 120},
