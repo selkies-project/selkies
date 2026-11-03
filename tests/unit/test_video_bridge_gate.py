@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
-from selkies.webrtc_engine import (BUDGET_WINDOW_S, FRAME_NUM_WRAP, GATE_TIMEOUT_S, IDR_REQUEST_FLOOR_S,
+from selkies.webrtc_engine import (BUDGET_RUN_MAX, BUDGET_WINDOW_S, FRAME_NUM_WRAP, GATE_TIMEOUT_S, IDR_REQUEST_FLOOR_S,
                                    LOST_CHAIN_FRAMES, PipelineBridge)
 
 
@@ -289,13 +289,13 @@ async def budget(res: H.Results) -> None:
     rate = 80_000
     window = rate / 8 * BUDGET_WINDOW_S
 
-    async def stream(bridge, first, size, seconds, fps=60, ref=None):
+    async def stream(bridge, first, size, seconds, fps=60, ref=None, anchor=False):
         """Frames of `size` bytes for `seconds`, each predicting from the newest let
-        through; the bytes and ids let through."""
+        through (an encoder's anchors where `anchor`); the bytes and ids let through."""
         passed, sent, last, fid = [], 0, ref, first
         for _ in range(int(seconds * fps)):
             clock.now += 1 / fps
-            item = SimpleNamespace(name=f"F{fid}", dependency=(fid, last),
+            item = SimpleNamespace(name=f"F{fid}", dependency=(fid, last), anchor=anchor,
                                    timing=(0, int(clock.now * 1e9), 0), data=b"x" * size)
             bridge.set_data(item, keyframe=False)
             if not bridge.empty():
@@ -343,6 +343,21 @@ async def budget(res: H.Results) -> None:
     bridge.set_budget(None)
     sent, passed, fid, last = await stream(bridge, key + 3, 500, 2.0, ref=key + 2)
     res.check("a lifted budget lets every frame through", len(passed) == 120, len(passed))
+
+    bridge.set_budget(rate)
+    sent, passed, fid, last = await stream(bridge, fid, 5000, 3.0, ref=last)
+    gaps = [b - a - 1 for a, b in zip(passed, passed[1:])]
+    res.check("a stream thirty times over the rate, from an encoder that sent no anchor, is thinned: no more "
+              "than BUDGET_RUN_MAX frames dropped in a row", gaps and max(gaps) == BUDGET_RUN_MAX, max(gaps or [0]))
+    anchored = PipelineBridge(request_keyframe=lambda: requests.append(clock.now), clock=clock,
+                              invalidate_reference=forgotten.append)
+    anchored.set_budget(rate)
+    anchored.set_data(SimpleNamespace(name="KA", dependency=(fid, None), data=b"x" * 100), keyframe=True)
+    await drain(anchored)
+    sent, passed, fid, last = await stream(anchored, fid + 1, 5000, 3.0, ref=fid, anchor=True)
+    gaps = [b - a - 1 for a, b in zip(passed, passed[1:])]
+    res.check("from one that keeps anchors, which predicts past any run, the budget drops longer runs",
+              max(gaps or [0]) > BUDGET_RUN_MAX, max(gaps or [0]))
 
     plain = PipelineBridge(request_keyframe=lambda: requests.append(clock.now), clock=clock)
     plain.set_budget(rate)

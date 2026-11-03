@@ -166,6 +166,18 @@ CLEANUP_FRAME_OVERHEAD = 1.5
 # its padding task writes in: the pacer admits padding only from its credit, which holds about
 # five milliseconds of its pace (`RtpPacer.padding_room`).
 PAD_TICK_S = 1.0
+# A rate cut by a queue the path showed whose bridge drops more than FPS_SHED_SHARE of the frames for its budget
+# (content the coarsest quantizer cannot fit to the path) lowers the capture's rate by the share let through, to
+# FPS_FLOOR at least (a target cut by loss alone, on a path that never queued, sheds nothing): the
+# encoder then predicts each frame from the one before, where the bridge's drops leave one without long-term
+# references nothing but a key frame to code, which overshoots again (#503). Past FPS_MIN_FRAMES a tick it climbs
+# back FPS_RISE a tick while the budget drops FPS_KEEP_SHARE or less, and to the configured rate once the rate is
+# back at its ceiling (`_shed_frames`).
+FPS_SHED_SHARE = 0.5
+FPS_KEEP_SHARE = 0.1
+FPS_RISE = 1.25
+FPS_FLOOR = 2.0
+FPS_MIN_FRAMES = 4
 PAD_STEP_S = 0.005
 
 def get_server_settings() -> Dict[str, Any]:
@@ -289,6 +301,9 @@ class WebRTCService(BaseStreamingService):
         self._rate_holds: Dict[str, RateHold] = {}
         self._link_allowances: Dict[str, LinkAllowance] = {}
         self._path_probes: Dict[str, PathProbe] = {}
+        # The capture rate congestion control shed to by display (`_shed_frames`), and the bridge's counts it read.
+        self._shed_fps: Dict[str, float] = {}
+        self._budget_counts: Dict[str, Tuple[int, int]] = {}
         self._padding: Dict[str, Dict[str, Any]] = {}
         # The browser tab of each peer (its signaling HELLO), and per display the
         # tab whose controller owns it: a controller of another tab streams and
@@ -3524,8 +3539,9 @@ class WebRTCService(BaseStreamingService):
                     current, ceiling, lo_kbps, min(goodputs), worst_loss, now, queue_s,
                     bucket["sent_bps"], probed=probe is not None and probe.padding))
                 # A target cut by a queue the path showed (the steer holds the capacity it measured), not by
-                # loss alone on a path that never queued: only then do repairs answer it.
+                # loss alone on a path that never queued: only then do the capture rate and repairs answer it.
                 queued = steer.capacity_kbps is not None
+                crowded = self._shed_frames(did, pipeline, target, ceiling, queued)
                 # What the path carries, through each peer's pacer, sets the rate a still
                 # screen's cleanup runs at; the bridge and the pacers take its frames whole. A
                 # pacer reads the path's capacity, not what cross traffic leaves of it: a target
@@ -3556,8 +3572,11 @@ class WebRTCService(BaseStreamingService):
                 for sender in repairing.get(did, []):
                     if hasattr(sender, "set_repair_budget"):
                         sender.set_repair_budget(target * 1000 if queued else None, min(goodputs))
+                # A display whose bridge dropped most of the tick's frames for the budget is not a still
+                # screen, however little it sent: right after a page switch, with its key frames no longer asked
+                # for on every NACK, it read as one and was padded into the queue the switch had built.
                 pad = self._path_probes.setdefault(did, PathProbe()).rate_bps(
-                    target, ceiling, max(0.0, bucket["sent_bps"] - bucket["padding_bps"]),
+                    target, ceiling, None if crowded else max(0.0, bucket["sent_bps"] - bucket["padding_bps"]),
                     queue_s if queue_s is not None else 0.0, now < steer.hold_until, now)
                 self._pad_display(did, padded.get(did, []), pad, now + 2 * PAD_TICK_S)
                 held_kbps = self._rate_holds.setdefault(did, RateHold()).note(target, now)
@@ -3583,6 +3602,43 @@ class WebRTCService(BaseStreamingService):
                 pad = self._path_probes.setdefault(did, PathProbe()).rate_bps(
                     float(pipeline.video_bitrate), ceiling, 0.0, 0.0, now < steer.hold_until, now)
                 self._pad_display(did, padded.get(did, []), pad, now + 2 * PAD_TICK_S)
+
+    def _shed_frames(self, display_id: str, pipeline: Any, target: float, ceiling: float, queued: bool) -> bool:
+        """Lower a display's capture rate while its bridge drops most frames for a rate cut by a queue the path
+        showed (`queued`: the steer holds the capacity it measured), and bring it back (FPS_SHED_SHARE). The
+        configured rate stays the pipeline's (`shed_framerate`). Returns whether the bridge dropped most of the
+        tick's frames for the budget, whatever cut it: a display with more to send than its budget, which the
+        path probe does not take for a still screen."""
+        counts_of = getattr(self.rtc_app, "video_budget_counts", None)
+        counts = counts_of(display_id) if counts_of is not None else None
+        if counts is None:
+            return False
+        before = self._budget_counts.get(display_id, counts)
+        self._budget_counts[display_id] = counts
+        over, passed = counts[0] - before[0], counts[1] - before[1]
+        total = over + passed
+        crowded = total >= FPS_MIN_FRAMES and over > FPS_SHED_SHARE * total
+        configured = float(getattr(pipeline, "framerate", 0) or 0)
+        shed = self._shed_fps.get(display_id)
+        if configured <= 0 or not hasattr(pipeline, "shed_framerate"):
+            return crowded
+        if queued and target < round(ceiling) and crowded:
+            fps = max(FPS_FLOOR, min(configured, (shed or configured) * passed / total))
+        elif shed is not None and (target >= round(ceiling) or over <= FPS_KEEP_SHARE * total):
+            fps = None if target >= round(ceiling) or shed * FPS_RISE >= configured else shed * FPS_RISE
+        else:
+            return crowded
+        if fps == shed:
+            return crowded
+        if fps is None:
+            self._shed_fps.pop(display_id, None)
+        else:
+            self._shed_fps[display_id] = fps
+        pipeline.shed_framerate(fps)
+        logger.info(f"Congestion control[{display_id}]: capture at "
+                    + (f"{fps:.1f} fps ({over} of {total} frames over the {target} kbps budget)" if fps else
+                       f"the configured {configured:g} fps again"))
+        return crowded
 
     def _pad_display(self, display_id: str, senders: List[Any], bps: float, until: float) -> None:
         """Pad a display's video `senders` at `bps` until `until` (`PathProbe`), each

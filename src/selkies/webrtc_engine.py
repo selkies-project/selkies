@@ -216,6 +216,10 @@ LOST_CHAIN_FRAMES = 3
 # How far past its display's steered rate a video bridge lets frames run, in
 # seconds of that rate, before it drops delta frames (`PipelineBridge.set_budget`).
 BUDGET_WINDOW_S = 0.25
+# The most delta frames in a row the budget drops from a stream whose encoder keeps no long-term anchor (`anchor`
+# on its frames): such an encoder predicts from its last eight frames only, the dropped ones among them, and a
+# longer run leaves it nothing to predict from but a key frame, which overshoots the rate again (#503).
+BUDGET_RUN_MAX = 6
 
 
 async def drain_data_channel(channel: RTCDataChannel,
@@ -348,7 +352,10 @@ class PipelineBridge:
     that drains at the rate, and while it holds more than BUDGET_WINDOW_S of
     the rate a delta frame that names what it predicts from is dropped with
     the word to the encoder, so the frame rate falls instead of the latency
-    rising. Keyframes pass uncharged: charged, a large one would drop the
+    rising, by no more than BUDGET_RUN_MAX frames in a row from an encoder that
+    has sent no anchor: one predicting from its last frames only codes a key
+    frame past a longer run (x264 from its last eight), and the key frame
+    overshoots the rate again, so the stream is thinned, not cut. Keyframes pass uncharged: charged, a large one would drop the
     delta frames behind it for as long as it takes on a slow path. Neither is
     a frame FRAME_NUM_WRAP frames or a multiple of it past a keyframe dropped:
     an H.264 decoder that misses the frame whose frame_num wraps to 0 cannot
@@ -401,6 +408,11 @@ class PipelineBridge:
         self.invalidated = 0
         self._budget_bps: Optional[float] = None
         self._budget_bytes = 0.0
+        # Budget drops in a row, and whether the encoder has sent an anchor (`BUDGET_RUN_MAX`).
+        self._budget_run = 0
+        self._anchored = False
+        # Delta frames naming their reference let through, beside `over_budget`, the ones the budget dropped.
+        self.passed = 0
         self._budget_at = 0.0
         self.over_budget = 0
         # Frames the encoder coded since the last keyframe, as they arrive.
@@ -464,6 +476,7 @@ class PipelineBridge:
             self._lost.clear()
             self._held = 0
             self._since_key = 0
+            self._budget_run = 0
             return
         self._since_key += 1
         dependency = data.dependency if self._invalidate is not None else None
@@ -474,10 +487,14 @@ class PipelineBridge:
                 return
             kept = (str(getattr(data, "codec", "") or "").lower() == "video/h264"
                     and not self._since_key % FRAME_NUM_WRAP)
-            if self._since_key % FRAME_NUM_WRAP and self._budget_full():
+            self._anchored = self._anchored or bool(getattr(data, "anchor", False))
+            if (self._since_key % FRAME_NUM_WRAP and self._budget_full()
+                    and (self._anchored or self._budget_run < BUDGET_RUN_MAX)):
                 self.over_budget += 1
+                self._budget_run += 1
                 self._drop(data)
                 return
+            self._budget_run = 0
             if queue.full():
                 if self._queued_keyframe:
                     self._drop(data)
@@ -488,6 +505,7 @@ class PipelineBridge:
                     return
             queue.put_nowait(data)
             self._charge(data)
+            self.passed += 1
             self._queued_keyframe = kept
             self._held = 0
             if self._lost and self._told_at is not None:
@@ -1554,6 +1572,13 @@ class RTCApp:
                         bridge.set_data(packet)
                 except Exception as e:
                     logger.error(f"error processing audio sample: {e}")
+
+    def video_budget_counts(self, display_id: str) -> Optional[Tuple[int, int]]:
+        """The delta frames a display's video bridge dropped for its budget and the ones it let through, since
+        it started (`PipelineBridge.over_budget`, `passed`), or None without a bridge."""
+        graph = self.displays.get(display_id or "primary")
+        bridge = graph.get("video_bridge") if graph else None
+        return None if bridge is None else (bridge.over_budget, bridge.passed)
 
     def bridge_drops(self) -> Dict[str, tuple]:
         """Frames each display's video bridge has dropped, and how many of those the
