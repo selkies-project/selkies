@@ -38,9 +38,12 @@ variables alike:
   `/etc/sysconfig/desktop`. Without either, a session named after its own
   desktop goes first (`gnome` before `gnome-xorg` or a kiosk session). A name
   only the other backend's sessions carry stands for their desktop, so a
-  default recorded for X11 finds the same desktop's Wayland session. On the
-  Wayland backend the session is a compositor or a desktop that starts one,
-  nested in Selkies' own.
+  default recorded for X11 finds the same desktop's Wayland session; where the
+  desktop has no session for the backend (KDE Plasma 6.8 and later ship none
+  for X11), `selkies session` says which backend has it. On the Wayland backend
+  the session is a compositor or a desktop that starts one, nested in Selkies'
+  own; KDE Plasma 6.8 and later nest only on the compositor's GPU renderer,
+  since KWin's Wayland backend composites with OpenGL alone.
 
 ```bash
 selkies session --session=xfce --enable-basic-auth=false            # http://localhost:8080
