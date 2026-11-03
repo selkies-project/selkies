@@ -3,7 +3,10 @@
 #     pip install pre-commit
 #     pre-commit install
 #
-# Run over the whole tree at any time with `pre-commit run --all-files`.
+# Run over the whole tree at any time with `pre-commit run --all-files`. rustfmt
+# and clippy come with the Rust toolchain (`rustup component add rustfmt
+# clippy`); clippy builds the workspace, so it needs the native libraries a
+# test build does and the pixelflux and pcmflux the workspace links.
 #
 # The revisions here and the linter pins in .github/workflows/ci.yaml name the
 # same tools; bump them together. CI additionally runs actionlint over the
@@ -12,7 +15,7 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.3
     hooks:
-      # Rule selection lives in pyproject.toml
+      # Rule selection lives in ruff.toml
       - id: ruff-check
 
   - repo: https://github.com/codespell-project/codespell
@@ -26,6 +29,19 @@ repos:
 
   - repo: local
     hooks:
+      - id: rustfmt
+        name: rustfmt
+        entry: rustfmt --edition 2024
+        language: system
+        types: [rust]
+        # The vendored crates keep upstream's formatting
+        exclude: ^crates/selkies-rtc/vendor/
+      - id: clippy
+        name: clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
       - id: web-lint
         name: eslint and tsc (web client)
         # The flat configs are per package and their rules read across files, so
