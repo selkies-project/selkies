@@ -7,11 +7,11 @@ time. The browser keeps the login it took from the URL, so the page reloads at
 the same URL without them and streams as it would have.
 
 Each engine opens the dashboard that way under Basic auth: it ends at the URL
-without the credentials, its `/api/status` probe published the mode, and a
-relative fetch answers; Chromium and Firefox stream with one core connected.
-WebKit on Linux sends no Basic credentials with a WebSocket handshake (refused
-with them given to Playwright too), so it streams nothing under Basic auth here.
-Chromium does the same on the core's own page.
+without the credentials, its `/api/status` probe published the mode, it streams
+with one core connected, and a relative fetch answers. Chromium does the same on
+the core's own page. WebKit attaches no Basic credentials to a WebSocket
+handshake, which presents the socket cookie the page load was answered with
+instead; it also streams at a plain URL with the login given to the browser.
 """
 import os
 import re
@@ -52,18 +52,19 @@ def settled_url(page, seconds: float = 15) -> str:
     return url
 
 
-def visit(p, engine: str, page_name: str) -> None:
+def visit(p, engine: str, page_name: str, in_url: bool = True) -> None:
     browser = C.launch_browser(p, engine)
     try:
-        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page = browser.new_page(viewport={"width": 1280, "height": 800}, **(
+            {} if in_url else {"http_credentials": {"username": USER, "password": PASSWORD}}))
         log_from = os.path.getsize(H.LOG) if os.path.exists(H.LOG) else 0
-        page.goto(H.BASE_URL.replace("://", f"://{USER}:{PASSWORD}@") + "/", wait_until="domcontentloaded")
-        tag = f"{engine}, {page_name}"
+        page.goto((H.BASE_URL.replace("://", f"://{USER}:{PASSWORD}@") if in_url else H.BASE_URL) + "/",
+                  wait_until="domcontentloaded")
+        tag = f"{engine}, {page_name}" + ("" if in_url else ", the login given to the browser")
         url = settled_url(page)
         check(f"{tag}: the page ends at the URL without the credentials", url and "@" not in url, url)
-        if engine != "webkit":
-            info = C.wait_ws_video(page, timeout=30)
-            check(f"{tag}: the stream comes up", info is not None, info)
+        info = C.wait_ws_video(page, timeout=30)
+        check(f"{tag}: the stream comes up", info is not None, info)
         if page_name == "dashboard":
             mode = page.evaluate("window.__SELKIES_STREAMING_MODE__")
             check(f"{tag}: the /api/status probe published the mode", mode == "websockets", mode)
@@ -71,8 +72,7 @@ def visit(p, engine: str, page_name: str) -> None:
         with open(H.LOG, errors="replace") as f:
             f.seek(log_from)
             sockets = len(re.findall(r"Client \(.*\) connected", f.read()))
-        if engine != "webkit":
-            check(f"{tag}: one core connected", sockets == 1, f"{sockets} stream sockets")
+        check(f"{tag}: one core connected", sockets == 1, f"{sockets} stream sockets")
         status = page.evaluate("fetch('manifest.json').then(r => r.status, e => String(e))")
         check(f"{tag}: a relative fetch answers", status in (200, 404), status)
     finally:
@@ -87,6 +87,7 @@ def main() -> None:
         with sync_playwright() as p:
             for engine in ("chromium", "firefox", "webkit"):
                 visit(p, engine, "dashboard")
+            visit(p, "webkit", "dashboard", in_url=False)
         H.server_stop()
         H.server_start(mode="websockets", wayland=False, extra_env=env)
         with sync_playwright() as p:

@@ -22,6 +22,8 @@ a slow disk never stalls streaming.
 import os
 import ssl
 import hmac
+import hashlib
+import secrets
 import errno
 import json
 import html
@@ -1298,6 +1300,12 @@ WEBSOCKET_ROUTES: Tuple[str, ...] = ("/api/websockets", "/api/webrtc/signaling",
 # Mirror of the secure-mode session token for requests the client cannot put
 # a header on (the file-manager iframe and its download links).
 SESSION_TOKEN_COOKIE: str = "selkies_token"
+# What a Basic-authenticated page's WebSocket handshakes carry in place of the Basic credentials, which WebKit
+# attaches to its requests but not to a handshake (`_renew_socket_cookie`): good for SOCKET_COOKIE_S, signed with a
+# key of this process's, so a restart ends every one and the reconnect's probe (a plain GET) takes a new one.
+SOCKET_COOKIE: str = "selkies_socket"
+SOCKET_COOKIE_S: int = 86400
+_SOCKET_COOKIE_KEY: bytes = secrets.token_bytes(32)
 # Subprotocols of a handshake presenting its session token without a URL: the
 # one selected, and the prefix of the base64url token (``handshake_session_token``).
 SESSION_TOKEN_PROTOCOL: str = "selkies"
@@ -2451,6 +2459,40 @@ class CentralizedStreamServer:
             response.force_close()
         return response
 
+    @staticmethod
+    def _socket_cookie_value(role: str, expires: int) -> str:
+        """The socket cookie for `role` ("controller" or "viewer") until `expires` (epoch seconds)."""
+        body = f"{role}.{expires}"
+        return f"{body}.{hmac.new(_SOCKET_COOKIE_KEY, body.encode(), hashlib.sha256).hexdigest()}"
+
+    @classmethod
+    def _socket_cookie_role(cls, request: web.Request) -> Optional[Tuple[str, int]]:
+        """The role a request's socket cookie grants and when it ends, or None for none, one past its time, or
+        one this process did not sign."""
+        value = request.cookies.get(SOCKET_COOKIE, "")
+        parts = value.split(".")
+        if len(parts) != 3 or parts[0] not in ("controller", "viewer") or not parts[1].isdigit():
+            return None
+        expires = int(parts[1])
+        if expires <= time.time() or not hmac.compare_digest(cls._socket_cookie_value(parts[0], expires), value):
+            return None
+        return parts[0], expires
+
+    @classmethod
+    def _renew_socket_cookie(cls, request: web.Request, response: web.StreamResponse, role: str) -> None:
+        """Answer a Basic-authenticated request with the socket cookie for its `role` where it carries none for
+        that role with more than half its time left: HttpOnly, SameSite=Strict, under the route prefix, Secure
+        over https. A page's load sets it for its first handshake, and the reconnect's probe for the next."""
+        held = cls._socket_cookie_role(request)
+        if held is not None and held[0] == role and held[1] - time.time() > SOCKET_COOKIE_S / 2:
+            return
+        expires = int(time.time()) + SOCKET_COOKIE_S
+        secure = request.secure or (
+            request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower() == "https")
+        response.set_cookie(
+            SOCKET_COOKIE, cls._socket_cookie_value(role, expires), max_age=SOCKET_COOKIE_S,
+            path=(request.app["settings"].subfolder or "") + "/", httponly=True, samesite="Strict", secure=secure)
+
     async def _authorize(
         self,
         request: web.Request,
@@ -2550,6 +2592,12 @@ class CentralizedStreamServer:
         if is_ws_handshake and settings.master_token:
             return await handler(request)
         if not auth_header or not auth_header.startswith("Basic "):
+            held = self._socket_cookie_role(request) if is_ws_handshake else None
+            if held is not None:
+                # WebKit attaches no Basic credentials to a handshake: the cookie the page's
+                # Basic-authenticated requests were answered with stands for them, at its role.
+                request["auth_role_ceiling"] = held[0]
+                return await handler(request)
             if is_ws_upgrade:
                 # A WS handshake gets no challenge/retry: without this log the
                 # rejection is invisible on both ends.
@@ -2589,7 +2637,10 @@ class CentralizedStreamServer:
             )
         except Exception:
             return self._basic_auth_challenge(request)
-        return await handler(request)
+        response = await handler(request)
+        if not is_ws_upgrade and request.method in ("GET", "HEAD") and not response.prepared:
+            self._renew_socket_cookie(request, response, request["auth_role_ceiling"])
+        return response
 
     def _require_configured_credentials(self) -> None:
         """Refuse to serve a login that nobody chose a password for.

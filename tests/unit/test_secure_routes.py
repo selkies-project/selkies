@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 import urllib.parse
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -38,7 +39,7 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 from selkies import sessions  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 from selkies.stream_server import (  # noqa: E402
-    AUTH_REALM, MASTER_TOKEN_HEADER, SESSION_TOKEN_COOKIE, SESSION_TOKEN_PROTOCOL,
+    AUTH_REALM, MASTER_TOKEN_HEADER, SESSION_TOKEN_COOKIE, SESSION_TOKEN_PROTOCOL, SOCKET_COOKIE,
     SESSION_TOKEN_PROTOCOL_PREFIX, CentralizedStreamServer, handshake_session_token,
 )
 
@@ -362,6 +363,69 @@ async def legacy_modes() -> None:
               status == 403 and body == "viewer", f"{status} {body}")
 
 
+async def basic_socket_cookie() -> None:
+    """Basic auth without a master token: a Basic-authenticated request is answered with the socket cookie,
+    which a WebSocket handshake carrying no Basic credentials (WebKit's) presents in their place."""
+    _provision()
+    upgrade = {"Upgrade": "websocket", "Connection": "Upgrade"}
+    async with _App(_Settings(master_token="", enable_basic_auth=(True,),
+                              basic_auth_viewonly_password="look")) as app:
+        async def load(password: str, extra=None):
+            app.client.session.cookie_jar.clear()
+            response = await app.client.request(
+                "GET", "/", headers=dict({"Authorization": _basic("user", password)}, **(extra or {})))
+            await response.text()
+            # The test client keeps cookies; every case here names the one it presents.
+            app.client.session.cookie_jar.clear()
+            return response.status, response.cookies.get(SOCKET_COOKIE)
+
+        def carrying(value: str, **more) -> dict:
+            return dict(upgrade, Cookie=f"{SOCKET_COOKIE}={value}", **more)
+
+        status, morsel = await load("secret")
+        check("a Basic-authenticated page load sets the socket cookie: HttpOnly, SameSite=Strict, under /",
+              status == 200 and morsel is not None and morsel["httponly"] and morsel["samesite"] == "Strict"
+              and morsel["path"] == "/" and not morsel["secure"], morsel and morsel.OutputString())
+        value = morsel.value if morsel is not None else ""
+        for path in ("/api/websockets", "/api/webrtc/signaling"):
+            status, body, _ = await app.call("GET", path, headers=carrying(value))
+            check(f"a handshake to {path} carrying it and no Basic credentials passes as controller",
+                  status == 200 and body == "controller", f"{status} {body}")
+        status, _, _ = await app.call("GET", "/api/websockets", headers=carrying(value, Origin="http://elsewhere.example"))
+        check("a handshake from another site carrying it is refused by Origin", status == 403, status)
+        status, _, _ = await app.call("GET", "/api/websockets", headers={"Cookie": f"{SOCKET_COOKIE}={value}"})
+        check("it is no credential for a plain GET of the socket route", status == 401, status)
+        status, _, _ = await app.call("GET", "/api/files/", headers={"Cookie": f"{SOCKET_COOKIE}={value}"})
+        check("nor for any other route", status == 401, status)
+        role, expires, mac = value.split(".")
+        status, _, _ = await app.call("GET", "/api/websockets", headers=carrying(f"viewer.{expires}.{mac}"))
+        check("a cookie whose role was changed is refused", status == 401, status)
+        status, _, _ = await app.call("GET", "/api/websockets", headers=carrying(f"{role}.{int(expires) + 60}.{mac}"))
+        check("a cookie whose time was changed is refused", status == 401, status)
+        past = CentralizedStreamServer._socket_cookie_value("controller", int(time.time()) - 1)
+        status, _, _ = await app.call("GET", "/api/websockets", headers=carrying(past))
+        check("a cookie past its time is refused", status == 401, status)
+        status, _, _ = await app.call("GET", "/api/websockets", headers=upgrade)
+        check("a handshake with neither cookie nor Basic credentials is refused", status == 401, status)
+
+        status, morsel = await load("look")
+        viewer = morsel.value if morsel is not None else ""
+        status, body, _ = await app.call("GET", "/api/websockets", headers=carrying(viewer))
+        check("the view-only password's cookie passes a handshake as a viewer, no more",
+              status == 200 and body == "viewer" and viewer.startswith("viewer."), f"{status} {body}")
+        status, morsel = await load("wrong")
+        check("a refused login sets no cookie", status == 401 and morsel is None, status)
+        status, morsel = await load("secret", {"Cookie": f"{SOCKET_COOKIE}={value}"})
+        check("a request carrying a fresh cookie for its role is not answered with another",
+              status == 200 and morsel is None, morsel and morsel.OutputString())
+        status, morsel = await load("secret", {"Cookie": f"{SOCKET_COOKIE}={viewer}"})
+        check("one carrying another role's is answered with its own",
+              status == 200 and morsel is not None and morsel.value.startswith("controller."), morsel)
+        status, morsel = await load("secret", {"X-Forwarded-Proto": "https"})
+        check("behind https the cookie is Secure", morsel is not None and bool(morsel["secure"]),
+              morsel and morsel.OutputString())
+
+
 def _token_protocol(token: str) -> str:
     return SESSION_TOKEN_PROTOCOL_PREFIX + base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
 
@@ -399,6 +463,7 @@ def main() -> bool:
     asyncio.run(secure_subfolder())
     asyncio.run(secure_basic_on())
     asyncio.run(legacy_modes())
+    asyncio.run(basic_socket_cookie())
     handshake_carriers()
     print(f"[secure-routes] {passed}/{passed + failed} passed", flush=True)
     return failed == 0
