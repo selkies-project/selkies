@@ -6,9 +6,6 @@
 # container). DISTRO_TAG keeps the Fedora and EL flavors apart once the release
 # job collects every package into a single directory.
 set -eux
-# The interpreter the package's venv is built on and depends on: the
-# distribution's python3 unless the matrix names another (EL9's python3.12)
-PY="${SELKIES_PYTHON:-python3}"
 
 # Package managers with no retry option of their own -- apk, dnf, pacman, and
 # RubyGems all lack one -- are bounded-retried here. This composes with whatever
@@ -21,15 +18,29 @@ retry() {
         i=$((i + 1)); sleep 5
     done
 }
-# python3-devel and the compilers: dependencies without a wheel for this
-# distribution's Python are compiled from their sdist. libxkbcommon is loaded
-# with ctypes at runtime and lets mkvenv.sh's smoke test exercise that path
-# pipewire-devel gives the V4L2 interposer its PipeWire frame source (headers
-# only; the library is loaded at runtime when an application uses it)
+# EL keeps nasm, meson, and the input and Wayland headers in CRB, which only
+# the distribution's own repositories reach; no third-party repository (RPM
+# Fusion, EPEL) is added, so every codec library neither carries is built by
+# codecs.sh and linked in. Fedora has no CRB and needs none.
+if [ -e /etc/redhat-release ] && ! grep -q Fedora /etc/redhat-release; then
+    retry dnf install -y dnf-plugins-core
+    dnf config-manager --set-enabled crb
+fi
+# The server's build: the toolchain bindgen and the vendored C sources need,
+# the headers of every library it links, and the codec headers the
+# distribution carries, each tried on its own since a release may lack it
+# (codecs.sh builds whatever is missing or older than pixelflux needs). pipewire-devel
+# gives the V4L2 interposer its PipeWire frame source (headers only; the
+# library is loaded at runtime when an application uses it)
 retry dnf install -y \
-    "${PY}" "${PY}-pip" "${PY}-devel" \
-    libxkbcommon pkgconf-pkg-config pipewire-devel \
-    ruby rubygems ruby-devel gcc gcc-c++ make rpm-build ca-certificates
+    ca-certificates git gcc gcc-c++ make cmake nasm meson ninja-build clang clang-devel \
+    pkgconf-pkg-config diffutils libva-devel libdrm-devel mesa-libgbm-devel mesa-libEGL-devel \
+    wayland-devel libinput-devel systemd-devel libxkbcommon-devel pixman-devel libxcb-devel \
+    pulseaudio-libs-devel pipewire-devel \
+    ruby rubygems ruby-devel rpm-build
+for package in libvpx-devel svt-av1-devel libdav1d-devel; do
+    dnf install -y "${package}" || echo "${package}: not in this distribution"
+done
 # The i686 glibc builds the interposer's 32-bit variant, which the Wine and
 # Steam catalog loads through `/usr/$LIB`
 if [ "$(uname -m)" = "x86_64" ]; then
@@ -38,9 +49,16 @@ fi
 retry gem install --no-document fpm
 # shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
-/repo/infra/packaging/mkvenv.sh
+rm -rf /pkg-root
+/repo/infra/packaging/server.sh /pkg-root
 /repo/infra/packaging/interposer.sh /pkg-root
 /repo/infra/packaging/v4l2-interposer.sh /pkg-root
+# One --depends per package behind a library the server links or loads
+DEPENDS="$(/repo/infra/packaging/runtime-deps.sh /pkg-root/usr/bin/selkies)"
+set --
+for package in ${DEPENDS}; do
+    set -- "$@" --depends "${package}"
+done
 RPM_ARCH="$(uname -m)"
 mkdir -p /out
 cd /out
@@ -52,24 +70,9 @@ fpm -s dir -t rpm \
     --description "Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)" \
     --url "https://github.com/selkies-project/selkies" \
     --license "MPL-2.0" \
-    --depends "${PY}" \
-    --depends pulseaudio-libs \
-    --depends libxcb \
-    --depends libxkbcommon \
-    --depends libX11-xcb \
-    --depends libva \
-    --depends libdrm \
-    --depends mesa-libgbm \
-    --depends mesa-libEGL \
-    --depends libwayland-server \
-    --depends glib2 \
-    --depends pixman \
-    --depends libXfixes \
-    --depends libXext \
-    --depends libICE \
-    --depends libSM \
+    "$@" \
     --rpm-os linux \
-    -C /pkg-root opt usr
+    -C /pkg-root usr
 # Every package file is selkies-<version>-<distribution>-<architecture>.<format>, the
 # version as the release tag spells it; rpm reads its own version and ordering
 # (2.0.0~rc0-1.distro) from inside the archive.

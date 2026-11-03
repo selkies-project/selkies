@@ -1,13 +1,16 @@
 name: Packages
 
 # Native packages: .deb (Ubuntu/Debian), .rpm (Fedora/EL), .apk (Alpine),
-# .pkg.tar.zst (Arch), and .AppImage (x86_64 + aarch64, via rattler-build +
-# linuxdeploy-plugin-conda). Everything is assembled inside a container of the
-# target distribution; only apt/apt-get, dnf, apk, or pacman are ever invoked.
+# .pkg.tar.zst (Arch), and .AppImage (x86_64 + aarch64). Each builds the Rust
+# server inside a container of the target distribution (the AppImage inside
+# manylinux_2_28, its glibc floor), installs it at /usr/bin/selkies with the
+# web client at /usr/share/selkies/web, and declares the packages behind the
+# libraries the binary links and loads, as that distribution names them. Cargo
+# fetches pixelflux and pcmflux at the commits Cargo.lock pins. Only
+# apt/apt-get, dnf, apk, or pacman are ever invoked.
 
-# Triggered by ci.yaml on pushes to main and by release.yaml for releases;
-# can also be run standalone via the Actions tab, in which case it builds
-# the wheel itself unless `wheel_artifact` names an existing artifact.
+# Triggered by ci.yaml on pushes to main and by release.yaml for releases; can
+# also be run standalone via the Actions tab.
 
 on:
   workflow_dispatch:
@@ -16,46 +19,53 @@ on:
         description: Version string stamped into the packages
         type: string
         default: 0.0.0.dev0
-      wheel_artifact:
-        description: Artifact name of a prebuilt wheel (skips the wheel build when set)
-        type: string
-        default: ""
-      capture_stack_published:
-        description: Resolve the pinned pixelflux/pcmflux from PyPI, an explicit choice for a build made after they were published there
-        type: boolean
-        default: false
   workflow_call:
     inputs:
       package_version:
         description: Version string stamped into the packages
         type: string
         default: 0.0.0.dev0
-      wheel_artifact:
-        description: Artifact name of a prebuilt wheel (skips the wheel build when set)
-        type: string
-        default: ""
-      capture_stack_published:
-        description: Resolve the pinned pixelflux/pcmflux from PyPI, an explicit choice for a build made after they were published there
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
+env:
+  NODE_VERSION: "26"
+
 jobs:
-  wheel:
-    name: Build wheel for the packages
-    if: ${{ inputs.wheel_artifact == '' }}
-    permissions:
-      contents: read
-    uses: ./.github/workflows/build-wheel.yaml
-    with:
-      package_version: ${{ inputs.package_version }}
+  web:
+    name: Web client for the packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            addons/selkies-web-core/package-lock.json
+            addons/selkies-dashboard/package-lock.json
+      - name: Build the web client bundle
+        env:
+          # For the controller database's lookups (gendb.js)
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/ci/build-web.sh
+          tar -C dist -cf selkies-web-client.tar web
+      # One bundle for every package and AppImage, so the browser payload is
+      # identical in every channel; one file, which the release job leaves out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selkies-web-client
+          path: selkies-web-client.tar
+          if-no-files-found: error
+          retention-days: 1
 
   package:
     name: ${{ matrix.kind.name }} (${{ matrix.arch.name }})
-    needs: wheel
-    if: ${{ !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
+    needs: web
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -88,19 +98,16 @@ jobs:
             install: apt-get update -qq && apt-get install -y -qq /out/*.deb
           - name: rpm-fedora
             tag: fc
-            # The oldest Fedora still supported, not the newest: the venv the
-            # package carries is tied to the interpreter it was built with, so
-            # building on the oldest is what makes one package cover every
-            # release that is maintained. Bumped when Fedora retires it.
+            # The oldest Fedora still supported, not the newest: the sonames
+            # the server links are the ones its build found, so building on
+            # the oldest is what makes one package cover every release that is
+            # maintained. Bumped when Fedora retires it.
             image: fedora:43
             script: infra/packaging/rpm.sh
             install: dnf install -y -q /out/*.rpm
           - name: rpm-el9
             tag: el9
             image: almalinux:9
-            # EL9's own python3 is 3.9, whose aiohttp stops at 3.13 and its
-            # server fixes since; AppStream carries 3.12 beside it
-            python: python3.12
             script: infra/packaging/rpm.sh
             install: dnf install -y -q /out/*.rpm
           - name: apk
@@ -122,8 +129,9 @@ jobs:
               script: infra/packaging/arch.sh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Free disk space
-        # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
         with:
           remove_android: true
@@ -133,68 +141,28 @@ jobs:
           remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
-      - name: Download the wheel
+      - name: Download the web client
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
-          path: dist/
-      # The pixelflux/pcmflux wheels the orchestrating run resolved: each
-      # project's main HEAD, or the pinned release at a release. Absence is
-      # tolerated (standalone dispatch) and mkvenv.sh leaves them to the index
-      - name: Download the pixelflux wheels
-        if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        continue-on-error: true
-        with:
-          pattern: pixelflux-wheels-*
-          path: dist/
-          merge-multiple: true
-      - name: Download the pcmflux wheels
-        if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        continue-on-error: true
-        with:
-          pattern: pcmflux-wheels-*
-          path: dist/
-          merge-multiple: true
-      - name: Check the capture stack this build carries
-        env:
-          PUBLISHED: ${{ inputs.capture_stack_published }}
-        run: |
-          if [ "${PUBLISHED}" = "true" ]; then
-            echo "capture stack: the pinned releases, resolved from PyPI"
-            exit 0
-          fi
-          for project in pixelflux pcmflux; do
-            # What ships has to be the capture stack this run resolved, which
-            # exists nowhere else, so the wheels are required rather than
-            # preferred: the orchestrating workflow puts them here before
-            # calling, and a standalone dispatch has to supply them the same way.
-            if ! ls "dist/${project}"-*.whl > /dev/null 2>&1; then
-              echo "::error::No ${project} wheel in dist/; run this through ci.yaml or release.yaml, which resolve the capture stack first"
-              exit 1
-            fi
-            echo "${project}: wheel from this run"
-          done
+          name: selkies-web-client
+      - name: Unpack the web client into dist/web
+        run: mkdir -p dist && tar -C dist -xf selkies-web-client.tar && rm selkies-web-client.tar
       - name: Build the package inside the target distro container
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
           DISTRO_TAG: ${{ matrix.kind.tag }}
-          SELKIES_PYTHON: ${{ matrix.kind.python }}
           IMAGE: ${{ matrix.kind.image }}
           SCRIPT: ${{ matrix.kind.script }}
         run: |
           set -e
           mkdir -p out
-          # /repo is read-only: the scripts stage everything under /pkg-root and
-          # /build inside the container and only write their artifacts to /out
+          # /repo is read-only: the scripts build under /build and stage under
+          # /pkg-root inside the container and only write their artifacts to /out
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/repo:ro" \
-            -v "${GITHUB_WORKSPACE}/dist:/dist:ro" \
             -v "${GITHUB_WORKSPACE}/out:/out" \
             -e SELKIES_VERSION \
             -e DISTRO_TAG \
-            -e SELKIES_PYTHON \
             "${IMAGE}" \
             sh "/repo/${SCRIPT}"
           ls -la out/
@@ -208,7 +176,7 @@ jobs:
           # runtime library shows up here and nowhere else, because the build
           # container has the whole toolchain installed.
           docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" \
-            -e INSTALL -e SELKIES_PACKAGE_VERIFY=1 \
+            -e INSTALL \
             -v "${GITHUB_WORKSPACE}/scripts/ci/verify-package.sh:/verify.sh:ro" \
             "${IMAGE}" sh /verify.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -223,8 +191,7 @@ jobs:
 
   appimage:
     name: AppImage (${{ matrix.arch.name }})
-    # The AppImage builds selkies from this checkout with rattler-build, so it
-    # needs no prebuilt wheel
+    needs: web
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -236,8 +203,9 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Free disk space
-        # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
         with:
           remove_android: true
@@ -247,46 +215,17 @@ jobs:
           remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
-      # The same wheels the packages above carry, required for the same reason
-      - name: Download the pixelflux wheels
-        if: ${{ !inputs.capture_stack_published }}
+      - name: Download the web client
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        continue-on-error: true
         with:
-          pattern: pixelflux-wheels-*
-          path: pixelflux-pcmflux-wheels/
-          merge-multiple: true
-      - name: Download the pcmflux wheels
-        if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        continue-on-error: true
-        with:
-          pattern: pcmflux-wheels-*
-          path: pixelflux-pcmflux-wheels/
-          merge-multiple: true
-      - name: Check the capture stack the AppImage carries
-        env:
-          PUBLISHED: ${{ inputs.capture_stack_published }}
-        run: |
-          if [ "${PUBLISHED}" = "true" ]; then
-            echo "capture stack: the pinned releases, resolved from PyPI"
-            exit 0
-          fi
-          for project in pixelflux pcmflux; do
-            if ! ls "pixelflux-pcmflux-wheels/${project}"-*.whl > /dev/null 2>&1; then
-              echo "::error::No ${project} wheel; run this through ci.yaml or release.yaml, which resolve the capture stack first"
-              exit 1
-            fi
-            echo "${project}: wheel from this run"
-          done
-      - name: Build the AppImage (rattler-build + linuxdeploy-plugin-conda)
+          name: selkies-web-client
+      - name: Unpack the web client into dist/web
+        run: mkdir -p dist && tar -C dist -xf selkies-web-client.tar && rm selkies-web-client.tar
+      - name: Build the AppImage (manylinux_2_28 + linuxdeploy)
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
-          # For the release lookups behind the downloads' checks
+          # For the release lookup behind linuxdeploy's download check
           GH_TOKEN: ${{ github.token }}
-          # Left unset where the run resolves the capture stack from PyPI:
-          # appimage.sh then names the projects rather than wheel paths.
-          PIXELFLUX_PCMFLUX_WHEELS_DIR: ${{ inputs.capture_stack_published && '' || format('{0}/pixelflux-pcmflux-wheels', github.workspace) }}
         run: ./scripts/ci/appimage.sh "${{ matrix.arch.name }}"
       - name: Check the AppImage on a pristine host at its glibc floor
         # The build checked it on this runner, whose own libraries stand in for

@@ -2,8 +2,8 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
-# Native spellings of the wheel's PEP 440 version, for the packaging scripts
-# that need one.
+# Native spellings of the release's PEP 440 version, for the packaging scripts
+# that need one, and the semver spelling Cargo stamps into the server.
 #
 # dpkg and rpm sort `~` below every other separator, so a pre-release built as
 # 2.0.0~rc0 is superseded by the final 2.0.0 instead of outranking it. Alpine
@@ -25,4 +25,15 @@ alpine_version() {
         -e 's/^([0-9]+(\.[0-9]+)*)\.?rc([0-9]+)$/\1_rc\3/' \
         -e 's/^([0-9]+(\.[0-9]+)*)\.?dev([0-9]+)$/\1_alpha\3/' \
         -e 's/^([0-9]+(\.[0-9]+)*)\.?post([0-9]+)$/\1_p\3/'
+}
+
+# 2.0.0rc0 -> 2.0.0-rc.0 and 0.0.0.dev0 -> 0.0.0-dev.0, as pixelflux stamps its
+# crate: Cargo takes semver alone
+crate_version() {
+    printf '%s' "$1" | sed -E \
+        -e 's/^([0-9]+(\.[0-9]+)*)\.?dev([0-9]+)$/\1-dev.\3/' \
+        -e 's/^([0-9]+(\.[0-9]+)*)\.?post([0-9]+)$/\1-post.\3/' \
+        -e 's/^([0-9]+(\.[0-9]+)*)\.?a([0-9]+)$/\1-alpha.\3/' \
+        -e 's/^([0-9]+(\.[0-9]+)*)\.?b([0-9]+)$/\1-beta.\3/' \
+        -e 's/^([0-9]+(\.[0-9]+)*)\.?rc([0-9]+)$/\1-rc.\3/'
 }

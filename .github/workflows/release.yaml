@@ -215,14 +215,12 @@ jobs:
 
   packages:
     name: Build native packages
-    needs: [check, wheel, wheel-smoke]
+    needs: [check]
     permissions:
       contents: read
     uses: ./.github/workflows/packages.yaml
     with:
       package_version: ${{ needs.check.outputs.version }}
-      wheel_artifact: selkies-wheel
-      capture_stack_published: ${{ inputs.capture_stack == 'pypi' }}
 
   draft-release:
     name: Assemble draft release
@@ -252,10 +250,10 @@ jobs:
           # stay on the pixelflux and pcmflux releases this run took them from
           find release-artifacts -type f \( -name 'pixelflux-*.whl' -o -name 'pcmflux-*.whl' \) -delete
           # Artifacts of the run rather than of the release: the build record
-          # docker/build-push-action uploads per image, the record of what each
-          # image was built from, and the conda package the AppImage is
-          # assembled from
-          find release-artifacts -type f \( -name '*.dockerbuild' -o -name 'selkies-*-images-*.txt' -o -name '*.conda' \) -delete
+          # docker/build-push-action uploads per image, the record of what
+          # each image was built from, and the web client the packages carry
+          find release-artifacts -type f \( -name '*.dockerbuild' -o -name 'selkies-*-images-*.txt' \
+            -o -name 'selkies-web-client.tar' \) -delete
           find release-artifacts -type f -exec mv {} release/ \;
           (cd release && sha256sum -- * > SHA256SUMS)
           ls -la release/

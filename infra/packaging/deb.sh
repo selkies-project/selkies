@@ -23,15 +23,17 @@ retry() {
 # several minutes in
 printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' > /etc/apt/apt.conf.d/99-selkies-retries
 apt-get clean && apt-get update
-# python3-dev and build-essential: dependencies without a wheel for this
-# distribution's Python are compiled from their sdist. libxkbcommon0 is loaded
-# with ctypes at runtime and lets mkvenv.sh's smoke test exercise that path
-# libpipewire-0.3-dev gives the V4L2 interposer its PipeWire frame source
-# (headers only; the library is loaded at runtime when an application uses it)
+# The server's build: the toolchain bindgen and the vendored C sources need,
+# and the headers of every library it links. libpipewire-0.3-dev gives the V4L2
+# interposer its PipeWire frame source (headers only; the library is loaded at
+# runtime when an application uses it)
 apt-get install --no-install-recommends -y \
-    python3 python3-venv python3-pip python3-dev \
-    libxkbcommon0 pkg-config libpipewire-0.3-dev \
-    ruby ruby-dev build-essential ca-certificates
+    ca-certificates curl git build-essential pkg-config cmake nasm clang libclang-dev \
+    libx264-dev libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev \
+    libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
+    libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
+    libxcb-xfixes0-dev libpulse-dev libpipewire-0.3-dev \
+    ruby ruby-dev
 # gcc-multilib builds the interposer's 32-bit variant, which the Wine and Steam
 # catalog loads through `/usr/$LIB`
 if [ "$(dpkg --print-architecture)" = "amd64" ]; then
@@ -40,9 +42,16 @@ fi
 retry gem install --no-document fpm
 # shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
-/repo/infra/packaging/mkvenv.sh
+rm -rf /pkg-root
+/repo/infra/packaging/server.sh /pkg-root
 /repo/infra/packaging/interposer.sh /pkg-root
 /repo/infra/packaging/v4l2-interposer.sh /pkg-root
+# One --depends per package behind a library the server links or loads
+DEPENDS="$(/repo/infra/packaging/runtime-deps.sh /pkg-root/usr/bin/selkies)"
+set --
+for package in ${DEPENDS}; do
+    set -- "$@" --depends "${package}"
+done
 # dpkg knows the Debian name for whatever this is running on, so a new
 # architecture needs no translation table here
 DEB_ARCH="$(dpkg --print-architecture)"
@@ -56,28 +65,8 @@ fpm -s dir -t deb \
     --description "Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)" \
     --url "https://github.com/selkies-project/selkies" \
     --license "MPL-2.0" \
-    --depends python3 \
-    --depends libpulse0 \
-    --depends libxcb1 \
-    --depends libxkbcommon0 \
-    --depends libx11-xcb1 \
-    --depends libva2 \
-    --depends libva-drm2 \
-    --depends libva-x11-2 \
-    --depends libdrm2 \
-    --depends libgbm1 \
-    --depends libegl1 \
-    --depends libwayland-server0 \
-    --depends libglib2.0-0 \
-    --depends libpixman-1-0 \
-    --depends libxcb-render0 \
-    --depends libxcb-shm0 \
-    --depends libxcb-dri3-0 \
-    --depends libxfixes3 \
-    --depends libxext6 \
-    --depends libice6 \
-    --depends libsm6 \
-    -C /pkg-root opt usr
+    "$@" \
+    -C /pkg-root usr
 # Every package file is selkies-<version>-<distribution>-<architecture>.<format>, the
 # version as the release tag spells it; dpkg reads its own version and ordering
 # (2.0.0~rc0-1~distro) from inside the archive.

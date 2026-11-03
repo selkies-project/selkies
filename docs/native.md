@@ -5,7 +5,7 @@ description: Install Selkies as a package or an AppImage and attach it to a disp
 
 Selkies also ships outside a container: native packages for the common distributions, and an AppImage that installs nothing. Neither brings a desktop, a display server, or an audio server — they attach to the ones you run — so [Getting Started](start.md) is the shorter road if a container will do.
 
-None of these needs a Python environment: the web client, the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions, and the interposers all travel inside. Every block below uses the release version, which is the release's tag, so paste this line first (set `SELKIES_VERSION` yourself for a release other than the latest):
+Each carries the Selkies server, one binary that links `pixelflux` (screen capture and video encoding) and `pcmflux` (PulseAudio capture with Opus encoding), with its web client and the interposers. Every block below uses the release version, which is the release's tag, so paste this line first (set `SELKIES_VERSION` yourself for a release other than the latest):
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name')"
@@ -13,7 +13,7 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 
 ## Packages
 
-Installs a private Python environment at `/opt/selkies`, puts `selkies` on `PATH` (with its commands `selkies session`, `selkies resize`, and `selkies gpu-probe`), carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
+Installs the server at `/usr/bin/selkies` (with its commands `selkies session`, `selkies resize`, and `selkies gpu-probe`) and its web client at `/usr/share/selkies/web`, carries both interposers, and depends on the distribution's packages behind every library the server links or loads, so your package manager pulls them in. A software codec library the distribution does not carry at the release `pixelflux` needs (x264, x265, and libde265 on Fedora, all of them on Enterprise Linux) is built into the server instead. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
 
 ```bash
 # Ubuntu and Debian. The suffix names the distribution the package was built in
@@ -55,7 +55,7 @@ For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVID
 
 ## The AppImage
 
-Runs from wherever you put it, on any distribution with glibc 2.28 or newer (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. Every Python and native dependency is inside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
+Runs from wherever you put it, on any distribution with glibc 2.28 or newer (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. The server and every library it links are inside, the graphics stack aside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
 
 ```bash
 APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
@@ -68,7 +68,7 @@ chmod +x "./${APP}"
 
 Given `session` as its first argument, it runs a whole session instead, with its own display and sound server and the host's desktop, as [Jupyter, Coder, and Open OnDemand](platforms.md) describes: `"./${APP}" session --port=8080 --enable-basic-auth=false`. Given `resize` or `gpu-probe`, it runs that command on the display already up.
 
-What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL`, and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
+What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL`, `libdrm`, and the GPU's own driver have to be the host's for the GPU to be reachable at all, VA-API encodes through the host's `libva`, which is the one that knows where the host keeps its drivers, and an X11 session needs the host's X server (or `Xvfb`). Everything above them travels with the AppImage.
 
 ## Run a session
 

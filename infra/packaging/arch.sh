@@ -16,20 +16,21 @@ retry() {
         i=$((i + 1)); sleep 5
     done
 }
-# base-devel: dependencies without a wheel for this distribution's Python are
-# compiled from their sdist. libxkbcommon is loaded with ctypes at runtime and
-# lets mkvenv.sh's smoke test exercise that path
+# The server's build: the toolchain bindgen and the vendored C sources need and
+# every library it links, whose headers Arch ships in the library packages.
 # pipewire carries the headers the V4L2 interposer's PipeWire frame source is
 # built against (the library is loaded at runtime when an application uses it)
-retry pacman -Syu --noconfirm --needed python python-pip base-devel libxkbcommon sudo pipewire
-/repo/infra/packaging/mkvenv.sh
+retry pacman -Syu --noconfirm --needed base-devel sudo git cmake nasm clang \
+    x264 x265 libvpx svt-av1 dav1d libde265 libva libdrm mesa wayland libinput \
+    systemd-libs libxkbcommon pixman libxcb libpulse pipewire
+/repo/infra/packaging/server.sh /pkg-root
 /repo/infra/packaging/interposer.sh /pkg-root
 /repo/infra/packaging/v4l2-interposer.sh /pkg-root
 # The print queue runs a copy of cupsd as the session user, which Arch's cups
 # package installs readable by root alone; the hook opens it on either install.
 install -Dm644 /repo/infra/packaging/arch/selkies-cupsd.hook /pkg-root/usr/share/libalpm/hooks/selkies-cupsd.hook
 # makepkg writes src/ and pkg/ next to the PKGBUILD, and /repo is read-only
-rm -rf /build
+rm -rf /build/arch
 mkdir -p /build /out
 cp -r /repo/infra/packaging/arch /build/arch
 chmod -R u+w /build/arch
@@ -37,9 +38,12 @@ chmod -R u+w /build/arch
 # below the bare release on its own, so nothing else here needs translating.
 PKGVER="$(printf '%s' "${SELKIES_VERSION:-0.0.0}" | tr '-' '.')"
 sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" /build/arch/PKGBUILD
+# The packages behind every library the server links or loads by name
+DEPENDS="$(/repo/infra/packaging/runtime-deps.sh /pkg-root/usr/bin/selkies | sed 's/.*/"&"/' | tr '\n' ' ')"
+sed -i "s/^depends=.*/depends=(${DEPENDS% })/" /build/arch/PKGBUILD
 # makepkg refuses to run as root
 useradd -m builder 2>/dev/null || true
-chown -R builder:builder /build /out
+chown -R builder:builder /build/arch /out
 su builder -c "cd /build/arch && PKGDEST=/out makepkg -f --nodeps"
 # Every package file is selkies-<version>-<architecture>.<format>, the version as the
 # release tag spells it; pacman reads the version and pkgrel from inside the archive.

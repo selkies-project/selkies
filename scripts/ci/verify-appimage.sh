@@ -5,16 +5,14 @@
 #
 # Prove the AppImage in $1 works somewhere other than where it was built.
 #
-# The build's own `--help` smoke test runs inside the AppDir at the path the
-# conda prefix was installed to, where an entry point that names that path
-# resolves anyway. What ships mounts at a path chosen at run time, and every
-# absolute path the build left inside is wrong there: the interpreter each
-# entry point names, and the module directory and startup script the bundled
-# sound server has compiled in. This runs from an extracted copy instead,
-# which is also how a user reaches the payload by hand.
-#
-# Every path checked has to be inside that copy rather than merely resolve,
-# because the build path is still there on the machine that built the AppImage.
+# What ships mounts at a path chosen at run time, so every path the build
+# could have left pointing at the build machine is checked from an extracted
+# copy, which is also how a user reaches the payload by hand: the libraries
+# the server and the bundled sound server link resolve inside the copy or on
+# the host, the server finds its web client beside itself, and the sound server
+# AppRun starts takes its modules from the copy rather than from the module
+# directory its build compiled in. Run on a pristine host at the glibc floor,
+# whose own libraries cannot stand in for one the AppImage forgot.
 #
 # Usage: verify-appimage.sh <appimage>
 
@@ -27,63 +25,42 @@ trap 'rm -rf "${WORK}" 2>/dev/null || true' EXIT
 cd "${WORK}"
 "${IMAGE}" --appimage-extract > /dev/null
 APP="${WORK}/squashfs-root"
-PREFIX="${APP}/usr/conda"
 
+"${IMAGE}" --appimage-extract-and-run --version
+"${APP}/AppRun" --version
 "${APP}/AppRun" --help > /dev/null
 echo "AppRun runs from an extracted copy"
 "${APP}/AppRun" session --help > /dev/null
 "${APP}/usr/libexec/selkies-session/pulseaudio" --version > /dev/null
 echo "AppRun runs the session launcher, and its sound server wrapper finds the daemon"
-
-# Through usr/bin too, the symlink farm linuxdeploy is given rather than the
-# scripts themselves, so an entry point that resolves its interpreter from its
-# own path has to follow the link first
 "${APP}/usr/bin/selkies" --help > /dev/null
-"${PREFIX}/bin/pip" --version > /dev/null
-"${PREFIX}/bin/conda" --version > /dev/null
-echo "the entry points run, by either name"
+echo "the server runs by its own path"
+test -f "${APP}/usr/share/selkies/web/index.html"
+echo "the web client sits beside the server"
 
-# Not only the ones this project calls: a launcher left naming the build path
-# is the whole class of defect, and a script nobody here runs is a user's first
-# command as easily as any other. An interpreter under this copy passes, and so
-# does one of the system's, which the shell prologue and the scripts conda
-# ships for other languages name; anything else is a prefix that existed only
-# on the machine that built the AppImage, and would resolve there.
-outside="$(for path in "${PREFIX}"/bin/* "${PREFIX}"/condabin/*; do
-    [ -f "${path}" ] || continue
-    [ "$(head -c 2 "${path}" 2>/dev/null)" = '#!' ] || continue
-    named="$(head -2 "${path}" | sed -n \
-        -e 's|^#!\(/[^ ]*\).*|\1|p' \
-        -e "s|^'''exec' \"\{0,1\}\(/[^\" ]*\).*|\1|p")"
-    for interp in ${named}; do
-        case "${interp}" in
-            "${APP}"/*|/bin/*|/usr/bin/*|/usr/local/bin/*) ;;
-            *) echo "${path##*/}: ${interp}" ;;
-        esac
-    done
-done)"
-if [ -n "${outside}" ]; then
-    echo "::error::entry points naming an interpreter from neither this copy nor the system:"
-    echo "${outside}"
+# Every executable and library, the PulseAudio modules among them, resolves
+# through what the copy carries and what the host provides
+missing="$(find "${APP}" -type f \( -perm -u+x -o -name '*.so*' \) | while read -r f; do
+    [ "$(head -c 4 "${f}" | od -An -c | tr -d ' ')" = '177ELF' ] || continue
+    ldd "${f}" 2>/dev/null | grep 'not found' | sed "s|^|${f#"${APP}"/}: |"
+done | sort -u)"
+if [ -n "${missing}" ]; then
+    echo "::error::bundled files with unresolved libraries:"
+    echo "${missing}"
     exit 1
 fi
-echo "every entry point names an interpreter inside this copy"
-# Nothing at run time reads a package cache, and building the interposers
-# leaves one in the prefix
-if [ -e "${PREFIX}/pkgs" ]; then
-    echo "::error::the prefix carries a conda package cache of $(du -sh "${PREFIX}/pkgs" | cut -f1)"
-    exit 1
-fi
-echo "the prefix carries no conda package cache"
-
-"${PREFIX}/bin/python" -c "import selkies, pixelflux, pcmflux"
-echo "selkies, pixelflux, and pcmflux import"
+echo "every bundled ELF file resolves"
+for lib in selkies_input_interposer.so selkies_v4l2_interposer.so; do
+    test -f "${APP}/usr/lib/${lib}"
+done
+echo "the interposers are where AppRun exports them"
 
 # The sound server AppRun starts, started by AppRun: a daemon that finds no
 # module directory exits with "startup without any loaded modules", taking
 # audio out of the AppImage while everything else still streams. The Wayland
 # backend is selected so no X server is started, and its compositor is checked
-# too. Its own runtime directory, never a live session's.
+# too. Its own runtime directory, never a live session's, and no login, which
+# the server otherwise refuses to start without a password for.
 RUNTIME="${WORK}/runtime"
 mkdir -p "${RUNTIME}"
 chmod 700 "${RUNTIME}"
@@ -92,13 +69,13 @@ PULSE_LOG="/tmp/pulseaudio_selkies.log"
 rm -f "${PULSE_LOG}"
 env XDG_RUNTIME_DIR="${RUNTIME}" PULSE_SERVER="unix:${RUNTIME}/pulse/native" \
     PULSE_RUNTIME_PATH="${RUNTIME}/pulse" SELKIES_WAYLAND="true" \
-    setsid "${APP}/AppRun" > "${WORK}/apprun.log" 2>&1 &
+    setsid "${APP}/AppRun" --enable-basic-auth=false > "${WORK}/apprun.log" 2>&1 &
 session="$!"
 sinks=""
 i=0
 while [ "${i}" -lt 40 ]; do
     sinks="$(env XDG_RUNTIME_DIR="${RUNTIME}" PULSE_SERVER="unix:${RUNTIME}/pulse/native" \
-        "${PREFIX}/bin/pactl" list short sinks 2>/dev/null || true)"
+        "${APP}/usr/bin/pactl" list short sinks 2>/dev/null || true)"
     [ -n "${sinks}" ] && break
     i=$((i + 1))
     sleep 1
@@ -133,19 +110,6 @@ case "${modules}" in
         ;;
 esac
 echo "AppRun's sound server comes up with a sink, on this copy's modules"
-# The system bus it asks RTKit for real-time scheduling on, which the bundled
-# libdbus also has at the build path; a runner without a bus logs the one it tried
-bus="$(sed -n 's|.*Failed to connect to system bus: .*socket \(/[^:]*\):.*|\1|p' "${PULSE_LOG}" | tail -1)"
-case "${bus}" in
-    ""|/var/run/dbus/system_bus_socket) ;;
-    *)
-        echo "::error::AppRun's sound server looked for the system bus at ${bus}"
-        exit 1
-        ;;
-esac
-echo "AppRun's sound server looks for the system bus at the well-known address"
-# Its keyboard needs the keymaps AppRun points the bundled libxkbcommon at,
-# whose own default is the build path
 if ! grep -q "Wayland compositor socket: " "${WORK}/apprun.log"; then
     echo "::error::the Wayland compositor AppRun starts never came up; its log:"
     tail -n 20 "${WORK}/apprun.log"
@@ -174,10 +138,10 @@ if [ -e /dev/fuse ]; then
     fi
     "${point}/AppRun" --help > /dev/null
     "${point}/AppRun" session --help > /dev/null
-    "${point}/usr/conda/bin/selkies" --help > /dev/null
+    "${point}/usr/bin/selkies" --help > /dev/null
     kill "${mounted}" 2>/dev/null || true
     wait "${mounted}" 2>/dev/null || true
-    echo "AppRun and the entry points run from the read-only mount too"
+    echo "AppRun and the server run from the read-only mount too"
 else
     echo "note: no /dev/fuse here, so the read-only mount was not exercised"
 fi

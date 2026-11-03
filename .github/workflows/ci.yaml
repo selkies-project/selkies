@@ -174,10 +174,7 @@ jobs:
 
   packages:
     name: Native packages
-    needs: [wheel, wheel-smoke, pixelflux-pcmflux]
     if: github.event_name == 'push'
     permissions:
       contents: read
     uses: ./.github/workflows/packages.yaml
-    with:
-      wheel_artifact: selkies-wheel
