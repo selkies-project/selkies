@@ -21,8 +21,12 @@
   another role); the parsers of remote bytes in `webrtc/` and `ice/` (one packet must not stall the event loop,
   which serves every client); the interposers' C code; file upload and download confinement.
 - In scope but lower: the web client (origin checks on `postMessage`, token handling), CI workflows and release
-  scripts.
-- Out of scope: `website/`, `docs/`, `infra/`, and the prebuilt third-party wheels and patches in `addons/base`.
+  scripts, and what the images download at build time outside a signed apt repository: the desktop image takes the
+  `selkies-desktop` binary at the release tag `SELKIES_DESKTOP_VERSION` pins, checked against the `.sha256` that
+  release publishes beside it, and proot-apps checked against the digest GitHub records for it.
+- Out of scope: `website/`, `docs/`, `infra/`, the prebuilt third-party wheels and patches in `addons/base`, and the
+  `selkies-desktop` program itself, a separate project, whose control socket sits in the session's
+  `$XDG_RUNTIME_DIR`.
 
 ## How to exercise it
 - `python -m pytest tests -m unit` runs offline from the source tree (pixelflux and pcmflux are stubbed), as the

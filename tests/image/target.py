@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 # hand apps the session's gamepads and webcam, and the toolkit settings a
 # browser started without them can die on. The images' defaults stand where no
 # such process runs yet.
-DESKTOP_PROCS = "plasmashell lxqt-panel xfce4-panel pcmanfm-qt mate-panel gnome-shell kwin_x11 kwin_wayland labwc openbox"
+DESKTOP_PROCS = "plasmashell selkies-desktop lxqt-panel xfce4-panel pcmanfm-qt mate-panel gnome-shell kwin_x11 kwin_wayland labwc openbox"
 SESSION_ENV = (
     'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(id -un)}"; '
     f'for n in {DESKTOP_PROCS}; do p=$(pgrep -u "$(id -u)" -x -o "$n") || continue; '

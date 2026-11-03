@@ -14,8 +14,8 @@
 #
 # Everything a Selkies session needs and nothing that decides what the session
 # looks like: no window manager, no panel, no file manager, no applications.
-# addons/desktop builds the reference LXQt desktop on top of this, and any
-# other desktop can be built the same way.
+# addons/desktop builds the reference desktop, selkies-desktop, on top of this,
+# and any other desktop can be built the same way.
 #
 #   - X11 display server (XLibre's Xvfb, with glamor and DRI3) and the headless Wayland backend
 #     with SELKIES_WAYLAND=true, whose nested labwc supplies window management,

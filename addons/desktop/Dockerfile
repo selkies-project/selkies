@@ -7,17 +7,15 @@
 #
 # The base (addons/base) is the whole session apart from what it looks like —
 # X11 and the Wayland backend, audio, GPU wiring, s6, coTURN, and Selkies
-# itself. This layer adds only the desktop: LXQt with the Openbox window
-# manager on X11 and natively on the nested labwc compositor under
-# SELKIES_WAYLAND=true, the browsers, and the proot-apps runner behind the
-# dashboards' apps panel.
+# itself. This layer adds only the desktop: selkies-desktop, Selkies' own
+# panel, start menu, and desktop, over the Openbox window manager on X11 and
+# the nested labwc compositor under SELKIES_WAYLAND=true, the browsers, and the
+# proot-apps runner behind the dashboards' apps panel.
 #
 # BASE_IMAGE is a whole reference — tag or digest — so this layer follows
 # whichever base container it is pointed at: the published Ubuntu 26.04 one by
-# default, a Debian Trixie one, or the exact digest a CI run just built. Both
-# published bases carry LXQt 2.1 or newer, which anchors its panel and desktop
-# through wlr-layer-shell: the Wayland session then runs natively, with none of
-# the XWayland detour older releases need.
+# default, a Debian Trixie one, or the exact digest a CI run just built.
+# SELKIES_DESKTOP_VERSION is the selkies-desktop release the image installs.
 
 ARG BASE_IMAGE="ghcr.io/selkies-project/selkies/base:main-ubuntu26.04"
 
@@ -25,7 +23,7 @@ FROM ${BASE_IMAGE}
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 LABEL org.opencontainers.image.title="Selkies Desktop Container"
-LABEL org.opencontainers.image.description="Reference minimal Selkies container: LXQt on X11 by default, the same desktop on headless Wayland (labwc) with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
+LABEL org.opencontainers.image.description="Reference minimal Selkies container: selkies-desktop over Openbox on X11 by default, the same desktop over labwc on headless Wayland with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
 LABEL org.opencontainers.image.source="https://github.com/selkies-project/selkies"
 LABEL org.opencontainers.image.licenses="MPL-2.0"
 
@@ -51,32 +49,23 @@ USER 1000
 SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
 
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
-        # Minimal LXQt desktop (Openbox window manager); breeze is the LXQt 2
-        # icon set and actually ships the glyph groups the slim Adwaita build lacks
-        lxqt-session \
-        lxqt-panel \
-        lxqt-runner \
-        breeze-icon-theme \
-        lxqt-about \
+        # The window manager under selkies-desktop on X11; on Wayland the base's
+        # labwc is, and it reads Openbox's stock themes as well
         openbox \
-        obconf-qt \
-        qterminal \
-        pcmanfm-qt \
-        # qterminal is the session's terminal; xterm backs the callers that spawn
-        # a terminal by hardcoded name (libfm-qt, GLib's Terminal=true handling)
-        xterm \
-        # Recommends of the packages above, named here because the image installs
-        # none of them by default and each is load-bearing rather than optional:
-        # lxqt-qtplugin is the platform theme QT_QPA_PLATFORMTHEME=lxqt loads, so
-        # without it no Qt application picks up the session's icons or palette;
-        # lxqt-config supplies the settings backend the session reads; and an icon
-        # theme is named by LXQt rather than shipped, so every icon is blank
-        # without one. The notification and PolicyKit agents are what applications
-        # expect a session to provide. pavucontrol-qt is the panel volume plugin's
-        # mixer, and lximage-qt the image handler and screenshot tool. Deliberately
-        # still dropped: screen lockers and power management (a container session
-        # suspends nothing), the gvfs mount backends, and the KDE portal.
+        # The icon sets selkies-desktop, labwc's titlebar, and GTK resolve names
+        # in: breeze ships the full-color glyph groups the slim Adwaita build
+        # lacks, and both bring hicolor, every icon theme's fallback
+        breeze-icon-theme \
         adwaita-icon-theme \
+        # The terminal for the menu's Terminal=true entries and for every caller
+        # that spawns one by hardcoded name, on X11 and through XWayland alike
+        xterm \
+        # pactl, which selkies-desktop's volume control drives the sink through
+        pulseaudio-utils \
+        # The notification server applications call over the session bus,
+        # started on the first notification by D-Bus activation on either
+        # backend
+        dunst \
         # A file manager keeps whether a desktop entry may be launched in GIO
         # metadata: gvfs carries the client module that implements that
         # attribute namespace, gvfs-daemons the store behind it. Without both,
@@ -84,114 +73,15 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # there.
         gvfs \
         gvfs-daemons \
-        # notify-send, for the notice the replaced leave binary shows
-        libnotify-bin \
-        lxqt-qtplugin \
-        lxqt-config \
-        lxqt-notificationd \
-        lxqt-policykit \
-        pavucontrol-qt \
-        lximage-qt \
-        # Translations for each shipped component, which are Recommends too
-        lxqt-about-l10n \
-        lxqt-config-l10n \
-        lxqt-notificationd-l10n \
-        lxqt-panel-l10n \
-        lxqt-policykit-l10n \
-        lxqt-runner-l10n \
-        lxqt-session-l10n \
-        obconf-qt-l10n \
-        pcmanfm-qt-l10n \
-        qterminal-l10n \
-        # What the LXQt session needs to draw on Wayland: the Qt platform plugin
-        # with its xdg-shell integration, and LayerShellQt, which is what anchors
-        # the panel and the desktop to their edges. Without the latter both are
-        # surfaces with nothing to anchor to and paint nothing at all
-        qt6-wayland \
-        layer-shell-qt \
-        # The session's own portal backend, which answers the file-chooser and
-        # screen-share requests toolkits make of a desktop
-        xdg-desktop-portal-lxqt \
-        # Application menu definitions for the panel and the file manager, which
-        # lxqt-panel recommends rather than depends on: without them the session's
-        # application menus are empty
-        lxqt-menu-data \
-        # Qt 6 splits SVG rendering into qt6-svg-plugins with nothing depending on
-        # it. Without the SVG icon engine every scalable icon in the session — menu
-        # entries, the panel's menu button, tray icons — is silently blank
-        qt6-svg-plugins \
-        # Qt reads only PNG, JPEG, and GIF on its own; the rest of what a clipboard
-        # image or a downloaded file arrives as (WebP, TIFF, AVIF, HEIF) needs
-        # these, and without them lximage-qt and the file manager show nothing
-        qt6-image-formats-plugins \
-        kimageformat6-plugins \
+        # gio, which selkies-proot sets those marks with, and
+        # glib-compile-schemas for the GSettings override below
+        libglib2.0-bin \
         # proot-apps refreshes the icon cache of the per-user theme it installs
         # into by calling gtk-update-icon-cache, which nothing else here brings
         # in; without it that refresh is a silent no-op and the cache a session
         # reads is whatever was there before the application arrived
         gtk-update-icon-cache && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-
-# The Selkies theme, one look on both backends: LXQt stylesheets and
-# wallpaper, the Openbox themerc labwc also reads, and the qterminal palette.
-# The wallpaper is the logo on black as SVG — no committed raster, and the
-# flat field keeps a full desktop refresh cheap on the stream.
-COPY --chown=1000:1000 addons/desktop/theme/lxqt/ /usr/share/lxqt/themes/selkies/
-COPY --chown=1000:1000 addons/desktop/theme/openbox/ /usr/share/themes/Selkies/openbox-3/
-COPY --chown=1000:1000 addons/desktop/theme/qterminal/Selkies.colorscheme /usr/share/qtermwidget6/color-schemes/Selkies.colorscheme
-# The panel layout; why it is spelled out is documented in the file
-COPY --chown=1000:1000 addons/desktop/theme/panel.conf /etc/xdg/lxqt/panel.conf
-
-# LXQt's system defaults, which the distribution packages do not ship: without
-# them a session has no theme, so lxqt-panel finds no stylesheet, keeps the
-# invalid colors it writes as its own default, and paints nothing at all — a
-# panel that runs and maps a window but is invisible against the desktop. The
-# icon theme goes with it, since LXQt otherwise falls back to Oxygen, which is
-# not installed here. This is the system scope, so a user's own
-# ~/.config/lxqt/lxqt.conf still overrides it. The names are taken from what is
-# installed rather than asserted, so a renamed or dropped theme still leaves a
-# session that paints; only an image with none of them at all fails here.
-#
-# pcmanfm-qt gets its desktop background the same way, for the same reason: its
-# own default is #000000 with no wallpaper, which reads as a broken session
-# rather than a plain one. The resolved theme's wallpaper when it ships one
-# and a flat color otherwise — never a photograph, because every full refresh
-# re-encodes whatever the desktop shows.
-# Both names are taken from what is installed rather than asserted, so a
-# distribution that renames or drops one still produces a session that paints;
-# the Qt palette rides only with the selkies theme it matches.
-#
-# The terminal goes with them: libfm-qt compiles in `xterm` and libqt5xdg/libqt6xdg
-# ship /etc/xdg/qtxdg.conf naming xterm.desktop, so "Open Terminal" and every
-# Terminal=true launcher reach for the wrong one. Only the LXQt scope
-# (lxqt-qtxdg.conf) is packaged correctly.
-RUN set -eu; \
-    first_installed() { \
-        base="$1"; shift; \
-        for name in "$@"; do [ -d "${base}/${name}" ] && { printf '%s' "${name}"; return; }; done; \
-    }; \
-    first_on_path() { \
-        for name in "$@"; do command -v "${name}" >/dev/null 2>&1 && { printf '%s' "${name}"; return; }; done; \
-    }; \
-    ICON_THEME="$(first_installed /usr/share/icons Adwaita breeze oxygen hicolor)"; \
-    THEME="$(first_installed /usr/share/lxqt/themes selkies ambiance system light Leech)"; \
-    TERMINAL="$(first_on_path qterminal x-terminal-emulator xterm)"; \
-    echo "LXQt defaults: icon_theme=${ICON_THEME} theme=${THEME} terminal=${TERMINAL}"; \
-    mkdir -pm755 /etc/xdg/lxqt /etc/xdg/pcmanfm-qt/lxqt; \
-    printf '[General]\nicon_theme=%s\ntheme=%s\n' "${ICON_THEME}" "${THEME}" > /etc/xdg/lxqt/lxqt.conf; \
-    if [ "${THEME}" = "selkies" ]; then \
-        printf '[Palette]\nwindow_color=#120724\nwindow_text_color=#F2EEFB\nbase_color=#0C0318\ntext_color=#F2EEFB\nhighlight_color=#AE3F7E\nhighlighted_text_color=#FFFFFF\nlink_color=#46E5E5\nlink_visited_color=#7967C5\ntooltip_base_color=#1C0E38\ntooltip_text_color=#F2EEFB\n[Qt]\nstyle=Fusion\n' \
-            >> /etc/xdg/lxqt/lxqt.conf; \
-    fi; \
-    WALLPAPER="/usr/share/lxqt/themes/${THEME}/wallpaper.svg"; \
-    if [ -f "${WALLPAPER}" ]; then \
-        printf '[Desktop]\nWallpaperMode=zoom\nWallpaper=%s\nPerScreenWallpaper=true\nBgColor=#000000\nFgColor=#f2eefb\nShadowColor=#000000\n[System]\nTerminal=%s\n' \
-            "${WALLPAPER}" "${TERMINAL}" > /etc/xdg/pcmanfm-qt/lxqt/settings.conf; \
-    else \
-        printf '[Desktop]\nWallpaperMode=color\nBgColor=#2e3436\nFgColor=#ffffff\n[System]\nTerminal=%s\n' \
-            "${TERMINAL}" > /etc/xdg/pcmanfm-qt/lxqt/settings.conf; \
-    fi; \
-    printf 'TerminalEmulator=%s.desktop\n' "${TERMINAL}" > /etc/xdg/qtxdg.conf
 
 # The browsers, in one apt operation: Firefox from Mozilla's own APT repository,
 # which serves real .deb builds and is pinned over the distribution package, and
@@ -275,87 +165,86 @@ RUN set -eu; \
         printf '[Settings]\ngtk-decoration-layout=:minimize,maximize,close\n' > /etc/gtk-3.0/settings.ini; \
     fi
 
-# Name the theme for both decorators and qterminal, and declare the session
-# dark where Qt does not reach. Openbox's theme is its rc.xml's first `name`
-# element; labwc's rc.xml gains the name it otherwise leaves to the default.
-# Firefox and Chrome read darkness from GTK's setting and the GSettings
-# default, compiled beside the decoration override above. The file manager's
-# desktop entry is overridden (first-name-wins, like the hidden leave entries)
-# to carry the theme's icon; the panel's quicklaunch names that override.
+# The desktop itself: selkies-desktop (https://github.com/selkies-project/selkies-desktop)
+# draws the panel, start menu, taskbar, wallpaper, and file manager, and
+# generates the window manager's theme from its own settings. It is one static
+# binary per architecture that links no system library, taken at the release
+# SELKIES_DESKTOP_VERSION names and checked against the SHA-256 that release
+# publishes beside it.
+ARG SELKIES_DESKTOP_VERSION="1.0.0"
 RUN set -eu; \
-    if [ -f /usr/share/applications/pcmanfm-qt.desktop ]; then \
-        mkdir -pm755 /usr/local/share/applications; \
-        sed 's|^Icon=.*|Icon=/usr/share/lxqt/themes/selkies/filemanager.svg|' \
-            /usr/share/applications/pcmanfm-qt.desktop > /usr/local/share/applications/pcmanfm-qt.desktop; \
-    fi; \
-    if [ -f /etc/xdg/openbox/rc.xml ]; then \
-        sed -i '0,/<name>[^<]*<\/name>/s||<name>Selkies</name>|' /etc/xdg/openbox/rc.xml; \
-    fi; \
-    if [ -f /etc/xdg/labwc/rc.xml ] && ! grep -q '<name>' /etc/xdg/labwc/rc.xml; then \
-        sed -i 's|<theme>|<theme>\n    <name>Selkies</name>\n    <dropShadows>yes</dropShadows>|' /etc/xdg/labwc/rc.xml; \
-    fi; \
-    mkdir -pm755 /etc/xdg/qterminal.org; \
-    printf '[General]\ncolorScheme=Selkies\n' > /etc/xdg/qterminal.org/qterminal.ini; \
-    if [ -d /usr/share/qtermwidget5/color-schemes ]; then \
-        cp /usr/share/qtermwidget6/color-schemes/Selkies.colorscheme /usr/share/qtermwidget5/color-schemes/; \
-    fi; \
-    printf "[org.gnome.desktop.interface]\ncolor-scheme='prefer-dark'\n" \
-        > /usr/share/glib-2.0/schemas/selkies-dark.gschema.override; \
-    glib-compile-schemas /usr/share/glib-2.0/schemas/; \
-    sed -i '/^\[Settings\]/a gtk-application-prefer-dark-theme=1' /etc/gtk-3.0/settings.ini
+    arch="$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/aarch64/')"; \
+    release="https://github.com/selkies-project/selkies-desktop/releases/download/${SELKIES_DESKTOP_VERSION}"; \
+    mkdir -p /tmp/selkies-desktop; \
+    cd /tmp/selkies-desktop; \
+    curl -fsSL --retry 5 -o "selkies-desktop-${arch}" "${release}/selkies-desktop-${arch}"; \
+    curl -fsSL --retry 5 -o "selkies-desktop-${arch}.sha256" "${release}/selkies-desktop-${arch}.sha256"; \
+    sha256sum -c "selkies-desktop-${arch}.sha256"; \
+    install -m 0755 "selkies-desktop-${arch}" /usr/bin/selkies-desktop; \
+    cd /; \
+    rm -rf /tmp/selkies-desktop
 
-# Leaving the session is not something this desktop can offer: logging out or
-# locking ends or blocks the session the stream is showing and leaves a
-# connected client on a dead display, and shutdown, reboot, suspend, and
-# hibernate address an init this container does not run.
-#
-# Every one of those entries runs the one lxqt-leave binary, and the panel's own
-# menu offers a button that runs it directly rather than through an entry, so
-# both halves are covered: the entries are hidden so nothing offers the actions,
-# and the binary is replaced so nothing performs them.
-#
-# Which entries those are is read from the entries themselves rather than
-# listed, so one renamed or added upstream is covered too. Hiding them uses the
-# XDG rule that the first entry of a given file name across XDG_DATA_DIRS wins,
-# and /usr/local/share precedes /usr/share; replacing the binary uses dpkg's own
-# diversion, so an upgrade of lxqt-session reinstalls to the diverted path and
-# leaves this in place. No lxqt-panel release exposes a setting for the button.
-RUN mkdir -pm755 /usr/local/share/applications && \
-    grep -lE '^Exec=[^=]*lxqt-leave' /usr/share/applications/*.desktop | while read -r entry; do \
-        hidden="/usr/local/share/applications/$(basename "${entry}")"; \
-        sed -e '/^NoDisplay=/d' -e '/^\[Desktop Entry\]/a NoDisplay=true' \
-            "${entry}" > "${hidden}"; \
-    done && \
-    if [ -x /usr/bin/lxqt-leave ]; then \
-        dpkg-divert --divert /usr/bin/lxqt-leave.real --rename /usr/bin/lxqt-leave && \
-        printf '#!/bin/sh\n# See the Dockerfile: this desktop has no session to leave.\nnotify-send -i dialog-information "Not available here" "This desktop runs in a container: there is no session to log out of, lock, or shut down." 2>/dev/null || true\nexit 0\n' \
-            > /usr/bin/lxqt-leave && \
-        chmod 755 /usr/bin/lxqt-leave; \
-    fi
+# What the desktop finds in place of settings of its own. Its start button and
+# default wallpaper are the Selkies logo it reads from a fixed path, installed
+# here from the Selkies package the base carries; without it the start button
+# is a blank strip. Its icon theme is GTK's setting, which Ubuntu's file names
+# as Yaru, not installed here, leaving every themed glyph to hicolor's few and
+# the volume control blank; breeze, which is, replaces it for GTK as well. The
+# window managers name Openbox's stock Clearlooks theme, the name
+# selkies-desktop writes its generated theme under ~/.themes as, so a frame
+# looks the same on both backends with or without that theme. Super alone
+# opens the start menu: labwc on its release, so a Super chord still reaches
+# its own binding, with `<default />` keeping labwc's stock keybindings beside
+# it; Openbox binds no key release, so on X11 it opens on the press. Each edit
+# is checked, so an upstream file that no longer matches fails the build
+# rather than a session.
+RUN set -eu; \
+    icons="$(python3 -I -c 'import importlib.util as u; print(u.find_spec("selkies").submodule_search_locations[0])')/selkies_web"; \
+    mkdir -pm755 /usr/share/selkies/www; \
+    cp "${icons}/icon-512.png" /usr/share/selkies/www/icon.png; \
+    if grep -q '^gtk-icon-theme-name' /etc/gtk-3.0/settings.ini; then \
+        sed -i 's/^gtk-icon-theme-name.*/gtk-icon-theme-name = breeze/' /etc/gtk-3.0/settings.ini; \
+    else \
+        sed -i '/^\[Settings\]/a gtk-icon-theme-name = breeze' /etc/gtk-3.0/settings.ini; \
+    fi; \
+    grep -q '^gtk-icon-theme-name = breeze$' /etc/gtk-3.0/settings.ini; \
+    [ -d /usr/share/themes/Clearlooks/openbox-3 ]; \
+    sed -i 's|<theme>|<theme>\n    <name>Clearlooks</name>|' /etc/xdg/labwc/rc.xml; \
+    sed -i 's|</labwc_config>|  <keyboard>\n    <default />\n    <keybind key="Super_L" onRelease="yes"><action name="Execute" command="selkies-desktop --toggle-menu" /></keybind>\n  </keyboard>\n</labwc_config>|' /etc/xdg/labwc/rc.xml; \
+    grep -q '<name>Clearlooks</name>' /etc/xdg/labwc/rc.xml; \
+    grep -q 'command="selkies-desktop --toggle-menu"' /etc/xdg/labwc/rc.xml; \
+    grep -q '<name>Clearlooks</name>' /etc/xdg/openbox/rc.xml; \
+    sed -i '0,/<keyboard>/s||<keyboard>\n    <keybind key="Super_L">\n      <action name="Execute"><command>selkies-desktop --toggle-menu</command></action>\n    </keybind>|' /etc/xdg/openbox/rc.xml; \
+    grep -q '<command>selkies-desktop --toggle-menu</command>' /etc/xdg/openbox/rc.xml; \
+    printf '\n! A scalable face, so the terminal follows the session density Xft.dpi carries\nXTerm*faceName: Monospace\nXTerm*faceSize: 11\n' \
+        >> /etc/X11/app-defaults/XTerm
 
-# The session's own s6 service, supervised beside the base container's
+# The desktop's s6 services, supervised beside the base container's: the shell
+# on either backend, and the window manager X11 needs
 COPY --chown=1000:1000 addons/desktop/services/ /etc/service/
-# The same desktop for what starts one from a session file; LXQt ships the X11 one
-COPY --chown=1000:1000 addons/desktop/lxqt-wayland.desktop /usr/share/wayland-sessions/lxqt.desktop
-RUN find /etc/service \( -name run -o -name finish \) -exec chmod -f 755 {} +
+# The same desktop for what starts one from a session file or as the
+# x-session-manager, `selkies session` among them. The alternative outranks
+# Openbox's own, which would start the window manager with no desktop on it.
+COPY --chown=1000:1000 addons/desktop/selkies-desktop-session /usr/local/bin/selkies-desktop-session
+COPY --chown=1000:1000 addons/desktop/selkies-desktop.desktop /usr/share/xsessions/selkies-desktop.desktop
+COPY --chown=1000:1000 addons/desktop/selkies-desktop.desktop /usr/share/wayland-sessions/selkies-desktop.desktop
+RUN chmod -f 755 /usr/local/bin/selkies-desktop-session && \
+    update-alternatives --install /usr/bin/x-session-manager x-session-manager /usr/local/bin/selkies-desktop-session 100 && \
+    find /etc/service \( -name run -o -name finish \) -exec chmod -f 755 {} +
 
 RUN printf "==============================================\n=         Selkies Desktop Container          =\n==============================================\n" > /etc/motd
 
 USER 0
 # Real root for the same reason the base needs it: under the fakeroot SHELL an
 # ownership change lands only in fakeroot's database, leaving a setuid bit on a
-# file owned by uid 1000, which the kernel refuses to honor. The PolicyKit
-# agent helper and pkexec need theirs to authenticate at all, and xterm's
-# utempter its setgid to record sessions. `restore` covers everything released
+# file owned by uid 1000, which the kernel refuses to honor. xterm's utempter
+# needs its setgid to record sessions. `restore` covers everything released
 # above, which is the base's own set rather than these. A file capability set
 # under fakeroot is lost the same way, so the apps panel's ptrace-capable proot
 # gets its CAP_SYS_PTRACE here.
 SHELL ["/bin/sh", "-c"]
 RUN chown -R root:root /opt/proot-apps-cap && setcap cap_sys_ptrace+ep /opt/proot-apps-cap/proot && \
     selkies-privileged-files restore && \
-    for helper in /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1 /usr/bin/pkexec; do \
-        if [ -e "$helper" ]; then chown -f root:root "$helper" && chmod -f 4755 "$helper" || echo "Failed to restore setuid for $helper"; fi; \
-    done && \
     for helper in /usr/lib/*/utempter/utempter /usr/libexec/utempter/utempter; do \
         if [ -e "$helper" ]; then chown -f root:utmp "$helper" && chmod -f 2755 "$helper" || echo "Failed to restore setgid for $helper"; fi; \
     done
@@ -368,5 +257,6 @@ USER 1000
 # terminal, so the desktop image enables the channel; disable with
 # -e SELKIES_COMMAND_ENABLED=false.
 ENV SELKIES_COMMAND_ENABLED="true"
-# Start the LXQt session (set to false to run only the display server)
-ENV START_LXQT="true"
+# Start the desktop: selkies-desktop, and Openbox under it on X11 (set to false
+# to run only the display server)
+ENV START_DESKTOP="true"

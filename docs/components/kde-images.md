@@ -3,7 +3,7 @@ title: KDE Plasma Desktops
 description: The docker-selkies-egl-desktop and docker-selkies-glx-desktop images, what each draws the desktop on, how they are laid out, and how they are developed and kept in step.
 ---
 
-[`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) and [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) are ready-to-go KDE Plasma desktops in separate repositories, built `FROM` the [Base Container](base-image.md) the way [`addons/desktop`](desktop-image.md) builds the LXQt one. Each README carries the run commands for Docker, Kubernetes, and Apptainer, the variables the image adds, and its troubleshooting; this page is what the two are and how they relate to what this repository provides.
+[`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) and [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) are ready-to-go KDE Plasma desktops in separate repositories, built `FROM` the [Base Container](base-image.md) the way [`addons/desktop`](desktop-image.md) builds the reference one. Each README carries the run commands for Docker, Kubernetes, and Apptainer, the variables the image adds, and its troubleshooting; this page is what the two are and how they relate to what this repository provides.
 
 ## What each one is
 
