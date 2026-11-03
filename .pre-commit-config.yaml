@@ -43,7 +43,7 @@ repos:
         args: [--check]
         language: script
         pass_filenames: false
-        files: ^(src/selkies/settings\.py|docs/settings\.md|scripts/generate-settings-doc\.py)$
+        files: ^(crates/selkies/src/settings/(table|mod)\.rs|docs/settings\.md|scripts/generate-settings-doc\.py)$
 
       - id: file-index
         name: nginx fancyindex fragments
