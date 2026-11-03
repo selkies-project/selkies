@@ -232,6 +232,8 @@ impl MediaPipeline for FakePipeline {
 
     fn set_link_rate(&self, _kbps: i64) {}
 
+    fn shed_framerate(&self, _fps: Option<f64>) {}
+
     fn set_scale(&self, _scale: f64) {}
 
     fn scale(&self) -> f64 {

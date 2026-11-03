@@ -579,6 +579,15 @@ impl RtcEngine {
         }
     }
 
+    /// The delta frames a display's bridge dropped for its budget and the ones it let through,
+    /// since it started, or None without a bridge.
+    pub fn video_budget_counts(&self, display_id: &str) -> Option<(u64, u64)> {
+        self.displays
+            .lock()
+            .get(display_id)
+            .map(|g| (g.video_bridge.over_budget(), g.video_bridge.passed()))
+    }
+
     /// A display's dropped and invalidated frames, for the metrics.
     pub fn bridge_drops(&self) -> HashMap<String, (u64, u64)> {
         self.displays

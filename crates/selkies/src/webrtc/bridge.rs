@@ -36,7 +36,10 @@
 //! and whatever repairs the loss adds more. The frames let through fill a bucket that drains at
 //! the rate, and while it holds more than `BUDGET_WINDOW_S` of the rate a delta frame that names
 //! what it predicts from is dropped with the word to the encoder, so the frame rate falls instead
-//! of the latency rising. Key frames pass uncharged: charged, a large one would drop the delta
+//! of the latency rising, by no more than `BUDGET_RUN_MAX` frames in a row from an encoder that has
+//! sent no anchor: one predicting from its last frames only codes a key frame past a longer run,
+//! and the key frame overshoots the rate again, so the stream is thinned, not cut. Key frames pass
+//! uncharged: charged, a large one would drop the delta
 //! frames behind it for as long as it takes on a slow path. Neither is a frame `FRAME_NUM_WRAP`
 //! frames or a multiple of it past a key frame dropped: an H.264 decoder that misses the frame
 //! whose `frame_num` wraps to 0 cannot be predicted past the gap, so the encoder answers such a
@@ -69,6 +72,11 @@ pub const GATE_TIMEOUT_S: f64 = 1.0;
 pub const LOST_CHAIN_FRAMES: u32 = 3;
 /// How far past its steered rate a bridge lets frames run, in seconds of that rate.
 pub const BUDGET_WINDOW_S: f64 = 0.25;
+/// The most delta frames in a row the budget drops from a stream whose encoder keeps no long-term
+/// anchor (`BridgeItem::anchor`): such an encoder predicts from its last frames only, the dropped
+/// ones among them, and a longer run leaves it nothing to predict from but a key frame, which
+/// overshoots the rate again.
+pub const BUDGET_RUN_MAX: u32 = 6;
 
 /// What the bridge reads of a frame.
 pub trait BridgeItem: Send {
@@ -79,6 +87,10 @@ pub trait BridgeItem: Send {
     /// When its encode began, on the bridge's clock in seconds.
     fn encode_start_s(&self) -> Option<f64> {
         None
+    }
+    /// Whether the encoder marked the frame a long-term anchor.
+    fn anchor(&self) -> bool {
+        false
     }
     /// Whether the frame is H.264, whose `frame_num` can wrap.
     fn is_h264(&self) -> bool {
@@ -99,6 +111,10 @@ impl BridgeItem for Arc<EncodedFrame> {
         self.timing
             .filter(|t| t.encode_start_ns > 0)
             .map(|t| t.encode_start_ns as f64 / 1e9)
+    }
+
+    fn anchor(&self) -> bool {
+        self.anchor
     }
 
     fn is_h264(&self) -> bool {
@@ -139,6 +155,11 @@ struct State<T> {
     budget_at: f64,
     over_budget: u64,
     since_key: u32,
+    /// Budget drops in a row, and whether the encoder has sent an anchor (`BUDGET_RUN_MAX`).
+    budget_run: u32,
+    anchored: bool,
+    /// Delta frames naming their reference let through, beside `over_budget`.
+    passed: u64,
 }
 
 /// One queue between a capture and its consumer (module docblock).
@@ -169,6 +190,9 @@ impl<T: BridgeItem> PipelineBridge<T> {
                 budget_at: 0.0,
                 over_budget: 0,
                 since_key: 0,
+                budget_run: 0,
+                anchored: false,
+                passed: 0,
             }),
             available: Notify::new(),
         }
@@ -207,6 +231,11 @@ impl<T: BridgeItem> PipelineBridge<T> {
     /// Frames dropped for the steered rate.
     pub fn over_budget(&self) -> u64 {
         self.state.lock().over_budget
+    }
+
+    /// Delta frames naming their reference let through, beside `over_budget`.
+    pub fn passed(&self) -> u64 {
+        self.state.lock().passed
     }
 
     /// Whether nothing is queued.
@@ -264,6 +293,7 @@ impl<T: BridgeItem> State<T> {
             self.lost.clear();
             self.held = 0;
             self.since_key = 0;
+            self.budget_run = 0;
             return;
         }
         self.since_key += 1;
@@ -308,11 +338,14 @@ impl<T: BridgeItem> State<T> {
         }
         let at_wrap = self.since_key.is_multiple_of(FRAME_NUM_WRAP);
         let kept = data.is_h264() && at_wrap;
-        if !at_wrap && self.budget_full() {
+        self.anchored |= data.anchor();
+        if !at_wrap && self.budget_full() && (self.anchored || self.budget_run < BUDGET_RUN_MAX) {
             self.over_budget += 1;
+            self.budget_run += 1;
             self.drop_item(frame_id);
             return;
         }
+        self.budget_run = 0;
         if self.queue.len() >= self.maxsize {
             if self.queued_keyframe {
                 self.drop_item(frame_id);
@@ -332,6 +365,7 @@ impl<T: BridgeItem> State<T> {
         let bytes = data.byte_len();
         self.queue.push_back(data);
         self.charge(bytes);
+        self.passed += 1;
         self.queued_keyframe = kept;
         self.held = 0;
         if !self.lost.is_empty()
@@ -436,6 +470,7 @@ mod tests {
         at: Option<f64>,
         size: usize,
         h264: bool,
+        anchor: bool,
     }
 
     impl BridgeItem for F {
@@ -444,6 +479,9 @@ mod tests {
         }
         fn encode_start_s(&self) -> Option<f64> {
             self.at
+        }
+        fn anchor(&self) -> bool {
+            self.anchor
         }
         fn is_h264(&self) -> bool {
             self.h264
@@ -460,6 +498,7 @@ mod tests {
             at: None,
             size: 0,
             h264: false,
+            anchor: false,
         }
     }
 
@@ -470,6 +509,7 @@ mod tests {
             at: None,
             size: 0,
             h264: false,
+            anchor: false,
         }
     }
 
@@ -806,6 +846,63 @@ mod tests {
     }
 
     #[test]
+    fn budget_runs() {
+        let rig = Rig::new();
+        let rate = 80_000.0;
+        let max_gap = |bridge: &PipelineBridge<F>, first: u32, reference: u32, anchor: bool| {
+            let (mut passed, mut last) = (Vec::new(), reference);
+            for fid in first..first + 180 {
+                rig.step(1.0 / 60.0);
+                let item = F {
+                    size: 5000,
+                    anchor,
+                    ..timed(fid, Some(last), rig.at())
+                };
+                bridge.set_data(item, false);
+                if bridge.try_take().is_some() {
+                    passed.push(fid);
+                    last = fid;
+                }
+            }
+            passed
+                .windows(2)
+                .map(|w| w[1] - w[0] - 1)
+                .max()
+                .unwrap_or(0)
+        };
+        let bridge = rig.bridge(true);
+        bridge.set_budget(Some(rate));
+        bridge.set_data(
+            F {
+                size: 100,
+                ..tracked(0, None)
+            },
+            true,
+        );
+        drain(&bridge);
+        assert_eq!(
+            max_gap(&bridge, 1, 0, false),
+            BUDGET_RUN_MAX,
+            "a stream thirty times over the rate, from an encoder that sent no anchor, is thinned: \
+             no more than BUDGET_RUN_MAX frames dropped in a row"
+        );
+        let anchored = rig.bridge(true);
+        anchored.set_budget(Some(rate));
+        anchored.set_data(
+            F {
+                size: 100,
+                ..tracked(1000, None)
+            },
+            true,
+        );
+        drain(&anchored);
+        assert!(
+            max_gap(&anchored, 1001, 1000, true) > BUDGET_RUN_MAX,
+            "from one that keeps anchors, which predicts past any run, the budget drops longer runs"
+        );
+    }
+
+    #[test]
     fn budget() {
         let rig = Rig::new();
         let rate = 80_000.0;
@@ -932,6 +1029,7 @@ mod tests {
         let bridge = rig.bridge(true);
         let h264 = |id, reference| F {
             h264: true,
+            anchor: false,
             ..tracked(id, reference)
         };
         bridge.set_data(h264(0, None), true);
