@@ -128,9 +128,10 @@ credential or role its principals, and a change to what a role may reach its rul
 tier needs (a system package the crates build against, a Makefile under `addons/` or `tests/tools`, a web
 package's lockfile) into `Dockerfile`.
 
-`.clusterfuzzlite/` builds the `cargo fuzz` targets in an OSS-Fuzz builder for ClusterFuzzLite
-(`.github/workflows/fuzz.yaml`: the code a pull request changes for five minutes, every target for an hour a day)
-and OSS-Fuzz. `build.sh` builds every target and zips the seed corpora named in it. Code that parses bytes a peer,
+`.clusterfuzzlite/` builds the `cargo fuzz` targets of `crates/selkies-rtc/fuzz` in an OSS-Fuzz builder for
+ClusterFuzzLite (`.github/workflows/fuzz.yaml`: the code a pull request changes for five minutes, every target for
+an hour a day) and OSS-Fuzz. `build.sh` builds every target `cargo fuzz list` names and zips each one's seeds from
+`fuzz/seeds/<target>/`. Code that parses bytes a peer,
 a client, or another local account controls gets a target, a seed corpus zipped by `build.sh` where valid inputs
 are hard to stumble on, and its source among the workflow's `pull_request` paths; a target builds without pixelflux
 and pcmflux, whose native libraries the builder lacks. A crash the fuzzer finds is fixed at its cause, and its input
