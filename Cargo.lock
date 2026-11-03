@@ -670,6 +670,7 @@ dependencies = [
 [[package]]
 name = "codec-sys"
 version = "0.1.0"
+source = "git+https://github.com/selkies-project/pixelflux?rev=77fbcd8d86504aee3e8f5c5851bf0542a4e92285#77fbcd8d86504aee3e8f5c5851bf0542a4e92285"
 dependencies = [
  "bindgen 0.73.2",
  "pkg-config",
@@ -2348,6 +2349,7 @@ dependencies = [
 [[package]]
 name = "nvcodec-sys"
 version = "0.1.0"
+source = "git+https://github.com/selkies-project/pixelflux?rev=77fbcd8d86504aee3e8f5c5851bf0542a4e92285#77fbcd8d86504aee3e8f5c5851bf0542a4e92285"
 
 [[package]]
 name = "nvml-wrapper"
@@ -2480,6 +2482,7 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 [[package]]
 name = "pcmflux"
 version = "2.2.1"
+source = "git+https://github.com/selkies-project/pcmflux?rev=31128ad09b6a0456f3d8c2169852944e9ddef6a1#31128ad09b6a0456f3d8c2169852944e9ddef6a1"
 dependencies = [
  "bytemuck",
  "libc",
@@ -2522,6 +2525,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pixelflux"
 version = "2.2.2"
+source = "git+https://github.com/selkies-project/pixelflux?rev=77fbcd8d86504aee3e8f5c5851bf0542a4e92285#77fbcd8d86504aee3e8f5c5851bf0542a4e92285"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.2",
@@ -4388,6 +4392,7 @@ dependencies = [
 [[package]]
 name = "va-sys"
 version = "0.1.0"
+source = "git+https://github.com/selkies-project/pixelflux?rev=77fbcd8d86504aee3e8f5c5851bf0542a4e92285#77fbcd8d86504aee3e8f5c5851bf0542a4e92285"
 dependencies = [
  "libloading 0.9.0",
 ]

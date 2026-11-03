@@ -235,7 +235,16 @@ The three core repositories each carry one, and they are written to be read toge
 | [pixelflux](https://github.com/selkies-project/pixelflux/tree/main/AGENTS.md) | The same priority order, the capture backends and encoder engines, the probes a session is built from and the ladder it falls through, the Python API Selkies drives and what a change to it has to keep, and the GPU tests that need the hardware |
 | [pcmflux](https://github.com/selkies-project/pcmflux/tree/main/AGENTS.md) | The same priority order, the capture and Opus paths, the microphone and recording sockets, and the same conventions on its side |
 
-A change in one repository often belongs in another, since Selkies pins the capture stack and its suites drive both extensions, so give an agent all three checkouts and have it land a change in each of them, on the same day, in the order the pins are read: `pcmflux` and `pixelflux` first, so that Selkies' own CI builds against the commits it names, then `selkies`.
+A change in one repository often belongs in another, since Selkies pins the capture stack and its suites drive both extensions, so give an agent all three checkouts and have it land a change in each of them, on the same day, in the order the pins are read: `pcmflux` and `pixelflux` first, then `selkies` with the `rev` of each in `Cargo.toml` moved to the commit just pushed, so that Selkies' own CI builds against the commits it names. While the change is in progress, the server builds against the checkouts beside it through a `[patch]` in a Cargo configuration outside the repository, such as `~/.cargo/config.toml`:
+
+```toml
+[patch."https://github.com/selkies-project/pixelflux"]
+pixelflux = { path = "/path/to/pixelflux/pixelflux" }
+[patch."https://github.com/selkies-project/pcmflux"]
+pcmflux = { path = "/path/to/pcmflux/pcmflux" }
+```
+
+The patch takes the pinned sources out of `Cargo.lock` while it applies, so the lockfile goes back to the committed one (`git checkout Cargo.lock`) before a commit.
 
 Give the agent a container to work in rather than your own machine. An agent is at its most useful when it closes its own feedback loop, changing the code, running it, measuring what happened, and trying again, and that loop needs it to start servers and displays, install packages, and break things without stopping to ask. A container lets it do all of that freely while keeping the consequences inside: the processes it leaves running, the files it writes, the displays, audio devices, and ports it opens, and whatever credentials or personal files a host would otherwise expose all stay apart from your host and from the desktop session you watch it from.
 
