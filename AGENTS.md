@@ -198,12 +198,14 @@ what runs where.
   feature itself (a symbol resolved at run time, a capability the driver reports, an error the API returns) —
   never compare a version number.
 - The capture stack is pinned, not detected: every Selkies build and release names the pixelflux and pcmflux
-  build or release it goes with (their dependency entries in the workspace's `Cargo.toml`), which CI resolves for
-  the branch under test, so the two are never mixed across versions. Backward compatibility measures against a
-  sibling are unwanted for that reason: a probe for an API a newer one adds, or a suite that skips because the
-  build lacks an API, hedges a combination that never ships and hides the path it was meant to measure. Call the
-  sibling API directly and land its commit first, so the run here builds against it. What a pinned build was
-  compiled with (software H.264, below) is still read, as is the host's CUDA range above.
+  commit it goes with (the `rev` of their git dependencies in the workspace's `Cargo.toml`, which `Cargo.lock`
+  records), so the two are never mixed across versions. Backward compatibility measures against a sibling are
+  unwanted for that reason: a probe for an API a newer one adds, or a suite that skips because the build lacks an
+  API, hedges a combination that never ships and hides the path it was meant to measure. Call the sibling API
+  directly, push its commit first, and move the `rev` to it, so the run here builds against it. A sibling checked
+  out beside this tree is built through a `[patch]` of its repository's URL in a Cargo configuration outside the
+  repository, never a `path` in `Cargo.toml`, and the `Cargo.lock` that patch rewrites is never committed. What
+  a pinned build was compiled with (software H.264, below) is still read, as is the host's CUDA range above.
 
 ## Cross-cutting invariants
 

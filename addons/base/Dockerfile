@@ -30,7 +30,7 @@
 #     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
 #   - The Selkies server, built from this tree's crates with the pixelflux and
-#     pcmflux clones beside it, and the web client it serves
+#     pcmflux commits Cargo.toml pins, and the web client it serves
 #
 # Supported bases: Ubuntu 26.04 and Debian Trixie, and later releases of both
 # (select with --build-arg DISTRIB_IMAGE=ubuntu|debian DISTRIB_RELEASE=26.04|trixie).
@@ -284,8 +284,8 @@ RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
 # against the hash rustup publishes beside it. The packages behind every
 # library the binary links are recorded for the final stage, so the image
 # declares what the server needs rather than inheriting it from whatever else
-# happens to pull those libraries in. pixelflux and pcmflux are the workspace's
-# path dependencies, the clones beside the sources.
+# happens to pull those libraries in. pixelflux and pcmflux are fetched at the
+# commits the workspace pins, never from a clone in the build context.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS server
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG RUST_TOOLCHAIN="1.99.1"
@@ -308,8 +308,6 @@ RUN set -e; \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY pixelflux ./pixelflux
-COPY pcmflux ./pcmflux
 RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/src/target \
     set -e; \

@@ -3,13 +3,10 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # The Rust Selkies: one workspace, the server crate under crates/, and the capture stack
-# as path dependencies while the three trees are developed side by side.
+# pinned to a commit of each sibling repository.
 [workspace]
 resolver = "3"
 members = ["crates/selkies", "crates/selkies-rtc"]
-# The sibling checkouts keep their own workspaces, locks, and profiles: each is released on
-# its own, and a build run from inside one must resolve against its own Cargo.lock.
-exclude = ["pixelflux", "pcmflux"]
 
 [workspace.package]
 version = "0.0.0"
@@ -19,10 +16,11 @@ license = "MPL-2.0"
 repository = "https://github.com/selkies-project/selkies"
 
 [workspace.dependencies]
-# The capture stack, pinned by the build like the Python package pins its wheels: a path
-# while the trees sit beside each other, a version before anything is released.
-pixelflux = { path = "pixelflux/pixelflux", default-features = false, features = ["gpl"] }
-pcmflux = { path = "pcmflux/pcmflux", default-features = false }
+# The capture stack, pinned to the commit of each repository this tree is built and released
+# with. Working on a sibling beside this tree is a `[patch]` of that repository's URL with a
+# path, in a Cargo configuration outside the repository, so every checkout builds the pins.
+pixelflux = { git = "https://github.com/selkies-project/pixelflux", rev = "77fbcd8d86504aee3e8f5c5851bf0542a4e92285", default-features = false, features = ["gpl"] }
+pcmflux = { git = "https://github.com/selkies-project/pcmflux", rev = "31128ad09b6a0456f3d8c2169852944e9ddef6a1", default-features = false }
 
 [profile.release]
 opt-level = 3

@@ -1,14 +1,12 @@
 # Both Dockerfiles build from the repository root, so keep the context small.
 # npm dependencies and every generated bundle are rebuilt inside the image.
 .git
-# pixelflux and pcmflux are the server's path dependencies, the clones beside the
-# sources: their sources go in, their histories and build products do not
+# A pixelflux or pcmflux clone kept beside the sources stays out: the server is
+# built from the commits Cargo.toml pins.
 **/.git
 **/target
-pixelflux/build
-pcmflux/build
-pixelflux/*.egg-info
-pcmflux/*.egg-info
+pixelflux/
+pcmflux/
 **/node_modules
 **/dist
 **/__pycache__
