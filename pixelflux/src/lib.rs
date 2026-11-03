@@ -6098,6 +6098,45 @@ fn gpu_render_init(
     Ok((gbm_allocator, renderer))
 }
 
+/// What the compositor renders with on a GPU, all of it brought up before any client hears of
+/// the GPU (`gpu_bring_up`).
+struct GpuBringUp {
+    gbm: RawGbmDevice<File>,
+    renderer: GlesRenderer,
+    formats: Vec<smithay::backend::allocator::Format>,
+    node: DrmNode,
+    target: (BufferObject<()>, Dmabuf),
+}
+
+/// The GL renderer on `device_path`, the dmabuf formats it imports, and its offscreen render
+/// target at `width` by `height`. It touches no Wayland global: the caller advertises the GPU
+/// only once this succeeded, since a dmabuf global left behind by a failed start (a render node
+/// whose EGL comes up but whose allocator refuses the target, as on a virtual GPU) offered the
+/// GL renderer's formats to a compositor rendering in Pixman, which refused every buffer, and a
+/// nested kwin_wayland died of the protocol error.
+fn gpu_bring_up(
+    device_path: &std::path::Path,
+    width: u32,
+    height: u32,
+) -> Result<GpuBringUp, String> {
+    let (gbm, renderer) = gpu_render_init(device_path)?;
+    let formats = Bind::<Dmabuf>::supported_formats(&renderer)
+        .ok_or("Failed to query formats")?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let node = DrmNode::from_path(device_path).map_err(|_| "Failed to create DrmNode")?;
+    let bo = alloc_render_target(&gbm, width, height, GbmFormat::Argb8888)
+        .map_err(|_| "Failed to allocate GBM buffer")?;
+    let dmabuf = create_dmabuf_from_bo(&bo);
+    Ok(GpuBringUp {
+        gbm,
+        renderer,
+        formats,
+        node,
+        target: (bo, dmabuf),
+    })
+}
+
 /// `GL_RENDERER` of a live renderer — the driver that actually answered, which is the only
 /// thing that separates a GPU from Mesa's software fallback on the same node. Empty when the
 /// context cannot be made current or the string is unavailable.
@@ -6261,49 +6300,29 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
     let mut gpu_success = false;
     if use_gpu {
         println!("[Wayland] Renderer: GL on {dri_node}.");
-        let init_res: Result<(), String> = (|| {
-            let device_path = std::path::Path::new(&dri_node);
-            let (gbm_allocator, mut renderer) = gpu_render_init(device_path)?;
-
-            if let Err(e) = renderer.bind_wl_display(&dh) {
-                crate::log::debug!(
-                    "[Wayland] EGL did not bind to the Wayland display (optional): {:?}",
-                    e
-                );
-            }
-
-            let formats = Bind::<Dmabuf>::supported_formats(&renderer)
-                .ok_or("Failed to query formats")?
-                .into_iter()
-                .collect::<Vec<_>>();
-
-            let node = DrmNode::from_path(device_path).map_err(|_| "Failed to create DrmNode")?;
-            let dmabuf_default_feedback =
-                DmabufFeedbackBuilder::new(node.dev_id(), formats.clone()).build();
-
-            dmabuf_global = Some(if let Ok(default_feedback) = dmabuf_default_feedback {
-                dmabuf_state.create_global_with_default_feedback::<AppState>(&dh, &default_feedback)
-            } else {
-                dmabuf_state.create_global::<AppState>(&dh, formats)
+        let init_res = gpu_bring_up(std::path::Path::new(&dri_node), width as u32, height as u32)
+            .map(|mut up| {
+                if let Err(e) = up.renderer.bind_wl_display(&dh) {
+                    crate::log::debug!(
+                        "[Wayland] EGL did not bind to the Wayland display (optional): {:?}",
+                        e
+                    );
+                }
+                let feedback =
+                    DmabufFeedbackBuilder::new(up.node.dev_id(), up.formats.clone()).build();
+                dmabuf_global = Some(if let Ok(default_feedback) = feedback {
+                    dmabuf_state
+                        .create_global_with_default_feedback::<AppState>(&dh, &default_feedback)
+                } else {
+                    dmabuf_state.create_global::<AppState>(&dh, up.formats)
+                });
+                offscreen_buffer = Some(up.target);
+                gbm_device_raw = Some(up.gbm);
+                gles_renderer = Some(up.renderer);
             });
 
-            let bo = alloc_render_target(
-                &gbm_allocator,
-                width as u32,
-                height as u32,
-                GbmFormat::Argb8888,
-            )
-            .map_err(|_| "Failed to allocate GBM buffer")?;
-
-            let dmabuf = create_dmabuf_from_bo(&bo);
-            offscreen_buffer = Some((bo, dmabuf));
-            gbm_device_raw = Some(gbm_allocator);
-            gles_renderer = Some(renderer);
-            Ok(())
-        })();
-
         match init_res {
-            Ok(_) => {
+            Ok(()) => {
                 gpu_success = true;
                 report::set_renderer(report::Renderer {
                     kind: "gl",
@@ -8961,6 +8980,29 @@ pub(crate) fn join_within(handle: thread::JoinHandle<()>, what: &str) {
         thread::sleep(std::time::Duration::from_millis(10));
     }
     let _ = handle.join();
+}
+
+#[cfg(test)]
+mod gpu_bring_up_tests {
+    use super::*;
+
+    /// A render target the allocator refuses fails the bring-up, which holds no Wayland display
+    /// and so cannot have advertised the GPU, and a size it takes comes up whole. Ignored by
+    /// default: needs a render node (the first one).
+    #[test]
+    #[ignore]
+    fn gpu_bring_up_fails_whole_on_a_target_the_allocator_refuses() {
+        let index = first_render_node_index().expect("needs a render node");
+        let node = format!("/dev/dri/renderD{}", 128 + index);
+        let path = std::path::Path::new(&node);
+        let err = gpu_bring_up(path, 0, 0)
+            .err()
+            .expect("an empty target is refused");
+        assert_eq!(err, "Failed to allocate GBM buffer");
+        let up = gpu_bring_up(path, 64, 64).expect("a 64x64 target is taken");
+        assert!(!up.formats.is_empty());
+        assert_eq!((up.target.0.width(), up.target.0.height()), (64, 64));
+    }
 }
 
 #[cfg(test)]
