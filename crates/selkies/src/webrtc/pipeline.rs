@@ -107,6 +107,9 @@ pub trait MediaPipeline: Send + Sync {
     /// Store a size and region for the next start.
     fn set_geometry(&self, w: i32, h: i32, region: Option<(i32, i32)>);
     fn framerate(&self) -> f64;
+    /// Run the capture at `fps` under the configured rate, or back at the configured rate
+    /// (None), leaving the configured rate itself, which the display's modes follow, as it is.
+    fn shed_framerate(&self, fps: Option<f64>);
     /// The rate the encoder is held to, in kbps.
     fn video_bitrate(&self) -> f64;
     /// `cbr` or `crf`.
@@ -748,6 +751,16 @@ impl MediaPipeline for Handle {
 
     fn framerate(&self) -> f64 {
         self.0.live.lock().config.framerate
+    }
+
+    fn shed_framerate(&self, fps: Option<f64>) {
+        let (capturing, configured) = {
+            let l = self.0.live.lock();
+            (l.capturing, l.config.framerate)
+        };
+        if capturing && let Err(e) = self.0.capture.update_framerate(fps.unwrap_or(configured)) {
+            debug!(target: "webrtc", "Shed frame rate not taken: {e}");
+        }
     }
 
     fn video_bitrate(&self) -> f64 {

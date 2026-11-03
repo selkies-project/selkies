@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::pipeline::MediaPipeline;
 use log::{debug, info, warn};
 use selkies_rtc::rtp::clock;
 use selkies_rtc::rtp::pacer::CLEANUP_PACE_SHARE;
@@ -34,6 +35,56 @@ pub const CLEANUP_FRAME_S: f64 = 0.2;
 pub const CLEANUP_FRAME_OVERHEAD: f64 = 1.5;
 /// Between congestion ticks.
 const CONGESTION_TICK: Duration = Duration::from_secs(1);
+/// A rate cut by a queue the path showed whose bridge drops more than `FPS_SHED_SHARE` of the
+/// frames for its budget (content the coarsest quantizer cannot fit to the path) lowers the
+/// capture's rate by the share let through, to `FPS_FLOOR` at least (a target cut by loss alone, on
+/// a path that never queued, sheds nothing): the encoder then predicts each frame from the one
+/// before, where the bridge's drops leave one without long-term references nothing but a key frame
+/// to code, which overshoots again. Past `FPS_MIN_FRAMES` a tick it climbs back `FPS_RISE` a tick
+/// while the budget drops `FPS_KEEP_SHARE` or less, and to the configured rate once the rate is
+/// back at its ceiling (`shed_step`).
+const FPS_SHED_SHARE: f64 = 0.5;
+const FPS_KEEP_SHARE: f64 = 0.1;
+const FPS_RISE: f64 = 1.25;
+const FPS_FLOOR: f64 = 2.0;
+const FPS_MIN_FRAMES: u64 = 4;
+
+/// One congestion tick's answer for a display's capture rate: whether its bridge dropped most of
+/// the tick's frames (`over` of `over + passed`) for the budget, whatever cut it, and the rate to
+/// shed to where it changes (`Some(None)` back at the configured rate). `shed` is the rate shed to
+/// now, `queued` whether a queue the path showed cut the target (module constants `FPS_*`).
+pub(crate) fn shed_step(
+    configured: f64,
+    shed: Option<f64>,
+    over: u64,
+    passed: u64,
+    queued: bool,
+    target: f64,
+    ceiling: f64,
+) -> (bool, Option<Option<f64>>) {
+    let total = over + passed;
+    let crowded = total >= FPS_MIN_FRAMES && over as f64 > FPS_SHED_SHARE * total as f64;
+    if configured <= 0.0 {
+        return (crowded, None);
+    }
+    let at_ceiling = target >= ceiling.round();
+    let fps = if queued && !at_ceiling && crowded {
+        Some(
+            FPS_FLOOR
+                .max(configured.min(shed.unwrap_or(configured) * passed as f64 / total as f64)),
+        )
+    } else if let Some(shed) = shed
+        && (at_ceiling || over as f64 <= FPS_KEEP_SHARE * total as f64)
+    {
+        (!at_ceiling && shed * FPS_RISE < configured).then_some(shed * FPS_RISE)
+    } else {
+        return (crowded, None);
+    };
+    if fps == shed {
+        return (crowded, None);
+    }
+    (crowded, Some(fps))
+}
 
 /// The keys a page's `SETTINGS` may change.
 const SETTINGS_ALLOWED: [&str; 19] = [
@@ -727,6 +778,7 @@ impl WebRtcService {
                 // answer it.
                 (target, steer.restored, steer.capacity_kbps.is_some())
             };
+            let crowded = self.shed_frames(&did, pipeline.as_ref(), target, ceiling, queued);
             // What the path carries, through each peer's pacer, sets the rate a still screen's
             // cleanup runs at. A pacer reads the path's capacity, not what cross traffic leaves of
             // it: a target backed off under the display's ceiling reads as no room.
@@ -768,7 +820,9 @@ impl WebRtcService {
             // A cut target over a still screen pads its stream to test the path. A trickle's
             // window reads no queue (too few feedback packets): padding starts on it, and the queue
             // the padded windows measure stops it.
-            let content = (bucket.sent_bps - bucket.padding_bps).max(0.0);
+            // A display whose bridge dropped most of the tick's frames for the budget is not a
+            // still screen, however little it sent.
+            let content = (!crowded).then(|| (bucket.sent_bps - bucket.padding_bps).max(0.0));
             let pad = self.probe_rate(&did, target, ceiling, content, queue_s.unwrap_or(0.0), now);
             self.pad_display(
                 &did,
@@ -823,7 +877,7 @@ impl WebRtcService {
                 .map_or(hi, |d| d.video_bitrate)
                 .clamp(lo, hi);
             let now = clock::monotonic();
-            let pad = self.probe_rate(&did, pipeline.video_bitrate(), ceiling, 0.0, 0.0, now);
+            let pad = self.probe_rate(&did, pipeline.video_bitrate(), ceiling, Some(0.0), 0.0, now);
             self.pad_display(
                 &did,
                 padded.get(&did).map_or(&[][..], Vec::as_slice),
@@ -840,7 +894,7 @@ impl WebRtcService {
         display: &str,
         target: f64,
         ceiling: f64,
-        content_bps: f64,
+        content_bps: Option<f64>,
         queue_s: f64,
         now: f64,
     ) -> f64 {
@@ -852,7 +906,54 @@ impl WebRtcService {
         st.path_probes
             .entry(display.to_string())
             .or_default()
-            .rate_bps(target, ceiling, Some(content_bps), Some(queue_s), held, now)
+            .rate_bps(target, ceiling, content_bps, Some(queue_s), held, now)
+    }
+
+    /// Lower or restore a display's capture rate from what its bridge dropped for the budget this
+    /// tick (`shed_step`), leaving the configured rate as it is; whether the bridge dropped most of
+    /// the tick's frames for the budget.
+    fn shed_frames(
+        &self,
+        display: &str,
+        pipeline: &dyn MediaPipeline,
+        target: f64,
+        ceiling: f64,
+        queued: bool,
+    ) -> bool {
+        let Some(counts) = self.engine.video_budget_counts(display) else {
+            return false;
+        };
+        let configured = pipeline.framerate();
+        let (crowded, change, over, total) = {
+            let mut st = self.st.lock();
+            let before = st
+                .budget_counts
+                .insert(display.to_string(), counts)
+                .unwrap_or(counts);
+            let (over, passed) = (counts.0 - before.0, counts.1 - before.1);
+            let shed = st.shed_fps.get(display).copied();
+            let (crowded, change) =
+                shed_step(configured, shed, over, passed, queued, target, ceiling);
+            if let Some(fps) = change {
+                match fps {
+                    Some(fps) => st.shed_fps.insert(display.to_string(), fps),
+                    None => st.shed_fps.remove(display),
+                };
+            }
+            (crowded, change, over, over + passed)
+        };
+        if let Some(fps) = change {
+            pipeline.shed_framerate(fps);
+            match fps {
+                Some(fps) => {
+                    info!(target: "webrtc", "Congestion control[{display}]: capture at {fps:.1} fps ({over} of {total} frames over the {target:.0} kbps budget)")
+                }
+                None => {
+                    info!(target: "webrtc", "Congestion control[{display}]: capture at the configured {configured} fps again")
+                }
+            }
+        }
+        crowded
     }
 
     /// Pad a display's `peers` at `bps` until `until`, each through its own pacer, or stop padding
@@ -899,5 +1000,127 @@ impl WebRtcService {
             st.path_probes.remove(display);
         }
         self.pad_display(display, &[], 0.0, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod shed_tests {
+    use super::*;
+
+    const CEILING: f64 = 8000.0;
+    const _: () = assert!(FPS_KEEP_SHARE < FPS_SHED_SHARE && FPS_RISE > 1.0);
+
+    /// A display at 60 fps whose ticks run `shed_step` the way `shed_frames` does: the rate shed
+    /// to now, and every change it made (`None` back at the configured rate).
+    #[derive(Default)]
+    struct Display {
+        shed: Option<f64>,
+        rates: Vec<Option<f64>>,
+    }
+
+    impl Display {
+        fn tick_at(&mut self, over: u64, passed: u64, target: f64, queued: bool) -> Option<f64> {
+            let (_, change) = shed_step(60.0, self.shed, over, passed, queued, target, CEILING);
+            if let Some(fps) = change {
+                self.shed = fps;
+                self.rates.push(fps);
+            }
+            self.shed
+        }
+
+        fn tick(&mut self, over: u64, passed: u64) -> Option<f64> {
+            self.tick_at(over, passed, 1000.0, true)
+        }
+    }
+
+    #[test]
+    fn a_crowded_display_sheds_its_capture_rate_and_climbs_back() {
+        let mut d = Display::default();
+        assert!(
+            d.tick_at(56, 4, 1000.0, false).is_none()
+                && d.tick_at(56, 4, 1000.0, false).is_none()
+                && d.rates.is_empty(),
+            "a target cut by loss alone sheds nothing, whatever the bridge drops"
+        );
+        let shed = d.tick(50, 10);
+        assert_eq!(
+            shed,
+            Some(10.0),
+            "one cut by a queue the path showed sheds to the share let through"
+        );
+        assert_eq!(d.rates, [Some(10.0)]);
+        assert_eq!(d.tick(6, 4), Some(4.0), "again at the shed rate");
+        assert_eq!(d.tick(9, 1), Some(FPS_FLOOR), "to FPS_FLOOR at least");
+        assert_eq!(
+            d.tick(0, 2),
+            Some(FPS_FLOOR * FPS_RISE),
+            "a tick that dropped nothing climbs FPS_RISE"
+        );
+        let before = d.tick(0, 0);
+        assert_eq!(
+            before,
+            Some(FPS_FLOOR * FPS_RISE * FPS_RISE),
+            "so does a still tick"
+        );
+        assert_eq!(
+            d.tick(1, 10),
+            before.map(|b| b * FPS_RISE),
+            "and one that dropped FPS_KEEP_SHARE or less"
+        );
+        let held = d.rates.len();
+        d.tick(3, 7);
+        assert_eq!(
+            d.rates.len(),
+            held,
+            "one that dropped more, short of FPS_SHED_SHARE, holds"
+        );
+        d.tick_at(8, 2, 1000.0, false);
+        assert_eq!(
+            d.rates.len(),
+            held,
+            "a shed rate climbs back once the cut is loss alone, and sheds no further"
+        );
+        while d.tick(0, 10).is_some() {}
+        assert_eq!(
+            d.rates.last(),
+            Some(&None),
+            "climbing past the configured rate restores it"
+        );
+
+        let mut d = Display::default();
+        d.tick(50, 10);
+        assert_eq!(d.rates, [Some(10.0)]);
+        d.tick_at(10, 0, CEILING, true);
+        assert_eq!(
+            d.rates.last(),
+            Some(&None),
+            "a target back at its ceiling restores the configured rate whatever the bridge dropped"
+        );
+        d.tick_at(50, 10, CEILING, true);
+        assert_eq!(
+            d.rates,
+            [Some(10.0), None],
+            "and a tick at the ceiling never sheds"
+        );
+        d.tick(FPS_MIN_FRAMES - 1, 0);
+        assert_eq!(
+            d.rates,
+            [Some(10.0), None],
+            "nor one of fewer than FPS_MIN_FRAMES frames"
+        );
+    }
+
+    #[test]
+    fn a_display_whose_bridge_dropped_most_frames_is_crowded() {
+        let crowded =
+            |over, passed, queued| shed_step(60.0, None, over, passed, queued, 1000.0, CEILING).0;
+        assert!(
+            crowded(50, 10, false) && crowded(50, 10, true),
+            "whatever cut the target"
+        );
+        assert!(
+            !crowded(5, 5, false) && !crowded(FPS_MIN_FRAMES - 1, 0, false),
+            "one that dropped half or fewer, or of too few frames, is not"
+        );
     }
 }

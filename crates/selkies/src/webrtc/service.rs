@@ -155,6 +155,10 @@ pub(crate) struct State {
     pub link_allowances: HashMap<String, LinkAllowance>,
     /// Each display's `PathProbe`, and the peers its padding goes to, by peer id.
     pub path_probes: HashMap<String, PathProbe>,
+    /// The capture rate congestion control shed to by display (`shed_step`), and the bridge's
+    /// counts it read.
+    pub shed_fps: HashMap<String, f64>,
+    pub budget_counts: HashMap<String, (u64, u64)>,
     pub padded: HashMap<String, Vec<(String, Peer)>>,
     pub invalidation_log: HashMap<(String, bool), (f64, u32)>,
     pub stop_grace: Option<JoinHandle<()>>,
@@ -245,6 +249,8 @@ impl WebRtcService {
                 rate_holds: HashMap::new(),
                 link_allowances: HashMap::new(),
                 path_probes: HashMap::new(),
+                shed_fps: HashMap::new(),
+                budget_counts: HashMap::new(),
                 padded: HashMap::new(),
                 invalidation_log: HashMap::new(),
                 stop_grace: None,
