@@ -17,7 +17,13 @@
 //! credential when Basic auth is off and one accepted beside it when on; a cookie-carried
 //! token on a state-changing request is held to the Origin rule too; with a master token set,
 //! the WebSocket handshakes skip Basic, since a browser cannot attach fresh Basic credentials to
-//! one; and everything else falls through to Basic Auth when it is enabled. A request that
+//! one; and everything else falls through to Basic Auth when it is enabled. Without a master
+//! token a WebSocket handshake may present the [`SOCKET_COOKIE`] in place of Basic credentials,
+//! which WebKit attaches to a page's requests but not to a handshake: every Basic-authenticated
+//! `GET` or `HEAD` is answered with one for its login's role (HttpOnly, SameSite=Strict, under
+//! the route prefix, Secure over https), signed with a key of this process's for
+//! [`SOCKET_COOKIE_S`], so a restart ends every one and the reconnect's probe takes a new one.
+//! It authenticates no other request. A request that
 //! authenticates with the view-only password or a viewer-role token is tagged with a viewer
 //! [`RoleCeiling`], which handlers that change host or session state refuse through
 //! [`Ceiling`]. Every request that passes also carries a [`RequestAuth`], the same verdict in
@@ -25,6 +31,10 @@
 //!
 //! Both challenges name [`AUTH_REALM`]: the web client's 401 guard keys on the Bearer one as
 //! this server's own token verdict and leaves the page alone, and reloads once on any other.
+//! Only a page load (a navigation's `Sec-Fetch-Mode`, or none sent) is challenged with the Basic
+//! scheme: a browser holds a background request open behind its login prompt, which a
+//! fullscreen session hides, so the page stalled. Answered with a scheme no browser prompts
+//! for, the guard reloads the page and the prompt comes with the page itself.
 
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
@@ -33,6 +43,8 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use super::AppState;
@@ -54,6 +66,14 @@ pub const SESSION_TOKEN_PROTOCOL_PREFIX: &str = "selkies.token.";
 /// Fallback carrier for the master token on the token and control endpoints, the same
 /// `Bearer <token>` grammar as `Authorization`.
 pub const MASTER_TOKEN_HEADER: &str = "Selkies-Authorization";
+/// What a Basic-authenticated page's WebSocket handshakes carry in place of the Basic
+/// credentials (the module docstring), `<role>.<expires>.<hex HMAC-SHA256>`.
+pub const SOCKET_COOKIE: &str = "selkies_socket";
+/// How long a socket cookie is good for, in seconds.
+pub const SOCKET_COOKIE_S: u64 = 86_400;
+
+/// The key socket cookies are signed with, this process's alone.
+static SOCKET_COOKIE_KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
 
 /// The role the credential that authenticated a request caps it at, as a request extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,12 +138,19 @@ fn carries_master_token(headers: &HeaderMap, master_token: &str) -> bool {
 
 /// A 401 that re-opens the browser's login prompt; wrong credentials carry it too, since
 /// without one the browser renders the body as a page and a mistyped password ends the session.
-pub fn basic_challenge(text: &str) -> Response {
+/// Only a page load gets the Basic scheme (the module docstring); a background request gets one
+/// no browser prompts for.
+pub fn basic_challenge(headers: &HeaderMap, text: &str) -> Response {
+    let mode = headers.get("sec-fetch-mode").and_then(header_text);
+    let scheme = match mode {
+        None | Some("navigate") | Some("nested-navigate") => "Basic",
+        Some(_) => "PageLogin",
+    };
     (
         StatusCode::UNAUTHORIZED,
         [(
             header::WWW_AUTHENTICATE,
-            format!("Basic realm=\"{AUTH_REALM}\", charset=\"UTF-8\""),
+            format!("{scheme} realm=\"{AUTH_REALM}\", charset=\"UTF-8\""),
         )],
         text.to_string(),
     )
@@ -148,6 +175,81 @@ pub fn query_param(query: Option<&str>, name: &str) -> Option<String> {
     url::form_urlencoded::parse(query?.as_bytes())
         .find(|(k, _)| k == name)
         .map(|(_, v)| v.into_owned())
+}
+
+/// Seconds since the epoch.
+fn epoch_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The socket cookie for `role` until `expires` (epoch seconds).
+pub(crate) fn socket_cookie_value(role: Role, expires: u64) -> String {
+    let body = format!("{role}.{expires}");
+    let mut mac = Hmac::<Sha256>::new_from_slice(&*SOCKET_COOKIE_KEY).expect("any key length");
+    mac.update(body.as_bytes());
+    let digest: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{body}.{digest}")
+}
+
+/// The role a request's socket cookie grants and when it ends, or none for none, one past its
+/// time, or one this process did not sign.
+fn socket_cookie_role(headers: &HeaderMap) -> Option<(Role, u64)> {
+    let value = cookie_value(headers, SOCKET_COOKIE)?;
+    let mut parts = value.splitn(3, '.');
+    let (role, expires) = (parts.next()?, parts.next()?);
+    let role = match role {
+        "controller" => Role::Controller,
+        "viewer" => Role::Viewer,
+        _ => return None,
+    };
+    let expires: u64 = expires.parse().ok()?;
+    if expires <= epoch_s()
+        || !ct_eq(
+            socket_cookie_value(role, expires).as_bytes(),
+            value.as_bytes(),
+        )
+    {
+        return None;
+    }
+    Some((role, expires))
+}
+
+/// The `Set-Cookie` renewing a Basic-authenticated request's socket cookie for `role`, or none
+/// where it carries one for that role with more than half its time left.
+fn renewed_socket_cookie(
+    request_headers: &HeaderMap,
+    role: Role,
+    secure: bool,
+    subfolder: &str,
+) -> Option<HeaderValue> {
+    let now = epoch_s();
+    if socket_cookie_role(request_headers).is_some_and(|(held, expires)| {
+        held == role && expires.saturating_sub(now) > SOCKET_COOKIE_S / 2
+    }) {
+        return None;
+    }
+    let forwarded_https = request_headers
+        .get("x-forwarded-proto")
+        .and_then(header_text)
+        .and_then(|v| v.split(',').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"));
+    let value = socket_cookie_value(role, now + SOCKET_COOKIE_S);
+    let secure = if secure || forwarded_https {
+        "; Secure"
+    } else {
+        ""
+    };
+    HeaderValue::from_str(&format!(
+        "{SOCKET_COOKIE}={value}; Max-Age={SOCKET_COOKIE_S}; Path={subfolder}/; HttpOnly; SameSite=Strict{secure}"
+    ))
+    .ok()
 }
 
 /// The value of the cookie `name` as the client sent it.
@@ -329,18 +431,27 @@ fn declares_body(headers: &HeaderMap) -> bool {
 /// A refusal is taken before the request's body is read, so an unauthenticated upload is not
 /// paid for, and the connection is closed with it: leaving those bytes unread on a keep-alive
 /// connection would have the server parse them as the next request.
-pub async fn gate(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+pub async fn gate(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let has_body = declares_body(request.headers());
     let mut response = match authorize(&state, &request) {
         Verdict::Refused(response) => response,
-        Verdict::Pass(ceiling) => {
-            let auth = request_auth(&state, &request, ceiling);
-            let extensions = request.extensions_mut();
-            extensions.insert(auth);
-            if let Some(role) = ceiling {
-                extensions.insert(RoleCeiling(role));
+        Verdict::Pass(ceiling) => pass(&state, request, next, ceiling).await,
+        Verdict::Basic(role) => {
+            let renewal = (!is_websocket_upgrade(request.headers())
+                && matches!(*request.method(), Method::GET | Method::HEAD))
+            .then(|| {
+                let secure = request
+                    .extensions()
+                    .get::<ConnInfo>()
+                    .is_some_and(|c| c.secure);
+                renewed_socket_cookie(request.headers(), role, secure, &state.config.subfolder)
+            })
+            .flatten();
+            let mut response = pass(&state, request, next, Some(role)).await;
+            if let Some(cookie) = renewal {
+                response.headers_mut().append(header::SET_COOKIE, cookie);
             }
-            next.run(request).await
+            response
         }
     };
     if response.status().as_u16() >= 400 && has_body {
@@ -349,6 +460,22 @@ pub async fn gate(State(state): State<AppState>, mut request: Request, next: Nex
             .insert(header::CONNECTION, HeaderValue::from_static("close"));
     }
     response
+}
+
+/// Hand a request the gate passed to its route, tagged with its verdict.
+async fn pass(
+    state: &AppState,
+    mut request: Request,
+    next: Next,
+    ceiling: Option<Role>,
+) -> Response {
+    let auth = request_auth(state, &request, ceiling);
+    let extensions = request.extensions_mut();
+    extensions.insert(auth);
+    if let Some(role) = ceiling {
+        extensions.insert(RoleCeiling(role));
+    }
+    next.run(request).await
 }
 
 /// The verdict as the file routes read it: every token the request carried, valid or not,
@@ -370,6 +497,8 @@ fn request_auth(state: &AppState, request: &Request, ceiling: Option<Role>) -> R
 enum Verdict {
     /// On to the route, under the ceiling the credential set, none where no credential did.
     Pass(Option<Role>),
+    /// On to the route as a Basic login of this role, whose answer renews the socket cookie.
+    Basic(Role),
     Refused(Response),
 }
 
@@ -442,6 +571,9 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
     }
     let auth_header = headers.get(header::AUTHORIZATION).and_then(header_text);
     let Some(encoded) = auth_header.and_then(|h| h.strip_prefix("Basic ")) else {
+        if let Some((role, _)) = socket_cookie_role(headers).filter(|_| is_ws_handshake) {
+            return Verdict::Pass(Some(role));
+        }
         if is_ws_upgrade {
             let remote = remote_ip(request)
                 .map(|ip| ip.to_string())
@@ -451,14 +583,14 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
                  Authorization header (browsers only attach cached credentials; set a master token or disable \
                  basic auth for browser clients behind proxies).");
         }
-        return Verdict::Refused(basic_challenge("Authorization Required"));
+        return Verdict::Refused(basic_challenge(headers, "Authorization Required"));
     };
     let decoded = STANDARD
         .decode(encoded.trim())
         .ok()
         .and_then(|b| String::from_utf8(b).ok());
     let Some((username, password)) = decoded.as_deref().and_then(|d| d.split_once(':')) else {
-        return Verdict::Refused(basic_challenge("Invalid Credentials"));
+        return Verdict::Refused(basic_challenge(headers, "Invalid Credentials"));
     };
     let user_ok = ct_eq(username.as_bytes(), config.basic_auth_user.as_bytes());
     let main_ok = ct_eq(password.as_bytes(), config.basic_auth_password.as_bytes());
@@ -466,13 +598,13 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
     let viewonly_ok = ct_eq(password.as_bytes(), viewonly) && !viewonly.is_empty();
     if !(user_ok && (main_ok || viewonly_ok)) {
         log::warn!(target: "server", "Invalid credentials provided for user: {}", config.basic_auth_user);
-        return Verdict::Refused(basic_challenge("Invalid Credentials"));
+        return Verdict::Refused(basic_challenge(headers, "Invalid Credentials"));
     }
-    Verdict::Pass(Some(if viewonly_ok && !main_ok {
+    Verdict::Basic(if viewonly_ok && !main_ok {
         Role::Viewer
     } else {
         Role::Controller
-    }))
+    })
 }
 
 /// Why a handshake's token carriers were refused; answered 400 with the text.

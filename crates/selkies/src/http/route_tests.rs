@@ -833,6 +833,252 @@ async fn legacy_modes() {
     app.stop().await;
 }
 
+/// Only a page load, or a client sending no `Sec-Fetch-Mode`, is challenged with the Basic
+/// scheme; a background request gets one the browser never prompts for.
+#[tokio::test]
+async fn basic_challenge_schemes() {
+    let config = HttpConfig {
+        master_token: String::new(),
+        enable_basic_auth: true,
+        ..secure_config()
+    };
+    let (app, _state) = stub_server(config).await;
+    let wrong = basic("user", "wrong");
+    let modes = [
+        None,
+        Some("navigate"),
+        Some("nested-navigate"),
+        Some("cors"),
+        Some("no-cors"),
+        Some("same-origin"),
+        Some("websocket"),
+    ];
+    for (name, credentials) in [
+        ("no credentials", None),
+        ("wrong credentials", Some(wrong.as_str())),
+    ] {
+        for mode in modes {
+            let mut headers = Vec::new();
+            if let Some(c) = credentials {
+                headers.push(("authorization", c));
+            }
+            if let Some(m) = mode {
+                headers.push(("sec-fetch-mode", m));
+            }
+            let r = app.call("GET", "/", &headers).await;
+            let scheme = match mode {
+                None | Some("navigate") | Some("nested-navigate") => "Basic",
+                Some(_) => "PageLogin",
+            };
+            assert!(
+                r.status == 401
+                    && r.header("www-authenticate")
+                        == Some(
+                            format!("{scheme} realm=\"{AUTH_REALM}\", charset=\"UTF-8\"").as_str()
+                        ),
+                "{name}, Sec-Fetch-Mode {mode:?}: {} {:?}",
+                r.status,
+                r.header("www-authenticate")
+            );
+        }
+    }
+    let r = app
+        .call(
+            "GET",
+            "/",
+            &[
+                ("authorization", &basic("user", "secret")),
+                ("sec-fetch-mode", "cors"),
+            ],
+        )
+        .await;
+    assert!(
+        r.status == 200 && r.header("www-authenticate").is_none(),
+        "an authenticated request is not challenged"
+    );
+    app.stop().await;
+}
+
+/// Basic auth without a master token: a Basic-authenticated request is answered with the
+/// socket cookie, which a WebSocket handshake carrying no Basic credentials (WebKit's) presents
+/// in their place, and which authenticates nothing else.
+#[tokio::test]
+async fn basic_socket_cookie() {
+    use super::auth::{SOCKET_COOKIE, socket_cookie_value};
+    use crate::core::Role;
+
+    let config = HttpConfig {
+        master_token: String::new(),
+        enable_basic_auth: true,
+        basic_auth_viewonly_password: "look".into(),
+        ..secure_config()
+    };
+    let (app, _state) = stub_server(config).await;
+    let set_cookie = |r: &super::testing::Reply| -> Option<String> {
+        r.headers
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|v| v.starts_with(&format!("{SOCKET_COOKIE}=")))
+            .map(str::to_string)
+    };
+    let value_of = |cookie: &str| -> String {
+        cookie[SOCKET_COOKIE.len() + 1..]
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let carried = |value: &str| format!("{SOCKET_COOKIE}={value}");
+    let upgrade = [("upgrade", "websocket"), ("connection", "Upgrade")];
+
+    let r = app
+        .call("GET", "/", &[("authorization", &basic("user", "secret"))])
+        .await;
+    let cookie = set_cookie(&r).expect("a Basic-authenticated page load sets the socket cookie");
+    assert!(
+        r.status == 200
+            && cookie.contains("; HttpOnly")
+            && cookie.contains("; SameSite=Strict")
+            && cookie.contains("; Path=/;")
+            && !cookie.contains("Secure"),
+        "HttpOnly, SameSite=Strict, under /, not Secure over http: {cookie}"
+    );
+    let value = value_of(&cookie);
+    for path in ["/api/websockets", "/api/webrtc/signaling"] {
+        let c = carried(&value);
+        let r = app
+            .call("GET", path, &[upgrade[0], upgrade[1], ("cookie", &c)])
+            .await;
+        assert!(
+            r.status == 200 && r.body == "controller",
+            "a handshake to {path} carrying it and no Basic credentials passes as controller: {} {}",
+            r.status,
+            r.body
+        );
+    }
+    let c = carried(&value);
+    let r = app
+        .call(
+            "GET",
+            "/api/websockets",
+            &[
+                upgrade[0],
+                upgrade[1],
+                ("cookie", &c),
+                ("origin", "http://elsewhere.example"),
+            ],
+        )
+        .await;
+    assert_eq!(
+        r.status, 403,
+        "a handshake from another site carrying it is refused by Origin"
+    );
+    assert_eq!(
+        app.call("GET", "/api/websockets", &[("cookie", &c)])
+            .await
+            .status,
+        401,
+        "it is no credential for a plain GET of the socket route"
+    );
+    assert_eq!(
+        app.call("GET", "/api/files/", &[("cookie", &c)])
+            .await
+            .status,
+        401,
+        "nor for any other route"
+    );
+    let mut parts = value.splitn(3, '.');
+    let (role, expires, mac) = (
+        parts.next().unwrap(),
+        parts.next().unwrap(),
+        parts.next().unwrap(),
+    );
+    let expires: u64 = expires.parse().unwrap();
+    for (forged, why) in [
+        (
+            format!("viewer.{expires}.{mac}"),
+            "a cookie whose role was changed is refused",
+        ),
+        (
+            format!("{role}.{}.{mac}", expires + 60),
+            "a cookie whose time was changed is refused",
+        ),
+        (
+            socket_cookie_value(Role::Controller, expires - super::auth::SOCKET_COOKIE_S - 1),
+            "a cookie past its time is refused",
+        ),
+    ] {
+        let c = carried(&forged);
+        let r = app
+            .call(
+                "GET",
+                "/api/websockets",
+                &[upgrade[0], upgrade[1], ("cookie", &c)],
+            )
+            .await;
+        assert_eq!(r.status, 401, "{why}");
+    }
+    assert_eq!(
+        app.call("GET", "/api/websockets", &upgrade).await.status,
+        401,
+        "a handshake with neither cookie nor Basic credentials is refused"
+    );
+
+    let r = app
+        .call("GET", "/", &[("authorization", &basic("user", "look"))])
+        .await;
+    let viewer = value_of(&set_cookie(&r).expect("the view-only login sets one too"));
+    let c = carried(&viewer);
+    let r = app
+        .call(
+            "GET",
+            "/api/websockets",
+            &[upgrade[0], upgrade[1], ("cookie", &c)],
+        )
+        .await;
+    assert!(
+        r.status == 200 && r.body == "viewer" && viewer.starts_with("viewer."),
+        "the view-only password's cookie passes a handshake as a viewer, no more: {} {}",
+        r.status,
+        r.body
+    );
+    let r = app
+        .call("GET", "/", &[("authorization", &basic("user", "wrong"))])
+        .await;
+    assert!(
+        r.status == 401 && set_cookie(&r).is_none(),
+        "a refused login sets no cookie"
+    );
+    let c = carried(&value);
+    let r = app
+        .call(
+            "GET",
+            "/",
+            &[("authorization", &basic("user", "secret")), ("cookie", &c)],
+        )
+        .await;
+    assert!(
+        r.status == 200 && set_cookie(&r).is_none(),
+        "a request carrying a fresh cookie for its role is not answered with another"
+    );
+    let r = app
+        .call(
+            "GET",
+            "/",
+            &[
+                ("authorization", &basic("user", "secret")),
+                ("x-forwarded-proto", "https"),
+            ],
+        )
+        .await;
+    assert!(
+        set_cookie(&r).is_some_and(|c| c.ends_with("; Secure")),
+        "behind a proxy terminating https the cookie is Secure"
+    );
+    app.stop().await;
+}
+
 /// `POST /api/switch` through the real gate, by Origin.
 #[tokio::test]
 async fn switch_origin_cases() {
