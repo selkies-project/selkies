@@ -40,9 +40,9 @@ use selkies_rtc::rtp::sender::SenderTransport;
 use selkies_rtc::rtp::transport::SinkError;
 use selkies_rtc::rtp::twcc::{TWCC_QUEUE_MS, Window};
 use selkies_rtc::rtp::{
-    CodecParameters, EncodedFrame, HeaderExtensionParameters, Kind, PacedTransport, PacketSink,
-    RtcpPacket, RtpPacket, RtpReceiver, RtpRouter, RtpSender, SendParameters, SenderHooks,
-    TwccReceiver, clock,
+    CodecParameters, EncodedFrame, HeaderExtensionParameters, HeaderExtensionsMap, Kind,
+    PacedTransport, PacketSink, RtcpPacket, RtpPacket, RtpReceiver, RtpRouter, RtpSender,
+    SendParameters, SenderHooks, TwccReceiver, clock,
 };
 use selkies_rtc::sctp::{
     ChannelState, DataChannel, DataChannelParameters, DtlsDatagrams, Message, SctpEvent,
@@ -343,6 +343,27 @@ enum Track {
     Audio,
     Microphone,
     Webcam,
+}
+
+/// An uplink packet routed to its track and parsed with the header extensions that track's
+/// media section negotiated. Routing reads the SSRC and payload type alone, so the packet is
+/// checked against no extensions first, which keeps a malformed one from teaching the router an
+/// SSRC, then read with its own track's: the microphone's section carries no abs-send-time, which
+/// the webcam's receive estimate needs.
+fn parse_uplink(
+    router: &mut RtpRouter<Track>,
+    data: &Bytes,
+    microphone: Option<&HeaderExtensionsMap>,
+    webcam: Option<&HeaderExtensionsMap>,
+) -> Option<(Track, RtpPacket)> {
+    let header = RtpPacket::parse(data, &HeaderExtensionsMap::default()).ok()?;
+    let track = router.route_rtp(&header)?;
+    let map = match track {
+        Track::Microphone => microphone?,
+        Track::Webcam => webcam?,
+        _ => return None,
+    };
+    Some((track, RtpPacket::parse(data, map).ok()?))
 }
 
 /// The step a peer's padding is written in.
@@ -1183,16 +1204,15 @@ impl Media {
     }
 
     fn on_uplink_rtp(&mut self, data: Bytes, arrived: Instant, now: f64) {
-        let map = self
-            .microphone
-            .as_ref()
-            .or(self.webcam.as_ref())
-            .map(|r| r.header_extensions().clone());
-        let Some(map) = map else { return };
-        let Ok(packet) = RtpPacket::parse(&data, &map) else {
-            return;
-        };
-        let Some(track) = self.router.route_rtp(&packet) else {
+        let maps = (
+            self.microphone
+                .as_ref()
+                .map(|r| r.header_extensions().clone()),
+            self.webcam.as_ref().map(|r| r.header_extensions().clone()),
+        );
+        let Some((track, packet)) =
+            parse_uplink(&mut self.router, &data, maps.0.as_ref(), maps.1.as_ref())
+        else {
             return;
         };
         let (receiver, uplink) = match track {
@@ -1323,5 +1343,66 @@ async fn recv_audio(feed: &mut Option<RelayTrack<AudioSample>>) -> AudioSample {
     match feed {
         Some(feed) => feed.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use selkies_rtc::rtp::packet::{ABS_SEND_TIME_URI, MID_URI};
+
+    fn map(extensions: &[(u8, &str)]) -> HeaderExtensionsMap {
+        let mut map = HeaderExtensionsMap::new();
+        let params: Vec<HeaderExtensionParameters> = extensions
+            .iter()
+            .map(|(id, uri)| HeaderExtensionParameters {
+                id: *id,
+                uri: uri.to_string(),
+            })
+            .collect();
+        map.configure(&params);
+        map
+    }
+
+    #[test]
+    fn an_uplink_packet_is_read_with_its_own_tracks_extensions() {
+        let microphone = map(&[(1, MID_URI)]);
+        let webcam = map(&[(1, MID_URI), (3, ABS_SEND_TIME_URI)]);
+        let mut router = RtpRouter::new();
+        router.register_receiver(Track::Microphone, &[0x1111], &[111]);
+        router.register_receiver(Track::Webcam, &[0x2222], &[96]);
+        let mut camera = RtpPacket::new(96, 7, 9000, 0x2222);
+        camera.extensions.abs_send_time = Some(0x12_3456);
+        let wire = Bytes::from(camera.serialize(&webcam));
+        assert_eq!(
+            RtpPacket::parse(&wire, &microphone)
+                .unwrap()
+                .extensions
+                .abs_send_time,
+            None,
+            "the microphone's section negotiated no abs-send-time"
+        );
+        let (track, packet) =
+            parse_uplink(&mut router, &wire, Some(&microphone), Some(&webcam)).unwrap();
+        assert_eq!(track, Track::Webcam);
+        assert_eq!(
+            packet.extensions.abs_send_time,
+            Some(0x12_3456),
+            "a webcam packet keeps the abs-send-time its receive estimate reads"
+        );
+        let voice = Bytes::from(RtpPacket::new(111, 1, 960, 0x1111).serialize(&microphone));
+        let (track, _) =
+            parse_uplink(&mut router, &voice, Some(&microphone), Some(&webcam)).unwrap();
+        assert_eq!(track, Track::Microphone);
+        assert!(
+            parse_uplink(
+                &mut router,
+                &wire.slice(..6),
+                Some(&microphone),
+                Some(&webcam)
+            )
+            .is_none(),
+            "a truncated packet is routed nowhere"
+        );
     }
 }
