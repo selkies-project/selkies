@@ -29,8 +29,6 @@ import sys
 import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(os.path.dirname(TESTS), "src")
-sys.path.insert(0, SRC)
 sys.path.insert(0, TESTS)
 import helpers as H  # noqa: E402
 import websockets  # noqa: E402
@@ -44,12 +42,11 @@ SECOND = (1024, 768)
 # signal, appended to a file with GDK's monitors at that moment.
 PROBE = r"""
 import json, sys
-sys.path.insert(0, sys.argv[3])
 import gi
 gi.require_version("Gdk", "3.0"); gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk
-from selkies.Xlib import display as x11_display
-from selkies.Xlib.ext import randr
+from Xlib import display as x11_display
+from Xlib.ext import randr
 
 ready, log = sys.argv[1], sys.argv[2]
 x = x11_display.Display()
@@ -106,8 +103,8 @@ def unplug_spare_outputs(display_name: str) -> None:
     """Leave the server as a stock Xvfb is: the images' Xvfb offers spare
     outputs through a ``Connected`` property, which the server takes as the
     capability to lay displays out as outputs of their own."""
-    from selkies.Xlib import display as x11_display
-    from selkies.Xlib.ext import randr
+    from Xlib import display as x11_display
+    from Xlib.ext import randr
 
     d = x11_display.Display(display_name)
     try:
@@ -122,7 +119,7 @@ def unplug_spare_outputs(display_name: str) -> None:
 
 def root_size(display_name: str) -> tuple:
     """The root's size, read on a fresh connection."""
-    from selkies.Xlib import display as x11_display
+    from Xlib import display as x11_display
     d = x11_display.Display(display_name)
     try:
         return d.screen().width_in_pixels, d.screen().height_in_pixels
@@ -185,7 +182,7 @@ def run() -> "H.Results":
     probe = None
     try:
         unplug_spare_outputs(display_name)
-        probe = subprocess.Popen([python, script, ready, log, SRC],
+        probe = subprocess.Popen([python, script, ready, log],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
                                  env=dict(os.environ, DISPLAY=display_name))
         deadline = time.time() + 20

@@ -145,7 +145,7 @@ class Patch:
     """
 
     def __init__(self, display: str, rgb: Tuple[int, int, int]) -> None:
-        from selkies.Xlib import X, display as xdisplay
+        from Xlib import X, display as xdisplay
 
         self.d = xdisplay.Display(display)
         root = self.d.screen().root

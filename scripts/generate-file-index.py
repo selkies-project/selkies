@@ -16,30 +16,23 @@ Usage:
     python3 scripts/generate-file-index.py --check  # exit 1 when they are stale
 """
 import argparse
-import ast
 import os
+import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NGINX = os.path.join(REPO, "addons", "selkies-web-core", "nginx")
-SERVER = os.path.join(REPO, "src", "selkies", "stream_server.py")
+SERVER = os.path.join(REPO, "crates", "selkies", "src", "files", "index_html.rs")
 
 
 def constants() -> dict:
-    """The two page halves, read from the source rather than imported.
-
-    Importing the module would pull in aiohttp, which the lint gate and the
-    pre-commit hook that run this have no reason to install.
-    """
+    """The two page halves, the server's raw string constants read from its source, so this
+    needs no build."""
+    source = open(SERVER, encoding="utf-8").read()
     found = {}
-    for node in ast.parse(open(SERVER, encoding="utf-8").read()).body:
-        target = None
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            target = node.target.id
-        elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            target = node.targets[0].id
-        if target in ("FILE_INDEX_HEADER", "FILE_INDEX_FOOTER") and isinstance(node.value, ast.Constant):
-            found[target] = node.value.value
+    for name, _hashes, body in re.findall(r'pub const (FILE_INDEX_HEADER|FILE_INDEX_FOOTER): &str = r(#+)"(.*?)"\2;',
+                                         source, re.S):
+        found[name] = body
     missing = {"FILE_INDEX_HEADER", "FILE_INDEX_FOOTER"} - set(found)
     if missing:
         raise SystemExit(f"{os.path.relpath(SERVER, REPO)} no longer defines {', '.join(sorted(missing))}")

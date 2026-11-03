@@ -1,0 +1,7 @@
+# Ruff runs on the test suites and repository scripts as a bug-finder, not a
+# style enforcer: only rule families that flag defects (pyflakes, bugbear,
+# pycodestyle errors, pylint errors) are enabled. Run: ruff check
+target-version = "py39"
+
+[lint]
+select = ["E4", "E9", "F", "B", "PLE"]

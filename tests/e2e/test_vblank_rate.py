@@ -27,7 +27,7 @@ RATE_ATOMS = ("_FAKE_SCREEN_FPS", "_FAKE_SCREEN_MILLIHZ")
 
 def fake_rate() -> tuple:
     """The root window's `_FAKE_SCREEN_FPS` and `_FAKE_SCREEN_MILLIHZ`, None where absent."""
-    from selkies.Xlib import Xatom
+    from Xlib import Xatom
     d = H.x_display()
     try:
         props = [d.screen().root.get_full_property(d.intern_atom(name), Xatom.CARDINAL) for name in RATE_ATOMS]

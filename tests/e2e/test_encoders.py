@@ -151,7 +151,7 @@ def near(rgb: Optional[list], want: tuple, tolerance: int = TOLERANCE) -> bool:
 def paint_x11() -> Any:
     """Map the two solid override-redirect windows on the test display; closing
     the returned display connection takes them down again."""
-    from selkies.Xlib import display as xdisp, X
+    from Xlib import display as xdisp, X
     d = xdisp.Display(H.require_display())
     scr = d.screen()
     for block, argb in ((BLOCK, PAINT_ARGB), (BLOCK2, SATURATED_ARGB)):
@@ -191,7 +191,7 @@ class Picture:
             time.sleep(LIVE_SECS)
             flips = round(LIVE_SECS / LIVE_FLIP_S)
         else:
-            from selkies.Xlib import X
+            from Xlib import X
             d = self.handle
             scr = d.screen()
             win = scr.root.create_window(*FLICKER, 0, scr.root_depth, window_class=X.InputOutput,

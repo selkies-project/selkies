@@ -6,8 +6,9 @@ build). Selkies never chooses between them — it reads pixelflux.SOFTWARE_ENCOD
 decode in a real browser on either build: full-frame `h264enc` forced onto the
 CPU, then the per-stripe `h264enc-striped` streams, on X11 and on Wayland.
 
-Run with SELKIES_TEST_PYTHON pointing at the interpreter whose pixelflux build is
-under test (tests/helpers.py starts the server with it).
+Run with SELKIES_TEST_SERVER pointing at the server whose pixelflux build is under
+test, and the suites' interpreter carrying the matching pixelflux wheel, whose
+SOFTWARE_ENCODERS names the encoder to expect.
 
 Usage: python3 tests/e2e/test_software_h264.py [x11|wl|all]
 """

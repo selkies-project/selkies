@@ -107,8 +107,8 @@ def session_image(wayland: bool, want: str = "") -> tuple:
                              timeout=10, env=_wl_env())
         return targets, mime, got.stdout
 
-    from selkies.Xlib import display as xdisp, X
-    from selkies.Xlib.protocol import event as xevent
+    from Xlib import display as xdisp, X
+    from Xlib.protocol import event as xevent
     d = xdisp.Display(H.require_display())
     try:
         scr = d.screen()
@@ -158,8 +158,8 @@ def own_session_image(data: bytes, wayland: bool) -> dict:
         proc.communicate(data, timeout=10)
         return {"stop": lambda: None}
 
-    from selkies.Xlib import display as xdisp, X
-    from selkies.Xlib.protocol import event as xevent
+    from Xlib import display as xdisp, X
+    from Xlib.protocol import event as xevent
     d = xdisp.Display(H.require_display())
     scr = d.screen()
     win = scr.root.create_window(0, 0, 1, 1, 0, scr.root_depth, window_class=X.InputOutput)

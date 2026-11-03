@@ -210,7 +210,7 @@ def paint_bars(w: int, h: int) -> Any:
     """A bar over the last CROP_BAR rows and another over the last columns, on
     the test display, so the edge a padded picture would push out of view is
     a known color."""
-    from selkies.Xlib import display as xdisp, X
+    from Xlib import display as xdisp, X
     d = xdisp.Display(H.require_display())
     scr = d.screen()
     for geometry, argb in (((0, h - CROP_BAR, w, CROP_BAR), TENC.PAINT_ARGB),

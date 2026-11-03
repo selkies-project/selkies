@@ -806,6 +806,9 @@ pub enum Parsed {
     Run(Options, Vec<String>),
     /// `--help`: the usage text to print.
     Help,
+    /// `--jupyter-config`: the Jupyter server configuration that offers this desktop
+    /// (`jupyter_config`) to print.
+    JupyterConfig,
     /// A usage error, as argparse reports one.
     Error(String),
 }
@@ -819,7 +822,8 @@ pub fn usage(prog: &str) -> String {
          \x20 -h, --help         show this help message and exit\n\
          \x20 --session SESSION  a session by file, desktop, or program name (plasma, KDE, xfce, startlxqt), else a command\n\
          \x20                    to run; unset, the desktop XDG_CURRENT_DESKTOP names, else the host's default desktop\n\
-         \x20 --follow           end the session when the parent exits, as the Jupyter server proxy's entry asks\n"
+         \x20 --follow           end the session when the parent exits, as the Jupyter server proxy's entry asks\n\
+         \x20 --jupyter-config   print the Jupyter server configuration that offers this desktop and exit\n"
     )
 }
 
@@ -842,6 +846,8 @@ pub fn parse(argv: &[String]) -> Parsed {
             return Parsed::Help;
         } else if arg == "--follow" {
             options.follow = true;
+        } else if arg == "--jupyter-config" {
+            return Parsed::JupyterConfig;
         } else if arg == "--session" {
             match argv.get(i).filter(|v| !v.starts_with('-')) {
                 Some(value) => {
@@ -874,6 +880,10 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
     let (options, selkies_args) = match parse(argv) {
         Parsed::Help => {
             print!("{}", usage(prog));
+            return 0;
+        }
+        Parsed::JupyterConfig => {
+            println!("{:#}", jupyter_config());
             return 0;
         }
         Parsed::Error(message) => {
@@ -946,6 +956,19 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
     status
 }
 
+/// The Jupyter server configuration that offers this desktop: jupyter-server-proxy reads its
+/// servers from `ServerProxy.servers` in any file of a Jupyter configuration directory's
+/// `jupyter_server_config.d`, so `selkies session --jupyter-config` written there gives every
+/// Jupyter server of that environment a Selkies launcher item. The entry names this executable
+/// and the installed web client's `selkies.svg`.
+pub fn jupyter_config() -> Json {
+    let selkies = std::env::current_exe().unwrap_or_else(|_| "selkies".into());
+    let icon = crate::http::static_files::bundle_dir()
+        .unwrap_or_default()
+        .join("selkies.svg");
+    json!({"ServerProxy": {"servers": {"selkies": jupyter(&selkies, &icon)}}})
+}
+
 /// The server process jupyter-server-proxy starts a desktop with.
 ///
 /// Jupyter authenticates the route and the proxy's Unix socket sits in a directory only this
@@ -1013,6 +1036,7 @@ mod tests {
             )
         );
         assert_eq!(parse(&argv(&["--port=1", "--help"])), Parsed::Help);
+        assert_eq!(parse(&argv(&["--jupyter-config"])), Parsed::JupyterConfig);
         assert!(matches!(parse(&argv(&["--session"])), Parsed::Error(_)));
         assert!(usage("selkies session").starts_with("usage: selkies session "));
     }
@@ -1196,6 +1220,25 @@ mod tests {
         x11_socket_dir(&sockets);
         fs::remove_dir_all(&dir).unwrap();
         assert!(!answers(&sockets.join("X0")));
+    }
+
+    #[test]
+    fn the_jupyter_config_offers_this_executable_as_a_proxy_server() {
+        let config = jupyter_config();
+        let entry = &config["ServerProxy"]["servers"]["selkies"];
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(
+            entry["command"][0].as_str(),
+            Some(exe.to_string_lossy().as_ref()),
+            "the executable that printed it"
+        );
+        assert_eq!(entry["command"][1], "session");
+        assert!(
+            entry["launcher_entry"]["icon_path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("selkies.svg")),
+            "the web client's icon"
+        );
     }
 
     #[test]

@@ -149,7 +149,7 @@ def cursor_window(size: int):
     The connection stays open for the run: the window and its cursor are freed
     with it, and the desktop's own cursor comes back.
     """
-    from selkies.Xlib import X
+    from Xlib import X
 
     d = H.x_display()
     root = d.screen().root

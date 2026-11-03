@@ -65,17 +65,15 @@ def main() -> bool:
     # to read: the probe answers for exactly what it is given, so a variable
     # sitting in the recording alone steers nothing, and one in the actual
     # environment does.
-    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     with tempfile.TemporaryDirectory() as runtime:
         with open(os.path.join(runtime, "container-env"), "w") as fh:
             fh.write("export DRINODE=/dev/dri/renderD999\n")
-        env = dict(os.environ, XDG_RUNTIME_DIR=runtime,
-                   PYTHONPATH=os.path.join(repo, "src"))
-        recorded = subprocess.run([sys.executable, "-m", "selkies.gpu_probe"],
+        env = dict(os.environ, XDG_RUNTIME_DIR=runtime)
+        recorded = subprocess.run([H.SERVER, "gpu-probe"],
                                   capture_output=True, text=True, timeout=120, env=env)
         res.check("a recorded variable alone does not steer the probe",
                   "renderD999" not in recorded.stderr, recorded.stderr.strip()[:120])
-        given = subprocess.run([sys.executable, "-m", "selkies.gpu_probe"],
+        given = subprocess.run([H.SERVER, "gpu-probe"],
                                capture_output=True, text=True, timeout=120,
                                env=dict(env, DRINODE="/dev/null"))
         res.check("what the probe is actually given wins",
@@ -84,9 +82,9 @@ def main() -> bool:
     # The client-path facts, measured on whatever this machine has: every one
     # reported, each from its own small vocabulary, and consistent with each
     # other, since the entrypoint maps them without looking further.
-    probed = subprocess.run([sys.executable, "-m", "selkies.gpu_probe"],
+    probed = subprocess.run([H.SERVER, "gpu-probe"],
                             capture_output=True, text=True, timeout=180,
-                            env=dict(os.environ, PYTHONPATH=os.path.join(repo, "src")))
+                            env=dict(os.environ))
     facts = dict(line.split("=", 1) for line in probed.stdout.splitlines() if "=" in line)
     client = ("SELKIES_GPU_GL_VENDOR", "SELKIES_GPU_EGL_X11",
               "SELKIES_GPU_MESA_DRIVER", "SELKIES_GPU_VULKAN_PRESENTS")

@@ -14,7 +14,6 @@ import time
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 SELECTOR = sys.argv[1] if len(sys.argv) > 1 else "all"
 # The settings parser reads argv when the package is imported.
 sys.argv = ["selkies"]
@@ -22,7 +21,59 @@ sys.argv = ["selkies"]
 import helpers as H  # noqa: E402
 import core_lib as C  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
-from selkies.resource_stats import SystemUsage  # noqa: E402
+import psutil  # noqa: E402
+
+
+def _read(directory: str, name: str) -> str:
+    try:
+        with open(os.path.join(directory, name)) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def memory_reference() -> tuple:
+    """The session's memory total and use as the server reports them, read independently: where
+    the session's cgroup caps CPU or memory below the host, its memory limit (the host's total
+    without one) and its use less the page cache the kernel can drop (the inactive file pages);
+    otherwise psutil's system-wide figures."""
+    host = psutil.virtual_memory()
+    try:
+        lines = open("/proc/self/cgroup").read().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        controllers, path = parts[1], parts[2].lstrip("/")
+        if controllers == "":
+            d, files = os.path.join("/sys/fs/cgroup", path), ("memory.current", "memory.max", "inactive_file")
+            limits = ("cpu.max", "memory.max")
+        elif "memory" in controllers.split(","):
+            d = os.path.join("/sys/fs/cgroup", controllers, path)
+            d = d if os.path.isdir(d) else os.path.join("/sys/fs/cgroup", controllers)
+            files = ("memory.usage_in_bytes", "memory.limit_in_bytes", "total_inactive_file")
+            limits = ("memory.limit_in_bytes",)
+        else:
+            continue
+
+        limited = False
+        for name in limits:
+            value = _read(d, name).split()
+            if value and value[0].isdigit() and (name.startswith("cpu") or int(value[0]) < host.total):
+                limited = True
+        current, limit = _read(d, files[0]), _read(d, files[1])
+        if not limited or not current.isdigit():
+            continue
+        cache = 0
+        for stat in _read(d, "memory.stat").splitlines():
+            key, _, value = stat.partition(" ")
+            if key == files[2] and value.isdigit():
+                cache = int(value)
+        total = int(limit) if limit.isdigit() and int(limit) < host.total else host.total
+        return total, max(0, int(current) - cache)
+    return host.total, host.used
 
 STATS_JS = """() => {
     const latest = window.stream_stats && window.stream_stats.latest;
@@ -54,8 +105,6 @@ def wait_for(page: Any, script: str, timeout: float = 20) -> Any:
 
 def block(mode: str) -> "H.Results":
     res = H.Results(f"system-usage-{mode}")
-    own = SystemUsage()
-    own.sample()
     H.server_start(mode=mode, wayland=False)
     with sync_playwright() as pw:
         browser = C.chromium_launch(pw)
@@ -77,7 +126,7 @@ def block(mode: str) -> "H.Results":
                           and bool(info.get("capture")), info)
             page.evaluate(OPEN_JS, True)
             first = wait_for(page, STATS_JS)
-            _, total, used = own.sample()
+            total, used = memory_reference()
             res.check("opened, the page holds the session's CPU and memory figures",
                       first is not None and 0 <= first[0] <= 100 and 0 < first[2] <= first[1], first)
             res.check("the memory total is what the session's own cgroup allows",

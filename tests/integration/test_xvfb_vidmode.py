@@ -21,7 +21,6 @@ import sys
 from fractions import Fraction
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(TESTS), "src"))
 sys.path.insert(0, TESTS)
 import helpers as H  # noqa: E402
 
@@ -77,7 +76,7 @@ def mesa_rate(dot: int, line: ModeLine) -> Fraction:
 
 def set_rate(display_name: str, name: str, value) -> None:
     """Set the root window's `name` to `value`, or delete it for None."""
-    from selkies.Xlib import Xatom, display as x11_display
+    from Xlib import Xatom, display as x11_display
     d = x11_display.Display(display_name)
     try:
         root, atom = d.screen().root, d.intern_atom(name)

@@ -1,0 +1,17 @@
+# The suites' own dependencies: `pip install -r tests/requirements.txt`. The
+# server under test is the selkies binary (SELKIES_TEST_SERVER, else selkies on
+# PATH, else target/release/selkies in the tree); the suites that drive the
+# capture libraries directly also need the pixelflux and pcmflux wheels the
+# build pins. The browsers the e2e tier drives come from `playwright install
+# --with-deps chromium firefox webkit`; WebKit on Linux also needs GStreamer's
+# opengl plugin (gstreamer1.0-gl), or its video sink falls back.
+pytest
+playwright
+websockets
+pywayland
+python-xlib
+psutil
+aiohttp
+aiortc
+jupyter-server
+jupyter-server-proxy

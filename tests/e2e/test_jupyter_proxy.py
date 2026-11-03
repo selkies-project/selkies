@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""The desktop through Jupyter's server proxy, as `selkies[jupyter]` offers it.
+"""The desktop through Jupyter's server proxy, as `selkies session --jupyter-config` offers it.
 
-The package registers a server process with jupyter-server-proxy, so a
+The configuration it prints, placed in a Jupyter configuration directory's
+jupyter_server_config.d, registers a server process with jupyter-server-proxy, so a
 Jupyter server lists a Selkies item and serves the desktop at /selkies/: it
 starts the launcher on a Unix socket of the proxy's own and carries the page,
 the API, and the data WebSocket behind Jupyter's token, its Xvfb screen
@@ -12,9 +13,8 @@ host's own never starts beside the one it runs. A Jupyter server killed
 outright leaves no session behind, the stand-in's daemonized helper included:
 the launcher follows its parent down.
 
-Needs jupyter-server-proxy beside the interpreter that runs the server under
-test, with selkies installed there rather than only importable, since the
-proxy finds the desktop through the package's entry point.
+Needs jupyter-server and jupyter-server-proxy beside the interpreter that runs the
+suites (tests/requirements.txt).
 """
 import json
 import os
@@ -55,12 +55,20 @@ def get(url: str, token: str) -> tuple:
 
 
 def registered() -> bool:
-    """Whether the server under test's interpreter carries the proxy and the entry point."""
-    probe = ("import jupyter_server_proxy\nfrom importlib.metadata import entry_points\n"
-             "eps = entry_points()\ngroup = eps.select(group='jupyter_serverproxy_servers') "
-             "if hasattr(eps, 'select') else eps.get('jupyter_serverproxy_servers', [])\n"
-             "raise SystemExit(0 if any(e.name == 'selkies' for e in group) else 3)")
+    """Whether the suites' interpreter carries Jupyter's server and its proxy."""
+    probe = "import jupyter_server, jupyter_server_proxy"
     return subprocess.run([H.PYTHON, "-c", probe], capture_output=True).returncode == 0
+
+
+def offer_selkies(config_dir: str) -> None:
+    """Register the server under test with jupyter-server-proxy the way an install does: the
+    configuration `selkies session --jupyter-config` prints, in jupyter_server_config.d."""
+    printed = subprocess.run([H.SERVER, "session", "--jupyter-config"], capture_output=True, text=True,
+                             timeout=30, check=True).stdout
+    json.loads(printed)
+    os.makedirs(os.path.join(config_dir, "jupyter_server_config.d"))
+    with open(os.path.join(config_dir, "jupyter_server_config.d", "selkies.json"), "w") as fh:
+        fh.write(printed)
 
 
 def start_jupyter(token: str, runtime: str, wayland: bool) -> tuple:
@@ -75,6 +83,7 @@ def start_jupyter(token: str, runtime: str, wayland: bool) -> tuple:
            "JUPYTER_CONFIG_DIR": os.path.join(runtime, "config"), "JUPYTER_DATA_DIR": os.path.join(runtime, "data"),
            "JUPYTER_RUNTIME_DIR": os.path.join(runtime, "jupyter"), "SELKIES_WEB_ROOT": H.CORE_DIST,
            "SELKIES_WAYLAND": "true" if wayland else "false"}
+    offer_selkies(env["JUPYTER_CONFIG_DIR"])
     proc = H.spawn([H.PYTHON, "-m", "jupyter_server", "--ServerApp.ip=127.0.0.1", f"--ServerApp.port={port}",
                     "--ServerApp.port_retries=0", f"--ServerApp.token={token}", f"--ServerApp.root_dir={runtime}",
                     "--ServerApp.open_browser=False"],
@@ -90,9 +99,9 @@ def start_jupyter(token: str, runtime: str, wayland: bool) -> tuple:
 
 
 def launcher_of(jupyter: subprocess.Popen):
-    """The launcher the proxy started, as the child of the Jupyter server running selkies.session."""
+    """The launcher the proxy started, as the child of the Jupyter server running `selkies session`."""
     for pid in open(f"/proc/{jupyter.pid}/task/{jupyter.pid}/children").read().split():
-        if "selkies.session" in H._cmdline(int(pid)):
+        if "session --follow" in H._cmdline(int(pid)):
             return int(pid)
     return None
 
@@ -178,8 +187,8 @@ def block(res: H.Results, wayland: bool) -> None:
 def main() -> bool:
     res = H.Results("jupyter-proxy")
     if not registered():
-        H.skip_suite("jupyter-server-proxy with the selkies entry point is not installed beside "
-                     f"{H.PYTHON}; pip install 'selkies[jupyter]' there")
+        H.skip_suite(f"jupyter-server and jupyter-server-proxy are not installed beside {H.PYTHON}; "
+                     "pip install -r tests/requirements.txt")
     block(res, wayland=False)
     block(res, wayland=True)
     return res.summary()

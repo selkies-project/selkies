@@ -11,7 +11,6 @@ pixelflux/*.egg-info
 pcmflux/*.egg-info
 **/node_modules
 **/dist
-src/*.egg-info
 **/__pycache__
 **/*.pyc
 .ruff_cache

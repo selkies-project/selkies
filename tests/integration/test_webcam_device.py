@@ -65,7 +65,7 @@ def encode_stream(codec: str, width: int, height: int, frames: int):
     root turns between two greens a level apart at the rate, so every tick codes a frame."""
     if codec not in getattr(pixelflux, "SOFTWARE_ENCODERS", {}):
         return None
-    from selkies.Xlib import display as xdisplay
+    from Xlib import display as xdisplay
     xproc, disp = H.private_x_server(width, height)
     packets = []
     enough = threading.Event()

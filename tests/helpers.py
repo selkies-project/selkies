@@ -25,12 +25,24 @@ from typing import Any, Dict, Iterable, Iterator, NoReturn, Optional
 REPO = os.environ.get(
     "SELKIES_REPO",
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SRC = os.path.join(REPO, "src")
-sys.path.insert(0, SRC)
 TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
-# The interpreter that runs the server under test. Defaults to the one running
-# the tests, so a venv with selkies installed needs no further configuration.
-PYTHON = os.environ.get("SELKIES_TEST_PYTHON", sys.executable)
+# The interpreter that runs the suites' helper tools: the one running the tests.
+PYTHON = sys.executable
+
+
+def _server() -> str:
+    """The selkies server under test: SELKIES_TEST_SERVER, else the release build of this tree,
+    else the selkies on PATH."""
+    configured = os.environ.get("SELKIES_TEST_SERVER", "").strip()
+    if configured:
+        return configured
+    built = os.path.join(REPO, "target", "release", "selkies")
+    if os.access(built, os.X_OK):
+        return built
+    return shutil.which("selkies") or "selkies"
+
+
+SERVER = _server()
 # Tools beside that interpreter (ffmpeg/ffplay in a conda env) are findable
 # without activation; appended, so a system tool of the same name still wins.
 _PY_BIN = os.path.dirname(os.path.abspath(PYTHON))
@@ -651,7 +663,7 @@ def server_start(mode: str = "websockets", wayland: bool = False,
     with open(log, "w") as lf:
         lf.write("")
     proc = spawn(
-        [PYTHON, "-m", "selkies"],
+        [SERVER],
         env=env, cwd=WORKDIR,
         stdout=open(log, "a"), stderr=subprocess.STDOUT,
         start_new_session=True)
@@ -1016,9 +1028,33 @@ def stop_x_server(proc: subprocess.Popen, display: str) -> None:
 
 
 def x_display() -> Any:
-    """A selkies.Xlib Display connected to the test server."""
-    from selkies.Xlib import display as xdisp
+    """A python-xlib Display connected to the test server."""
+    from Xlib import display as xdisp
     return xdisp.Display(require_display())
+
+
+def x_has_pluggable_outputs() -> bool:
+    """Whether the test X server offers outputs a display can be plugged in as: an output beside
+    the first connected one that carries the `Connected` property the images' Xvfb gives its
+    spare outputs. False on any failure, as the server reads it."""
+    from Xlib import display as xdisp
+    from Xlib.ext import randr
+    try:
+        d = xdisp.Display(require_display())
+    except Exception:
+        return False
+    try:
+        res = randr.get_screen_resources(d.screen().root)
+        primary = next((o for o in res.outputs
+                        if randr.get_output_info(d, o, res.config_timestamp).connection == randr.Connected), None)
+        if primary is None:
+            return False
+        connected = d.intern_atom("Connected")
+        return any(o != primary and connected in randr.list_output_properties(d, o).atoms for o in res.outputs)
+    except Exception:
+        return False
+    finally:
+        d.close()
 
 
 def x_own_clipboard(payload: bytes, extra: Optional[Dict[str, bytes]] = None) -> tuple:
@@ -1032,8 +1068,8 @@ def x_own_clipboard(payload: bytes, extra: Optional[Dict[str, bytes]] = None) ->
     Returns:
         `(display, stop)` where setting `stop["flag"]` ends the serving thread.
     """
-    from selkies.Xlib import display as xdisp, X
-    from selkies.Xlib.protocol import event as xevent
+    from Xlib import display as xdisp, X
+    from Xlib.protocol import event as xevent
     ext = xdisp.Display(require_display())
     scr = ext.screen()
     win = scr.root.create_window(0, 0, 1, 1, 0, scr.root_depth, window_class=X.InputOutput)
@@ -1095,8 +1131,8 @@ def x_own_clipboard(payload: bytes, extra: Optional[Dict[str, bytes]] = None) ->
 
 def x_read_clipboard(timeout: float = 8.0) -> Optional[str]:
     """Read current CLIPBOARD text from the test X server."""
-    from selkies.Xlib import display as xdisp, X
-    from selkies.Xlib.protocol import event as xevent
+    from Xlib import display as xdisp, X
+    from Xlib.protocol import event as xevent
     d2 = xdisp.Display(require_display())
     # Closed on every path: an X server allows a bounded number of clients, and
     # a helper called once per clipboard assertion exhausts it part-way through a
@@ -1135,7 +1171,7 @@ def x_key_watcher() -> tuple:
         `(display, events, stop)`: the events list fills from a daemon thread
         until `stop["flag"]` is set or 30 seconds pass.
     """
-    from selkies.Xlib import display as xdisp, X
+    from Xlib import display as xdisp, X
     d = xdisp.Display(require_display())
     scr = d.screen()
     root = scr.root
@@ -1179,7 +1215,7 @@ def x_root_size() -> tuple:
     The size rides the connection handshake, so a new one is what picks up a
     RandR resize; it is closed here because callers poll this in a loop.
     """
-    from selkies.Xlib import display as xdisp
+    from Xlib import display as xdisp
     d = xdisp.Display(require_display())
     try:
         return d.screen().width_in_pixels, d.screen().height_in_pixels

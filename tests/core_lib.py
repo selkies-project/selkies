@@ -615,7 +615,7 @@ def wait_log_absent(substr: str, timeout: float = 6, log: str = H.LOG) -> bool:
 def x11_keymap_pressed(keysym_char: str = "x") -> Optional[bool]:
     """Whether the X server currently reports the key for `keysym_char` as
     held, straight from query_keymap; None if the keysym has no keycode."""
-    from selkies.Xlib import XK
+    from Xlib import XK
     code = None
     d = H.x_display()
     try:
@@ -673,7 +673,7 @@ class Churn:
 
     def start(self) -> None:
         """Map the window and start drawing; returns once frames are flowing."""
-        from selkies.Xlib import X, display as xdisp
+        from Xlib import X, display as xdisp
         if self._thread is not None:
             return
         self._stop = threading.Event()

@@ -89,7 +89,7 @@ def spawn_server(log: str) -> subprocess.Popen:
            "SELKIES_PORT": str(H.PORT), "SELKIES_UNIX_SOCKET": SOCK, **H.inherited_env()}
     with open(log, "w") as lf:
         lf.write("")
-    return H.spawn([H.PYTHON, "-m", "selkies"], env=env, cwd=H.WORKDIR,
+    return H.spawn([H.SERVER], env=env, cwd=H.WORKDIR,
                    stdout=open(log, "a"), stderr=subprocess.STDOUT, start_new_session=True)
 
 

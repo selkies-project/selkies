@@ -19,7 +19,6 @@ The `raw_pointer_motion` setting is checked against the same engines: turned off
 it must keep the client from asking at all, and turned on it must ask, whatever
 the engine then answers.
 """
-import asyncio
 import http.server
 import json
 import os
@@ -249,8 +248,8 @@ def lock(res, label: str, d) -> bool:
     Returns:
         True once the page reports the lock; a check has been recorded on failure.
     """
-    from selkies.Xlib import X
-    from selkies.Xlib.ext import xtest
+    from Xlib import X
+    from Xlib.ext import xtest
 
     root = d.screen().root
     # A browser still opening its window swallows the first click; a machine
@@ -274,8 +273,8 @@ def lock(res, label: str, d) -> bool:
 
 def measure(res, browser: str, dpr: float) -> None:
     """Lock the pointer in `browser` and record the travel for each pattern."""
-    from selkies.Xlib import X
-    from selkies.Xlib.ext import xtest
+    from Xlib import X
+    from Xlib.ext import xtest
 
     label = f"{browser} at dpr {dpr}"
     d = H.x_display()
@@ -368,10 +367,8 @@ def size_screen() -> None:
     """
     if screen_fits()[0]:
         return
-    from selkies import display_utils as DU
-    os.environ["DISPLAY"] = H.require_display()
-    DU._drop_module_display()
-    asyncio.run(DU.resize_display(f"{SCREEN[0]}x{SCREEN[1]}"))
+    subprocess.run([H.SERVER, "resize", f"{SCREEN[0]}x{SCREEN[1]}"],
+                   env=dict(os.environ, DISPLAY=H.require_display()), check=False, timeout=30)
 
 
 def screen_fits() -> tuple:

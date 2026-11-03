@@ -138,7 +138,7 @@ class FrameCounter:
 
 def x_root_size() -> tuple[int, int]:
     """(width, height) of the test X server's root window."""
-    from selkies.Xlib import display as xdisp
+    from Xlib import display as xdisp
     d = xdisp.Display(TEST_DISPLAY)
     s = d.screen()
     w, h = s.width_in_pixels, s.height_in_pixels

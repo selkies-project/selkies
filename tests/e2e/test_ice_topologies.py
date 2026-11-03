@@ -32,7 +32,7 @@ import core_lib as C
 import test_browsers as TB
 import test_browser_backends as BB
 from playwright.sync_api import sync_playwright
-from selkies.ice.ice import get_host_addresses
+import psutil
 
 ENGINES = ("chromium", "firefox", "webkit")
 
@@ -109,8 +109,23 @@ STATS_JS = """async () => {
 }"""
 
 
+
+
+def get_host_addresses(use_ipv4: bool, use_ipv6: bool) -> list:
+    """The host's addresses an ICE agent offers: loopback and IPv6 link-local ones left out."""
+    addresses = []
+    for adapter in psutil.net_if_addrs().values():
+        for addr in adapter:
+            if addr.family == socket.AF_INET and use_ipv4 and addr.address != "127.0.0.1":
+                addresses.append(addr.address)
+            elif addr.family == socket.AF_INET6 and use_ipv6:
+                ip, _, zone = addr.address.partition("%")
+                if ip != "::1" and not zone:
+                    addresses.append(ip)
+    return addresses
+
 def mux_addresses() -> list:
-    """The `(family, address)` pairs a mux binds, as `ice.get_host_addresses`
+    """The `(family, address)` pairs a mux binds, as `get_host_addresses`
     reports them; loopback stands in on a host that has no other address."""
     return [(socket.AF_INET6 if ":" in address else socket.AF_INET, address)
             for address in get_host_addresses(use_ipv4=True, use_ipv6=True)] or [

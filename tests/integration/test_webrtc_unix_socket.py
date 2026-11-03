@@ -40,7 +40,7 @@ with socket.socket() as probe:
     probe.bind(("127.0.0.1", 0))
     UNUSED_PORT = probe.getsockname()[1]
 server = H.spawn(
-    [H.PYTHON, "-m", "selkies", "--port", str(UNUSED_PORT), "--unix-socket", SOCK],
+    [H.SERVER, "--port", str(UNUSED_PORT), "--unix-socket", SOCK],
     env=env, cwd=H.WORKDIR,
     stdout=open(os.path.join(H.WORKDIR, "selkies-webrtc.log"), "w"),
     stderr=subprocess.STDOUT, start_new_session=True)

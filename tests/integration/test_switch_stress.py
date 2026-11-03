@@ -76,9 +76,7 @@ async def flip_under_a_client(res: "H.Results") -> None:
             await asyncio.sleep(5.0)
             outputs = False
             if not IS_WAYLAND:
-                from selkies import display_utils as DU
-                os.environ["DISPLAY"] = H.require_display()
-                outputs = await DU.has_pluggable_outputs()
+                outputs = H.x_has_pluggable_outputs()
                 if outputs:
                     res.skip("the layout engine defined this client's monitor",
                              "displays are outputs; one display defines no monitor")
