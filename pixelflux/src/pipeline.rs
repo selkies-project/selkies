@@ -916,11 +916,14 @@ pub fn decide_hw_fullframe(
         }
         return d;
     }
-    // A band the encoder took back for coming out past its cap covered only so far.
+    // A band the encoder took back for coming out past its cap covered only so far. One it took
+    // back before the last band began (a band two frames old, its report late) leaves the sweep
+    // the least band to size the next from: a negative one panicked `band_share`'s clamp, which
+    // ended the capture and froze the stream.
     if let Some((from, size)) = st.sweep.as_mut()
         && let Some(end) = encoder.refit.filter(|&end| end > 0.0 && end < *from)
     {
-        *size -= *from - end;
+        *size = (*size - (*from - end)).max(LEAST_BAND);
         *from = end;
     }
     // A cleanup's frames, a sweep's bands and outside Turbo the rate control's, are kept to the
@@ -3447,6 +3450,58 @@ mod tests {
     /// carry none. A frame of the rate control's taken back for coming out past it starts the
     /// sweep on the next frame, and a band taken back resumes where it ended, so the bands still
     /// cover the picture.
+    /// A band taken back by a report that ends before the last band began (the encoder's report
+    /// of a band two frames old) restarts the sweep there with the least band, where the rewound
+    /// band came out negative and `band_share`'s clamp panicked, ending the capture.
+    #[test]
+    fn a_band_taken_back_before_the_last_band_began_restarts_the_sweep() {
+        let s = hw_settings();
+        let budget = frame_budget(s.video_bitrate_kbps, s.target_fps);
+        let rc = |held: usize, refit: Option<f64>| EncoderQuality {
+            last: Some(38),
+            bytes: Some(budget as usize),
+            holds: true,
+            reopens: false,
+            keys: true,
+            band: Some(held),
+            measures: false,
+            psnr: None,
+            refit,
+            follows_cap: false,
+            finer: 0,
+            ends_on_key: false,
+        };
+        let mut st = StripeState::default();
+        decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, rc(0, None));
+        decide_hw_fullframe(&mut st, &s, 1, Damage::None, false, false, rc(0, None));
+        decide_hw_fullframe(&mut st, &s, 2, Damage::None, false, false, rc(0, None));
+        let swept =
+            decide_hw_fullframe(&mut st, &s, 3, Damage::None, false, false, rc(0, Some(0.0)));
+        assert_eq!(swept.hold_band, Some((0.0, FIRST_BAND)));
+        let mut bands = vec![(0.0, FIRST_BAND)];
+        for i in 4..=8u16 {
+            let (a, b) = *bands.last().unwrap();
+            let held = ((b - a) * 128.0 * budget) as usize;
+            let d = decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, rc(held, None));
+            bands.push(d.hold_band.expect("a band a frame"));
+        }
+        let (a, _) = *bands.last().unwrap();
+        let end = bands[1].0 / 2.0;
+        assert!(end < a, "{bands:?}");
+        let d = decide_hw_fullframe(
+            &mut st,
+            &s,
+            9,
+            Damage::None,
+            false,
+            false,
+            rc(budget as usize, Some(end)),
+        );
+        let (from, to) = d.hold_band.expect("the sweep goes on");
+        assert_eq!(from, end, "it resumes where the band taken back ended");
+        assert!(to > from, "with a band of its own: {from}..{to}");
+    }
+
     #[test]
     fn a_cleanup_frame_past_its_cap_is_taken_back() {
         let s = hw_settings();
