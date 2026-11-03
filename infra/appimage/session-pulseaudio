@@ -1,0 +1,13 @@
+#!/bin/sh
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The bundled PulseAudio for `selkies session`, which starts its sound server by
+# name: the daemon is told the module directory and startup script the AppImage
+# carries in place of the build machine's, and keeps the libraries AppRun
+# preloads for selkies out.
+HERE="$(dirname "$(readlink -f "${0}")")/../../.."
+unset LD_PRELOAD
+exec "${HERE}/usr/bin/pulseaudio" -p "${HERE}/usr/lib/pulseaudio/modules" \
+    -F "${HERE}/usr/share/selkies/pulse/default.pa" "$@"

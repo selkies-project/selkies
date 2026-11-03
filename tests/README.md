@@ -97,20 +97,15 @@ GNOME's, whose dialog nothing answers headless.
 
 `tests/packaging/simulate.sh` runs `infra/packaging/*.sh` against a genuinely
 read-only `/repo` with the root-only tools stubbed, on any host, with no
-container runtime. It catches the staging, read-only-mount, and package-version
+container runtime. The server's build is stubbed too (a `cargo` that leaves a
+stand-in binary reporting the version its manifest was stamped with, and the
+codec and dependency resolution, which read the distribution), so it catches
+the staging, read-only-mount, package-version, and dependency-declaration
 mistakes that otherwise only surface in the release job:
 
 ```bash
-python3 -m build            # or drop a wheel in dist/
 tests/packaging/simulate.sh
 ```
-
-`packaging/test_packaging.py` is that script as a suite, in the `integration`
-tier. It reports one check per packager and needs nothing prepared: it packages
-a wheel from `WHEEL_DIR` or `dist/` when one is there and builds one into
-`$E2E_WORKDIR/packaging-wheel` when not, reusing it afterwards. The packaging
-scripts build a virtualenv, so it hands them the interpreter running the tests
-rather than a distro `python3` that may lack `ensurepip`.
 
 Those scripts also compile the Input Interposer into each package, including
 a 32-bit variant wherever the compiler can produce one. A host without a

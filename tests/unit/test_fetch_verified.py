@@ -158,8 +158,8 @@ def main() -> int:
           desktop.count("fetch-verified key ") == 2 and "fetch-verified release linuxserver/proot-apps" in desktop
           and "dl.google.com/linux/direct" not in desktop, "addons/desktop/Dockerfile")
     appimage = open(os.path.join(REPO, "scripts", "ci", "appimage.sh"), encoding="utf-8").read()
-    check("the AppImage build stages it beside the conda plugin",
-          'cp addons/base/fetch-verified "${WORK}/fetch-verified"' in appimage, "scripts/ci/appimage.sh")
+    check("the AppImage build fetches linuxdeploy with it",
+          "addons/base/fetch-verified release linuxdeploy/linuxdeploy" in appimage, "scripts/ci/appimage.sh")
 
     print(f"[fetch-verified] {passed}/{passed + failed} passed", flush=True)
     return 1 if failed else 0

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""The packaged dependency lists say the same thing as the wheel's.
+"""Every distribution channel ships the server the same way.
 
-The AppImage installs Selkies with `pip install --no-deps` and resolves the
-dependencies through conda instead, so its recipe carries a second copy of
-[project.dependencies]. A copy drifts: it kept PyAV long after the WebRTC
-stack stopped using it, which put a GPL FFmpeg in the AppImage and made the
-licensing page wrong. This holds the two lists to each other, name and floor,
-and names the packages that legitimately come from pip because conda-forge has
-none.
+The base image, the native packages, and the AppImage each build the Rust
+server on their own distribution and each declare what it needs there, so a
+fact one of them states the others have to state the same way, or one channel
+ships a server another would not. Held here: the libraries the capture stack
+opens by name at run time (no ELF dependency names them, so the image build,
+the packages' dependency resolution, and the pristine-install check each carry
+the list), the toolchain the server is built with, and that every packager
+builds the server through infra/packaging/server.sh, declares its dependencies
+through runtime-deps.sh, and stages both interposers, which the AppImage
+compiles and exports the paths of too.
 """
 import os
 import re
@@ -15,19 +18,13 @@ import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
-PYPROJECT = os.path.join(REPO, "pyproject.toml")
-RECIPE = os.path.join(REPO, "infra", "appimage", "recipe.yaml")
-APPIMAGE = os.path.join(REPO, "scripts", "ci", "appimage.sh")
-# Both prove the libraries the capture stack opens by name are present, one
-# inside the image build and one in a pristine container of a packaged distro
+PACKAGING = os.path.join(REPO, "infra", "packaging")
 DOCKERFILE = os.path.join(REPO, "addons", "base", "Dockerfile")
 VERIFY_PACKAGE = os.path.join(REPO, "scripts", "ci", "verify-package.sh")
-
-# conda-forge spells a few of them differently.
-CONDA_NAME = {"msgpack": "msgpack-python", "pillow": "pillow"}
-# No conda-forge package exists, so scripts/ci/appimage.sh pip-installs them
-# into the same prefix.
-PIP_ONLY = {"pixelflux", "pcmflux", "pulsectl-asyncio"}
+RUNTIME_DEPS = os.path.join(PACKAGING, "runtime-deps.sh")
+SERVER = os.path.join(PACKAGING, "server.sh")
+APPIMAGE_BUILD = os.path.join(REPO, "infra", "appimage", "build.sh")
+APPRUN = os.path.join(REPO, "infra", "appimage", "AppRun")
 
 passed = failed = 0
 
@@ -38,104 +35,60 @@ def check(label: str, ok, detail="") -> None:
     print(f"{'PASS' if ok else 'FAIL'}  [package-deps] {label}  {detail}", flush=True)
 
 
-def wheel_dependencies() -> tuple:
-    """[project.dependencies] as (required, legacy) name-to-floor maps.
-
-    A requirement split across interpreters (aiohttp) keeps the floor of the
-    branch for the newest Python, which is what the AppImage's own runtime is;
-    one gated to Python below 3.10 is `legacy`, which the conda package may
-    carry for the interpreters it also supports but need not.
-    """
-    body = open(PYPROJECT, encoding="utf-8").read()
-    block = body.split("dependencies = [", 1)[1].split("]", 1)[0]
-    required, legacy = {}, {}
-    for line in block.splitlines():
-        line = line.strip()
-        if not line.startswith('"'):
-            continue
-        spec, _, marker = line.strip('",').partition(";")
-        name = re.split(r"[<>=~!\[]", spec, maxsplit=1)[0].strip().lower()
-        m = re.search(r">=\s*([0-9][0-9a-zA-Z.\-]*)", spec)
-        (legacy if "python_version < " in marker else required)[name] = m.group(1) if m else ""
-    return required, {n: f for n, f in legacy.items() if n not in required}
+def read(path: str) -> str:
+    return open(path, encoding="utf-8").read()
 
 
-def recipe_run() -> dict:
-    """Requirement name to floor from the recipe's `run:` list."""
-    body = open(RECIPE, encoding="utf-8").read()
-    block = body.split("  run:", 1)[1].split("\ntests:", 1)[0]
-    out = {}
-    for line in block.splitlines():
-        line = line.strip()
-        if not line.startswith("- "):
-            continue
-        item = line[2:].strip()
-        name, _, rest = item.partition(" ")
-        name = name.lower()
-        if name == "python":
-            continue
-        m = re.search(r">=\s*([0-9][0-9a-zA-Z.\-]*)", rest)
-        out[name] = m.group(1) if m else ""
-    return out
+def sonames(text: str) -> set:
+    return set(re.findall(r"lib[A-Za-z0-9_+.-]+\.so\.[0-9]+", text))
 
 
-wheel, legacy = wheel_dependencies()
-recipe = recipe_run()
-check("both lists parsed", bool(wheel) and bool(recipe),
-      f"{len(wheel)} wheel, {len(recipe)} recipe")
-
-expected = {CONDA_NAME.get(n, n): f for n, f in wheel.items() if n not in PIP_ONLY}
-allowed = dict(expected, **{CONDA_NAME.get(n, n): f for n, f in legacy.items()})
-missing = sorted(set(expected) - set(recipe))
-extra = sorted(set(recipe) - set(allowed))
-check("the recipe carries every conda-resolvable dependency", not missing,
-      ", ".join(missing))
-check("the recipe carries nothing the wheel does not depend on", not extra,
-      ", ".join(extra))
-
-mismatched = [f"{n}: wheel {allowed[n]!r} vs recipe {recipe[n]!r}"
-              for n in sorted(set(allowed) & set(recipe))
-              if allowed[n] != recipe[n]]
-check("the floors agree", not mismatched, "; ".join(mismatched))
-
-def runtime_libraries(path: str, anchor: str) -> set:
-    """The library names the `ctypes` check after `anchor` in `path` loads.
-
-    Only that list counts: both files name other libraries elsewhere, the
-    image the NVIDIA driver's among them.
-    """
-    body = open(path, encoding="utf-8").read()
-    listed = re.split(r"[)\]]", body.split(anchor, 1)[1], maxsplit=1)[0]
-    return set(re.findall(r"""["'](lib[^"']+)["']""", listed))
+def assigned(path: str, name: str) -> set:
+    """The sonames of the shell assignment `name="..."` in `path`."""
+    m = re.search(rf'^{name}="([^"]*)"', read(path), re.M)
+    return sonames(m.group(1)) if m else set()
 
 
-image_libs = runtime_libraries(DOCKERFILE, "ctypes.CDLL(name) for name in (")
-package_libs = runtime_libraries(VERIFY_PACKAGE, "NEEDED = [")
-check("the image build names runtime-loaded libraries", bool(image_libs),
-      f"{len(image_libs)} in addons/base/Dockerfile")
-check("the image and the packages are held to the same ones",
-      image_libs == package_libs,
-      " ".join(sorted(image_libs ^ package_libs)) or "")
+def image_libraries() -> set:
+    """The sonames the base image's final check loops over."""
+    body = read(DOCKERFILE)
+    m = re.search(r"for name in (.*?); do", body, re.S)
+    return sonames(m.group(1)) if m else set()
 
-appimage = open(APPIMAGE, encoding="utf-8").read()
-for name in sorted(PIP_ONLY):
-    check(f"the AppImage pip-installs {name}", name in appimage, "scripts/ci/appimage.sh")
 
-# Every medium builds the interposers from its own script, so one added to the
-# packagers alone reaches no AppImage user, and one whose path is exported
-# nowhere reaches no application at all.
+image = image_libraries()
+resolved = assigned(RUNTIME_DEPS, "RUNTIME_LOADED")
+verified = assigned(VERIFY_PACKAGE, "NEEDED")
+check("the image build names runtime-loaded libraries", bool(image),
+      f"{len(image)} in addons/base/Dockerfile")
+check("the packages declare the packages behind the same ones", resolved == image,
+      " ".join(sorted(resolved ^ image)))
+check("a pristine install is checked for the same ones", verified == image,
+      " ".join(sorted(verified ^ image)))
+
+toolchain = re.search(r'^ARG RUST_TOOLCHAIN="([^"]+)"', read(DOCKERFILE), re.M)
+packaged = re.search(r'RUST_TOOLCHAIN="\$\{RUST_TOOLCHAIN:-([^}]+)\}"', read(SERVER))
+check("the packages build with the image's toolchain",
+      bool(toolchain) and bool(packaged) and toolchain.group(1) == packaged.group(1),
+      f"{toolchain and toolchain.group(1)} vs {packaged and packaged.group(1)}")
+
 for packager in ("deb.sh", "rpm.sh", "apk.sh", "arch.sh"):
-    body = open(os.path.join(REPO, "infra", "packaging", packager), encoding="utf-8").read()
-    for addon in ("interposer.sh", "v4l2-interposer.sh"):
-        check(f"{packager} stages the {addon.rsplit('.', 1)[0]}",
-              f"/{addon}" in body, f"infra/packaging/{packager}")
+    body = read(os.path.join(PACKAGING, packager))
+    for step in ("server.sh", "runtime-deps.sh", "interposer.sh", "v4l2-interposer.sh"):
+        check(f"{packager} runs {step}", f"/infra/packaging/{step} " in body,
+              f"infra/packaging/{packager}")
+    check(f"{packager} carries no Python prefix",
+          "/opt/selkies" not in body and "mkvenv" not in body, f"infra/packaging/{packager}")
 
+build = read(APPIMAGE_BUILD)
+apprun = read(APPRUN)
+check("the AppImage builds the server as the packages do",
+      "/repo/infra/packaging/server.sh " in build, "infra/appimage/build.sh")
 for source, env in (("input-interposer/input_interposer.c", "SELKIES_INTERPOSER"),
                     ("v4l2-interposer/v4l2_interposer.c", "SELKIES_WEBCAM_INTERPOSER")):
-    check(f"the AppImage compiles {os.path.basename(source)}", source in appimage,
-          "scripts/ci/appimage.sh")
-    check(f"the AppImage exports {env}", f"export {env}=" in appimage,
-          "scripts/ci/appimage.sh")
+    check(f"the AppImage compiles {os.path.basename(source)}", source in build,
+          "infra/appimage/build.sh")
+    check(f"the AppImage exports {env}", f"export {env}=" in apprun, "infra/appimage/AppRun")
 
 print(f"[package-deps] {passed}/{passed + failed} passed", flush=True)
 sys.exit(1 if failed else 0)

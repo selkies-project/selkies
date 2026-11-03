@@ -2,8 +2,8 @@
 """What a release carries is whatever every job of the run uploaded, minus a list.
 
 The draft release is assembled from one download of every artifact in the run,
-so each job's incidental output -- an image build record, the conda package an
-AppImage is assembled from, the capture-stack wheels that belong to their own
+so each job's incidental output -- an image build record, the web client every
+package is built with, the capture-stack wheels that belong to their own
 projects' releases, the empty digest files a manifest merge passes between jobs
 -- lands beside the deliverables unless the collect step drops it. This runs
 that step over a tree holding one of each and reads back what a user would see
@@ -35,7 +35,7 @@ DELIVERED = (
 )
 WITHHELD = (
     ("an image build record", "selkies-project.selkies.8M3GBU.dockerbuild"),
-    ("the AppImage's conda package", "selkies-2.0.0rc0-pyh4616a5c_0.conda"),
+    ("the packages' web client", "selkies-web-client.tar"),
     ("a pixelflux wheel", "pixelflux-2.1.0rc0-cp39-abi3-manylinux_2_28_x86_64.whl"),
     ("a pcmflux wheel", "pcmflux-2.1.0rc0-cp39-abi3-musllinux_1_2_aarch64.whl"),
     ("an image-digest placeholder", "a" * 64),

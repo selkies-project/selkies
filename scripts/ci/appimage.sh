@@ -3,337 +3,40 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Build selkies-<ver>-<arch>.AppImage on the runner for this architecture.
-# Uses rattler-build to package selkies as a conda package, then assembles the
-# AppImage with linuxdeploy and the conda plugin in infra/appimage.
+# Build out/selkies-<ver>-<arch>.AppImage on the runner for this architecture:
+# linuxdeploy is fetched here, checked against the digest GitHub records for
+# it, and infra/appimage/build.sh assembles the AppImage inside a
+# manylinux_2_28 container, whose glibc is the AppImage's floor, with this
+# checkout mounted read-only and the network reachable, for Cargo to fetch the
+# pixelflux and pcmflux commits the lock pins. The web client has to be in
+# dist/web already (scripts/ci/build-web.sh). The result is then checked from
+# an extracted copy by scripts/ci/verify-appimage.sh.
 #
 # Usage: scripts/ci/appimage.sh [arch]   (any `uname -m` name; defaults to this host)
 
 set -eux
 
-# linuxdeploy and Miniforge both name their artifacts after `uname -m`
 ARCH="${1:-$(uname -m)}"
 
 cd "$(readlink -f "$(dirname "$0")")/../.."
 WORK="${PWD}/build/appimage"
-rm -rf "${WORK}" AppDir
-mkdir -p "${WORK}"
+rm -rf "${WORK}"
+mkdir -p "${WORK}" out
+test -f dist/web/index.html
 
-# pixi has no retry of its own, and neither does a piped installer script.
-retry() {
-  local i=1
-  until "$@"; do
-    [ "${i}" -ge 5 ] && return 1
-    i=$((i + 1)); sleep 5
-  done
-}
-
-# 1) rattler-build: selkies conda package (noarch) from the repo
-export PATH="${HOME}/.pixi/bin:${PATH}"
-# Both solvers, because the conda plugin invoked further down prefers mamba and
-# mamba does not read the CONDA_* names.
-export MAMBA_REMOTE_MAX_RETRIES="5" MAMBA_REMOTE_BACKOFF_FACTOR="3" \
-    MAMBA_REMOTE_CONNECT_TIMEOUT_SECS="30"
-export CONDA_REMOTE_MAX_RETRIES="5" CONDA_REMOTE_BACKOFF_FACTOR="3" \
-    CONDA_REMOTE_CONNECT_TIMEOUT_SECS="30" CONDA_REMOTE_READ_TIMEOUT_SECS="120"
-if ! command -v pixi >/dev/null; then
-  # The latest release asset, checked against the digest GitHub records for it,
-  # rather than pixi's installer, whose own download makes one attempt
-  addons/base/fetch-verified release prefix-dev/pixi latest \
-      "pixi-${ARCH}-unknown-linux-musl.tar.gz" "${WORK}/pixi.tar.gz"
-  mkdir -p "${HOME}/.pixi/bin"
-  tar -xzf "${WORK}/pixi.tar.gz" -C "${HOME}/.pixi/bin"
-fi
-retry pixi global install rattler-build
-rattler-build build \
-    --recipe infra/appimage/recipe.yaml \
-    --output-dir "${WORK}/conda-output" \
-    --channel-priority disabled
-
-PKG="$(find "${WORK}/conda-output" \( -name 'selkies-*.tar.bz2' -o -name 'selkies-*.conda' \) | head -n1)"
-test -f "${PKG}"
-
-# 2) linuxdeploy (latest published build) and the conda plugin from
-#    infra/appimage: upstream publishes no release artifacts, and this one
-#    installs Miniforge, keeping the AppImage on conda-forge alone.
+# The latest published build: upstream publishes no release artifacts
 addons/base/fetch-verified release linuxdeploy/linuxdeploy continuous \
     "linuxdeploy-${ARCH}.AppImage" "${WORK}/linuxdeploy.AppImage"
-cp infra/appimage/linuxdeploy-plugin-conda.sh "${WORK}/linuxdeploy-plugin-conda.sh"
-# The plugin reads both of these from beside itself: Miniforge comes from the
-# same rate-limited host as linuxdeploy, checked the same way, and the prefix
-# it installs needs its entry points pointed at the interpreter before an
-# AppImage can carry them.
-cp addons/base/fetch-verified "${WORK}/fetch-verified"
-cp infra/appimage/relocate-shebangs.sh "${WORK}/relocate-shebangs.sh"
-chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.sh" \
-    "${WORK}/fetch-verified" "${WORK}/relocate-shebangs.sh"
-# linuxdeploy resolves `--plugin conda` by searching PATH
-export PATH="${WORK}:${PATH}"
+chmod +x "${WORK}/linuxdeploy.AppImage"
 
-# 3) Assemble the AppDir: the conda plugin installs a Miniforge prefix at
-#    AppDir/usr/conda, adds the channels and packages named below, and finally
-#    pip-installs PIP_REQUIREMENTS into the same prefix.
-export OUTPUT="selkies-${SELKIES_VERSION:-0.0.0}-${ARCH}.AppImage"
-# conda channels are ';'-separated; the local one is the rattler-build output
-# root, the directory holding noarch/
-CONDA_CHANNELS="${WORK}/conda-output;conda-forge"
-CONDA_PYTHON_VERSION="3.12"
-# libva is what pixelflux's VA-API session opens at run time, and pixman is
-# what its wheel links but does not carry
-CONDA_PACKAGES="selkies;libxcb;pulseaudio;libva;libxkbcommon;pixman;zlib"
-# Runtime dependencies with no conda-forge package. pixelflux and pcmflux come
-# from the wheels the run resolved (the AppImage env always runs Python 3.12,
-# see CONDA_PYTHON_VERSION above); the index only where the run chose it.
-PIP_REQUIREMENTS="pulsectl-asyncio"
-for project in pixelflux pcmflux; do
-  wheel=""
-  if [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
-    wheel="$(find "${PIXELFLUX_PCMFLUX_WHEELS_DIR}" -maxdepth 1 \
-        -name "${project}-*cp312*manylinux*${ARCH}*.whl" | head -n1)"
-  fi
-  # A wheels directory that yielded nothing means the AppImage carries whatever
-  # the index resolves rather than the build meant to ride along, so say so. No
-  # directory at all is the run's explicit choice of the index.
-  if [ -z "${wheel}" ] && [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
-    echo "::warning::No ${project} wheel in ${PIXELFLUX_PCMFLUX_WHEELS_DIR}; the AppImage resolves it from PyPI"
-  fi
-  PIP_REQUIREMENTS="${PIP_REQUIREMENTS} ${wheel:-${project}}"
-done
+docker run --rm \
+    -v "${PWD}:/repo:ro" \
+    -v "${WORK}:/work" \
+    -v "${PWD}/out:/out" \
+    -e SELKIES_VERSION -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    "quay.io/pypa/manylinux_2_28_${ARCH}" \
+    sh /repo/infra/appimage/build.sh
 
-# conda and pip read CONDA_*/PIP_* names of their own, where a ';'-separated
-# channel list parses as one channel. These four address the plugin, so they
-# reach linuxdeploy alone and the toolchain solve below stays on conda-forge.
-# CONDA_OVERRIDE_GLIBC is the solver's own: it solves for the AppImage's glibc
-# floor rather than the runner's, where conda-forge carries a build for both.
-env CONDA_OVERRIDE_GLIBC="2.28" \
-    CONDA_CHANNELS="${CONDA_CHANNELS}" \
-    CONDA_PYTHON_VERSION="${CONDA_PYTHON_VERSION}" \
-    CONDA_PACKAGES="${CONDA_PACKAGES}" \
-    PIP_REQUIREMENTS="${PIP_REQUIREMENTS}" \
-    "${WORK}/linuxdeploy.AppImage" --appimage-extract-and-run \
-    --appdir AppDir \
-    --plugin conda
-
-# Fails the build early rather than carrying a prefix that cannot start. This
-# runs at the path the prefix was installed to, so it says nothing about the
-# absolute paths inside it; scripts/ci/verify-appimage.sh covers those from an
-# extracted copy once the AppImage exists.
-AppDir/usr/conda/bin/selkies --help > /dev/null
-
-# 3b) The interposers, for containers with no reachable /dev/uinput or
-#     /dev/video*. Compiled with the conda-forge toolchain rather than the
-#     runner's gcc, whose glibc is far newer than the rest of the AppImage
-#     needs; 2.28 is the oldest sysroot still carrying the kernel input
-#     headers. The V4L2 interposer is built without its PipeWire frame source,
-#     which needs headers this toolchain has no reason to carry.
-CC_ENV="${WORK}/cc-env"
-# conda names its sysroot packages after its own subdir (linux-64,
-# linux-aarch64, ...), which no `uname -m` mapping reproduces
-CONDA_SUBDIR="$(AppDir/usr/conda/bin/conda info --json \
-    | AppDir/usr/conda/bin/python -c 'import json,sys; print(json.load(sys.stdin)["platform"])')"
-AppDir/usr/conda/bin/conda create -y -p "${CC_ENV}" -c conda-forge \
-    c-compiler "sysroot_${CONDA_SUBDIR}=2.28" \
-  || AppDir/usr/conda/bin/conda create -y -p "${CC_ENV}" -c conda-forge c-compiler
-CONDA_CC="$(find "${CC_ENV}/bin" -name '*-linux-gnu-gcc' | head -n1)"
-CONDA_SYSROOT="$(find "${CC_ENV}" -maxdepth 2 -type d -name sysroot | head -n1)"
-mkdir -p AppDir/usr/lib
-"${CONDA_CC}" --sysroot="${CONDA_SYSROOT}" -shared -fPIC -O2 \
-    -o AppDir/usr/lib/selkies_input_interposer.so \
-    addons/input-interposer/input_interposer.c -ldl -lpthread
-# Back-compat name for deployments that preload the pre-rename path.
-ln -sf selkies_input_interposer.so AppDir/usr/lib/selkies_joystick_interposer.so
-"${CONDA_CC}" --sysroot="${CONDA_SYSROOT}" -shared -fPIC -O2 \
-    -o AppDir/usr/lib/selkies_v4l2_interposer.so \
-    addons/v4l2-interposer/v4l2_interposer.c -ldl -lpthread
-# The toolchain's packages stay in the cache of the conda that fetched them,
-# which is the AppImage's own
-rm -rf "${CC_ENV}" AppDir/usr/conda/pkgs
-
-# The floor is the whole point of building from conda, and one package built
-# for a newer glibc, or the toolchain fallback above, raises it silently, so
-# every ELF file in the AppDir is checked rather than assumed
-AppDir/usr/conda/bin/python - <<'FLOOR'
-import os, re, subprocess, sys
-over = []
-for base, _, names in os.walk("AppDir"):
-    for name in names:
-        path = os.path.join(base, name)
-        if os.path.islink(path):
-            continue
-        with open(path, "rb") as fh:
-            if fh.read(4) != b"\x7fELF":
-                continue
-        symbols = subprocess.run(["objdump", "-T", path], capture_output=True, text=True).stdout
-        need = max(((int(a), int(b)) for a, b in re.findall(r"GLIBC_(\d+)\.(\d+)", symbols)), default=(0, 0))
-        if need > (2, 28):
-            over.append(f"GLIBC_{need[0]}.{need[1]} {path}")
-if over:
-    sys.exit("these need a glibc newer than 2.28:\n" + "\n".join(sorted(over)))
-print("every ELF file in the AppDir needs at most GLIBC_2.28")
-FLOOR
-
-# 4) Custom AppRun + desktop integration. No desktop session is bundled: the
-#    AppImage streams an existing X display/Xvfb or a Wayland compositor, or
-#    runs `selkies session` with the host's own desktop.
-mkdir -p AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/512x512/apps
-cat > AppDir/usr/share/applications/selkies.desktop <<'DESKTOP'
-[Desktop Entry]
-Name=Selkies
-Comment=Low-latency HTML5 remote desktop streaming
-Exec=selkies
-Icon=selkies
-Type=Application
-Categories=Network;RemoteAccess;
-Terminal=true
-DESKTOP
-cp docs/assets/logo/icon-512x512.png AppDir/usr/share/icons/hicolor/512x512/apps/selkies.png
-# The bundled PulseAudio for `selkies session`, which starts its sound server by
-# name: the daemon is told the module directory and startup script its build
-# prefix compiled in, and keeps the libraries AppRun preloads for selkies out.
-mkdir -p AppDir/usr/libexec/selkies-session
-cat > AppDir/usr/libexec/selkies-session/pulseaudio <<'PULSE'
-#!/bin/sh
-HERE="$(dirname "$(readlink -f "${0}")")/../../.."
-unset LD_PRELOAD
-exec "${HERE}/usr/conda/bin/pulseaudio" -p "${HERE}/usr/conda/lib/pulseaudio/modules" \
-    -F "${HERE}/usr/conda/etc/pulse/default.pa" "$@"
-PULSE
-chmod +x AppDir/usr/libexec/selkies-session/pulseaudio
-cat > AppDir/AppRun <<'APPRUN'
-#!/bin/sh
-HERE="$(dirname "$(readlink -f "${0}")")"
-ENV_BIN="${HERE}/usr/conda/bin"
-HOST_PATH="${PATH}"
-export PATH="${ENV_BIN}:${PATH}"
-# The bundled libdbus names the system bus under its build prefix; the
-# well-known address reaches the host's, where RTKit schedules the sound server
-export DBUS_SYSTEM_BUS_ADDRESS="${DBUS_SYSTEM_BUS_ADDRESS:-unix:path=/var/run/dbus/system_bus_socket}"
-# The bundled libxkbcommon looks for keymaps under its build prefix too: the
-# host's, which the session's applications read as well, or the copy carried here
-xkb_root="${HERE}/usr/conda/share/X11/xkb"
-[ ! -d /usr/share/X11/xkb ] || xkb_root="/usr/share/X11/xkb"
-export XKB_CONFIG_ROOT="${XKB_CONFIG_ROOT:-${xkb_root}}"
-# Paths to the bundled interposers, for LD_PRELOADing into an application that
-# needs gamepads where /dev/uinput is unreachable, or the webcam where no
-# v4l2loopback device is. Deliberately not added to LD_PRELOAD here: selkies
-# itself must keep seeing the real device nodes.
-export SELKIES_INTERPOSER="${HERE}/usr/lib/selkies_input_interposer.so"
-export SELKIES_WEBCAM_INTERPOSER="${HERE}/usr/lib/selkies_v4l2_interposer.so"
-
-# The first library named that exists, and only where the marker file does. The
-# NVIDIA X and EGL stack on L4T is linked against the distribution's libxcb, and
-# resolving it to the bundled copy instead takes the capture thread down with
-# SIGSEGV seconds after capture starts, on every encoder. Any other host has one
-# libxcb and is left alone.
-first_present_if() {
-    marker="${1}"
-    shift
-    [ -e "${marker}" ] || return 1
-    for candidate in "$@"; do
-        if [ -e "${candidate}" ]; then
-            printf '%s' "${candidate}"
-            return 0
-        fi
-    done
-    return 1
-}
-
-system_xcb="$(first_present_if /etc/nv_tegra_release \
-    /usr/lib/aarch64-linux-gnu/libxcb.so.1 /usr/lib/libxcb.so.1)" || system_xcb=""
-
-# `session` brings up its own display, sound server, and desktop in a runtime
-# directory of its own, so it starts before the defaults and servers below; the
-# interposers above are preloaded into its desktop, and the libxcb below into
-# Selkies alone. Those are the host's, with the bundled PulseAudio and tools
-# after them: a bundled session bus names its build machine's paths. `resize`
-# and `gpu-probe` act on a display already up, so they start nothing either.
-case "${1:-}" in
-    session)
-        shift
-        export PATH="${HOST_PATH}:${HERE}/usr/libexec/selkies-session:${ENV_BIN}"
-        [ -z "${system_xcb}" ] || export SELKIES_PRELOAD="${system_xcb}"
-        exec "${ENV_BIN}/selkies" session "$@"
-        ;;
-    resize|gpu-probe)
-        command="$1"
-        shift
-        exec "${ENV_BIN}/selkies" "${command}" "$@"
-        ;;
-esac
-
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
-export PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR}/pulse/native}"
-export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-256/48000}"
-export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
-
-# A help or version query prints and exits, so it starts no display or audio server
-for arg in "$@"; do
-    case "${arg}" in
-        -h|--help|--version) exec "${ENV_BIN}/selkies" "$@" ;;
-    esac
-done
-
-# Backend toggle, resolved as selkies resolves it: SELKIES_WAYLAND when set
-# (blank included), else the legacy PIXELFLUX_WAYLAND, with "true" or "1" in
-# any case ahead of a "|locked" suffix.
-wayland="${SELKIES_WAYLAND-${PIXELFLUX_WAYLAND-}}"
-wayland="$(printf '%s' "${wayland%%|*}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-
-# X11 mode streams an existing display; start a virtual one when none is up.
-# Wayland mode starts its own compositor and needs nothing here.
-if [ "${wayland}" != "true" ] && [ "${wayland}" != "1" ]; then
-    export DISPLAY="${DISPLAY:-:20}"
-    if [ ! -S "/tmp/.X11-unix/X${DISPLAY#*:}" ] && command -v Xvfb >/dev/null 2>&1; then
-        Xvfb "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem >/tmp/Xvfb_selkies.log 2>&1 &
-        echo 'Waiting for X Socket'
-        until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
-        echo 'X Server is ready'
-    fi
-fi
-
-# Start a PulseAudio server when none is listening yet (the conda env bundles
-# its own pulseaudio, falling back to a host binary otherwise)
-if [ ! -e "${PULSE_SERVER#unix:}" ] && [ ! -S "${PULSE_SERVER#unix:}" ]; then
-    if [ -x "${ENV_BIN}/pulseaudio" ]; then
-        # The bundled daemon has its module directory and startup script
-        # compiled in at the path the prefix was built at, and refuses to run
-        # having loaded no module, so both are named here instead. Its
-        # daemon.conf and client.conf carry no uncommented setting, so the
-        # copies it does not find cost nothing.
-        "${ENV_BIN}/pulseaudio" --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit --exit-idle-time="-1" \
-            -p "${HERE}/usr/conda/lib/pulseaudio/modules" -F "${HERE}/usr/conda/etc/pulse/default.pa" &
-    elif command -v pulseaudio >/dev/null 2>&1; then
-        pulseaudio --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit --exit-idle-time="-1" &
-    fi
-fi
-
-# Preloaded for selkies alone: the servers started above, and whatever the
-# session runs under them, keep resolving the libraries their own binaries name.
-if [ -n "${system_xcb}" ]; then
-    echo "L4T detected; preloading the system ${system_xcb} into selkies"
-    exec env LD_PRELOAD="${system_xcb}${LD_PRELOAD:+:${LD_PRELOAD}}" "${ENV_BIN}/selkies" "$@"
-fi
-
-exec "${ENV_BIN}/selkies" "$@"
-APPRUN
-chmod +x AppDir/AppRun
-ln -sf usr/share/icons/hicolor/512x512/apps/selkies.png AppDir/selkies.png
-ln -sf usr/share/applications/selkies.desktop AppDir/selkies.desktop
-
-# 5) Final AppImage
-"${WORK}/linuxdeploy.AppImage" --appimage-extract-and-run \
-    --appdir AppDir \
-    --output appimage
-
-mkdir -p out
-mv "${OUTPUT}" out/
-# The AppDir goes before the AppImage is checked: an absolute path the build
-# left inside the payload resolves while the prefix it names is still there, so
-# a payload that runs nowhere else would pass every check below.
-rm -rf AppDir
-scripts/ci/verify-appimage.sh "out/${OUTPUT}"
-# The conda package is noarch, so exactly one architecture's job uploads it
-if [ "${ARCH}" = "${CONDA_PACKAGE_ARCH:-x86_64}" ]; then
-  cp "${PKG}" out/
-fi
+OUTPUT="out/selkies-${SELKIES_VERSION:-0.0.0}-${ARCH}.AppImage"
+scripts/ci/verify-appimage.sh "${OUTPUT}"
 ls -la out/
