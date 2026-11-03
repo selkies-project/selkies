@@ -33,7 +33,7 @@ if [ -n "${LD_PRELOAD:-}" ]; then
   export LD_PRELOAD="${kept}"
 fi
 
-# Backend toggle, resolved as settings.py resolves it: SELKIES_WAYLAND when set
+# Backend toggle, resolved as the server's settings resolve it: SELKIES_WAYLAND when set
 # (blank included), else the legacy PIXELFLUX_WAYLAND, with "true" or "1" in any
 # case ahead of a "|locked" suffix. Repeated here for running this script alone;
 # container-entrypoint.sh has already canonicalized it for the service.
@@ -43,22 +43,23 @@ wayland="${wayland#"${wayland%%[![:space:]]*}"}"
 wayland="${wayland%"${wayland##*[![:space:]]}"}"
 wayland="${wayland,,}"
 
-# Dev mode: run a checkout mounted into the container instead of the package
-# baked into the image, so a change can be tried without rebuilding. The web
-# client is a build product and is absent from a fresh checkout, so the image's
-# own bundle is linked in where the tree has none -- the path is gitignored, so
-# the link does not show up as a change in the checkout.
+# Dev mode: run the server built in a checkout mounted into the container instead
+# of the one baked into the image, so a change can be tried without rebuilding
+# the image. The checkout's own web client (dist/web) is served where it has
+# one, else the image's.
+selkies="selkies"
 if [ -n "${SELKIES_DEV_SOURCE:-}" ]; then
-  if [ -d "${SELKIES_DEV_SOURCE}/src/selkies" ]; then
-    bundled="$(python3 -c 'import os, selkies; print(os.path.join(os.path.dirname(selkies.__file__), "selkies_web"))' 2>/dev/null || true)"
-    if [ ! -e "${SELKIES_DEV_SOURCE}/src/selkies/selkies_web" ] && [ -d "${bundled}" ]; then
-      ln -sfn "${bundled}" "${SELKIES_DEV_SOURCE}/src/selkies/selkies_web" 2>/dev/null ||
-        echo "Dev mode: no web client in the checkout and its src/selkies is not writable" >&2
+  built="${SELKIES_DEV_SOURCE}/target/release/selkies"
+  if [ -x "${built}" ]; then
+    selkies="${built}"
+    if [ -f "${SELKIES_DEV_SOURCE}/dist/web/index.html" ]; then
+      export SELKIES_WEB_BUNDLE="${SELKIES_DEV_SOURCE}/dist/web"
+    else
+      export SELKIES_WEB_BUNDLE="/usr/local/share/selkies/web"
     fi
-    export PYTHONPATH="${SELKIES_DEV_SOURCE}/src${PYTHONPATH:+:${PYTHONPATH}}"
-    echo "Dev mode: serving from ${SELKIES_DEV_SOURCE}/src"
+    echo "Dev mode: serving ${built}"
   else
-    echo "Dev mode: ${SELKIES_DEV_SOURCE} holds no src/selkies; serving the image's own package" >&2
+    echo "Dev mode: ${SELKIES_DEV_SOURCE} holds no target/release/selkies; serving the image's own server" >&2
   fi
 fi
 
@@ -71,20 +72,16 @@ if [ "${wayland}" != "true" ] && [ "${wayland}" != "1" ]; then
   echo 'X Server is ready'
   # Preset the resolution, which dynamic resizing (SELKIES_ENABLE_RESIZE, on by
   # default) replaces with the client window's as soon as a client connects: the
-  # size a manual resolution locks the stream to, as settings.py resolves it from
-  # what selkies is started with below, else DISPLAY_SIZEW by DISPLAY_SIZEH. A
-  # display already that size keeps the mode its X server came up in.
-  size="$(python3 - "$@" 2>/dev/null <<'EOF'
-from selkies.settings import settings
-if settings.manual_resolution[0]:
-    print(f"{settings.manual_width}x{settings.manual_height}")
-EOF
-)" || size=""
+  # size a manual resolution locks the stream to, as the server resolves it from
+  # what it is started with below (`selkies manual-size`), else DISPLAY_SIZEW by
+  # DISPLAY_SIZEH. A display already that size keeps the mode its X server came
+  # up in.
+  size="$("${selkies}" manual-size "$@" 2>/dev/null)" || size=""
   size="${size:-${DISPLAY_SIZEW:-1920}x${DISPLAY_SIZEH:-1080}}"
   if [ "$(xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2; exit}')" != "${size}" ]; then
-    selkies resize "${size}"
+    "${selkies}" resize "${size}"
   fi
 fi
 
 # The published port is the container's boundary, so listen on every interface
-exec selkies --public --port="${SELKIES_PORT:-8080}" "$@"
+exec "${selkies}" --public --port="${SELKIES_PORT:-8080}" "$@"

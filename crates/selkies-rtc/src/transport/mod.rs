@@ -25,9 +25,8 @@
 //! through the task, which owns the association, as bytes in, and SCTP packets the peer sends
 //! come out of the incoming channel as bytes.
 //!
-//! The specification is `src/selkies/webrtc/rtcdtlstransport.py` and `rtcicetransport.py`;
-//! what those also carried for RTP routing, transport-wide congestion control, and pacing
-//! belongs to the RTP layer built on this handle.
+//! RTP routing, transport-wide congestion control, and pacing belong to the RTP layer built on
+//! this handle.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
