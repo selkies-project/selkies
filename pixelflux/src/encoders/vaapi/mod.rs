@@ -3244,7 +3244,7 @@ mod tests {
     fn vaapi_h264_constant_rate_decodes_above_level_5_2() {
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h, tile_w, tile_h) = (3840usize, 2160usize, 1280usize, 720usize);
-        let mut settings = RustCaptureSettings {
+        let mut settings = CaptureSettings {
             width: w as i32,
             height: h as i32,
             codec: Codec::H264,
@@ -3328,7 +3328,7 @@ mod tests {
         let Some((gbm, mut renderer)) = gpu_render() else {
             return;
         };
-        let settings = RustCaptureSettings {
+        let settings = CaptureSettings {
             width: w as i32,
             height: h as i32,
             codec: Codec::H264,
