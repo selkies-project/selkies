@@ -9,12 +9,13 @@
 //!
 //! `rtc_sdp` is the syntax layer, parsing a description's lines and printing them back;
 //! this module is the semantic one. `SessionDescription::parse` lifts the lines into typed
-//! media sections: a malformed attribute is skipped rather than refusing the whole offer, a
-//! payload type outside 0-255 or in the forbidden 72-76 refuses it, and a section past
-//! `MAX_CODECS`, `MAX_SSRCS`, or `MAX_RTCP_FB` is refused at once, since the parse runs on
-//! the task every session shares on what a page sends over signaling; `MAX_REMOTE_SDP`
-//! bounds what is parsed at all. `to_sdp` prints a description in the line order browsers
-//! expect, through `rtc_sdp::SessionDescription::marshal`.
+//! media sections: a malformed attribute is skipped rather than refusing the whole offer, as is
+//! an `a=rtpmap` for a payload type already mapped, a payload type outside 0-255 or in the
+//! forbidden 72-76 refuses it, and a section past `MAX_CODECS`, `MAX_SSRCS`, or `MAX_RTCP_FB`
+//! is refused at once, since the parse runs on the task every session shares on what a page
+//! sends over signaling; `MAX_REMOTE_SDP` bounds what is parsed at all. `to_sdp` prints a
+//! description in the line order browsers expect, through
+//! `rtc_sdp::SessionDescription::marshal`.
 //!
 //! `codecs` holds the codec and header-extension tables the offer is built from and the
 //! negotiation over them; `offer` the construction of offers and answers and the
@@ -45,7 +46,9 @@ pub use offer::{LocalTransport, Session, Transceiver};
 pub const MAX_CODECS: usize = 256;
 /// The most SSRCs a media section may name.
 pub const MAX_SSRCS: usize = 512;
-/// The most `a=rtcp-fb` lines a media section may carry.
+/// The most feedback entries a media section may carry: an `a=rtcp-fb` line adds one to each
+/// codec it names, every codec for `*`, and counts at least once, so a section holds no more
+/// than it prints back.
 pub const MAX_RTCP_FB: usize = 512;
 /// The longest remote description read at all, in bytes: a browser's answer is a few
 /// kilobytes.
@@ -857,6 +860,7 @@ impl SessionDescription {
                 .map(|b| (b.bandwidth_type.clone(), b.bandwidth))
                 .collect();
             let mut ssrc_count = 0usize;
+            let mut rtpmap_count = 0usize;
             for attribute in &rtc_media.attributes {
                 let value = attribute_value(attribute);
                 match attribute.key.as_str() {
@@ -944,8 +948,12 @@ impl SessionDescription {
                         } else {
                             None
                         };
-                        if media.codecs.len() >= MAX_CODECS {
+                        rtpmap_count += 1;
+                        if rtpmap_count > MAX_CODECS {
                             return Err(SdpError::Bound(MAX_CODECS, "codecs"));
+                        }
+                        if media.codecs.iter().any(|c| c.payload_type == payload_type) {
+                            continue;
                         }
                         media.codecs.push(Codec {
                             mime_type: format!("{}/{}", media.kind, bits[0]),
@@ -1058,26 +1066,19 @@ impl SessionDescription {
                         if bits.len() < 2 {
                             continue;
                         }
-                        feedback += 1;
+                        let payload_type = bits[0].parse::<u8>().ok();
+                        let wildcard = bits[0] == "*";
+                        let lands = |c: &Codec| wildcard || Some(c.payload_type) == payload_type;
+                        feedback += media.codecs.iter().filter(|c| lands(c)).count().max(1);
                         if feedback > MAX_RTCP_FB {
-                            return Err(SdpError::Bound(MAX_RTCP_FB, "feedback lines"));
+                            return Err(SdpError::Bound(MAX_RTCP_FB, "feedback entries"));
                         }
                         let entry = RtcpFeedback {
                             kind: bits[1].to_owned(),
                             parameter: bits.get(2).map(|p| (*p).to_owned()),
                         };
-                        if bits[0] == "*" {
-                            for codec in &mut media.codecs {
-                                codec.rtcp_feedback.push(entry.clone());
-                            }
-                        } else if let Ok(payload_type) = bits[0].parse::<u8>() {
-                            for codec in media
-                                .codecs
-                                .iter_mut()
-                                .filter(|c| c.payload_type == payload_type)
-                            {
-                                codec.rtcp_feedback.push(entry.clone());
-                            }
+                        for codec in media.codecs.iter_mut().filter(|c| lands(c)) {
+                            codec.rtcp_feedback.push(entry.clone());
                         }
                     }
                     _ => {}

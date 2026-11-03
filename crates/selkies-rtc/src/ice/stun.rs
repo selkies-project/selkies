@@ -363,7 +363,7 @@ pub mod attrs {
 #[cfg(test)]
 mod tests {
     //! Regression vectors for the parser every datagram a peer sends reaches first, as the
-    //! fork's `fuzz_stun.py` target exercises it: nothing malformed may escape as a panic.
+    //! `stun` fuzz target exercises it: nothing malformed may escape as a panic.
     use super::*;
 
     fn header(method_class: u16, length: u16) -> Vec<u8> {
@@ -427,9 +427,8 @@ mod tests {
         }
     }
 
-    /// What `fuzz_stun.py` feeds the fork's parser, deterministically: a valid check mutated
-    /// byte by byte reaches the parser and the authenticator with no panic. The corpus under
-    /// `tests/fuzz/corpus` holds no STUN inputs to replay.
+    /// What the `stun` fuzz target feeds the parser, deterministically: a valid check mutated
+    /// byte by byte reaches the parser and the authenticator with no panic.
     #[test]
     fn mutated_checks_never_panic() {
         use rand::SeedableRng;

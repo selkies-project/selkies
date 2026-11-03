@@ -2439,8 +2439,8 @@ fn a_transport_that_paces_nothing_reports_the_frame_once_written() {
 // ---- what a peer can send
 
 /// Random and mutated bytes against everything that parses what a peer sends: the crate's
-/// fuzz targets run these same paths under coverage, this keeps them from panicking in the
-/// unit tier. `tests/fuzz/corpus` holds no RTP vectors, so the seeds are built here.
+/// fuzz targets (`crates/selkies-rtc/fuzz`) run these same paths under coverage, this keeps
+/// them from panicking in the unit tier.
 #[test]
 fn nothing_a_peer_sends_panics() {
     let mut state = 0x9E37_79B9_7F4A_7C15u64;

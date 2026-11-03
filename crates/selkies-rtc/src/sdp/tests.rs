@@ -8,7 +8,7 @@
 //! reach the display's own video section and no other.
 //!
 //! The parse runs on the task every session shares, on what a page sends over signaling: a
-//! media section at the caps on codecs, feedback lines, and SSRCs parses at once, one past
+//! media section at the caps on codecs, feedback entries, and SSRCs parses at once, one past
 //! any cap is refused, a description far past anything a browser sends is refused as fast,
 //! and one longer than its bound is refused before parsing. The offer bundles the display's
 //! sendonly video with the recvonly webcam section the browser encodes; full color rewrites
@@ -73,7 +73,7 @@ fn a_section_at_every_cap_parses_at_once() {
 fn one_past_a_cap_is_refused() {
     for (label, args) in [
         ("codecs", (MAX_CODECS + 1, 0, 0)),
-        ("feedback lines", (1, MAX_RTCP_FB + 1, 0)),
+        ("feedback entries", (1, MAX_RTCP_FB + 1, 0)),
         ("SSRCs", (1, 0, MAX_SSRCS + 1)),
     ] {
         let (outcome, _) = parse(&section(args.0, args.1, args.2));
@@ -82,6 +82,51 @@ fn one_past_a_cap_is_refused() {
             "{label}: {outcome:?}"
         );
     }
+}
+
+/// A section of `codecs` distinct payload types, each mapped twice, under `wildcards` lines of
+/// `a=rtcp-fb:* nack`.
+fn wildcard_section(codecs: u8, wildcards: usize) -> String {
+    let mut lines = vec![
+        "m=video 9 UDP/TLS/RTP/SAVPF 96".to_owned(),
+        "c=IN IP4 0.0.0.0".to_owned(),
+        "a=mid:0".to_owned(),
+        "a=rtcp-mux".to_owned(),
+        "a=recvonly".to_owned(),
+    ];
+    for _ in 0..2 {
+        lines.extend((0..codecs).map(|pt| format!("a=rtpmap:{pt} VP8/90000")));
+    }
+    lines.extend(std::iter::repeat_n(
+        "a=rtcp-fb:* nack".to_owned(),
+        wildcards,
+    ));
+    format!("{}{}\r\n", head(), lines.join("\r\n"))
+}
+
+#[test]
+fn feedback_counts_every_codec_a_line_lands_on() {
+    let entries = |d: &SessionDescription| -> usize {
+        d.media[0]
+            .codecs
+            .iter()
+            .map(|c| c.rtcp_feedback.len())
+            .sum()
+    };
+    let parsed = SessionDescription::parse(&wildcard_section(100, 5)).expect("500 entries parse");
+    assert_eq!(
+        parsed.media[0].codecs.len(),
+        100,
+        "a second mapping is skipped"
+    );
+    assert_eq!(entries(&parsed), 500);
+    let printed = SessionDescription::parse(&parsed.to_sdp()).expect("what was printed parses");
+    assert_eq!(entries(&printed), 500, "the same feedback prints back");
+    assert_eq!(
+        SessionDescription::parse(&wildcard_section(120, 5)),
+        Err(SdpError::Bound(MAX_RTCP_FB, "feedback entries")),
+        "five wildcards over 120 codecs are 600 entries"
+    );
 }
 
 #[test]
@@ -103,7 +148,7 @@ fn an_answer_past_its_bound_is_refused_before_anything_else() {
 
 #[test]
 fn the_corpus_answer_parses_and_prints_back() {
-    let text = include_str!("../../../../tests/fuzz/corpus/sdp/answer.sdp");
+    let text = include_str!("../../fuzz/seeds/sdp/answer.sdp");
     let parsed = SessionDescription::parse(text).expect("the corpus answer parses");
     assert!(!parsed.media.is_empty());
     let printed = parsed.to_sdp();
@@ -516,10 +561,10 @@ fn an_ice_lite_session_says_so_in_its_offer() {
     );
 }
 
-/// `tests/fuzz/fuzz_sdp.py`'s shape: the corpus answer mutated, parsed, and what parses printed.
+/// The `sdp` fuzz target's shape: its seed answer mutated, parsed, and what parses printed.
 #[test]
 fn mutated_descriptions_never_panic_the_parse() {
-    let seed = include_str!("../../../../tests/fuzz/corpus/sdp/answer.sdp").as_bytes();
+    let seed = include_str!("../../fuzz/seeds/sdp/answer.sdp").as_bytes();
     let mut state = 0x1234_5678_9abc_def0u64;
     let mut next = move || {
         state ^= state << 13;

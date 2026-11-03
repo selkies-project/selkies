@@ -34,8 +34,10 @@
   `unit/test_webrtc_topology_settings.py` needs a network interface besides loopback for its ICE host candidates and
   fails without one. The suites in `tests/unit` show how to drive the token table, the auth middleware (aiohttp test
   client), the input dispatcher and the interposers (`tests/tools` builds a uinput shim and a V4L2 probe).
-- The parsers can be called directly: `selkies.ice.stun.parse_message`, `selkies.webrtc.rtp`,
-  `selkies.webrtc.rtcsctptransport`, `selkies.webrtc.sdp`.
+- The parsers of what a WebRTC peer sends can be called directly from `crates/selkies-rtc`: `ice::stun::parse`,
+  `rtp::RtpPacket::parse` and `rtp::RtcpPacket::parse`, `sctp::Sctp::handle_packet`, `sdp::SessionDescription::parse`.
+  `crates/selkies-rtc/fuzz` drives each the way the server does (`cargo fuzz run rtp|sctp|sdp|stun` on a nightly
+  toolchain, seeds in `fuzz/seeds/<target>`).
 - The full server needs a display, PulseAudio and a GPU or software encoder; reproducers that need no display are
   preferred.
 
