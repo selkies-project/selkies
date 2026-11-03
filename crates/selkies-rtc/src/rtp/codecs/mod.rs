@@ -174,6 +174,14 @@ impl Packetizer {
         })
     }
 
+    /// RED's redundancy state, where this packs RED.
+    pub fn red(&mut self) -> Option<&mut opus::RedState> {
+        match self {
+            Packetizer::Red(state) => Some(state),
+            _ => None,
+        }
+    }
+
     /// The RTP payloads of one frame. `timestamp` is the frame's RTP timestamp, which RED
     /// stamps its redundant blocks against.
     pub fn pack(&mut self, data: &Bytes, timestamp: u32) -> Result<Packed, PackError> {
