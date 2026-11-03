@@ -523,13 +523,19 @@ pub fn unpack_header_extensions(
     Ok(extensions)
 }
 
+/// The longest value an RTP header extension can carry, the two-byte form's length byte (RFC 8285).
+pub const MAX_EXTENSION_VALUE: usize = 255;
+
 /// Serialize `(id, value)` pairs (RFC 8285) into `out`, padded to a word: the one-byte form
-/// where every id is 14 or less and every value 1 to 16 bytes, else the two-byte form.
-/// Returns the profile, 0 for no extensions, which writes nothing.
+/// where every id is 14 or less and every value 1 to 16 bytes, else the two-byte form. A value
+/// longer than `MAX_EXTENSION_VALUE` fits neither form and is left out, rather than written behind a
+/// length byte that would misframe every extension after it. Returns the profile, 0 for no
+/// extensions, which writes nothing.
 pub fn pack_header_extensions<'a>(
     extensions: impl Iterator<Item = (u8, &'a [u8])> + Clone,
     out: &mut Vec<u8>,
 ) -> u16 {
+    let extensions = extensions.filter(|(_, value)| value.len() <= MAX_EXTENSION_VALUE);
     let mut any = false;
     let mut one_byte = true;
     for (id, value) in extensions.clone() {
@@ -815,6 +821,29 @@ pub fn random32() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_value_too_long_for_either_form_is_left_out() {
+        let long = vec![7u8; MAX_EXTENSION_VALUE + 1];
+        let kept = [1u8, 2, 3];
+        let mut out = Vec::new();
+        let profile =
+            pack_header_extensions([(3u8, &long[..]), (5, &kept[..])].into_iter(), &mut out);
+        let parsed = unpack_header_extensions(profile, &out).unwrap();
+        assert_eq!(
+            parsed,
+            vec![(5, &kept[..])],
+            "the extension behind it still frames"
+        );
+        let mut out = Vec::new();
+        let longest = vec![7u8; MAX_EXTENSION_VALUE];
+        let profile = pack_header_extensions([(3u8, &longest[..])].into_iter(), &mut out);
+        assert_eq!(profile, 0x1000);
+        assert_eq!(
+            unpack_header_extensions(profile, &out).unwrap(),
+            vec![(3, &longest[..])]
+        );
+    }
 
     fn configured(uris: &[&str], offset: u8) -> HeaderExtensionsMap {
         let mut map = HeaderExtensionsMap::new();
