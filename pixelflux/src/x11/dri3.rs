@@ -1183,7 +1183,8 @@ where
             gpu.settings.video_bitrate_kbps = controls.bitrate_kbps.load(Ordering::Relaxed);
             gpu.settings.video_vbv_multiplier =
                 controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
-            gpu.settings.target_fps = fps;
+            gpu.settings.target_fps =
+                f64::from_bits(controls.fps_bits.load(Ordering::Relaxed)).max(1.0);
             let live = gpu.settings.clone();
             if let Err(e) = gpu.enc().reconfigure_rate(&live) {
                 eprintln!(
