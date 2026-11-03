@@ -1006,8 +1006,8 @@ impl XorShift {
     }
 }
 
-/// `tests/fuzz/fuzz_sctp.py`'s shape: chunk bytes mutated from valid seeds, the checksum and
-/// the tag made to match so each reaches the handlers, on associations established and not.
+/// The `sctp` fuzz target's shape: chunk bytes mutated from valid seeds, the checksum and the
+/// tag made to match so each reaches the handlers, on associations established and not.
 #[test]
 fn mutated_packets_never_panic_the_association() {
     let mut rng = XorShift(0x5e1c_1e50_dead_beef);
