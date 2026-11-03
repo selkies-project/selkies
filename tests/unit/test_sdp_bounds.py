@@ -2,10 +2,12 @@
 """A remote SDP is parsed in time linear in its length.
 
 The parse runs on the event loop every session shares, on what a page sends
-over signaling. A media section at the caps on codecs, feedback lines and
-SSRCs parses at once; one past any cap is refused; a description far past
-anything a browser sends is refused just as fast; and set_sdp refuses an
-answer longer than its bound before parsing it.
+over signaling. A media section at the caps on codecs, feedback entries and
+SSRCs parses at once; one past any cap is refused; a feedback line counts once
+for every codec it lands on, and a repeated a=rtpmap for one payload type
+makes no second codec, so no section holds more entries than its cap; a
+description far past anything a browser sends is refused just as fast; and
+set_sdp refuses an answer longer than its bound before parsing it.
 """
 import asyncio
 import os
@@ -24,9 +26,9 @@ HEAD = ("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\n"
         "a=ice-ufrag:abcd\r\na=ice-pwd:abcdefghijklmnopqrstuv\r\n")
 
 
-def section(codecs: int, feedback: int, ssrcs: int) -> str:
+def section(codecs: int, feedback: int, ssrcs: int, distinct: int = 1) -> str:
     lines = ["m=video 9 UDP/TLS/RTP/SAVPF 96", "c=IN IP4 0.0.0.0", "a=mid:0", "a=rtcp-mux", "a=recvonly"]
-    lines += ["a=rtpmap:96 VP8/90000"] * codecs
+    lines += [f"a=rtpmap:{96 + i % distinct} VP8/90000" for i in range(codecs)]
     lines += ["a=rtcp-fb:* nack"] * feedback
     lines += [f"a=ssrc:{1000 + i} cname:x" for i in range(ssrcs)]
     return HEAD + "\r\n".join(lines) + "\r\n"
@@ -35,8 +37,10 @@ def section(codecs: int, feedback: int, ssrcs: int) -> str:
 def parse(text: str) -> tuple:
     start = time.monotonic()
     try:
-        sdp.SessionDescription.parse(text)
-        outcome = "parsed"
+        parsed = sdp.SessionDescription.parse(text)
+        codecs = parsed.media[0].rtp.codecs
+        entries = sum(len(c.rtcpFeedback) for c in codecs)
+        outcome = f"parsed {len(codecs)} codecs, {entries} feedback entries"
     except ValueError as e:
         outcome = f"refused: {e}"
     return outcome, time.monotonic() - start
@@ -45,11 +49,21 @@ def parse(text: str) -> tuple:
 def main() -> bool:
     res = H.Results("sdp-bounds")
     outcome, took = parse(section(sdp.MAX_CODECS, sdp.MAX_RTCP_FB, sdp.MAX_SSRCS))
-    res.check("a section at every cap parses at once", outcome == "parsed" and took < 1.0, f"{outcome} {took:.3f} s")
-    for label, args in (("codecs", (sdp.MAX_CODECS + 1, 0, 0)), ("feedback lines", (1, sdp.MAX_RTCP_FB + 1, 0)),
+    res.check("a section at every cap parses at once", outcome.startswith("parsed") and took < 1.0,
+              f"{outcome} {took:.3f} s")
+    for label, args in (("codecs", (sdp.MAX_CODECS + 1, 0, 0)), ("feedback entries", (1, sdp.MAX_RTCP_FB + 1, 0)),
                         ("SSRCs", (1, 0, sdp.MAX_SSRCS + 1))):
         outcome, _ = parse(section(*args))
         res.check(f"one past the cap on {label} is refused", outcome.startswith("refused"), outcome)
+    outcome, _ = parse(section(sdp.MAX_CODECS, 0, 0))
+    res.check("a repeated a=rtpmap for one payload type makes one codec", outcome.startswith("parsed 1 codecs"),
+              outcome)
+    outcome, _ = parse(section(3, sdp.MAX_RTCP_FB // 3 + 1, 0, distinct=3))
+    res.check("a feedback line counts once for every codec it lands on", "feedback entries" in outcome
+              and outcome.startswith("refused"), outcome)
+    outcome, _ = parse(section(3, sdp.MAX_RTCP_FB // 3, 0, distinct=3))
+    res.check("feedback landing on several codecs parses up to the cap", outcome.startswith("parsed 3 codecs"),
+              outcome)
     big = section(4000, 4000, 4000)
     outcome, took = parse(big)
     res.check(f"a {len(big) // 1024} KiB description of thousands is refused at once",

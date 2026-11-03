@@ -51,6 +51,10 @@ from .rtcsctptransport import RTCSctpCapabilities
 
 # Most a media section may name of each, far past what a browser sends: parsing a
 # remote description, which arrives over signaling, stays linear in its length.
+# MAX_CODECS bounds the a=rtpmap lines, of which only the first for a payload
+# type makes a codec. MAX_RTCP_FB bounds feedback entries, not lines: an
+# a=rtcp-fb line adds one to each codec it names, every codec for "*", and
+# counts at least once, so a section holds no more than it prints back.
 MAX_CODECS = 256
 MAX_SSRCS = 512
 MAX_RTCP_FB = 512
@@ -517,6 +521,7 @@ class SessionDescription:
             current_media.ice_options = ice_options
             session.media.append(current_media)
             ssrcs: dict[int, SsrcDescription] = {}
+            rtpmaps = 0
 
             for line in media_lines[1:]:
                 if line.startswith("c="):
@@ -620,8 +625,11 @@ class SessionDescription:
                             )
                         except ValueError:
                             continue
-                        if len(current_media.rtp.codecs) >= MAX_CODECS:
+                        rtpmaps += 1
+                        if rtpmaps > MAX_CODECS:
                             raise ValueError(f"A media section names more than {MAX_CODECS} codecs")
+                        if any(c.payloadType == codec.payloadType for c in current_media.rtp.codecs):
+                            continue
                         current_media.rtp.codecs.append(codec)
                     elif attr == "sctpmap":
                         if not value or " " not in value:
@@ -665,9 +673,7 @@ class SessionDescription:
                 current_media.dtls = None
 
             # requires codecs to have been parsed
-            by_pt: dict[int, list[RTCRtpCodecParameters]] = {}
-            for codec in current_media.rtp.codecs:
-                by_pt.setdefault(codec.payloadType, []).append(codec)
+            by_pt = {codec.payloadType: codec for codec in current_media.rtp.codecs}
             feedback = 0
             for line in media_lines[1:]:
                 if line.startswith("a="):
@@ -677,28 +683,29 @@ class SessionDescription:
                             continue
                         format_id, format_desc = value.split(" ", 1)
                         try:
-                            named = by_pt.get(int(format_id))
+                            codec = by_pt.get(int(format_id))
                         except ValueError:
                             continue
-                        if not named:
+                        if codec is None:
                             continue
-                        named[0].parameters = parameters_from_sdp(format_desc)
+                        codec.parameters = parameters_from_sdp(format_desc)
                     elif attr == "rtcp-fb":
                         if not value:
                             continue
                         bits = value.split(" ", 2)
                         if len(bits) < 2:
                             continue
-                        feedback += 1
-                        if feedback > MAX_RTCP_FB:
-                            raise ValueError(f"A media section names more than {MAX_RTCP_FB} feedback lines")
                         if bits[0] == "*":
                             named = current_media.rtp.codecs
                         else:
                             try:
-                                named = by_pt.get(int(bits[0]), [])
+                                codec = by_pt.get(int(bits[0]))
                             except ValueError:
-                                continue
+                                codec = None
+                            named = [codec] if codec is not None else []
+                        feedback += max(1, len(named))
+                        if feedback > MAX_RTCP_FB:
+                            raise ValueError(f"A media section names more than {MAX_RTCP_FB} feedback entries")
                         for codec in named:
                             codec.rtcpFeedback.append(
                                 RTCRtcpFeedback(
