@@ -70,6 +70,16 @@ const BAND_BITS_PER_MB: f64 = 1.0;
 /// came out 0.3 to 0.8 dB finer than none at index 3.
 const VP8_UNFILTERED_QINDEX: u32 = 16;
 
+/// Quality index steps finer than the paint-over one VP8 codes a refined block at
+/// (`FrameEncoder::refines`): none, since a VP8 session's paint-over quantizer already sits at
+/// the floor its bounds keep (`VP8_DEFAULT_MIN_LEVEL`), and 1080p text beside a video came out
+/// the same at 0, 3, and 6 steps finer (39.7 dB at 2 Mbit/s and 42.6 at 8 against 29.6 and 33.5
+/// unrefined, where VP8's cleanup of the still screen reaches 42.0). VP9 refines no block: in
+/// its screen mode a block whose source has not changed reads as static and is skipped
+/// whatever its segment's quantizer, and refined, the same text came to 25.9 and 35.4 dB
+/// against 25.6 and 34.9, where VP9's cleanup of the still screen reaches 37.7 and 51.1.
+pub const REFINE_FINER: u32 = 0;
+
 /// Whether the loaded libvpx codes VP9 4:4:4 in the flexible mode the sessions run: before 1.13
 /// its layer machinery re-sizes every frame at 4:2:0, so a profile 1 session writes headers
 /// over pictures no decoder takes.
@@ -109,6 +119,8 @@ pub struct VpxEncoder {
     held_bytes: usize,
     /// One segment per macroblock for a held band (`band_roi`): 1 inside it, 0 outside.
     band_map: Vec<u8>,
+    /// The blocks the next frame of the rate control's refines (`refine_blocks`).
+    refinement: Option<crate::ledger::Refinement>,
     /// The quality index the rate control last coded a frame at, held frames aside.
     last_quality: Option<u32>,
     /// The bytes of the last frame the rate control coded, held frames aside.
@@ -221,6 +233,7 @@ impl VpxEncoder {
             held_band: None,
             held_bytes: 0,
             band_map: Vec::new(),
+            refinement: None,
             last_quality: None,
             last_bytes: None,
             cap: None,
@@ -533,6 +546,62 @@ impl VpxEncoder {
         Ok(())
     }
 
+    /// Code the blocks `refinement` names in the next frame of the rate control's at its target
+    /// quality (`ledger`), through libvpx's region-of-interest map (`refine_roi`).
+    pub fn refine_blocks(&mut self, refinement: &crate::ledger::Refinement) {
+        self.refinement = Some(refinement.clone());
+    }
+
+    /// Hand libvpx the region map of `refinement`, or clear it with `None`: segment 1 the blocks
+    /// it refines, coded the steps of libvpx's quantizer between the rate control's last and the
+    /// target finer than the frame (which libvpx translates to its internal index), segment 0
+    /// the rest at the frame's own. VP8 maps its 16x16 macroblocks and skips a refined block
+    /// with no static threshold, since an unchanged block under the session's own
+    /// (`VP8_STATIC_THRESHOLD`) would be copied rather than coded finer; VP9 maps its 8x8
+    /// blocks, and runs the map in place of its cyclic refresh for the frame.
+    fn refine_roi(&mut self, refinement: Option<&crate::ledger::Refinement>) -> Result<(), String> {
+        let unit = if self.codec == Codec::Vp8 { 16 } else { 8 };
+        let cols = self.cfg.g_w.div_ceil(unit);
+        let rows = self.cfg.g_h.div_ceil(unit);
+        let mut roi: vpx_roi_map_t = unsafe { std::mem::zeroed() };
+        roi.rows = rows;
+        roi.cols = cols;
+        roi.ref_frame = [-1; 8];
+        if let Some(r) = refinement {
+            let step = |index: i32| self.codec.quantizer(index) as i32;
+            let delta = (step(r.target) - step(r.from)).clamp(-63, 0);
+            let u = unit as i32;
+            self.band_map.clear();
+            self.band_map.extend((0..rows).flat_map(|row| {
+                (0..cols).map(move |col| {
+                    u8::from(r.plan.refines_area(col as i32 * u, row as i32 * u, u, u))
+                })
+            }));
+            roi.roi_map = self.band_map.as_mut_ptr();
+            roi.delta_q[1] = delta;
+            roi.static_threshold[0] = VP8_STATIC_THRESHOLD as u32;
+        }
+        let control = if self.codec == Codec::Vp8 {
+            VP8E_SET_ROI_MAP
+        } else {
+            VP9E_SET_ROI_MAP
+        };
+        let res = unsafe {
+            vpx_codec_control_(
+                &mut self.ctx,
+                control as c_int,
+                &mut roi as *mut vpx_roi_map_t as *mut c_void,
+            )
+        };
+        if res != VPX_CODEC_OK {
+            return Err(error(
+                &self.ctx,
+                "libvpx refused the refinement's region map",
+            ));
+        }
+        Ok(())
+    }
+
     /// Pin the configuration's quantizer bounds to the one the quality index `crf` selects.
     fn pin_quantizer(&mut self, crf: u32) -> Result<(), String> {
         let level = vpx_level(self.codec, self.codec.quantizer(crf as i32));
@@ -612,10 +681,20 @@ impl VpxEncoder {
                 held.is_some_and(|crf| self.codec.quantizer(crf as i32) <= VP8_UNFILTERED_QINDEX);
             self.band_roi(band, unfiltered)?;
         }
+        let refinement = self
+            .refinement
+            .take()
+            .filter(|_| held.is_none() && !force_idr);
+        if let Some(r) = &refinement {
+            self.refine_roi(Some(r))?;
+        }
         let quality = self.last_quality;
         let mut result = self.encode_frame(pixels, stride, rgba, frame_number, force_idr);
         if band.is_some() {
             self.band_roi(None, false)?;
+        }
+        if refinement.is_some() {
+            self.refine_roi(None)?;
         }
         let mut coded_at = held;
         let retry = match (held, &result) {

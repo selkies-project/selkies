@@ -439,7 +439,7 @@ fn cleanup_bench() {
         .map(|path| std::fs::File::create(&path).unwrap_or_else(|e| panic!("{path}: {e}")));
     let mut frame = vec![0u8; w * 4 * h];
     let mut previous = vec![0u8; w * 4 * h];
-    let mut video_psnr: Vec<f64> = Vec::new();
+    let mut video_psnr: Vec<(i64, f64)> = Vec::new();
     for t in 0..total {
         let scroll = if t < motion {
             t * step
@@ -537,7 +537,7 @@ fn cleanup_bench() {
                 None => psnr(&shown, &src),
             };
             if let Some(area) = video.filter(|_| in_still) {
-                video_psnr.push(psnr_inside(&shown, &src, w, area));
+                video_psnr.push((rel, psnr_inside(&shown, &src, w, area)));
             }
             last_ssim = if ssim_all || rel >= -1 {
                 ssim(&shown, &src, w, h)
@@ -620,11 +620,21 @@ fn cleanup_bench() {
         .collect();
     println!("  still frames sent: {still_sent} of {still}; psnr at stop {psnr_at_stop:.2}");
     if !video_psnr.is_empty() {
+        let least = video_psnr
+            .iter()
+            .cloned()
+            .fold((0, f64::INFINITY), |a, b| if b.1 < a.1 { b } else { a });
         println!(
-            "  video area psnr over the still phase: mean {:.2}, least {:.2}",
-            video_psnr.iter().sum::<f64>() / video_psnr.len() as f64,
-            video_psnr.iter().cloned().fold(f64::INFINITY, f64::min)
+            "  video area psnr over the still phase: mean {:.2}, least {:.2} at t={:+}",
+            video_psnr.iter().map(|v| v.1).sum::<f64>() / video_psnr.len() as f64,
+            least.1,
+            least.0
         );
+        if std::env::var("PF_BENCH_VIDEO_ROWS").is_ok() {
+            for (t, v) in video_psnr.iter().filter(|(t, _)| *t < 120) {
+                println!("  video t={t:+} {v:.2}");
+            }
+        }
     }
     println!(
         "summary codec={} turbo={} cbr={} kbps={} {}x{} first_key={:?} keys={still_keys} max_kB={:.1}@{} still_kB={:.1} still_kbps={:.0} resume_kB={:.1} end_psnr={:.2} end_ssim={:.5} to_end-1dB={} to_end-0.5dB={} to_target({target:.2})={} link_wait_ms={}",

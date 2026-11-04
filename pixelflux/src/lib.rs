@@ -1644,6 +1644,7 @@ fn wayland_encode_loop<B: WlPayload>(
                     &settings,
                     &decision,
                     crate::pipeline::EncoderQuality::of(encoder),
+                    outcome.as_ref().map_or(0, Vec::len),
                 );
                 match outcome {
                     Ok(data) => {

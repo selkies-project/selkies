@@ -51,9 +51,10 @@ const REFINE_START_FRAMES: usize = 512;
 /// macroblock offset toward nothing, and left the text at 42 dB; at 16 a frame it reached 48.
 const REFINE_RISE: i32 = 2;
 
-/// Frame budgets a refining frame may come out at before its refined blocks a frame halve, as
-/// they do past `REFINE_RISE`: a rate control pinned at its coarsest quantizer says nothing
-/// through it, and at 2 Mbit/s at 1080p x264 sent the refinement at twice the rate.
+/// Frame budgets, or as much as the frames before refining came to where that is more, a
+/// refining frame may come out at before its refined blocks a frame halve, as they do past
+/// `REFINE_RISE`: a rate control pinned at its coarsest quantizer says nothing through it, and
+/// at 2 Mbit/s at 1080p x264 sent the refinement at twice the rate.
 const REFINE_OVER: f64 = 1.5;
 
 /// A frame's refinement: the blocks (`plan`), the quality index they are coded at (`target`),
@@ -72,11 +73,29 @@ impl Refinement {
     }
 }
 
-/// How many blocks a region refines a frame (`REFINE_FRAMES`, `REFINE_RISE`, `REFINE_OVER`).
+/// Frames a region refines nothing for once a frame refining one block came out past
+/// `REFINE_OVER` or `REFINE_RISE`: a rate that cannot afford a block a frame is one where the
+/// encoder's own refinement of the region does better than a block a frame. VP8 at 2 Mbit/s
+/// beside a video came to 24.2 dB refining a block a frame, against 29.6 with none, its cyclic
+/// refresh, which the region map displaces, refining the still screen itself.
+const REFINE_PAUSE: u32 = 64;
+
+/// The frame budgets the frames of a region refining nothing may average before it refines
+/// nothing for `REFINE_PAUSE` frames: a rate control that already runs over its rate has none to
+/// spare. Beside a video, VP8's frames averaged 1.38 budgets at 2 Mbit/s, where refining took
+/// the text to 25.5 dB against 29.6 by its cyclic refresh and 12% more bytes, and 0.76 at 8
+/// Mbit/s, where it took the text from 33.5 to 42.6.
+const REFINE_RATE_HELD: f64 = 1.2;
+
+/// How many blocks a region refines a frame (`REFINE_FRAMES`, `REFINE_RISE`, `REFINE_OVER`,
+/// `REFINE_PAUSE`, `REFINE_RATE_HELD`).
 #[derive(Clone, Debug, Default)]
 pub struct RefinePace {
     count: usize,
     base: Option<i32>,
+    /// The bytes of the frames that refined nothing, on average over the last eight or so.
+    base_bytes: f64,
+    paused: u32,
 }
 
 impl RefinePace {
@@ -85,6 +104,10 @@ impl RefinePace {
         let most = blocks.div_ceil(REFINE_FRAMES);
         if !constant_rate {
             return most;
+        }
+        if self.paused > 0 {
+            self.paused -= 1;
+            return 0;
         }
         if self.count == 0 {
             self.count = blocks.div_ceil(REFINE_START_FRAMES);
@@ -97,12 +120,21 @@ impl RefinePace {
     pub fn coded(&mut self, refined: bool, coded: i32, bytes: usize, budget: f64, blocks: usize) {
         if !refined {
             self.base = Some(coded);
+            self.base_bytes += (bytes as f64 - self.base_bytes) / 8.0;
+            if self.base_bytes > budget * REFINE_RATE_HELD {
+                self.paused = REFINE_PAUSE;
+            }
             return;
         }
         let base = *self.base.get_or_insert(coded);
+        let budget = budget.max(self.base_bytes);
         let most = blocks.div_ceil(REFINE_FRAMES);
         let count = self.count;
-        self.count = if bytes as f64 > budget * REFINE_OVER || coded > base + REFINE_RISE {
+        let costly = bytes as f64 > budget * REFINE_OVER || coded > base + REFINE_RISE;
+        if costly && count <= 1 {
+            self.paused = REFINE_PAUSE;
+        }
+        self.count = if costly {
             (count / 2).max(1)
         } else if coded <= base {
             (count + count / 4 + 1).min(most)
@@ -353,6 +385,27 @@ mod tests {
         assert!(
             plan.refines_area(32, 32, 32, 32),
             "the bottom row of blocks"
+        );
+    }
+
+    #[test]
+    fn a_rate_that_cannot_afford_a_block_a_frame_pauses_refinement() {
+        let mut pace = RefinePace::default();
+        assert_eq!(pace.most(512, true), 1);
+        pace.coded(true, 30, 3000, 1000.0, 512);
+        assert_eq!(
+            pace.most(512, true),
+            0,
+            "a block a frame over budget pauses"
+        );
+        for _ in 1..REFINE_PAUSE {
+            assert_eq!(pace.most(512, true), 0);
+        }
+        assert_eq!(pace.most(512, true), 1, "and resumes after the pause");
+        assert_eq!(
+            pace.most(512, false),
+            8,
+            "a constant quality refines its share"
         );
     }
 

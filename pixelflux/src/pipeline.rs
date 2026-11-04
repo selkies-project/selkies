@@ -694,8 +694,8 @@ pub fn plan_refinement(
     }
 }
 
-/// What a full-frame frame decided as `d` left in `st`'s ledger once coded, the encoder now
-/// reporting `quality`: its refined blocks are clean where the rate control's quality index put
+/// What a full-frame frame decided as `d` left in `st`'s ledger once coded in `bytes`, the
+/// encoder now reporting `quality`: its refined blocks are clean where the rate control's quality index put
 /// them at the target (`BlockLedger::refinement_coded`) and the pace follows the rate control
 /// (`RefinePace`); a frame held whole at the paint-over quality, or the region's cleanup having
 /// run its course, cleans the region, and a key frame at the rate control's own leaves it
@@ -705,6 +705,7 @@ pub fn refinement_coded(
     settings: &CaptureSettings,
     d: &HwFrameDecision,
     quality: EncoderQuality,
+    bytes: usize,
 ) {
     let normal = settings.video_crf as u32;
     if let Some(refinement) = &d.refine {
@@ -725,7 +726,7 @@ pub fn refinement_coded(
         st.refine.coded(
             d.refine.is_some(),
             coded as i32,
-            quality.bytes.unwrap_or(0),
+            bytes,
             frame_budget(settings.video_bitrate_kbps, settings.target_fps),
             blocks,
         );
@@ -2143,11 +2144,13 @@ impl X11Pipeline {
                     self.turbo_dirty.clear();
                     encode()
                 };
+                let bytes = res.as_ref().map_or(0, Vec::len);
                 refinement_coded(
                     &mut self.hw_state,
                     &self.settings,
                     &d,
                     EncoderQuality::of(enc),
+                    bytes,
                 );
                 match res {
                     Ok(data) if !data.is_empty() => {

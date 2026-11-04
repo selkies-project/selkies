@@ -1352,11 +1352,13 @@ impl FrameEncoder {
     /// own (`refine_blocks`), the quality index steps finer than the paint-over one it codes them
     /// at, so a refined block comes to what the region's own cleanup reaches; `None` where it
     /// does not: NVENC's H.264, HEVC, and AV1 through the QP delta map
-    /// (`nvenc::REFINE_FINER`). x264's striped sessions refine within `software::encode_cpu`
+    /// (`nvenc::REFINE_FINER`), libvpx's VP8 through its region-of-interest map
+    /// (`vpx::REFINE_FINER`, which says why not VP9). x264's striped sessions refine within `software::encode_cpu`
     /// (`ledger::REFINE_FINER`).
     pub fn refines(&self) -> Option<u32> {
         match self {
             FrameEncoder::Nvenc(enc) => enc.refines().then_some(nvenc::REFINE_FINER),
+            FrameEncoder::Vpx(enc) => (enc.codec() == Codec::Vp8).then_some(vpx::REFINE_FINER),
             _ => None,
         }
     }
@@ -1364,8 +1366,10 @@ impl FrameEncoder {
     /// Code the blocks `refinement` names in the next frame, where it is the rate control's, at
     /// its target quality (`ledger`), where `refines`.
     pub fn refine_blocks(&mut self, refinement: &crate::ledger::Refinement) {
-        if let FrameEncoder::Nvenc(enc) = self {
-            enc.refine_blocks(refinement);
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.refine_blocks(refinement),
+            FrameEncoder::Vpx(enc) => enc.refine_blocks(refinement),
+            _ => {}
         }
     }
 

@@ -1369,7 +1369,8 @@ where
                 )
             };
             let coded = EncoderQuality::of(gpu.enc());
-            refinement_coded(&mut state, &gpu.settings, &decision, coded);
+            let bytes = result.as_ref().map_or(0, Vec::len);
+            refinement_coded(&mut state, &gpu.settings, &decision, coded, bytes);
             match result {
                 Ok(data) if !data.is_empty() => {
                     encode_errors = 0;
