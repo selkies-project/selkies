@@ -7,7 +7,7 @@
  * inside it, and the dashboard keeps its handlers inside its components.
  * This plugin therefore converts every function that carries a docblock —
  * module-level or nested — into its module's page, so the reference covers
- * what the docblocks cover, as griffe does for the Python modules. A default
+ * what the docblocks cover, as rustdoc does for the server's crates. A default
  * export is named after its declaration rather than `default`.
  *
  * `_`-prefixed members are dropped from the reference: the web sources mark

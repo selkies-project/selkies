@@ -2,6 +2,11 @@
 // that does not resolve. Pages cross-reference each other by file name, and
 // those names are rewritten at build time, so a rename that breaks a link is
 // invisible until something checks the output.
+//
+// The rustdoc pages generate-rust-docs.mjs copies in are targets, never
+// sources: links into them are checked, but rustdoc's own pages are its
+// output, whose source-line anchors its script resolves and whose inlined
+// dependency docs keep their crate's relative links.
 import { readFile, readdir } from 'node:fs/promises';
 import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +27,7 @@ async function walk(dir) {
 const files = await walk(out);
 const exists = new Set(files.map((f) => `/${relative(out, f).split(/[\\/]/).join('/')}`));
 const pages = files.filter((f) => f.endsWith('.html'));
+const isRustdoc = (url) => url.split('/').includes('rustdoc');
 
 /** Every id an exported page defines, so anchors can be checked against it. */
 const ids = new Map();
@@ -45,6 +51,7 @@ let checked = 0;
 
 for (const page of pages) {
   const url = `/${relative(out, page).split(/[\\/]/).join('/')}`;
+  if (isRustdoc(url)) continue;
   const html = await readFile(page, 'utf8');
   const here = posix.dirname(url);
 

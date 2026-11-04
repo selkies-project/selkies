@@ -2,8 +2,10 @@
  * Builds the web halves of the Developer Reference under docs/reference from
  * the JSDoc blocks and type annotations in the web addons.
  *
- * Runs after generate-python-docs.mjs from the same predev/prebuild npm hooks
- * and adds one gitignored folder per addon beside the Python modules. TypeDoc
+ * Runs after the server's half (generate-rust-docs.mjs, or
+ * generate-python-docs.mjs for a release whose server is Python) from the
+ * same predev/prebuild npm hooks and adds one gitignored folder per addon
+ * beside it. TypeDoc
  * reads plain JavaScript through the TypeScript compiler's JSDoc support and
  * TypeScript natively, so one configuration covers selkies-web-core and the
  * dashboard; typedoc-plugin-markdown writes the pages
@@ -107,8 +109,8 @@ async function generate({ dir, title, source, entryPoints }) {
 await fs.mkdir(referenceDir, { recursive: true });
 for (const addon of ADDONS) await generate(addon);
 
-// The folder's meta.json is written by generate-python-docs.mjs; the web
-// sections follow the Python modules behind a separator.
+// The folder's meta.json is written by the server's half; the web sections
+// follow it behind a separator.
 const metaPath = join(referenceDir, 'meta.json');
 let meta = { title: 'Developer Reference', pages: ['index'] };
 try {

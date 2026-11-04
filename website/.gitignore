@@ -4,6 +4,7 @@
 # generated content
 .source
 /public/assets
+/public/rustdoc
 /selkies.json
 /.venv-docs
 

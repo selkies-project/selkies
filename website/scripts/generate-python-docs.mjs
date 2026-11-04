@@ -1,6 +1,8 @@
 /**
  * Builds the Developer Reference pages under docs/reference from the Google-
- * style docstrings and type hints in src/selkies.
+ * style docstrings and type hints in src/selkies, for a version whose server
+ * is that Python package: the releases build:versions renders with this
+ * tree's tooling. A tree without it is left to generate-rust-docs.mjs.
  *
  * The pages are build output, not source: docs/reference is gitignored and
  * this script runs from the predev/prebuild npm hooks, so a local build and
@@ -52,6 +54,10 @@ function extract() {
 }
 
 let jsonPath = process.argv[2];
+if (!jsonPath && !existsSync(join(repoRoot, 'src', 'selkies', '__init__.py'))) {
+  console.log('generate-python-docs: no Python package in this tree; skipped');
+  process.exit(0);
+}
 if (!jsonPath) {
   try {
     jsonPath = extract();

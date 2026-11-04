@@ -3,7 +3,9 @@
 // The export writes one file per page, which GitHub Pages serves for the
 // slashless URL and 404s for the other. Writing the same document to
 // <page>/index.html as well makes both spellings resolve directly, so neither
-// is the one a link has to use.
+// is the one a link has to use. The rustdoc pages generate-rust-docs.mjs
+// copies in are rustdoc's, linked by file name, and are left as they are: a
+// copy one directory deeper would break every relative link in it.
 import { copyFile, mkdir, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +17,7 @@ async function mirror(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
+      if (entry.name === 'rustdoc') continue;
       written += await mirror(path);
     } else if (entry.name.endsWith('.html') && entry.name !== 'index.html') {
       const asDirectory = path.slice(0, -'.html'.length);
