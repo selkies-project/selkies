@@ -267,7 +267,7 @@ Each is documented in full where named; read that before changing the subsystem.
   `crates/selkies/src/settings`, `LADDER_ORDER` and `nextRung` in the core): the full-frame codecs the host encodes
   in hardware, most efficient first, then those it encodes in software by their encoders' measured time per frame,
   then striped H.264, and JPEG last. Over WebSockets the client walks it through the encoders it decodes; over
-  WebRTC the offer lists it behind the display's codec (`prefer_codec`) and the display follows the codec the
+  WebRTC the offer lists it behind the display's codec (`video_preferences`) and the display follows the codec the
   answer took. 10 bits (`video_10bit`) follow the same rule with one difference: the client is asked by decoding a
   10-bit key frame of the format, never by its decoder's word, since engines accept 10-bit configurations they then
   fail to decode (`util.canDecodeTenBit`); the server says which formats its encode node and its software encoders

@@ -26,7 +26,7 @@
 //! callback ever touches a socket. Blocking native work (capture start and stop, the X
 //! server, the sound server) runs on blocking threads or behind the `host` traits, and no
 //! lock is held across an await: the state sits behind mutexes taken for short sections in the
-//! order `state` gives, the sequencing locks (`reconfigure`, `video_capture`) are async.
+//! order `state` gives, the sequencing locks (`reconfigure_lock`, `video_capture_lock`) are async.
 
 pub mod audio;
 pub mod client;

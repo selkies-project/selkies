@@ -8,8 +8,8 @@
 //! model, the settings a page applies, the per-display captures with their relays and
 //! backpressure, the layout pass, and the broadcasts that tell the pages about all of it.
 //!
-//! `reconfigure` serializes layout passes (a request during a pass coalesces into one
-//! follow-up) and `video_capture` serializes per-display capture start and stop underneath
+//! `reconfigure_lock` serializes layout passes (a request during a pass coalesces into one
+//! follow-up) and `video_capture_lock` serializes per-display capture start and stop underneath
 //! it. One capture per display persists for the server's lifetime so a restart keeps the
 //! encoder backend warm. A display whose page dropped keeps its entry and its running capture
 //! for the reconnect grace, so a reloading page resumes on it instead of paying a pipeline
