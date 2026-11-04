@@ -29,10 +29,7 @@ services:
   base:
     ###
     # NOTE: export DISTRIB_IMAGE and DISTRIB_RELEASE to change the base image.
-    # To test an unreleased wheel, build it with the `dist` service, then copy it
-    # from the `selkies-py-build` image into `addons/base/wheels/` before
-    # building this service; otherwise the wheel of the newest GitHub release
-    # is installed.
+    # The server is built from this checkout.
     ###
     image: selkies-base:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     build:

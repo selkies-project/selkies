@@ -28,7 +28,7 @@ on:
         type: string
         default: integration
       wheels_ready:
-        description: The caller already built the pixelflux and pcmflux wheels in this run
+        description: The caller already built the selkies wheel and the pixelflux and pcmflux wheels in this run
         type: boolean
         default: false
   schedule:
@@ -63,8 +63,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The uinput ABI is computed in pure Python, so every interpreter the
-        # package claims support for checks it against the kernel headers
+        # The suites and the repository scripts hold to the oldest interpreter
+        # ruff.toml targets, and run on the newest as well
         python-version: ["3.9", "3.15"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -88,23 +88,62 @@ jobs:
         run: scripts/ci/install-shellcheck.sh
       - name: Run the unit tier
         run: |
-          # The suites import the source tree, so every module-level import
-          # under selkies has to resolve: the runtime dependencies from
-          # pyproject.toml minus the capture stack, which the suites stub.
-          python scripts/ci/unit-deps.py > "${RUNNER_TEMP}/unit-requirements.txt"
-          python -m pip install pytest -r "${RUNNER_TEMP}/unit-requirements.txt"
+          # The tier is the source tree and the standard library; pytest is all
+          # it imports beyond them
+          python -m pip install pytest
           python -m pytest tests -m unit -v --junitxml=unit-report.xml
       - name: Fail if any suite skipped
         if: ${{ !cancelled() }}
         run: python tests/tools/assert_no_skips.py unit-report.xml
 
-  # pixelflux and pcmflux ship as wheels this run has in hand rather than from
-  # an index, which carries neither pre-release. The caller passes them in as
-  # artifacts when it has already resolved them; a standalone run resolves them
-  # here, downloading each project's per-commit pre-release or building what
-  # has none yet.
+  # The server's own unit tier, which runs wherever the suites' does
+  server-unit:
+    name: Unit tests (server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            addons/selkies-web-core/package-lock.json
+            addons/selkies-dashboard/package-lock.json
+      # The HTTP tests serve the bundle from dist/web
+      - name: Build the web client
+        env:
+          # For the controller database's lookups (gendb.js)
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci/build-web.sh
+      - name: Install the server's toolchain and libraries
+        run: scripts/ci/server-build-deps.sh
+      # The audio tests drive a real sound server, the one the suites stream
+      # from, whose null sink stays the default while they load and unload
+      # sinks beside it
+      - name: Start the display server and audio
+        run: |
+          sudo apt-get install --no-install-recommends -y xvfb pulseaudio pulseaudio-utils
+          scripts/ci/test-stack.sh
+          echo "PULSE_SERVER=unix:$(pactl info | sed -n 's/^Server String: //p')" >> "$GITHUB_ENV"
+      - name: cargo test
+        run: cargo test --locked --workspace
+
+  # The server the suites drive is the one this run's selkies wheel carries,
+  # and the capture stack they drive beside it rides wheels this run has in
+  # hand rather than an index, which carries neither pre-release. The caller
+  # passes them in as artifacts when it has already built them; a standalone
+  # run builds the selkies wheel and resolves the capture stack here,
+  # downloading each project's per-commit pre-release or building what has
+  # none yet.
+  wheel:
+    name: Build wheel
+    if: ${{ !inputs.wheels_ready }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-wheel.yaml
+
   wheels:
-    name: Capture stack (main HEAD)
+    name: Capture stack (pinned commits)
     if: ${{ !inputs.wheels_ready }}
     permissions:
       contents: read
@@ -114,8 +153,10 @@ jobs:
   # it by budget, so a shard stays inside the job's two hours.
   suites:
     name: Suites (${{ inputs.tiers || 'integration or e2e' }}, ${{ matrix.shard }}/3)
-    needs: [wheels]
-    if: ${{ always() && (needs.wheels.result == 'success' || needs.wheels.result == 'skipped') }}
+    needs: [wheel, wheels]
+    if: >-
+      ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
+          && contains(fromJSON('["success", "skipped"]'), needs.wheels.result) }}
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 120
     strategy:
@@ -276,49 +317,51 @@ jobs:
       - name: Verify the patched Xvfb
         run: |
           Xvfb -help 2>&1 | grep -q -- 'CRTCs per screen (default: 4)'
-      # The suites have to exercise the pixelflux and pcmflux that the images,
-      # packages, and AppImages ship, which come from main HEAD rather than any
-      # released version. Whichever job resolved them left them here.
-      - name: Download the pixelflux wheels (main HEAD)
+      # Whichever jobs built them left the selkies wheel and the pixelflux and
+      # pcmflux wheels of the commits Cargo.toml pins here.
+      - name: Download the selkies wheel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: selkies-wheel
+          path: dist/
+      - name: Download the pixelflux wheels (pinned commit)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
-          path: main-wheels/
+          path: capture-wheels/
           merge-multiple: true
-      - name: Download the pcmflux wheels (main HEAD)
+      - name: Download the pcmflux wheels (pinned commit)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
-          path: main-wheels/
+          path: capture-wheels/
           merge-multiple: true
       - name: Install selkies and the test dependencies
         run: |
           python -m pip install --upgrade pip
-          # Built once and installed from the wheel, rather than installed from
-          # the source tree: dist/ is where the packaging suite looks, so it
-          # packages the very artifact these suites ran against instead of
-          # spending another build on a second copy of it.
-          python -m pip wheel --no-deps -w dist .
+          # The server under test is the one the wheel carries, installed as a
+          # user installs it: pip picks this platform's out of dist/
+          python -m pip install --no-index --find-links "$PWD/dist" --only-binary=:all: selkies
+          server="$(python -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/selkies"
+          "${server}" --version
+          echo "SELKIES_TEST_SERVER=${server}" >> "$GITHUB_ENV"
+          python -m pip install -r tests/requirements.txt
           # The pinned pixelflux/pcmflux are a pre-release no index carries:
-          # resolve them from the main-HEAD wheels downloaded above. The test extras
-          # (pytest, playwright, ...) come from the wheel's own [test] group.
-          mkdir -p main-wheels
-          wheel="$(ls dist/selkies-*.whl)"
-          python -m pip install --find-links "$PWD/main-wheels" "${wheel}[test]"
+          # install them from the wheels downloaded above.
+          mkdir -p capture-wheels
           ABI="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
           WHEEL_GLOB="*${ABI}-*manylinux*$(uname -m)*.whl"
           # Fatal rather than a note: a run that quietly took an index's copy
-          # tests a capture stack nothing ships, and reports it as a pass.
+          # tests a capture stack the server does not link, and reports it as a pass.
           for project in pixelflux pcmflux; do
-            found="$(find main-wheels -maxdepth 1 -name "${project}-${WHEEL_GLOB}" 2>/dev/null || true)"
+            found="$(find capture-wheels -maxdepth 1 -name "${project}-${WHEEL_GLOB}" 2>/dev/null || true)"
             if [ -z "${found}" ]; then
-              echo "::error::No main-HEAD ${project} wheel matching ${WHEEL_GLOB}"
+              echo "::error::No ${project} wheel of the pinned commit matching ${WHEEL_GLOB}"
               exit 1
             fi
             echo "${found}" | xargs python -m pip install --force-reinstall --no-deps
-            echo "${found}" | xargs cp -t dist/
           done
           python -c 'import pixelflux, pcmflux; print("capture stack:", pixelflux.__file__)'
       - name: Build the web client

@@ -1,30 +1,21 @@
 name: Capture stack wheels
 
-# Puts pixelflux and pcmflux into this run's artifacts, so container images,
-# native packages, AppImages, and the suites ride wheels this run holds rather
-# than an index. `pinned` says which build: the main branch (HEAD) of
-# selkies-project/pixelflux and selkies-project/pcmflux, which is what the
-# builds ahead of a release carry, or the versions this repository pins, which
-# is what a release ships. Both projects attach the wheels their own CI built to
-# every release they cut, per commit and per version alike, so naming one
-# fetches exactly what shipped. A main HEAD whose pre-release its project's CI
-# is still building is waited for, which takes less than building it again
-# here; a build here is only for what no release covers nor will, and runs as
-# the project's own wheel workflow does (below, `plan`).
+# Puts pixelflux and pcmflux into this run's artifacts, so the suites, which
+# drive the capture stack through its Python modules beside the server that
+# links it, ride wheels this run holds rather than an index. The build is the
+# commit of selkies-project/pixelflux and selkies-project/pcmflux that the
+# workspace's Cargo.toml pins, the one the server is built against, so the
+# suites never mix two versions of it. Both projects attach the wheels their
+# own CI built to the pre-release they cut for every commit of their main
+# branch, so naming one fetches exactly what shipped. A commit whose
+# pre-release its project's CI is still building is waited for, which takes
+# less than building it again here; a build here is only for what no release
+# covers nor will, and runs as the project's own wheel workflow does (below,
+# `plan`).
 
 on:
   workflow_dispatch:
-    inputs:
-      pinned:
-        description: Take the versions this repository pins, from each project's release, rather than their main HEAD
-        type: boolean
-        default: false
   workflow_call:
-    inputs:
-      pinned:
-        description: Take the versions this repository pins, from each project's release, rather than their main HEAD
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -41,10 +32,8 @@ jobs:
       pcmflux: ${{ steps.probe.outputs.pcmflux }}
       pixelflux_ref: ${{ steps.probe.outputs.pixelflux_ref }}
       pcmflux_ref: ${{ steps.probe.outputs.pcmflux_ref }}
-      pixelflux_version: ${{ steps.probe.outputs.pixelflux_version }}
-      pcmflux_version: ${{ steps.probe.outputs.pcmflux_version }}
     steps:
-      # The pins a pinned run reads live in this repository's pyproject.toml
+      # The pins live in this repository's Cargo.toml
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -52,7 +41,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
-          PINNED: ${{ inputs.pinned }}
           # How long a pre-release in the making is waited for, and how long
           # after a push its run may take to show up
           WAIT_S: "4500"
@@ -62,60 +50,43 @@ jobs:
           fetch="[]"
           for project in pixelflux pcmflux; do
             repo="${OWNER}/${project}"
-            tag=""
-            version=""
-            if [ "${PINNED}" = "true" ]; then
-              want="$(sed -n "s/^ *\"${project}[~=<>!]*\([0-9][^\"]*\)\".*/\1/p" pyproject.toml)"
-              if [ -z "${want}" ]; then
-                echo "::error::pyproject.toml pins no ${project} version"
-                exit 1
-              fi
-              # Built, where it has to be, as its release is: the tag's commit
-              # with the crate versioned as the tag
-              ref=""
-              version="${want}"
-              # The release that version was cut as, taken only when it carries
-              # wheels of that version rather than of whatever the tag moved to
-              assets="$(gh release view "${want}" --repo "${repo}" --json assets \
-                        --jq '.assets[].name' 2>/dev/null || true)"
-              case "${assets}" in *"${project}-${want}-"*) tag="${want}" ;; esac
-            else
-              # The commit itself, so a push while this runs changes nothing
-              sha="$(gh api "repos/${repo}/commits/main" --jq .sha 2>/dev/null || true)"
-              ref="${sha:-main}"
-              deadline=$((SECONDS + WAIT_S))
-              while [ -n "${sha}" ]; do
-                # Pre-releases are tagged with an abbreviated SHA, so match by prefix
-                tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
-                        --jq '.[].tagName' 2>/dev/null || true)"
-                tag=""
-                for candidate in ${tags}; do
-                  case "${sha}" in "${candidate}"*) tag="${candidate}"; break ;; esac
-                done
-                # Waited for while its project's pre-release run is in flight, which
-                # tags the release before its wheels finish uploading, or while the
-                # commit is too fresh for that run to have shown up
-                runs="$(gh run list --repo "${repo}" --workflow pre-release.yml --commit "${sha}" \
-                        --json status --jq '[.[].status] | join(" ")' 2>/dev/null || true)"
-                pushed="$(gh api "repos/${repo}/commits/${sha}" --jq .commit.committer.date 2>/dev/null || true)"
-                pushed_s="$(date -d "${pushed:-@0}" +%s 2>/dev/null || echo 0)"
-                age=$(( $(date +%s) - pushed_s ))
-                case " ${runs} " in
-                  *" queued "*|*" in_progress "*|*" waiting "*|*" pending "*|*" requested "*) ;;
-                  *) [ -z "${tag}" ] && [ -z "${runs}" ] && [ "${age}" -lt "${SHOW_UP_S}" ] || break ;;
-                esac
-                if [ "${SECONDS}" -ge "${deadline}" ]; then
-                  echo "${project}: its pre-release of ${sha} is still building; building it here"
-                  tag=""
-                  break
-                fi
-                echo "${project}: waiting for the pre-release of ${sha} (runs: ${runs:-none yet})"
-                sleep "${POLL_S}"
-              done
+            # The rev of the workspace's git dependency on the project
+            sha="$(sed -n "s/^${project} = {.* rev = \"\([0-9a-f]*\)\".*/\1/p" Cargo.toml)"
+            if [ -z "${sha}" ]; then
+              echo "::error::Cargo.toml pins no ${project} commit"
+              exit 1
             fi
+            deadline=$((SECONDS + WAIT_S))
+            while :; do
+              # Pre-releases are tagged with an abbreviated SHA, so match by prefix
+              tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
+                      --jq '.[].tagName' 2>/dev/null || true)"
+              tag=""
+              for candidate in ${tags}; do
+                case "${sha}" in "${candidate}"*) tag="${candidate}"; break ;; esac
+              done
+              # Waited for while its project's pre-release run is in flight, which
+              # tags the release before its wheels finish uploading, or while the
+              # commit is too fresh for that run to have shown up
+              runs="$(gh run list --repo "${repo}" --workflow pre-release.yml --commit "${sha}" \
+                      --json status --jq '[.[].status] | join(" ")' 2>/dev/null || true)"
+              pushed="$(gh api "repos/${repo}/commits/${sha}" --jq .commit.committer.date 2>/dev/null || true)"
+              pushed_s="$(date -d "${pushed:-@0}" +%s 2>/dev/null || echo 0)"
+              age=$(( $(date +%s) - pushed_s ))
+              case " ${runs} " in
+                *" queued "*|*" in_progress "*|*" waiting "*|*" pending "*|*" requested "*) ;;
+                *) [ -z "${tag}" ] && [ -z "${runs}" ] && [ "${age}" -lt "${SHOW_UP_S}" ] || break ;;
+              esac
+              if [ "${SECONDS}" -ge "${deadline}" ]; then
+                echo "${project}: its pre-release of ${sha} is still building; building it here"
+                tag=""
+                break
+              fi
+              echo "${project}: waiting for the pre-release of ${sha} (runs: ${runs:-none yet})"
+              sleep "${POLL_S}"
+            done
             {
-              echo "${project}_ref=${ref}"
-              echo "${project}_version=${version}"
+              echo "${project}_ref=${sha}"
               echo "${project}=${tag}"
             } >> "$GITHUB_OUTPUT"
             if [ -n "${tag}" ]; then
@@ -124,7 +95,7 @@ jobs:
                 '. + [["manylinux", "musllinux"][] as $l | ["x86_64", "aarch64"][] as $a
                       | {project: $p, tag: $t, platform: $l, arch: $a}]' <<< "${fetch}")"
             else
-              echo "${project}: nothing released for ${ref:-${version}}; building it"
+              echo "${project}: nothing released for ${sha}; building it"
             fi
           done
           echo "fetch=${fetch}" >> "$GITHUB_OUTPUT"
@@ -170,18 +141,14 @@ jobs:
   # into parallel jobs on it. Nothing here writes the Actions cache: what it
   # builds comes from another repository's commit, which a cache entry would
   # carry into later runs on the default branch.
-  # Only for what no release covers, and for everything when the probe could
-  # not answer, since what ships has to be the capture stack that was asked
-  # for. A pinned run is the exception: without the probe there is no version
-  # to build, and building main would ship a different one. A run cancelled
-  # while the probe waits (a newer push) builds nothing.
+  # Only for what no release covers. A run canceled while the probe waits (a
+  # newer push) builds nothing.
   plan:
     name: Capture stack (plan)
     needs: [locate]
     if: >-
-      ${{ !cancelled() && (needs.locate.result == 'success'
-                       && (needs.locate.outputs.pixelflux == '' || needs.locate.outputs.pcmflux == '')
-                       || needs.locate.result != 'success' && !inputs.pinned) }}
+      ${{ !cancelled() && needs.locate.result == 'success'
+          && (needs.locate.outputs.pixelflux == '' || needs.locate.outputs.pcmflux == '') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -196,17 +163,17 @@ jobs:
           sparse-checkout: .github/workflows
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ needs.locate.result != 'success' || needs.locate.outputs.pixelflux == '' }}
+        if: ${{ needs.locate.outputs.pixelflux == '' }}
         with:
           repository: ${{ github.repository_owner }}/pixelflux
-          ref: ${{ needs.locate.outputs.pixelflux_version && format('refs/tags/{0}', needs.locate.outputs.pixelflux_version) || needs.locate.outputs.pixelflux_ref || 'main' }}
+          ref: ${{ needs.locate.outputs.pixelflux_ref }}
           path: src/pixelflux
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ needs.locate.result != 'success' || needs.locate.outputs.pcmflux == '' }}
+        if: ${{ needs.locate.outputs.pcmflux == '' }}
         with:
           repository: ${{ github.repository_owner }}/pcmflux
-          ref: ${{ needs.locate.outputs.pcmflux_version && format('refs/tags/{0}', needs.locate.outputs.pcmflux_version) || needs.locate.outputs.pcmflux_ref || 'main' }}
+          ref: ${{ needs.locate.outputs.pcmflux_ref }}
           path: src/pcmflux
           persist-credentials: false
       # No token, so the planner counts no image as cached: every image is
@@ -217,9 +184,6 @@ jobs:
       # container and execute nothing of the project on the runner.
       - name: Plan the images and the wheels
         id: plan
-        env:
-          PIXELFLUX_VERSION: ${{ needs.locate.outputs.pixelflux_version }}
-          PCMFLUX_VERSION: ${{ needs.locate.outputs.pcmflux_version }}
         run: |
           version="$(sed -n 's|.*uses: pypa/cibuildwheel@[0-9a-f]* # v\([0-9.]*\)$|\1|p' \
                      self/.github/workflows/build-pixelflux-pcmflux-wheels.yaml)"
@@ -241,14 +205,13 @@ jobs:
               echo "::error::${own} names no IMAGE or JOBS"
               exit 1
             fi
-            tag_var="${project^^}_VERSION"
             plan="$(cd "src/${project}" && "${RUNNER_TEMP}/cibuildwheel/bin/python" scripts/wheel-plan.py matrix "${image}" "${jobs}")"
             echo "${plan}"
             commit="$(git -C "src/${project}" rev-parse HEAD)"
             recipe="$(cd "src/${project}" && "${RUNNER_TEMP}/cibuildwheel/bin/python" scripts/wheel-plan.py recipe)"
             stamp() {
-              jq -c --arg project "${project}" --arg image "${image}" --arg tag "${!tag_var}" \
-                --arg commit "${commit}" '[.[] | . + {project: $project, image: $image, tag: $tag, commit: $commit}]'
+              jq -c --arg project "${project}" --arg image "${image}" \
+                --arg commit "${commit}" '[.[] | . + {project: $project, image: $image, commit: $commit}]'
             }
             groups="$(jq -c -n --argjson a "${groups}" \
                       --argjson b "$(sed -n 's/^groups=//p' <<< "${plan}" | stamp)" '$a + $b')"
@@ -310,21 +273,6 @@ jobs:
           repository: ${{ github.repository_owner }}/${{ matrix.group.project }}
           ref: ${{ matrix.group.commit }}
           persist-credentials: false
-
-      - name: Version the crate as the tag
-        # As the project's release does: the wheel takes its version from the
-        # crate, whose manifest spells a pre-release the semver way; the lock
-        # names the crate's own version too, and the build runs --locked.
-        if: ${{ matrix.group.tag != '' }}
-        env:
-          PROJECT: ${{ matrix.group.project }}
-          RELEASE_TAG: ${{ matrix.group.tag }}
-        run: |
-          crate="$(echo "${RELEASE_TAG}" | sed -E 's/rc([0-9]+)$/-rc.\1/; s/a([0-9]+)$/-alpha.\1/; s/b([0-9]+)$/-beta.\1/; s/\.post([0-9]+)$/-post.\1/; s/\.dev([0-9]+)$/-dev.\1/')"
-          sed -i "0,/^version = /s|^version = .*|version = \"${crate}\"|" "${PROJECT}/Cargo.toml"
-          sed -i "/^name = \"${PROJECT}\"$/{n;s|^version = .*|version = \"${crate}\"|}" "${PROJECT}/Cargo.lock"
-          grep -q "^version = \"${crate}\"$" "${PROJECT}/Cargo.toml"
-          grep -A1 "^name = \"${PROJECT}\"$" "${PROJECT}/Cargo.lock" | grep -q "^version = \"${crate}\"$"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

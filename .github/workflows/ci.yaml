@@ -1,8 +1,8 @@
 name: CI
 
-# Single orchestrator for pushes to main: lint, build the wheel once, then
-# fan out to the image and native-package builds, which consume the wheel
-# artifact instead of rebuilding it. Pushes that only touch docs or
+# Single orchestrator for pushes to main: lint, build the wheel once for its
+# smoke test and the suites, then fan out to the image and native-package
+# builds, which build the server from source. Pushes that only touch docs or
 # devcontainer files skip CI (their own workflows cover them).
 
 on:
@@ -93,6 +93,22 @@ jobs:
           python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
           pre-commit run --all-files --show-diff-on-failure web-lint
 
+  rust-lint:
+    name: Lint server
+    # Its own job rather than a step of Lint, as the web client's is: clippy
+    # builds the workspace, which is the slow part
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the server's toolchain and libraries
+        run: scripts/ci/server-build-deps.sh
+      - name: rustfmt and clippy
+        # Through pre-commit so the hook definitions are the single source of truth
+        run: |
+          python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
+          pre-commit run --all-files --show-diff-on-failure rustfmt
+          pre-commit run --all-files --show-diff-on-failure clippy
+
   python-compat:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -109,15 +125,17 @@ jobs:
           # its final release
           allow-prereleases: true
       - name: Byte-compile every module
-        # pyproject.toml claims 3.9 through 3.15; this catches syntax that only
-        # the newer interpreters accept
-        run: python -m compileall -q src/selkies
+        # pyproject.toml claims 3.9 through 3.15 for the wheel's Python, the
+        # Jupyter entry point; this catches syntax that only the newer
+        # interpreters accept
+        run: python -m compileall -q infra/wheel/selkies
 
   tests:
     name: Test suites
     # The wheels are a dependency, not just an ordering constraint: the suites
-    # run against the same main-HEAD capture stack the artifacts ship
-    needs: [python-compat, pixelflux-pcmflux]
+    # run the server this run's wheel carries, and drive the capture stack it
+    # links through that stack's own wheels
+    needs: [python-compat, wheel, pixelflux-pcmflux]
     # The browser tier runs nightly from tests.yaml; this keeps the push and
     # pull-request path at the suites that need no browser install
     permissions:
@@ -125,13 +143,13 @@ jobs:
     uses: ./.github/workflows/tests.yaml
     with:
       tiers: unit or integration
-      # The job above puts them in this run's artifacts either way
+      # The jobs above put them in this run's artifacts
       wheels_ready: true
 
   wheel:
     name: Build wheel
-    # Only the smoke test needs the capture stack, so the wheel is built while
-    # those wheels still are: it depends on nothing but the interpreters.
+    # Built while the capture stack's wheels still are: it depends on nothing
+    # but the interpreters.
     needs: [python-compat]
     permissions:
       contents: read
@@ -145,10 +163,10 @@ jobs:
     uses: ./.github/workflows/smoke-wheel.yaml
 
   pixelflux-pcmflux:
-    name: Capture stack (main HEAD)
-    # Each project's per-commit pre-release when it is published, a build when
-    # it is not. Either way the wheels land in this run's artifacts, which is
-    # where the images, packages, and suites read them, and running it here
+    name: Capture stack (pinned commits)
+    # The per-commit pre-release of the commit Cargo.toml pins when it is
+    # published, a build when it is not. Either way the wheels land in this
+    # run's artifacts, which is where the suites read them, and running it here
     # rather than inside each caller keeps it to one resolution per run.
     permissions:
       contents: read
@@ -156,7 +174,7 @@ jobs:
 
   images:
     name: Multi-arch images
-    needs: [wheel, wheel-smoke, pixelflux-pcmflux]
+    needs: [wheel, wheel-smoke]
     if: github.event_name == 'push'
     # A called workflow can only narrow the caller's token, so the GHCR push
     # scope has to be granted here
@@ -166,7 +184,6 @@ jobs:
     uses: ./.github/workflows/images.yaml
     with:
       tag_prefix: main
-      wheel_artifact: selkies-wheel
 
   packages:
     name: Native packages

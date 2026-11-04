@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""Which pixelflux and pcmflux a build carries is decided by one shell step.
+"""Which pixelflux and pcmflux the suites drive is decided by one shell step.
 
-Images, packages, AppImages, and the suites install the capture stack from wheels
-the run holds rather than from an index, and the `locate` step of
+The suites install the capture stack's Python modules from wheels the run holds
+rather than from an index, and the `locate` step of
 `build-pixelflux-pcmflux-wheels.yaml` is what names them: each project's
-per-commit pre-release for a build ahead of a release, and the release carrying
-the pinned version for a release, which is what lets a release be cut with
-nothing of either project on PyPI. It reads the pins out of `pyproject.toml`, so
-a pin spelled in a way it cannot read, or a release whose assets are of some
-other version, is a build that quietly ships a capture stack the wheel did not
-ask for. Ahead of a release it waits for a pre-release its project's CI is still
-building rather than building the same wheels a second time, and builds what no
-pre-release will cover. What it builds, the image jobs prepare from the recipe
-the plan read out of each project: they check nothing out and run that recipe
-in their container alone, so no code of another repository's commit runs on a
-runner of the default branch.
+per-commit pre-release of the commit the workspace's `Cargo.toml` pins, which is
+the commit the server under test links. It reads the pins out of `Cargo.toml`,
+so a pin spelled in a way it cannot read is a run whose suites drive a capture
+stack the server was not built against. It waits for a pre-release its
+project's CI is still building rather than building the same wheels a second
+time, and builds what no pre-release will cover. What it builds, the image jobs
+prepare from the recipe the plan read out of each project: they check nothing
+out and run that recipe in their container alone, so no code of another
+repository's commit runs on a runner of the default branch.
 """
 import json
 import os
@@ -72,18 +70,10 @@ if not STEP.strip() or "${{" in STEP:
 # commit's date is STUB_PUSHED.
 STUB_GH = """#!/bin/sh
 case "$1" in
-  api)
-    case "$2" in
-      */commits/main) printf '%s\\n' "${STUB_SHA}" ;;
-      *) printf '%s\\n' "${STUB_PUSHED}" ;;
-    esac ;;
+  api) printf '%s\\n' "${STUB_PUSHED}" ;;
   release)
-    case "$2" in
-      list)
-        n=$(( $(cat "${STUB_COUNT}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "${STUB_COUNT}"
-        [ "$n" -ge "${STUB_TAGS_AFTER:-1}" ] && printf '%s\\n' ${STUB_TAGS} ;;
-      view) printf '%s\\n' ${STUB_ASSETS} ;;
-    esac ;;
+    n=$(( $(cat "${STUB_COUNT}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "${STUB_COUNT}"
+    [ "$n" -ge "${STUB_TAGS_AFTER:-1}" ] && printf '%s\\n' ${STUB_TAGS} ;;
   run)
     if [ "$(cat "${STUB_COUNT}" 2>/dev/null || echo 0)" -ge "${STUB_DONE_AFTER:-999999}" ]; then
       echo completed
@@ -93,121 +83,101 @@ case "$1" in
 esac
 """
 
+# The workspace's own pins, which is what every run resolves
+PINS = dict(re.findall(r'^(pixelflux|pcmflux) = \{.* rev = "([0-9a-f]+)"',
+                       open(os.path.join(REPO, "Cargo.toml")).read(), re.M))
+check("both capture-stack pins are commits in Cargo.toml",
+      set(PINS) == {"pixelflux", "pcmflux"} and all(len(sha) == 40 for sha in PINS.values()), str(PINS))
 
-def probe(pinned: bool, pins=None, **stub) -> tuple:
+
+def manifest(pins: dict) -> str:
+    """A workspace manifest carrying `pins`, spelled as the repository's is."""
+    deps = "".join(f'{project} = {{ git = "https://github.com/{OWNER}/{project}", rev = "{sha}", '
+                   f'default-features = false }}\n' for project, sha in pins.items())
+    return f'[workspace]\nmembers = []\n\n[workspace.dependencies]\n{deps}'
+
+
+def probe(pins=None, **stub) -> tuple:
     """The locate step, run against a stubbed `gh`: `(accepted, step outputs)`.
 
-    `pins` writes a pyproject.toml carrying them; without it a pinned run reads
-    the repository's own, which is what a release resolves. A HEAD run reads no
-    pins and runs in a checkout of its own.
+    `pins` writes a Cargo.toml carrying them; without it the step reads the
+    repository's own.
     """
     with tempfile.TemporaryDirectory() as tmp:
         os.mkdir(os.path.join(tmp, "bin"))
         gh = os.path.join(tmp, "bin", "gh")
         open(gh, "w").write(STUB_GH)
         os.chmod(gh, 0o755)
-        if pins is None and pinned:
+        if pins is None:
             cwd = REPO
         else:
             cwd = tmp
-            deps = "".join(f'    "{pin}",\n' for pin in pins or [])
-            open(os.path.join(tmp, "pyproject.toml"), "w").write(
-                f'[project]\ndependencies = [\n    "Pillow",\n{deps}]\n')
+            open(os.path.join(tmp, "Cargo.toml"), "w").write(manifest(pins))
         out = os.path.join(tmp, "github_output")
         open(out, "w").close()
         env = dict(os.environ, GITHUB_OUTPUT=out, PATH=os.path.join(tmp, "bin") + os.pathsep + os.environ["PATH"],
-                   OWNER=OWNER, PINNED="true" if pinned else "false",
-                   WAIT_S=str(stub.get("wait", 0)), SHOW_UP_S="600", POLL_S="0",
-                   STUB_SHA=stub.get("sha", ""), STUB_TAGS=stub.get("tags", ""),
-                   STUB_TAGS_AFTER=str(stub.get("tags_after", 1)), STUB_COUNT=os.path.join(tmp, "count"),
-                   STUB_RUNS=stub.get("runs", ""), STUB_DONE_AFTER=str(stub.get("done_after", 999999)),
-                   STUB_PUSHED=stub.get("pushed", "2026-01-01T00:00:00Z"),
-                   STUB_ASSETS=stub.get("assets", ""))
+                   OWNER=OWNER, WAIT_S=str(stub.get("wait", 0)), SHOW_UP_S="600", POLL_S="0",
+                   STUB_TAGS=stub.get("tags", ""), STUB_TAGS_AFTER=str(stub.get("tags_after", 1)),
+                   STUB_COUNT=os.path.join(tmp, "count"), STUB_RUNS=stub.get("runs", ""),
+                   STUB_DONE_AFTER=str(stub.get("done_after", 999999)),
+                   STUB_PUSHED=stub.get("pushed", "2026-01-01T00:00:00Z"))
         proc = subprocess.run(["bash", "-e", "-c", STEP], cwd=cwd, capture_output=True,
                               text=True, timeout=120, env=env)
         outputs = dict(ln.split("=", 1) for ln in open(out).read().splitlines() if "=" in ln)
     return proc.returncode == 0, outputs
 
 
-PINS = dict(re.findall(r'"(pixelflux|pcmflux)[~=<>!]*([0-9][^"]*)"',
-                       open(os.path.join(REPO, "pyproject.toml")).read()))
-check("both capture-stack pins are in pyproject.toml", set(PINS) == {"pixelflux", "pcmflux"}, str(PINS))
-
 def fetched(out: dict, project: str) -> int:
     """How many platform jobs the fetch matrix holds for `project`."""
     return sum(1 for entry in json.loads(out.get("fetch", "[]")) if entry["project"] == project)
 
 
-# The pins this repository carries, against a release that has their wheels
-assets = " ".join(f"{p}-{v}-cp312-cp312-manylinux_2_28_x86_64.whl" for p, v in PINS.items())
-ok, out = probe(pinned=True, assets=assets)
-check("a release run reads both pins", ok)
-for project, version in PINS.items():
-    check(f"{project} {version} is taken from the release of that version",
-          out.get(project) == version, out.get(project, "<unset>"))
-    check(f"{project} would be built as its release is, at its tag",
-          out.get(f"{project}_version") == version and out.get(f"{project}_ref") == "",
-          f"{out.get(f'{project}_version', '<unset>')} {out.get(f'{project}_ref', '<unset>')!r}")
+# The pins this repository carries, against releases tagged with their abbreviated SHAs
+ok, out = probe(tags=" ".join(sha[:7] for sha in PINS.values()))
+check("a run reads both of the repository's pins", ok)
+for project, sha in PINS.items():
+    check(f"{project} is taken from the pre-release of {sha[:7]}", out.get(project) == sha[:7],
+          out.get(project, "<unset>"))
+    check(f"{project} would be built at that commit", out.get(f"{project}_ref") == sha,
+          out.get(f"{project}_ref", "<unset>"))
     check(f"{project}'s four platforms are fetched", fetched(out, project) == 4, out.get("fetch", "<unset>"))
 
-# A tag that moved: the release exists, its wheels are of another version
-_, out = probe(pinned=True, assets=" ".join(f"{p}-0.0.1-cp312-cp312-manylinux_2_28_x86_64.whl"
-                                            for p in PINS))
-check("a release carrying another version's wheels is built instead",
-      out.get("pixelflux") == "" and fetched(out, "pixelflux") == 0, out.get("fetch", "<unset>"))
-
-# Nothing released for the pin at all
-_, out = probe(pinned=True)
-check("a pin no release carries is built from its tag",
-      out.get("pixelflux") == "" and out.get("pixelflux_version") == PINS["pixelflux"],
-      out.get("pixelflux_version", "<unset>"))
-
-# pin -> the version the step reads out of it
-SPELLINGS = {"pixelflux~=2.1.0": "2.1.0", "pixelflux==2.1.0rc1": "2.1.0rc1",
-             "pixelflux>=2.1.0": "2.1.0", "pixelflux~=2.1.0.dev1": "2.1.0.dev1"}
-for pin, version in SPELLINGS.items():
-    _, out = probe(pinned=True, pins=[pin, "pcmflux~=2.1.0"])
-    check(f"{pin} names {version}", out.get("pixelflux_version") == version,
-          out.get("pixelflux_version", "<unset>"))
-ok, _ = probe(pinned=True, pins=["pcmflux~=2.1.0"])
+ok, _ = probe(pins={"pcmflux": "0" * 40})
 check("a missing pin fails the run rather than guessing one", not ok)
 
-# Ahead of a release: the per-commit pre-release of each project's main HEAD,
-# which is tagged with an abbreviated SHA
+# Pre-releases are tagged with an abbreviated SHA
 SHA = "a3290fdc0ffee0000000000000000000000000de"
-_, out = probe(pinned=False, sha=SHA, tags="97ef61d a3290fd 57995fb")
-check("a HEAD run takes the pre-release of the commit main is on",
+OTHER = {"pcmflux": "57995fb" + "0" * 33}
+_, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="97ef61d a3290fd 57995fb")
+check("the pre-release of the pinned commit is taken",
       out.get("pixelflux") == "a3290fd" and fetched(out, "pixelflux") == 4, out.get("pixelflux", "<unset>"))
-check("a HEAD run would build that commit, not whatever main is by then", out.get("pixelflux_ref") == SHA,
+check("a build checks out the pinned commit", out.get("pixelflux_ref") == SHA,
       out.get("pixelflux_ref", "<unset>"))
-_, out = probe(pinned=False, sha=SHA, tags="97ef61d a3290fd", tags_after=3, runs="in_progress", done_after=5,
-               wait=60)
+_, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="97ef61d a3290fd", tags_after=3, runs="in_progress",
+               done_after=5, wait=60)
 check("a pre-release still building is waited for and taken",
       out.get("pixelflux") == "a3290fd", out.get("pixelflux", "<unset>"))
 # The run tags the release before its wheels finish uploading, and one still
 # uploading cannot be downloaded
-_, out = probe(pinned=False, sha=SHA, tags="a3290fd", runs="in_progress", done_after=3, wait=60)
+_, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="a3290fd", runs="in_progress", done_after=3, wait=60)
 check("a pre-release tagged while its run still attaches the wheels is taken once the run ends",
       out.get("pixelflux") == "a3290fd", out.get("pixelflux", "<unset>"))
-_, out = probe(pinned=False, sha=SHA, tags="a3290fd", runs="in_progress", wait=0)
+_, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="a3290fd", runs="in_progress", wait=0)
 check("nor taken while the run is in flight: the wait running out builds it here",
       out.get("pixelflux") == "", out.get("pixelflux", "<unset>"))
-_, out = probe(pinned=False, sha=SHA, tags="a3290fd", tags_after=99, runs="queued", wait=0)
+_, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="a3290fd", tags_after=99, runs="queued", wait=0)
 check("a pre-release that outlasts the wait is built here", out.get("pixelflux") == "",
       out.get("pixelflux", "<unset>"))
-_, out = probe(pinned=False, sha=SHA, tags="97ef61d 57995fb", runs="completed", wait=60)
-check("a HEAD whose pre-release run ended without one is built at once",
+_, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="97ef61d 57995fb", runs="completed", wait=60)
+check("a commit whose pre-release run ended without one is built at once",
       out.get("pixelflux") == "" and fetched(out, "pixelflux") == 0, out.get("pixelflux", "<unset>"))
-_, out = probe(pinned=False, sha=SHA, tags="97ef61d 57995fb", wait=60)
-check("a HEAD long past its push with no pre-release run is built at once",
+_, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="97ef61d 57995fb", wait=60)
+check("a commit long past its push with no pre-release run, such as one off main, is built at once",
       out.get("pixelflux") == "", out.get("pixelflux", "<unset>"))
 fresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-_, out = probe(pinned=False, sha=SHA, tags="a3290fd", tags_after=3, pushed=fresh, wait=60)
-check("a HEAD pushed moments ago is waited for until its pre-release shows up",
+_, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="a3290fd", tags_after=3, pushed=fresh, wait=60)
+check("a commit pushed moments ago is waited for until its pre-release shows up",
       out.get("pixelflux") == "a3290fd", out.get("pixelflux", "<unset>"))
-_, out = probe(pinned=False, tags="97ef61d a3290fd")
-check("a HEAD the probe could not read is built from main",
-      out.get("pixelflux") == "" and out.get("pixelflux_ref") == "main", out.get("pixelflux_ref", "<unset>"))
 
 text = open(WORKFLOW).read()
 image_job = text[text.index("\n  image:\n"):text.index("\n  build:\n")]

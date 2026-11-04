@@ -7,8 +7,7 @@ name: Images
 
 # Triggered by ci.yaml on pushes to main and by release.yaml for releases;
 # can also be run standalone via the Actions tab, from main alone since the
-# images leave the run, in which case it builds the wheel itself unless
-# `wheel_artifact` names an existing artifact.
+# images leave the run.
 
 on:
   workflow_dispatch:
@@ -21,14 +20,6 @@ on:
         description: Also move the floating `latest` tags onto this build
         type: boolean
         default: true
-      wheel_artifact:
-        description: Artifact name of a prebuilt wheel (skips the wheel build when set)
-        type: string
-        default: ""
-      capture_stack_published:
-        description: Resolve the pinned pixelflux/pcmflux from PyPI, an explicit choice for a build made after they were published there
-        type: boolean
-        default: false
   workflow_call:
     inputs:
       tag_prefix:
@@ -39,14 +30,6 @@ on:
         description: Also move the floating `latest` tags onto this build
         type: boolean
         default: true
-      wheel_artifact:
-        description: Artifact name of a prebuilt wheel (skips the wheel build when set)
-        type: string
-        default: ""
-      capture_stack_published:
-        description: Resolve the pinned pixelflux/pcmflux from PyPI, an explicit choice for a build made after they were published there
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -63,17 +46,9 @@ env:
   PUSH_RETRY_DELAY: "60"
 
 jobs:
-  wheel:
-    name: Build wheel for the images
-    if: ${{ inputs.wheel_artifact == '' }}
-    permissions:
-      contents: read
-    uses: ./.github/workflows/build-wheel.yaml
-
   build:
     name: ${{ matrix.flavor.name }} (${{ matrix.arch.name }})
-    needs: wheel
-    if: ${{ github.ref == 'refs/heads/main' && !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -105,56 +80,6 @@ jobs:
           remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
-      - name: Download the wheel
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
-          path: dist/
-      # The pixelflux/pcmflux wheels the orchestrating run resolved: each
-      # project's main HEAD, or the pinned release at a release. Absence is
-      # tolerated (standalone dispatch): the Dockerfile takes what is missing
-      # from the GitHub releases, and the index only where those have nothing
-      - name: Download the pixelflux wheels
-        if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        continue-on-error: true
-        with:
-          pattern: pixelflux-wheels-*
-          path: dist/
-          merge-multiple: true
-      - name: Download the pcmflux wheels
-        if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        continue-on-error: true
-        with:
-          pattern: pcmflux-wheels-*
-          path: dist/
-          merge-multiple: true
-      - name: Check the capture stack this build carries
-        env:
-          PUBLISHED: ${{ inputs.capture_stack_published }}
-        run: |
-          if [ "${PUBLISHED}" = "true" ]; then
-            echo "capture stack: the pinned releases, resolved from PyPI"
-            exit 0
-          fi
-          for project in pixelflux pcmflux; do
-            # What ships has to be the capture stack this run resolved, which
-            # exists nowhere else, so the wheels are required rather than
-            # preferred: the orchestrating workflow puts them here before
-            # calling, and a standalone dispatch has to supply them the same way.
-            if ! ls "dist/${project}"-*.whl > /dev/null 2>&1; then
-              echo "::error::No ${project} wheel in dist/; run this through ci.yaml or release.yaml, which resolve the capture stack first"
-              exit 1
-            fi
-            echo "${project}: wheel from this run"
-          done
-      - name: Prepare wheels directory
-        run: |
-          set -e
-          # .gitignore keeps addons/base/wheels/*.whl out of git
-          cp dist/*.whl addons/base/wheels/
-          ls -la addons/base/wheels/
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
@@ -255,10 +180,6 @@ jobs:
   merge:
     name: Merge base and desktop manifests (${{ matrix.flavor }})
     needs: build
-    # Stated rather than left to the default: `wheel` is skipped whenever the
-    # caller supplies the artifact, and the images stay untagged if that skip
-    # carries down the chain past `build`.
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

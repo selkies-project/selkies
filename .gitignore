@@ -4,7 +4,6 @@ dist
 coturn_env
 NOTES.md
 **/__pycache__/
-addons/base/wheels/*.whl
 build/appimage/
 out/
 release-artifacts/

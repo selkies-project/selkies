@@ -31,12 +31,6 @@ name: Release
 # through the trusted publisher registered on PyPI for that workflow file and
 # the `pypi` environment. PyPI keeps the first upload of a version, so a
 # re-release of one it holds fails there and changes the GitHub release alone.
-#
-# The pinned pixelflux and pcmflux come from the release each project cut for
-# that version: the smoke test, the images, the packages, and the AppImages all
-# install the wheels those projects published. `capture_stack: pypi` is the
-# explicit choice to resolve them from PyPI instead, for a release made after
-# the two were published there; nothing takes that road on its own.
 
 on:
   push:
@@ -58,11 +52,6 @@ on:
         type: choice
         options: [auto, always, never]
         default: auto
-      capture_stack:
-        description: Where the pinned pixelflux and pcmflux come from; pypi only once they are published there
-        type: choice
-        options: [releases, pypi]
-        default: releases
 
 concurrency:
   group: ${{ github.workflow }}
@@ -169,18 +158,6 @@ jobs:
     with:
       package_version: ${{ needs.check.outputs.version }}
 
-  capture-stack:
-    name: Capture stack (pinned releases)
-    needs: check
-    # The wheels pixelflux and pcmflux released for the pinned versions, which
-    # everything below installs. A run resolving them from PyPI skips this.
-    if: ${{ inputs.capture_stack != 'pypi' }}
-    permissions:
-      contents: read
-    uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
-    with:
-      pinned: true
-
   wheel-smoke:
     name: Smoke test the wheel
     needs: [check, wheel]
@@ -200,8 +177,6 @@ jobs:
     with:
       tag_prefix: ${{ needs.check.outputs.version }}
       floating_tags: ${{ needs.check.outputs.latest == 'true' }}
-      wheel_artifact: selkies-wheel
-      capture_stack_published: ${{ inputs.capture_stack == 'pypi' }}
 
   packages:
     name: Build native packages
@@ -236,9 +211,6 @@ jobs:
           # Drop the empty image-digest placeholder files (64-hex filenames);
           # they only exist for the multi-arch manifest merge
           find release-artifacts -type f -regextype posix-extended -regex '.*/[0-9a-f]{64}' -delete
-          # The capture stack rides inside the images and packages; its wheels
-          # stay on the pixelflux and pcmflux releases this run took them from
-          find release-artifacts -type f \( -name 'pixelflux-*.whl' -o -name 'pcmflux-*.whl' \) -delete
           # Artifacts of the run rather than of the release: the build record
           # docker/build-push-action uploads per image, the record of what
           # each image was built from, the web client the packages carry, and
