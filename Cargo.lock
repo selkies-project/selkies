@@ -636,7 +636,7 @@ dependencies = [
 [[package]]
 name = "codec-sys"
 version = "0.1.0"
-source = "git+https://github.com/selkies-project/pixelflux?rev=77fbcd8d86504aee3e8f5c5851bf0542a4e92285#77fbcd8d86504aee3e8f5c5851bf0542a4e92285"
+source = "git+https://github.com/selkies-project/pixelflux?rev=0e9ad950f567cbd6b5c78ac10930403e17659775#0e9ad950f567cbd6b5c78ac10930403e17659775"
 dependencies = [
  "bindgen 0.73.2",
  "pkg-config",
@@ -2296,7 +2296,7 @@ dependencies = [
 [[package]]
 name = "nvcodec-sys"
 version = "0.1.0"
-source = "git+https://github.com/selkies-project/pixelflux?rev=77fbcd8d86504aee3e8f5c5851bf0542a4e92285#77fbcd8d86504aee3e8f5c5851bf0542a4e92285"
+source = "git+https://github.com/selkies-project/pixelflux?rev=0e9ad950f567cbd6b5c78ac10930403e17659775#0e9ad950f567cbd6b5c78ac10930403e17659775"
 
 [[package]]
 name = "nvml-wrapper"
@@ -2429,7 +2429,7 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 [[package]]
 name = "pcmflux"
 version = "2.2.1"
-source = "git+https://github.com/selkies-project/pcmflux?rev=31128ad09b6a0456f3d8c2169852944e9ddef6a1#31128ad09b6a0456f3d8c2169852944e9ddef6a1"
+source = "git+https://github.com/selkies-project/pcmflux?rev=f81ca4085198a184e4696a50f5c1c92b3056518b#f81ca4085198a184e4696a50f5c1c92b3056518b"
 dependencies = [
  "bytemuck",
  "libc",
@@ -2472,7 +2472,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pixelflux"
 version = "2.2.2"
-source = "git+https://github.com/selkies-project/pixelflux?rev=77fbcd8d86504aee3e8f5c5851bf0542a4e92285#77fbcd8d86504aee3e8f5c5851bf0542a4e92285"
+source = "git+https://github.com/selkies-project/pixelflux?rev=0e9ad950f567cbd6b5c78ac10930403e17659775#0e9ad950f567cbd6b5c78ac10930403e17659775"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.2",
@@ -4334,7 +4334,7 @@ dependencies = [
 [[package]]
 name = "va-sys"
 version = "0.1.0"
-source = "git+https://github.com/selkies-project/pixelflux?rev=77fbcd8d86504aee3e8f5c5851bf0542a4e92285#77fbcd8d86504aee3e8f5c5851bf0542a4e92285"
+source = "git+https://github.com/selkies-project/pixelflux?rev=0e9ad950f567cbd6b5c78ac10930403e17659775#0e9ad950f567cbd6b5c78ac10930403e17659775"
 dependencies = [
  "libloading 0.9.0",
 ]

@@ -69,10 +69,7 @@ SETS = ("gpl", "non-gpl")
 SET_LABELS = {"gpl": "GPL", "non-gpl": "non-GPL"}
 
 # Crates whose manifest carries no `license` field; deny.toml clarifies the same ones.
-CLARIFY: Dict[str, str] = {
-    "pixelflux": "MPL-2.0",
-    "pcmflux": "MPL-2.0",
-}
+CLARIFY: Dict[str, str] = {}
 
 # Copyleft components and the configurations allowed to contain them. Anything copyleft
 # (or LGPL, which a statically linked crate cannot honor) that is not listed here fails
