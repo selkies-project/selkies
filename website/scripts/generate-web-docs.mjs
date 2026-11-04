@@ -3,8 +3,8 @@
  * the JSDoc blocks and type annotations in the web addons.
  *
  * Runs after the server's half (generate-rust-docs.mjs, or
- * generate-python-docs.mjs for a release whose server is Python) from the
- * same predev/prebuild npm hooks and adds one gitignored folder per addon
+ * generate-python-docs.mjs for a release whose server is Python) from
+ * generate-reference.mjs and adds one gitignored folder per addon
  * beside it. TypeDoc
  * reads plain JavaScript through the TypeScript compiler's JSDoc support and
  * TypeScript natively, so one configuration covers selkies-web-core and the
@@ -16,9 +16,16 @@
  * here and render as `any`; React's are, so component signatures resolve.
  * Type errors never fail the build: the addons' own lint and typecheck steps
  * own correctness, this script only documents.
+ *
+ * `--archive <dir> --ref <ref>` writes each addon with TypeDoc's own HTML
+ * theme into `<dir>/<addon>` instead, for the download
+ * build-reference-archive.mjs attaches to a release, its "Defined in" links
+ * naming the source at `<ref>`. That theme links its pages relatively and
+ * loads its search and navigation by script tag, so it opens from a file
+ * with both working; the Markdown the site renders would open as plain text.
  */
 import * as fs from 'node:fs/promises';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Minimatch } from 'minimatch';
 import { Application, TSConfigReader } from 'typedoc';
@@ -58,8 +65,27 @@ const ADDONS = [
   { dir: 'dashboard', title: 'Dashboard', source: 'selkies-dashboard/src', entryPoints: ['.'] },
 ];
 
-async function generate({ dir, title, source, entryPoints }) {
-  const out = join(referenceDir, dir);
+const archiveAt = process.argv.indexOf('--archive');
+const archiveDir = archiveAt === -1 ? undefined : resolve(process.argv[archiveAt + 1] ?? '');
+const refAt = process.argv.indexOf('--ref');
+const sourceRef = refAt === -1 ? 'main' : process.argv[refAt + 1];
+
+// typedoc-plugin-markdown's options, for the pages the site renders.
+const MARKDOWN = {
+  outputFileStrategy: 'modules',
+  fileExtension: '.md',
+  entryFileName: 'index.md',
+  hidePageHeader: true,
+  hideBreadcrumbs: true,
+  hidePageTitle: true,
+  useCodeBlocks: true,
+  parametersFormat: 'table',
+  sanitizeComments: true,
+};
+
+/** Renders one addon into `out`, as the site's Markdown or, for `html`, TypeDoc's own theme. */
+async function generate({ title, source, entryPoints }, out, html) {
+  const plugins = [join(root, 'scripts', 'web-reference-plugin.mjs')];
   const app = await Application.bootstrapWithPlugins(
     {
       name: title,
@@ -67,7 +93,7 @@ async function generate({ dir, title, source, entryPoints }) {
       entryPointStrategy: 'expand',
       exclude: EXCLUDE,
       tsconfig: join(root, 'scripts', 'web-reference.tsconfig.json'),
-      plugin: ['typedoc-plugin-markdown', join(root, 'scripts', 'web-reference-plugin.mjs')],
+      plugin: html ? plugins : ['typedoc-plugin-markdown', ...plugins],
       out,
       readme: 'none',
       skipErrorChecking: true,
@@ -75,19 +101,10 @@ async function generate({ dir, title, source, entryPoints }) {
       excludePrivate: true,
       disableGit: true,
       basePath: join(addons, source),
-      sourceLinkTemplate: `https://github.com/selkies-project/selkies/blob/main/addons/${source}/{path}#L{line}`,
+      sourceLinkTemplate: `https://github.com/selkies-project/selkies/blob/${sourceRef}/addons/${source}/{path}#L{line}`,
       logLevel: 'Warn',
       sort: ['source-order'],
-      // typedoc-plugin-markdown
-      outputFileStrategy: 'modules',
-      fileExtension: '.md',
-      entryFileName: 'index.md',
-      hidePageHeader: true,
-      hideBreadcrumbs: true,
-      hidePageTitle: true,
-      useCodeBlocks: true,
-      parametersFormat: 'table',
-      sanitizeComments: true,
+      ...(html ? { githubPages: false } : MARKDOWN),
     },
     [new TSConfigReader()],
   );
@@ -95,19 +112,27 @@ async function generate({ dir, title, source, entryPoints }) {
   if (!project) throw new Error(`generate-web-docs: TypeDoc could not convert ${title}`);
   await fs.rm(out, { recursive: true, force: true });
   await app.generateOutputs(project);
+  const extension = html ? '.html' : '.md';
+  const pages = (await fs.readdir(out, { recursive: true })).filter((f) => f.endsWith(extension)).length;
+  console.log(`generate-web-docs: wrote ${pages} pages to ${html ? out : relative(repoRoot, out)}`);
+}
 
+if (archiveDir) {
+  for (const addon of ADDONS) await generate(addon, join(archiveDir, addon.dir), true);
+  process.exit(0);
+}
+
+await fs.mkdir(referenceDir, { recursive: true });
+for (const addon of ADDONS) {
+  const out = join(referenceDir, addon.dir);
+  await generate(addon, out, false);
   // Sidebar order follows the source tree; `...` picks up the nested folders
   // (lib/, components/) that TypeDoc mirrors from the addon.
   await fs.writeFile(
     join(out, 'meta.json'),
-    JSON.stringify({ title, pages: ['index', '...'] }, null, 2) + '\n',
+    JSON.stringify({ title: addon.title, pages: ['index', '...'] }, null, 2) + '\n',
   );
-  const pages = (await fs.readdir(out, { recursive: true })).filter((f) => f.endsWith('.md')).length;
-  console.log(`generate-web-docs: wrote ${pages} pages to ${relative(repoRoot, out)}`);
 }
-
-await fs.mkdir(referenceDir, { recursive: true });
-for (const addon of ADDONS) await generate(addon);
 
 // The folder's meta.json is written by the server's half; the web sections
 // follow it behind a separator.

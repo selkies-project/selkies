@@ -33,6 +33,7 @@ DELIVERED = (
     ("the rpm", "selkies-2.0.0.rc0-1.el9.x86_64.rpm"),
     ("the apk", "selkies-2.0.0_rc0-r0-x86_64.apk"),
     ("the pacman package", "selkies-2.0.0rc0-1-x86_64.pkg.tar.zst"),
+    ("the Developer Reference", "selkies-2.0.0rc0-reference.tar.gz"),
 )
 WITHHELD = (
     ("an image build record", "selkies-project.selkies.8M3GBU.dockerbuild"),

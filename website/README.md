@@ -14,15 +14,23 @@ npm run check-links    # every link and anchor in out/ must resolve
 ```
 
 Everything is prerendered: GitHub Pages serves files, so the export carries its
-own search index and there is no server at runtime. Each page is written both
-as `page.html` and as `page/index.html`, so `/page` and `/page/` both resolve
-without a redirect; the slashless form is the canonical one.
+own search index and there is no server at runtime. Each page is written as
+`page/index.html` (`trailingSlash`), which Pages serves at `/page/` and
+redirects `/page` to; the form with the slash is the canonical one. After the
+build, `scripts/drop-full-payloads.mjs` deletes the second copy of each page's
+payload Next.js writes, which a static export never fetches.
 
 The published site is versioned the way Read the Docs lays a site out:
 `scripts/build-versions.mjs` builds one export per release tag that carries
 this directory and one for `main`, and assembles them as `out/<version>/`.
 The newest release is built as `latest`, and its own version segment, the
 site root, and every page address without a version redirect into it.
+`main` and `latest` carry the Developer Reference as pages, the server's
+rustdoc and the web client's TypeDoc. Every other release's is a file attached
+to its GitHub release (`scripts/build-reference-archive.mjs`, run by the
+`build-reference.yaml` workflow), and that version's reference section is one
+page linking it. A plain `npm run build` or `npm run dev` renders the
+reference as pages, to preview a docblock change.
 `out/versions.json` lists the versions, and the sidebar's version dropdown
 switches between them. Every
 version is rendered by the tooling in this directory over that version's own

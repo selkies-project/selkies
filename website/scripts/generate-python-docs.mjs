@@ -14,13 +14,19 @@
  * python3; delete that directory to force a clean bootstrap, e.g. after
  * upgrading the fumadocs-python npm package. Passing a JSON path as the first
  * argument skips extraction and converts that file instead.
+ *
+ * `--archive <dir>` writes the pages as static HTML into `<dir>` instead
+ * (python-reference-html.mjs), for the download build-reference-archive.mjs
+ * attaches to a release, and leaves the site's pages alone; that build has no
+ * earlier reference to fall back on and fails outright.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as Python from 'fumadocs-python';
+import { writeHtml } from './python-reference-html.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = join(root, '..');
@@ -53,7 +59,10 @@ function extract() {
   return join(root, 'selkies.json');
 }
 
-let jsonPath = process.argv[2];
+const args = process.argv.slice(2);
+const archiveAt = args.indexOf('--archive');
+const archiveDir = archiveAt === -1 ? undefined : resolve(args.splice(archiveAt, 2)[1] ?? '');
+let jsonPath = args[0];
 if (!jsonPath && !existsSync(join(repoRoot, 'src', 'selkies', '__init__.py'))) {
   console.log('generate-python-docs: no Python package in this tree; skipped');
   process.exit(0);
@@ -62,6 +71,7 @@ if (!jsonPath) {
   try {
     jsonPath = extract();
   } catch (err) {
+    if (archiveDir) throw err;
     // A site contributor without a working python3 can still build the rest
     // of the site against a previously generated reference; a from-scratch
     // build has nothing to fall back on.
@@ -80,6 +90,12 @@ for (const name of EXCLUDED_MODULES) delete pkg.modules[name];
 // groupBy 'none' keeps the pages at the root of the output directory, so a
 // module is published as /reference/<module> rather than under the package.
 const files = Python.convert(pkg, { baseUrl: '/reference', groupBy: 'none' });
+
+if (archiveDir) {
+  const pages = await writeHtml(files, archiveDir, 'Python server', '/reference');
+  console.log(`generate-python-docs: wrote ${pages} pages to ${archiveDir}`);
+  process.exit(0);
+}
 
 await fs.rm(outDir, { recursive: true, force: true });
 await Python.write(files, outDir);

@@ -39,9 +39,9 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      # The server's Developer Reference is cargo doc's, which type-checks
-      # pixelflux and pcmflux against the libraries they build with, the ones
-      # the base image's server stage installs.
+      # main's Developer Reference is cargo doc's, which type-checks pixelflux
+      # and pcmflux against the libraries they build with, the ones the base
+      # image's server stage installs
       - name: Install the Rust toolchain and the server's build libraries
         run: |
           rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
@@ -57,8 +57,9 @@ jobs:
       - name: Build the static site, one version per release and main
         working-directory: website
         env:
-          # The build asks GitHub which release is the latest, authenticated so
-          # the runner's shared address never trips the unauthenticated limit
+          # The build asks GitHub which release is the latest, authenticated
+          # so the runner's shared address never trips the unauthenticated
+          # limit
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           npm ci --no-audit --no-fund

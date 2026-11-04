@@ -7,6 +7,13 @@
  * the largest build. A pre-release leaves the list once its release is tagged,
  * and its segment redirects to that release the same way.
  *
+ * The branch and the latest release carry their Developer Reference as pages
+ * of the site, the server's half and the web client's. An older release's is
+ * a download instead, attached to that release (build-reference-archive.mjs),
+ * and its section is one page linking it (generate-reference.mjs): rendered
+ * as pages a reference is nearly all of a version's size, and every release
+ * kept so would outgrow what GitHub Pages serves.
+ *
  * Every version is rendered by this tree's site tooling over that version's
  * own pages and source, so a fix to the site reaches every version the next
  * time the site is published. A tag is exported with `git archive` into a
@@ -21,29 +28,13 @@
 import { spawnSync } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join, relative } from 'node:path';
+import { exportTag, git, referenceAssetUrl, repoRoot, repository, run, site, siteDir } from './version-tree.mjs';
 
-const site = dirname(dirname(fileURLToPath(import.meta.url)));
-const repoRoot = dirname(site);
-const siteDir = basename(site);
 // The branch the working tree stands for; gitConfig.branch in lib/shared.ts.
 const BRANCH = 'main';
 const LATEST = 'latest';
 const sitePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
-
-function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
-  if (res.status !== 0) {
-    throw new Error(`${cmd} ${args.join(' ')} exited with ${res.status ?? res.error}`);
-  }
-}
-
-function git(args) {
-  const res = spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8' });
-  if (res.status !== 0) throw new Error(`git ${args.join(' ')} exited with ${res.status}: ${res.stderr}`);
-  return res.stdout;
-}
 
 // A version tag: a dotted number with an optional pre-release or post-release
 // suffix in PEP 440 or SemVer spelling (2.0.0rc0, 2.0.0-beta.1, 2.0.0.post1).
@@ -90,32 +81,6 @@ function releases() {
   return [...found.values()].sort((a, b) => compareVersions(a.parsed, b.parsed));
 }
 
-/** Exports `tag` under `tree` and gives it this tree's site tooling. */
-async function exportTag(tag, tree) {
-  console.log(`build-versions: exporting ${tag}`);
-  await mkdir(tree, { recursive: true });
-  const archive = `${tree}.tar`;
-  git(['archive', '--format=tar', `--output=${archive}`, tag]);
-  run('tar', ['-xf', archive, '-C', tree]);
-  await rm(archive);
-
-  // The site directory is the tooling's, and the tag's copy of it gives way to
-  // the tracked and unignored files of the working tree, so a local change to
-  // the tooling is what every version is built with, and nothing generated or
-  // installed leaks in.
-  await rm(join(tree, siteDir), { recursive: true });
-  const tooling = git(['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', siteDir])
-    .split('\0')
-    .filter(Boolean);
-  for (const file of tooling) {
-    await mkdir(join(tree, dirname(file)), { recursive: true });
-    await cp(join(repoRoot, file), join(tree, file));
-  }
-  // Copied rather than linked: Turbopack refuses a node_modules that resolves
-  // outside the tree it builds.
-  run('cp', ['-a', join(site, 'node_modules'), join(tree, siteDir, 'node_modules')]);
-}
-
 /** Moves a directory, copying when the destination is on another filesystem. */
 async function move(from, to) {
   await mkdir(dirname(to), { recursive: true });
@@ -128,8 +93,12 @@ async function move(from, to) {
   }
 }
 
-/** Builds the site directory under `tree` as `segment`, into `staging`. */
-async function build(tree, segment, index, staging) {
+/**
+ * Builds the site directory under `tree` as `segment`, into `staging`. Its
+ * Developer Reference is pages, or with `download`, the address of the file a
+ * release carries, one page linking it (generate-reference.mjs reads both).
+ */
+async function build(tree, segment, index, staging, download) {
   console.log(`build-versions: building ${segment}`);
   const cwd = join(tree, siteDir);
   run('npm', ['run', 'build'], {
@@ -138,6 +107,7 @@ async function build(tree, segment, index, staging) {
       ...process.env,
       NEXT_PUBLIC_BASE_PATH: `${sitePath}/${segment}`,
       NEXT_PUBLIC_DOCS_VERSIONS: JSON.stringify(index),
+      ...(download ? { REFERENCE_FROM: 'release', REFERENCE_DOWNLOAD: download } : {}),
     },
   });
   await move(join(cwd, 'out'), join(staging, segment));
@@ -171,13 +141,15 @@ function redirect(to) {
 /**
  * Writes a redirect under `dir` for every page of the version served under
  * `target`, so an address under `dir` resolves to the same page there, hash
- * included. Next's own `_`-prefixed exports are not pages.
+ * included. A page is a directory index and is redirected to with the slash
+ * it is served under; any other file by its own name. Next's own
+ * `_`-prefixed exports are not pages.
  */
 async function writeRedirects(staging, dir, target) {
   let written = 0;
   for (const file of await walkHtml(join(staging, target))) {
     if (file.startsWith('_') || file === '404.html' || file.startsWith('404/')) continue;
-    const page = `/${file.replace(/(^|\/)index\.html$|\.html$/, '')}`;
+    const page = `/${file.replace(/(^|\/)index\.html$/, '$1')}`;
     await mkdir(join(staging, dir, dirname(file)), { recursive: true });
     await writeFile(join(staging, dir, file), redirect(`${sitePath}/${target}${page}`));
     written += 1;
@@ -199,11 +171,15 @@ async function writeRoot(staging, index) {
 
 /** The release GitHub designates as the latest, as a version segment, or undefined where it cannot be asked. */
 async function latestRelease() {
-  const repo = process.env.GITHUB_REPOSITORY || 'selkies-project/selkies';
+  return (await github('/releases/latest'))?.tag_name?.replace(/^v/, '');
+}
+
+/** GitHub's API at `path` under the repository, or undefined where it cannot be asked. */
+async function github(path) {
   const headers = process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {};
   try {
-    const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers });
-    return res.ok ? (await res.json()).tag_name?.replace(/^v/, '') : undefined;
+    const res = await fetch(`https://api.github.com/repos/${repository}${path}`, { headers });
+    return res.ok ? await res.json() : undefined;
   } catch {
     return undefined;
   }
@@ -233,7 +209,8 @@ try {
   for (const { tag, segment } of tags) {
     const tree = join(work, segment);
     await exportTag(tag, tree);
-    await build(tree, segment === newest.segment ? LATEST : segment, index, staging);
+    const latest = segment === newest.segment;
+    await build(tree, latest ? LATEST : segment, index, staging, latest ? undefined : referenceAssetUrl(tag, segment));
     await rm(tree, { recursive: true });
   }
   await build(repoRoot, BRANCH, index, staging);

@@ -10,9 +10,11 @@ name: Release
 # then released as a release since GitHub gives the badge to no pre-release.
 #
 # The run builds the wheel ONCE at the release version, then builds multi-arch
-# images, native packages, and AppImages around it, and assembles a DRAFT
-# GitHub release with every build artifact attached. The draft is finalized and
-# published manually.
+# images, native packages, and AppImages around it, and the release's
+# Developer Reference as one archive (build-reference.yaml), which the docs
+# site links rather than hosting a reference as pages, and assembles a
+# DRAFT GitHub release with every build artifact attached. The draft is
+# finalized and published manually.
 #
 # The `latest` input decides whether the release is designated as the latest
 # everywhere at once: the floating `latest` image tags and the "Latest" badge of
@@ -187,9 +189,18 @@ jobs:
     with:
       package_version: ${{ needs.check.outputs.version }}
 
+  reference:
+    name: Build the Developer Reference
+    needs: [check]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-reference.yaml
+    with:
+      version: ${{ needs.check.outputs.version }}
+
   draft-release:
     name: Assemble draft release
-    needs: [check, wheel, wheel-smoke, images, packages]
+    needs: [check, wheel, wheel-smoke, images, packages, reference]
     runs-on: ubuntu-latest
     permissions:
       contents: write

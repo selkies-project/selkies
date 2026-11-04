@@ -20,6 +20,12 @@
  * the rustdoc output holds these crates alone whatever else was documented in
  * the workspace's. A tree without the workspace, a release whose server is
  * the Python package under src/selkies, is left to generate-python-docs.mjs.
+ *
+ * `--archive <dir>` writes the rustdoc tree into `<dir>` instead, for the
+ * download build-reference-archive.mjs attaches to a release, and leaves the
+ * site's pages alone. rustdoc links its pages relatively and loads its search
+ * index by script tag, so the copy opens from a file as it does from the site.
+ * That build has no earlier reference to fall back on and fails outright.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -54,6 +60,29 @@ function cargoDoc() {
   }
 }
 
+const archiveAt = process.argv.indexOf('--archive');
+const archiveDir = archiveAt === -1 ? undefined : resolve(process.argv[archiveAt + 1] ?? '');
+
+/** Copies rustdoc's output to `dir`, with a page at the documentation root. */
+async function copyRustdoc(dir) {
+  await fs.rm(dir, { recursive: true, force: true });
+  // rustdoc's build lock is not part of the output.
+  await fs.cp(join(targetDir, 'doc'), dir, { recursive: true, filter: (src) => !src.endsWith('.lock') });
+  // rustdoc's own pages link the documentation root, which a workspace build
+  // leaves without a page; it opens the server crate.
+  await fs.writeFile(
+    join(dir, 'index.html'),
+    `<!DOCTYPE html>\n<meta http-equiv="refresh" content="0; url=${CRATES[0].dir}/index.html">\n<a href="${CRATES[0].dir}/index.html">${CRATES[0].pkg}</a>\n`,
+  );
+}
+
+if (archiveDir) {
+  cargoDoc();
+  await copyRustdoc(archiveDir);
+  console.log(`generate-rust-docs: rustdoc of ${CRATES.map((c) => c.pkg).join(', ')} written to ${archiveDir}`);
+  process.exit(0);
+}
+
 try {
   cargoDoc();
 } catch (err) {
@@ -71,15 +100,7 @@ try {
   process.exit(1);
 }
 
-await fs.rm(rustdocDir, { recursive: true, force: true });
-// rustdoc's build lock is not part of the output.
-await fs.cp(join(targetDir, 'doc'), rustdocDir, { recursive: true, filter: (src) => !src.endsWith('.lock') });
-// rustdoc's own pages link the documentation root, which a workspace build
-// leaves without a page; it opens the server crate.
-await fs.writeFile(
-  join(rustdocDir, 'index.html'),
-  `<!DOCTYPE html>\n<meta http-equiv="refresh" content="0; url=${CRATES[0].dir}/index.html">\n<a href="${CRATES[0].dir}/index.html">${CRATES[0].pkg}</a>\n`,
-);
+await copyRustdoc(rustdocDir);
 
 const crateLinks = CRATES.map((c) => `- [\`${c.pkg}\`](/rustdoc/${c.dir}/index.html): ${c.summary}`).join('\n');
 const index = `---

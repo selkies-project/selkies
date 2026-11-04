@@ -38,12 +38,16 @@ for (const page of pages) {
   ids.set(`/${relative(out, page).split(/[\\/]/).join('/')}`, set);
 }
 
-/** The file a site-absolute URL is served from, or undefined. */
-function resolve(path) {
-  for (const candidate of [path, `${path}/index.html`, `${path}.html`, `${path.replace(/\/$/, '')}/index.html`]) {
-    const normalized = candidate.replace(/\/{2,}/g, '/');
-    if (exists.has(normalized)) return normalized;
-  }
+/**
+ * The file GitHub Pages serves a site-absolute URL from, or undefined. An
+ * address ending in a slash is its directory's index.html, which is where the
+ * export writes every page (`trailingSlash`); any other is the file itself,
+ * that name with `.html`, or a directory Pages redirects to with the slash.
+ */
+function resolve(url) {
+  const path = url.replace(/\/{2,}/g, '/');
+  const candidates = path.endsWith('/') ? [`${path}index.html`] : [path, `${path}.html`, `${path}/index.html`];
+  return candidates.find((candidate) => exists.has(candidate));
 }
 
 const problems = [];
