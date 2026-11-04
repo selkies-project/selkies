@@ -81,7 +81,9 @@ fi
 # the server was a binary depends on.
 WHEELS="$(mktemp -d)"
 ./fetch-release-wheels.sh "${WHEELS}" "${RELEASE:-latest}"
-SELKIES="$(ls "${WHEELS}"/selkies-*.whl 2> /dev/null || echo "selkies${RELEASE:+==${RELEASE#v}}")"
+PIN=""
+[ "${RELEASE:-latest}" = latest ] || PIN="==${RELEASE#v}"
+SELKIES="$(ls "${WHEELS}"/selkies-*.whl 2> /dev/null || echo "selkies${PIN}")"
 PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --find-links "${WHEELS}" "${SELKIES}"
 rm -rf "${WHEELS}"
 # The startup script runs `selkies resize`, which came with `selkies session` in
