@@ -1754,9 +1754,6 @@ fn wayland_encode_loop<B: WlPayload>(
             if f.is_animated {
                 damage.push(Rectangle::new((0, 0).into(), (width, height).into()));
             }
-            let force_idr_all = requested_idr
-                || (settings.codec.is_video()
-                    && crate::pipeline::periodic_idr_due(&settings, f.frame_id));
             let encode_start_ns = wayland::host::now_ns();
             out = encoders::software::encode_cpu(
                 &mut stripes,
@@ -1769,7 +1766,7 @@ fn wayland_encode_loop<B: WlPayload>(
                 f.frame_id,
                 cfg.use_gpu,
                 false,
-                force_idr_all,
+                requested_idr,
             );
             FrameTiming::stamp(&mut out, f.captured_ns, encode_start_ns);
         }

@@ -1249,8 +1249,8 @@ where
                 decision.hold_qp = None;
                 decision.cap = None;
                 decision.target_qp = normal;
-                decision.force_idr =
-                    pending_force_idr || periodic_idr_due(&gpu.settings, frame_counter);
+                decision.force_idr = pending_force_idr
+                    || state.scheduled_key(periodic_idr_due(&gpu.settings, frame_counter), true);
             }
             extent = Some(d);
         }

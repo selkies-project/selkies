@@ -288,6 +288,18 @@ impl StripeState {
         }
     }
 
+    /// Whether this frame codes the region's scheduled key frame, `due` being the schedule's
+    /// (`periodic_idr_due`). One that falls due while the region holds still, or changes only a
+    /// little, waits for a frame that `moved`: a key frame is coded at the rate control's own
+    /// quality, so on a still screen it would throw away the picture the cleanup refined every
+    /// interval, where a decoder holding that picture gains nothing from it, and motion coarsens
+    /// the picture anyway. A key frame coded for any other reason pays the debt
+    /// (`decide_hw_fullframe`).
+    pub fn scheduled_key(&mut self, due: bool, moved: bool) -> bool {
+        self.key_owed |= due;
+        moved && std::mem::take(&mut self.key_owed)
+    }
+
     /// What a report of the consumers does to this region's cleanup (`lost_frame`,
     /// `withheld_frame`).
     pub fn take_report(&mut self, report: crate::encoders::reference::ReferenceReport) {
@@ -752,7 +764,9 @@ fn refresh_quality(settings: &CaptureSettings, encoder: EncoderQuality, spent: f
 ///    does not, so constant low motion is cleaned up the same way.
 /// 2. **Recovery keyframe**: a requested or scheduled IDR, at the rate control's own quality: it
 ///    answers a join or a loss, often on a link that just fell behind, where a key frame the
-///    size of a cleanup would only fall behind again. On a still screen it opens the burst,
+///    size of a cleanup would only fall behind again. A scheduled one waits for motion
+///    (`StripeState::scheduled_key`), so only a requested one lands on a still screen, and
+///    any key frame coded pays a scheduled one owed. On a still screen it opens the burst,
 ///    which lasts until the rate control converges where the cleanup runs through it, or is
 ///    pinned (`OVERSHOOT_BUDGETS`).
 /// 3. **Recovery burst**: the frames after a keyframe or cleanup on a still screen keep flowing
@@ -789,22 +803,45 @@ pub fn decide_hw_fullframe(
     requested_idr: bool,
     encoder: EncoderQuality,
 ) -> HwFrameDecision {
-    if !settings.video_cbr_mode {
-        return decide_constant_quality(
+    let scheduled = st.scheduled_key(
+        periodic_idr_due(settings, frame_counter),
+        damage.is_motion(),
+    );
+    let recovery_idr = requested_idr || scheduled;
+    let d = if settings.video_cbr_mode {
+        decide_constant_rate(
             st,
             settings,
-            frame_counter,
             damage,
             is_animated,
             requested_idr,
+            recovery_idr,
             encoder,
-        );
+        )
+    } else {
+        decide_constant_quality(st, settings, damage, is_animated, recovery_idr, encoder)
+    };
+    if d.force_idr {
+        st.key_owed = false;
     }
+    d
+}
+
+/// `decide_hw_fullframe` for a constant-rate session, `recovery_idr` the key frame a consumer
+/// asked for or the schedule's.
+fn decide_constant_rate(
+    st: &mut StripeState,
+    settings: &CaptureSettings,
+    damage: Damage,
+    is_animated: bool,
+    requested_idr: bool,
+    recovery_idr: bool,
+    encoder: EncoderQuality,
+) -> HwFrameDecision {
     let normal_qp = settings.video_crf as u32;
     let paint_qp = settings.video_paintover_crf as u32;
     let burst = settings.video_paintover_burst_frames;
     let improves = paint_over_improves(settings, encoder);
-    let recovery_idr = requested_idr || periodic_idr_due(settings, frame_counter);
     let converges = encoder.converges();
     let holds = encoder.holds && !converges;
     // A session that holds its refresh and a band of a frame (libvpx's VP8) sweeps the refresh
@@ -1209,10 +1246,9 @@ fn sweep_refresh(st: &mut StripeState, d: &mut HwFrameDecision, qp: u32) {
 fn decide_constant_quality(
     st: &mut StripeState,
     settings: &CaptureSettings,
-    frame_counter: u16,
     damage: Damage,
     is_animated: bool,
-    requested_idr: bool,
+    recovery_idr: bool,
     encoder: EncoderQuality,
 ) -> HwFrameDecision {
     let normal_qp = settings.video_crf as u32;
@@ -1220,7 +1256,6 @@ fn decide_constant_quality(
     let burst = settings.video_paintover_burst_frames;
     let improves =
         settings.use_paint_over_quality && settings.video_paintover_crf < settings.video_crf;
-    let recovery_idr = requested_idr || periodic_idr_due(settings, frame_counter);
     let mut cleanup = cleanup_due(
         st,
         settings.paint_over_trigger(),
@@ -1916,7 +1951,11 @@ impl X11Pipeline {
                     d.hold_qp = None;
                     d.cap = None;
                     d.target_qp = normal;
-                    d.force_idr = requested || periodic_idr_due(&self.settings, self.frame_counter);
+                    d.force_idr = requested
+                        || self.hw_state.scheduled_key(
+                            periodic_idr_due(&self.settings, self.frame_counter),
+                            true,
+                        );
                 }
                 hashed = Some(dirty);
             }
@@ -2024,9 +2063,6 @@ impl X11Pipeline {
                 width as usize * 4,
                 "software encode path assumes tightly-packed rows (stride == width*4)"
             );
-            let force_idr_all = requested
-                || (self.settings.codec.is_video()
-                    && periodic_idr_due(&self.settings, self.frame_counter));
             if self.settings.codec.is_video() && self.settings.video_streaming_mode {
                 // As a full frame above: a frame that codes a stripe at the paint-over quality
                 // while it holds still is hashed before it is encoded, and decided on its own
@@ -2071,7 +2107,7 @@ impl X11Pipeline {
                         self.frame_counter,
                         false,
                         false,
-                        force_idr_all,
+                        requested,
                     )
                 };
                 if let Some(dirty) = hashed {
@@ -2105,7 +2141,7 @@ impl X11Pipeline {
                     self.frame_counter,
                     false,
                     true,
-                    force_idr_all,
+                    requested,
                 )
             }
         };
@@ -4467,14 +4503,71 @@ mod tests {
         s.keyframe_interval_s = 1.0;
         let mut scheduled = StripeState::default();
         assert!(
-            decide_hw_fullframe(&mut scheduled, &s, 60, Damage::None, false, false, HOLDS)
-                .force_idr
+            decide_hw_fullframe(
+                &mut scheduled,
+                &s,
+                60,
+                Damage::Area(1.0),
+                false,
+                false,
+                HOLDS
+            )
+            .force_idr
         );
         let mut off_beat = StripeState::default();
         assert!(
-            !decide_hw_fullframe(&mut off_beat, &s, 61, Damage::None, false, false, HOLDS)
-                .force_idr
+            !decide_hw_fullframe(
+                &mut off_beat,
+                &s,
+                61,
+                Damage::Area(1.0),
+                false,
+                false,
+                HOLDS
+            )
+            .force_idr
         );
+    }
+
+    /// A scheduled key frame is coded at the rate control's own quality, so on a still screen
+    /// the cleanup refined it would throw that picture away each interval (x264 at 18 Mbit/s,
+    /// 2560x1600 text: 52.5 dB down to 35-38 at every 2 s key frame). It waits for motion
+    /// instead, which coarsens the picture anyway, and a caret is no motion; a key frame a
+    /// consumer asks for is coded at once.
+    #[test]
+    fn a_scheduled_key_frame_waits_for_motion() {
+        for base in [hw_settings(), crf_settings()] {
+            let s = CaptureSettings {
+                keyframe_interval_s: 1.0,
+                ..base
+            };
+            let mut st = StripeState::default();
+            let mut decide = |fc: u16, damage: Damage, asked: bool| {
+                decide_hw_fullframe(&mut st, &s, fc, damage, false, asked, HOLDS)
+            };
+            decide(1, Damage::Area(1.0), false);
+            for fc in 2..60 {
+                decide(fc, Damage::None, false);
+            }
+            assert!(
+                (60..200).all(|fc| !decide(fc, Damage::None, false).force_idr),
+                "a still screen codes no scheduled key frame (cbr {})",
+                s.video_cbr_mode
+            );
+            assert!(
+                !decide(200, Damage::Area(0.001), false).force_idr,
+                "nor does a caret"
+            );
+            assert!(
+                decide(201, Damage::Area(1.0), false).force_idr,
+                "the motion after it does"
+            );
+            assert!(!decide(202, Damage::Area(1.0), false).force_idr, "once");
+            assert!(
+                decide(203, Damage::None, true).force_idr,
+                "a key frame asked for is coded on a still screen"
+            );
+        }
     }
 
     /// Software JPEG path emits on change and stays silent while static: the first frame
@@ -5127,12 +5220,6 @@ mod tests {
         assert!(periodic_idr_due(&s, 0));
         assert!(!periodic_idr_due(&s, 1));
         assert!(periodic_idr_due(&s, 120));
-        let mut st = StripeState::default();
-        let d = decide_hw_fullframe(&mut st, &s, 120, Damage::None, false, false, HOLDS);
-        assert!(
-            d.send && d.force_idr,
-            "interval keyframe fires on a static screen"
-        );
         s.keyframe_interval_s = 0.0;
         assert!(!periodic_idr_due(&s, 0) && !periodic_idr_due(&s, 120));
     }

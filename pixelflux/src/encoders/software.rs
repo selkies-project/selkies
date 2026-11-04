@@ -1104,6 +1104,9 @@ pub struct StripeState {
     pub change_mass: f32,
     /// Whether the region moved (`Damage::is_motion`) since its last cleanup.
     pub moved: bool,
+    /// Whether a scheduled key frame fell due that waits for the region's next motion
+    /// (`StripeState::scheduled_key`).
+    pub key_owed: bool,
     pub unclean_frames: u32,
     /// Whether the last cleanup was a key frame (`pipeline::lost_frame` repeats its kind).
     pub cleanup_keyed: bool,
@@ -1375,7 +1378,7 @@ pub fn stripes_held_still(stripes: &[StripeState], settings: &CaptureSettings) -
 /// * `use_gpu` - `true` when the source is RGBA (GLES readback); `false` for BGRA (X11 host).
 /// * `hash_damage` - `true` for X11 stripe-hash change detection; `false` when damage rects
 ///   are provided.
-/// * `force_idr_all` - Force a keyframe on every stripe (client join / reset / periodic IDR).
+/// * `requested_idr` - Force a keyframe on every stripe (client join / reset).
 ///
 /// # Returns
 ///
@@ -1415,8 +1418,10 @@ pub fn stripes_held_still(stripes: &[StripeState], settings: &CaptureSettings) -
 ///    one frame the whole screen's cleanup. A stripe is otherwise sent when it is dirty, while
 ///    its burst runs, or when streaming mode is on, at the base quality; a newly dirty frame
 ///    cancels its burst.
-/// 5. **Recovery IDR** (`force_idr_all`): forces a send on every stripe even when static so a
-///    reconnecting client can resume. For H.264 it forces an IDR at the stripe's own quality and
+/// 5. **Recovery IDR** (`requested_idr`): forces a send on every stripe even when static so a
+///    reconnecting client can resume. A scheduled one (`pipeline::periodic_idr_due`) waits, per
+///    stripe, for the stripe to change (`StripeState::scheduled_key`): a stripe's change has no
+///    known extent, so any counts as motion. For H.264 it forces an IDR at the stripe's own quality and
 ///    arms the burst (held at the paint-over quantizer at a constant quality, as in
 ///    `pipeline::decide_hw_fullframe`); for JPEG, where every stripe is already intra, it resends
 ///    a painted-over stripe at the paint-over quality already on screen so a joining viewer does
@@ -1458,10 +1463,10 @@ pub fn encode_cpu(
     frame_counter: u16,
     use_gpu: bool,
     hash_damage: bool,
-    force_idr_all: bool,
+    requested_idr: bool,
 ) -> Vec<EncodedStripe> {
     let codec = settings.codec;
-    let asked_idr = force_idr_all && !crate::pipeline::periodic_idr_due(settings, frame_counter);
+    let scheduled = codec.is_video() && crate::pipeline::periodic_idr_due(settings, frame_counter);
     let n_processing_stripes = stripe_count(height, codec, settings.video_fullframe);
 
     if stripes.len() != n_processing_stripes {
@@ -1524,7 +1529,7 @@ pub fn encode_cpu(
     // its cleanup waits the trigger, through the rate control or not.
     let start_frames = trigger_frames;
     let idle_candidate = damage_rects.is_empty()
-        && !force_idr_all
+        && !requested_idr
         && !(codec.is_video() && settings.video_streaming_mode);
     if idle_candidate {
         let no_pending_send = |st: &StripeState| {
@@ -1571,6 +1576,7 @@ pub fn encode_cpu(
                     Damage::None,
                 );
                 st.consecutive_changes = 0;
+                st.key_owed |= scheduled;
             }
             return Vec::new();
         }
@@ -1700,12 +1706,16 @@ pub fn encode_cpu(
                 Damage::None
             },
         );
+        let force_idr_all = requested_idr || stripe_state.scheduled_key(scheduled, is_dirty);
         let mut send_this_stripe = is_dirty || cleanup != Cleanup::None || force_idr_all;
         let mut quality_or_crf = if !video { jpeg_q } else { video_crf };
         let mut force_idr = video && (force_idr_all || cleanup == Cleanup::Key);
+        if force_idr {
+            stripe_state.key_owed = false;
+        }
         // A key frame asked for codes a clean stripe again at its rate control's quality: it is due
         // its cleanup again, as after a loss, a trigger period on (`pipeline::decide_hw_fullframe`).
-        if asked_idr && video && cleanup == Cleanup::None {
+        if requested_idr && video && cleanup == Cleanup::None {
             stripe_state.lost_frame();
         }
         let mut hold = None;
@@ -2599,6 +2609,71 @@ mod tests {
             "the cleanup refined past the skipped frames: {sent} frames"
         );
         assert!(psnr > 30.0, "{psnr:.1} dB");
+    }
+
+    /// A scheduled key frame waits, stripe by stripe, for the stripe to change: a still screen
+    /// sends nothing through its intervals, and the first change after one keys the stripes it
+    /// touches and no others, once.
+    #[test]
+    fn a_stripes_scheduled_key_frame_waits_for_its_change() {
+        use crate::CaptureSettings;
+        let (w, h) = (128, 512);
+        let settings = CaptureSettings {
+            width: w,
+            height: h,
+            codec: Codec::H264,
+            video_crf: 25,
+            use_paint_over_quality: false,
+            video_streaming_mode: false,
+            keyframe_interval_s: 1.0,
+            target_fps: 60.0,
+            ..Default::default()
+        };
+        let n = super::stripe_count(h, settings.codec, settings.video_fullframe);
+        if n < 2 {
+            return;
+        }
+        let mut stripes = Vec::new();
+        let mut carrying = 1.0f32;
+        let px: Vec<u8> = (0..(w * h * 4) as usize).map(|i| (i % 251) as u8).collect();
+        let mut encode = |pixels: &[u8], frame: u16| {
+            super::encode_cpu(
+                &mut stripes,
+                &mut carrying,
+                pixels,
+                w,
+                h,
+                &[],
+                &settings,
+                frame,
+                false,
+                true,
+                false,
+            )
+        };
+        assert_eq!(
+            encode(&px, 1).len(),
+            n,
+            "every stripe is sent on the first frame"
+        );
+        assert!(
+            (2..200).all(|frame| encode(&px, frame).is_empty()),
+            "a still screen sends nothing through its intervals"
+        );
+        let mut moved = px.clone();
+        for b in moved.iter_mut().take((w * 8 * 4) as usize) {
+            *b = b.wrapping_add(97);
+        }
+        let key = encode(&moved, 200);
+        assert_eq!(key.len(), 1, "the change sends its stripe alone");
+        assert_eq!(key[0].stripe_y_start, 0);
+        assert_eq!(key[0].data[1], 0x11, "as the key frame owed");
+        for b in moved.iter_mut().take((w * 8 * 4) as usize) {
+            *b = b.wrapping_add(31);
+        }
+        let next = encode(&moved, 201);
+        assert_eq!(next.len(), 1);
+        assert_ne!(next[0].data[1], 0x11, "once");
     }
 
     /// Without `gpl` the striped H.264 path runs one OpenH264 instance per stripe and speaks

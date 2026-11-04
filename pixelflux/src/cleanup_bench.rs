@@ -13,7 +13,7 @@
 //! `CODEC` (h264, h265, vp8, vp9, av1, jpeg), `CPU` (1 forces software), `FULLFRAME` (1),
 //! `FULLCOLOR` (1 for 4:4:4), `DEPTH` (bits per sample),
 //! `TURBO` (1), `CBR` (1), `KBPS`, `CRF`, `PAINT_CRF`, `PAINT` (use_paint_over_quality, 1),
-//! `W`, `H`, `FPS`, `MOTION` and `STILL` (frames), `STEP` (rows the scroll moves a frame, 4), `CARET`
+//! `KEYFRAME_S` (the scheduled key-frame interval), `W`, `H`, `FPS`, `MOTION` and `STILL` (frames), `STEP` (rows the scroll moves a frame, 4), `CARET`
 //! (frames per caret toggle, 0 none),
 //! `RESUME` (frames of motion after the still phase), `TRIGGER` (paint-over trigger frames),
 //! `PRESTILL` (frames held still before the measured phase, which then opens with the screen
@@ -264,6 +264,7 @@ fn cleanup_bench() {
         video_vbv_multiplier: env("VBV", 0.0),
         video_fullcolor: env("FULLCOLOR", 0) == 1,
         video_bit_depth: env("DEPTH", 8),
+        keyframe_interval_s: env("KEYFRAME_S", 0.0),
         ..Default::default()
     };
     let motion: usize = env("MOTION", 90);
