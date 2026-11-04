@@ -3311,4 +3311,56 @@ mod tests {
             assert!(worst < 20.0, "{fps} fps: {worst} off the source");
         }
     }
+
+    /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`, its render node in
+    /// `PIXELFLUX_TEST_RENDER_NODE`): a zero-copy session keeps its import of each recurring
+    /// dmabuf (`dmabuf_surface`), so a buffer repainted between frames, with another buffer's
+    /// frames in between, decodes to what was painted last, never to the picture it held when
+    /// it was first imported.
+    #[test]
+    #[ignore]
+    fn vaapi_dmabuf_import_follows_the_buffer() {
+        use crate::encoders::nvenc::gpu_tests::{
+            assert_painted, block_rect, decoded_means, gpu_render, paint_dmabuf, painted_dmabuf,
+        };
+        use crate::webcam::decode::VideoDecoder;
+        let (w, h) = (1280u32, 720u32);
+        let Some((gbm, mut renderer)) = gpu_render() else {
+            return;
+        };
+        let settings = RustCaptureSettings {
+            width: w as i32,
+            height: h as i32,
+            codec: Codec::H264,
+            target_fps: 60.0,
+            video_crf: 25,
+            ..Default::default()
+        };
+        let mut enc = VaapiEncoder::new(&settings, Codec::H264, Input::Dmabuf)
+            .expect("a zero-copy VA-API H.264 session");
+        let mut dec = VideoDecoder::new(Codec::H264).expect("decoder");
+        let (_a_bo, mut a) = painted_dmabuf(&gbm, &mut renderer, w, h, 1);
+        let (_b_bo, mut b) = painted_dmabuf(&gbm, &mut renderer, w, h, 2);
+        for frame in 0..8u32 {
+            let seed = frame + 1;
+            let (name, buffer) = if frame % 2 == 0 {
+                ("A", &mut a)
+            } else {
+                ("B", &mut b)
+            };
+            if frame >= 2 {
+                paint_dmabuf(&mut renderer, buffer, w, h, seed);
+            }
+            let out = enc
+                .encode_dmabuf(buffer, u64::from(frame), 25, frame == 0)
+                .expect("encode");
+            let (block, bg) = decoded_means(&mut dec, &out, block_rect(w, h, seed));
+            println!(
+                "{} frame {frame} (buffer {name}): block {block:.1?}, background {bg:.1?}",
+                enc.vendor()
+            );
+            assert_painted(&format!("frame {frame}, buffer {name}"), block, bg, 6.0);
+        }
+        assert_eq!(enc.imports.len(), 2, "one import a buffer");
+    }
 }

@@ -5180,7 +5180,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod gpu_tests {
+pub(crate) mod gpu_tests {
     use super::*;
     use crate::encoders::reference::REFERENCE_FRAMES;
 
@@ -8742,7 +8742,7 @@ mod gpu_tests {
     /// `PIXELFLUX_TEST_RENDER_NODE`, else the NVIDIA GPU's, brought up exactly as the compositor
     /// brings them up, or `None` where GBM allocates nothing there, as `probe_wayland_gpu`
     /// finds (NVIDIA's GBM backend arrived in driver 495), which the caller skips.
-    fn gpu_render() -> Option<(
+    pub(crate) fn gpu_render() -> Option<(
         gbm::Device<std::fs::File>,
         smithay::backend::renderer::gles::GlesRenderer,
     )> {
@@ -8766,18 +8766,18 @@ mod gpu_tests {
     }
 
     /// Background and block colors painted into test dmabufs, as `Color32F` components.
-    const BG: [f32; 3] = [0.1, 0.2, 0.8];
-    const FG: [f32; 3] = [0.9, 0.3, 0.1];
+    pub(crate) const BG: [f32; 3] = [0.1, 0.2, 0.8];
+    pub(crate) const FG: [f32; 3] = [0.9, 0.3, 0.1];
 
     /// Limited-range Y/Cb/Cr of a painted color, whose components are 0..1.
-    fn painted_ycbcr(rgb: [f32; 3]) -> [f64; 3] {
+    pub(crate) fn painted_ycbcr(rgb: [f32; 3]) -> [f64; 3] {
         use crate::encoders::chroma_siting::{BT709, ycbcr};
         ycbcr(rgb.map(|c| f64::from(c) * 255.0), BT709)
     }
 
     /// Where the foreground block of a `seed`-painted `w×h` frame sits: a quarter-size block
     /// whose origin moves with the seed.
-    fn block_rect(w: u32, h: u32, seed: u32) -> (i32, i32, i32, i32) {
+    pub(crate) fn block_rect(w: u32, h: u32, seed: u32) -> (i32, i32, i32, i32) {
         let x = ((seed * 37) % (w / 2)) as i32 & !1;
         let y = ((seed * 53) % (h / 2)) as i32 & !1;
         (x, y, (w / 4) as i32 & !1, (h / 4) as i32 & !1)
@@ -8786,7 +8786,7 @@ mod gpu_tests {
     /// Test helper: allocate a `w×h` ARGB8888 render-target dmabuf on `gbm` and paint it with
     /// the GLES renderer — `BG` everywhere and an `FG` block at `block_rect(seed)` — waiting for
     /// the render to land before returning, as the compositor does before encoding.
-    fn painted_dmabuf(
+    pub(crate) fn painted_dmabuf(
         gbm: &gbm::Device<std::fs::File>,
         renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
         w: u32,
@@ -8794,14 +8794,26 @@ mod gpu_tests {
         seed: u32,
     ) -> (gbm::BufferObject<()>, Dmabuf) {
         use gbm::{BufferObjectFlags, Format as GbmFormat};
-        use smithay::backend::renderer::{Bind, Color32F, Frame, Renderer};
-        use smithay::utils::{Physical, Rectangle, Size, Transform};
         let bo = gbm
             .create_buffer_object::<()>(w, h, GbmFormat::Argb8888, BufferObjectFlags::RENDERING)
             .expect("GBM buffer");
         let mut dmabuf = crate::create_dmabuf_from_bo(&bo);
+        paint_dmabuf(renderer, &mut dmabuf, w, h, seed);
+        (bo, dmabuf)
+    }
+
+    /// Test helper: paint `dmabuf` (`w×h`) as `painted_dmabuf` does, over what it held.
+    pub(crate) fn paint_dmabuf(
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        dmabuf: &mut Dmabuf,
+        w: u32,
+        h: u32,
+        seed: u32,
+    ) {
+        use smithay::backend::renderer::{Bind, Color32F, Frame, Renderer};
+        use smithay::utils::{Physical, Rectangle, Size, Transform};
         {
-            let mut fb = renderer.bind(&mut dmabuf).expect("bind dmabuf");
+            let mut fb = renderer.bind(dmabuf).expect("bind dmabuf");
             let size: Size<i32, Physical> = (w as i32, h as i32).into();
             let mut frame = renderer
                 .render(&mut fb, size, Transform::Normal)
@@ -8822,12 +8834,11 @@ mod gpu_tests {
             let sync = frame.finish().expect("finish");
             let _ = sync.wait();
         }
-        (bo, dmabuf)
     }
 
     /// Test helper: decode one H.264 access unit (the bytes behind the wire header)
     /// with the crate's H.264 decoder and return the mean Y/Cb/Cr inside `rect` and outside it.
-    fn decoded_means(
+    pub(crate) fn decoded_means(
         dec: &mut crate::webcam::decode::VideoDecoder,
         pkt: &[u8],
         rect: (i32, i32, i32, i32),
@@ -8859,7 +8870,7 @@ mod gpu_tests {
 
     /// Assert decoded region means sit within `tol` of the limited-range values of the painted
     /// colors — a wrong pitch, byte order, or stale buffer lands far outside this.
-    fn assert_painted(label: &str, block: [f64; 3], bg: [f64; 3], tol: f64) {
+    pub(crate) fn assert_painted(label: &str, block: [f64; 3], bg: [f64; 3], tol: f64) {
         let (eb, eg) = (painted_ycbcr(FG), painted_ycbcr(BG));
         for i in 0..3 {
             assert!(
