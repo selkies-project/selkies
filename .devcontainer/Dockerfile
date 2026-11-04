@@ -71,8 +71,7 @@ RUN sudo apt-get update && sudo apt-get install --no-install-recommends -y \
         kwin-x11 \
         kwin-wayland \
         netcat-openbsd && \
-    sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
-    sudo python3 -m pip install --no-cache-dir --retries 5 --timeout 60 --upgrade build
+    sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
 # Install the LXQt desktop environment
 COPY ./features/desktop-selkies/src/install-desktop-environment.sh /tmp/

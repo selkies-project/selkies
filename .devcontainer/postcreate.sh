@@ -3,32 +3,41 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# Faithful repo development setup: builds the web client from source and then
-# installs the Python package editable with the web client bundled, exactly as
-# the CI wheel build does.
+# Faithful repo development setup: builds the web client and the server from
+# this checkout, as CI does, and installs what the suites need beside them, so
+# the checkout can validate itself.
 set -e
 
 cd "${WORKSPACE_FOLDER:-/workspaces/selkies}"
 
-# The same script the wheel build, the conda recipe, and the root Dockerfile run,
-# so the bundle under src/selkies/selkies_web is the one every channel ships
+# The same script every channel builds the bundle with, so the bundle in
+# dist/web, which a server built from this checkout serves, is the one every
+# channel ships
 ./scripts/ci/build-web.sh
 
-# The pinned pixelflux and pcmflux are a coordinated pre-release, published per
-# commit to the GitHub releases, so the newest ones are fetched before the
-# editable install resolves the pin; a pin they leave unmet is pip's to report.
-WHEELS="$(mktemp -d)"
-.devcontainer/features/desktop-selkies/src/fetch-release-wheels.sh "${WHEELS}" none
+# The toolchain and the libraries the server links, then the server the suites
+# start (target/release/selkies)
+./scripts/ci/server-build-deps.sh
+PATH="${CARGO_HOME:-${HOME}/.cargo}/bin:${PATH}"
+cargo build --release --locked -p selkies
 
-# The test extras ride along, so the checkout can validate itself
-PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --retries 5 --timeout 60 \
-  --user --find-links "${WHEELS}" -e ".[test]"
+# The suites' own dependencies, and the pixelflux and pcmflux they drive beside
+# the server: the wheels of the commits Cargo.toml pins, from the pre-release
+# each project cuts per commit (tagged with its abbreviated SHA)
+WHEELS="$(mktemp -d)"
+pin() { sed -n "s/^$1 = {.* rev = \"\([0-9a-f]\{7\}\)[0-9a-f]*\".*/\1/p" Cargo.toml; }
+.devcontainer/features/desktop-selkies/src/fetch-release-wheels.sh "${WHEELS}" none \
+  "$(pin pixelflux)" "$(pin pcmflux)"
+PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --retries 5 --timeout 60 --user -r tests/requirements.txt
+if ls "${WHEELS}"/*.whl > /dev/null 2>&1; then
+  PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --user --no-deps --force-reinstall "${WHEELS}"/*.whl
+fi
 rm -rf "${WHEELS}"
 
 # The rest of what the suites need: the Playwright engines with their system
 # libraries, the OpenH264 plugin Firefox negotiates H.264 with, and the C
 # helpers under tests/tools. Best effort, so a container without the network
-# or the packages for them still has the editable install.
+# or the packages for them still has the server.
 if python3 -m playwright install --with-deps chromium firefox webkit &&
     sh tests/tools/fetch-openh264.sh &&
     make -C tests/tools; then
@@ -36,4 +45,4 @@ if python3 -m playwright install --with-deps chromium firefox webkit &&
 else
   echo "warning: the suites' browsers or tools did not install; the integration and e2e tiers need them" >&2
 fi
-echo "Selkies installed editable with the bundled web client. Start it with: start-selkies.sh"
+echo "Selkies is built from the checkout at target/release/selkies, and serves the web client in dist/web."

@@ -75,18 +75,12 @@ if [ "${DESKTOP:-lxqt}" != "none" ]; then
     ./install-desktop-environment.sh
 fi
 
-# Install Selkies from the wheels its GitHub releases carry -- the release asked
-# for, else the newest one, and the newest pixelflux and pcmflux releases --
-# looked in ahead of the index, which only resolves what no release carries.
+# Install Selkies from the wheel its GitHub release carries -- the release asked
+# for, else the newest one -- looked in ahead of the index, which only resolves
+# what no release carries, as it does the capture stack a release from before
+# the server was a binary depends on.
 WHEELS="$(mktemp -d)"
 ./fetch-release-wheels.sh "${WHEELS}" "${RELEASE:-latest}"
-# The capture stack goes in from the wheels ahead of the index the remaining
-# dependencies come from, so its pin is met before any resolver looks there.
-for project in pixelflux pcmflux; do
-    if ls "${WHEELS}/${project}"-*.whl > /dev/null 2>&1; then
-        PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --no-index --find-links "${WHEELS}" "${project}"
-    fi
-done
 SELKIES="$(ls "${WHEELS}"/selkies-*.whl 2> /dev/null || echo "selkies${RELEASE:+==${RELEASE#v}}")"
 PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --find-links "${WHEELS}" "${SELKIES}"
 rm -rf "${WHEELS}"

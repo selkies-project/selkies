@@ -1,20 +1,20 @@
 #!/bin/bash
 # Fetch the wheels selkies-project releases into the directory given: the
-# selkies wheel of the release named (else the newest release; `none` for a
-# checkout that installs itself), and the wheels of the newest pixelflux and
-# pcmflux releases for this interpreter and machine. A project whose wheel is
-# already in the directory is left alone. The GitHub releases are where every
-# release is cut, so they are looked in first; a wheel they do not carry is
-# reported, for the caller to resolve from the index as its fallback. A wheel
-# that does not hash to the SHA-256 its release records fails the fetch.
-# GITHUB_TOKEN, when set, authenticates the lookups.
+# selkies wheel of the release named for this machine (else the newest
+# release; `none` for a checkout that builds its own server), and, when tags
+# are given, the pixelflux and pcmflux wheels of those releases for this
+# interpreter and machine, which the suites drive beside the server. A project
+# whose wheel is already in the directory is left alone. The GitHub releases
+# are where every release is cut, so they are looked in first; a wheel they do
+# not carry is reported, for the caller to resolve from the index as its
+# fallback. A wheel that does not hash to the SHA-256 its release records fails
+# the fetch. GITHUB_TOKEN, when set, authenticates the lookups.
 #
-#   fetch-release-wheels.sh <directory> [selkies release tag | latest | none]
+#   fetch-release-wheels.sh <directory> [selkies release tag | latest | none] [<pixelflux tag> <pcmflux tag>]
 set -e
 
 DEST="$1"
 RELEASE="${2:-latest}"
-ABI="cp$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
 AUTH=()
 [ -z "${GITHUB_TOKEN:-}" ] || AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
 
@@ -46,9 +46,14 @@ fetch_wheel() {  # <project> <tag, or latest> <asset name pattern>
 }
 
 mkdir -p "${DEST}"
-[ "${RELEASE}" = "none" ] || fetch_wheel selkies "${RELEASE}" '^selkies-.*-py3-none-any\.whl$' \
-    || echo "warning: no selkies wheel in the ${RELEASE} release; the index is the fallback" >&2
-for project in pixelflux pcmflux; do
-    fetch_wheel "${project}" latest "^${project}-.*-${ABI}-.*manylinux.*$(uname -m)\\.whl$" \
-        || echo "warning: no ${project} wheel for ${ABI} $(uname -m) in its newest release; the index is the fallback" >&2
-done
+# A release from before the server was a binary carries one wheel for every machine
+[ "${RELEASE}" = "none" ] || fetch_wheel selkies "${RELEASE}" "^selkies-.*-py3-none-(manylinux_.*_$(uname -m)|any)\\.whl$" \
+    || echo "warning: no selkies wheel for $(uname -m) in the ${RELEASE} release; the index is the fallback" >&2
+if [ "$#" -ge 4 ]; then
+    ABI="cp$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
+    for project in pixelflux pcmflux; do
+        case "${project}" in pixelflux) tag="$3" ;; pcmflux) tag="$4" ;; esac
+        fetch_wheel "${project}" "${tag}" "^${project}-.*-${ABI}-.*manylinux.*$(uname -m)\\.whl$" \
+            || echo "warning: no ${project} wheel for ${ABI} $(uname -m) in its ${tag} release" >&2
+    done
+fi
