@@ -1,0 +1,110 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# cargo-deny policy for the crate graph the server ships (see docs/licensing.md).
+#
+#     cargo deny check
+#
+# resolves the workspace as committed, pixelflux with its `gpl` feature, which is
+# what every release links: every crate license must be in the permissive allow
+# list below, x264-sys's GPL clarification is accepted by its exception, the only
+# sources are crates.io and the git repositories `allow-git` names, and the
+# RustSec advisories are gated by the [advisories] policy (that check fetches the
+# database, so it needs the network). The non-GPL build (pixelflux's `openh264` in
+# place of `gpl`) is not a Cargo feature of this workspace, so cargo-deny cannot
+# select it; scripts/check-licenses.py resolves it from a copy of the manifest and
+# fails on any copyleft component there, and covers the native libraries crate
+# metadata cannot see.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+# Dev-dependencies build the tests only and ship in nothing.
+exclude-dev = true
+
+[licenses]
+# Permissive licenses only: a GPL, LGPL, or AGPL crate, or a crate without
+# license metadata, fails the check. MPL-2.0 is file-level copyleft and is
+# accepted (Selkies, pixelflux, and pcmflux are MPL-2.0).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+# The one copyleft component of the shipped graph, through pixelflux's `gpl`
+# feature, which the workspace's Cargo.toml turns on.
+exceptions = [
+    { crate = "x264-sys", allow = ["GPL-2.0-or-later"] },
+]
+
+# pixelflux and pcmflux carry their license in the repository LICENSE file
+# (MPL-2.0) rather than in a Cargo.toml `license` field.
+[[licenses.clarify]]
+crate = "pixelflux"
+expression = "MPL-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "pcmflux"
+expression = "MPL-2.0"
+license-files = []
+
+# x264-sys is an MIT binding, but the only library it can link is libx264,
+# which is GPL-2.0-or-later: a binary that contains it is GPL.
+[[licenses.clarify]]
+crate = "x264-sys"
+expression = "MIT AND GPL-2.0-or-later"
+license-files = []
+
+[licenses.private]
+ignore = false
+
+# Every ignore is pinned to the reason it is accepted rather than left silently
+# unaudited, and goes when that reason does.
+[advisories]
+ignore = [
+    # paste (through pixelflux: smithay's pixman, and the exr and rav1e that
+    # pixelflux's default image features pull in): a build-time proc-macro,
+    # unmaintained but sound, with no maintained release to move to. pixelflux
+    # carries the same ignore; pixman keeps it in the graph whatever the image
+    # features.
+    "RUSTSEC-2024-0436",
+    # rustls-pemfile: unmaintained, no vulnerability; 2.2 is a thin wrapper over
+    # the PEM parser of rustls-pki-types, which rustls already links. The server
+    # calls it directly in crates/selkies/src/http/tls.rs; the ignore goes with
+    # the move of those calls to `rustls_pki_types::pem::PemObject`.
+    "RUSTSEC-2025-0134",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The capture stack, pinned by `rev` in the workspace's Cargo.toml, and the
+# smithay commit pixelflux pins.
+allow-git = [
+    "https://github.com/selkies-project/pixelflux",
+    "https://github.com/selkies-project/pcmflux",
+    "https://github.com/Smithay/smithay",
+]

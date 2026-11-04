@@ -1,0 +1,69 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: Licenses
+
+# License gate for what the server links and the web client ships
+# (docs/licensing.md, "How this is kept up to date"). Everything here resolves
+# the crate graph with `cargo metadata` and reads the addons' lockfiles; nothing
+# is built, so no native packages are installed.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+
+concurrency:
+  group: licenses-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The toolchain the packages and images build the server with
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  licenses:
+    name: Crate, native library, and npm licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Inventory check, both builds, and the page
+        # Fails on a copyleft component outside the GPL build's libx264 and
+        # x265, on missing license metadata, on a native binding, direct
+        # dependency, or vendored crate the script does not describe, and on a
+        # docs/licensing.md that differs from what the graphs yield.
+        run: python3 scripts/check-licenses.py
+
+      - name: cargo-deny, the shipped (GPL) graph
+        # deny.toml: the permissive allow list plus x264-sys's exception, and
+        # crates.io and the pinned git repositories as the only sources.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check
+          command-arguments: licenses bans sources
+
+  advisories:
+    name: RustSec advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: cargo-deny advisories, the shipped (GPL) graph
+        # Fetches the RustSec database and enforces the [advisories] policy in
+        # deny.toml, whose every ignore names its reason. A job of its own, so
+        # an advisory published against an unchanged tree reads as one.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check
+          command-arguments: advisories
