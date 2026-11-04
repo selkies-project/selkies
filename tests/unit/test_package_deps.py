@@ -23,8 +23,8 @@ DOCKERFILE = os.path.join(REPO, "addons", "base", "Dockerfile")
 VERIFY_PACKAGE = os.path.join(REPO, "scripts", "ci", "verify-package.sh")
 RUNTIME_DEPS = os.path.join(PACKAGING, "runtime-deps.sh")
 SERVER = os.path.join(PACKAGING, "server.sh")
-APPIMAGE_BUILD = os.path.join(REPO, "infra", "appimage", "build.sh")
-APPRUN = os.path.join(REPO, "infra", "appimage", "AppRun")
+APPIMAGE_SERVER = os.path.join(REPO, "infra", "appimage", "build-server.sh")
+APPIMAGE = os.path.join(REPO, "scripts", "ci", "appimage.sh")
 
 passed = failed = 0
 
@@ -80,15 +80,14 @@ for packager in ("deb.sh", "rpm.sh", "apk.sh", "arch.sh"):
     check(f"{packager} carries no Python prefix",
           "/opt/selkies" not in body and "mkvenv" not in body, f"infra/packaging/{packager}")
 
-build = read(APPIMAGE_BUILD)
-apprun = read(APPRUN)
+appimage = read(APPIMAGE)
 check("the AppImage builds the server as the packages do",
-      "/repo/infra/packaging/server.sh " in build, "infra/appimage/build.sh")
+      "/repo/infra/packaging/server.sh " in read(APPIMAGE_SERVER), "infra/appimage/build-server.sh")
 for source, env in (("input-interposer/input_interposer.c", "SELKIES_INTERPOSER"),
                     ("v4l2-interposer/v4l2_interposer.c", "SELKIES_WEBCAM_INTERPOSER")):
-    check(f"the AppImage compiles {os.path.basename(source)}", source in build,
-          "infra/appimage/build.sh")
-    check(f"the AppImage exports {env}", f"export {env}=" in apprun, "infra/appimage/AppRun")
+    check(f"the AppImage compiles {os.path.basename(source)}", source in appimage,
+          "scripts/ci/appimage.sh")
+    check(f"the AppImage exports {env}", f"export {env}=" in appimage, "scripts/ci/appimage.sh")
 
 print(f"[package-deps] {passed}/{passed + failed} passed", flush=True)
 sys.exit(1 if failed else 0)

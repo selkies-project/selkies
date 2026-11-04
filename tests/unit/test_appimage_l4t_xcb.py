@@ -10,8 +10,8 @@ and sound servers it starts have no such conflict to fix and a preload exported
 over them would reach every application the session runs.
 
 The selection runs here as the AppImage runs it: the function is read out of
-the AppRun the build installs and called with fabricated paths, so what passes
-is the shipped text. Whether preloading cures the crash is a Jetson measurement
+the AppRun the build writes and called with fabricated paths, so what passes is
+the shipped text. Whether preloading cures the crash is a Jetson measurement
 and is recorded in the issue, not here; there is no L4T host in this sandbox.
 """
 import os
@@ -25,13 +25,15 @@ sys.path.insert(0, TESTS)
 import helpers as H  # noqa: E402
 
 REPO = os.path.dirname(TESTS)
-APPRUN = os.path.join(REPO, "infra", "appimage", "AppRun")
+APPIMAGE = os.path.join(REPO, "scripts", "ci", "appimage.sh")
 res = H.Results("appimage-l4t-xcb")
 
 
 def apprun() -> str:
-    """The AppRun script the build installs."""
-    return open(APPRUN, encoding="utf-8").read()
+    """The AppRun script the build writes, out of its heredoc."""
+    text = open(APPIMAGE).read()
+    body = text.split("cat > AppDir/AppRun <<'APPRUN'\n", 1)[1]
+    return body.split("\nAPPRUN\n", 1)[0]
 
 
 def selector(script: str) -> str:
@@ -83,7 +85,7 @@ res.check("the preload is never exported over the servers or the session",
 res.check("the session launcher is handed it for Selkies alone",
           'export SELKIES_PRELOAD="${system_xcb}"' in script)
 res.check("and a host without the marker still reaches the plain exec",
-          script.rstrip().endswith('exec "${BIN}/selkies" "$@"'),
+          script.rstrip().endswith('exec "${ENV_BIN}/selkies" "$@"'),
           script.rstrip()[-60:])
 res.check("the marker the platform is read from is L4T's",
           "/etc/nv_tegra_release" in script)

@@ -1,13 +1,15 @@
 name: Packages
 
 # Native packages: .deb (Ubuntu/Debian), .rpm (Fedora/EL), .apk (Alpine),
-# .pkg.tar.zst (Arch), and .AppImage (x86_64 + aarch64). Each builds the Rust
-# server inside a container of the target distribution (the AppImage inside
-# manylinux_2_28, its glibc floor), installs it at /usr/bin/selkies with the
-# web client at /usr/share/selkies/web, and declares the packages behind the
-# libraries the binary links and loads, as that distribution names them. Cargo
-# fetches pixelflux and pcmflux at the commits Cargo.lock pins. Only
-# apt/apt-get, dnf, apk, or pacman are ever invoked.
+# .pkg.tar.zst (Arch), and .AppImage (x86_64 + aarch64, via rattler-build +
+# linuxdeploy-plugin-conda). Each builds the Rust server inside a container of
+# the target distribution (the AppImage's inside manylinux_2_28, its glibc
+# floor); a native package installs it at /usr/bin/selkies with the web client
+# at /usr/share/selkies/web and declares the packages behind the libraries the
+# binary links and loads, as that distribution names them, and the AppImage
+# carries it in a conda environment of conda-forge's libraries. Cargo fetches
+# pixelflux and pcmflux at the commits Cargo.lock pins. Only apt/apt-get, dnf,
+# apk, pacman, or micromamba are ever invoked.
 
 # Triggered by ci.yaml on pushes to main and by release.yaml for releases; can
 # also be run standalone via the Actions tab.
@@ -221,10 +223,10 @@ jobs:
           name: selkies-web-client
       - name: Unpack the web client into dist/web
         run: mkdir -p dist && tar -C dist -xf selkies-web-client.tar && rm selkies-web-client.tar
-      - name: Build the AppImage (manylinux_2_28 + linuxdeploy)
+      - name: Build the AppImage (rattler-build + linuxdeploy-plugin-conda)
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
-          # For the release lookup behind linuxdeploy's download check
+          # For the release lookups behind the downloads' checks
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci/appimage.sh "${{ matrix.arch.name }}"
       - name: Check the AppImage on a pristine host at its glibc floor

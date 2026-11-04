@@ -55,7 +55,7 @@ For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVID
 
 ## The AppImage
 
-Runs from wherever you put it, on any distribution with glibc 2.28 or newer (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. The server and every library it links are inside, the graphics stack aside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
+Runs from wherever you put it, on any distribution with glibc 2.28 or newer (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. Every native dependency is inside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
 
 ```bash
 APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
@@ -68,7 +68,7 @@ chmod +x "./${APP}"
 
 Given `session` as its first argument, it runs a whole session instead, with its own display and sound server and the host's desktop, as [Jupyter, Coder, and Open OnDemand](platforms.md) describes: `"./${APP}" session --port=8080 --enable-basic-auth=false`. Given `resize` or `gpu-probe`, it runs that command on the display already up.
 
-What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL`, `libdrm`, and the GPU's own driver have to be the host's for the GPU to be reachable at all, VA-API encodes through the host's `libva`, which is the one that knows where the host keeps its drivers, and an X11 session needs the host's X server (or `Xvfb`). Everything above them travels with the AppImage.
+What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL`, and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
 
 ## Run a session
 

@@ -241,9 +241,10 @@ jobs:
           find release-artifacts -type f \( -name 'pixelflux-*.whl' -o -name 'pcmflux-*.whl' \) -delete
           # Artifacts of the run rather than of the release: the build record
           # docker/build-push-action uploads per image, the record of what
-          # each image was built from, and the web client the packages carry
+          # each image was built from, the web client the packages carry, and
+          # the conda package the AppImage is assembled from
           find release-artifacts -type f \( -name '*.dockerbuild' -o -name 'selkies-*-images-*.txt' \
-            -o -name 'selkies-web-client.tar' \) -delete
+            -o -name 'selkies-web-client.tar' -o -name '*.conda' \) -delete
           find release-artifacts -type f -exec mv {} release/ \;
           (cd release && sha256sum -- * > SHA256SUMS)
           ls -la release/
