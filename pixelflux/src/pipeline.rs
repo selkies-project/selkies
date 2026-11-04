@@ -1875,6 +1875,19 @@ impl X11Pipeline {
     ///
     /// Vec of [`EncodedStripe`] — empty when nothing changed.
     pub fn process(&mut self, argb: &[u8], stride: usize) -> Vec<EncodedStripe> {
+        self.process_damaged(argb, stride, &[])
+    }
+
+    /// [`Self::process`] for a frame whose source says where it changed (`changed`, in the
+    /// frame's coordinates), which places the change within each region for its block ledger
+    /// (`ledger`); the content hash still decides which regions changed, and one it finds
+    /// changed that no rectangle reaches counts as changed whole.
+    pub fn process_damaged(
+        &mut self,
+        argb: &[u8],
+        stride: usize,
+        changed: &[Rectangle<i32, Physical>],
+    ) -> Vec<EncodedStripe> {
         let width = self.settings.width;
         let height = self.settings.height;
         let requested = self.pending_force_idr;
@@ -2136,7 +2149,7 @@ impl X11Pipeline {
                     argb,
                     width,
                     height,
-                    &[],
+                    changed,
                     &self.settings,
                     self.frame_counter,
                     false,

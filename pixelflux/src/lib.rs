@@ -150,6 +150,8 @@ mod python;
 
 /// HTTP server implementing the Anthropic Computer Use spec for AI agent desktop control.
 pub mod computer_use;
+/// Per-block stillness and cleanliness of a region, for refining blocks while others move.
+pub mod ledger;
 /// When a capture is due a frame, shared by the X11 and Wayland backends.
 pub mod pace;
 /// Built-in MP4 recorder: independent capture-to-file with API/env/REST control.
