@@ -2164,7 +2164,7 @@ const avcFramed = (codec) => wireAvcc && typeof codec === 'string' && codec.star
 // The codec the page's encoder streams; frames of another are the stream it
 // just left, still in flight, and must not build (and lose) a decoder here.
 let wireExpect = null;
-let wireChunks = 0, wireFrames = 0, wireLastId = -1, wireStatsTimer = null;
+let wireChunks = 0, wireFrames = 0, wireLastId = -1, wireStatsTimer = null, wireGen = 0;
 // The codec helpers by source: a bundler renames the module bindings they
 // share, which a stringified function would carry in here unresolved.
 ${wireCodecsSource.replace(/^export /gm, '')}
@@ -2501,6 +2501,11 @@ self.onmessage = (e) => {
     wireChromium = !!m.chromium;
     wireAvcc = !!m.avcc;
     wireFullRange = !!m.fullRange;
+    // Another socket: the last one's port is let go, its frames stale, and the
+    // counts start over under the page's generation for this wiring.
+    if (wirePort && wirePort !== m.port) wirePort.onmessage = null;
+    wireGen = m.gen || 0;
+    wireChunks = 0; wireFrames = 0; wireLastId = -1; presentedFrames = 0;
     wirePort = m.port;
     m.port.onmessage = (ev) => onWire(ev.data);
     if (!wireStatsTimer) {
@@ -2513,7 +2518,7 @@ self.onmessage = (e) => {
         } else if (dec && wireH > 0) {
           rows[0] = wireH;
         }
-        self.postMessage({ type: 'wireStats', chunks: wireChunks, frames: wireFrames, lastId: wireLastId, presents: presentedFrames, rows: rows });
+        self.postMessage({ type: 'wireStats', gen: wireGen, chunks: wireChunks, frames: wireFrames, lastId: wireLastId, presents: presentedFrames, rows: rows });
         wireChunks = 0; wireFrames = 0; presentedFrames = 0;
         if (!stripedOn && dec) {
           const fps = pace.second();
@@ -2740,6 +2745,9 @@ function syncWireGeom() {
   catch (e) { /* respawns fresh */ }
 }
 
+/** The latest wiring of a socket to the video worker, which its wireStats echo. */
+let videoWireGen = 0;
+
 /**
  * Connects the socket worker to the video worker, so diverted stripes reach
  * decode without the page's thread on them; a fresh channel per call, for a
@@ -2752,7 +2760,7 @@ function wireSocketToVideoWorker() {
   const channel = new MessageChannel();
   try {
     videoWorker.postMessage({
-      type: 'wireIn', port: channel.port1,
+      type: 'wireIn', port: channel.port1, gen: ++videoWireGen,
       codecHint: workerKeyframeCodec, software: preferSoftwareDecode, chromium: isChromium,
       avcc: h264Framing() === 'avcc', fullRange: sessionFullRange,
     }, [channel.port1]);
@@ -2939,7 +2947,10 @@ function ensureVideoWorker() {
         if (m.lastId >= 0) { lastReceivedVideoFrameId = m.lastId; lastReceivedVideoFrameAt = performance.now(); }
         if (m.rows) window.videoStripeRows = m.rows;
         if (isSharedMode && m.chunks > 0) lastSharedVideoChunkTime = performance.now();
-        if (!streamStarted && (m.frames > 0 || (m.presents || 0) > 0)) startStream();
+        // Only frames of this wiring's socket start the stream: a tick counting the
+        // last socket's would end a reconnect's wait for its first frame early,
+        // and the key frame requests that wait makes.
+        if (!streamStarted && m.gen === videoWireGen && m.frames > 0) startStream();
         if (videoDivertOn) {
           activateWorkerSinkDisplay();
           checkWorkerSinkAlive();

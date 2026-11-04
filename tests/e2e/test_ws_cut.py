@@ -20,8 +20,8 @@ quick (the relay refuses connections for a while) shows the notice once it
 has waited, and the stream comes back after.
 
 Usage: python3 tests/e2e/test_ws_cut.py [chromium|firefox|all]
-(`firefox` runs the typing cut alone: Gecko routes the worker socket through
-the page's thread.)
+(`firefox` runs the typing cut and the paused, hidden and late ones alone:
+Gecko routes the worker socket through the page's thread.)
 """
 import asyncio
 import os
@@ -539,12 +539,13 @@ def session(engine: str) -> "H.Results":
                 typing_cut(res, page, relay, "half-open", engine, server_side=False)
                 time.sleep(STABLE_S)
                 held_cut(res, page, relay)
-                time.sleep(STABLE_S)
-                paused_cut(res, page, relay)
-                time.sleep(STABLE_S)
-                hidden_cut(res, page, relay)
-                time.sleep(STABLE_S)
-                late_cut(res, page, relay)
+            time.sleep(STABLE_S)
+            paused_cut(res, page, relay)
+            time.sleep(STABLE_S)
+            hidden_cut(res, page, relay)
+            time.sleep(STABLE_S)
+            late_cut(res, page, relay)
+            if engine == "chromium":
                 time.sleep(STABLE_S)
                 toggles_cut(res, page, relay)
                 time.sleep(STABLE_S)
