@@ -31,7 +31,6 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 futures = "0.3"
 bytes = "1"
 axum = { version = "0.8", features = ["ws", "http2", "macros", "multipart"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["util", "timeout", "limit"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "set-header", "compression-gzip"] }
 hyper = { version = "1", features = ["full"] }
@@ -67,7 +66,7 @@ sysinfo = "0.33"
 nvml-wrapper = "0.10"
 prometheus-client = "0.23"
 rmp-serde = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 chrono = "0.4"
 shlex = "1"
 tempfile = "3"

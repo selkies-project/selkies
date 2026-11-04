@@ -37,7 +37,7 @@ fn zip_entries(bytes: &[u8]) -> Vec<(String, u32)> {
     for i in 0..archive.len() {
         let entry = archive.by_index(i).unwrap();
         out.push((
-            entry.name().to_string(),
+            entry.name().unwrap().to_string(),
             entry.unix_mode().unwrap_or(0) & 0o7777,
         ));
     }
