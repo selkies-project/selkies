@@ -37,6 +37,7 @@ use parking_lot::RwLock;
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::crypto::CryptoProvider;
+use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -72,6 +73,8 @@ pub enum TlsError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Rustls(#[from] rustls::Error),
+    #[error("{0}")]
+    Pem(#[from] pem::Error),
     #[error("{0}")]
     Generate(#[from] rcgen::Error),
     #[error("{0}")]
@@ -163,7 +166,7 @@ fn read_pair(
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {
     let cert_pem = fs::read(cert)?;
     let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<Result<_, _>>()?;
+        CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<_, _>>()?;
     if certs.is_empty() {
         return Err(TlsError::Other(format!(
             "no certificate in {}",
@@ -174,8 +177,12 @@ fn read_pair(
         Some(key) => fs::read(key)?,
         None => cert_pem,
     };
-    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())?
-        .ok_or_else(|| TlsError::Other("no private key found".to_string()))?;
+    let key = match PrivateKeyDer::from_pem_slice(&key_pem) {
+        Err(pem::Error::NoItemsFound) => {
+            return Err(TlsError::Other("no private key found".to_string()));
+        }
+        key => key?,
+    };
     Ok((certs, key))
 }
 
@@ -488,10 +495,7 @@ mod tests {
 
     fn leaf(cert: &Path) -> CertificateDer<'static> {
         let pem = fs::read(cert).unwrap();
-        rustls_pemfile::certs(&mut pem.as_slice())
-            .next()
-            .unwrap()
-            .unwrap()
+        CertificateDer::from_pem_slice(&pem).unwrap()
     }
 
     /// Whether this process writes into `directory` whatever its mode says (CAP_DAC_OVERRIDE).
@@ -514,6 +518,31 @@ mod tests {
         let c = params.self_signed(&key_pair).unwrap();
         fs::write(cert, c.pem()).unwrap();
         fs::write(key, key_pair.serialize_pem()).unwrap();
+    }
+
+    #[test]
+    fn a_pair_loads_from_separate_files_and_from_one_combined_file() {
+        let work = tempfile_dir("selkies-pem-");
+        let (cert, key) = (work.join("s.pem"), work.join("s.key"));
+        write_localhost_only_pair(&cert, &key);
+        load_certified_key(&cert, Some(&key)).expect("the pair loads from its two files");
+
+        let combined = work.join("both.pem");
+        let mut both = fs::read(&cert).unwrap();
+        both.extend(fs::read(&key).unwrap());
+        fs::write(&combined, both).unwrap();
+        load_certified_key(&combined, None).expect("the key is read from the certificate file");
+    }
+
+    #[test]
+    fn a_certificate_without_a_key_is_refused_by_name() {
+        let work = tempfile_dir("selkies-pem-");
+        let (cert, key) = (work.join("s.pem"), work.join("s.key"));
+        write_localhost_only_pair(&cert, &key);
+        let err = load_certified_key(&cert, None).expect_err("no key, no pair");
+        assert_eq!(err.to_string(), "no private key found");
+        let err = load_certified_key(&key, Some(&key)).expect_err("no certificate, no pair");
+        assert!(err.to_string().starts_with("no certificate in "), "{err}");
     }
 
     /// One TLS handshake against `config` on an ephemeral port, verified by `verifier` and

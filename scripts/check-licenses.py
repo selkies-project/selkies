@@ -368,7 +368,7 @@ ROLES: Tuple[Role, ...] = (
     Role(("tokio", "tokio-util", "futures", "async-trait", "bytes"), "async runtime"),
     Role(("axum", "hyper", "hyper-util", "tower", "tower-http", "http", "http-body-util"),
          "HTTP and WebSocket server"),
-    Role(("rustls", "tokio-rustls", "hyper-rustls", "rustls-pemfile", "rustls-native-certs"),
+    Role(("rustls", "tokio-rustls", "hyper-rustls", "rustls-native-certs"),
          "HTTPS, TLS to TURN servers, and the outgoing requests of the TURN REST and Cloudflare sources",
          "cryptography from `aws-lc-rs` and `ring`"),
     Role(("rcgen",), "self-signed certificates"),

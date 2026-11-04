@@ -85,11 +85,6 @@ ignore = [
     # carries the same ignore; pixman keeps it in the graph whatever the image
     # features.
     "RUSTSEC-2024-0436",
-    # rustls-pemfile: unmaintained, no vulnerability; 2.2 is a thin wrapper over
-    # the PEM parser of rustls-pki-types, which rustls already links. The server
-    # calls it directly in crates/selkies/src/http/tls.rs; the ignore goes with
-    # the move of those calls to `rustls_pki_types::pem::PemObject`.
-    "RUSTSEC-2025-0134",
 ]
 
 [bans]

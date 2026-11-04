@@ -38,7 +38,6 @@ hyper-util = { version = "0.1", features = ["full"] }
 http = "1"
 http-body-util = "0.1"
 rustls = "0.23"
-rustls-pemfile = "2"
 tokio-rustls = "0.26"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "aws-lc-rs", "native-tokio"] }
 rcgen = "0.13"
