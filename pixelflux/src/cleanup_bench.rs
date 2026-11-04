@@ -156,7 +156,7 @@ impl Canvas {
 
 /// Source luma the way the stream's decoder reports it: BT.709 at limited range for the video
 /// codecs (BT.601 for VP8), BT.601 at full range for JPEG.
-fn source_luma(bgra: &[u8], codec: Codec) -> Vec<u8> {
+pub(crate) fn source_luma(bgra: &[u8], codec: Codec) -> Vec<u8> {
     let (kr, kb, limited) = match codec {
         Codec::Jpeg => (0.299, 0.114, false),
         Codec::Vp8 => (0.299, 0.114, true),
@@ -269,7 +269,7 @@ fn psnr_inside(
 }
 
 /// `psnr` of the `w`-wide luma planes `a` and `b` outside `area`.
-fn psnr_outside(
+pub(crate) fn psnr_outside(
     a: &[u8],
     b: &[u8],
     w: usize,

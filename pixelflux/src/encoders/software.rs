@@ -2015,8 +2015,12 @@ pub fn encode_cpu(
                 // A stripe moving at the session's quality refines the blocks of it that held
                 // still and are not clean, at the paint-over quality: a quantizer offset from
                 // the rate control's last, or from the session's rate factor.
-                let refines =
-                    video && is_dirty && cleanup == Cleanup::None && hold.is_none() && !force_idr;
+                let refines = video
+                    && armed
+                    && is_dirty
+                    && cleanup == Cleanup::None
+                    && hold.is_none()
+                    && !force_idr;
                 let plan = refines
                     .then(|| {
                         let most = stripe_state.ledger.blocks().div_ceil(REFINE_FRAMES);

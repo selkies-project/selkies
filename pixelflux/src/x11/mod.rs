@@ -503,6 +503,32 @@ fn captured_damage(
     crate::pipeline::Damage::of_rects(&local, width, height)
 }
 
+/// The root's damaged `rects` in the coordinates of the captured area at (`x`, `y`), `width` x
+/// `height`, clipped to it.
+fn frame_rects(
+    rects: &[Rectangle],
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+) -> Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>> {
+    rects
+        .iter()
+        .filter_map(|r| {
+            let left = (i32::from(r.x) - i32::from(x)).max(0);
+            let top = (i32::from(r.y) - i32::from(y)).max(0);
+            let right = (i32::from(r.x) + i32::from(r.width) - i32::from(x)).min(width.into());
+            let bottom = (i32::from(r.y) + i32::from(r.height) - i32::from(y)).min(height.into());
+            (right > left && bottom > top).then(|| {
+                smithay::utils::Rectangle::new(
+                    (left, top).into(),
+                    (right - left, bottom - top).into(),
+                )
+            })
+        })
+        .collect()
+}
+
 /// Wait for the connection to carry something, for at most `timeout`.
 fn readable(conn: &RustConnection, timeout: Duration) -> bool {
     let mut poll = libc::pollfd {
@@ -729,6 +755,9 @@ struct RawFrame {
     generation: u64,
     /// CLOCK_MONOTONIC nanoseconds at which the pixels were in hand.
     captured_ns: i64,
+    /// Where the frame changed since the one before, in its own coordinates, as the server
+    /// reported it and the overlays moved; empty where the server cannot say.
+    changed: Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>>,
 }
 /// `RawFrame` is `Send`: its raw pointer addresses a pooled shm surface that the pool
 /// guarantees is not reused until the encode thread recycles this frame, so the handle is safe to
@@ -1047,7 +1076,7 @@ fn encode_loop<F>(
         let buf = unsafe { std::slice::from_raw_parts(frame.ptr, frame.len) };
         let encode_start_ns = crate::wayland::host::now_ns();
         pl.set_link_rate(controls.link_kbps.load(Ordering::Relaxed));
-        let mut stripes = pl.process(buf, frame.stride);
+        let mut stripes = pl.process_damaged(buf, frame.stride, &frame.changed);
         FrameTiming::stamp(&mut stripes, frame.captured_ns, encode_start_ns);
         controls.codec.store(pl.codec().id(), Ordering::Relaxed);
         pool.recycle(frame.idx);
@@ -1338,6 +1367,9 @@ where
     // A shared framebuffer that retired, or whose server went away, is watched again on the next
     // grab, the XShm path's damage standing in where that fails.
     let mut rewatch = false;
+    // Where the cursor and the watermark were drawn onto the last frame published.
+    let mut last_overlays: Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>> =
+        Vec::new();
     // Consecutive channel rebuilds without one good grab in between: geometry
     // errors can burn out the grab budget repeatedly under a dead region, so
     // recovery only gets a bounded number of channel rebuilds.
@@ -1514,6 +1546,7 @@ where
                 Some(i) => i,
                 None => break,
             };
+            let mut reported = None;
             if std::mem::take(&mut rewatch) {
                 shared = open_framebuffer(
                     &conn,
@@ -1540,12 +1573,16 @@ where
                         }
                     }
                     None => {
-                        if let Some(d) = damage.as_ref() {
-                            d.clear(&conn);
-                        }
+                        reported = damage.as_ref().and_then(|d| d.take(&conn));
                         grab_frame(&conn, root, surface, cap_x, cap_y, cap_w, cap_h)
                     }
                 }
+            };
+            let region = (cap_x as u32, cap_y as u32, cap_w as u32, cap_h as u32);
+            let mut changed = match (shared.as_mut(), reported.take()) {
+                (Some(grab), _) => grab.changed(region),
+                (None, Some(rects)) => frame_rects(&rects, cap_x, cap_y, cap_w, cap_h),
+                (None, None) => Vec::new(),
             };
             if let Err(e) = grab_result {
                 // Most likely an external root resize between geometry polls made
@@ -1619,6 +1656,7 @@ where
             let frame_h = cap_h as i32;
             let stride = surface.stride;
             let buf = surface.as_mut_slice();
+            let mut overlays = Vec::new();
 
             if controls.capture_cursor.load(Ordering::Relaxed)
                 && let Some(c) = conn
@@ -1654,14 +1692,18 @@ where
                         c.height as i32,
                     );
                 }
+                overlays.push(smithay::utils::Rectangle::new(
+                    (img_x, img_y).into(),
+                    (c.width as i32, c.height as i32).into(),
+                ));
             }
 
             if watermark.is_active() {
                 watermark.update_position(frame_w, frame_h, settings.watermark_location_enum);
                 watermark.blend_bgra(buf, stride, frame_w, frame_h);
-                if let (Some(grab), Some(r)) =
-                    (shared.as_mut(), watermark.damage_rect(frame_w, frame_h))
-                {
+                let drawn = watermark.damage_rect(frame_w, frame_h);
+                overlays.extend(drawn);
+                if let (Some(grab), Some(r)) = (shared.as_mut(), drawn) {
                     grab.overlaid(
                         idx,
                         r.loc.x + cap_x as i32,
@@ -1672,6 +1714,12 @@ where
                 }
             }
 
+            // The overlays moved: where they were and where they are now changed with them.
+            if overlays != last_overlays {
+                changed.extend(last_overlays.iter().copied());
+                changed.extend(overlays.iter().copied());
+                last_overlays = overlays;
+            }
             let published = pool.publish(
                 RawFrame {
                     idx,
@@ -1682,6 +1730,7 @@ where
                     stride,
                     generation: pool.generation(),
                     captured_ns: crate::wayland::host::now_ns(),
+                    changed,
                 },
                 &controls.stop,
             );
@@ -1800,6 +1849,7 @@ mod pool_tests {
             stride: 0,
             generation: 0,
             captured_ns: 0,
+            changed: Vec::new(),
         }
     }
 
@@ -2575,6 +2625,129 @@ mod damage_tests {
             at(0.5),
             at(0.99),
             waits.len()
+        );
+    }
+
+    /// Noise in BGRX for a `width` x `height` area, from `seed`.
+    fn noise(width: usize, height: usize, mut seed: u32) -> Vec<u8> {
+        (0..width * height)
+            .flat_map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                [seed as u8, (seed >> 8) as u8, (seed >> 16) as u8, 0]
+            })
+            .collect()
+    }
+
+    /// Over a capture of `$DISPLAY` that keeps changing in one box, the still area around it is
+    /// refined (`ledger`) from where the server says the screen changed: a texture around a box
+    /// repainted with fresh noise at 60 fps, x264 at CRF 35 with the paint-over at 18, four
+    /// seconds, the decoded area around the box measured against what `GetImage` returns.
+    /// OpenH264, the H.264 encoder of a build without `gpl`, takes no quantizer per macroblock.
+    #[cfg(feature = "gpl")]
+    #[test]
+    #[ignore]
+    fn x11_ledger_refines_the_still_area_beside_motion() {
+        use crate::cleanup_bench::{psnr_outside, source_luma};
+        use crate::encoders::codec::{Codec, VIDEO_HEADER_LEN};
+        use crate::webcam::decode::{Codec as DecCodec, Decoder, VideoDecoder};
+        use x11rb::protocol::xproto::ImageFormat;
+        let (w, h) = (512u16, 256u16);
+        let painter = Painter::connect();
+        let gc = painter.conn.generate_id().expect("id");
+        painter
+            .conn
+            .create_gc(gc, painter.root, &CreateGCAux::new())
+            .expect("gc");
+        let put = |pixels: &[u8], x: i16, y: i16, pw: u16, ph: u16| {
+            painter
+                .conn
+                .put_image(
+                    ImageFormat::Z_PIXMAP,
+                    painter.root,
+                    gc,
+                    pw,
+                    ph,
+                    x,
+                    y,
+                    0,
+                    24,
+                    pixels,
+                )
+                .expect("put")
+                .check()
+                .expect("put done");
+        };
+        put(&noise(w as usize, h as usize, 7), 0, 0, w, h);
+        let settings = CaptureSettings {
+            codec: Codec::H264,
+            use_cpu: true,
+            video_fullframe: true,
+            video_streaming_mode: false,
+            video_cbr_mode: false,
+            video_crf: 35,
+            video_paintover_crf: 18,
+            use_paint_over_quality: true,
+            paint_over_trigger_frames: 15,
+            target_fps: 60.0,
+            width: w as i32,
+            height: h as i32,
+            capture_cursor: false,
+            ..Default::default()
+        };
+        let controls = Arc::new(Controls::new(&settings));
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (tid_tx, _tid_rx) = std::sync::mpsc::channel();
+        let capture = {
+            let controls = controls.clone();
+            thread::spawn(move || {
+                run_capture(settings, controls, tid_tx, move |stripes| {
+                    for s in stripes {
+                        let _ = tx.send(s.data.to_vec());
+                    }
+                })
+            })
+        };
+        let area = (384usize, 128usize, 128usize, 128usize);
+        let start = Instant::now();
+        let mut n = 0u32;
+        while start.elapsed() < Duration::from_secs(4) {
+            put(&noise(128, 128, n + 1), 384, 128, 128, 128);
+            n += 1;
+            thread::sleep(Duration::from_millis(16));
+        }
+        controls.stop.store(true, Ordering::Relaxed);
+        capture.join().expect("capture").expect("capture ran");
+        let mut dec = VideoDecoder::new(DecCodec::H264).expect("decoder");
+        let mut shown = vec![0u8; w as usize * h as usize];
+        for pkt in rx.try_iter() {
+            if dec.decode(&pkt[VIDEO_HEADER_LEN..]).expect("decode") {
+                let pic = dec.frame().expect("picture");
+                for r in 0..h as usize {
+                    shown[r * w as usize..(r + 1) * w as usize]
+                        .copy_from_slice(&pic.y[r * pic.y_stride..][..w as usize]);
+                }
+            }
+        }
+        let image = painter
+            .conn
+            .get_image(ImageFormat::Z_PIXMAP, painter.root, 0, 0, w, h, !0)
+            .expect("get")
+            .reply()
+            .expect("image");
+        let around = psnr_outside(
+            &shown,
+            &source_luma(&image.data, Codec::H264),
+            w as usize,
+            area,
+        );
+        let info = controls.report.info();
+        println!("{}: around the box {around:.2} dB", info.capture);
+        assert!(
+            around > 40.0,
+            "{}: the still area reached {around:.2} dB",
+            info.capture
         );
     }
 }

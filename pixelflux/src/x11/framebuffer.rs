@@ -315,17 +315,16 @@ impl SharedFramebuffer {
         })
     }
 
-    /// Take the tiles drawn since the last take, ORing them into each of `into`.
-    fn take(&self, into: &mut [Vec<u64>]) {
+    /// Take the tiles drawn since the last take, handing each nonzero word of the bitmap to
+    /// `into` with its index.
+    fn take(&self, mut into: impl FnMut(usize, u64)) {
         for i in 0..self.words() {
             let bits = self
                 .watch
                 .word64(WATCH_BITS + i * 8)
                 .swap(0, Ordering::AcqRel);
             if bits != 0 {
-                for pending in into.iter_mut() {
-                    pending[i] |= bits;
-                }
+                into(i, bits);
             }
         }
     }
@@ -461,10 +460,12 @@ impl SharedFramebuffer {
     }
 }
 
-/// The capture's watch and the tiles each pool surface is missing (module docblock).
+/// The capture's watch, the tiles each pool surface is missing (module docblock), and those
+/// drawn since the last frame said where it changed (`changed`).
 pub(crate) struct FramebufferGrab {
     pub fb: SharedFramebuffer,
     pending: Vec<Vec<u64>>,
+    drawn: Vec<u64>,
 }
 
 impl FramebufferGrab {
@@ -474,7 +475,60 @@ impl FramebufferGrab {
         Self {
             fb,
             pending: vec![vec![u64::MAX; words]; surfaces],
+            drawn: vec![u64::MAX; words],
         }
+    }
+
+    /// Take the tiles drawn since the last take into every surface's and into `drawn`.
+    fn take(&mut self) {
+        let (pending, drawn) = (&mut self.pending, &mut self.drawn);
+        self.fb.take(|i, bits| {
+            for p in pending.iter_mut() {
+                p[i] |= bits;
+            }
+            drawn[i] |= bits;
+        });
+    }
+
+    /// Where the screen was drawn since the last call, within the region at (`x`, `y`) of
+    /// `width` x `height`, in its coordinates: a rectangle a run of tiles along a row of them.
+    pub(crate) fn changed(
+        &mut self,
+        (x, y, width, height): (u32, u32, u32, u32),
+    ) -> Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>> {
+        self.take();
+        let tile = self.fb.tile;
+        let tiles_x = self.fb.tiles_x as usize;
+        let drawn = std::mem::replace(&mut self.drawn, vec![0; self.fb.words()]);
+        let set = |tx: u32, ty: u32| {
+            let t = ty as usize * tiles_x + tx as usize;
+            drawn[t / 64] >> (t % 64) & 1 != 0
+        };
+        let (tx0, tx1) = (x / tile, (x + width).div_ceil(tile).min(self.fb.tiles_x));
+        let (ty0, ty1) = (y / tile, (y + height).div_ceil(tile).min(self.fb.tiles_y));
+        let mut rects = Vec::new();
+        for ty in ty0..ty1 {
+            let mut tx = tx0;
+            while tx < tx1 {
+                if !set(tx, ty) {
+                    tx += 1;
+                    continue;
+                }
+                let run = tx;
+                while tx < tx1 && set(tx, ty) {
+                    tx += 1;
+                }
+                let left = (run * tile).max(x);
+                let right = (tx * tile).min(x + width);
+                let top = (ty * tile).max(y);
+                let bottom = ((ty + 1) * tile).min(y + height);
+                rects.push(smithay::utils::Rectangle::new(
+                    ((left - x) as i32, (top - y) as i32).into(),
+                    ((right - left) as i32, (bottom - top) as i32).into(),
+                ));
+            }
+        }
+        rects
     }
 
     /// Mark the whole screen missing from every surface (a region moved, the surfaces were
@@ -522,7 +576,7 @@ impl FramebufferGrab {
         if x + width > self.fb.width || y + height > self.fb.height {
             return false;
         }
-        self.fb.take(&mut self.pending);
+        self.take();
         for _ in 0..READ_ATTEMPTS {
             let Some(before) = self.fb.settled_seq() else {
                 continue;
@@ -534,14 +588,14 @@ impl FramebufferGrab {
                 self.pending[idx].fill(0);
                 return true;
             }
-            self.fb.take(&mut self.pending);
+            self.take();
         }
         false
     }
 
     /// Surface `idx` was grabbed whole through XShm: it misses nothing.
     pub(crate) fn grabbed(&mut self, idx: usize) {
-        self.fb.take(&mut self.pending);
+        self.take();
         self.pending[idx].fill(0);
     }
 }
@@ -644,6 +698,30 @@ mod tests {
         );
         grab.grabbed(0);
         assert!(grab.pending[0].iter().all(|&w| w == 0));
+    }
+
+    #[test]
+    fn a_frame_says_where_the_screen_was_drawn_within_its_region() {
+        let mut grab = FramebufferGrab::new(fake(64, 64, 16), 1);
+        assert_eq!(
+            grab.changed((8, 8, 48, 48)).len(),
+            4,
+            "a first frame changed whole, a run of tiles a row"
+        );
+        grab.fb
+            .watch
+            .word64(WATCH_BITS)
+            .store(0b0110 << 4, Ordering::Relaxed);
+        let rects = grab.changed((8, 8, 48, 48));
+        assert_eq!(
+            rects,
+            vec![smithay::utils::Rectangle::new(
+                (8, 8).into(),
+                (32, 16).into()
+            )],
+            "tiles (1,1) and (2,1), at 16..48 by 16..32, in the region's coordinates"
+        );
+        assert!(grab.changed((8, 8, 48, 48)).is_empty());
     }
 
     #[test]
