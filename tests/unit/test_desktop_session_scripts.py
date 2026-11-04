@@ -169,7 +169,8 @@ for name in sorted(set(re.findall(r'^\s*drop_service ([A-Za-z0-9_-]+)\s*$', entr
     check(f"the entrypoint holds down a service that exists: {name}",
           name in services, ", ".join(sorted(services)))
 
-SKIP_DIRS = {".git", "node_modules", "dist", "__pycache__", ".venv", "venv"}
+# Build output: Cargo's target holds the shell scripts its dependencies' C builds generate
+SKIP_DIRS = {".git", "node_modules", "dist", "target", "__pycache__", ".venv", "venv"}
 
 
 def shell_scripts(root: str) -> list:
