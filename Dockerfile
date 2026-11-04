@@ -7,7 +7,7 @@
 # pre-published images are consumed. The wheel is for the platform of
 # BUILD_IMAGE, a manylinux_2_28 or musllinux_1_2 image of this machine's
 # architecture, and lands in /opt/build/dist.
-ARG BUILD_IMAGE=quay.io/pypa/manylinux_2_28_x86_64
+ARG BUILD_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
 
 # 1) Build the web client through the same script the CI wheel build and every
 #    other channel run, so every channel ships an identical bundle

@@ -144,10 +144,10 @@ build_libde265() {
     cmake --install "${PREFIX}/src/libde265/build"
 }
 
-[ -f "${RECIPE}" ] && [ -f "${FLOORS}" ] || {
+if [ ! -f "${RECIPE}" ] || [ ! -f "${FLOORS}" ]; then
     echo "codecs: ${CRATE} holds no pixelflux wheel recipe and codec-sys" >&2
     exit 1
-}
+fi
 
 # recipe name, pkg-config name, and the variable that links it statically:
 # pkg-config-rs reads <NAME>_STATIC, system-deps (x264-sys) its own spelling
