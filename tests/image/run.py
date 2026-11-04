@@ -33,7 +33,6 @@ import argparse
 import importlib
 import json
 import os
-import shlex
 import sys
 import time
 import traceback
@@ -104,19 +103,6 @@ def load_items(numbers: List[int]) -> list:
     return mods
 
 
-# The selkies, pixelflux, and pcmflux an image runs, and the wheel each came from.
-PACKAGES_PY = """
-import importlib.metadata as m, json
-for p in ("selkies", "pixelflux", "pcmflux"):
-    try:
-        d = m.distribution(p)
-        url = json.loads(d.read_text("direct_url.json") or "{}")
-        print(p, d.version, (url.get("archive_info", {}).get("hash") or url.get("url") or "index")[:23])
-    except Exception as e:
-        print(p, "absent", type(e).__name__)
-"""
-
-
 def facts_of(target: Any) -> dict:
     """What an image brings, read once per target."""
     tools = target.out("for t in xdotool xclip xrandr wmctrl wl-copy wl-paste ffmpeg google-chrome chromium firefox "
@@ -124,8 +110,8 @@ def facts_of(target: Any) -> dict:
                        "command -v $t >/dev/null && printf '%s ' $t; done")
     return {"digest": target.digest, "node": getattr(target, "node", ""), "tools": tools.split(),
             "status": target.api("/api/status"),
-            "packages": target.out(f"py=$(head -1 \"$(command -v selkies)\" | sed 's/^#!//'); "
-                                   f"${{py:-python3}} -c {shlex.quote(PACKAGES_PY)}"),
+            # The server and the pixelflux and pcmflux builds it links, as it reports them
+            "packages": target.out("selkies --version 2>&1 | head -1"),
             "gpu": target.out("nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -1; "
                               "ls /dev/dri 2>/dev/null | tr '\\n' ' '")}
 
