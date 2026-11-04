@@ -464,7 +464,10 @@ const RECONNECT_UNOPENED_MAX = 3;
  * A reconnect in place under way, from the drop to the next socket's first
  * frame: the picture holds, the playback pipeline keeps running, and the
  * notice and the rest of the teardown wait RECONNECT_NOTICE_MS
- * (`reconnectNoticeTimer`), most reconnects landing sooner. What the user
+ * (`reconnectNoticeTimer`), most reconnects landing sooner. A socket whose
+ * MODE has come by then has landed even without a frame, which a paused
+ * video, such as a hidden tab's, never sends: the reconnect ends there and
+ * keeps the pipelines the new socket already joined. What the user
  * chose of the pipelines rides along in `carriedPipelines` for the next
  * socket, and input in `heldInput` from `inputHeldSince` on.
  */
@@ -9253,6 +9256,7 @@ class WorkerWebSocket {
           reconnectNoticeTimer = null;
           if (streamStarted) return;
           endReconnectInPlace();
+          if (modeSinceOpen) return;
           teardown();
           if (statusDisplayElement) statusDisplayElement.classList.remove('hidden');
         }, RECONNECT_NOTICE_MS);

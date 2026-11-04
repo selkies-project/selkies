@@ -10,7 +10,8 @@ the new socket takes, no notice covers it, playback keeps its context and
 runs on, the server restarts nothing of its audio capture, and keys typed in
 the gap reach the desktop in order. Keys and a button held across the cut stay
 held, the microphone stays on, and video and audio the user switched off stay
-off. A cut the server does not see (the page's side alone, a half-open
+off. Sound plays on through a cut while the video is paused, as a hidden tab
+pauses it, though no frame comes to say the reconnect landed. A cut the server does not see (the page's side alone, a half-open
 connection) is ridden over the same way. A reconnect that cannot be quick (the
 relay refuses connections for a while) shows the notice once it has waited,
 and the stream comes back after.
@@ -314,6 +315,24 @@ def held_cut(res: "H.Results", page: Any, relay: CutRelay) -> None:
     res.check("held: both let go when the user lets go", after == (False, ()), after)
 
 
+def paused_cut(res: "H.Results", page: Any, relay: CutRelay) -> None:
+    """Sound plays on through a cut while the video is paused, as a hidden
+    tab pauses it: no frame comes to say the reconnect landed, and none has
+    to."""
+    post(page, "{type: 'pipelineControl', pipeline: 'video', enabled: false}")
+    time.sleep(2)
+    cut_at = page_now(page)
+    relay.cut()
+    time.sleep(6)
+    state = page.evaluate("window.__cut")
+    loud = [lv for t, lv in state["levels"] if t > cut_at + 3000 and lv >= 0.01]
+    res.check("paused: sound plays on past the notice's wait", len(loud) > 10, len(loud))
+    shown = [o for o in state["overlay"] if o[0] > cut_at and o[1]]
+    res.check("paused: no notice covers the reconnect", not shown, shown[:2])
+    post(page, "{type: 'pipelineControl', pipeline: 'video', enabled: true}")
+    time.sleep(3)
+
+
 def toggles_cut(res: "H.Results", page: Any, relay: CutRelay) -> None:
     """The microphone the user switched on stays on, and video and audio the
     user switched off stay off."""
@@ -414,6 +433,8 @@ def session(engine: str) -> "H.Results":
                 typing_cut(res, page, relay, "half-open", engine, server_side=False)
                 time.sleep(STABLE_S)
                 held_cut(res, page, relay)
+                time.sleep(STABLE_S)
+                paused_cut(res, page, relay)
                 time.sleep(STABLE_S)
                 toggles_cut(res, page, relay)
                 time.sleep(STABLE_S)
