@@ -50,8 +50,9 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   which core messages or `window` state it consumes. A tag TypeDoc does not know (`@constructor`) is a build
   warning. Every docblock is published, exported or not, so a closure's docblock is reference material, not a
   private note.
-- Python is left only in the test suites and the repository scripts: a docstring on every module and on every
-  function that is not self-describing, type hints on signatures, and ruff's rules (`ruff.toml`).
+- Python is left only in the test suites, the repository scripts, and the Jupyter entry point the wheel carries
+  (`infra/wheel/selkies`): a docstring on every module and on every function that is not self-describing, type
+  hints on signatures, and ruff's rules (`ruff.toml`).
 
 Vendored code keeps upstream documentation style and is excluded from the reference: the crates under
 `crates/selkies-rtc/vendor` and the shadcn/ui primitives under `addons/selkies-dashboard/src/components/ui`; only
