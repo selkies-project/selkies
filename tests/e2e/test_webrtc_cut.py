@@ -7,9 +7,10 @@ does; the media path (ICE, straight to the server) never passes it. The
 session carries on: the picture and sound run on through the cut, the page
 keeps its peer connection and the server its media session (no session ends,
 none starts), no notice shows, and keys typed in the gap reach the desktop in
-order. A cut the server does not see (the page's side alone, a half-open
-connection) resumes the same way. A relay refusing the page past the server's
-hold ends the session, and the page starts a new one.
+order; with the video switched off the sound plays on. A cut the server does
+not see (the page's side alone, a half-open connection) resumes the same way.
+A relay refusing the page past the server's hold ends the session, and the
+page starts a new one.
 
 Usage: python3 tests/e2e/test_webrtc_cut.py [chromium|firefox|all]
 """
@@ -101,6 +102,24 @@ def typing_cut(res: "H.Results", page: Any, relay: ws.CutRelay, label: str, serv
                   any("is held" in ln for ln in lines), lines[:4])
 
 
+def paused_cut(res: "H.Results", page: Any, relay: ws.CutRelay) -> None:
+    """Sound plays on through a cut while the video is switched off, and no
+    notice waits for a frame."""
+    ws.post(page, "{type: 'pipelineControl', pipeline: 'video', enabled: false}")
+    time.sleep(2)
+    before = page.evaluate(AUDIO_JS)
+    cut_at = ws.page_now(page)
+    relay.cut()
+    time.sleep(6)
+    after = page.evaluate(AUDIO_JS)
+    res.check("paused: sound plays on through the cut", after["packets"] - before["packets"] > 200,
+              (before, after))
+    shown = [o for o in page.evaluate("window.__cut")["overlay"] if o[0] > cut_at and o[1]]
+    res.check("paused: no notice covers the reconnect", not shown, shown[:2])
+    ws.post(page, "{type: 'pipelineControl', pipeline: 'video', enabled: true}")
+    time.sleep(3)
+
+
 def slow_cut(res: "H.Results", page: Any, relay: ws.CutRelay) -> None:
     """A cut the page cannot come back from within the hold ends the session,
     and the page starts a new one."""
@@ -159,6 +178,8 @@ def session(engine: str) -> "H.Results":
             if engine == "chromium":
                 time.sleep(SETTLE_S)
                 typing_cut(res, page, relay, "half-open", server_side=False)
+                time.sleep(SETTLE_S)
+                paused_cut(res, page, relay)
                 time.sleep(SETTLE_S)
                 slow_cut(res, page, relay)
             res.check("no page errors", not errors, "; ".join(errors)[:300])

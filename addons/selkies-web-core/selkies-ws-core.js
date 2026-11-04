@@ -467,7 +467,8 @@ const RECONNECT_UNOPENED_MAX = 3;
  * (`reconnectNoticeTimer`), most reconnects landing sooner. A socket whose
  * MODE has come by then has landed even without a frame, which a paused
  * video, such as a hidden tab's, never sends: the reconnect ends there and
- * keeps the pipelines the new socket already joined. What the user
+ * keeps the pipelines the new socket already joined, the notice showing
+ * only while video is on and its first frame late. What the user
  * chose of the pipelines rides along in `carriedPipelines` for the next
  * socket, and input in `heldInput` from `inputHeldSince` on.
  */
@@ -9256,7 +9257,11 @@ class WorkerWebSocket {
           reconnectNoticeTimer = null;
           if (streamStarted) return;
           endReconnectInPlace();
-          if (modeSinceOpen) return;
+          if (modeSinceOpen) {
+            // Landed: the pipelines stay, and the notice waits only on a frame that is due.
+            if (isVideoPipelineActive && statusDisplayElement) statusDisplayElement.classList.remove('hidden');
+            return;
+          }
           teardown();
           if (statusDisplayElement) statusDisplayElement.classList.remove('hidden');
         }, RECONNECT_NOTICE_MS);

@@ -10,11 +10,14 @@ the new socket takes, no notice covers it, playback keeps its context and
 runs on, the server restarts nothing of its audio capture, and keys typed in
 the gap reach the desktop in order. Keys and a button held across the cut stay
 held, the microphone stays on, and video and audio the user switched off stay
-off. Sound plays on through a cut while the video is paused, as a hidden tab
-pauses it, though no frame comes to say the reconnect landed. A cut the server does not see (the page's side alone, a half-open
-connection) is ridden over the same way. A reconnect that cannot be quick (the
-relay refuses connections for a while) shows the notice once it has waited,
-and the stream comes back after.
+off. Sound plays on through a cut while the video is paused (switched off,
+or a hidden tab's), though no frame comes to say the reconnect landed, and a
+shown tab gets its picture back. A socket back before its first frame (the
+relay holds the video) keeps the sound playing and shows the notice until
+the picture comes. A cut the server does not see (the page's side alone, a
+half-open connection) is ridden over the same way. A reconnect that cannot be
+quick (the relay refuses connections for a while) shows the notice once it
+has waited, and the stream comes back after.
 
 Usage: python3 tests/e2e/test_ws_cut.py [chromium|firefox|all]
 (`firefox` runs the typing cut alone: Gecko routes the worker socket through
@@ -65,6 +68,7 @@ class CutRelay:
         self.loop = asyncio.new_event_loop()
         self.pairs: set = set()
         self.refuse_until = 0.0
+        self.hold_video_until = 0.0
         self.ready = threading.Event()
         threading.Thread(target=self._run, daemon=True).start()
         self.ready.wait(10)
@@ -102,18 +106,70 @@ class CutRelay:
                 if not (pair.half_open and dst is up_writer):
                     dst.transport.abort()
 
-        await asyncio.gather(pump(reader, up_writer), pump(up_reader, writer))
+        async def pump_holding_video(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+            """The server's side of a socket, its video frames (binary,
+            first byte 0x03 or 0x04) held until `hold_video_until`; the
+            handshake, text and audio pass at once."""
+            buf, held, upgraded = bytearray(), [], None
+            try:
+                while True:
+                    try:
+                        data = await asyncio.wait_for(src.read(65536), 0.05)
+                    except asyncio.TimeoutError:
+                        data = None
+                    if data == b"":
+                        break
+                    buf += data or b""
+                    if upgraded is None:
+                        end = buf.find(b"\r\n\r\n")
+                        if end < 0:
+                            continue
+                        upgraded = buf.startswith(b"HTTP/1.1 101")
+                        dst.write(bytes(buf[:end + 4]))
+                        del buf[:end + 4]
+                    holding = time.monotonic() < self.hold_video_until
+                    if not holding and held:
+                        dst.write(b"".join(held))
+                        held.clear()
+                    while upgraded and len(buf) >= 2:
+                        size, at = buf[1] & 0x7F, 2
+                        if size >= 126:
+                            at = 4 if size == 126 else 10
+                            if len(buf) < at:
+                                break
+                            size = int.from_bytes(buf[2:at], "big")
+                        if len(buf) < at + size:
+                            break
+                        frame = bytes(buf[:at + size])
+                        del buf[:at + size]
+                        if holding and frame[0] & 0x0F == 2 and size and frame[at] in (3, 4):
+                            held.append(frame)
+                        else:
+                            dst.write(frame)
+                    if not upgraded and buf:
+                        dst.write(bytes(buf))
+                        buf.clear()
+                    await dst.drain()
+            except (OSError, asyncio.CancelledError):
+                pass
+            finally:
+                dst.transport.abort()
+
+        down = pump_holding_video if time.monotonic() < self.hold_video_until else pump
+        await asyncio.gather(pump(reader, up_writer), down(up_reader, writer))
         self.pairs.discard(pair)
 
-    def cut(self, server_side: bool = True, refuse_s: float = 0.0) -> int:
+    def cut(self, server_side: bool = True, refuse_s: float = 0.0, hold_video_s: float = 0.0) -> int:
         """Abort every open connection, the server's side too unless
-        `server_side` is false, and refuse new ones for `refuse_s`; returns
-        how many connections there were."""
+        `server_side` is false, refuse new ones for `refuse_s`, and hold the
+        video frames of those opened in the next `hold_video_s` for that
+        long; returns how many connections there were."""
         done = threading.Event()
         count = [0]
 
         def _cut() -> None:
             self.refuse_until = time.monotonic() + refuse_s
+            self.hold_video_until = time.monotonic() + hold_video_s
             count[0] = len(self.pairs)
             for pair in list(self.pairs):
                 pair.half_open = not server_side
@@ -333,6 +389,56 @@ def paused_cut(res: "H.Results", page: Any, relay: CutRelay) -> None:
     time.sleep(3)
 
 
+def hide(page: Any, hidden: bool) -> None:
+    """Hide or show the page's tab, as the browser tells it."""
+    page.evaluate("""(h) => {
+      Object.defineProperty(document, 'hidden', {configurable: true, get: () => h});
+      Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => h ? 'hidden' : 'visible'});
+      document.dispatchEvent(new Event('visibilitychange'));
+    }""", hidden)
+
+
+def hidden_cut(res: "H.Results", page: Any, relay: CutRelay) -> None:
+    """A hidden tab's paused video brings no frame through a cut: the sound
+    plays on, no notice waits for it, and the picture comes back when the
+    tab is shown."""
+    hide(page, True)
+    time.sleep(2)
+    cut_at = page_now(page)
+    relay.cut()
+    time.sleep(6)
+    state = page.evaluate("window.__cut")
+    loud = [lv for t, lv in state["levels"] if t > cut_at + 3000 and lv >= 0.01]
+    res.check("hidden: sound plays on past the notice's wait", len(loud) > 10, len(loud))
+    shown = [o for o in state["overlay"] if o[0] > cut_at and o[1]]
+    res.check("hidden: no notice waits for the paused video", not shown, shown[:2])
+    shown_at = page_now(page)
+    hide(page, False)
+    time.sleep(4)
+    state = page.evaluate("window.__cut")
+    moving = [f for f in state["frames"] if f[0] > shown_at + 1000]
+    res.check("hidden: the picture comes back when the tab is shown", len(moving) > 30, len(moving))
+
+
+def late_cut(res: "H.Results", page: Any, relay: CutRelay) -> None:
+    """A socket back before its first frame: the notice shows once it has
+    waited, the sound plays on, and both settle when the picture comes."""
+    cut_at = page_now(page)
+    relay.cut(hold_video_s=3.0)
+    time.sleep(7)
+    state = page.evaluate("window.__cut")
+    shown = [o[0] - cut_at for o in state["overlay"] if o[0] > cut_at and o[1]]
+    res.check("late: the notice shows once the first frame is late", bool(shown) and shown[0] >= 1400,
+              [round(s) for s in shown[:2]])
+    hidden = [o[0] - cut_at for o in state["overlay"] if o[0] > cut_at and not o[1]]
+    res.check("late: and goes with the first frame", bool(shown) and bool(hidden) and hidden[-1] > shown[0],
+              [round(h) for h in hidden[-2:]])
+    loud = [lv for t, lv in state["levels"] if t > cut_at + 2000 and lv >= 0.01]
+    res.check("late: sound plays on past the notice's wait", len(loud) > 10, len(loud))
+    moving = [f for f in state["frames"] if f[0] > cut_at + 4000]
+    res.check("late: the picture moves again", len(moving) > 30, len(moving))
+
+
 def toggles_cut(res: "H.Results", page: Any, relay: CutRelay) -> None:
     """The microphone the user switched on stays on, and video and audio the
     user switched off stay off."""
@@ -435,6 +541,10 @@ def session(engine: str) -> "H.Results":
                 held_cut(res, page, relay)
                 time.sleep(STABLE_S)
                 paused_cut(res, page, relay)
+                time.sleep(STABLE_S)
+                hidden_cut(res, page, relay)
+                time.sleep(STABLE_S)
+                late_cut(res, page, relay)
                 time.sleep(STABLE_S)
                 toggles_cut(res, page, relay)
                 time.sleep(STABLE_S)
