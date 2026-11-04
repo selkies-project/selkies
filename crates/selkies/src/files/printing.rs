@@ -66,7 +66,7 @@ pub fn spool_path(configured: &str) -> PathBuf {
 /// [`spool_path`] against an explicit `XDG_STATE_HOME` and `HOME`.
 pub fn spool_path_in(configured: &str, state_home: Option<&str>, home: &str) -> PathBuf {
     if !configured.is_empty() {
-        return super::expand_user(configured);
+        return crate::core::expand_user(configured);
     }
     match state_home {
         Some(state) => Path::new(state).join("selkies").join("print"),

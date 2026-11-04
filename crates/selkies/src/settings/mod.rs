@@ -1429,15 +1429,12 @@ impl Settings {
         if folder.is_empty() {
             return String::new();
         }
-        let expanded = if let Some(rest) = folder.strip_prefix("~") {
-            format!("{}{rest}", std::env::var("HOME").unwrap_or_default())
-        } else {
-            folder.to_string()
-        };
+        let expanded = crate::core::expand_user(folder);
         std::path::absolute(&expanded)
             .map(|p| p.components().collect::<std::path::PathBuf>())
-            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or(expanded)
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Clamp or validate one client-provided setting against the server's limits, the

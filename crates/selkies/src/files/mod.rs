@@ -246,7 +246,7 @@ impl FilesState {
         let root_path = if config.file_manager_path.is_empty() {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
         } else {
-            expand_user(&config.file_manager_path)
+            crate::core::expand_user(&config.file_manager_path)
         };
         if let Err(e) = std::fs::create_dir_all(&root_path) {
             log::warn!(target: "server", "File-manager directory {} cannot be created: {e}", root_path.display());
@@ -364,16 +364,6 @@ impl FilesState {
             Vec::new()
         }
     }
-}
-
-/// `~` and `~/...` under `$HOME`; any other path as written.
-pub fn expand_user(path: &str) -> PathBuf {
-    if (path == "~" || path.starts_with("~/"))
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return PathBuf::from(format!("{home}{}", &path[1..]));
-    }
-    PathBuf::from(path)
 }
 
 /// The routes, relative to the API prefix: `POST /upload`, `GET /file-manager/browse`,

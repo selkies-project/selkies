@@ -55,7 +55,7 @@ pub fn bundle_dir() -> Option<PathBuf> {
 /// `index.html`, else the bundle; none, with a warning, when neither does.
 pub fn resolve_static_root(web_root: &str) -> Option<PathBuf> {
     if !web_root.is_empty() {
-        let path = expand_user(web_root);
+        let path = crate::core::expand_user(web_root);
         if path.is_dir() && path.join("index.html").is_file() {
             log::info!(target: "server", "Using custom web_root directory: {}", path.display());
             return Some(path);
@@ -68,17 +68,6 @@ pub fn resolve_static_root(web_root: &str) -> Option<PathBuf> {
         log::warn!(target: "server", "Unable to find web content, skipping web routers handlers");
     }
     bundle
-}
-
-/// `~` and `~/...` as the home directory.
-fn expand_user(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix('~')
-        && (rest.is_empty() || rest.starts_with('/'))
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest.trim_start_matches('/'));
-    }
-    PathBuf::from(path)
 }
 
 /// Whether a file of the client, by its root-relative name, is code a browser must

@@ -28,21 +28,6 @@ use super::uinput::*;
 use super::virtual_device::*;
 use super::*;
 
-/// The repository root, found from the crate directory.
-fn repo_root() -> PathBuf {
-    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    loop {
-        if dir.join("tests/tools/uinput_abi_truth.c").exists() {
-            return dir;
-        }
-        assert!(
-            dir.pop(),
-            "the repository root was not found above {}",
-            env!("CARGO_MANIFEST_DIR")
-        );
-    }
-}
-
 /// A scratch directory of this process for one test.
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("selkies-gamepad-{tag}-{}", std::process::id()));
@@ -53,7 +38,7 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// Build one tool under `tests/tools` with its Makefile and return its path.
 fn tool(name: &str) -> PathBuf {
-    let tools = repo_root().join("tests/tools");
+    let tools = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/tools");
     let status = Command::new("make")
         .args(["-s", "-C"])
         .arg(&tools)
