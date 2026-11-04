@@ -35,10 +35,6 @@ from typing import Dict, List, Optional, Sequence, Tuple
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 MANIFEST = os.path.join(REPO, "pixelflux", "Cargo.toml")
-ROOT_CRATE = "pixelflux"
-# The crate is licensed by the repository LICENSE file rather than a
-# Cargo.toml `license` field.
-ROOT_LICENSE = "MPL-2.0"
 
 # Build configurations, as setup.py selects them: the default features (`gpl`,
 # libx264) and the PIXELFLUX_ENABLE_GPL=0 build (`openh264` instead of `gpl`).
@@ -318,9 +314,6 @@ def audit(meta: dict, set_name: str) -> Tuple[List[dict], List[str]]:
         name = pkg["name"]
         expr = pkg.get("license")
         note = ""
-        if not expr and name == ROOT_CRATE:
-            expr = ROOT_LICENSE
-            note = "repository LICENSE; Cargo.toml has no license field"
         if not expr:
             rank = UNKNOWN
             expr = "(none)"

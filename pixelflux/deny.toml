@@ -58,13 +58,6 @@ exceptions = [
     { crate = "x264-sys", allow = ["GPL-2.0-or-later"] },
 ]
 
-# pixelflux carries its license in the repository LICENSE file (MPL-2.0) rather
-# than in a Cargo.toml `license` field.
-[[licenses.clarify]]
-crate = "pixelflux"
-expression = "MPL-2.0"
-license-files = []
-
 # x264-sys is an MIT binding, but the only library it can link is libx264,
 # which is GPL-2.0-or-later: a binary that contains it is GPL.
 [[licenses.clarify]]
