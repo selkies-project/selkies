@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(c.stamp(-1, 3_000_000_000), (90_000, 3_000_000_000));
     }
 
-    /// `tests/unit/test_codec_switch.py`'s capture tags.
+    /// A capture's frame tagged with its stripe type and codec bytes.
     fn stripe(type_byte: u8, codec_byte: u8) -> Frame {
         let mut data = vec![type_byte, codec_byte, 0, 1, 0, 0, 0x02, 0xD0, 0, 0, 0, 0];
         data.extend_from_slice(&[0u8; 16]);

@@ -598,8 +598,7 @@ mod tests {
 
     use pixelflux::webcam::ring;
 
-    /// The interposer's view of the ring, as `v4l2_interposer.c` mirrors it and
-    /// `test_webcam_abi.py` pins it.
+    /// The interposer's view of the ring, as `v4l2_interposer.c` mirrors it.
     #[test]
     fn ring_layout_matches_the_interposer() {
         assert_eq!(ring::SHM_MAGIC, 0x434B5753);

@@ -4,9 +4,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The X key names of the keysyms the X11 injector names to `xdotool` and treats as named
-//! keys (`server_keysym_map.py`'s `X11_KEYSYM_MAP`, keysym to `xkey_name`), sorted by keysym
-//! for a binary search. Generated from `keysymdef.h` data: edit the upstream coverage, not a row.
+//! The X key names of the keysyms the X11 injector names to `xdotool` and treats as named keys,
+//! sorted by keysym for a binary search. Generated from `keysymdef.h` data: edit the upstream
+//! coverage, not a row.
 
 /// `(keysym, X key name)` pairs in ascending keysym order.
 pub(crate) const KEYSYM_NAMES: &[(u32, &str)] = &[

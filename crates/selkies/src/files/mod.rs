@@ -4,9 +4,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The file routes: upload, browse, mkdir, zip, index, and download under the configured root
-//! with its confinement rules and transfer pacing, recording, screenshots, printing, and the
-//! apps catalog (`stream_server.py`'s file routes, `printing.py`, `apps_catalog.py`).
+//! The file routes: upload, browse, mkdir, zip, index, and download under the configured root with
+//! its confinement rules and transfer pacing, recording, screenshots, printing, and the apps
+//! catalog.
 //!
 //! [`router`] builds the routes relative to the API prefix the `http` module nests them under;
 //! that module's auth middleware runs ahead of them and leaves a [`RequestAuth`] in the request
@@ -114,20 +114,21 @@ pub trait SessionDirectory: Send + Sync {
     fn announce_print_document(&self, name: &str, size_bytes: u64);
 }
 
-/// Where the audit events go (`audit.py`'s `emit`): the fields never carry content.
+/// Where the audit events go ([`crate::http::audit::Audit`]): the fields never carry content.
 pub trait AuditSink: Send + Sync {
     /// Record `event` with `fields`; returns at once.
     fn emit(&self, event: &str, fields: Map<String, Json>);
 }
 
 /// The sound-server control plane's guarantee that the sink a recording's audio track is
-/// captured from exists (`audio_control.ensure_capture_sink`).
+/// captured from exists ([`crate::audio::ensure_capture_sink`]).
 pub trait CaptureSinkProvisioner: Send + Sync {
     /// Make sure the sink whose monitor `device_name` names exists; whether it does.
     fn ensure_capture_sink(&self, device_name: &str) -> BoxFuture<'_, bool>;
 }
 
-/// The compositor output id of a display name on Wayland (`display_utils.wayland_output_id`).
+/// The compositor output id of a display name on Wayland
+/// ([`crate::display::wayland::wayland_output_id`]).
 pub type OutputIdFn = fn(&str) -> u32;
 
 /// What the routes reach outside this module; the integrator fills it in.
@@ -365,7 +366,7 @@ impl FilesState {
     }
 }
 
-/// `~` and `~/...` under `$HOME`, as `os.path.expanduser` expands them.
+/// `~` and `~/...` under `$HOME`; any other path as written.
 pub fn expand_user(path: &str) -> PathBuf {
     if (path == "~" || path.starts_with("~/"))
         && let Ok(home) = std::env::var("HOME")
@@ -434,7 +435,7 @@ pub(crate) fn strerror(e: &std::io::Error) -> String {
     }
 }
 
-/// A request body of at most `limit` bytes, the cap aiohttp put on the JSON routes.
+/// A request body of at most `limit` bytes; the JSON routes read theirs under 1 MiB.
 pub(crate) async fn body_bytes(
     body: axum::body::Body,
     limit: usize,

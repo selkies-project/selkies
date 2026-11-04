@@ -175,7 +175,7 @@ pub fn rewrite_lxqt_font(path: &Path, dpi: i32, current_dpi: i32) -> Option<(f64
     Some(resolved)
 }
 
-/// A float as Python's `%g` writes it: no trailing zeros, no dangling point.
+/// A float to six decimals with no trailing zeros and no dangling point.
 fn trim_float(v: f64) -> String {
     if v.fract() == 0.0 {
         return format!("{}", v as i64);

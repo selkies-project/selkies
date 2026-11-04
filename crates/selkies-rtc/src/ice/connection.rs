@@ -10,10 +10,10 @@
 //! (`LocalPoint`): on each host address a UDP mux attachment or a socket of its own bound
 //! inside the port window, a passive TCP attachment where a TCP mux is configured, and a TURN
 //! relay where one is configured for a full agent; every point delivers to the one inbound
-//! channel the task reads. `gather` builds the candidates as the fork does: host candidates
-//! advertising the public address of their family behind 1:1 NAT (`IceConfig::public_ips`),
-//! with unique local preferences per address, then server-reflexive candidates by a STUN query
-//! over the IPv4 host points and a relay candidate by a TURN allocation, both within a bound.
+//! channel the task reads. `gather` builds the candidates: host candidates advertising the public
+//! address of their family behind 1:1 NAT (`IceConfig::public_ips`), with unique local preferences
+//! per address, then server-reflexive candidates by a STUN query over the IPv4 host points and a
+//! relay candidate by a TURN allocation, both within a bound.
 //!
 //! Every STUN request is authenticated here before any agent sees it (`stun::authenticate_request`):
 //! one that fails is answered 400 and its source stays unlearned, one that passes teaches the

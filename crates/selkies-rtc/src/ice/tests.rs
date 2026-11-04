@@ -1,4 +1,4 @@
-//! The fork's ICE suites on this layer: ICE-lite, the UDP and TCP muxes, the port window, the
+//! The ICE suites on this layer: ICE-lite, the UDP and TCP muxes, the port window, the
 //! remote candidate bounds, consent freshness, and the topology, all on loopback with real
 //! sockets and a hand-rolled peer where the browser's side has to be scripted.
 
@@ -318,7 +318,7 @@ fn server_addr(h: &Harness) -> SocketAddr {
         .unwrap()
 }
 
-// --- test_ice_lite.py --------------------------------------------------------------------
+// --- ICE-lite ----------------------------------------------------------------------------
 
 #[test]
 fn lite_construction() {
@@ -441,7 +441,7 @@ async fn lite_role_conflict_and_inbound_timeout() {
     );
 }
 
-// --- test_ice_consent.py -----------------------------------------------------------------
+// --- consent freshness -------------------------------------------------------------------
 
 async fn lite_with_fake_peer(timings: LiteTimings) -> (Harness, FakePeer) {
     let mut server = Harness::with_timings(loopback_config(false, true), timings).await;
@@ -510,7 +510,7 @@ async fn consent_lapses_without_answers() {
     );
 }
 
-// --- test_ice_remote_candidates.py -------------------------------------------------------
+// --- remote candidates -------------------------------------------------------------------
 
 #[tokio::test]
 async fn remote_candidates_are_deduplicated_and_bounded() {
@@ -621,7 +621,7 @@ async fn mdns_candidates_resolve_off_the_callers_task() {
     assert_eq!(asked.lock().unwrap().len(), 2);
 }
 
-// --- test_ice_udp_mux.py -----------------------------------------------------------------
+// --- the UDP mux -------------------------------------------------------------------------
 
 fn mux_config(mux: &Arc<UdpMux>, controlling: bool) -> IceConfig {
     IceConfig {
@@ -1002,7 +1002,7 @@ async fn late_address_nat1to1_and_port_range() {
     mux.close().await;
 }
 
-// --- test_ice_tcp_mux.py -----------------------------------------------------------------
+// --- the TCP mux -------------------------------------------------------------------------
 
 /// The browser's side of ICE-TCP: one stream to the passive candidate, RFC 4571 frames.
 struct ActivePeer {
@@ -1406,7 +1406,7 @@ async fn tcp_mux_full_lite_strangers_and_port_in_use() {
     );
 }
 
-// --- test_ice_port_range.py --------------------------------------------------------------
+// --- the port window ---------------------------------------------------------------------
 
 #[test]
 fn port_range_bounds_are_rejected_rather_than_clamped() {
@@ -1530,7 +1530,7 @@ async fn an_exhausted_window_skips_the_address() {
     );
 }
 
-// --- test_webrtc_topology_settings.py (the topology parts) --------------------------------
+// --- the topology ------------------------------------------------------------------------
 
 #[tokio::test]
 async fn the_topology_binds_every_host_address_once_and_hands_it_to_every_peer() {

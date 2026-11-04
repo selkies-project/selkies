@@ -1547,7 +1547,7 @@ async fn the_ping_for_a_key_frames_arrival_is_written_behind_it() {
     );
 }
 
-// --- A single-display Wayland resize (test_wayland_resize_session_screen.py) --------------------
+// --- A single-display Wayland resize -------------------------------------------------------------
 
 /// What the screens were asked since the last call, the capture compositor's and the session's.
 fn sized(rig: &Rig) -> Vec<String> {

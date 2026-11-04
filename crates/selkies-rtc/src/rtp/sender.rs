@@ -41,7 +41,7 @@
 //! packet is in. Each packet carries the header extensions the peer negotiated:
 //! abs-send-time, mid, a transport-wide sequence number of its own (retransmissions take
 //! fresh ones), playout-delay (0, 0), the color space on every packet of a key frame for
-//! the codecs whose bitstream cannot state it (`RTP_COLOR_SPACE`), video-timing on the last
+//! the codecs whose bitstream cannot state it (`rtp_color_space`), video-timing on the last
 //! packet of a frame about five times a second (`video_timing_legs`), abs-capture-time on
 //! the first packet of a key frame and once a second, and the dependency descriptor on
 //! every packet where the encoder tracks references (`describe`): the frame's number on the
@@ -737,7 +737,7 @@ impl RtpSender {
         self.fec_ssrc = fec_ssrc;
     }
 
-    /// The frames of redundancy a RED stream carries (`audio_red_distance`).
+    /// The frames of redundancy a RED stream carries.
     pub fn set_red_distance(&mut self, distance: Option<usize>) {
         self.red_distance = distance;
     }

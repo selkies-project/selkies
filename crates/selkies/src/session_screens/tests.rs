@@ -4,10 +4,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The session-screen ladder over a recording pixelflux and a live labwc
-//! (`test_session_screen_kwin.py`, `test_session_xwayland.py`), the layout passes against a model
-//! of the capture compositor's overlap rule (`test_wayland_secondary_shrink.py`), the start verdict
-//! (`test_wayland_start_verdict.py`), and the apps runner (`test_apps_local_repo.py`).
+//! The session-screen ladder over a recording pixelflux and a live labwc, the layout passes against
+//! a model of the capture compositor's overlap rule (`test_wayland_secondary_shrink.py`), the start
+//! verdict, and the apps runner (`test_apps_local_repo.py`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -220,7 +219,7 @@ fn ladder(
     (ladder, runtime)
 }
 
-// --- The KWin rung (test_session_screen_kwin.py) -------------------------------------------------
+// --- The KWin rung -------------------------------------------------------------------------------
 
 #[tokio::test]
 async fn a_session_without_the_protocol_needs_a_spare_screen() {
@@ -424,7 +423,7 @@ fn a_refused_screen_says_so() {
     );
 }
 
-// --- The second display's reasons (test_session_xwayland.py) -------------------------------------
+// --- The second display's reasons ----------------------------------------------------------------
 
 #[tokio::test]
 async fn what_a_session_offers_a_second_display() {
@@ -1671,7 +1670,7 @@ async fn a_teardown_retires_every_secondary_and_its_screen() {
     assert!(pf.asked("remove SELKIES-2"));
 }
 
-// --- The start verdict (test_wayland_start_verdict.py) -------------------------------------------
+// --- The start verdict ---------------------------------------------------------------------------
 
 fn capture(
     geometry: crate::ws::testkit::RealizedGeometry,

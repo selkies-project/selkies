@@ -10,7 +10,7 @@
  *
  * `window.stream_info` is what the server said of the stream: the capture path
  * and whether it is zero-copy, the encoder and whether it is hardware, the GPU,
- * and the reason a faster path was declined (`stream_stats.py` on the server).
+ * and the reason a faster path was declined (`ScreenCapture::stream_info`).
  * It arrives once and again on a change, whether or not anybody looks.
  * `window.stream_client` is this page's half: the transport and the path it
  * took, the codec and resolution, and the decoder with the evidence for calling

@@ -529,8 +529,8 @@ async fn stream_upload_body(
 
 #[cfg(test)]
 mod tests {
-    //! `tests/unit/test_upload_mode.py`: an upload carries the mode of a file it replaces only
-    //! from this user's own file, never its set-ID or sticky bits.
+    //! An upload carries the mode of a file it replaces only from this user's own file, never its
+    //! set-ID or sticky bits.
 
     use super::*;
     use std::os::unix::fs::PermissionsExt;

@@ -4,8 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The route cases of `tests/unit/test_file_confinement.py`, `test_file_index_parent.py`, and
-//! `test_printing.py`, driven through the router under a fixed auth.
+//! The route cases of the confinement rules, the index's parent link, and printing, driven through
+//! the router under a fixed auth.
 
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::sync::Arc;

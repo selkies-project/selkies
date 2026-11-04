@@ -53,8 +53,7 @@ fn pcmflux_version() -> &'static str {
     pcmflux::VERSION
 }
 
-/// The software encoder behind each video codec of this build, `codec=library` joined by
-/// commas, as `pixelflux.SOFTWARE_ENCODERS` lists them to Python.
+/// The software encoder behind each video codec of this build, `codec=library` joined by commas.
 fn software_encoders() -> String {
     use pixelflux::encoders::{Codec, software_encoder};
     Codec::VIDEO

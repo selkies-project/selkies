@@ -179,9 +179,8 @@ pub async fn handle_icon(
 
 #[cfg(test)]
 mod tests {
-    //! `tests/unit/test_apps_local_repo.py`: the repository's own metadata is the catalog, a
-    //! repository without one lists what it holds, and icons come from the image directory
-    //! alone.
+    //! The repository's own metadata is the catalog, a repository without one lists what it holds,
+    //! and icons come from the image directory alone.
 
     use super::*;
     use std::os::unix::fs::symlink;

@@ -8,14 +8,13 @@
  * File uploads, shared by both transports.
  *
  * Every upload is HTTP POSTs to `/api/upload` rather than a stream of chunks
- * over the WebSocket or a data channel: the browser's native HTTP path and
- * the server's C-accelerated aiohttp saturate the link, whereas per-message
- * chunk processing is bounded by pure-Python per-chunk work, and an upload
- * cannot stall or kill the realtime session socket. The destination path
- * rides URL-encoded in the `X-Upload-Path` header, the secure-mode session
- * token as a Bearer header, and progress is reported to the dashboards as
- * `{type: 'fileUpload'}` window messages with the statuses `start`,
- * `progress`, `end`, `error`, and `warning`.
+ * over the WebSocket or a data channel: the browser's native HTTP path
+ * saturates the link, where chunks over the session pay framing and dispatch
+ * for each message, and an upload cannot stall or kill the realtime session
+ * socket. The destination path rides URL-encoded in the `X-Upload-Path`
+ * header, the secure-mode session token as a Bearer header, and progress is
+ * reported to the dashboards as `{type: 'fileUpload'}` window messages with
+ * the statuses `start`, `progress`, `end`, `error`, and `warning`.
  *
  * Files at or under `UPLOAD_CHUNK_BYTES` go up as one plain POST (the whole
  * Blob, no extra headers, the shape every server accepts). Larger files are

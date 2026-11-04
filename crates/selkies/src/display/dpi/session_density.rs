@@ -4,12 +4,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! What the density ladder reads about the session, and what it remembers
-//! (`test_session_density.py`): a desktop that keeps its settings on a session bus is reached
-//! through the environment its own process runs with, read out of `/proc` rather than inherited,
-//! and the density last applied is what a page joining an existing session is told the desktop
-//! has. The readers run against real processes, stand-ins named as each daemon or session, and two
-//! private X servers; what a process reads from its environment runs in a process of its own.
+//! What the density ladder reads about the session, and what it remembers: a desktop that keeps its
+//! settings on a session bus is reached through the environment its own process runs with, read out
+//! of `/proc` rather than inherited, and the density last applied is what a page joining an
+//! existing session is told the desktop has. The readers run against real processes, stand-ins
+//! named as each daemon or session, and two private X servers; what a process reads from its
+//! environment runs in a process of its own.
 
 use super::*;
 use crate::session_screens::testing::{

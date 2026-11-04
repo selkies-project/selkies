@@ -370,7 +370,7 @@ fn payload_packet(seq: u16) -> RtpPacket {
     p
 }
 
-// ---- test_video_timing_legs
+// ---- `video_timing_legs`
 
 #[test]
 fn video_timing_legs_from_the_capture() {
@@ -402,7 +402,7 @@ fn video_timing_legs_from_the_capture() {
     );
 }
 
-// ---- test_rtp_color_space
+// ---- `rtp_color_space`
 
 #[test]
 fn color_space_per_codec_on_every_packet_of_a_key_frame() {
@@ -459,7 +459,7 @@ fn color_space_per_codec_on_every_packet_of_a_key_frame() {
     );
 }
 
-// ---- test_rtp_capture_clock
+// ---- the capture clock
 
 fn h264_frame() -> Bytes {
     let mut data = vec![0, 0, 0, 1, 0x65];
@@ -598,7 +598,7 @@ fn a_peer_that_did_not_negotiate_abs_capture_time_is_sent_none() {
     }
 }
 
-// ---- test_rtcp_xr
+// ---- RTCP XR
 
 #[test]
 fn a_reference_time_is_answered_beside_every_sender_report() {
@@ -669,7 +669,7 @@ fn a_reference_time_is_answered_beside_every_sender_report() {
     );
 }
 
-// ---- test_reference_invalidation: numbering
+// ---- reference invalidation: numbering
 
 #[test]
 fn frames_are_numbered_and_measured_back() {
@@ -703,7 +703,7 @@ fn frames_are_numbered_and_measured_back() {
     );
 }
 
-// ---- test_reference_invalidation: the answer to a NACK
+// ---- reference invalidation: the answer to a NACK
 
 #[test]
 fn a_second_nack_names_the_frame_lost_once() {
@@ -816,7 +816,7 @@ fn a_retransmission_is_wrapped_as_rtx_under_its_own_transport_number() {
     assert_eq!(s.packet_count(), 1, "the report counts media alone");
 }
 
-// ---- test_webrtc_padding: the sender's side
+// ---- padding: the sender's side
 
 #[test]
 fn padding_resends_the_newest_large_packets_on_the_rtx_stream() {
@@ -899,7 +899,7 @@ fn padding_resends_the_newest_large_packets_on_the_rtx_stream() {
     );
 }
 
-// ---- test_webrtc_gop_reset: the sender's repairs
+// ---- a GOP reset: the sender's repairs
 
 #[test]
 fn an_abandoned_gop_is_gone_from_the_repairs() {
@@ -949,7 +949,7 @@ fn an_abandoned_gop_is_gone_from_the_repairs() {
     assert_eq!(h.rec.events(), vec!["pli"]);
 }
 
-// ---- test_webrtc_resync
+// ---- resync
 
 #[test]
 fn a_pacer_cut_is_answered_without_a_key_frame() {
@@ -1514,7 +1514,7 @@ fn a_nack_whose_repairs_would_overflow_the_queue_is_past_repair() {
     );
 }
 
-// ---- test_still_request
+// ---- `still_request`
 
 struct Still(Harness);
 
@@ -1680,7 +1680,7 @@ fn a_receivers_wait_on_a_still_screen_costs_no_key_frame() {
     );
 }
 
-// ---- test_flexfec_normalization and the density steer of test_flexfec_repair
+// ---- FlexFEC normalization and the repair density steer
 
 const URIS: [&str; 7] = [
     MID_URI,
@@ -2050,7 +2050,7 @@ fn the_repair_density_follows_the_loss_and_the_queue() {
     );
 }
 
-// ---- test_h264_skip: the sender's stand-in
+// ---- a skipped H.264 frame: the sender's stand-in
 
 fn annex_b(nals: &[&[u8]]) -> Bytes {
     let mut out = Vec::new();
@@ -2375,7 +2375,7 @@ fn the_paced_transport_lets_a_frame_out_at_the_pace_and_reports_it_on_the_wire()
     assert_eq!(tr.pacer().unwrap().bytes_queued(), 0);
 }
 
-// ---- test_twcc_interval_delivery: the route, and test_webrtc_frame_end: nothing pacing
+// ---- transport-cc feedback: the route, and a frame end with nothing pacing
 
 #[test]
 fn routed_feedback_reaches_the_aggregate_measurement() {
@@ -2539,7 +2539,7 @@ fn nothing_a_peer_sends_panics() {
     }
 }
 
-// ---- the figure the port exists for
+// ---- the cost of a frame through the sender
 
 /// A sink that encrypts each datagram under SRTP and, where it has a socket, writes it there:
 /// what `Transport::send_rtp` does for each packet.

@@ -196,7 +196,8 @@ mod tests {
         ((img.width(), img.height()), (msg.hotx, msg.hoty))
     }
 
-    /// `tests/unit/test_cursor_cap.py`.
+    /// A sprite past the delivery cap is brought down to it, hotspot with it; one under it passes
+    /// untouched.
     #[test]
     fn delivery_cap() {
         assert_eq!(
@@ -229,7 +230,7 @@ mod tests {
         );
     }
 
-    /// `tests/unit/test_input_housekeeping.py`: the per-connect fetch reuses the encode.
+    /// The per-connect fetch reuses the encode.
     #[test]
     fn encode_cache() {
         let mut enc = CursorEncoder::default();

@@ -23,10 +23,10 @@
 //! and the ICE-lite choice from what `IceTopology::peer_config` hands it, never from the settings.
 //!
 //! The offer puts the display's codec first and the menu's other codecs behind it down the ladder
-//! (`prefer_codec`), so a browser that declines the codec answers with the next one it decodes,
-//! which the display then moves to (`settle_video_codec`). The offer's 4:4:4 and 10 bits are settled
-//! from the peer's hello before it is built (`settle_fullcolor`, `settle_ten_bit`), so a profile is
-//! never switched under a decoder mid-stream.
+//! (`video_preferences`), so a browser that declines the codec answers with the next one it
+//! decodes, which the display then moves to (`settle_video_codec`). The offer's 4:4:4 and 10 bits
+//! are settled from the peer's hello before it is built (`settle_fullcolor`, `settle_ten_bit`), so
+//! a profile is never switched under a decoder mid-stream.
 //!
 //! Every channel message is dispatched in arrival order by one consumer per channel through a
 //! bounded queue (`spawn_consumer`): running one handler at a time is what guarantees ordering, as

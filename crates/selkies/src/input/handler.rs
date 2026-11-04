@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The input authority shared by both transports (`WebRTCInput`): its state, the key
+//! The input authority shared by both transports ([`Dispatcher`]): its state, the key
 //! injectors on both backends with their fallback ladders, the Wayland keyboard worker, the
 //! stale-key sweep and server-side auto-repeat, keyboard resets, the client layout hint, and
 //! the app compositor the Wayland injection is aimed at.
@@ -653,7 +653,7 @@ impl Dispatcher {
         self.seat.is_some() && !self.has_separate_app_compositor()
     }
 
-    /// One step of Wayland's single serialized key-injection loop (`_keyboard_worker`).
+    /// One step of Wayland's single serialized key-injection loop.
     ///
     /// Drains the queue so every rung (seat keymap, virtual-keyboard batch, clipboard paste)
     /// sees keys in client order. Character-bearing keysyms the seat cannot deliver, Unicode
@@ -909,7 +909,7 @@ impl Dispatcher {
         }
     }
 
-    /// Inject one key transition on whichever backend this session uses (`send_x11_keypress`).
+    /// Inject one key transition on whichever backend this session uses.
     ///
     /// Wayland routes through the seat keymap owner (virtual keyboard or clipboard on error),
     /// X11 through XTEST with xdotool fallbacks. Cyrillic keysyms chorded with an action
@@ -1156,9 +1156,9 @@ impl Dispatcher {
         }
     }
 
-    /// Type a string in-process through the XTEST shim (`_type_text_xtest`); false, having
-    /// typed nothing, if the shim is unavailable or any character cannot be resolved, so the
-    /// caller falls back to xdotool without double-typing.
+    /// Type a string in-process through the XTEST shim; false, having typed nothing, if the shim is
+    /// unavailable or any character cannot be resolved, so the caller falls back to xdotool without
+    /// double-typing.
     pub(crate) async fn type_text_xtest(self: &Arc<Self>, text: &str, neutralize: bool) -> bool {
         let Some(x) = self.x() else { return false };
         if text.is_empty() {
@@ -1767,7 +1767,7 @@ impl Dispatcher {
         }
     }
 
-    /// One tick of X11 server-side key auto-repeat for held keys (`_key_repeat_loop`).
+    /// One tick of X11 server-side key auto-repeat for held keys.
     ///
     /// XTEST presses do not trigger the X server's native auto-repeat, so without this a held
     /// key types a single character: the most recently pressed still-held repeatable key is

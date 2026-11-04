@@ -6,15 +6,14 @@
 
 //! The host addresses a gatherer offers and the sockets it binds for them.
 //!
-//! `host_addresses` filters the interfaces as the fork does: loopback is left out, and an IPv6
-//! address carries a zone exactly when its scope id is non-zero, so the scope is what marks the
-//! link-local addresses to leave out. `bind_udp` is the port-window rule: with a configured
-//! range the bind is the reservation, the ports are tried in random order and the kernel rejects
-//! occupied ones, so concurrent sessions sharing one range spread without coordination; only an
-//! occupied port is cured by trying another, since anything else (address gone, permissions)
-//! would fail across the whole window identically. Every ICE socket gets the receive and send
-//! buffers libwebrtc gives its own (`UDP_SOCKET_BUFFER_SIZE`), clamped by the kernel where its
-//! per-socket ceiling is lower.
+//! `host_addresses` filters the interfaces: loopback is left out, and an IPv6 address carries a
+//! zone exactly when its scope id is non-zero, so the scope is what marks the link-local addresses
+//! to leave out. `bind_udp` is the port-window rule: with a configured range the bind is the
+//! reservation, the ports are tried in random order and the kernel rejects occupied ones, so
+//! concurrent sessions sharing one range spread without coordination; only an occupied port is
+//! cured by trying another, since anything else (address gone, permissions) would fail across the
+//! whole window identically. Every ICE socket gets the receive and send buffers libwebrtc gives its
+//! own (`UDP_SOCKET_BUFFER_SIZE`), clamped by the kernel where its per-socket ceiling is lower.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};

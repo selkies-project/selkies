@@ -8,14 +8,14 @@
 //! XFixes, and XInput behind the `XLink` trait, so the keyboard shim and the pointer logic run
 //! against a fake keymap in the unit tests and against x11rb in a session.
 //!
-//! The XKB half carries what the core protocol cannot say (`x11_xkb.py`): the core keymap folds
-//! every layout group into one column list, so a keysym's (group, level) cannot be told from it
-//! alone. `XkbGetMap` names the group and level every keysym sits at, `XkbGetState` and
-//! `XkbLatchLockState` read and lock the group an injection must run under, and
-//! `XkbSelectEvents` keeps keymap changes flowing: the server withholds core `MappingNotify`
-//! from an XKB-aware client and reports a whole-keyboard replacement (`setxkbmap`) to it only
-//! as `XkbNewKeyboardNotify`. Everything XKB is best effort: a server without the extension
-//! leaves the link without it and the keyboard falls back to the core keymap.
+//! The XKB half carries what the core protocol cannot say: the core keymap folds every layout group
+//! into one column list, so a keysym's (group, level) cannot be told from it alone. `XkbGetMap`
+//! names the group and level every keysym sits at, `XkbGetState` and `XkbLatchLockState` read and
+//! lock the group an injection must run under, and `XkbSelectEvents` keeps keymap changes flowing:
+//! the server withholds core `MappingNotify` from an XKB-aware client and reports a whole-keyboard
+//! replacement (`setxkbmap`) to it only as `XkbNewKeyboardNotify`. Everything XKB is best effort: a
+//! server without the extension leaves the link without it and the keyboard falls back to the core
+//! keymap.
 //!
 //! Every method here blocks on the connection; the handler calls them from the X worker
 //! thread (`x11_worker`) and never from the runtime.
@@ -106,7 +106,7 @@ pub trait XLink: Send + Sync {
     fn screen_dpi(&self) -> Option<f64>;
     /// The server's autorepeat `(delay ms, interval ms)` from XKB controls.
     fn autorepeat(&self) -> Option<(u16, u16)>;
-    /// Whether the server reads kernel input devices itself (`_display_reads_kernel_input`).
+    /// Whether the server reads kernel input devices itself.
     fn reads_kernel_input(&self) -> bool;
     /// Block until the server sends a keymap event; None once the connection is gone, or at
     /// once on a link that delivers no events.
@@ -664,9 +664,9 @@ impl XLink for X11Link {
     }
 }
 
-/// The X server's pointer, asked on a connection of its own (`_XPointerReader`), so a display
-/// server slow to answer holds the worker thread it is read from and never the runtime. The
-/// connection opens on first use and again after a failure.
+/// The X server's pointer, asked on a connection of its own, so a display server slow to answer
+/// holds the worker thread it is read from and never the runtime. The connection opens on first use
+/// and again after a failure.
 #[derive(Default)]
 pub struct XPointerReader {
     conn: Mutex<Option<(RustConnection, xproto::Window)>>,

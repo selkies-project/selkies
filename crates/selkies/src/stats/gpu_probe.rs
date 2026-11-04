@@ -454,10 +454,9 @@ pub fn main(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    //! The checks of `tests/unit/test_gpu_probe_facts.py`: the reading of the helpers'
-    //! answers, which is where a wrong fact would come from: a software renderer mistaken for
-    //! a vendor's, a vendor listed twice, a Zink that initializes but cannot present reported
-    //! as a working path.
+    //! The reading of the helpers' answers, which is where a wrong fact would come from: a software
+    //! renderer mistaken for a vendor's, a vendor listed twice, a Zink that initializes but cannot
+    //! present reported as a working path.
 
     use super::*;
     use std::sync::{Arc, Mutex};

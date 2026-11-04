@@ -163,7 +163,7 @@ impl std::fmt::Debug for TurnServer {
     }
 }
 
-/// The one STUN and one TURN server a connection uses, as `connection_kwargs` picked them.
+/// The one STUN and one TURN server a connection uses, as [`Servers::from_ice_servers`] picks them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Servers {
     pub stun: Option<(String, u16)>,

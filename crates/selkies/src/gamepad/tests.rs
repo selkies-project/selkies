@@ -4,13 +4,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The gamepad checks: the uinput ABI
-//! against the kernel headers (`test_uinput_abi`), the interposer struct layouts against
-//! the C compiler, the backend policy (`test_uinput_policy`), the slot gate
-//! (`test_gamepad_authority`), the force-feedback mix and the kernel requests
-//! (`test_gamepad_rumble`), the unread handle (`test_gamepad_slow_reader`), the sockets
-//! fake-udev enumerates (`test_fake_udev_enumeration`'s server side), and the kernel path
-//! under the `/dev/uinput` emulator (`test_uinput_backend`).
+//! The gamepad checks: the uinput ABI against the kernel headers, the interposer struct layouts
+//! against the C compiler, the backend policy, the slot gate, the force-feedback mix and the kernel
+//! requests, the unread handle, the sockets fake-udev enumerates (`test_fake_udev_enumeration`'s
+//! server side), and the kernel path under the `/dev/uinput` emulator.
 
 use std::collections::HashMap;
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -31,8 +28,7 @@ use super::uinput::*;
 use super::virtual_device::*;
 use super::*;
 
-/// The repository root, found from the crate directory (the module compiles in more than
-/// one crate while the port is under way).
+/// The repository root, found from the crate directory.
 fn repo_root() -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {

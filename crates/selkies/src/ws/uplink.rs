@@ -74,7 +74,7 @@ impl FloorHistory {
     }
 }
 
-/// One socket's ping clock and floor (`_uplink_session_state`).
+/// One socket's ping clock and floor.
 #[derive(Debug)]
 pub struct Uplink {
     /// Outstanding pings: counter to send time, oldest first.

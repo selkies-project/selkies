@@ -829,7 +829,7 @@ fn read_trimmed(path: &Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Whether `text` is a run of ASCII digits, the way `str.isdigit` reads a counter.
+/// Whether `text` is a run of ASCII digits, as a counter is.
 fn is_digits(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_ascii_digit())
 }
@@ -1408,10 +1408,9 @@ impl ResourceMonitor {
 
 #[cfg(test)]
 mod tests {
-    //! The checks of `tests/unit/test_system_usage.py`, `test_drm_gpu_stats.py`,
-    //! `test_gpu_stats_gate.py`, `test_nvml_failfast.py`, and the monitor half of
-    //! `test_stream_stats.py`, driven against fabricated `/sys` and `/proc` trees with a
-    //! clock the test advances itself; no GPU needed.
+    //! The host's CPU and memory under each cgroup layout, the DRM and NVIDIA GPU readers, and the
+    //! monitor's sampling gate, driven against fabricated `/sys` and `/proc` trees with a clock the
+    //! test advances itself; no GPU needed.
 
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

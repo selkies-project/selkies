@@ -52,8 +52,9 @@ import { t } from "@/i18n";
 export { displayLabel, canPlayEncoder, framerateLabel };
 
 /**
- * Mirrors the server's `audio_bitrate` allowed enum (settings.py) so the
- * slider never offers a value the server rejects; 510000 is libopus's maximum.
+ * Mirrors the server's `audio_bitrate` allowed enum (the settings table) so
+ * the slider never offers a value the server rejects; 510000 is libopus's
+ * maximum.
  */
 const audioBitrateOptions = [32000, 48000, 64000, 96000, 128000, 192000, 256000, 320000, 384000, 510000];
 const DEFAULT_AUDIO_BITRATE = 128000;
@@ -361,7 +362,7 @@ export function useStreamSettings() {
         return () => { live = false; };
     }, [fullColorCodec]);
     const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-    // Pre-settings fallbacks mirror the server defaults (settings.py).
+    // Pre-settings fallbacks mirror the server defaults (the settings table).
     const [jpegQuality, setJpegQuality] = useState(() => parseInt(readStored("jpeg_quality") ?? "", 10) || 40);
     const [paintOverJpegQuality, setPaintOverJpegQuality] = useState(() => parseInt(readStored("paint_over_jpeg_quality") ?? "", 10) || 90);
     const [videoPaintoverCRF, setVideoPaintoverCRF] = useState(() => parseInt(readStored("video_paintover_crf") ?? "", 10) || 18);

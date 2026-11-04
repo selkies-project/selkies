@@ -6,7 +6,7 @@
 
 //! Where the pointer is and what the pages are told about it: the laid-out displays a desktop
 //! point falls on, the position the handler tracks between absolute messages, and one trackpad
-//! page's pointer echo (`_PointerEcho`).
+//! page's pointer echo ([`PointerEcho`]).
 //!
 //! A trackpad page draws the pointer where the server echoes it, moved on by its own deltas and
 //! held inside that display after each, as the pointer is, so an echo that would leave it drawn
@@ -204,8 +204,8 @@ pub const MOUSE_MASK_BIT_ERASER: u32 = 1 << 5;
 /// while the message carries a scroll magnitude.
 pub const MOUSE_MASK_SCROLL_BITS: u32 = (1 << 3) | (1 << 4) | (1 << 6) | (1 << 7);
 
-/// The pointer state the handler keeps between messages (`send_x11_mouse`'s half that decides
-/// rather than injects).
+/// The pointer state the handler keeps between messages: the half of `Dispatcher::send_mouse`
+/// that decides rather than injects.
 #[derive(Debug, Default)]
 pub struct PointerTracker {
     /// The buttons held, in the client's bit numbering.
@@ -335,7 +335,7 @@ mod tests {
             .collect()
     }
 
-    /// `test_pointer_tracking.py`: the extent of the laid-out displays.
+    /// The extent of the laid-out displays.
     #[test]
     fn extents() {
         let single = layouts(&[("primary", 0, 0, 1920, 1080)]);

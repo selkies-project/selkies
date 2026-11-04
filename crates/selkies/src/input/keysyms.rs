@@ -290,7 +290,7 @@ pub fn keysym_name(keysym: u32) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// `tests/unit/test_typed_keysyms.py`: which keysym spells a typed character.
+    /// Which keysym spells a typed character.
     #[test]
     fn latin1_types_as_its_own_keysym() {
         let latin1 = (0x20u32..0x7F)

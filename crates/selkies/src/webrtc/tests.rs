@@ -561,7 +561,7 @@ fn region_past_root(log: &[String], root: (i32, i32), rects: &[(&str, Rect)]) ->
     bad
 }
 
-// tests/unit/test_webrtc_capture_region.py
+// The capture region.
 
 #[tokio::test]
 async fn capture_region_shrink_moves_before_the_root() {
@@ -764,7 +764,7 @@ async fn capture_region_a_consumer_start_looks_at_the_running_capture() {
     );
 }
 
-// tests/unit/test_webrtc_secondary_gate.py
+// The secondary display's gate.
 
 fn session_start(
     peer: &str,
@@ -873,7 +873,7 @@ async fn secondary_gate_a_started_display_stays_registered() {
     rig.service.shutdown().await;
 }
 
-// tests/unit/test_rtc_peer_lifecycle.py
+// A peer's lifecycle.
 
 /// Records what an engine asks of its service, and takes any offer.
 #[derive(Default)]
@@ -1050,7 +1050,7 @@ async fn lifecycle_a_self_closed_peer_is_reaped_by_its_state() {
     assert!(engine.displays.lock().is_empty());
 }
 
-// tests/unit/test_webrtc_reconnect_grace.py
+// The reconnect grace.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grace_a_reload_keeps_the_capture_and_a_departure_stops_it() {
@@ -1117,7 +1117,7 @@ async fn grace_a_secondarys_stop_is_immediate() {
     assert!(!rig.service.st.lock().pipelines.contains_key("display2"));
 }
 
-// tests/unit/test_video_declined.py
+// A declined video track.
 
 #[tokio::test]
 async fn video_declined_is_said_once_the_channel_is_open() {
@@ -1157,7 +1157,7 @@ async fn video_declined_is_said_once_the_channel_is_open() {
     engine.stop_all_rtc_connections().await;
 }
 
-// tests/unit/test_cc_start_rate.py
+// The rate a stream starts at.
 
 #[test]
 fn start_rate_hold_and_remembered_rate() {
@@ -1252,7 +1252,7 @@ async fn start_rate_seeds_the_only_controller() {
     );
 }
 
-// tests/unit/test_webrtc_port_range_setting.py
+// The port range setting.
 
 #[test]
 fn port_range_setting() {
@@ -1277,7 +1277,7 @@ fn port_range_setting() {
     }
 }
 
-// tests/unit/test_transport_probe.py
+// The transport probe.
 
 mod probe {
     use axum::body::Body;
@@ -1355,7 +1355,7 @@ mod probe {
     }
 }
 
-// tests/unit/test_media_on_start.py
+// What a session starts with.
 
 #[derive(Default)]
 struct FakeAudioEngine {
@@ -1786,8 +1786,7 @@ async fn media_size_starts_at_once_where_nothing_waits() {
     }
 }
 
-// tests/unit/test_mode_switch_teardown.py names no WebRTC server; the check it holds the other
-// transport to is that a stop leaves no capture running and no cursor sink behind.
+// A mode switch's teardown: a stop leaves no capture running and no cursor sink behind.
 
 #[tokio::test]
 async fn teardown_stops_the_capture_and_withdraws_its_sink() {
@@ -1804,7 +1803,7 @@ async fn teardown_stops_the_capture_and_withdraws_its_sink() {
     capture.set_cursor_sink(None);
 }
 
-// tests/unit/test_clipboard_supersede.py, test_clipboard_secret.py: the WebRTC cases.
+// The clipboard: a newer copy supersedes an older one, and a secret carries its mark.
 
 struct NoSession;
 
@@ -2240,7 +2239,7 @@ async fn owner_reconciliation_closes_a_revoked_peer_and_keeps_the_rest() {
     rig.service.shutdown().await;
 }
 
-// `initialize_components`: a manual resolution sizes the pipeline to what the X server realized.
+// Startup: a manual resolution sizes the pipeline to what the X server realized.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_a_manual_resolution_takes_what_the_x_server_realized() {
@@ -2257,7 +2256,7 @@ async fn startup_a_manual_resolution_takes_what_the_x_server_realized() {
     rig.service.shutdown().await;
 }
 
-// `uplink_session_conns`: the signaling sockets of browser peers, the server peer left out.
+// `uplink_sessions`: the signaling sockets of browser peers, the server peer left out.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_upload_gauge_reads_each_browsers_signaling_socket() {

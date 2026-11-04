@@ -457,7 +457,7 @@ impl<T: BridgeItem> State<T> {
 
 #[cfg(test)]
 mod tests {
-    //! `tests/unit/test_video_bridge_gate.py`, on stand-in frames and a manual clock.
+    //! The video bridge's gate, on stand-in frames and a manual clock.
 
     use std::sync::Mutex as StdMutex;
 

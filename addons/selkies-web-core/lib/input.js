@@ -4152,8 +4152,8 @@ export class Input {
      * One delta past the echo, in the echo's display: scaled as the echo says
      * and held inside the display after it, as the session holds its pointer
      * after each move. The server follows the same steps to tell whether an
-     * echo would move the drawn cursor at all (`_PointerEcho` in
-     * input_handler.py).
+     * echo would move the drawn cursor at all (`PointerEcho` in
+     * `crates/selkies/src/input/pointer.rs`).
      */
     _echoStep(x, y, dx, dy) {
         const echo = this._echo;

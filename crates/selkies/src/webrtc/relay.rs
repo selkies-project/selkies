@@ -220,8 +220,7 @@ impl<T> Drop for RelayTrack<T> {
 
 #[cfg(test)]
 mod tests {
-    //! `tests/unit/test_media_relay_pull.py`: a source that keeps only its newest frame, as a
-    //! video bridge does.
+    //! A source that keeps only its newest frame, as a video bridge does.
 
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};

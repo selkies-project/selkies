@@ -161,7 +161,7 @@ fn resumable(client_type: &str, key: &str) -> String {
     hello_json(meta)
 }
 
-// test_webrtc_hello_bounds
+// A hello's bounds
 
 #[tokio::test]
 async fn a_view_only_page_leaves_the_live_controller_and_a_newer_controller_takes_over() {
@@ -244,7 +244,7 @@ async fn the_storm_table_forgets_identities_whose_takeovers_left_the_window() {
     assert_eq!(registry.storm_identities(), 1);
 }
 
-// test_webrtc_signaling_close
+// What a close tells a page
 
 #[tokio::test]
 async fn the_server_peer_leaving_closes_every_page_as_going_away() {
@@ -321,7 +321,7 @@ async fn hellos_that_are_no_hellos_are_refused_as_protocol_errors() {
     assert!(registry.peer_ids().is_empty());
 }
 
-// test_webrtc_signaling_hello
+// What a hello carries
 
 #[test]
 fn capabilities_sit_beside_the_token_in_session_start() {
@@ -459,7 +459,7 @@ async fn a_token_with_whitespace_cannot_forge_session_start_fields() {
     assert_eq!(seen.fullcolor_codecs, None);
 }
 
-// test_webrtc_signaling_resume
+// A session outliving a cut of its socket
 
 struct Rig {
     registry: Arc<PeerRegistry>,
@@ -711,7 +711,7 @@ async fn rooms_relay_between_members() {
     assert_eq!(a.sent().last().unwrap(), &format!("ROOM_PEER_LEFT {b_uid}"));
 }
 
-// test_webrtc_page_identity
+// Who a page is
 
 struct Tokens(HashMap<&'static str, ClientType>);
 
@@ -1020,7 +1020,7 @@ async fn the_client_reconnects_when_its_connection_ends() {
     ));
 }
 
-// test_rtc_peer_lifecycle
+// A display's graph
 
 #[test]
 fn a_displays_graph_follows_its_consumers() {
@@ -1102,7 +1102,7 @@ fn a_displays_graph_follows_its_consumers() {
     assert!(graphs.has_graph("primary"));
 }
 
-// test_webrtc_reconnect_grace
+// The reconnect grace
 
 fn counted(count: &Arc<AtomicUsize>) -> impl FnOnce() -> std::future::Ready<()> + Send + 'static {
     let count = Arc::clone(count);

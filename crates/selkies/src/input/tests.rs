@@ -5,11 +5,7 @@
  */
 
 //! The handler end to end: wire messages through the real dispatcher and injectors, over a
-//! recording seat and a fake core keymap (`test_shift_navigation.py`,
-//! `test_keymap_held_carry.py`, `test_keymap_layout_hint.py`, `test_key_stall_release.py`,
-//! `test_pointer_sequence.py`, `test_pointer_tracking.py`, `test_pointer_echo.py`,
-//! `test_finger_scroll.py`, `test_x11_ime_binds.py`, `test_input_housekeeping.py`), and against
-//! a real X server where a check needs one.
+//! recording seat and a fake core keymap, and against a real X server where a check needs one.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -254,7 +250,7 @@ async fn settle(h: &Arc<Dispatcher>) {
     }
 }
 
-/// A us core keymap slice as `test_shift_navigation.py` lays it out.
+/// A us core keymap slice of the navigation and editing keys.
 const NAVIGATION: [(&str, u32); 12] = [
     ("Left", 0xFF51),
     ("Right", 0xFF53),
@@ -438,7 +434,7 @@ async fn shift_navigation_wayland() {
     h.disconnect().await;
 }
 
-/// `test_keymap_held_carry.py`: held keys survive a Wayland base-layout change.
+/// Held keys survive a Wayland base-layout change.
 #[tokio::test]
 async fn held_keys_survive_a_base_layout_change() {
     let (de, us) = (keymap_text("de"), keymap_text("us"));
@@ -577,7 +573,7 @@ async fn held_keys_survive_a_base_layout_change() {
     );
 }
 
-/// `test_keymap_layout_hint.py`: where the client `keyboardLayout` hint lands.
+/// Where the client `keyboardLayout` hint lands.
 #[tokio::test]
 async fn layout_hint_lands_on_the_seat_only_without_a_session_compositor() {
     let pushed = |seat: &FakeSeat| seat.layouts.lock().unwrap().clone();
@@ -827,7 +823,7 @@ where
     );
 }
 
-/// `test_key_stall_release.py`, X11.
+/// A stalled release, X11.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stalled_release_types_once_x11() {
     let link = Arc::new(FakeLink::new(HashMap::from([(26u8, vec![0x65])]), vec![]));
@@ -853,7 +849,7 @@ async fn a_stalled_release_types_once_x11() {
     h.disconnect().await;
 }
 
-/// `test_key_stall_release.py`, Wayland.
+/// A stalled release, Wayland.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stalled_release_types_once_wayland() {
     let us = keymap_text("us");
@@ -883,7 +879,7 @@ async fn a_stalled_release_types_once_wayland() {
     h.disconnect().await;
 }
 
-/// `test_pointer_sequence.py`: numbered pointer messages over a channel that keeps no order.
+/// Numbered pointer messages over a channel that keeps no order.
 #[tokio::test]
 async fn numbered_pointer_messages() {
     let link = Arc::new(FakeLink::new(HashMap::new(), vec![]));
@@ -998,7 +994,7 @@ async fn numbered_pointer_messages() {
     );
 }
 
-/// `test_pointer_tracking.py`, what each backend injects; the tracking itself is in `pointer`.
+/// What each backend injects as the pointer is tracked; the tracking itself is in `pointer`.
 #[tokio::test]
 async fn pointer_tracking_on_each_backend() {
     let single = layouts(&[("primary", 0, 0, 1920, 1080)]);
@@ -1064,7 +1060,7 @@ async fn pointer_tracking_on_each_backend() {
     );
 }
 
-/// `test_input_housekeeping.py`: one pointer message, one warp, one flush; `--` before typed text.
+/// One pointer message, one warp, one flush; `--` before typed text.
 #[tokio::test]
 async fn pointer_message_is_one_request_and_one_flush() {
     let link = Arc::new(FakeLink::new(HashMap::new(), vec![]));
@@ -1221,7 +1217,7 @@ fn rest() -> Duration {
     POINTER_ECHO_POLL * 3
 }
 
-/// `test_pointer_echo.py`: the echo a trackpad page draws its cursor from, on Wayland.
+/// The echo a trackpad page draws its cursor from, on Wayland.
 #[tokio::test]
 async fn pointer_echo_wayland() {
     let comp = Compositor::new(1.0, 1.0);
@@ -1289,7 +1285,7 @@ async fn pointer_echo_wayland() {
     assert!(!h.state.lock().echo_poll_running, "and so does the reading");
 }
 
-/// `test_pointer_echo.py`: moves the page cannot predict, and ones it can at a display's edge.
+/// The echo: moves the page cannot predict, and ones it can at a display's edge.
 #[tokio::test]
 async fn pointer_echo_surprises() {
     let comp = Compositor::new(1.0, 1.5);
@@ -1343,7 +1339,7 @@ async fn pointer_echo_surprises() {
     h.release_conn(1);
 }
 
-/// `test_pointer_echo.py`: a scaled output, and a session that cannot say.
+/// The echo: a scaled output, and a session that cannot say.
 #[tokio::test]
 async fn pointer_echo_scale_and_unknown() {
     let comp = Compositor::new(2.0, 1.0);
@@ -1401,8 +1397,8 @@ impl PointerReader for XServer {
     fn close(&self) {}
 }
 
-/// `test_pointer_echo.py`: X11 compares the position it tracks while the pointer moves and asks
-/// the server once it rests, from a worker thread.
+/// The echo on X11: it compares the position it tracks while the pointer moves and asks the server
+/// once it rests, from a worker thread.
 #[tokio::test]
 async fn pointer_echo_x11() {
     let link = Arc::new(FakeLink::new(HashMap::new(), vec![]));
@@ -1474,7 +1470,7 @@ async fn pointer_echo_x11() {
     h.release_conn(1);
 }
 
-/// `test_finger_scroll.py`: a touchpad's scroll as a finger's.
+/// A touchpad's scroll as a finger's.
 #[tokio::test]
 async fn finger_scroll() {
     let seat = Arc::new(FakeSeat::new(""));
@@ -1542,7 +1538,7 @@ async fn finger_scroll() {
     );
 }
 
-/// `test_x11_ime_binds.py`: three unbound letters cost the runtime nothing but the binds.
+/// Three unbound letters cost the runtime nothing but the binds.
 #[tokio::test]
 async fn ime_binds_keep_the_runtime_free() {
     let modmap = vec![50, 62, 66, 37, 105, 64, 108, 77, 133, 134, 92];
@@ -2040,8 +2036,7 @@ async fn real_x_server_round_trip() {
     h.disconnect().await;
 }
 
-// --- The session the applications run in (test_app_compositor_socket.py, test_app_session.py,
-// test_session_xwayland.py) ----------------------------------------------------------------------
+// --- The session the applications run in ---------------------------------------------------------
 
 /// Lay `names` out as live sockets in a fresh directory beside their lock files.
 fn live_sockets(names: &[&str]) -> (Scratch, Vec<std::os::unix::net::UnixListener>) {

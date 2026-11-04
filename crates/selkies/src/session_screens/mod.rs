@@ -4,9 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The session compositor's own screens, one implementation both transports share: the DPI
-//! ladder, the second-display capability, the screens a display owns, and the apps runner
-//! (`input_handler.py`, `websockets_mode.py`, `webrtc_mode.py`).
+//! The session compositor's own screens, one implementation both transports share: the DPI ladder,
+//! the second-display capability, the screens a display owns, and the apps runner.
 //!
 //! A nested session runs its applications on a compositor of its own, whose screens are not the
 //! capture compositor's outputs, so everything a display's output is told has to reach that

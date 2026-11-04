@@ -19,7 +19,7 @@
 //!
 //! Everything here is sans-IO: the driver authenticates each request before handing it in,
 //! and takes the answers and consent checks out through `poll_write`. The timings are
-//! parameters (`LiteTimings`) so a test can scale them, as the fork's suites do.
+//! parameters (`LiteTimings`) so a test can scale them.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;

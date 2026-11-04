@@ -49,7 +49,7 @@ pub const POINTER_ECHO_MIN: Duration = Duration::from_millis(8);
 pub const POINTER_ECHO_POLL: Duration = Duration::from_millis(25);
 /// The largest finger scroll one `sf` message moves, in pixels each way.
 pub const FINGER_SCROLL_MAX_PX: f64 = 4096.0;
-/// The rate control modes a client may name (`settings.RateControlMode`).
+/// The rate control modes a client may name, the `rate_control_mode` setting's.
 const RATE_CONTROL_MODES: &[&str] = &["cbr", "crf"];
 
 /// X core pointer buttons for XTEST.
@@ -573,15 +573,14 @@ impl Dispatcher {
         self.gamepads.release_slots(conn, slots);
     }
 
-    /// Apply one client pointer message on whichever backend this session uses
-    /// (`send_x11_mouse`): move the pointer (absolute coordinates offset into the named
-    /// display's region of the combined layout), then diff `button_mask` against the held state
-    /// bit by bit, emitting press and release, scroll clicks, or the Alt+Arrow back and forward
-    /// chords. The eraser bit (button 5) folds into the primary button: neither the X core
-    /// pointer nor `wl_pointer` has an eraser button, so the eraser clicks and drags like the pen
-    /// tip, and OR-ing it keeps press and release balanced when the tip bit is set at the same
-    /// time. `scroll_magnitude` is the wheel repeat count; 0 marks bits 3 and 4 as back and
-    /// forward buttons instead of wheel ticks.
+    /// Apply one client pointer message on whichever backend this session uses: move the pointer
+    /// (absolute coordinates offset into the named display's region of the combined layout), then
+    /// diff `button_mask` against the held state bit by bit, emitting press and release, scroll
+    /// clicks, or the Alt+Arrow back and forward chords. The eraser bit (button 5) folds into the
+    /// primary button: neither the X core pointer nor `wl_pointer` has an eraser button, so the
+    /// eraser clicks and drags like the pen tip, and OR-ing it keeps press and release balanced
+    /// when the tip bit is set at the same time. `scroll_magnitude` is the wheel repeat count; 0
+    /// marks bits 3 and 4 as back and forward buttons instead of wheel ticks.
     pub(crate) async fn send_mouse(
         self: &Arc<Self>,
         x: i32,

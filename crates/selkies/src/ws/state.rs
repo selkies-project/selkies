@@ -275,9 +275,9 @@ impl DisplayState {
     }
 }
 
-/// What a display streams with, keyed as `SETTINGS` carries it (`_display_settings`): the
-/// `use_cpu` the display asks for rather than the one a CPU-only encoder implies, and the
-/// session's audio bitrate; empty of the display's keys where it has no entry.
+/// What a display streams with, keyed as `SETTINGS` carries it: the `use_cpu` the display asks for
+/// rather than the one a CPU-only encoder implies, and the session's audio bitrate; empty of the
+/// display's keys where it has no entry.
 pub fn display_settings(state: Option<&DisplayState>, seeds: &Seeds) -> Map<String, Json> {
     let mut values = Map::new();
     if let Some(d) = state {

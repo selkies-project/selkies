@@ -99,7 +99,7 @@ pub fn file_parts(rel: &str) -> Option<Vec<String>> {
 }
 
 /// `path` with every symlink of its existing prefix resolved and the missing tail appended as
-/// written, as `os.path.realpath` resolves a path that need not exist. A path that exists is
+/// written, so a path that need not exist still resolves. A path that exists is
 /// `std::fs::canonicalize`'s answer.
 pub fn realpath(path: &Path) -> PathBuf {
     if let Ok(resolved) = std::fs::canonicalize(path) {
@@ -413,7 +413,7 @@ pub struct BrowseEntry {
     pub is_dir: bool,
     /// `None` for a directory.
     pub size: Option<u64>,
-    /// Local time without a zone, as Python's `datetime.isoformat()` writes it.
+    /// Local time in ISO 8601 without a zone, microseconds only where they are not zero.
     pub mtime: String,
 }
 
@@ -482,8 +482,8 @@ pub fn browse_dir(
     Ok(Some(entries))
 }
 
-/// A file time as `datetime.fromtimestamp(ts).isoformat()`: local time, the microseconds
-/// present only where they are not zero.
+/// A file time in ISO 8601 without a zone: local time, the microseconds present only where they are
+/// not zero.
 fn isoformat(secs: i64, nsec: i64) -> String {
     let t = local_time(secs, nsec);
     let micros = nsec.clamp(0, 999_999_999) / 1000;
@@ -496,7 +496,7 @@ fn isoformat(secs: i64, nsec: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! `tests/unit/test_file_confinement.py`, the primitive and walk cases.
+    //! The confinement primitives and the descriptor walk.
 
     use super::*;
     use std::os::unix::fs::symlink;

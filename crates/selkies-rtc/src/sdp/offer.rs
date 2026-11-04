@@ -21,9 +21,8 @@
 //! starts ICE, DTLS, the senders, the receivers, and SCTP from the `Negotiated` result.
 //!
 //! The signaling state machine refuses a description out of turn, as the W3C's does, and a
-//! description is validated as the fork validated it: ICE credentials present, an answer's
-//! `a=setup` active or passive, RTCP mux on every RTP section, and an answer's sections
-//! matching the offer's.
+//! description is validated: ICE credentials present, an answer's `a=setup` active or passive, RTCP
+//! mux on every RTP section, and an answer's sections matching the offer's.
 
 use std::collections::HashSet;
 

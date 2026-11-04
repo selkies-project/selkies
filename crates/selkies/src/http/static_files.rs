@@ -70,7 +70,7 @@ pub fn resolve_static_root(web_root: &str) -> Option<PathBuf> {
     bundle
 }
 
-/// `~` and `~/...` as the home directory, like Python's `expanduser`.
+/// `~` and `~/...` as the home directory.
 fn expand_user(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix('~')
         && (rest.is_empty() || rest.starts_with('/'))

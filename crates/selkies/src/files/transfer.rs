@@ -39,7 +39,7 @@ use tower_http::services::ServeFile;
 use super::pacing::{TRANSFER_MIN_GAUGED_BYTES, TransferPacer, UplinkGauge, gauged_chunk_size};
 use super::{AuditSink, FilesState, RequestAuth};
 
-/// `urllib.parse.quote`'s default: `/` and the unreserved characters pass, everything else is
+/// A path's percent-encoding: `/` and the unreserved characters pass, everything else is
 /// percent-encoded.
 pub const QUOTE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'/')

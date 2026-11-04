@@ -6,8 +6,7 @@
 
 //! The HTTP/HTTPS control plane and static-content server: the axum application every
 //! deployment fronts, its auth middleware and token table, the status and operator routes, the
-//! web client, TLS with hot reload, and listening on TCP or a Unix socket (`stream_server.py`,
-//! `sessions.py`, `websockets_mode.handle_tokens`, `audit.py`).
+//! web client, TLS with hot reload, and listening on TCP or a Unix socket.
 //!
 //! One router carries every route under the `subfolder` prefix (`"/desk"` or `""`), with
 //! [`auth::gate`] as its single middleware, a `Content-Security-Policy: frame-ancestors` header

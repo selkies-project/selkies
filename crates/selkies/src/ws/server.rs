@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The websockets-transport streaming service (`DataStreamingServer`): the display owner
+//! The websockets-transport streaming service ([`WsService`]): the display owner
 //! model, the settings a page applies, the per-display captures with their relays and
 //! backpressure, the layout pass, and the broadcasts that tell the pages about all of it.
 //!
@@ -1545,7 +1545,7 @@ impl WsService {
         self.tell(&clients, &message).await;
     }
 
-    /// Whether this session can attach a second display (`_second_screen_availability`).
+    /// Whether this session can attach a second display.
     pub(crate) fn second_screen_availability(&self) -> (bool, String) {
         let host = {
             let s = settings();
@@ -1712,7 +1712,7 @@ impl WsService {
     }
 
     /// Every connected socket's ping clock with its token and address, for the supervisor's
-    /// upload gauge (`uplink_session_conns`).
+    /// upload gauge.
     pub fn uplink_sessions(&self) -> Vec<crate::files::pacing::UplinkSession> {
         self.clients()
             .into_iter()

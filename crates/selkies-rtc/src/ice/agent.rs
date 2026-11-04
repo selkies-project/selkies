@@ -102,7 +102,7 @@ pub struct Arrival {
 }
 
 /// How long the full agent goes without hearing the peer before it is disconnected, and then
-/// failed: together the fork's consent timeout.
+/// failed: together its consent timeout.
 const DISCONNECTED_TIMEOUT: Duration = Duration::from_secs(5);
 const FAILED_TIMEOUT: Duration = Duration::from_secs(25);
 /// Binding requests per pair before the full agent gives a pair up: at its 200 ms check

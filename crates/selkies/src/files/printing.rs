@@ -331,8 +331,8 @@ pub async fn handle_print_document(
     audited_file_response(&state, request.method(), request.headers(), serve).await
 }
 
-/// The first `name` on the `:`-separated `path` the caller may `access` with `mode`, as
-/// `shutil.which` finds it: a file, never a directory.
+/// The first `name` on the `:`-separated `path` the caller may `access` with `mode`: a file, never
+/// a directory.
 fn which_in(path: &str, name: &str, mode: AccessFlags) -> Option<PathBuf> {
     path.split(':')
         .filter(|d| !d.is_empty())
@@ -628,8 +628,8 @@ impl PrintQueue {
 
 #[cfg(test)]
 mod tests {
-    //! `tests/unit/test_printing.py`: names, the spool's place, the paper, pending documents,
-    //! the watcher, the scheduler's discovery, and the state root's claim.
+    //! Names, the spool's place, the paper, pending documents, the watcher, the scheduler's
+    //! discovery, and the state root's claim.
 
     use super::*;
     use parking_lot::Mutex;

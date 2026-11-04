@@ -17,9 +17,8 @@
 //!
 //! `find_common_codecs` and `find_common_header_extensions` read a remote description
 //! against the table; `filter_preferred_codecs` applies `setCodecPreferences`; and
-//! `codec_preferences` orders a sender's codecs the way `RTCApp.prefer_codec` does: the
-//! display's codec first, the other codecs down the fallback ladder behind it, RTX, and
-//! FlexFEC where the receiver takes it.
+//! `codec_preferences` orders a sender's codecs for the offer: the display's codec first, the other
+//! codecs down the fallback ladder behind it, RTX, and FlexFEC where the receiver takes it.
 
 use std::collections::{HashMap, HashSet};
 

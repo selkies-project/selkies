@@ -847,7 +847,7 @@ impl Collector for SharedCollector {
 
 #[cfg(test)]
 mod tests {
-    //! The checks of `tests/unit/test_stats_csv_cells.py` and `test_metrics_reregister.py`.
+    //! The CSV cells of a client report, and the collectors a second build registers.
 
     use super::*;
     use serde_json::json;

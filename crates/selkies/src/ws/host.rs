@@ -38,7 +38,8 @@ use crate::ws::client::ClientId;
 pub struct TokenEntry {
     /// `controller`, or `viewer` for anything else an entry names.
     pub role: String,
-    /// `null` for none, a number for one slot, a list for several (`sessions.stored_slot`).
+    /// `null` for none, a number for one slot, a list for several
+    /// ([`crate::gamepad::stored_slot`]).
     pub slot: Json,
 }
 
@@ -103,7 +104,7 @@ pub trait Input: Send + Sync {
     fn installed_apps(&self) -> Option<Vec<String>>;
 }
 
-/// The clipboard policy a page may change (`input_handler.update_binary_clipboard_setting`).
+/// The clipboard policy a page may change.
 #[async_trait]
 pub trait Clipboard: Send + Sync {
     /// Whether binary clipboard formats cross the wire, as a page's sanitized
@@ -206,10 +207,9 @@ pub trait Display: Send + Sync {
     /// The DPI the desktop has now, which the last page of any session gave it.
     fn applied_dpi(&self) -> Option<i32>;
 
-    /// Wayland: the first half of the layout apply, before the primary's capture start:
-    /// retire, shrink, and move compositor screens, growing the primary's to hold its
-    /// rectangle at `primary_scale` (`_apply_wayland_output_layout`). `keep` names the live
-    /// captures that follow the layout.
+    /// Wayland: the first half of the layout apply, before the primary's capture start: retire,
+    /// shrink, and move compositor screens, growing the primary's to hold its rectangle at
+    /// `primary_scale`. `keep` names the live captures that follow the layout.
     async fn wayland_layout_before_start(
         &self,
         layouts: &mut Layouts,
@@ -219,8 +219,7 @@ pub trait Display: Send + Sync {
 
     /// Wayland: the second half, once the primary's capture start sized its screen: grow each
     /// laid-out secondary's session screen and create its output at its rectangle, at the DPI in
-    /// `dpis`, the scale the session leaves returned in `LayoutOutcome::scales`
-    /// (`_create_wayland_outputs`).
+    /// `dpis`, the scale the session leaves returned in `LayoutOutcome::scales`.
     async fn wayland_layout_after_primary(
         &self,
         layouts: &mut Layouts,
@@ -321,7 +320,7 @@ pub trait Webcam: Send + Sync {
     fn demand_detach(&self, port: &Arc<dyn DemandTransport>);
 }
 
-/// The host's resource sampler (`resource_stats.ResourceMonitor`).
+/// The host's resource sampler ([`crate::stats::resources::ResourceMonitor`]).
 #[async_trait]
 pub trait Stats: Send + Sync {
     /// Start the monitor with the first connection, sampling only while `watched` and calling
@@ -342,7 +341,7 @@ pub trait Stats: Send + Sync {
     fn host_stats(&self) -> Map<String, Json>;
 }
 
-/// The process supervisor the transport reports to (`stream_server`'s supervisor).
+/// The process supervisor the transport reports to ([`crate::server::stack::TransportSupervisor`]).
 pub trait Supervisor: Send + Sync {
     /// The transport in force, `websockets` or `webrtc`; `None` between services.
     fn current_mode(&self) -> Option<String>;
@@ -354,7 +353,7 @@ pub trait Supervisor: Send + Sync {
     fn pending_print_documents(&self) -> Vec<(String, u64)>;
 }
 
-/// The Prometheus gauges fed server-side (`metrics.Metrics`).
+/// The Prometheus gauges fed server-side ([`crate::stats::metrics::Metrics`]).
 pub trait Metrics: Send + Sync {
     fn set_fps(&self, fps: f64);
     fn set_latency(&self, ms: f64);

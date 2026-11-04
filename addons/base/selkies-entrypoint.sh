@@ -13,12 +13,13 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 # shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
 [ -f "${XDG_RUNTIME_DIR}/container-env" ] && . "${XDG_RUNTIME_DIR}/container-env"
 
-# The interposers belong to the session's applications, never to the backend that
-# serves them: they answer for /dev/video0 and /dev/input, which capture and
-# gamepads must keep seeing as the kernel reports them, and their process-wide
-# read/close/ioctl/epoll_ctl hooks block the asyncio loop. SELKIES_INTERPOSER
-# stays exported, telling the backend applications reach gamepads through the
-# preload. Dropped by value, so an operator-supplied LD_PRELOAD survives.
+# The interposers belong to the session's applications, never to the backend
+# that serves them: they answer for /dev/video0 and /dev/input, which capture
+# and gamepads must keep seeing as the kernel reports them, and their
+# process-wide read/close/ioctl/epoll_ctl hooks would block the server's event
+# loop. SELKIES_INTERPOSER stays exported, telling the backend applications
+# reach gamepads through the preload. Dropped by value, so an operator-supplied
+# LD_PRELOAD survives.
 if [ -n "${LD_PRELOAD:-}" ]; then
   kept=""
   rest="${LD_PRELOAD}"

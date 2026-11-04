@@ -6,8 +6,7 @@
 
 //! Server-side keyboard, mouse, touch, and IME injection with the input authority both
 //! transports enforce, and the fallback ladders for X11 (XTEST) and Wayland (the compositor's
-//! seat, the virtual keyboard, a clipboard paste) (`input_handler.py`, `server_keysym_map.py`,
-//! `x11_xkb.py`).
+//! seat, the virtual keyboard, a clipboard paste).
 //!
 //! Both transports feed every input-channel text message into one [`Dispatcher`], so input
 //! authority ([`authority`]) and fallback behavior stay identical across modes. Injection

@@ -19,7 +19,7 @@
 //! AES-128-GCM, and AES-128-CM with an 80-bit HMAC-SHA1 tag (RFC 5764, RFC 7714), and the
 //! keying material is the RFC 5764 export, `2 * (key + salt)` bytes under the label
 //! `EXTRACTOR-dtls_srtp`. The cipher suites offered are ECDHE-ECDSA with AES-128-GCM,
-//! ChaCha20-Poly1305, and AES-256-CBC-SHA, as the fork offered.
+//! ChaCha20-Poly1305, and AES-256-CBC-SHA.
 //!
 //! `Dtls` is sans-IO over `rtc_dtls::endpoint::Endpoint`: the task feeds it the datagrams that
 //! arrive on the pair, drives its retransmission timer, and sends what it queues. The endpoint
@@ -511,7 +511,7 @@ mod tests {
     }
 
     /// Two transports complete a handshake in memory and exchange application records, each
-    /// datagram delivered whole and without a later one: the fork's `test_dtls_records`.
+    /// datagram delivered whole and without a later one.
     #[test]
     fn records_are_delivered_as_they_arrive_and_close_notify_closes() {
         let now = Instant::now();

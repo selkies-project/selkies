@@ -760,8 +760,8 @@ fn ip_from_sdp(info: &ConnectionInformation) -> Option<String> {
     info.address.as_ref().map(|a| a.address.clone())
 }
 
-/// `rtc_sdp::MediaDescription::attribute` reports a flag as `Some(None)`; the fork read a
-/// flag's value as the empty string.
+/// `rtc_sdp::MediaDescription::attribute` reports a flag as `Some(None)`, whose value reads as the
+/// empty string.
 fn attribute_value(attribute: &Attribute) -> &str {
     attribute.value.as_deref().unwrap_or("")
 }

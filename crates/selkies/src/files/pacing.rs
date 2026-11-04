@@ -559,10 +559,9 @@ impl TransferPacer {
 
 #[cfg(test)]
 mod tests {
-    //! `tests/unit/test_transfer_pacer.py`: the bucket delivers the configured rate, the
-    //! congestion step arms its ceiling once per epoch and probes multiplicatively only before
-    //! the first congestion, an unset cap does not throttle, chunks follow the rate, and the
-    //! gauge's verdicts come from timing its own pings.
+    //! The bucket delivers the configured rate, the congestion step arms its ceiling once per epoch
+    //! and probes multiplicatively only before the first congestion, an unset cap does not
+    //! throttle, chunks follow the rate, and the gauge's verdicts come from timing its own pings.
 
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};

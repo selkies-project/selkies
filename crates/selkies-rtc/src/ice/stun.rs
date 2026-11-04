@@ -10,11 +10,11 @@
 //! Every datagram a peer sends reaches `is_stun` and, when it is one, `parse` before any
 //! authentication, so both refuse anything malformed with an error rather than a panic: a
 //! truncated attribute, a length that does not match, a fingerprint that does not check.
-//! `authenticate_request` is the short-term credential rule of RFC 5389 10.1.2 as the fork
-//! applies it: a request needs both USERNAME and MESSAGE-INTEGRITY, its USERNAME must open with
-//! the local fragment, and its HMAC must be the local password's; one that fails any of these is
-//! answered 400 and its source is never learned as a peer. The messages built here carry
-//! MESSAGE-INTEGRITY and FINGERPRINT, in that order, as every check and answer on the wire does.
+//! `authenticate_request` is the short-term credential rule of RFC 5389 10.1.2: a request needs
+//! both USERNAME and MESSAGE-INTEGRITY, its USERNAME must open with the local fragment, and its
+//! HMAC must be the local password's; one that fails any of these is answered 400 and its source is
+//! never learned as a peer. The messages built here carry MESSAGE-INTEGRITY and FINGERPRINT, in
+//! that order, as every check and answer on the wire does.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};

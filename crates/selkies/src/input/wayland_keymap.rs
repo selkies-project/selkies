@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Keysym policy owner for the Wayland compositor seat (`_WaylandKeymapOwner`).
+//! Keysym policy owner for the Wayland compositor seat.
 //!
 //! Resolves keysyms to keycodes against the compositor's own keymap (synthesizing Shift and
 //! AltGr for leveled glyphs) and binds unmapped keysyms, Unicode codepoints and IME output, to

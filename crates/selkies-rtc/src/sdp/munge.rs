@@ -20,9 +20,9 @@
 //! 4:4:4, H.265 Main 10 in place of Main, H.264 High 10 (`6e001f`); AV1's main profile
 //! carries both depths.
 //!
-//! `settle_fullcolor` and `settle_ten_bit` are the pure parts of `RTCApp._settle_fullcolor`
-//! and `_settle_ten_bit`: whether the offer may describe 4:4:4 or 10 bits to a peer whose
-//! hello named what it decodes, and what the engine has to do about it.
+//! `settle_fullcolor` and `settle_ten_bit` are the pure parts of the engine's settlement before an
+//! offer: whether the offer may describe 4:4:4 or 10 bits to a peer whose hello named what it
+//! decodes, and what the engine has to do about it.
 
 use std::fmt::Write as _;
 
@@ -57,9 +57,8 @@ pub enum Settlement {
     /// The format is off for this offer: the host carries no such format for the encoder,
     /// so the stream is the plain one whatever is asked, and the setting stays.
     HostLacks,
-    /// The peer decodes no such format: the display should turn it off before the offer
-    /// (`on_fullcolor_declined`, `on_ten_bit_declined`); where the setting is held, the
-    /// offer keeps it and the peer paints nothing of the stream.
+    /// The peer decodes no such format: the display should turn it off before the offer; where the
+    /// setting is held, the offer keeps it and the peer paints nothing of the stream.
     Decline,
 }
 

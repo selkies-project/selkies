@@ -598,9 +598,9 @@ impl StreamWatch {
 
 #[cfg(test)]
 mod tests {
-    //! The checks of `tests/unit/test_stream_stats.py` that belong to this module: the verb,
-    //! the hardware expectation, GPU presence, and the differencing of a capture's counters
-    //! with the figures a window adds. The monitor's own checks live in `resources`.
+    //! The stats checks that belong to this module: the verb, the hardware expectation, GPU
+    //! presence, and the differencing of a capture's counters with the figures a window adds. The
+    //! monitor's own checks live in `resources`.
 
     use super::*;
     use crate::settings::{Sides, TenBit};

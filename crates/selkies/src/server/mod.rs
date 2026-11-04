@@ -4,9 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The stream server: the one HTTP application every deployment fronts and the supervisor
-//! of the active streaming service (websockets or webrtc), so only one owns capture at a
-//! time (`stream_server.py`'s `CentralizedStreamServer`, `__main__.py`'s `run`).
+//! The stream server: the one HTTP application every deployment fronts and the supervisor of the
+//! active streaming service (websockets or webrtc), so only one owns capture at a time.
 //!
 //! `run` publishes the socket directories the interposers read, starts the Computer-Use
 //! server where configured, waits for the app's ready file, settles the desktop's density

@@ -16,8 +16,8 @@
  * the rest), which it may set again on its root.
  *
  * Adding a layout is a component over those, one entry here, its value in the
- * server's `ui_layout` enum (`settings.py`), and its name in the dictionary
- * (`layout.<id>`).
+ * server's `ui_layout` enum (`crates/selkies/src/settings/table.rs`), and its
+ * name in the dictionary (`layout.<id>`).
  *
  * Which layout a page shows: the pick stored under the prefixed `ui_layout`
  * key, else what the server names in `ui_layout` (its `/api/status` probe

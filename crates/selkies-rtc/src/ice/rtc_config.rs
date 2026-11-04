@@ -71,7 +71,7 @@ pub const FILE_POLL: Duration = Duration::from_secs(1);
 /// The lifetime asked of Cloudflare's credentials.
 pub const CLOUDFLARE_TTL: u64 = 86400;
 
-/// Everything `urllib.parse.quote(safe="")` escapes: all but letters, digits, and `_.-~`.
+/// The userinfo escape: everything but letters, digits, and `_.-~` is percent-encoded.
 const USERINFO: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'.')
@@ -1267,7 +1267,7 @@ mod tests {
         );
     }
 
-    /// The fork's `turn_credentials_unlogged`: the peer gets the credential, a log line does not.
+    /// The peer gets the credential, a log line does not.
     #[test]
     fn a_peer_gets_the_turn_credential_and_the_log_does_not() {
         let turn = vec![

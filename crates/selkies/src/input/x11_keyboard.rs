@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The X11 keyboard injector over XTEST (`_XTestKeyboard`).
+//! The X11 keyboard injector over XTEST.
 //!
 //! Keysyms the layout lacks (Unicode, exotic symbols) bind on demand to spare keycodes, so they
 //! inject in-process through XTEST instead of forking xdotool. The bindings are round-robin
@@ -467,11 +467,10 @@ impl<L: XLink> XTestKeyboard<L> {
         self.placement = None;
     }
 
-    /// Handle one keymap event the link reported (`_handle_mapping_notify`): refresh the cache
-    /// and keep the overlay coherent with server-side keymap changes. A modifier remap only
-    /// re-resolves the Shift/AltGr keycodes: it never touches the overlay, and this shim's own
-    /// overlay binds surface as modifier notifies on some servers, so clearing the overlay
-    /// there would loop bind, notify, clear forever.
+    /// Handle one keymap event the link reported: refresh the cache and keep the overlay coherent
+    /// with server-side keymap changes. A modifier remap only re-resolves the Shift/AltGr keycodes:
+    /// it never touches the overlay, and this shim's own overlay binds surface as modifier notifies
+    /// on some servers, so clearing the overlay there would loop bind, notify, clear forever.
     pub fn keymap_changed(&mut self, event: super::x11_link::KeymapEvent) {
         use super::x11_link::KeymapEvent;
         match event {
@@ -848,7 +847,7 @@ impl<L: XLink> XTestKeyboard<L> {
         self.link.flush();
     }
 
-    /// Type a string in-process (`_type_text_xtest`'s shim half).
+    /// Type a string in-process, the shim half of `Dispatcher::type_text_xtest`.
     ///
     /// Each character is a press and release of its keysym (mapped characters with shift
     /// synthesis, unmapped ones through the spare-keycode overlay). A character prefers its
@@ -1138,7 +1137,7 @@ pub(crate) mod testing {
         }
     }
 
-    /// Latin letters on keycodes 38 to 63, as `test_x11_ime_binds.py` lays its keymap out.
+    /// Latin letters on keycodes 38 to 63.
     pub fn latin_letters() -> HashMap<u8, Vec<u32>> {
         (38u8..64)
             .map(|kc| (kc, vec![0x61 + kc as u32 - 38]))
@@ -1204,7 +1203,7 @@ mod tests {
         XTestKeyboard::new(FakeLink::new(bound, pc105_modmap()))
     }
 
-    /// `test_x11_text_spares.py`: the pool's order on both keycode sets.
+    /// The pool's order on both keycode sets.
     #[test]
     fn text_spares_lead_the_pool() {
         let mut kb = keyboard(xfree86());
@@ -1346,7 +1345,7 @@ mod tests {
         );
     }
 
-    /// `test_x11_ime_binds.py`: telling this shim's notify from a foreign change.
+    /// Telling this shim's notify from a foreign change.
     #[test]
     fn own_notify_reads_as_intact() {
         let mut kb = keyboard(latin_letters());
