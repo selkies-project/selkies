@@ -11,7 +11,9 @@ in the named fallback header; the
 liveness routes, the static client, and the WebSocket handshakes (which carry
 their own token gate) stay as they are. A viewer-role token is refused where
 the view-only password is. With Basic auth on as well, a token is accepted
-beside the Basic credentials; without a master token nothing changes.
+beside the Basic credentials, and Basic credentials without one count as a
+viewer, as a proxy may send the session's login for every participant; without
+a master token nothing changes.
 """
 import asyncio
 import base64
@@ -312,7 +314,17 @@ async def secure_basic_on() -> None:
         check("Basic+token: the page itself wants Basic", status == 401 and (challenge or "").startswith("Basic"),
               f"{status} {challenge!r}")
         status, body, _ = await app.call("POST", "/api/upload", headers={"Authorization": _basic("user", "secret")})
-        check("Basic+token: Basic credentials upload", status == 200 and body == "controller", f"{status} {body}")
+        check("Basic+token: Basic credentials without a token count as a viewer and cannot upload",
+              status == 403 and body == "viewer", f"{status} {body}")
+        status, body, _ = await app.call("GET", "/api/files/", headers={"Authorization": _basic("user", "secret")})
+        check("Basic+token: nor list files", status == 403 and body == "viewer", f"{status} {body}")
+        basic = {"Authorization": _basic("user", "secret")}
+        status, body, _ = await app.call("POST", "/api/upload", headers=dict(basic, **_cookie(CTRL)))
+        check("Basic+token: a proxy's Basic login beside a controller's cookie uploads as controller",
+              status == 200 and body == "controller", f"{status} {body}")
+        status, body, _ = await app.call("GET", "/api/files/", headers=dict(basic, **_cookie(VIEW)))
+        check("Basic+token: a proxy's Basic login beside a viewer's cookie lists no files",
+              status == 403 and body == "viewer", f"{status} {body}")
         status, body, _ = await app.call("POST", "/api/upload", headers=_bearer(CTRL))
         check("Basic+token: a session token uploads beside Basic (a script's header replaces the browser's)",
               status == 200 and body == "controller", f"{status} {body}")
@@ -329,7 +341,7 @@ async def secure_basic_on() -> None:
         status, _, _ = await app.call("POST", "/api/switch", headers=_bearer(VIEW))
         check("Basic+token: a viewer token still cannot", status == 403, status)
         status, _, _ = await app.call("POST", "/api/switch", headers={"Authorization": _basic("user", "secret")})
-        check("Basic+token: Basic credentials switch modes as before", status == 200, status)
+        check("Basic+token: Basic credentials without a token cannot switch modes", status == 403, status)
         status, _, _ = await app.call(
             "GET", "/api/websockets", headers={"Upgrade": "websocket", "Connection": "Upgrade"})
         check("Basic+token: WebSocket upgrades skip Basic (own token gate)", status == 200, status)

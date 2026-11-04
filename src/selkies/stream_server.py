@@ -2521,7 +2521,8 @@ class CentralizedStreamServer:
         WebSocket handshakes skip Basic (a browser cannot attach fresh Basic
         credentials to a handshake, so it would add only an undebuggable
         401). A request that authenticates with the view-only password or a
-        viewer-role token is tagged with ``auth_role_ceiling = "viewer"`` for
+        viewer-role token, or in secure mode reaches an API route with a Basic
+        login and no token, is tagged with ``auth_role_ceiling = "viewer"`` for
         downstream handlers to enforce.
         """
         settings = request.app["settings"]
@@ -2569,8 +2570,12 @@ class CentralizedStreamServer:
             )
             return web.Response(status=403, text="Forbidden origin")
 
-        if (settings.master_token and not is_ws_handshake and not token_path
-                and path.startswith(f"{api_prefix}/api/")):
+        # In secure mode the token decides an API request's role: a Basic login
+        # without one counts as a viewer, as a proxy in front may send the session's
+        # own login for every participant (SealSkin's rooms).
+        token_bound = bool(settings.master_token and not is_ws_handshake and not token_path
+                           and path.startswith(f"{api_prefix}/api/"))
+        if token_bound:
             verdict = self._session_token_verdict(request, settings)
             if verdict is not None:
                 ceiling, source = verdict
@@ -2633,7 +2638,7 @@ class CentralizedStreamServer:
                 )
                 return self._basic_auth_challenge(request)
             request["auth_role_ceiling"] = (
-                "viewer" if (viewonly_ok and not main_ok) else "controller"
+                "viewer" if (viewonly_ok and not main_ok) or token_bound else "controller"
             )
         except Exception:
             return self._basic_auth_challenge(request)

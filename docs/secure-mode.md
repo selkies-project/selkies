@@ -71,7 +71,7 @@ scrape_configs:
 
 ## Secure Mode with Basic Authentication
 
-Both can be on. Basic authentication then guards the page load and anything that presents no token; a request that carries a valid session token is accepted on the API routes without Basic credentials (a script's own `Authorization` header replaces the browser's cached ones, so this is what lets the tokened page work behind a login). The WebSocket handshakes skip Basic in secure mode and rely on the token, since a browser cannot attach fresh credentials to an upgrade. The mode switch still takes the master token or the Basic login, not a session token.
+Both can be on. Basic authentication then guards the page load and anything that presents no token; a request that carries a valid session token is accepted on the API routes without Basic credentials (a script's own `Authorization` header replaces the browser's cached ones, so this is what lets the tokened page work behind a login). On the API routes the token decides the role: Basic credentials that come without one count as a viewer and are refused what a viewer token is (uploads, the file listing, printed documents, the mode switch, starting or stopping a recording), since a proxy in front may send the session's own login for every participant. The WebSocket handshakes skip Basic in secure mode and rely on the token, since a browser cannot attach fresh credentials to an upgrade. The mode switch takes a controller session token or the master token.
 
 ## Origin Checks
 
