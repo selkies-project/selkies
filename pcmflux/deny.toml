@@ -33,13 +33,6 @@ allow = [
 confidence-threshold = 0.8
 exceptions = []
 
-# pcmflux carries its license in the repository LICENSE file (MPL-2.0) rather
-# than in a Cargo.toml `license` field.
-[[licenses.clarify]]
-crate = "pcmflux"
-expression = "MPL-2.0"
-license-files = []
-
 [licenses.private]
 ignore = false
 
