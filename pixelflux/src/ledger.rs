@@ -30,6 +30,88 @@ use smithay::utils::{Physical, Rectangle};
 /// covers (`BlockPlan::refines_area`).
 pub const BLOCK: i32 = 16;
 
+/// Quality index steps finer than the paint-over one x264 codes a refined block at, so the block
+/// comes to what the region's own cleanup reaches: one predicted frame at the paint-over
+/// quantizer left 1080p text at 44.6 dB, where the cleanup's key frame, at x264's intra offset,
+/// reached 49.1; six steps finer reached 49.4. Each encoder that refines says its own
+/// (`FrameEncoder::refines`).
+pub const REFINE_FINER: u32 = 6;
+
+/// The most blocks a region refines a frame, as a share of it: a large set is refined over
+/// `REFINE_FRAMES` frames at least rather than in one frame the size of a cleanup. A constant
+/// quality refines that many; a constant rate starts at a share of `REFINE_START_FRAMES` and
+/// follows its rate control (`RefinePace`).
+const REFINE_FRAMES: usize = 64;
+const REFINE_START_FRAMES: usize = 512;
+
+/// Quality index steps the rate control's frames may come out coarser than before the region
+/// started refining before its refined blocks a frame halve (or past `REFINE_OVER`); where they
+/// come out no coarser, a quarter more. Dense 1080p text refined at 128 blocks a frame beside a
+/// video at 8 Mbit/s ran x264's row-level control past quantizer 51, where it scales every
+/// macroblock offset toward nothing, and left the text at 42 dB; at 16 a frame it reached 48.
+const REFINE_RISE: i32 = 2;
+
+/// Frame budgets a refining frame may come out at before its refined blocks a frame halve, as
+/// they do past `REFINE_RISE`: a rate control pinned at its coarsest quantizer says nothing
+/// through it, and at 2 Mbit/s at 1080p x264 sent the refinement at twice the rate.
+const REFINE_OVER: f64 = 1.5;
+
+/// A frame's refinement: the blocks (`plan`), the quality index they are coded at (`target`),
+/// and the rate control's index the offset to it was taken from (`from`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refinement {
+    pub plan: BlockPlan,
+    pub target: i32,
+    pub from: i32,
+}
+
+impl Refinement {
+    /// The quality index steps the refined blocks are coded off the frame's own.
+    pub fn offset(&self) -> i32 {
+        (self.target - self.from).min(0)
+    }
+}
+
+/// How many blocks a region refines a frame (`REFINE_FRAMES`, `REFINE_RISE`, `REFINE_OVER`).
+#[derive(Clone, Debug, Default)]
+pub struct RefinePace {
+    count: usize,
+    base: Option<i32>,
+}
+
+impl RefinePace {
+    /// The most blocks of a region of `blocks` this frame refines, under a constant rate or not.
+    pub fn most(&mut self, blocks: usize, constant_rate: bool) -> usize {
+        let most = blocks.div_ceil(REFINE_FRAMES);
+        if !constant_rate {
+            return most;
+        }
+        if self.count == 0 {
+            self.count = blocks.div_ceil(REFINE_START_FRAMES);
+        }
+        self.count.min(most)
+    }
+
+    /// A frame the rate control coded at quality index `coded` in `bytes` against a `budget`,
+    /// which refined blocks or not, of a region of `blocks`.
+    pub fn coded(&mut self, refined: bool, coded: i32, bytes: usize, budget: f64, blocks: usize) {
+        if !refined {
+            self.base = Some(coded);
+            return;
+        }
+        let base = *self.base.get_or_insert(coded);
+        let most = blocks.div_ceil(REFINE_FRAMES);
+        let count = self.count;
+        self.count = if bytes as f64 > budget * REFINE_OVER || coded > base + REFINE_RISE {
+            (count / 2).max(1)
+        } else if coded <= base {
+            (count + count / 4 + 1).min(most)
+        } else {
+            count
+        };
+    }
+}
+
 /// The blocks of a picture to code at the paint-over quality this frame (`BlockLedger::plan`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockPlan {
@@ -176,6 +258,16 @@ impl BlockLedger {
             refine,
             count,
         })
+    }
+
+    /// A frame that carried `refinement` came out with the rate control at quality index
+    /// `coded`: its blocks are clean where that put them at the target or finer. A rate control
+    /// codes the rows a refinement overspends coarser, and a block it left short is refined again
+    /// on its next turn, from the index it now codes at.
+    pub fn refinement_coded(&mut self, refinement: &Refinement, coded: i32) {
+        if coded + refinement.offset() <= refinement.target {
+            self.refined(&refinement.plan);
+        }
     }
 
     /// The blocks `plan` refined were coded at the paint-over quality: they are clean.

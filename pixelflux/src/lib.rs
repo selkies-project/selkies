@@ -1603,14 +1603,24 @@ fn wayland_encode_loop<B: WlPayload>(
             if encoder.take_lost_cleanup() {
                 hw_state.lost_frame();
             }
-            let decision = crate::pipeline::decide_hw_fullframe(
+            let damage = crate::pipeline::Damage::of_rects(&f.damage, width, height);
+            let mut decision = crate::pipeline::decide_hw_fullframe(
                 &mut hw_state,
                 &settings,
                 f.frame_id,
-                crate::pipeline::Damage::of_rects(&f.damage, width, height),
+                damage,
                 f.is_animated,
                 requested_idr,
                 crate::pipeline::EncoderQuality::of(encoder),
+            );
+            crate::pipeline::plan_refinement(
+                &mut hw_state,
+                &settings,
+                &mut decision,
+                damage,
+                Some(&f.damage),
+                encoder.refines(),
+                encoder.last_quality(),
             );
             if decision.send || encoder.holds_frame() {
                 let force_idr = decision.force_idr;
@@ -1629,6 +1639,12 @@ fn wayland_encode_loop<B: WlPayload>(
                 } else {
                     encoder.push_held(f.frame_id as u64)
                 };
+                crate::pipeline::refinement_coded(
+                    &mut hw_state,
+                    &settings,
+                    &decision,
+                    crate::pipeline::EncoderQuality::of(encoder),
+                );
                 match outcome {
                     Ok(data) => {
                         hw_error_streak = 0;

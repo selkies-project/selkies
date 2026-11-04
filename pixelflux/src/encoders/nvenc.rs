@@ -841,6 +841,14 @@ fn set_cbr_rate(rc: &mut NV_ENC_RC_PARAMS, bps: u32, vbv: u32) {
     rc.vbvInitialDelay = vbv;
 }
 
+/// Quality index steps finer than the paint-over one a refined block is coded at
+/// (`FrameEncoder::refines`): what brings it to the quality NVENC's own cleanup of a still screen
+/// reaches. 1080p text beside a video, H.264 on an RTX 3060, against that cleanup's 45.2 dB at
+/// 8 Mbit/s, 47.6 at 16, and 47.0 at a constant quality: 44.4, 45.5, and 46.8 at the paint-over
+/// quantizer, 45.9, 47.0, and 48.1 three steps finer, 48.2, 48.7, and 50.6 six steps finer,
+/// spending on the text what the video would have had.
+pub const REFINE_FINER: u32 = 3;
+
 /// The share of its cap a held band taken back for coming out past it is coded again to, at the
 /// bytes a block of it came to (`NvencEncoder::cap`): the next rows of a page can be denser.
 const REFIT_SHARE: f64 = 0.8;
@@ -1726,6 +1734,12 @@ pub struct NvencEncoder {
     /// Bytes of the last held frame, and the QP delta map a held band is coded through.
     held_bytes: usize,
     qp_map: Vec<i8>,
+    /// The blocks the next frame of the rate control's refines (`refine_blocks`), whether the
+    /// session's rate control takes a QP delta map, and whether the driver refused one, said
+    /// once, which ends refinement on the session.
+    refinement: Option<crate::ledger::Refinement>,
+    delta_mapped: bool,
+    refine_refused: bool,
     /// The quality index the rate control last coded a frame at (held frames aside), from the
     /// driver's average quantizer.
     last_quality: Option<u32>,
@@ -2814,6 +2828,9 @@ impl NvencEncoder {
                 lost_cleanup: false,
                 held_bytes: 0,
                 qp_map: Vec::new(),
+                refinement: None,
+                delta_mapped: false,
+                refine_refused: false,
                 last_quality: None,
                 last_bytes: None,
                 encode_config: config,
@@ -3585,6 +3602,63 @@ impl NvencEncoder {
         self.held_band = band.filter(|_| self.band_size().is_some());
     }
 
+    /// Whether the session refines blocks through a QP delta map under its rate control
+    /// (`refine_blocks`): H.264, HEVC, and AV1, until the driver refuses the map.
+    pub fn refines(&self) -> bool {
+        matches!(self.codec, Codec::H264 | Codec::H265 | Codec::Av1) && !self.refine_refused
+    }
+
+    /// Code the blocks `refinement` names in the next frame of the rate control's at its target
+    /// quality, through the frame's QP delta map: each map unit (a 16x16 macroblock, a 32x32
+    /// coding tree block, a 64x64 superblock) holding a refined block takes the delta from the
+    /// quantizer the rate control last coded at to the target, the rest 0. The rate control
+    /// is put on the delta map mode the first time, by the reconfigure that takes the
+    /// rate-control mode without a reset, and stays there.
+    pub fn refine_blocks(&mut self, refinement: &crate::ledger::Refinement) {
+        self.refinement = self.refines().then(|| refinement.clone());
+    }
+
+    /// Fill `qp_map` for `refinement` (`refine_blocks`), returning whether the session codes
+    /// through it, which a refused reconfigure ends for good.
+    unsafe fn refine_map(&mut self, refinement: &crate::ledger::Refinement) -> bool {
+        if !self.delta_mapped {
+            let saved = self.encode_config.rcParams;
+            self.encode_config.rcParams.qpMapMode = NV_ENC_QP_MAP_MODE::NV_ENC_QP_MAP_DELTA;
+            let status = self.reconfigure(false, false);
+            if status != NVENCSTATUS::NV_ENC_SUCCESS {
+                self.encode_config.rcParams = saved;
+                self.refine_refused = true;
+                eprintln!(
+                    "[NVENC] Refining blocks through a QP delta map refused ({status:?}): {}",
+                    last_error(&self.nvenc_funcs, self.encoder_session)
+                );
+                return false;
+            }
+            self.delta_mapped = true;
+        }
+        let hw = |index: i32| self.codec.hardware_quantizer(Hardware::Nvenc, index) as i32;
+        let delta = (hw(refinement.target) - hw(refinement.from)).clamp(i8::MIN as i32, 0) as i8;
+        let unit = match self.codec {
+            Codec::H264 => 16,
+            Codec::H265 => 32,
+            _ => 64,
+        };
+        let (cols, rows) = (self.width.div_ceil(unit), self.height.div_ceil(unit));
+        let plan = &refinement.plan;
+        self.qp_map.clear();
+        self.qp_map.extend((0..rows).flat_map(|row| {
+            (0..cols).map(move |col| {
+                let (x, y, u) = ((col * unit) as i32, (row * unit) as i32, unit as i32);
+                if plan.refines_area(x, y, u, u) {
+                    delta
+                } else {
+                    0
+                }
+            })
+        }));
+        true
+    }
+
     /// Take the next frame back where it comes out past `bytes` and code it again within them: a
     /// held band in a shorter one, to `REFIT_SHARE` of them at the bytes the band came to, and a
     /// frame of the rate control's at the coarsest quantizer, which on a still screen refines
@@ -3941,6 +4015,15 @@ impl NvencEncoder {
                 _ => self.hold_rate(q, None),
             }
         });
+        let refinement = self
+            .refinement
+            .take()
+            .filter(|_| held_qp.is_none() && !force_idr);
+        if let Some(refinement) = refinement
+            && self.refine_map(&refinement)
+        {
+            point_at_qp_map(&mut pic_params, &mut self.qp_map, nvenc_cur_ver());
+        }
         let mut result = self.encode_picture(
             &mut pic_params,
             output_bitstream,

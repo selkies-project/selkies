@@ -270,11 +270,14 @@ paint-over quantizer once the region holds still for the trigger, a key frame at
 change has held still for four times that, and the same cleanup for a region that keeps changing
 only a little. Within a region that keeps changing, a block ledger (`ledger.rs`) refines the blocks that
 held still for the trigger and are not clean through the encoder's per-block quantizer, six steps
-finer than the paint-over quantizer, a turn of them a frame sized to what the rate control has
+finer than the paint-over quantizer as the encoder needs to come to what its own cleanup
+reaches (six for x264, three for NVENC), a turn of them a frame sized to what the rate control has
 room for, a block counting clean once its frame came out at that quantizer: a video playing in
 one window no longer holds the text around it at motion quality. x264's sessions take it as
 macroblock quantizer offsets, under adaptive quantization at a strength that moves no quantizer
-itself; the other encoders keep the region-wide cleanup alone. Under a constant quality the cleanup moves the session's quality to the
+itself, and NVENC's H.264, HEVC, and AV1 through the QP delta map under the rate control, on X11
+(XShm, the shared framebuffer, DRI3) and Wayland; NvFBC, whose driver says only that a frame is
+new, and the other encoders keep the region-wide cleanup alone. Under a constant quality the cleanup moves the session's quality to the
 paint-over one until the region moves again (`pipeline::decide_constant_quality`, and the stripe's
 rate factor in `encode_cpu`), as main's paint-over did, so every encoder codes the cleanup key
 frame the way it codes one at that quality, with its own intra offset. Under a constant rate,

@@ -505,7 +505,7 @@ fn captured_damage(
 
 /// The root's damaged `rects` in the coordinates of the captured area at (`x`, `y`), `width` x
 /// `height`, clipped to it.
-fn frame_rects(
+pub(crate) fn frame_rects(
     rects: &[Rectangle],
     x: i16,
     y: i16,
@@ -2649,6 +2649,19 @@ mod damage_tests {
     #[test]
     #[ignore]
     fn x11_ledger_refines_the_still_area_beside_motion() {
+        refines_the_still_area_beside_motion(true);
+    }
+
+    /// The same through the hardware encoder of the capture's GPU, on a server whose screen
+    /// lives on it (DRI3, NVENC's QP delta map).
+    #[test]
+    #[ignore]
+    fn gpu_dri3_ledger_refines_the_still_area_beside_motion() {
+        refines_the_still_area_beside_motion(false);
+    }
+
+    /// `x11_ledger_refines_the_still_area_beside_motion` in software (`use_cpu`) or not.
+    fn refines_the_still_area_beside_motion(use_cpu: bool) {
         use crate::cleanup_bench::{psnr_outside, source_luma};
         use crate::encoders::codec::{Codec, VIDEO_HEADER_LEN};
         use crate::webcam::decode::{Codec as DecCodec, Decoder, VideoDecoder};
@@ -2682,7 +2695,14 @@ mod damage_tests {
         put(&noise(w as usize, h as usize, 7), 0, 0, w, h);
         let settings = CaptureSettings {
             codec: Codec::H264,
-            use_cpu: true,
+            use_cpu,
+            encode_node_index: if use_cpu {
+                -1
+            } else {
+                crate::auto_render_node("true")
+                    .and_then(|node| crate::render_node_index(&node))
+                    .unwrap_or(0)
+            },
             video_fullframe: true,
             video_streaming_mode: false,
             video_cbr_mode: false,

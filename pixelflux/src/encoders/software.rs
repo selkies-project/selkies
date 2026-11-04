@@ -27,7 +27,7 @@ use super::reference::{Invalidation, ReferenceWindow};
 #[cfg(feature = "gpl")]
 use super::sps::{WideFrameNum, h264_frame_num_range};
 use crate::CaptureSettings;
-use crate::ledger::BlockLedger;
+use crate::ledger::{BlockLedger, RefinePace};
 use crate::pipeline::{Cleanup, Damage};
 use rayon::prelude::*;
 use smithay::utils::{Physical, Rectangle};
@@ -1190,10 +1190,8 @@ pub struct StripeState {
     /// The region's blocks, which held still and which are clean (`ledger`), for refining the
     /// ones that held still while others move.
     pub ledger: BlockLedger,
-    /// The blocks a constant-rate stripe refines a frame at most, and the quantizer its rate
-    /// control coded at before it refined (`REFINE_RISE`); 0 and `None` before the first.
-    pub refine_count: usize,
-    pub refine_base: Option<i32>,
+    /// How many of them a frame refines (`ledger::RefinePace`).
+    pub refine: RefinePace,
 }
 
 /// The bits per sample the striped H.264 path codes `settings` at: 10 where they ask for it
@@ -1418,37 +1416,6 @@ fn ledger_frame(
         ledger.frame(&local);
     }
 }
-
-/// The most blocks a stripe's x264 session refines a frame (`ledger::BlockLedger::plan`), as a
-/// share of the stripe: a large set is refined over `REFINE_FRAMES` frames at least rather
-/// than in one frame the size of a cleanup. A constant quality refines that many; a constant
-/// rate starts at a share of `REFINE_START_FRAMES` and follows its rate control
-/// (`REFINE_RISE`).
-#[cfg(feature = "gpl")]
-const REFINE_FRAMES: usize = 64;
-#[cfg(feature = "gpl")]
-const REFINE_START_FRAMES: usize = 512;
-
-/// Quantizer steps the rate control's frames may come out coarser than before the stripe
-/// started refining before its refined blocks a frame halve (or past `REFINE_OVER`); where
-/// they come out no coarser, a quarter more. Dense 1080p text refined at 128 blocks a frame
-/// beside a video at 8 Mbit/s ran x264's row-level control past quantizer 51, where it scales
-/// every macroblock offset toward nothing, and left the text at 42 dB; at 16 a frame it
-/// reached 48.
-#[cfg(feature = "gpl")]
-const REFINE_RISE: i32 = 2;
-
-/// Frame budgets a refining frame may come out at before its refined blocks a frame halve, as
-/// they do past `REFINE_RISE`: a rate control pinned at its coarsest quantizer says nothing
-/// through it, and at 2 Mbit/s at 1080p x264 sent the refinement at twice the rate.
-#[cfg(feature = "gpl")]
-const REFINE_OVER: f64 = 1.5;
-
-/// Quantizer steps finer than the paint-over one a refined block is coded at: one predicted
-/// frame at the paint-over quantizer left 1080p text at 44.6 dB, where the cleanup's key frame,
-/// at x264's intra offset, reached 49.1; six steps finer reached 49.4.
-#[cfg(feature = "gpl")]
-const REFINE_FINER: i32 = 6;
 
 /// The software encoder's per-frame entry point: split the frame into horizontal stripes,
 /// decide per stripe whether it needs sending, and encode only those as JPEG or H.264 (libx264
@@ -2023,16 +1990,8 @@ pub fn encode_cpu(
                     && !force_idr;
                 let plan = refines
                     .then(|| {
-                        let most = stripe_state.ledger.blocks().div_ceil(REFINE_FRAMES);
-                        let most = if video_cbr {
-                            if stripe_state.refine_count == 0 {
-                                stripe_state.refine_count =
-                                    stripe_state.ledger.blocks().div_ceil(REFINE_START_FRAMES);
-                            }
-                            stripe_state.refine_count.min(most)
-                        } else {
-                            most
-                        };
+                        let blocks = stripe_state.ledger.blocks();
+                        let most = stripe_state.refine.most(blocks, video_cbr);
                         stripe_state.ledger.plan(trigger_frames, most)
                     })
                     .flatten();
@@ -2040,15 +1999,18 @@ pub fn encode_cpu(
                     if let Some(q) = hold.filter(|_| video_cbr) {
                         enc.hold_quantizer(q);
                     }
-                    let offset = plan.as_ref().map(|plan| {
-                        let from = if video_cbr {
-                            enc.last_qp().map_or(video_crf, |q| q as i32)
-                        } else {
-                            video_crf
+                    let refinement = plan.map(|plan| {
+                        let refinement = crate::ledger::Refinement {
+                            plan,
+                            target: video_po_crf - crate::ledger::REFINE_FINER as i32,
+                            from: if video_cbr {
+                                enc.last_qp().map_or(video_crf, |q| q as i32)
+                            } else {
+                                video_crf
+                            },
                         };
-                        let offset = (video_po_crf - REFINE_FINER - from).min(0);
-                        enc.refine_blocks(plan, offset as f32);
-                        offset
+                        enc.refine_blocks(&refinement.plan, refinement.offset() as f32);
+                        refinement
                     });
                     let y_size = width_usize * actual_height;
                     let uv_size = if video_fullcolor { y_size } else { y_size / 4 };
@@ -2141,45 +2103,30 @@ pub fn encode_cpu(
                         if hold.is_none() || !video_cbr {
                             stripe_state.rc_bytes = stripe_state.packet_buf.len();
                         }
-                        // Refined blocks are clean once the frame came out at the paint-over
-                        // quantizer or finer there: x264's row-level control codes the rows a
-                        // refinement overspends coarser, and a block it left short is refined
-                        // again on its next turn, from the quantizer it now codes at.
-                        if let (Some(plan), Some(offset)) = (&plan, offset) {
+                        if let Some(refinement) = &refinement {
                             let coded = if video_cbr {
                                 enc.last_qp().map_or(i32::MAX, |q| q as i32)
                             } else {
                                 video_crf
                             };
-                            if coded + offset <= video_po_crf - REFINE_FINER {
-                                stripe_state.ledger.refined(plan);
-                            }
+                            stripe_state.ledger.refinement_coded(refinement, coded);
                         }
                         if video_cbr
                             && hold.is_none()
                             && !force_idr
                             && let Some(coded) = enc.last_qp().map(|q| q as i32)
                         {
-                            if plan.is_none() {
-                                stripe_state.refine_base = Some(coded);
-                            } else {
-                                let base = *stripe_state.refine_base.get_or_insert(coded);
-                                let most = stripe_state.ledger.blocks().div_ceil(REFINE_FRAMES);
-                                let count = stripe_state.refine_count;
-                                let budget =
-                                    crate::pipeline::frame_budget(video_bitrate, target_fps)
-                                        * actual_height as f64
-                                        / height.max(1) as f64;
-                                let over =
-                                    stripe_state.packet_buf.len() as f64 > budget * REFINE_OVER;
-                                stripe_state.refine_count = if over || coded > base + REFINE_RISE {
-                                    (count / 2).max(1)
-                                } else if coded <= base {
-                                    (count + count / 4 + 1).min(most)
-                                } else {
-                                    count
-                                };
-                            }
+                            let budget = crate::pipeline::frame_budget(video_bitrate, target_fps)
+                                * actual_height as f64
+                                / height.max(1) as f64;
+                            let blocks = stripe_state.ledger.blocks();
+                            stripe_state.refine.coded(
+                                refinement.is_some(),
+                                coded,
+                                stripe_state.packet_buf.len(),
+                                budget,
+                                blocks,
+                            );
                         }
                         if hold.is_some_and(|q| q <= video_po_crf) {
                             stripe_state.ledger.cleaned();

@@ -1348,6 +1348,27 @@ impl FrameEncoder {
         }
     }
 
+    /// Where the session refines blocks of a frame of its rate control's at a quality of their
+    /// own (`refine_blocks`), the quality index steps finer than the paint-over one it codes them
+    /// at, so a refined block comes to what the region's own cleanup reaches; `None` where it
+    /// does not: NVENC's H.264, HEVC, and AV1 through the QP delta map
+    /// (`nvenc::REFINE_FINER`). x264's striped sessions refine within `software::encode_cpu`
+    /// (`ledger::REFINE_FINER`).
+    pub fn refines(&self) -> Option<u32> {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.refines().then_some(nvenc::REFINE_FINER),
+            _ => None,
+        }
+    }
+
+    /// Code the blocks `refinement` names in the next frame, where it is the rate control's, at
+    /// its target quality (`ledger`), where `refines`.
+    pub fn refine_blocks(&mut self, refinement: &crate::ledger::Refinement) {
+        if let FrameEncoder::Nvenc(enc) = self {
+            enc.refine_blocks(refinement);
+        }
+    }
+
     /// Whether `hold_quantizer` holds a frame at the quantizer asked for under the session's rate
     /// control: NVENC, libvpx's VP8, and SVT-AV1 at a constant rate (where the release takes a
     /// new target with a picture) do; x265, VA-API, and libvpx's VP9 only at a constant

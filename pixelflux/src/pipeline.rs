@@ -613,6 +613,8 @@ pub struct HwFrameDecision {
     pub measure: bool,
     /// The bytes a still screen's cleanup frame may come to (`FrameEncoder::cap`).
     pub cap: Option<usize>,
+    /// The blocks this frame refines (`plan_refinement`).
+    pub refine: Option<crate::ledger::Refinement>,
 }
 
 impl HwFrameDecision {
@@ -636,6 +638,105 @@ impl HwFrameDecision {
         if self.measure {
             encoder.measure();
         }
+        if let Some(refinement) = &self.refine {
+            encoder.refine_blocks(refinement);
+        }
+    }
+}
+
+/// The block ledger's part of a full-frame decision `d` (`ledger`): take this frame's change
+/// into `st`'s ledger, from where the source says it changed (`changed`, in the frame's
+/// coordinates), or the whole frame where the source cannot say and `damage` says something
+/// changed; and where the frame goes at the session's own quality while the region moves, on a
+/// session that refines (`refines`, the steps finer than the paint-over quality it refines at)
+/// with the cleanup armed, name the blocks it refines, the offset taken from the quality index
+/// the rate control last coded at (`last`) or, at a constant quality, the session's.
+pub fn plan_refinement(
+    st: &mut StripeState,
+    settings: &CaptureSettings,
+    d: &mut HwFrameDecision,
+    damage: Damage,
+    changed: Option<&[Rectangle<i32, Physical>]>,
+    refines: Option<u32>,
+    last: Option<u32>,
+) {
+    st.ledger.fit(settings.width, settings.height);
+    match changed {
+        Some(rects) if !(rects.is_empty() && damage.is_dirty()) => st.ledger.frame(rects),
+        _ if damage.is_dirty() => st.ledger.frame_all(),
+        _ => st.ledger.frame([]),
+    }
+    let normal = settings.video_crf as u32;
+    let Some(finer) = refines else {
+        return;
+    };
+    if !(settings.cleans_up()
+        && damage.is_dirty()
+        && d.send
+        && !d.force_idr
+        && d.hold_qp.is_none()
+        && d.target_qp == normal)
+    {
+        return;
+    }
+    let blocks = st.ledger.blocks();
+    let most = st.refine.most(blocks, settings.video_cbr_mode);
+    if let Some(plan) = st.ledger.plan(settings.paint_over_trigger(), most) {
+        let from = match (settings.video_cbr_mode, last) {
+            (true, Some(q)) => q as i32,
+            _ => normal as i32,
+        };
+        d.refine = Some(crate::ledger::Refinement {
+            plan,
+            target: settings.video_paintover_crf - finer as i32,
+            from,
+        });
+    }
+}
+
+/// What a full-frame frame decided as `d` left in `st`'s ledger once coded, the encoder now
+/// reporting `quality`: its refined blocks are clean where the rate control's quality index put
+/// them at the target (`BlockLedger::refinement_coded`) and the pace follows the rate control
+/// (`RefinePace`); a frame held whole at the paint-over quality, or the region's cleanup having
+/// run its course, cleans the region, and a key frame at the rate control's own leaves it
+/// unclean.
+pub fn refinement_coded(
+    st: &mut StripeState,
+    settings: &CaptureSettings,
+    d: &HwFrameDecision,
+    quality: EncoderQuality,
+) {
+    let normal = settings.video_crf as u32;
+    if let Some(refinement) = &d.refine {
+        let coded = if settings.video_cbr_mode {
+            quality.last.map_or(i32::MAX, |q| q as i32)
+        } else {
+            normal as i32
+        };
+        st.ledger.refinement_coded(refinement, coded);
+    }
+    if settings.video_cbr_mode
+        && d.send
+        && d.hold_qp.is_none()
+        && !d.force_idr
+        && let Some(coded) = quality.last
+    {
+        let blocks = st.ledger.blocks();
+        st.refine.coded(
+            d.refine.is_some(),
+            coded as i32,
+            quality.bytes.unwrap_or(0),
+            frame_budget(settings.video_bitrate_kbps, settings.target_fps),
+            blocks,
+        );
+    }
+    let paint = settings.video_paintover_crf.max(0) as u32;
+    let cleanup_ended =
+        st.paint_over_sent && st.h264_burst_frames_remaining <= 0 && st.sweep.is_none();
+    if d.cleanup_quality(normal).is_some_and(|q| q <= paint) || cleanup_ended {
+        st.ledger.cleaned();
+    } else if d.force_idr {
+        st.ledger.coarsened();
     }
 }
 
@@ -880,6 +981,7 @@ fn decide_constant_rate(
         hold_band: None,
         measure: false,
         cap: None,
+        refine: None,
     };
     if damage.is_dirty() {
         if !converges || damage.is_motion() {
@@ -1288,6 +1390,7 @@ fn decide_constant_quality(
         hold_band: None,
         measure: false,
         cap: None,
+        refine: None,
     };
     if recovery_idr && cleanup == Cleanup::None {
         d.target_qp = normal_qp;
@@ -1976,6 +2079,18 @@ impl X11Pipeline {
             {
                 self.hold = [decided, (d.cleanup_quality(normal), d.force_idr)];
             }
+            {
+                let enc = self.hw.as_ref().unwrap();
+                plan_refinement(
+                    &mut self.hw_state,
+                    &self.settings,
+                    &mut d,
+                    damage,
+                    Some(changed),
+                    enc.refines(),
+                    enc.last_quality(),
+                );
+            }
             let fc = self.frame_counter as u64;
             if d.send || self.hw.as_ref().unwrap().holds_frame() {
                 let force_idr = d.force_idr;
@@ -2028,6 +2143,12 @@ impl X11Pipeline {
                     self.turbo_dirty.clear();
                     encode()
                 };
+                refinement_coded(
+                    &mut self.hw_state,
+                    &self.settings,
+                    &d,
+                    EncoderQuality::of(enc),
+                );
                 match res {
                     Ok(data) if !data.is_empty() => {
                         self.hw_error_streak = 0;
