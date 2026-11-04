@@ -31,7 +31,7 @@ Video is H.264, H.265, VP8, VP9, or AV1, chosen from the dashboard, encoded on t
 
 **NOTE: this project is licensed under the [Mozilla Public License, version 2.0](https://www.mozilla.org/en-US/MPL/2.0/FAQ/), which obliges to share modified code files licensed by MPL-2.0 when distributed externally, but does not apply for any larger work outside this project, which might be open-source or proprietary under any license of choice. Externally originated components outside this project may contain works licensed over more restrictive copyleft/proprietary licenses, as well as other terms of intellectual property, including but not limited to patents, which users or developers are obliged to adhere to.**
 
-[**Licensing**](licensing.md) inventories those components (Python and npm dependencies, the vendored python-xlib, the GPL libraries the pixelflux wheels bring in) with their licenses.
+[**Licensing**](licensing.md) inventories those components (the crates the server links and the npm dependencies of the web client, the vendored code, the GPL libraries pixelflux brings in) with their licenses.
 
 [**What is Selkies?**](design.md)
 

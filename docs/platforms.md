@@ -126,7 +126,7 @@ in `selkies_command` how the node finds Selkies: `selkies session` from a native
 package or a module, `<AppImage> session`, or
 `apptainer exec --nv <image> selkies session` with the flags
 [Getting Started](start.md#apptainer) gives an image, a home of its own
-among them, so the image's Python does not import the user's packages from the
+among them, so the session keeps its settings and downloads apart from the
 host's home.
 `submit.yml.erb` takes what the site's scheduler needs beyond the hours and the
 queue, and the portal's `host_regex` has to admit the nodes, as for every

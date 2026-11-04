@@ -130,13 +130,13 @@ Please read [**WebRTC and Firewall Issues**](firewall.md).
 
 ### Backgrounds
 
-Selkies has a modularized architecture, but at runtime it is a **single Python application**, the one every package and image carries, that:
+Selkies has a modularized architecture, but at runtime it is a **single executable**, `selkies`, the one every package and image carries, that:
 
-- serves the HTML5 web client, which is bundled inside it (at `src/selkies/selkies_web`) and served from the same single port;
-- captures and encodes the screen through the `pixelflux` extension (hardware H.264 via NVENC or VA-API, software H.264 via `x264` — or OpenH264 in a GPL-free `pixelflux` build — or JPEG);
-- captures and encodes audio through the `pcmflux` extension (Opus);
-- injects keyboard, mouse, and gamepad input through a vendored `python-xlib` (XTEST/XFixes);
-- and, only for the opt-in WebRTC transport, uses a vendored fork of `aiortc`.
+- serves the HTML5 web client, which is installed beside it (at `share/selkies/web` next to the directory holding the executable) and served from the same single port;
+- captures and encodes the screen through the `pixelflux` library it links (hardware H.264 via NVENC or VA-API, software H.264 via `x264` — or OpenH264 in a GPL-free `pixelflux` build — or JPEG);
+- captures and encodes audio through the `pcmflux` library it links (Opus);
+- injects keyboard and mouse input through XTEST/XFixes on X11, and gamepad input through the Input Interposer's sockets or uinput;
+- and, only for the opt-in WebRTC transport, uses its own WebRTC stack, the `selkies-rtc` crate.
 
 `pixelflux`, `pcmflux`, and the web client all travel inside whichever medium you installed. There is **no separate multimedia-framework build or web-interface package to install**.
 
@@ -231,9 +231,9 @@ sudo mkdir -pm1777 /dev/input
 # Starts the remote desktop process with the interposers unloaded: they answer
 # for /dev/input and /dev/video0 in the session's applications, which the
 # gamepad and capture sides must keep seeing as the kernel reports them, and
-# their process-wide hooks can stop the asyncio loop answering. The two
-# variables stay set, which is what tells Selkies applications reach the
-# devices through the preload.
+# their process-wide hooks would sit under the server's own reads and polls.
+# The two variables stay set, which is what tells Selkies applications reach
+# the devices through the preload.
 # In the default WebSocket mode, change `--encoder=` to `h265enc`, `vp8enc`, `vp9enc`, `av1enc`, `h264enc-striped` or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
 # For the WebRTC transport instead, add `--mode=webrtc` (the full-frame encoders stream over WebRTC; `h264enc-striped` and `jpeg` are WebSocket-only)
 # DO NOT set `--enable-resize=true` if there is a physical display

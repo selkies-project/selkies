@@ -205,27 +205,29 @@ Try the [TURN-REST Container](components/turn.md#turn-rest) or its underlying tu
 
 The below steps can be used when you want to test your TURN server configured with a shared secret instead of the legacy username/password authentication:
 
-**1. Run the [Desktop Container](components/desktop-image.md) (set `DISTRIB_FLAVOR` to an image flavor, `ubuntu26.04` or `debiantrixie`):**
+**1. Run the [Desktop Container](components/desktop-image.md) in WebRTC mode with the TURN server and its shared secret (set `DISTRIB_FLAVOR` to an image flavor, `ubuntu26.04` or `debiantrixie`):**
 
 ```bash
-docker run --name selkies -it -d --rm -p 8080:8080 -p 3478:3478 ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}
-docker exec -it selkies bash
+docker run --name selkies -it -d --rm -p 8080:8080 -p 3478:3478 \
+  -e SELKIES_MODE=webrtc \
+  -e SELKIES_TURN_HOST="YOUR_TURN_HOST" \
+  -e SELKIES_TURN_PORT="YOUR_TURN_PORT" \
+  -e SELKIES_TURN_SHARED_SECRET="YOUR_SHARED_SECRET" \
+  -e SELKIES_TURN_REST_USERNAME="user" \
+  ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}
 ```
 
 > **The default login is `ubuntu` / `mypasswd`.** Change it with `-e PASSWD=...` before putting a session anywhere others can reach it.
 
 Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs, with the NVIDIA Container Toolkit v1.20.1 or higher on the host.
 
-**2. From inside the test container, call the `generate_rtc_config` method.**
+**2. Ask the server for the RTC configuration it generated from the shared secret.**
 
 ```bash
-export SELKIES_TURN_HOST="YOUR_TURN_HOST"
-export SELKIES_TURN_PORT="YOUR_TURN_PORT"
-export SELKIES_TURN_SHARED_SECRET="YOUR_SHARED_SECRET"
-export SELKIES_TURN_USERNAME="user"
-
-python3 -c 'import os;from selkies.webrtc_ice_config import generate_rtc_config; print(generate_rtc_config(os.environ["SELKIES_TURN_HOST"], os.environ["SELKIES_TURN_PORT"], os.environ["SELKIES_TURN_SHARED_SECRET"], os.environ["SELKIES_TURN_USERNAME"]))'
+curl -sk -u ubuntu:mypasswd https://localhost:8080/api/turn
 ```
+
+The `turn:` server in `iceServers` carries the short-term credential: the `username` `<expiry>:user` and, as its `credential`, the base64 HMAC-SHA1 of that username under the shared secret.
 
 Using both methods, you can then test your TURN server configuration from the [Trickle ICE](https://webrtc.github.io/samples/src/content/peerconnection/trickle-ice/) website.
 

@@ -6,10 +6,10 @@ description: What a Selkies installation contains besides Selkies, the license o
 ## Selkies itself
 
 Selkies is licensed under the [Mozilla Public License 2.0](https://github.com/selkies-project/selkies/blob/main/LICENSE)
-(`LICENSE` in the repository, `license = "MPL-2.0"` in `pyproject.toml`). MPL-2.0
-is file-level copyleft: a modified MPL file stays MPL when distributed, the
-larger work around it may be under any license. The Python package, the web
-client, the addons (Input Interposer, V4L2 interposer, fake-udev, coturn and
+(`LICENSE` in the repository, `license = "MPL-2.0"` in the workspace's
+`Cargo.toml` and in `pyproject.toml`). MPL-2.0 is file-level copyleft: a
+modified MPL file stays MPL when distributed, the larger work around it may be
+under any license. The server's crates, the web client, the addons (Input Interposer, V4L2 interposer, fake-udev, coturn and
 TURN REST helpers, universal touch gamepad), and the build and packaging scripts
 all carry MPL-2.0 headers.
 
@@ -22,11 +22,11 @@ LGPL additionally requires the library stay replaceable), **permissive**
 ## Where the GPL code is
 
 A Selkies installation has no GPL code of its own. Two dependencies bring
-GPL-licensed libraries into an installation made from the release wheels:
+GPL-licensed libraries into every release build:
 
 | Source | GPL component | How it gets in | How to leave it out |
 | --- | --- | --- | --- |
-| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used: the `h264enc` fallback and `h264enc-striped` alike; and x265 (GPL-2.0-or-later) behind `h265enc` in the same case | the default `gpl` Cargo feature of pixelflux; the published wheels are built with it and bundle `libx264.so` and `libx265.so` | build pixelflux with `PIXELFLUX_ENABLE_GPL=0` (`--no-default-features --features openh264`): BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The inventory and the check that keeps that build copyleft-free live in [pixelflux's LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md). |
+| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used: the `h264enc` fallback and `h264enc-striped` alike; and x265 (GPL-2.0-or-later) behind `h265enc` in the same case | the `gpl` Cargo feature of pixelflux, which the workspace's `Cargo.toml` turns on, so the server links libx264 and x265 in every release build | name pixelflux's `openh264` feature in place of `gpl` in the workspace's `Cargo.toml`: BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The inventory and the check that keeps that build copyleft-free live in [pixelflux's LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md). |
 
 pixelflux and pcmflux encode and decode the video and audio through the codec
 libraries they link, and the RTP layer packetizes their output through an
@@ -37,46 +37,47 @@ The container images also install the distribution's `ffmpeg`, a GPL build on
 Debian and Ubuntu, for the desktop's own players and browsers, so an image is
 distributed under GPL terms for that part as well.
 
-## Python dependencies
+## Rust dependencies
 
-`pyproject.toml` dependencies, with the license from the installed
-distribution metadata (`importlib.metadata`). "How used" names native code the
-wheel bundles or loads, which is where licenses other than the package's own
-come in.
+The crates the server links, as `Cargo.lock` pins them, with the license each
+declares in its manifest. "How used" names the native libraries a crate links
+or loads, which is where licenses other than the crate's own come in.
 
-| Package | License | Category | How used | Notes |
+| Crate | License | Category | How used | Notes |
 | --- | --- | --- | --- | --- |
-| `pixelflux` | MPL-2.0 | weak copyleft | PyO3 extension; links libvpx, SVT-AV1, dav1d, OpenH264 (BSD), libde265 (LGPL-3.0-or-later), libgbm, libpixman, libxkbcommon (MIT); libx264 and x265 (GPL) in the default build, kvazaar (BSD) otherwise | see [pixelflux LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md) |
-| `pcmflux` | MPL-2.0 | weak copyleft | PyO3 extension; links libpulse (LGPL-2.1-or-later) and libopus (BSD-3-Clause), bundled into its wheels with libpulse's LGPL/permissive dependency tree | see [pcmflux LICENSES.md](https://github.com/selkies-project/pcmflux/blob/main/LICENSES.md) |
-| `aiohttp` | Apache-2.0 AND MIT | permissive | HTTP and WebSocket server | bundles llhttp (MIT); pulls `aiohappyeyeballs` (PSF-2.0), `aiosignal`, `frozenlist`, `multidict`, `propcache`, `yarl` (Apache-2.0), `attrs` (MIT), `idna` (BSD-3-Clause) |
-| `aiofiles` | Apache-2.0 | permissive | file uploads and downloads | |
-| `cryptography` | Apache-2.0 OR BSD-3-Clause | permissive | DTLS/SRTP keys, self-signed certificates | bundles OpenSSL (Apache-2.0); `cffi` (MIT), `pycparser` (BSD-3-Clause) |
-| `pyOpenSSL` | Apache-2.0 | permissive | DTLS transport | |
-| `pylibsrtp` | BSD-3-Clause | permissive | SRTP | bundles libsrtp2 (BSD-3-Clause) |
-| `google-crc32c` | Apache-2.0 | permissive | SCTP checksums | bundles crc32c (BSD-3-Clause) |
-| `dnspython` | ISC | permissive | mDNS ICE candidates | |
-| `pyee` | MIT | permissive | event emitter of the WebRTC stack | `typing_extensions` (PSF-2.0) |
-| `uvloop` | MIT OR Apache-2.0 | permissive | event loop (Linux, macOS) | bundles libuv (MIT) |
-| `msgpack` | Apache-2.0 | permissive | control-channel encoding | |
-| `psutil` | BSD-3-Clause | permissive | system and process statistics, interface enumeration for ICE | |
-| `watchdog` | Apache-2.0 | permissive | file-change notifications | |
-| `Pillow` | MIT-CMU (HPND) | permissive | clipboard images, cursors, icons | bundles libjpeg-turbo (IJG/BSD-3-Clause/Zlib), libpng, libtiff, libwebp, openjpeg, libavif, freetype (FTL or GPL-2.0-or-later, dual), harfbuzz, lcms2, brotli, zstd (BSD-3-Clause or GPL-2.0, dual), xz, xcb: all usable under permissive terms |
-| `prometheus_client` | Apache-2.0 AND BSD-2-Clause | permissive | metrics endpoint | |
-| `pulsectl-asyncio` | MIT | permissive | microphone routing through PulseAudio | `pulsectl` (MIT) opens the host's libpulse (LGPL-2.1-or-later) through ctypes at run time |
-| `nvidia-ml-py` | BSD-3-Clause | permissive | GPU statistics | opens the NVIDIA driver's libnvidia-ml (proprietary) through ctypes at run time when present |
-| `importlib_resources` (Python 3.9 only) | Apache-2.0 | permissive | package data on 3.9 | |
+| `pixelflux` | MPL-2.0 | weak copyleft | screen capture and video encoding; links libvpx, SVT-AV1, dav1d, OpenH264 (BSD), libde265 (LGPL-3.0-or-later), libgbm, libpixman, libxkbcommon (MIT); libx264 and x265 (GPL) in the default build, kvazaar (BSD) otherwise | see [pixelflux LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md) |
+| `pcmflux` | MPL-2.0 | weak copyleft | audio capture and Opus encoding; links libpulse (LGPL-2.1-or-later) and libopus (BSD-3-Clause) | see [pcmflux LICENSES.md](https://github.com/selkies-project/pcmflux/blob/main/LICENSES.md) |
+| `selkies-rtc` | MPL-2.0 | weak copyleft | the WebRTC stack, in this repository under `crates/selkies-rtc` | built over the `rtc-*` crates of [webrtc-rs](https://github.com/webrtc-rs/rtc) (MIT OR Apache-2.0), `rtc-sctp` vendored (below) |
+| `tokio`, `tokio-util` | MIT | permissive | async runtime | |
+| `axum`, `axum-server`, `hyper`, `hyper-util`, `tower`, `tower-http`, `http`, `http-body-util` | MIT, or MIT OR Apache-2.0 | permissive | HTTP and WebSocket server | |
+| `rustls`, `tokio-rustls`, `hyper-rustls`, `rustls-pemfile`, `rustls-native-certs` | Apache-2.0 OR ISC OR MIT | permissive | HTTPS, and the outgoing requests of the TURN REST and Cloudflare sources | cryptography from `ring` (Apache-2.0 AND ISC) and `aws-lc-rs`, which builds AWS-LC (ISC, Apache-2.0, MIT, BSD-3-Clause) |
+| `rcgen` | MIT OR Apache-2.0 | permissive | self-signed certificates | |
+| `x11rb` | MIT OR Apache-2.0 | permissive | X11 input injection (XTEST), the clipboard (XFixes), and the display's outputs (RandR) | speaks the X protocol itself |
+| `xkbcommon` | MIT | permissive | keymaps | links libxkbcommon (MIT) |
+| `libpulse-binding` | MIT OR Apache-2.0 | permissive | the sound-server control plane | links libpulse (LGPL-2.1-or-later) |
+| `nvml-wrapper` | MIT OR Apache-2.0 | permissive | GPU statistics | opens the NVIDIA driver's libnvidia-ml (proprietary) at run time when present |
+| `sysinfo` | MIT | permissive | system and process statistics | |
+| `prometheus-client` | Apache-2.0 OR MIT | permissive | metrics endpoint | |
+| `image` | MIT OR Apache-2.0 | permissive | clipboard images and cursors | |
+| `zip`, `flate2` | MIT; MIT OR Apache-2.0 | permissive | folder downloads, compressed messages | |
+| `rmp-serde` | MIT | permissive | MessagePack to the uinput mouse socket | |
 
-The Python interpreter itself (PSF-2.0) and, when installed, the distribution's
-PulseAudio or PipeWire, X servers, Wayland compositors, and GPU drivers are
-outside the package and keep their own licenses.
+Every other crate in the graph, the dependencies of pixelflux and pcmflux
+included, is under permissive terms: MIT, Apache-2.0, BSD-2-Clause,
+BSD-3-Clause, ISC, Zlib, Unicode-3.0, BSL-1.0, CC0-1.0, 0BSD, or the
+Unlicense, most of them dual-licensed MIT OR Apache-2.0; `r-efi`, which
+offers LGPL-2.1-or-later, offers MIT and Apache-2.0 beside it.
 
-## Vendored code in the Python package
+The distribution's PulseAudio or PipeWire, X servers, Wayland compositors, and
+GPU drivers, and the Python interpreter a wheel is installed into, are outside
+Selkies and keep their own licenses.
+
+## Vendored code
 
 | Component | Where | License | Category | Notes |
 | --- | --- | --- | --- | --- |
-| python-xlib 0.33 fork | `src/selkies/Xlib` | LGPL-2.1-or-later (every module header: "version 2.1 of the License, or (at your option) any later version") | weak copyleft | Imported, not modified in license terms; the wheel ships `selkies/Xlib/LICENSE` (`tool.setuptools.package-data`) as the LGPL-3.0 text: the headers grant "version 2.1 or (at your option) any later version", and the fork is carried under LGPL-3.0 for compatibility with the MPL-2.0 of the rest of Selkies. The Python sources are the preferred form, so the LGPL's replaceability requirement is met as is. |
-| aiortc and aioice forks | `src/selkies/webrtc`, `src/selkies/ice` | BSD-3-Clause (Jeremy Lainé), MPL-2.0 for the Selkies changes | weak copyleft | every file keeps the upstream copyright and license notice under the MPL header |
-| Built web client | `src/selkies/selkies_web` (generated by `scripts/ci/build-web.sh`, not in git) | MPL-2.0 plus the npm runtime dependencies below | weak copyleft | |
+| rtc-sctp 0.21.1 | `crates/selkies-rtc/vendor/rtc-sctp` | MIT OR Apache-2.0 (webrtc-rs), MPL-2.0 for the Selkies changes | permissive, weak copyleft for the changes | the workspace patches the published crate with it; `rtc-sctp-selkies.patch` beside it is the diff |
+| Built web client | `dist/web` (generated by `scripts/ci/build-web.sh`, not committed), installed at `share/selkies/web` beside the executable | MPL-2.0 plus the npm runtime dependencies below | weak copyleft | |
 
 ## Web client (npm)
 
@@ -109,23 +110,24 @@ so it matches the sources.
 
 pixelflux builds with its GPL components on by default (libx264 for software
 H.264, x265 for software H.265), and that is the supported default for every
-deployment — the release wheels, the container images, and the AppImage.
-`PIXELFLUX_ENABLE_GPL=0` is the opt-out for operators who need a copyleft-free
+deployment — the wheel, the native packages, the container images, and the
+AppImage. Naming pixelflux's `openh264` feature in place of `gpl` in the
+workspace's `Cargo.toml` is the opt-out for operators who need a copyleft-free
 build; the sections below describe both.
 
 ## What a non-GPL deployment contains
 
-With pixelflux built with `PIXELFLUX_ENABLE_GPL=0`: Selkies, pixelflux,
+With pixelflux's `openh264` feature in place of `gpl`: Selkies, pixelflux,
 pcmflux, and the web client under the weak copyleft of MPL-2.0, the permissive
-Python packages above, and the LGPL libraries they load (libpulse through
-pcmflux and pulsectl, python-xlib, glibc, libde265 through pixelflux). Nothing
+crates above, and the LGPL libraries they load (libpulse through pcmflux and
+`libpulse-binding`, glibc, libde265 through pixelflux). Nothing
 GPL, and nothing that reaches beyond its own files. The WebRTC stack
 packetizes pixelflux/pcmflux output and brings in no media library of its own.
 
 ## What the default (GPL-enabled) deployment adds
 
-An installed Selkies adds libx264 and x265 through the pixelflux wheel inside
-it, both GPL-2.0-or-later, and the container images add the distribution's
+An installed Selkies adds libx264 and x265 through the pixelflux it links,
+both GPL-2.0-or-later, and the container images add the distribution's
 `ffmpeg` on top, so a deployment that ships them is distributed under GPL terms
 for those parts.
 
@@ -135,6 +137,6 @@ Selkies has no license gate of its own: the copyleft switch is pixelflux's, and
 pixelflux's `scripts/check-licenses.py`, `deny.toml`, and `Licenses` workflow
 enforce that its non-GPL build stays copyleft-free (pcmflux carries the same
 cargo-deny check). This page is the inventory of what Selkies adds on top.
-Regenerate the figures with `pip show` or `importlib.metadata` for the Python
-packages and `npx license-checker --summary --production` in each of the three
+Regenerate the figures with `cargo metadata --format-version 1` (each
+package's `license`) for the crates and `npx license-checker --summary --production` in each of the three
 addon directories after `npm install`.

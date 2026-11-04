@@ -16,7 +16,7 @@ The [Base Container](https://github.com/selkies-project/selkies/tree/main/addons
 | Printing | A CUPS scheduler Selkies runs its own print queue on, so a document printed in the session reaches the browser |
 | Supervision | The [s6](https://skarnet.org/software/s6/) supervision suite from the distribution's packages, one service directory per daemon under `/etc/service` |
 | TURN | An embedded [coTURN](turn.md#coturn) for the WebRTC transport, started only when no external TURN server is configured |
-| Selkies | The `selkies` wheel with `pixelflux` and `pcmflux`, the [Input Interposer](input-interposer.md), [fake-udev](input-interposer.md#fake-udev), and the [V4L2 Interposer](v4l2-interposer.md) built from source, and `selkies-privileged-files` |
+| Selkies | The `selkies` server built from source with `pixelflux` and `pcmflux` linked in, its web client, the [Input Interposer](input-interposer.md), [fake-udev](input-interposer.md#fake-udev), and the [V4L2 Interposer](v4l2-interposer.md) built from source, and `selkies-privileged-files` |
 
 The image is built for Ubuntu 26.04 and Debian Trixie, on `x86_64` and `aarch64`, and is rootless: every layer runs as uid 1000 through `fakeroot`, so the package database and apt cache belong to the session user and `sudo apt-get install` works inside a running session the same way. `sudo-root` is the real thing, for device nodes and permissions only. The setuid and setgid files (`mount`, `su`, `sudo`, `fusermount3`, the PAM helpers) belong to root, which is what the privileged-file bracket below is for.
 
@@ -26,7 +26,7 @@ The image is built for Ubuntu 26.04 and Debian Trixie, on `x86_64` and `aarch64`
 
 1. Creates `XDG_RUNTIME_DIR` (`/tmp/runtime-ubuntu`) with the `0700` mode dbus and PipeWire require, sets the time zone from `TZ` and the account password from `PASSWD`, and creates the XDG directories a desktop menu watches so the first application installed into the home appears in it.
 2. Wires the gamepad and webcam plumbing for the session's applications: `SELKIES_INTERPOSER`, `SELKIES_WEBCAM_INTERPOSER`, and `FAKE_UDEV_LIB` go into `LD_PRELOAD`, and `/dev/input` is created where the container has none of its own.
-3. Reads the backend (`SELKIES_WAYLAND`) and the transport (`SELKIES_MODE`) the way `settings.py` reads them, so the service set and Selkies agree.
+3. Reads the backend (`SELKIES_WAYLAND`) and the transport (`SELKIES_MODE`) the way the server's settings read them, so the service set and Selkies agree.
 4. Runs `selkies gpu-probe`, which resolves the render node from `SELKIES_RENDER_DRI` or the `SELKIES_AUTO_GPU` token exactly as the capture will and brings the compositor's renderer up on it. From that one report the entrypoint settles hardware OpenGL for the session's applications (the vendor's GLX and EGL on NVIDIA, Mesa's own driver elsewhere, Zink on the Vulkan driver where Mesa itself does not reach the GPU, `DISABLE_ZINK=true` to opt out) and whether a Wayland session can keep its backend: a compositor that cannot reach the GPU starts the X11 backend instead unless `SELKIES_WAYLAND_X11_FALLBACK=false`. `docker exec <container> selkies gpu-probe` asks it the same question later.
 5. Sets the display (`DISPLAY=:20` on X11; the nested compositor's XWayland takes the first free number on Wayland), the PipeWire latency and the PulseAudio socket, and the print queue's socket.
 6. Computes the session environment, embedded coTURN defaults included: the address a browser outside the container would reach the TURN server on is asked of a public resolver, and the embedded server is only started when no external TURN server is configured well enough to be used (a REST service, or a host and port with credentials or a shared secret).
@@ -48,7 +48,7 @@ The services under `/etc/service` are, each a `run` script and a `finish` script
 
 `s6-svc` and `s6-svstat` control and inspect them, the `supervisorctl` equivalents (`s6-svc -r /etc/service/selkies` restarts Selkies). `s6-overlay` is deliberately not used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init.
 
-`/etc/selkies-entrypoint.sh` is the Selkies service. It sources the environment file, drops the interposers from its own `LD_PRELOAD` by value (they answer for `/dev/video0` and `/dev/input` in whatever process loads them, which the capture and gamepad backends must keep seeing as the kernel reports them; an operator-supplied preload survives), waits for the X socket on the X11 backend and presets the display's size, and starts `selkies`, whose every setting comes from the `SELKIES_*` variables of the environment ([Settings Reference](../settings.md)). The preset is the size a manual resolution locks the stream to, as `settings.py` resolves it from those variables and the command line, else `DISPLAY_SIZEW` by `DISPLAY_SIZEH` (1920x1080 unless set); a display already that size keeps the mode its X server came up in, and dynamic resizing replaces it with the client's own size once one connects.
+`/etc/selkies-entrypoint.sh` is the Selkies service. It sources the environment file, drops the interposers from its own `LD_PRELOAD` by value (they answer for `/dev/video0` and `/dev/input` in whatever process loads them, which the capture and gamepad backends must keep seeing as the kernel reports them; an operator-supplied preload survives), waits for the X socket on the X11 backend and presets the display's size, and starts `selkies`, whose every setting comes from the `SELKIES_*` variables of the environment ([Settings Reference](../settings.md)). The preset is the size a manual resolution locks the stream to, as the server resolves it from those variables and the command line (`selkies manual-size`), else `DISPLAY_SIZEW` by `DISPLAY_SIZEH` (1920x1080 unless set); a display already that size keeps the mode its X server came up in, and dynamic resizing replaces it with the client's own size once one connects.
 
 ## Layout
 
@@ -57,14 +57,14 @@ The services under `/etc/service` are, each a `run` script and a `finish` script
 | `/etc/container-entrypoint.sh`, `/etc/selkies-entrypoint.sh` | The two scripts above |
 | `/etc/service/<name>/` | One directory per s6 service, with its `run` and `finish` scripts |
 | `/tmp/runtime-ubuntu` (`XDG_RUNTIME_DIR`) | The session's sockets, the environment file, the print queue's socket, the logs the services write |
-| `selkies`, `selkies gpu-probe`, `selkies resize` | The wheel's executable and two of its commands: the server, the GPU report, and the resize helper for a session with `--enable-resize=false` |
+| `selkies`, `selkies gpu-probe`, `selkies resize` | The server's executable, `/usr/local/bin/selkies` with its web client under `/usr/local/share/selkies/web`, and two of its commands: the server, the GPU report, and the resize helper for a session with `--enable-resize=false` |
 | `/usr/local/bin/selkies-privileged-files` | The setuid bracket for package layers, and the `sudo-root ... run` path for in-session package management |
 | `/usr/$LIB/selkies_input_interposer.so`, `selkies_v4l2_interposer.so`, `libudev.so.1.0.0-fake` | The preloads the session's applications get, exported as `SELKIES_INTERPOSER`, `SELKIES_WEBCAM_INTERPOSER`, and `FAKE_UDEV_LIB` |
 | `/home/ubuntu` | The session user's home, uid 1000; mount a volume there to keep settings, downloads, and installed applications |
 
 ## Running a checkout inside it
 
-`SELKIES_DEV_SOURCE` names a checkout mounted into the container, and the Selkies service then runs from that tree instead of the package baked into the image, so a change takes effect on a restart of the service rather than a rebuild of the image. The web client is a build product and a fresh checkout has none, so the image's own bundle is linked in at the (gitignored) path it is served from; `scripts/ci/build-web.sh` builds a real one into the tree. It works on any image built on the base, a published one included:
+`SELKIES_DEV_SOURCE` names a checkout mounted into the container, and the Selkies service then runs the server built in that tree (`target/release/selkies`) instead of the one baked into the image, so a change takes effect on a rebuild of the server and a restart of the service rather than a rebuild of the image; a checkout holding no build is served by the image's own server. The web client is a build product and a fresh checkout has none, so the image's own bundle is served until `scripts/ci/build-web.sh` builds one into the tree's `dist/web`. It works on any image built on the base, a published one included:
 
 ```bash
 docker run --rm -it --shm-size=2g -p 8080:8080 \
@@ -72,7 +72,7 @@ docker run --rm -it --shm-size=2g -p 8080:8080 \
   ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
 ```
 
-The repository's [`docker-compose.yml`](https://github.com/selkies-project/selkies/tree/main/docker-compose.yml) does the same for the `desktop` service, and builds every image here; [Development](../development.md#local-builds) describes it. A change to `pixelflux` or `pcmflux` reaches the container as a wheel installed into the image's Python beside the mounted tree.
+The repository's [`docker-compose.yml`](https://github.com/selkies-project/selkies/tree/main/docker-compose.yml) does the same for the `desktop` service, and builds every image here; [Development](../development.md#local-builds) describes it. A change to `pixelflux` or `pcmflux` reaches the container through the server built in the mounted tree, against that checkout through a `[patch]` in a Cargo configuration outside the repository ([Development](../development.md#agentic-development)).
 
 ## Building a desktop on it
 
