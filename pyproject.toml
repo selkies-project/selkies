@@ -33,7 +33,7 @@ dependencies = [
     "psutil",
     "watchdog",
     "Pillow",
-    "pixelflux==2.2.2",
+    "pixelflux==2.2.3",
     "pcmflux==2.2.1",
     # PulseAudio Microphone
     "pulsectl-asyncio",
