@@ -31,6 +31,8 @@
 
 use std::collections::HashSet;
 use std::future::Future;
+/// The ownership and mode rules the config trust reads; the kernel's, and gated with it.
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -573,7 +575,8 @@ pub fn server_urls(servers: &[IceServer]) -> String {
 }
 
 /// Whether the configuration file at `path` is safe to trust: no symlink, owned by root or this
-/// user, not group- or world-writable.
+/// user, not group- or world-writable. The ownership and mode rules are the kernel's; off Linux
+/// the file's ACL governs and the symlink refusal is what this checks.
 pub fn is_trusted_config_file(path: &Path) -> bool {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -586,26 +589,29 @@ pub fn is_trusted_config_file(path: &Path) -> bool {
         warn!(target: "webrtc", "Refusing to follow symlinked RTC config file '{}'.", path.display());
         return false;
     }
-    // SAFETY: getuid takes no arguments and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    if metadata.uid() != 0 && metadata.uid() != uid {
-        warn!(
-            target: "webrtc",
-            "RTC config file '{}' is owned by uid {}, not root or the current user ({uid}).",
-            path.display(),
-            metadata.uid()
-        );
-        return false;
-    }
-    let mode = metadata.permissions().mode();
-    if mode & 0o022 != 0 {
-        warn!(
-            target: "webrtc",
-            "RTC config file '{}' is group- or world-writable (mode {:o}); refusing to trust it.",
-            path.display(),
-            mode & 0o7777
-        );
-        return false;
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: getuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        if metadata.uid() != 0 && metadata.uid() != uid {
+            warn!(
+                target: "webrtc",
+                "RTC config file '{}' is owned by uid {}, not root or the current user ({uid}).",
+                path.display(),
+                metadata.uid()
+            );
+            return false;
+        }
+        let mode = metadata.permissions().mode();
+        if mode & 0o022 != 0 {
+            warn!(
+                target: "webrtc",
+                "RTC config file '{}' is group- or world-writable (mode {:o}); refusing to trust it.",
+                path.display(),
+                mode & 0o7777
+            );
+            return false;
+        }
     }
     true
 }
@@ -1099,7 +1105,25 @@ impl RtcConfigMonitor {
 /// What changes when the file does: inode, size, and modification time.
 fn file_identity(path: &Path) -> Option<(u64, u64, i64, i64)> {
     let m = std::fs::symlink_metadata(path).ok()?;
-    Some((m.ino(), m.size(), m.mtime(), m.mtime_nsec()))
+    #[cfg(target_os = "linux")]
+    let identity = (m.ino(), m.size(), m.mtime(), m.mtime_nsec());
+    // Off Linux the modification instant carries the nanoseconds the inode's mtime pair
+    // does, and a zero stands for the inode the kernel does not name.
+    #[cfg(not(target_os = "linux"))]
+    let identity = {
+        let since_epoch = m
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        (
+            0,
+            m.len(),
+            since_epoch.as_secs() as i64,
+            since_epoch.subsec_nanos() as i64,
+        )
+    };
+    Some(identity)
 }
 
 #[cfg(test)]

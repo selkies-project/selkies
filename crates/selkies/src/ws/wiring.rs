@@ -422,11 +422,20 @@ impl Display for ServerDisplay {
     }
 
     async fn host_output_capacity(&self) -> Option<i64> {
-        let compositor = pixelflux::running_compositor()?;
-        tokio::task::spawn_blocking(move || compositor.output_capacity().ok())
-            .await
-            .ok()
-            .flatten()
+        // Off Linux no compositor runs in this process, so the answer is the one a Linux
+        // session without one gives.
+        #[cfg(target_os = "linux")]
+        {
+            let compositor = pixelflux::running_compositor()?;
+            tokio::task::spawn_blocking(move || compositor.output_capacity().ok())
+                .await
+                .ok()
+                .flatten()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
     }
 
     fn session_screen_capability(&self) -> (bool, String) {

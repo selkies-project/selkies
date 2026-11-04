@@ -139,6 +139,8 @@ pub fn configured_refresh() -> Option<f64> {
 }
 
 /// Record the configured refresh once per process; a second call keeps the first.
+/// Linux alone: the X11 rate machinery that reads it is the Linux display's own.
+#[cfg(target_os = "linux")]
 pub(crate) fn note_configured_refresh(rate: f64) {
     let mut slot = CONFIGURED_REFRESH.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_none() && rate > 0.0 {

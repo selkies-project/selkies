@@ -20,28 +20,55 @@
 //! scheduler's for the job, still reaches the launcher and stops them in order. What they
 //! orphan, a desktop's agents and every application a menu double-forks, the launcher adopts
 //! ([`adopt_orphans`]), collects once it exits, and ends with the session.
+//!
+//! Off Linux the platform starts no session stack: no Unix socket answers, no Xvfb or sound
+//! server is found to run, and the children start as the plain commands the platform spawns,
+//! without the POSIX hardening -- no process group of their own, no inherited descriptor, no
+//! subreaper, no parent-death signal -- so the ordered stop is the one the platform's own
+//! process handles give. The session commands still spawn, and a session still ends with
+//! Selkies. The Windows session milestone lands in the places the twins hold.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, Read};
+/// The reader the pipe's lines come through; the pdeathsig fd dance that pairs with it is
+/// the Linux spawn's own.
+#[cfg(target_os = "linux")]
+use std::io::{BufRead, BufReader};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
+#[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
+/// The *nix session plumbing the launcher reads: polling the display pipe, signaling the
+/// process groups, waiting on what they orphan. The kernel's, and gated with it.
+#[cfg(target_os = "linux")]
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+#[cfg(target_os = "linux")]
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, kill, killpg, sigaction};
+#[cfg(target_os = "linux")]
 use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid};
+#[cfg(target_os = "linux")]
 use nix::unistd::{Pid, getpgid, setpgid};
+#[cfg(target_os = "linux")]
 use rand::RngCore;
 use regex::Regex;
 use serde_json::{Value as Json, json};
 
 use super::sessions::{Desktops, Entry, which};
 use crate::settings::Settings;
+
+/// A descriptor the child keeps open past exec, Xvfb's display pipe. Off Linux no X server is
+/// started, so the spawn contract keeps its shape with no descriptor to carry and is always
+/// handed none.
+#[cfg(not(target_os = "linux"))]
+type OwnedFd = ();
 
 /// Xvfb's arguments: the framebuffer bounds the sizes Selkies can resize the screen to, and
 /// `-s 0 -dpms` keeps the server from blanking what is streamed.
@@ -81,7 +108,16 @@ pub fn log(message: &str) {
 
 /// Whether the Unix socket at `path` accepts a connection.
 pub fn answers(path: &Path) -> bool {
-    UnixStream::connect(path).is_ok()
+    #[cfg(target_os = "linux")]
+    {
+        UnixStream::connect(path).is_ok()
+    }
+    // No Unix sockets are served off Linux, so nothing answers on one.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 /// Whether `child` has exited, and with what status (`None` while it runs).
@@ -115,11 +151,15 @@ fn wait_for(
 
 /// The directory X servers put their sockets in, world-writable and sticky as a host's boot
 /// makes it. An Xvfb creates it itself; the XWayland that kwin_wayland starts does not, and
-/// without it Plasma's Wayland session never starts its shell.
+/// without it Plasma's Wayland session never starts its shell. The mode is the kernel's; off
+/// Linux the directory is created plain, no X server asking for one.
 pub fn x11_socket_dir(path: &Path) {
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     match fs::create_dir(path) {
-        Ok(()) => {
+        Ok(()) =>
+        {
+            #[cfg(target_os = "linux")]
             if let Err(err) = fs::set_permissions(path, fs::Permissions::from_mode(0o1777)) {
                 log(&format!(
                     "cannot make {} world-writable ({err})",
@@ -204,6 +244,9 @@ pub struct Session {
     pub runtime_dir: PathBuf,
     pub env: Env,
     children: Vec<Child>,
+    /// The process groups the reap walks; the Linux spawn's own, with the pre_exec that
+    /// sets them.
+    #[cfg(target_os = "linux")]
     groups: BTreeSet<i32>,
     /// Index into `children` of the Selkies server, once started.
     selkies: Option<usize>,
@@ -247,6 +290,7 @@ impl Session {
             runtime_dir,
             env,
             children: Vec::new(),
+            #[cfg(target_os = "linux")]
             groups: BTreeSet::new(),
             selkies: None,
         })
@@ -260,6 +304,8 @@ impl Session {
         env: Option<&Env>,
         inherit: Option<&OwnedFd>,
     ) -> io::Result<usize> {
+        // The group the pre_exec sets the child into; the Linux spawn's own.
+        #[cfg(target_os = "linux")]
         let group = self.groups.iter().next().copied().unwrap_or(0);
         let mut command = Command::new(&argv[0]);
         command
@@ -267,22 +313,31 @@ impl Session {
             .env_clear()
             .envs(env.unwrap_or(&self.env))
             .stdin(Stdio::null());
-        let keep = inherit.map(std::os::fd::AsRawFd::as_raw_fd);
-        unsafe {
-            command.pre_exec(move || {
-                if setpgid(Pid::from_raw(0), Pid::from_raw(group)).is_err() {
-                    setpgid(Pid::from_raw(0), Pid::from_raw(0))?;
-                }
-                if let Some(fd) = keep {
-                    let flags = libc::fcntl(fd, libc::F_GETFD);
-                    if flags >= 0 {
-                        libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+        // The process group, the inherited descriptor, and the group the kernel reports are
+        // the POSIX spawn hardening; off Linux the platform's own spawn is what starts the
+        // child.
+        #[cfg(target_os = "linux")]
+        {
+            let keep = inherit.map(std::os::fd::AsRawFd::as_raw_fd);
+            unsafe {
+                command.pre_exec(move || {
+                    if setpgid(Pid::from_raw(0), Pid::from_raw(group)).is_err() {
+                        setpgid(Pid::from_raw(0), Pid::from_raw(0))?;
                     }
-                }
-                Ok(())
-            });
+                    if let Some(fd) = keep {
+                        let flags = libc::fcntl(fd, libc::F_GETFD);
+                        if flags >= 0 {
+                            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                        }
+                    }
+                    Ok(())
+                });
+            }
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = &inherit;
         let child = command.spawn()?;
+        #[cfg(target_os = "linux")]
         if let Ok(pgid) = getpgid(Some(Pid::from_raw(child.id() as i32))) {
             self.groups.insert(pgid.as_raw());
         }
@@ -381,6 +436,7 @@ impl Session {
     ///
     /// A server whose GLX cannot load (a vendor's GL stack beside a stock Xvfb) is started
     /// again without it, so the desktop comes up and only GL applications on X11 go without.
+    #[cfg(target_os = "linux")]
     pub fn x11(&mut self, render_dri: &str) -> Result<(), String> {
         if which("Xvfb").is_none() {
             return Err(
@@ -447,6 +503,19 @@ impl Session {
             let _ = self.children[index].kill();
         }
         Err("Xvfb did not come up".into())
+    }
+
+    /// An Xvfb on the first free display that admits this session's cookie alone, rendering
+    /// on the GPU through glamor where the server offers it.
+    ///
+    /// A server whose GLX cannot load (a vendor's GL stack beside a stock Xvfb) is started
+    /// again without it, so the desktop comes up and only GL applications on X11 go without.
+    ///
+    /// Off Linux no X server runs, so the answer is the refusal Xvfb's own absence already
+    /// gives.
+    #[cfg(not(target_os = "linux"))]
+    pub fn x11(&mut self, _render_dri: &str) -> Result<(), String> {
+        Err("the X11 backend needs Xvfb; install it, or set SELKIES_WAYLAND=true".into())
     }
 
     /// Start the screen at the manual resolution where one is set, else at [`START_SIZE`],
@@ -648,25 +717,31 @@ impl Session {
         for child in &mut self.children {
             let _ = child.try_wait();
         }
-        let ours: BTreeSet<i32> = self.children.iter().map(|c| c.id() as i32).collect();
-        loop {
-            let status = waitid(
-                Id::All,
-                WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
-            );
-            let pid = match status {
-                Ok(WaitStatus::StillAlive) | Err(_) => return,
-                Ok(status) => status.pid(),
-            };
-            let Some(pid) = pid else { return };
-            if ours.contains(&pid.as_raw()) {
-                return;
+        // Only Linux adopts orphans to collect; off Linux the handles above are every child
+        // there is.
+        #[cfg(target_os = "linux")]
+        {
+            let ours: BTreeSet<i32> = self.children.iter().map(|c| c.id() as i32).collect();
+            loop {
+                let status = waitid(
+                    Id::All,
+                    WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+                );
+                let pid = match status {
+                    Ok(WaitStatus::StillAlive) | Err(_) => return,
+                    Ok(status) => status.pid(),
+                };
+                let Some(pid) = pid else { return };
+                if ours.contains(&pid.as_raw()) {
+                    return;
+                }
+                let _ = waitpid(pid, None);
             }
-            let _ = waitpid(pid, None);
         }
     }
 
     /// The session's process groups, then whatever left them.
+    #[cfg(target_os = "linux")]
     pub fn signal_session(&self, signal: Signal) {
         for pgid in &self.groups {
             let _ = killpg(Pid::from_raw(*pgid), signal);
@@ -682,24 +757,39 @@ impl Session {
         if let Some(index) = self.selkies {
             let child = &mut self.children[index];
             if exited(child).is_none() {
-                let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while exited(child).is_none() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(100));
+                // SIGTERM asks Selkies to close its capture before its display; off Linux
+                // the lever the platform offers a parent is termination itself.
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while exited(child).is_none() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
                 }
                 if exited(child).is_none() {
                     let _ = child.kill();
                 }
             }
         }
-        self.signal_session(Signal::SIGTERM);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        #[cfg(target_os = "linux")]
+        {
+            self.signal_session(Signal::SIGTERM);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for child in &mut self.children {
+                while exited(child).is_none() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            self.signal_session(Signal::SIGKILL);
+        }
+        // Off Linux there are no groups to signal, so each child is ended by its own handle.
+        #[cfg(not(target_os = "linux"))]
         for child in &mut self.children {
-            while exited(child).is_none() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(100));
+            if exited(child).is_none() {
+                let _ = child.kill();
             }
         }
-        self.signal_session(Signal::SIGKILL);
         for child in &mut self.children {
             let _ = child.wait();
         }
@@ -709,6 +799,7 @@ impl Session {
 }
 
 /// The first render node, for an Xvfb that draws on the GPU.
+#[cfg(target_os = "linux")]
 fn first_render_node() -> String {
     let Ok(entries) = fs::read_dir("/dev/dri") else {
         return String::new();
@@ -726,6 +817,7 @@ fn first_render_node() -> String {
 }
 
 /// A pipe whose write end a child may inherit (no close-on-exec).
+#[cfg(target_os = "linux")]
 fn pipe() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
@@ -735,6 +827,7 @@ fn pipe() -> Result<(OwnedFd, OwnedFd), String> {
 }
 
 /// The first line written to `fd` within `timeout`, trimmed, or `None`.
+#[cfg(target_os = "linux")]
 fn read_line_within(fd: OwnedFd, timeout: Duration) -> Option<String> {
     let mut fds = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
     let millis = u16::try_from(timeout.as_millis()).unwrap_or(u16::MAX);
@@ -751,28 +844,44 @@ fn read_line_within(fd: OwnedFd, timeout: Duration) -> Option<String> {
 
 /// Have the kernel make the launcher, not the host's init, the parent of every process the
 /// session orphans.
+#[cfg(target_os = "linux")]
 pub fn adopt_orphans() {
     unsafe {
         libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
     }
 }
 
+/// Have the kernel make the launcher, not the host's init, the parent of every process the
+/// session orphans. Off Linux the kernel offers no subreaper, so the launcher stays the
+/// parent of what it started and nothing else.
+#[cfg(not(target_os = "linux"))]
+pub fn adopt_orphans() {}
+
 /// Have the kernel send SIGTERM when the parent exits.
+#[cfg(target_os = "linux")]
 pub fn follow_parent() {
     unsafe {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
     }
 }
 
+/// Have the kernel send SIGTERM when the parent exits. Off Linux the kernel sends no
+/// parent-death signal; the platform ends a parent-less process its own way.
+#[cfg(not(target_os = "linux"))]
+pub fn follow_parent() {}
+
 /// The signal that asked the launcher to stop, or 0.
 static STOPPING: AtomicI32 = AtomicI32::new(0);
 
+/// The signal that asked the launcher to stop, as the POSIX handler records it.
+#[cfg(target_os = "linux")]
 extern "C" fn note_stop(signal: libc::c_int) {
     STOPPING.store(signal, Ordering::SeqCst);
 }
 
 /// Stop in order on SIGTERM, SIGINT, and SIGHUP, except one the caller ignores (nohup's, and
 /// a background job's SIGINT), which stays ignored.
+#[cfg(target_os = "linux")]
 fn install_stop_handlers() {
     let action = SigAction::new(
         SigHandler::Handler(note_stop),
@@ -788,6 +897,12 @@ fn install_stop_handlers() {
         }
     }
 }
+
+/// Stop in order on SIGTERM, SIGINT, and SIGHUP, except one the caller ignores (nohup's, and
+/// a background job's SIGINT), which stays ignored. Off Linux the console's Ctrl-C ends the
+/// launcher as the platform ends a console process, and Selkies' own exit orders the stop.
+#[cfg(not(target_os = "linux"))]
+fn install_stop_handlers() {}
 
 /// The launcher's own options.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

@@ -20,6 +20,7 @@
 //! refused unless root or this process's user owns it and nobody else can write to it.
 
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -330,15 +331,20 @@ pub async fn handle_tokens(State(state): State<AppState>, body: Bytes) -> Respon
 
 /// The token table `path` holds, or none when it is unsafe or holds none, with the reason
 /// logged. A symlink is followed, as a Kubernetes secret mount is one, and the file it
-/// reaches is the one checked.
+/// reaches is the one checked. The ownership and mode rules are the kernel's; off Linux the
+/// file's ACL governs and the read itself is what this checks.
 pub fn read_tokens_file(path: &str) -> Option<Map<String, Json>> {
     let read = || -> std::io::Result<Option<Map<String, Json>>> {
         let file = std::fs::File::open(path)?;
+        #[cfg(target_os = "linux")]
         let info = file.metadata()?;
-        let uid = nix::unistd::getuid().as_raw();
-        if !(info.uid() == 0 || info.uid() == uid) || info.mode() & 0o022 != 0 {
-            log::warn!(target: "ws", "Refusing the tokens file {path:?}: another user owns it or can write to it.");
-            return Ok(None);
+        #[cfg(target_os = "linux")]
+        {
+            let uid = nix::unistd::getuid().as_raw();
+            if !(info.uid() == 0 || info.uid() == uid) || info.mode() & 0o022 != 0 {
+                log::warn!(target: "ws", "Refusing the tokens file {path:?}: another user owns it or can write to it.");
+                return Ok(None);
+            }
         }
         let text = std::io::read_to_string(file)?;
         let table: Json = serde_json::from_str(&text).map_err(std::io::Error::other)?;
@@ -365,7 +371,9 @@ pub fn read_tokens_file(path: &str) -> Option<Map<String, Json>> {
 /// The file holds the body `/api/tokens` takes and is provisioned the same way, so a restart
 /// needs no POST. A POST still replaces the table until the file next changes, and a file
 /// that cannot be used leaves the table as it was. Without a master token the file is ignored
-/// and the watcher returns at once.
+/// and the watcher returns at once. A change is the file's identity moving: inode and change
+/// time on Linux, the creation instant with a zeroed inode off Linux, so a file renamed over
+/// it (a Kubernetes secret update) reads as new however little else differs.
 pub async fn watch_tokens_file(table: TokenTable, path: String, secure_mode: bool, poll: Duration) {
     if !secure_mode {
         log::warn!(target: "ws", "tokens_file is ignored: it needs secure mode, which a master token turns on.");
@@ -377,7 +385,22 @@ pub async fn watch_tokens_file(table: TokenTable, path: String, secure_mode: boo
         let stat = tokio::task::spawn_blocking(move || std::fs::metadata(&stat_path)).await;
         match stat {
             Ok(Ok(info)) => {
+                #[cfg(target_os = "linux")]
                 let current = Some((info.ino(), info.ctime(), info.ctime_nsec(), info.size()));
+                #[cfg(not(target_os = "linux"))]
+                let current = {
+                    let created = info
+                        .created()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .unwrap_or_default();
+                    Some((
+                        0,
+                        created.as_secs() as i64,
+                        created.subsec_nanos() as i64,
+                        info.len(),
+                    ))
+                };
                 if seen != Some(current) {
                     seen = Some(current);
                     let read_path = path.clone();

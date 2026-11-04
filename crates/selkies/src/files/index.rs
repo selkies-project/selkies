@@ -146,7 +146,7 @@ async fn serve_index(
             audit_name: parts.join("/"),
             download_name: resolved
                 .file_name()
-                .map(|n| std::os::unix::ffi::OsStrExt::as_bytes(n).to_vec())
+                .map(|n| n.as_encoded_bytes().to_vec())
                 .unwrap_or_default(),
             allow_fallback: true,
         };

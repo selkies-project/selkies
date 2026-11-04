@@ -271,15 +271,24 @@ const NVIDIA_SMI_QUERY: &str =
 
 /// The first executable `name` on `PATH`.
 pub(crate) fn which_on_path(name: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     std::env::var_os("PATH")?
         .to_string_lossy()
-        .split(':')
+        .split(if cfg!(target_os = "linux") { ':' } else { ';' })
         .map(|dir| Path::new(dir).join(name))
         .find(|path| {
-            std::fs::metadata(path)
+            // The execute bit is a Unix mode; off Linux a plain file is what PATH names
+            // and the caller's own spawn refusal answers a non-executable one.
+            #[cfg(target_os = "linux")]
+            let hit = std::fs::metadata(path)
                 .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false)
+                .unwrap_or(false);
+            #[cfg(not(target_os = "linux"))]
+            let hit = std::fs::metadata(path)
+                .map(|m| m.is_file())
+                .unwrap_or(false);
+            hit
         })
 }
 
@@ -847,8 +856,11 @@ fn stat_value(path: &Path, key: &str) -> Option<u64> {
 
 /// The processors this process may run on.
 fn allowed_cores() -> f64 {
-    // SAFETY: a zeroed cpu_set_t is a valid empty set, and the call writes within its size.
+    // The kernel's own affinity answer, where the kernel names the calls; elsewhere the
+    // standard library's parallelism already carries the process's affinity mask.
+    #[cfg(target_os = "linux")]
     let count = unsafe {
+        // SAFETY: a zeroed cpu_set_t is a valid empty set, and the call writes within its size.
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) == 0 {
             libc::CPU_COUNT(&set)
@@ -856,6 +868,7 @@ fn allowed_cores() -> f64 {
             0
         }
     };
+    #[cfg(target_os = "linux")]
     if count > 0 {
         return count as f64;
     }

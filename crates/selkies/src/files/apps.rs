@@ -184,6 +184,7 @@ mod tests {
     //! alone.
 
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::symlink;
 
     const METADATA: &str = "include:\n  - name: firefox\n    full_name: Firefox\n    description: Browser\n    icon: firefox.svg\n";
@@ -233,12 +234,16 @@ mod tests {
                 "not a file name: {name:?}"
             );
         }
-        symlink(folder.join("SHALAYER"), folder.join("metadata/img/out.svg")).unwrap();
-        assert_eq!(
-            icon_path(folder_str, "out.svg"),
-            None,
-            "a link leading out of the image directory"
-        );
+        // A link leading out of the image directory is the Unix case.
+        #[cfg(target_os = "linux")]
+        {
+            symlink(folder.join("SHALAYER"), folder.join("metadata/img/out.svg")).unwrap();
+            assert_eq!(
+                icon_path(folder_str, "out.svg"),
+                None,
+                "a link leading out of the image directory"
+            );
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 

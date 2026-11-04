@@ -50,7 +50,10 @@ mod socket_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
 
-pub use handler::{PeerInfo, PeerSocket, routes, websocket_handler};
+/// The accepted socket's descriptor extension, where the kernel's socket counters exist.
+#[cfg(target_os = "linux")]
+pub use handler::PeerSocket;
+pub use handler::{PeerInfo, routes, websocket_handler};
 pub use host::WsDeps;
 pub use server::{Timings, WsService};
 

@@ -45,19 +45,28 @@ pub fn read_entry(path: &Path) -> Entry {
 }
 
 /// The first executable `name` resolves to: as given when it carries a directory, else along
-/// `PATH`.
+/// `PATH`. The execute bit is a Unix mode, so off Linux a plain file is what the platform
+/// runs, read along the separator that OS's `PATH` carries.
 pub fn which(name: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "linux")]
     let executable = |path: &Path| {
         fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     };
+    #[cfg(not(target_os = "linux"))]
+    let executable = |path: &Path| fs::metadata(path).is_ok_and(|m| m.is_file());
+    #[cfg(target_os = "linux")]
+    let path_separator = ':';
+    #[cfg(not(target_os = "linux"))]
+    let path_separator = ';';
     if name.contains('/') {
         let path = PathBuf::from(name);
         return executable(&path).then_some(path);
     }
     std::env::var_os("PATH")?
         .to_str()?
-        .split(':')
+        .split(path_separator)
         .filter(|dir| !dir.is_empty())
         .map(|dir| Path::new(dir).join(name))
         .find(|path| executable(path))

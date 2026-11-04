@@ -22,21 +22,35 @@
 //! socket. The scheduler is asked to die with this process (`PR_SET_PDEATHSIG`): one killed
 //! outright would otherwise leave the scheduler holding the socket and the program for the
 //! next start to trip over.
+//!
+//! Off Linux no CUPS scheduler and no directory-change watcher run: the watcher's start
+//! answers the failure a Linux session that cannot watch the spool does, which the caller
+//! logs as printing off, and the queue's start the absence a host without CUPS installed does,
+//! so no job is scheduled and no document is announced, while the routes still hand over the
+//! documents that land in the spool by other means. The Windows printing milestone
+//! (`ReadDirectoryChangesW`) lands in the places the twins hold.
 
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
-use std::ffi::{CString, OsStr};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
-use nix::unistd::AccessFlags;
 
+#[cfg(target_os = "linux")]
+use nix::unistd::AccessFlags;
+#[cfg(target_os = "linux")]
+use std::ffi::{CString, OsStr};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
+
+use super::confine::mtime_pair;
 use super::transfer::{FileServe, audited_file_response};
 use super::{FilesState, RequestAuth, text};
 
@@ -45,10 +59,13 @@ use super::{FilesState, RequestAuth, text};
 /// modified well within this.
 pub const SETTLE_SECONDS: f64 = 0.5;
 
-/// The queue's CUPS backend, written into the scheduler's private tree.
-const BACKEND: &[u8] = include_bytes!("../../assets/cups/backend");
-/// The queue's PPD, as shipped (A4).
+/// The queue's PPD, as shipped (A4). Linux alone: the CUPS queue it names is the Linux
+/// spool's own.
+#[cfg(target_os = "linux")]
 const PPD: &str = include_str!("../../assets/cups/selkies.ppd");
+/// The queue's CUPS backend, written into the scheduler's private tree.
+#[cfg(target_os = "linux")]
+const BACKEND: &[u8] = include_bytes!("../../assets/cups/backend");
 
 /// The print spool: `configured` when set (`~` expanded), else `selkies/print` under the XDG
 /// state directory, as the server's other state is.
@@ -75,9 +92,14 @@ pub fn spool_path_in(configured: &str, state_home: Option<&str>, home: &str) -> 
 }
 
 /// `name` when it names a document in the spool, else `None`: a path, a hidden or partial
-/// file, or anything that is not a PDF is refused.
+/// file, or anything that is not a PDF is refused. Off Linux the backslash is a path
+/// separator too, so a name holding one is a path there and refused with the slashes.
 pub fn document_name(name: &str) -> Option<&str> {
     if name.is_empty() || name.contains('/') || name.starts_with('.') || name.contains('\0') {
+        return None;
+    }
+    #[cfg(not(target_os = "linux"))]
+    if name.contains('\\') {
         return None;
     }
     name.to_lowercase().ends_with(".pdf").then_some(name)
@@ -97,7 +119,8 @@ pub fn pending(spool: &Path) -> Vec<(String, u64)> {
             if !meta.is_file() {
                 return None;
             }
-            let mtime = i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec());
+            let (secs, nsec) = mtime_pair(&meta);
+            let mtime = i128::from(secs) * 1_000_000_000 + i128::from(nsec);
             Some((mtime, name, meta.len()))
         })
         .collect();
@@ -140,6 +163,7 @@ pub fn default_paper(ppd: &str, requested: &str) -> (String, Option<String>) {
 pub type OnDocument = Arc<dyn Fn(&str, u64) + Send + Sync>;
 
 /// Announces each document that lands whole in the spool (module docs).
+#[cfg(target_os = "linux")]
 pub struct SpoolWatcher {
     stop: Arc<AtomicBool>,
     reader: Option<std::thread::JoinHandle<()>>,
@@ -148,9 +172,11 @@ pub struct SpoolWatcher {
 
 /// The inotify events the watcher reads: a name created, moved in, opened, modified, or
 /// closed after writing.
+#[cfg(target_os = "linux")]
 const WATCH_MASK: u32 =
     libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_OPEN | libc::IN_MODIFY | libc::IN_CLOSE_WRITE;
 
+#[cfg(target_os = "linux")]
 impl SpoolWatcher {
     /// Watch `spool`, creating it where missing, and call `on_document` for each whole
     /// document; fails where inotify cannot watch the directory.
@@ -194,6 +220,7 @@ impl SpoolWatcher {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for SpoolWatcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -203,6 +230,7 @@ impl Drop for SpoolWatcher {
 
 /// The reader thread: poll the inotify descriptor, parse each event into its mask and name,
 /// and send them on; closes the descriptor when told to stop or when the receiver is gone.
+#[cfg(target_os = "linux")]
 fn read_events(fd: i32, stop: &AtomicBool, tx: &tokio::sync::mpsc::UnboundedSender<(u32, String)>) {
     let mut buf = vec![0u8; 64 * 1024];
     while !stop.load(Ordering::Relaxed) {
@@ -244,6 +272,7 @@ fn read_events(fd: i32, stop: &AtomicBool, tx: &tokio::sync::mpsc::UnboundedSend
 
 /// The announcing task: a document moved in or closed after writing is announced at once; one
 /// merely created is announced after [`SETTLE_SECONDS`] unless it is opened or modified first.
+#[cfg(target_os = "linux")]
 async fn announce_loop(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<(u32, String)>,
     spool: PathBuf,
@@ -272,6 +301,7 @@ async fn announce_loop(
 }
 
 /// Announce `name` where it is a document still in the spool.
+#[cfg(target_os = "linux")]
 fn announce(spool: &Path, name: &str, on_document: &OnDocument) {
     if document_name(name).is_none() {
         return;
@@ -280,6 +310,26 @@ fn announce(spool: &Path, name: &str, on_document: &OnDocument) {
         return;
     };
     on_document(name, meta.len());
+}
+
+/// The watcher where no directory-change events are read (module docs): a start answers the
+/// failure a Linux session that cannot watch the spool does, so the caller logs printing off,
+/// and no document is ever announced. The Windows milestone lands in this file's place.
+#[cfg(not(target_os = "linux"))]
+pub struct SpoolWatcher;
+
+#[cfg(not(target_os = "linux"))]
+impl SpoolWatcher {
+    /// Refuse the watch: no spool watcher is wired for this OS.
+    pub fn start(_spool: PathBuf, _on_document: OnDocument) -> std::io::Result<SpoolWatcher> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no spool watcher is wired for this OS",
+        ))
+    }
+
+    /// Nothing was started, so there is nothing to stop.
+    pub fn stop(&mut self) {}
 }
 
 /// `GET /api/print/{name}`: hand a printed document to the page that prints it, and take it
@@ -313,9 +363,7 @@ pub async fn handle_print_document(
         return text(StatusCode::NOT_FOUND, "No such document");
     };
     let full = state.print_spool.join(name);
-    let mut prefix = state.print_spool.as_os_str().to_os_string();
-    prefix.push("/");
-    if !full.as_os_str().as_bytes().starts_with(prefix.as_bytes()) || !full.is_file() {
+    if !full.starts_with(&state.print_spool) || !full.is_file() {
         return text(StatusCode::NOT_FOUND, "No such document");
     }
     let serve = FileServe {
@@ -333,6 +381,7 @@ pub async fn handle_print_document(
 
 /// The first `name` on the `:`-separated `path` the caller may `access` with `mode`, as
 /// `shutil.which` finds it: a file, never a directory.
+#[cfg(target_os = "linux")]
 fn which_in(path: &str, name: &str, mode: AccessFlags) -> Option<PathBuf> {
     path.split(':')
         .filter(|d| !d.is_empty())
@@ -341,6 +390,7 @@ fn which_in(path: &str, name: &str, mode: AccessFlags) -> Option<PathBuf> {
 }
 
 /// The session's print queue (module docs).
+#[cfg(target_os = "linux")]
 pub struct PrintQueue {
     /// The scheduler's state root.
     pub root: PathBuf,
@@ -353,6 +403,7 @@ pub struct PrintQueue {
     process: Option<tokio::process::Child>,
 }
 
+#[cfg(target_os = "linux")]
 impl PrintQueue {
     /// Where the scheduler is looked for, beyond `PATH`: the sbin directories a session's
     /// `PATH` usually leaves out.
@@ -626,12 +677,40 @@ impl PrintQueue {
     }
 }
 
+/// The queue where no CUPS scheduler runs (module docs): a start reports the absence a host
+/// without CUPS installed does, one line telling the story, and no job is ever scheduled. The
+/// Windows milestone lands in this file's place.
+#[cfg(not(target_os = "linux"))]
+pub struct PrintQueue;
+
+#[cfg(not(target_os = "linux"))]
+impl PrintQueue {
+    /// A queue spooling to `spool`; nothing runs until a start, and no start starts anything.
+    pub fn new(_spool: PathBuf) -> Self {
+        PrintQueue
+    }
+
+    /// Start; always reports that no scheduler runs, one line telling the story, the answer a
+    /// host without CUPS installed gets.
+    pub async fn start(&mut self) -> bool {
+        log::info!(
+            target: "printing",
+            "No CUPS scheduler on this OS: documents printed into the spool are still handed over, but there is no Selkies queue to print to"
+        );
+        false
+    }
+
+    /// Nothing was started, so there is nothing to stop.
+    pub async fn stop(&mut self) {}
+}
+
 #[cfg(test)]
 mod tests {
     //! `tests/unit/test_printing.py`: names, the spool's place, the paper, pending documents,
     //! the watcher, the scheduler's discovery, and the state root's claim.
 
     use super::*;
+    #[cfg(target_os = "linux")]
     use parking_lot::Mutex;
 
     fn scratch() -> PathBuf {
@@ -738,6 +817,8 @@ mod tests {
         std::fs::remove_dir_all(&spool).unwrap();
     }
 
+    /// The watcher reads inotify; the scheduler cases read the Unix file mode.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_watcher_announces_whole_documents_once() {
         let root = scratch();
@@ -809,6 +890,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_locked_scheduler_is_named_with_its_mode() {
         let root = scratch();
@@ -849,6 +931,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_state_root_is_this_users_alone() {
         let tmp = scratch();

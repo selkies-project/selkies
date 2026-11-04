@@ -63,6 +63,14 @@
 //! The typing route for compositors without a virtual keyboard (KWin) rides on the same
 //! ladders: the text is written as a secret, pasted with Shift+Insert, and the previous
 //! clipboard restored once the focused application has fetched it ([`paste`]).
+//!
+//! Off Linux the X11 module is a twin answering that no display is live and no monitor
+//! builds, so both ladders fall through to their last rung and the surface reports no
+//! backend, and the app-compositor rung of [`CompositorClipboard`] answers the absence
+//! pixelflux's own surface does, since pixelflux gates its data-control client with the Unix
+//! sockets it speaks through: no mimes offered, no payload to read, nothing served, and the
+//! writes and watches refused the way a session without a compositor is. The Windows
+//! clipboard milestone lands in the places those twins hold.
 
 pub mod flavors;
 pub mod monitor;
@@ -70,9 +78,17 @@ pub mod outbound;
 pub mod paste;
 pub mod png;
 pub mod verbs;
+/// The XFixes selection monitor on the X server's own selection machinery.
+#[cfg(target_os = "linux")]
 pub mod x11;
+/// The X11 names where no X server runs, as [`x11`] off Linux.
+#[cfg(not(target_os = "linux"))]
+pub mod x11_stub;
 pub mod xclip;
+#[cfg(not(target_os = "linux"))]
+pub use x11_stub as x11;
 
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests;
 
@@ -379,27 +395,71 @@ impl CompositorClipboard for pixelflux::ScreenCapture {
     }
 
     fn clipboard_types_app(&self, display: &str) -> Result<Vec<String>, String> {
-        pixelflux::ScreenCapture::clipboard_types_app(self, display.to_string())
-            .map_err(|e| e.to_string())
+        #[cfg(target_os = "linux")]
+        {
+            pixelflux::ScreenCapture::clipboard_types_app(self, display.to_string())
+                .map_err(|e| e.to_string())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = display;
+            Ok(Vec::new())
+        }
     }
 
     fn clipboard_read_app(&self, display: &str, mime: &str) -> Result<Option<Vec<u8>>, String> {
-        pixelflux::ScreenCapture::clipboard_read_app(self, display.to_string(), mime.to_string())
+        #[cfg(target_os = "linux")]
+        {
+            pixelflux::ScreenCapture::clipboard_read_app(
+                self,
+                display.to_string(),
+                mime.to_string(),
+            )
             .map_err(|e| e.to_string())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, mime);
+            Ok(None)
+        }
     }
 
     fn clipboard_write_app(&self, display: &str, entries: Vec<Entry>) -> Result<(), String> {
-        pixelflux::ScreenCapture::clipboard_write_app(self, display.to_string(), entries)
-            .map_err(|e| e.to_string())
+        #[cfg(target_os = "linux")]
+        {
+            pixelflux::ScreenCapture::clipboard_write_app(self, display.to_string(), entries)
+                .map_err(|e| e.to_string())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, entries);
+            Err("wayland backend not running".to_string())
+        }
     }
 
     fn clipboard_served_app(&self, after: usize, timeout: Duration) -> Vec<String> {
-        pixelflux::ScreenCapture::clipboard_served_app(self, after, timeout.as_secs_f64())
+        #[cfg(target_os = "linux")]
+        {
+            pixelflux::ScreenCapture::clipboard_served_app(self, after, timeout.as_secs_f64())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (after, timeout);
+            Vec::new()
+        }
     }
 
     fn clipboard_clear_app(&self, display: &str) -> Result<(), String> {
-        pixelflux::ScreenCapture::clipboard_clear_app(self, display.to_string())
-            .map_err(|e| e.to_string())
+        #[cfg(target_os = "linux")]
+        {
+            pixelflux::ScreenCapture::clipboard_clear_app(self, display.to_string())
+                .map_err(|e| e.to_string())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = display;
+            Err("wayland backend not running".to_string())
+        }
     }
 
     fn clipboard_watch_app(
@@ -407,12 +467,23 @@ impl CompositorClipboard for pixelflux::ScreenCapture {
         display: &str,
         watch: Arc<dyn pixelflux::sink::SelectionWatch>,
     ) -> Result<(), String> {
-        pixelflux::ScreenCapture::clipboard_watch_app(self, display.to_string(), watch)
-            .map_err(|e| e.to_string())
+        #[cfg(target_os = "linux")]
+        {
+            pixelflux::ScreenCapture::clipboard_watch_app(self, display.to_string(), watch)
+                .map_err(|e| e.to_string())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, watch);
+            Err("wayland backend not running".to_string())
+        }
     }
 
     fn clipboard_unwatch_app(&self, display: &str) {
-        pixelflux::ScreenCapture::clipboard_unwatch_app(self, display.to_string())
+        #[cfg(target_os = "linux")]
+        pixelflux::ScreenCapture::clipboard_unwatch_app(self, display.to_string());
+        #[cfg(not(target_os = "linux"))]
+        let _ = display;
     }
 }
 

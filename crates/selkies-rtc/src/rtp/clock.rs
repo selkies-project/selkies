@@ -48,15 +48,25 @@ use std::sync::OnceLock;
 /// Seconds between the NTP epoch (1900) and the Unix epoch (1970).
 pub const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
 
-/// Nanoseconds of `CLOCK_MONOTONIC` now.
+/// Nanoseconds of `CLOCK_MONOTONIC` now: the kernel's own clock where libc serves it,
+/// the standard library's monotonic instant elsewhere.
 pub fn monotonic_ns() -> i64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: clock_gettime writes the timespec it is handed and nothing else.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+    #[cfg(target_os = "linux")]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes the timespec it is handed and nothing else.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::time::Instant;
+        static EPOCH: OnceLock<Instant> = OnceLock::new();
+        EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as i64
+    }
 }
 
 /// Seconds of `CLOCK_MONOTONIC` now.
@@ -67,13 +77,23 @@ pub fn monotonic() -> f64 {
 fn ntp_offset_ns() -> i64 {
     static OFFSET: OnceLock<i64> = OnceLock::new();
     *OFFSET.get_or_init(|| {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
+        #[cfg(target_os = "linux")]
+        let wall_ns = {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: as above, for the wall clock.
+            unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+            ts.tv_sec * 1_000_000_000 + ts.tv_nsec
         };
-        // SAFETY: as above, for the wall clock.
-        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
-        let wall_ns = ts.tv_sec * 1_000_000_000 + ts.tv_nsec;
+        // The wall clock elsewhere: the Unix epoch the NTP offset is measured from is
+        // the same one the standard library counts.
+        #[cfg(not(target_os = "linux"))]
+        let wall_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
         wall_ns + NTP_UNIX_OFFSET as i64 * 1_000_000_000 - monotonic_ns()
     })
 }

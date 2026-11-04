@@ -2186,10 +2186,14 @@ pub(crate) fn detect_app_compositor_in(runtime: &str, capture: &str) -> Option<S
             if !name.starts_with("wayland-") || name.ends_with(".lock") || name == cap_base {
                 return None;
             }
+            #[cfg(target_os = "linux")]
             let meta = std::fs::metadata(e.path()).ok()?;
-            use std::os::unix::fs::FileTypeExt;
-            if !meta.file_type().is_socket() {
-                return None;
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                if !meta.file_type().is_socket() {
+                    return None;
+                }
             }
             // A stale wayland-* file left by a dead compositor must not be adopted; it would
             // silently break clipboard and input.
@@ -2222,8 +2226,16 @@ pub(crate) fn detect_app_compositor_in(runtime: &str, capture: &str) -> Option<S
 
 /// Whether a Wayland socket accepts a connection right now (rejecting a stale socket file with
 /// no listener).
+#[cfg(target_os = "linux")]
 fn wl_socket_live(path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+/// No Unix socket exists off Linux, so nothing answers live: the app-compositor detection
+/// finds no socket to adopt, and a named app compositor is always re-detected.
+#[cfg(not(target_os = "linux"))]
+fn wl_socket_live(_path: &std::path::Path) -> bool {
+    false
 }
 
 /// The `xdotool key` argument for a keysym the shim could not inject, and the character an

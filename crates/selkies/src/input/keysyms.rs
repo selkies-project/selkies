@@ -12,7 +12,10 @@
 //! rule and xkbcommon reads it back, but X clients that look keys up through an input
 //! context get the bare Latin-1 byte out of `XmbLookupString`, which a UTF-8 client drops, so
 //! XWayland apps would lose exactly the accented characters. The legacy planes (Cyrillic,
-//! Greek, Arabic, ...) decode through libxkbcommon. An overlay bind is a key the server
+//! Greek, Arabic, ...) decode through libxkbcommon, which is linked on Linux alone: off
+//! Linux a legacy-plane keysym decodes as nothing, a character takes its universal
+//! (Latin-1 or Unicode-plane) spelling as its layout keysym, and no keysym is named. An
+//! overlay bind is a key the server
 //! invents, so any keysym that spells one character is bound in its universal (Latin-1 or
 //! Unicode-plane) form, since the toolkits' tables for legacy national keysyms disagree across
 //! versions while those two forms translate algorithmically everywhere.
@@ -20,6 +23,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(target_os = "linux")]
 use xkbcommon::xkb;
 
 use super::keysym_names::KEYSYM_NAMES;
@@ -186,13 +190,19 @@ fn decode_character(keysym: u32) -> Option<char> {
     } else if keysym == 0x20AC {
         '€'
     } else {
-        let text = xkb::keysym_to_utf8(xkb::Keysym::new(keysym));
-        let mut chars = text.chars();
-        let first = chars.next()?;
-        if chars.next().is_some() {
-            return None;
+        #[cfg(target_os = "linux")]
+        {
+            let text = xkb::keysym_to_utf8(xkb::Keysym::new(keysym));
+            let mut chars = text.chars();
+            let first = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            first
         }
-        first
+        // No libxkbcommon is linked off Linux: a legacy-plane keysym decodes as nothing.
+        #[cfg(not(target_os = "linux"))]
+        return None;
     };
     let code = ch as u32;
     if code < 0x20 || (0x7F..=0x9F).contains(&code) {
@@ -204,10 +214,14 @@ fn decode_character(keysym: u32) -> Option<char> {
 /// The canonical keysym for a character (the one a physical keyboard layout binds:
 /// `Cyrillic_ef` for ф, not its Unicode-plane alias), so text typed onto a seat whose layout
 /// carries the script lands on real layout keys instead of overlay binds. Falls back to the
-/// Latin-1/Unicode-plane encoding.
+/// Latin-1/Unicode-plane encoding, which is what every character gets off Linux, where no
+/// libxkbcommon is linked to ask for the layout's own spelling.
 pub fn character_to_layout_keysym(ch: char) -> u32 {
     let codepoint = ch as u32;
+    #[cfg(target_os = "linux")]
     let keysym = xkb::utf32_to_keysym(codepoint).raw();
+    #[cfg(not(target_os = "linux"))]
+    let keysym = 0;
     if keysym != 0 {
         return keysym;
     }
@@ -277,6 +291,7 @@ pub fn xkey_name(keysym: u32) -> Option<&'static str> {
 }
 
 /// The xkbcommon name of any keysym, for the xdotool fallback of a key the table does not name.
+#[cfg(target_os = "linux")]
 pub fn keysym_name(keysym: u32) -> Option<String> {
     let name = xkb::keysym_get_name(xkb::Keysym::new(keysym));
     if name.is_empty() || name == "NoSymbol" {
@@ -284,6 +299,13 @@ pub fn keysym_name(keysym: u32) -> Option<String> {
     } else {
         Some(name)
     }
+}
+
+/// No libxkbcommon is linked off Linux, so no keysym is named beyond the X name table
+/// [`xkey_name`] already carries.
+#[cfg(not(target_os = "linux"))]
+pub fn keysym_name(_keysym: u32) -> Option<String> {
+    None
 }
 
 #[cfg(test)]
@@ -352,22 +374,30 @@ mod tests {
             "nothing typeable is dropped from a mixed string"
         );
         assert!(text_to_wayland_keysyms("\x00\x7f\u{80}\u{9f}\x1b").is_empty());
-        let printable: Vec<char> = sample.chars().filter(|c| !"\t\n".contains(*c)).collect();
-        for c in &printable {
-            let ks = universal_text_keysym(*c).unwrap();
-            assert_eq!(
-                keysym_to_character(ks),
-                Some(*c),
-                "every keysym decodes back to its character"
-            );
-            assert_eq!(
-                xkb::keysym_to_utf8(xkb::Keysym::new(ks)),
-                c.to_string(),
-                "xkbcommon decodes every keysym the same way"
-            );
+        // The round trip through `keysym_to_character` is libxkbcommon's legacy-plane
+        // decoding, which only a Linux build links.
+        #[cfg(target_os = "linux")]
+        {
+            let printable: Vec<char> = sample.chars().filter(|c| !"\t\n".contains(*c)).collect();
+            for c in &printable {
+                let ks = universal_text_keysym(*c).unwrap();
+                assert_eq!(
+                    keysym_to_character(ks),
+                    Some(*c),
+                    "every keysym decodes back to its character"
+                );
+                assert_eq!(
+                    xkb::keysym_to_utf8(xkb::Keysym::new(ks)),
+                    c.to_string(),
+                    "xkbcommon decodes every keysym the same way"
+                );
+            }
         }
     }
 
+    /// The layout keysym's legacy-plane preference is libxkbcommon's, which only a Linux
+    /// build links.
+    #[cfg(target_os = "linux")]
     #[test]
     fn layout_keysym_prefers_the_legacy_plane_and_overlay_binds_universalize_it() {
         let ef = character_to_layout_keysym('ф');
@@ -397,6 +427,7 @@ mod tests {
         assert_eq!(xkey_name(0x20), Some("space"));
         assert_eq!(xkey_name(0x0100_0000 | 0x1F600), None);
         assert_eq!(cyrillic_to_qwerty(0x06D3), Some(0x63));
+        #[cfg(target_os = "linux")]
         assert_eq!(keysym_name(0xFF08).as_deref(), Some("BackSpace"));
     }
 }

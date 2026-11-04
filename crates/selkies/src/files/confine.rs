@@ -17,18 +17,38 @@
 //! the check and the act cannot steer it outside the root, the one case the string check cannot
 //! see. An in-tree symlink stays what it always was, a link the manager follows the way the
 //! resolved path did.
+//!
+//! Off Linux no descriptor carries a path the kernel would name it by, so the act is the
+//! resolved string the check already validated: [`DirFd`] is the canonical path there, the
+//! walk resolves each component and checks it against the root the same way, and every helper
+//! the routes act through (`mkdir` in a directory, the upload's staging, the archive's pack)
+//! names its object by that path. The Windows confinement milestone (the object-holding
+//! handle) lands in the places those twins hold.
 
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::Metadata;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(target_os = "linux")]
 use nix::fcntl::{OFlag, open, openat};
+#[cfg(target_os = "linux")]
 use nix::sys::stat::{Mode, mkdirat};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
+
+/// The open directory a confinement act names its objects through: a descriptor walked
+/// component by component on Linux, and off Linux the canonical path the string
+/// confinement verified, which is what the act is named by there.
+#[cfg(target_os = "linux")]
+pub type DirFd = OwnedFd;
+/// The open directory a confinement act names its objects through, as [`DirFd`] is on
+/// Linux.
+#[cfg(not(target_os = "linux"))]
+pub type DirFd = PathBuf;
 
 /// The most entries the file manager's JSON listing returns for one folder: a folder past it
 /// is refused rather than listed in part, and no request can make the server stat and
@@ -62,6 +82,7 @@ impl From<io::Error> for WalkError {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl From<nix::Error> for WalkError {
     fn from(e: nix::Error) -> Self {
         WalkError::Io(io::Error::from(e))
@@ -73,14 +94,19 @@ impl From<nix::Error> for WalkError {
 /// Empty and `.` components are dropped, and a `..` surviving the normalization is the escape;
 /// a path that normalizes to nothing is no components, which is the root itself. A NUL byte
 /// names nothing on the filesystem and is refused with the escapes, rather than failing the
-/// calls that would see it.
+/// calls that would see it. Off Linux the backslash is a separator too, so a path is split on
+/// both there and no `..` survives inside what one OS calls a single component.
 pub fn file_parts(rel: &str) -> Option<Vec<String>> {
     if rel.contains('\0') {
         return None;
     }
     let rel = rel.trim_matches(|c| c == '/' || c == '\\');
+    #[cfg(target_os = "linux")]
+    let components = rel.split('/');
+    #[cfg(not(target_os = "linux"))]
+    let components = rel.split(['/', '\\']);
     let mut parts: Vec<&str> = Vec::new();
-    for component in rel.split('/') {
+    for component in components {
         match component {
             "" | "." => {}
             ".." => match parts.last() {
@@ -125,7 +151,26 @@ pub fn realpath(path: &Path) -> PathBuf {
     }
 }
 
+/// A file's modification time as `(seconds, nanoseconds)`: the stat field pair on Linux,
+/// the standard library's instant off it, where the metadata serves no stat fields.
+pub fn mtime_pair(st: &Metadata) -> (i64, i64) {
+    #[cfg(target_os = "linux")]
+    {
+        (st.mtime(), st.mtime_nsec())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        st.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or((0, 0), |d| {
+                (d.as_secs() as i64, i64::from(d.subsec_nanos()))
+            })
+    }
+}
+
 /// Where a descriptor's open really landed, from the kernel's record of it.
+#[cfg(target_os = "linux")]
 pub fn fd_path(fd: &OwnedFd) -> io::Result<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
 }
@@ -151,16 +196,25 @@ impl FileRoot {
     /// starts with the root's followed by the separator, so a sibling whose name extends the
     /// root's is not read as inside it. A root of `/` is a prefix that already ends in one.
     pub fn within(&self, resolved: &Path) -> bool {
-        let base = self.base.as_os_str().as_bytes();
-        let candidate = resolved.as_os_str().as_bytes();
-        if candidate == base {
-            return true;
+        #[cfg(target_os = "linux")]
+        {
+            let base = self.base.as_os_str().as_bytes();
+            let candidate = resolved.as_os_str().as_bytes();
+            if candidate == base {
+                return true;
+            }
+            let mut prefix = base.to_vec();
+            if prefix.last() != Some(&b'/') {
+                prefix.push(b'/');
+            }
+            candidate.starts_with(&prefix)
         }
-        let mut prefix = base.to_vec();
-        if prefix.last() != Some(&b'/') {
-            prefix.push(b'/');
+        // The same containment by components, the spelling the standard library serves off
+        // Linux, where an `OsStr` has no bytes to compare.
+        #[cfg(not(target_os = "linux"))]
+        {
+            resolved.starts_with(&self.base)
         }
-        candidate.starts_with(&prefix)
     }
 
     /// Resolve a root-relative path to a filesystem path at or under the root, or `None` when
@@ -200,7 +254,8 @@ impl FileRoot {
     /// [`WalkError::Escape`] instead of handing the caller an object to act outside with.
     /// With `create`, a missing component is made in place first; what the walk itself
     /// created is inside the descriptor it came from, so it needs no verification.
-    pub fn open_dir_fd(&self, parts: &[String], create: bool) -> Result<OwnedFd, WalkError> {
+    #[cfg(target_os = "linux")]
+    pub fn open_dir_fd(&self, parts: &[String], create: bool) -> Result<DirFd, WalkError> {
         let dir_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC;
         let raw = open(&self.base, dir_flags, Mode::empty())?;
         let mut fd = unsafe { OwnedFd::from_raw_fd(raw) };
@@ -247,6 +302,39 @@ impl FileRoot {
         Ok(fd)
     }
 
+    /// The walk off Linux (module docs): each component is resolved under the root and
+    /// checked against it, and a missing one is made where `create` asks, the string
+    /// confinement the static path analyzer already follows. A backslash is a separator on
+    /// the OSes this serves, so a part holding one is not a name component there.
+    #[cfg(not(target_os = "linux"))]
+    pub fn open_dir_fd(&self, parts: &[String], create: bool) -> Result<DirFd, WalkError> {
+        let mut dir = self.base.clone();
+        for part in parts {
+            if matches!(part.as_str(), "" | "." | "..") || part.contains('/') || part.contains('\\')
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("not a name component: {part:?}"),
+                )
+                .into());
+            }
+            dir.push(part);
+            if create && !dir.is_dir() {
+                match std::fs::create_dir(&dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            let resolved = realpath(&dir);
+            if !self.within(&resolved) {
+                return Err(WalkError::Escape(part.clone()));
+            }
+            dir = resolved;
+        }
+        Ok(dir)
+    }
+
     /// Open the directory `parts` names under the root as a descriptor, with the canonical
     /// path it opened to, or `None` when that sits outside the root.
     ///
@@ -256,7 +344,8 @@ impl FileRoot {
     /// listable the way the resolved string path allowed it while one resolving outside is
     /// refused. `O_DIRECTORY` refuses a file or a FIFO before anything is read, so a FIFO
     /// cannot hold the open waiting for a writer; the error is `NotADirectory`.
-    pub fn open_resolved_fd(&self, parts: &[String]) -> io::Result<Option<(OwnedFd, PathBuf)>> {
+    #[cfg(target_os = "linux")]
+    pub fn open_resolved_fd(&self, parts: &[String]) -> io::Result<Option<(DirFd, PathBuf)>> {
         let (leaf, dirs) = match parts.split_last() {
             Some(split) => split,
             None => (&String::new(), parts),
@@ -280,6 +369,39 @@ impl FileRoot {
             return Ok(None);
         }
         Ok(Some((fd, resolved)))
+    }
+
+    /// The resolved directory `parts` names, or `None` when it sits outside the root
+    /// (module docs); a leaf that is not a directory answers `NotADirectory` the descriptor's
+    /// `O_DIRECTORY` does.
+    #[cfg(not(target_os = "linux"))]
+    pub fn open_resolved_fd(&self, parts: &[String]) -> io::Result<Option<(DirFd, PathBuf)>> {
+        let (leaf, dirs) = match parts.split_last() {
+            Some(split) => split,
+            None => (&String::new(), parts),
+        };
+        let mut dir = match self.open_dir_fd(dirs, false) {
+            Ok(dir) => dir,
+            Err(WalkError::Escape(_)) => return Ok(None),
+            Err(WalkError::Io(e)) => return Err(e),
+        };
+        if !leaf.is_empty() {
+            dir.push(leaf);
+        }
+        let resolved = realpath(&dir);
+        if !self.within(&resolved) {
+            return Ok(None);
+        }
+        if !std::fs::metadata(&resolved)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "not a directory",
+            ));
+        }
+        Ok(Some((resolved.clone(), resolved)))
     }
 
     /// Whether `target` is the root itself rather than an entry within it.
@@ -366,10 +488,11 @@ pub fn scan_directory(
                 continue;
             }
         };
-        let mut name = entry.file_name().as_bytes().to_vec();
+        let mut name = entry.file_name().as_encoded_bytes().to_vec();
         if is_dir {
             name.push(b'/');
         }
+        let (secs, nsec) = mtime_pair(&stat);
         entries.push(IndexItem {
             name,
             size: if is_dir {
@@ -377,7 +500,7 @@ pub fn scan_directory(
             } else {
                 format!("{:.1} KB", stat.len() as f64 / 1024.0)
             },
-            mtime: local_time(stat.mtime(), stat.mtime_nsec())
+            mtime: local_time(secs, nsec)
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string(),
             is_dir,
@@ -454,7 +577,16 @@ pub fn browse_dir(
         return Ok(None);
     };
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(format!("/proc/self/fd/{}", dir_fd.as_raw_fd()))? {
+    // Where the pinned directory is listed from: the kernel's record of the descriptor on
+    // Linux, the resolved path itself off it (module docs).
+    let listing = {
+        #[cfg(target_os = "linux")]
+        let dir = PathBuf::from(format!("/proc/self/fd/{}", dir_fd.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let dir = dir_fd.clone();
+        std::fs::read_dir(dir)?
+    };
+    for entry in listing {
         let Ok(entry) = entry else { continue };
         if entries.len() >= max_entries {
             return Err(BrowseError::TooLarge);
@@ -468,9 +600,10 @@ pub fn browse_dir(
         } else {
             format!("{rel}/{name}")
         };
+        let (secs, nsec) = mtime_pair(&stat);
         entries.push(BrowseEntry {
             size: if is_dir { None } else { Some(stat.len()) },
-            mtime: isoformat(stat.mtime(), stat.mtime_nsec()),
+            mtime: isoformat(secs, nsec),
             name,
             path,
             is_dir,
@@ -499,7 +632,9 @@ mod tests {
     //! `tests/unit/test_file_confinement.py`, the primitive and walk cases.
 
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::symlink;
+    #[cfg(target_os = "linux")]
     use std::time::Duration;
 
     fn scratch(prefix: &str) -> PathBuf {
@@ -544,8 +679,17 @@ mod tests {
         );
         assert_eq!(file_parts(""), Some(vec![]));
         assert_eq!(file_parts(".//real/"), Some(parts(&["real"])));
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            file_parts("a\\..\\b"),
+            Some(parts(&["b"])),
+            "off Linux the backslash separates and normalizes like the slash"
+        );
     }
 
+    /// The resolve and walk cases read the Unix tree the confinement was built around:
+    /// symlinks, a FIFO, and the kernel's record of a descriptor.
+    #[cfg(target_os = "linux")]
     #[test]
     fn resolve_confines_to_the_root() {
         let base = scratch("selkies-confinement");
@@ -600,6 +744,7 @@ mod tests {
         assert_eq!(fd_path(&fd).unwrap(), PathBuf::from("/tmp"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_descriptor_walk_verifies_each_open() {
         let base = scratch("selkies-walk");

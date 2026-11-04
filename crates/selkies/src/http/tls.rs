@@ -26,8 +26,10 @@
 //! one serves the next handshake with no window in which nothing listens.
 
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::io::Write;
 use std::net::IpAddr;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -135,16 +137,26 @@ fn absolute(path: &str) -> PathBuf {
 }
 
 /// The names a generated certificate is issued for: loopback under every spelling, since
-/// that is what a published container port is reached by, plus the host's own name. Its
+/// that is what a published container port is reached by, plus the host's own name, what the
+/// platform reports (`gethostname` on Linux, the `COMPUTERNAME` variable elsewhere). Its
 /// routable address is deliberately absent: the pair outlives the address a container is
 /// given on each run, and one naming last week's is worse than one claiming none.
 pub fn self_signed_names() -> (Vec<String>, Vec<IpAddr>) {
     let mut dns = vec!["localhost".to_string()];
+    #[cfg(target_os = "linux")]
     if let Ok(hostname) = nix::unistd::gethostname() {
         let hostname = hostname.to_string_lossy().into_owned();
         if !hostname.is_empty() && hostname != "localhost" {
             dns.push(hostname);
         }
+    }
+    #[cfg(not(target_os = "linux"))]
+    if let Some(hostname) =
+        std::env::var_os("COMPUTERNAME").map(|n| n.to_string_lossy().into_owned())
+        && !hostname.is_empty()
+        && hostname != "localhost"
+    {
+        dns.push(hostname);
     }
     (
         dns,
@@ -286,7 +298,8 @@ fn ymd(when: chrono::DateTime<chrono::Utc>) -> (i32, u8, u8) {
 }
 
 /// Write the certificate, then the key readable by its owner alone; the mode is set after the
-/// write too, since creating leaves an existing file's mode alone.
+/// write too, since creating leaves an existing file's mode alone. Off Linux no mode is set:
+/// the file's ACL governs.
 fn write_pair(
     cert_path: &Path,
     key_path: &Path,
@@ -300,17 +313,24 @@ fn write_pair(
         fs::create_dir_all(parent)?;
     }
     fs::write(cert_path, cert_pem)?;
-    let mut key_file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(key_path)?;
-    key_file.write_all(key_pem.as_bytes())?;
-    fs::set_permissions(
-        key_path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )?;
+    #[cfg(target_os = "linux")]
+    {
+        let mut key_file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(key_path)?;
+        key_file.write_all(key_pem.as_bytes())?;
+        fs::set_permissions(
+            key_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        fs::write(key_path, key_pem)?;
+    }
     Ok(())
 }
 

@@ -37,6 +37,9 @@ pub mod recording;
 pub mod transfer;
 pub mod upload;
 
+/// The route suites read the Unix tree the confinement was built around: symlinks, a FIFO,
+/// and the Unix file mode.
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod route_tests;
 
@@ -223,6 +226,8 @@ pub struct FilesState {
     pub(crate) chunked: Mutex<HashMap<PathBuf, ChunkState>>,
     /// Folder packs run at most two at a time: each stages a full copy of the folder on disk.
     pub(crate) archive_pool: Arc<tokio::sync::Semaphore>,
+    /// The recording's audio capture, where pcmflux runs.
+    #[cfg(target_os = "linux")]
     pub(crate) recording_audio: tokio::sync::Mutex<Option<pcmflux::AudioCapture>>,
     pub(crate) hooks: Mutex<Hooks>,
     pub(crate) print_watching: AtomicBool,
@@ -261,6 +266,7 @@ impl FilesState {
             upload_pacer: Arc::new(TransferPacer::adaptive()),
             chunked: Mutex::new(HashMap::new()),
             archive_pool: Arc::new(tokio::sync::Semaphore::new(2)),
+            #[cfg(target_os = "linux")]
             recording_audio: tokio::sync::Mutex::new(None),
             hooks: Mutex::new(hooks),
             print_watching: AtomicBool::new(false),
@@ -426,11 +432,19 @@ pub(crate) fn query_param(uri: &axum::http::Uri, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-/// The description of an OS error alone (`strerror`), never a path of the server's.
+/// The description of an OS error alone (`strerror`), never a path of the server's: the errno
+/// table's own text on Linux, the error's message off it, where no errno table is linked.
 pub(crate) fn strerror(e: &std::io::Error) -> String {
-    match e.raw_os_error() {
-        Some(code) => nix::errno::Errno::from_raw(code).desc().to_string(),
-        None => e.to_string(),
+    #[cfg(target_os = "linux")]
+    {
+        match e.raw_os_error() {
+            Some(code) => nix::errno::Errno::from_raw(code).desc().to_string(),
+            None => e.to_string(),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        e.to_string()
     }
 }
 

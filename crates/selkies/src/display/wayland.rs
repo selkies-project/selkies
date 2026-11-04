@@ -20,12 +20,21 @@
 //!
 //! Every call blocks on the compositor thread's answer for up to two seconds, so each runs
 //! on a blocking thread of the runtime.
+//!
+//! Off Linux no compositor runs: `running` answers `None`, the answer a Linux session
+//! without one gives, and the `Compositor` impl gates with pixelflux's Wayland backend --
+//! while the output-id mapping and the keep, shrink, and recreate rules stay compiled, so
+//! the layout passes and their suites run the same name math everywhere.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use log::{error, warn};
-use pixelflux::{Compositor, Error, OutputDesc};
+/// The compositor handle; the Wayland backend's, gated with it. The output-id mapping and
+/// the keep-shrink-recreate rules below are name math and stay compiled.
+#[cfg(target_os = "linux")]
+use pixelflux::Compositor;
+use pixelflux::{Error, OutputDesc};
 
 use crate::core::PRIMARY_DISPLAY;
 
@@ -85,6 +94,9 @@ pub trait CompositorOutputs: Send + Sync + 'static {
     fn get_realized_geometry(&self, id: u32) -> Result<Option<(i32, i32, f64)>, Error>;
 }
 
+/// The live compositor answers the trait; the handle exists only under Linux, where
+/// pixelflux's Wayland backend does.
+#[cfg(target_os = "linux")]
 impl CompositorOutputs for Compositor {
     fn list_outputs(&self) -> Result<Vec<OutputDesc>, Error> {
         Compositor::list_outputs(self)
@@ -135,9 +147,16 @@ impl WaylandOutputs {
         WaylandOutputs { compositor }
     }
 
-    /// Output management over the running compositor, `None` before one runs.
+    /// Output management over the running compositor, `None` before one runs: the live
+    /// Wayland backend, which exists nowhere off Linux, so every caller falls back the way a
+    /// Linux session without a compositor does.
     pub fn running() -> Option<WaylandOutputs> {
-        pixelflux::running_compositor().map(|c| WaylandOutputs::new(c))
+        #[cfg(target_os = "linux")]
+        {
+            pixelflux::running_compositor().map(|c| WaylandOutputs::new(c))
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
     }
 
     async fn blocking<T: Send + 'static>(

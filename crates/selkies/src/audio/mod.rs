@@ -37,24 +37,46 @@
 //! opens a surround capture with (`SURROUND_SINK_MAPS`), so the sound server has nothing to remix
 //! between them: applications see a 5.1 or 7.1 device rather than a stereo one whose two channels
 //! the capture would only spread over six or eight.
+//!
+//! The whole stack gates with pcmflux under Linux, where the sound server it drives runs; off
+//! Linux `stub.rs` answers the surface the transports and the routes reach, every call reporting
+//! that no backend is wired, so a client's audio and microphone messages keep their wire shape
+//! and are answered with the refusals a Linux session without a sound server serves. The Windows
+//! audio milestone lands in the place that file holds.
 
+#[cfg(target_os = "linux")]
 mod control;
+#[cfg(target_os = "linux")]
 mod engine;
+#[cfg(target_os = "linux")]
 mod microphone;
+#[cfg(target_os = "linux")]
 mod pulse;
+#[cfg(not(target_os = "linux"))]
+mod stub;
 
+#[cfg(target_os = "linux")]
 use pcmflux::AudioCaptureSettings;
 
+#[cfg(target_os = "linux")]
 pub use control::{
     AudioControl, AudioControlError, BackendKind, Connector, ControlBackend, PactlRunner,
     PulseNode, ensure_capture_sink, parse_pactl_list,
 };
+#[cfg(target_os = "linux")]
 pub use engine::{
     AUDIO_RED_DISTANCE, AudioEngine, AudioGuard, AudioPacket, ClientId, Framing, HEALTH_INTERVAL,
     HealthCheck, HealthMonitor, PtsClock, RED_SETTLE, RESTART_FLOOR, RedCapability,
 };
+#[cfg(target_os = "linux")]
 pub use microphone::{MicWrite, MicrophoneUplink, microphone_playback_settings};
+#[cfg(target_os = "linux")]
 pub use pulse::PulseBackend;
+#[cfg(not(target_os = "linux"))]
+pub use stub::{
+    AudioControl, AudioEngine, AudioPacket, Framing, MicWrite, MicrophoneUplink,
+    ensure_capture_sink,
+};
 
 /// The sink whose monitor the server captures when `audio_device_name` names none.
 pub const DEFAULT_CAPTURE_SINK: &str = "output";
@@ -123,6 +145,7 @@ pub fn capture_channels() -> i32 {
 /// zeros, so a WebRTC receiver extrapolating across the gap extrapolates silence. Its concealment
 /// counter rises for the same reason, which is why that counter says nothing about loss on a
 /// quiet desktop.
+#[cfg(target_os = "linux")]
 pub fn opus_capture_settings(
     audio_device_name: Option<&str>,
     channels: i32,
@@ -144,6 +167,8 @@ pub fn opus_capture_settings(
     }
 }
 
+/// The settings the audio module's own tests install; they exercise the Linux stack.
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 pub(crate) fn install_test_settings() {
     crate::settings::install(crate::settings::Settings::parse(&[], &|_| None));
@@ -161,6 +186,8 @@ mod tests {
         assert_eq!(capture_sink_name(Some(".monitor")), "output");
     }
 
+    /// The pcmflux settings are a property of the Linux capture.
+    #[cfg(target_os = "linux")]
     #[test]
     fn opus_capture_settings_pin_the_latency_floor_to_the_frame() {
         let s = opus_capture_settings(Some("output.monitor"), 2, 128000, 10.0);

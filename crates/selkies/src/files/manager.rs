@@ -9,10 +9,10 @@
 //!
 //! The listing is read-only, but it carries both gates of the HTML index: the download
 //! permission, and the viewer ceiling, since a viewer watches the desktop and never reaches the
-//! files on it. It reads the descriptor the confinement opened
+//! files on it. It reads the directory the confinement opened
 //! ([`FileRoot::open_resolved_fd`](super::FileRoot::open_resolved_fd)), never a path re-walked
 //! after the check, so a symlink swapped in after the path was validated cannot turn the
-//! listing into one of a directory outside the root. A new folder is made inside a descriptor
+//! listing into one of a directory outside the root. A new folder is made inside the directory
 //! of its parent that the confinement walked, so a symlink planted over an intermediate name
 //! cannot move the creation outside the root; a name already taken is the `mkdir`'s own
 //! `EEXIST`, not a check ahead of it that a concurrent request could invalidate. Uploads double
@@ -20,17 +20,20 @@
 //! Another site's page is refused a new folder too: a form posting `text/plain` needs no
 //! preflight, and the browser attaches a cached Basic login to it.
 
-use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use nix::sys::stat::{Mode, mkdirat};
 use serde_json::json;
 
-use super::confine::{BrowseError, WalkError, browse_dir};
+#[cfg(target_os = "linux")]
+use nix::sys::stat::{Mode, mkdirat};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+
+use super::confine::{BrowseError, DirFd, WalkError, browse_dir};
 use super::{FilesState, RequestAuth, body_bytes, json_error, query_param, strerror};
 
 /// `GET /api/file-manager/browse?path=<rel>` (module docs).
@@ -90,6 +93,26 @@ fn viewer_or_disabled_files(state: &FilesState, auth: &RequestAuth) -> Option<&'
     None
 }
 
+/// Create the directory `leaf` names inside `parent`, the directory the confinement walked:
+/// relative to its descriptor on Linux, by the resolved path off it
+/// ([`confine`'s module docs](super::confine)). A name already taken is the creation's own
+/// `EEXIST`, not a check ahead of it a concurrent request could invalidate.
+#[cfg(target_os = "linux")]
+fn mkdir_in(parent: &DirFd, leaf: &str) -> std::io::Result<()> {
+    mkdirat(
+        Some(parent.as_raw_fd()),
+        leaf,
+        Mode::from_bits_truncate(0o777),
+    )?;
+    Ok(())
+}
+
+/// Create the directory `leaf` names inside `parent` (the Linux body's docs).
+#[cfg(not(target_os = "linux"))]
+fn mkdir_in(parent: &DirFd, leaf: &str) -> std::io::Result<()> {
+    std::fs::create_dir(parent.join(leaf))
+}
+
 /// `POST /api/file-manager/mkdir` with body `{"path": "<rel>"}` (module docs).
 pub async fn handle_mkdir(State(state): State<Arc<FilesState>>, request: Request) -> Response {
     let auth = RequestAuth::of(request.extensions());
@@ -128,11 +151,7 @@ pub async fn handle_mkdir(State(state): State<Arc<FilesState>>, request: Request
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput).into());
         };
         let parent = root.open_dir_fd(dirs, true)?;
-        mkdirat(
-            Some(parent.as_raw_fd()),
-            leaf.as_str(),
-            Mode::from_bits_truncate(0o777),
-        )?;
+        mkdir_in(&parent, leaf)?;
         Ok(())
     })
     .await;

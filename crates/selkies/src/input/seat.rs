@@ -13,6 +13,12 @@
 //! `get_keyboard_state`, `set_xkb_layout`) blocks for the round trip, and a typer call
 //! (`type_keysyms_wayland`) runs a one-shot Wayland client to completion, so the handler runs
 //! those on a blocking thread; `inject_*` and the keymap swaps are channel sends.
+//!
+//! Off Linux pixelflux gates its Wayland typer and its app-compositor unwatch with the Unix
+//! sockets they speak through, so those two bodies answer here instead: the typer the
+//! refusal a session without a compositor gets, the unwatch the no-op stopping a watch that
+//! never started is. The rest of the surface pixelflux serves on every OS, answering
+//! absence itself (`inject_mouse_move` returning None, the pointer nowhere).
 
 use pixelflux::{Error, ScreenCapture};
 
@@ -94,7 +100,15 @@ impl WaylandSeat for ScreenCapture {
     }
 
     fn type_keysyms_wayland(&self, display: String, keysyms: Vec<u32>) -> Result<(), Error> {
-        ScreenCapture::type_keysyms_wayland(self, display, keysyms)
+        #[cfg(target_os = "linux")]
+        {
+            ScreenCapture::type_keysyms_wayland(self, display, keysyms)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, keysyms);
+            Err(Error::Compositor("wayland backend not running".into()))
+        }
     }
 
     fn inject_mouse_move(&self, x: f64, y: f64) -> Result<Option<u64>, Error> {
@@ -130,6 +144,9 @@ impl WaylandSeat for ScreenCapture {
     }
 
     fn clipboard_unwatch_app(&self, display: String) {
-        ScreenCapture::clipboard_unwatch_app(self, display)
+        #[cfg(target_os = "linux")]
+        ScreenCapture::clipboard_unwatch_app(self, display);
+        #[cfg(not(target_os = "linux"))]
+        let _ = display;
     }
 }

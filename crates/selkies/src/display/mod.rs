@@ -57,15 +57,52 @@
 //! processes run with (`dpi::pids_on_display`, `dpi::session_env`), never through whatever
 //! bus Selkies inherited, since another display's session may share the home and would
 //! apply the change live.
+//!
+//! Off Linux the RandR stack -- the retained connection (`x11`), the subprocess chain
+//! (`xrandr`), the logical-monitor layout and the window-manager restarts (`monitors`), the
+//! resize entry points (`resize`), and the density application (`dpi`) -- gates with the X
+//! server it drives, and twins answer the surface the transports and the tools reach: a
+//! resize that cannot be made, a layout the caller falls back from, a density that stays
+//! what the settings gave it. The Wayland module stays compiled -- its output-id mapping and
+//! its keep, shrink, and recreate rules are name math -- but no compositor runs to reach,
+//! `running` answering `None` as a Linux session without one does. The capture settings
+//! both transports populate (`capture`) are pixelflux's alone, so a start reaches the
+//! backend pixelflux serves for the OS and video runs. The Windows display milestone lands
+//! in the places the twins hold.
 
 pub mod capture;
+/// The per-desktop density application, gated with the X resource database it writes.
+#[cfg(target_os = "linux")]
 pub mod dpi;
+/// The density names where no X server runs, as [`dpi`] off Linux.
+#[cfg(not(target_os = "linux"))]
+pub mod dpi_stub;
+#[cfg(not(target_os = "linux"))]
+pub use dpi_stub as dpi;
 pub mod geometry;
 pub mod modes;
+/// The RandR 1.5 logical-monitor layout, gated with the X server it lays out.
+#[cfg(target_os = "linux")]
 pub mod monitors;
+/// The monitor names where no X server runs, as [`monitors`] off Linux.
+#[cfg(not(target_os = "linux"))]
+pub mod monitors_stub;
+#[cfg(not(target_os = "linux"))]
+pub use monitors_stub as monitors;
+/// The resize and layout entry points, gated with the RandR calls they drive.
+#[cfg(target_os = "linux")]
 pub mod resize;
+/// The resize names where no X server runs, as [`resize`] off Linux.
+#[cfg(not(target_os = "linux"))]
+pub mod resize_stub;
+#[cfg(not(target_os = "linux"))]
+pub use resize_stub as resize;
 pub mod wayland;
+/// The retained RandR connection, gated with the X server it speaks to.
+#[cfg(target_os = "linux")]
 pub mod x11;
+/// The xrandr subprocess chain, gated with the X server whose tools it runs.
+#[cfg(target_os = "linux")]
 pub mod xrandr;
 
 use std::collections::BTreeMap;
@@ -82,9 +119,17 @@ pub use geometry::{
     compute_dual_layout, cursor_size_for_dpi, fit_res, layout_extent, layouts_literal,
     output_layout_stage, parse_resize_dims, reconcile_realized_layout, window_moves,
 };
+/// The X11 window bookkeeping -- a client-list snapshot and the moves that follow a layout
+/// -- has no counterpart where no X server runs, so the twin holds the rest of the surface.
+#[cfg(target_os = "linux")]
 pub use monitors::{
     MultiMonitorWindowManager, WindowSnapshot, announce_monitor_change, apply_monitor_layout,
     clear_selkies_monitors, follow_display_moves, replace_selkies_monitors, window_snapshot,
+};
+#[cfg(not(target_os = "linux"))]
+pub use monitors::{
+    MultiMonitorWindowManager, announce_monitor_change, apply_monitor_layout,
+    clear_selkies_monitors, replace_selkies_monitors,
 };
 pub use resize::{
     ResolutionInfo, apply_extended_layout, apply_output_layout, ensure_mode, get_new_res,
@@ -92,6 +137,7 @@ pub use resize::{
     resize_display, retire_displays,
 };
 pub use wayland::{WAYLAND_SCREEN_OUTPUT_ID, WaylandOutputs, wayland_output_id};
+#[cfg(target_os = "linux")]
 pub use xrandr::generate_xrandr_gtf_modeline;
 
 /// A display's rectangle, `(x, y, w, h)` in root coordinates.
@@ -174,6 +220,9 @@ impl fmt::Display for DisplayError {
 
 impl std::error::Error for DisplayError {}
 
+/// The X protocol's error shapes; the connection carries them only under Linux, where the
+/// retained `x11rb` connection exists.
+#[cfg(target_os = "linux")]
 impl From<x11rb::errors::ReplyError> for DisplayError {
     fn from(e: x11rb::errors::ReplyError) -> DisplayError {
         match e {
@@ -187,12 +236,14 @@ impl From<x11rb::errors::ReplyError> for DisplayError {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl From<x11rb::errors::ConnectionError> for DisplayError {
     fn from(e: x11rb::errors::ConnectionError) -> DisplayError {
         DisplayError::Connection(e.to_string())
     }
 }
 
+#[cfg(target_os = "linux")]
 impl From<x11rb::errors::ConnectError> for DisplayError {
     fn from(e: x11rb::errors::ConnectError) -> DisplayError {
         DisplayError::Connection(e.to_string())

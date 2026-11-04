@@ -42,6 +42,7 @@
 #[cfg(feature = "frame-log")]
 pub mod frame_log;
 pub mod gpu_probe;
+#[cfg(target_os = "linux")]
 mod gpu_probe_helpers;
 pub mod metrics;
 pub mod resources;
@@ -81,15 +82,28 @@ pub const PEAK_WINDOW_S: f64 = 10.0;
 
 /// The monotonic clock in nanoseconds, the one pixelflux stamps its frames with
 /// (`CLOCK_MONOTONIC`), so a frame's capture time and the moment it reaches the wire are
-/// on one axis.
+/// on one axis. Off Linux the standard library's monotonic instant serves the same axis
+/// from its own epoch: the two clocks differ only by the startup gap between them, so a
+/// frame's wire time read against pixelflux's own stamps off Linux carries that constant
+/// offset until pixelflux exposes its clock.
 pub fn now_ns() -> i64 {
-    let mut t = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `t` is a valid, writable timespec and CLOCK_MONOTONIC is always available.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
-    t.tv_sec * 1_000_000_000 + t.tv_nsec
+    #[cfg(target_os = "linux")]
+    {
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `t` is a valid, writable timespec and CLOCK_MONOTONIC is always available.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
+        t.tv_sec * 1_000_000_000 + t.tv_nsec
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        static EPOCH: OnceLock<Instant> = OnceLock::new();
+        EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as i64
+    }
 }
 
 /// Round to `digits` decimals the way the figures are published.

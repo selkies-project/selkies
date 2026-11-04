@@ -49,8 +49,15 @@ fn pixelflux_version() -> &'static str {
 }
 
 /// The pcmflux crate version compiled in.
+/// Linux alone: the audio stack links there, so off Linux no version is named.
+#[cfg(target_os = "linux")]
 fn pcmflux_version() -> &'static str {
     pcmflux::VERSION
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pcmflux_version() -> &'static str {
+    ""
 }
 
 /// The software encoder behind each video codec of this build, `codec=library` joined by

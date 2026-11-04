@@ -17,14 +17,23 @@
 //! optimistically and needs a counter-signal to roll back. A clean exit settles a pending
 //! install; the dashboards decide relevance by age, since a long-lived app quitting nonzero
 //! hours later is application lifecycle rather than a launch failure.
+//!
+//! Off Linux no `/bin/sh` session shell, no `/proc`, and no Unix socket to probe a session bus
+//! over exist, so a launch is refused outright and nothing is adopted: the requester is handed
+//! the launch failure the reporting above already describes.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::os::fd::OwnedFd;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::net::UnixStream;
+#[cfg(target_os = "linux")]
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
 
 use log::{debug, error, info, warn};
 use tokio::io::AsyncReadExt;
@@ -91,9 +100,19 @@ pub fn live_x_displays() -> Vec<String> {
 }
 
 /// Whether the first transport of a D-Bus address is a Unix socket that accepts a connection,
-/// or is not a Unix socket at all (unverifiable, kept).
+/// or is not a Unix socket at all (unverifiable, kept); a `unix:` address off Linux names a
+/// socket no host serves, so it is answered dead.
 pub fn dbus_address_live(address: &str) -> bool {
     let first = address.split(';').next().unwrap_or("");
+    if !first.starts_with("unix:") {
+        return true;
+    }
+    unix_bus_live(first)
+}
+
+/// Whether the Unix socket a `unix:` D-Bus address names accepts a connection.
+#[cfg(target_os = "linux")]
+fn unix_bus_live(first: &str) -> bool {
     let Some(params) = first.strip_prefix("unix:") else {
         return true;
     };
@@ -116,7 +135,14 @@ pub fn dbus_address_live(address: &str) -> bool {
     true
 }
 
+/// No Unix socket exists off Linux, so no bus address over one is live.
+#[cfg(not(target_os = "linux"))]
+fn unix_bus_live(_first: &str) -> bool {
+    false
+}
+
 /// The given pids plus every live descendant of theirs, from `/proc/*/stat`.
+#[cfg(target_os = "linux")]
 fn descendants(roots: &HashSet<i32>) -> HashSet<i32> {
     let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -153,6 +179,7 @@ fn descendants(roots: &HashSet<i32>) -> HashSet<i32> {
 }
 
 /// A process's environment from `/proc`, or None when unreadable.
+#[cfg(target_os = "linux")]
 fn process_environ(pid: i32) -> Option<HashMap<String, String>> {
     let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     Some(
@@ -178,6 +205,7 @@ fn process_environ(pid: i32) -> Option<HashMap<String, String>> {
 /// process of this runtime dir ranks before a leftover of an earlier session. Commands launched
 /// from here and their descendants carry whatever was adopted for them and are never a source.
 /// Blocking: it walks `/proc`.
+#[cfg(target_os = "linux")]
 pub fn session_environment(
     x11_display: Option<&str>,
     wayland_display: Option<&str>,
@@ -248,6 +276,16 @@ pub fn session_environment(
                 .collect();
         }
     }
+    HashMap::new()
+}
+
+/// The desktop-session environment off Linux: no `/proc` exists to read a session from, so
+/// nothing is adopted -- the answer a Linux session that has not started gives.
+#[cfg(not(target_os = "linux"))]
+pub fn session_environment(
+    _x11_display: Option<&str>,
+    _wayland_display: Option<&str>,
+) -> HashMap<String, String> {
     HashMap::new()
 }
 
@@ -414,11 +452,16 @@ where
         }
         let Ok(status) = status else { return };
         let runtime = started.elapsed().as_secs_f64();
-        use std::os::unix::process::ExitStatusExt;
-        // A signal death reads as the negative number a process's owner would see.
-        let code = status
-            .code()
-            .unwrap_or_else(|| -status.signal().unwrap_or(1));
+        #[cfg(target_os = "linux")]
+        let code = {
+            use std::os::unix::process::ExitStatusExt;
+            // A signal death reads as the negative number a process's owner would see.
+            status
+                .code()
+                .unwrap_or_else(|| -status.signal().unwrap_or(1))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let code = status.code().unwrap_or(1);
         if code == 0 {
             on_end(CommandOutcome::Done);
             return;
@@ -446,11 +489,20 @@ where
     });
 }
 
+/// The read end a launched command's combined output arrives on.
+#[cfg(target_os = "linux")]
+type CommandPipe = tokio::net::unix::pipe::Receiver;
+/// No command is launched off Linux, so nothing is ever read; the alias holds the place the
+/// Linux pipe fills.
+#[cfg(not(target_os = "linux"))]
+type CommandPipe = tokio::io::Empty;
+
 /// `sh -c command` with stdout and stderr on one pipe, whose read end comes back.
+#[cfg(target_os = "linux")]
 fn spawn_shell(
     command: &str,
     env: &HashMap<String, String>,
-) -> std::io::Result<(tokio::process::Child, tokio::net::unix::pipe::Receiver)> {
+) -> std::io::Result<(tokio::process::Child, CommandPipe)> {
     let (read, write): (OwnedFd, OwnedFd) = nix::unistd::pipe().map_err(std::io::Error::from)?;
     let stderr = write.try_clone()?;
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
@@ -470,6 +522,17 @@ fn spawn_shell(
     ))
 }
 
+/// No `/bin/sh` session shell runs off Linux, so no command is launched; the requester is
+/// handed the launch failure `run_client_command` already reports.
+#[cfg(not(target_os = "linux"))]
+fn spawn_shell(
+    _command: &str,
+    _env: &HashMap<String, String>,
+) -> std::io::Result<(tokio::process::Child, CommandPipe)> {
+    Err(std::io::Error::other("no session shell runs on this OS"))
+}
+
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests {
     use super::*;

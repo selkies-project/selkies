@@ -10,10 +10,12 @@
 //! for. The folder is packed to a temporary file first and the response starts once the whole
 //! archive exists; the wait before the first byte is that packing, and the temporary is
 //! unlinked as soon as it is open for streaming, so it outlives nothing. Symlinks are not
-//! followed, FIFOs and devices are left out, and every file is read through a descriptor opened
-//! `O_NOFOLLOW` relative to its own directory's descriptor, so no link planted before the walk
-//! or swapped in during it puts content from outside the root into an archive the user asked
-//! for the tree's contents of. The root is refused like every route that acts rather than lists,
+//! followed, FIFOs and devices are left out, and every file is read through the directory the
+//! confinement walked, so no link planted before the walk or swapped in during it puts content
+//! from outside the root into an archive the user asked for the tree's contents of. Off Linux
+//! the directory is the resolved path the string confinement verified
+//! ([`confine`'s module docs](super::confine)) and a leaf that is not a plain file is left out
+//! the same way. The root is refused like every route that acts rather than lists,
 //! view-only credentials are refused the archive like the listing and the bytes, and another
 //! site's page is refused too: an image or a link there would spend the pack on the session's
 //! cached login.
@@ -29,8 +31,6 @@
 
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -39,12 +39,20 @@ use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{Datelike, Timelike};
-use nix::fcntl::AtFlags;
-use nix::fcntl::{OFlag, openat};
-use nix::sys::stat::{FileStat, Mode, SFlag, fstat, fstatat};
 use zip::write::SimpleFileOptions;
 
-use super::confine::{FileRoot, local_time};
+#[cfg(target_os = "linux")]
+use nix::fcntl::AtFlags;
+#[cfg(target_os = "linux")]
+use nix::fcntl::{OFlag, openat};
+#[cfg(target_os = "linux")]
+use nix::sys::stat::{FileStat, Mode, SFlag, fstat, fstatat};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
+
+use super::confine::{DirFd, FileRoot, local_time, mtime_pair};
 use super::transfer::{Download, is_conditional, serve_paced_download};
 use super::{FilesState, RequestAuth, json_error, query_param, text};
 
@@ -72,6 +80,7 @@ impl From<io::Error> for ArchiveError {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl From<nix::Error> for ArchiveError {
     fn from(e: nix::Error) -> Self {
         ArchiveError::Io(e.into())
@@ -84,18 +93,77 @@ impl From<zip::result::ZipError> for ArchiveError {
     }
 }
 
+/// An entry's `lstat` as the platform serves it to a walk: the stat struct on Linux, the
+/// standard library's metadata off it, which carries the same answers through the helpers
+/// below.
+#[cfg(target_os = "linux")]
+type EntryStat = FileStat;
+#[cfg(not(target_os = "linux"))]
+type EntryStat = std::fs::Metadata;
+
 /// The kind of a status.
+#[cfg(target_os = "linux")]
 fn kind(st: &FileStat) -> SFlag {
     SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT
+}
+
+/// Whether a walked entry is a regular file, never a link, a FIFO, or a device.
+#[cfg(target_os = "linux")]
+fn entry_is_regular(st: &EntryStat) -> bool {
+    kind(st) == SFlag::S_IFREG
+}
+
+/// Whether a walked entry is a regular file (the Linux body's docs).
+#[cfg(not(target_os = "linux"))]
+fn entry_is_regular(st: &EntryStat) -> bool {
+    st.is_file()
+}
+
+/// A walked entry's size in bytes.
+#[cfg(target_os = "linux")]
+fn entry_size(st: &EntryStat) -> u64 {
+    st.st_size as u64
+}
+
+/// A walked entry's size in bytes (the Linux body's docs).
+#[cfg(not(target_os = "linux"))]
+fn entry_size(st: &EntryStat) -> u64 {
+    st.len()
+}
+
+/// A walked entry's modification time in whole seconds.
+#[cfg(target_os = "linux")]
+fn entry_mtime(st: &EntryStat) -> i64 {
+    st.st_mtime
+}
+
+/// A walked entry's modification time in whole seconds (the Linux body's docs).
+#[cfg(not(target_os = "linux"))]
+fn entry_mtime(st: &EntryStat) -> i64 {
+    mtime_pair(st).0
+}
+
+/// The permission bits a walked entry carries into the archive: its own on Linux, and the
+/// archive's default off it, where a file holds no bits to carry.
+#[cfg(target_os = "linux")]
+fn entry_mode(st: &EntryStat) -> u32 {
+    st.st_mode & 0o777
+}
+
+/// The permission bits a walked entry carries into the archive (the Linux body's docs).
+#[cfg(not(target_os = "linux"))]
+fn entry_mode(_st: &EntryStat) -> u32 {
+    0o644
 }
 
 /// Walk the tree under `dir_fd` top-down, never descending a symlinked directory, calling
 /// `visit` for every entry that is not a directory with its own directory's descriptor, its
 /// name, its path relative to the top, and its `lstat`; `visit` returns `false` to stop.
+#[cfg(target_os = "linux")]
 fn walk(
-    dir_fd: &OwnedFd,
+    dir_fd: &DirFd,
     prefix: &Path,
-    visit: &mut dyn FnMut(&OwnedFd, &OsStr, &Path, &FileStat) -> bool,
+    visit: &mut dyn FnMut(&DirFd, &OsStr, &Path, &EntryStat) -> bool,
 ) -> bool {
     let Ok(listing) = std::fs::read_dir(format!("/proc/self/fd/{}", dir_fd.as_raw_fd())) else {
         return true;
@@ -136,16 +204,53 @@ fn walk(
     true
 }
 
+/// Walk the tree under `dir` top-down, never descending a symlinked directory, calling
+/// `visit` for every entry that is not a directory with its directory's resolved path, its
+/// name, its path relative to the top, and its `lstat`; `visit` returns `false` to stop. An
+/// entry that vanishes mid-walk is skipped rather than failing the walk, and a directory whose
+/// path no longer resolves is left unvisited, the resolved-string act of the whole off-Linux
+/// side.
+#[cfg(not(target_os = "linux"))]
+fn walk(
+    dir: &DirFd,
+    prefix: &Path,
+    visit: &mut dyn FnMut(&DirFd, &OsStr, &Path, &EntryStat) -> bool,
+) -> bool {
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    let mut subdirs = Vec::new();
+    for entry in listing.flatten() {
+        let name = entry.file_name();
+        let Ok(st) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if st.is_dir() {
+            subdirs.push(name);
+            continue;
+        }
+        if !visit(dir, &name, &prefix.join(&name), &st) {
+            return false;
+        }
+    }
+    for name in subdirs {
+        if !walk(&dir.join(&name), &prefix.join(&name), visit) {
+            return false;
+        }
+    }
+    true
+}
+
 /// The total size and count of the regular files an archive of `dir_fd` would carry, by
 /// `lstat` without reading contents, stopping as soon as either is past its bound; an entry
 /// that vanishes mid-walk is skipped rather than failing the request.
-pub fn archive_source_bounds(dir_fd: &OwnedFd, max_entries: usize) -> (u64, usize) {
+pub fn archive_source_bounds(dir_fd: &DirFd, max_entries: usize) -> (u64, usize) {
     let (mut total, mut count) = (0u64, 0usize);
     walk(dir_fd, Path::new(""), &mut |_, _, _, st| {
-        if kind(st) != SFlag::S_IFREG {
+        if !entry_is_regular(st) {
             return true;
         }
-        total += st.st_size as u64;
+        total += entry_size(st);
         count += 1;
         total <= ARCHIVE_MAX_SOURCE_BYTES && count <= max_entries
     });
@@ -182,13 +287,11 @@ fn staged_archive() -> io::Result<(std::fs::File, PathBuf)> {
     for _ in 0..16 {
         let path =
             std::env::temp_dir().join(format!("selkies-files-{:016x}.zip", rand::random::<u64>()));
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(target_os = "linux")]
+        options.mode(0o600);
+        match options.open(&path) {
             Ok(file) => return Ok((file, path)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -200,6 +303,33 @@ fn staged_archive() -> io::Result<(std::fs::File, PathBuf)> {
     ))
 }
 
+/// Open the entry `name` in `dir` for reading without following a symlink, with the stat the
+/// pack reads its size, time, and mode from, or `None` where it is not a regular file: a
+/// link, a FIFO, or a device is left out of the archive rather than read.
+#[cfg(target_os = "linux")]
+fn open_regular(dir: &DirFd, name: &OsStr) -> Option<(std::fs::File, EntryStat)> {
+    let flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC;
+    let raw = openat(Some(dir.as_raw_fd()), name, flags, Mode::empty()).ok()?;
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let st = fstat(fd.as_raw_fd()).ok()?;
+    if kind(&st) != SFlag::S_IFREG {
+        return None;
+    }
+    Some((std::fs::File::from(fd), st))
+}
+
+/// Open the entry `name` in `dir` for reading without following a symlink (the Linux body's
+/// docs); the link check is the `lstat` the walk already holds.
+#[cfg(not(target_os = "linux"))]
+fn open_regular(dir: &DirFd, name: &OsStr) -> Option<(std::fs::File, EntryStat)> {
+    let st = std::fs::symlink_metadata(dir.join(name)).ok()?;
+    if !st.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(dir.join(name)).ok()?;
+    Some((file, st))
+}
+
 /// Write the regular files under `dir_fd` to a zip archive in the temporary directory and
 /// return it open and already unlinked, so it lives exactly as long as the stream reading it.
 ///
@@ -207,7 +337,7 @@ fn staged_archive() -> io::Result<(std::fs::File, PathBuf)> {
 /// bits ride along, no set-ID or sticky bit, into an archive another machine may extract; a
 /// modification time an entry cannot hold is clamped rather than failing the pack.
 pub fn build_directory_archive(
-    dir_fd: &OwnedFd,
+    dir_fd: &DirFd,
     max_entries: usize,
 ) -> Result<std::fs::File, ArchiveError> {
     let (staged, path) = staged_archive()?;
@@ -217,17 +347,9 @@ pub fn build_directory_archive(
         let mut entries = 0usize;
         let mut failure: Option<ArchiveError> = None;
         walk(dir_fd, Path::new(""), &mut |dir, name, rel, _| {
-            let flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC;
-            let Ok(raw) = openat(Some(dir.as_raw_fd()), name, flags, Mode::empty()) else {
+            let Some((mut source, st)) = open_regular(dir, name) else {
                 return true;
             };
-            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-            let Ok(st) = fstat(fd.as_raw_fd()) else {
-                return true;
-            };
-            if kind(&st) != SFlag::S_IFREG {
-                return true;
-            }
             let entry_name = rel.to_string_lossy().into_owned();
             entries += 1;
             if entries > max_entries {
@@ -236,14 +358,13 @@ pub fn build_directory_archive(
             }
             let options = SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated)
-                .last_modified_time(zip_date_time(st.st_mtime))
-                .unix_permissions(st.st_mode & 0o777)
-                .large_file(st.st_size as u64 >= ARCHIVE_ZIP64_FROM);
+                .last_modified_time(zip_date_time(entry_mtime(&st)))
+                .unix_permissions(entry_mode(&st))
+                .large_file(entry_size(&st) >= ARCHIVE_ZIP64_FROM);
             if let Err(e) = archive.start_file(&entry_name, options) {
                 failure = Some(e.into());
                 return false;
             }
-            let mut source = std::fs::File::from(fd);
             let mut buf = vec![0u8; 1 << 20];
             loop {
                 let n = match source.read(&mut buf) {

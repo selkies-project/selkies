@@ -29,15 +29,47 @@
 //! connection held ([`GamepadSlots::release_for_conn`]). Rumble goes to the one client
 //! driving the slot as the system action `rumble,<slot>,<strong>,<weak>,<ms>`, through the
 //! [`GamepadHost`] the transport wires.
+//!
+//! Off Linux the slots, the kernel backend, and the published devices -- the interposer
+//! socket servers ([`pad`]), the `/dev/uinput` mirror ([`uinput`]), and the evdev nodes a
+//! session publishes ([`virtual_device`]) -- gate with the kernel and the sockets they
+//! serve, and twins answer the surface the slot table and the transports reach: a slot
+//! whose servers never come up, a `uinput_gamepad` setting that resolves to no kernel
+//! device, and a published device that never opens, so the slot table's start line already
+//! says what a session gets ("0 virtual gamepads ready ... kernel uinput off"). The
+//! evdev ABI, the force-feedback records, and the control mappings are byte layouts and
+//! stay compiled. The Windows gamepad milestone lands in the places the twins hold.
 
 pub mod abi;
 pub mod ff;
 pub mod mapper;
+/// One virtual gamepad slot, gated with the interposer sockets it serves.
+#[cfg(target_os = "linux")]
 pub mod pad;
+/// The slot where no kernel or interposer serves one, as [`pad`] off Linux.
+#[cfg(not(target_os = "linux"))]
+pub mod pad_stub;
+#[cfg(not(target_os = "linux"))]
+pub use pad_stub as pad;
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests;
+/// The kernel uinput backend, gated with `/dev/uinput` it creates devices through.
+#[cfg(target_os = "linux")]
 pub mod uinput;
+/// The kernel backend's names where no kernel serves one, as [`uinput`] off Linux.
+#[cfg(not(target_os = "linux"))]
+pub mod uinput_stub;
+#[cfg(not(target_os = "linux"))]
+pub use uinput_stub as uinput;
+/// The published input devices, gated with the evdev nodes they create.
+#[cfg(target_os = "linux")]
 pub mod virtual_device;
+/// The published devices where none can be created, as [`virtual_device`] off Linux.
+#[cfg(not(target_os = "linux"))]
+pub mod virtual_device_stub;
+#[cfg(not(target_os = "linux"))]
+pub use virtual_device_stub as virtual_device;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

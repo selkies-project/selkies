@@ -26,6 +26,9 @@
 //! input-capable client.
 
 use std::net::SocketAddr;
+/// The socket link carries the descriptor only where the kernel's socket counters exist;
+/// elsewhere no descriptor travels with the peer.
+#[cfg(target_os = "linux")]
 use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,8 +58,10 @@ use crate::input::authority::{
 };
 use crate::settings::{WS_MAX_MESSAGE_BYTES, settings};
 use crate::stats::stats_request;
+#[cfg(target_os = "linux")]
+use crate::ws::client::TcpLink;
 use crate::ws::client::{
-    BOUNDED_SEND_SECONDS, Client, ClientId, Frame, NoLink, Perms, SocketLink, TcpLink, run_writer,
+    BOUNDED_SEND_SECONDS, Client, ClientId, Frame, NoLink, Perms, SocketLink, run_writer,
 };
 use crate::ws::host::MicUplink;
 use crate::ws::link::MAX_UINT16_FRAME_ID;
@@ -84,6 +89,8 @@ const SESSION_TOKEN_PROTOCOL: &str = "selkies";
 /// The accepted socket's descriptor, as a request extension the listener adds: what the
 /// liveness watch and the frame count ask the kernel about. Without it a socket is judged by
 /// what stands in this process's own queue and by its pings.
+/// Linux alone: the kernel socket counters it feeds are the kernel's own.
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug)]
 pub struct PeerSocket(pub RawFd);
 
@@ -91,6 +98,8 @@ pub struct PeerSocket(pub RawFd);
 #[derive(Clone, Copy, Debug)]
 pub struct PeerInfo {
     pub remote: Option<SocketAddr>,
+    /// The accepted socket's descriptor, where the kernel's socket counters exist.
+    #[cfg(target_os = "linux")]
     pub fd: Option<RawFd>,
 }
 
@@ -109,6 +118,7 @@ impl PeerInfo {
             });
         PeerInfo {
             remote,
+            #[cfg(target_os = "linux")]
             fd: parts
                 .extensions
                 .get::<PeerSocket>()
@@ -190,10 +200,15 @@ async fn run_socket(
     query_role: String,
     query_slot: Option<String>,
 ) {
+    // Off Linux no descriptor travels with the peer, so the socket is judged by what
+    // stands in this process's own queue and by its pings.
+    #[cfg(target_os = "linux")]
     let link: Box<dyn SocketLink> = match peer.fd {
         Some(fd) => Box::new(TcpLink::new(fd)),
         None => Box::new(NoLink),
     };
+    #[cfg(not(target_os = "linux"))]
+    let link: Box<dyn SocketLink> = Box::new(NoLink);
     let remote = peer
         .remote
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));

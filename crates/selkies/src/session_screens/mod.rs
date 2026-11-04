@@ -51,6 +51,13 @@
 //! [`input::InputHost::app_compositor_adopted`] to [`SessionScreens::compositor_adopted`] with its
 //! [`ScreenTransport`].
 //!
+//! Off Linux no session compositor runs: the control socket and pixelflux's screen control are
+//! Linux, and the [`AppScreens`] backend answers the absence a Linux session without those rungs
+//! gets -- no control socket, no outputs for clients, no screens -- so every ladder falls
+//! through to keeping the screens a session booted with, exactly as a Linux session without a
+//! compositor's rungs does, and each refusal is the one line its caller already logs. The
+//! Windows session-screen milestone lands in the places the twins hold.
+//!
 //! [`attach`es]: SessionScreens::attach
 //! [`input::InputHost::app_compositor_adopted`]: crate::input::InputHost::app_compositor_adopted
 
@@ -66,6 +73,7 @@ pub(crate) mod testing;
 mod tests;
 
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -76,9 +84,12 @@ use async_trait::async_trait;
 use log::{debug, info, warn};
 use parking_lot::{Mutex, RwLock};
 use pixelflux::ScreenCapture;
+#[cfg(target_os = "linux")]
 pub use pixelflux::wayland::AppScreen;
 use serde_json::Value as Json;
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(target_os = "linux")]
 use tokio::net::UnixStream;
 
 use crate::core::PRIMARY_DISPLAY;
@@ -87,6 +98,12 @@ use crate::settings::settings;
 
 pub use apps::{APP_RUNNER, AppsRunner};
 
+/// An enabled screen as clients see it: name, layout position, and the size of the mode it
+/// currently holds, pixelflux's own tuple on Linux; off Linux no session compositor serves one,
+/// and it keeps the trait's answers typed, which stay the empty list.
+#[cfg(not(target_os = "linux"))]
+pub type AppScreen = (String, i32, i32, i32, i32);
+
 /// Basename of the session compositor's control socket in `XDG_RUNTIME_DIR`.
 pub const SESSION_IPC_SOCKET: &str = "labwc.sock";
 /// Size of a held spare session screen: small enough to leave the desktop's center on the screen
@@ -94,10 +111,13 @@ pub const SESSION_IPC_SOCKET: &str = "labwc.sock";
 pub const SPARE_SCREEN_SIZE: (i32, i32) = (320, 240);
 
 /// How long a probe of the control socket waits on the connect.
+#[cfg(target_os = "linux")]
 const IPC_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a command waits on the connect.
+#[cfg(target_os = "linux")]
 const IPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a command waits on the compositor's reply.
+#[cfg(target_os = "linux")]
 const IPC_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a grown screen's host window gets to park, so the output created next adopts it.
 const SCREEN_PARK_WAIT: Duration = Duration::from_secs(5);
@@ -166,12 +186,21 @@ impl AppScreens for ScreenCapture {
         scale: f64,
         index: usize,
     ) -> Result<bool, String> {
-        text(ScreenCapture::set_app_output_scale(
-            self,
-            display.to_string(),
-            scale,
-            index,
-        ))
+        #[cfg(target_os = "linux")]
+        {
+            text(ScreenCapture::set_app_output_scale(
+                self,
+                display.to_string(),
+                scale,
+                index,
+            ))
+        }
+        // No session compositor runs off Linux, so it manages no outputs for clients.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, scale, index);
+            Ok(false)
+        }
     }
 
     fn set_app_screen_geometry(
@@ -182,14 +211,23 @@ impl AppScreens for ScreenCapture {
         scale: f64,
         index: usize,
     ) -> Result<bool, String> {
-        text(ScreenCapture::set_app_screen_geometry(
-            self,
-            display.to_string(),
-            width,
-            height,
-            scale,
-            index,
-        ))
+        #[cfg(target_os = "linux")]
+        {
+            text(ScreenCapture::set_app_screen_geometry(
+                self,
+                display.to_string(),
+                width,
+                height,
+                scale,
+                index,
+            ))
+        }
+        // No session compositor runs off Linux, so it manages no outputs for clients.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, width, height, scale, index);
+            Ok(false)
+        }
     }
 
     fn set_app_screen_layout(
@@ -197,22 +235,49 @@ impl AppScreens for ScreenCapture {
         display: &str,
         rects: Vec<(i32, i32, i32, i32)>,
     ) -> Result<usize, String> {
-        text(ScreenCapture::set_app_screen_layout(
-            self,
-            display.to_string(),
-            rects,
-        ))
+        #[cfg(target_os = "linux")]
+        {
+            text(ScreenCapture::set_app_screen_layout(
+                self,
+                display.to_string(),
+                rects,
+            ))
+        }
+        // No session compositor runs off Linux, so none of its screens was positioned.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, rects);
+            Ok(0)
+        }
     }
 
     fn list_app_screens(&self, display: &str) -> Result<Vec<AppScreen>, String> {
-        text(ScreenCapture::list_app_screens(self, display.to_string()))
+        #[cfg(target_os = "linux")]
+        {
+            text(ScreenCapture::list_app_screens(self, display.to_string()))
+        }
+        // No session compositor runs off Linux, so it manages no outputs for clients.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = display;
+            Ok(Vec::new())
+        }
     }
 
     fn app_screen_control_offered(&self, display: &str) -> Result<bool, String> {
-        text(ScreenCapture::app_screen_control_offered(
-            self,
-            display.to_string(),
-        ))
+        #[cfg(target_os = "linux")]
+        {
+            text(ScreenCapture::app_screen_control_offered(
+                self,
+                display.to_string(),
+            ))
+        }
+        // No session compositor runs off Linux, so none offers screens on demand.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = display;
+            Ok(false)
+        }
     }
 
     fn add_app_screen(
@@ -223,18 +288,36 @@ impl AppScreens for ScreenCapture {
         height: i32,
         scale: f64,
     ) -> Result<(), String> {
-        text(ScreenCapture::add_app_screen(
-            self,
-            display.to_string(),
-            name.to_string(),
-            width,
-            height,
-            scale,
-        ))
+        #[cfg(target_os = "linux")]
+        {
+            text(ScreenCapture::add_app_screen(
+                self,
+                display.to_string(),
+                name.to_string(),
+                width,
+                height,
+                scale,
+            ))
+        }
+        // No session compositor runs off Linux, so none grows a screen.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, name, width, height, scale);
+            Err("wayland backend not running".to_string())
+        }
     }
 
     fn remove_app_screen(&self, name: &str) -> Result<bool, String> {
-        text(ScreenCapture::remove_app_screen(self, name.to_string()))
+        #[cfg(target_os = "linux")]
+        {
+            text(ScreenCapture::remove_app_screen(self, name.to_string()))
+        }
+        // No session compositor runs off Linux, so no screen is held to remove.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = name;
+            Ok(false)
+        }
     }
 
     fn hold_spare_app_screens(
@@ -244,13 +327,22 @@ impl AppScreens for ScreenCapture {
         width: i32,
         height: i32,
     ) -> Result<usize, String> {
-        text(ScreenCapture::hold_spare_app_screens(
-            self,
-            display.to_string(),
-            keep,
-            width,
-            height,
-        ))
+        #[cfg(target_os = "linux")]
+        {
+            text(ScreenCapture::hold_spare_app_screens(
+                self,
+                display.to_string(),
+                keep,
+                width,
+                height,
+            ))
+        }
+        // No session compositor runs off Linux, so it holds no spare screens.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, keep, width, height);
+            Ok(0)
+        }
     }
 
     fn parked_windows(&self) -> Result<usize, String> {
@@ -406,6 +498,7 @@ impl SessionScreens {
     }
 
     /// The control socket's path, off Wayland or without a runtime directory `None`.
+    #[cfg(target_os = "linux")]
     fn ipc_path(&self) -> Option<PathBuf> {
         if !self.is_wayland {
             return None;
@@ -431,6 +524,7 @@ impl SessionScreens {
 
     /// Probe the control socket and keep the answer. A connect rather than a stat, so a socket
     /// file a dead compositor left behind reads as absent.
+    #[cfg(target_os = "linux")]
     pub async fn probe_ipc(&self) -> bool {
         let mut ok = false;
         if let Some(path) = self.ipc_path() {
@@ -443,6 +537,14 @@ impl SessionScreens {
         ok
     }
 
+    /// No session compositor's control socket runs off Linux, so no probe finds one (the Linux
+    /// body's docs).
+    #[cfg(not(target_os = "linux"))]
+    pub async fn probe_ipc(&self) -> bool {
+        self.ipc_ok.store(false, Ordering::Relaxed);
+        false
+    }
+
     /// A socket as an identity (path, inode, creation time, zeros where none exists), so a
     /// restarted compositor reads as a new one.
     fn socket_identity(&self, display: &str) -> (PathBuf, u64, i128) {
@@ -453,9 +555,26 @@ impl SessionScreens {
         };
         match std::fs::metadata(&path) {
             Ok(meta) => {
-                let created =
-                    i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec());
-                (path, meta.ino(), created)
+                #[cfg(target_os = "linux")]
+                let (ino, created) = {
+                    let created =
+                        i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec());
+                    (meta.ino(), created)
+                };
+                // Off Linux a zero stands for the inode the kernel does not name, and the
+                // creation instant for the ctime pair it does not.
+                #[cfg(not(target_os = "linux"))]
+                let (ino, created) = {
+                    let created = meta
+                        .created()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| {
+                            i128::from(d.as_secs()) * 1_000_000_000 + i128::from(d.subsec_nanos())
+                        });
+                    (0, created)
+                };
+                (path, ino, created)
             }
             Err(_) => (path, 0, 0),
         }
@@ -547,6 +666,7 @@ impl SessionScreens {
 
     /// One command over the control socket: a fresh connection, a newline-terminated command, a
     /// JSON line back. Bounded; an unreachable or silent compositor yields an empty object.
+    #[cfg(target_os = "linux")]
     async fn ipc_command(&self, command: &str) -> Json {
         let empty = Json::Object(Default::default());
         let Some(path) = self.ipc_path() else {
@@ -585,6 +705,13 @@ impl SessionScreens {
                 empty
             }
         }
+    }
+
+    /// No session compositor's control socket runs off Linux, so every command yields the empty
+    /// object (the Linux body's docs).
+    #[cfg(not(target_os = "linux"))]
+    async fn ipc_command(&self, _command: &str) -> Json {
+        Json::Object(Default::default())
     }
 
     /// Retire the session screens whose displays are gone, by the names the compositor coined. A

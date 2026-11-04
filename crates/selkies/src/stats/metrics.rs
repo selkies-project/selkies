@@ -25,6 +25,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+/// The no-follow open's kernel flags; the refusal below is the standard library's off
+/// Linux, where the file's ACL governs the mode.
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -68,10 +71,28 @@ pub fn csv_cell(text: &str) -> String {
 /// owner alone: the names are predictable, and in a shared directory another account could
 /// plant a link there first.
 fn open_no_follow(path: &Path, options: &mut OpenOptions) -> std::io::Result<File> {
-    options
-        .custom_flags(libc::O_NOFOLLOW)
-        .mode(0o600)
-        .open(path)
+    #[cfg(target_os = "linux")]
+    {
+        options
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(0o600)
+            .open(path)
+    }
+    // Off Linux the same refusal through the standard library: a link is refused before
+    // the open, and no mode is set — the file's ACL governs.
+    #[cfg(not(target_os = "linux"))]
+    {
+        if path
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: refusing to follow a symlink", path.display()),
+            ));
+        }
+        options.open(path)
+    }
 }
 
 fn open_append(path: &Path) -> std::io::Result<File> {

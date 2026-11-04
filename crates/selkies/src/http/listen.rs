@@ -16,6 +16,13 @@
 //! non-socket at the path refuses the start, and the file is unlinked on stop unless another
 //! instance took it over.
 //!
+//! Off Linux the same rules ride the standard library's own listener, put in non-blocking
+//! mode for the runtime, and the Unix socket is a Linux feature: a configured `unix_socket`
+//! refuses the start rather than being silently dropped, so the operator learns the setting
+//! took nothing, and [`ConnInfo`] carries no descriptor for the liveness watch -- the kernel
+//! view of a connection is read through interfaces the platform does not have, so a socket
+//! is judged by what stands in this process's own queue and by its pings.
+//!
 //! Every connection runs HTTP/1.1 with hyper's header-read timer set to the idle timeout,
 //! which hyper re-arms while it waits for each request's head: a peer that connects and sends
 //! nothing, stops inside its headers, or leaves a kept-alive connection idle after a response
@@ -30,6 +37,7 @@
 //! file-manager listing, and the Referer of every request that page makes.
 
 use std::net::{SocketAddr, ToSocketAddrs};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,12 +50,19 @@ use axum::http::{HeaderMap, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use hyper_util::rt::{TokioIo, TokioTimer};
+#[cfg(target_os = "linux")]
 use nix::errno::Errno;
+#[cfg(target_os = "linux")]
 use nix::sys::socket::{self, AddressFamily, SockFlag, SockType, SockaddrIn, SockaddrIn6, sockopt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+
+/// A bind failure's errno, as the platform reports one: nix's on Linux, the standard
+/// library's I/O error elsewhere.
+#[cfg(not(target_os = "linux"))]
+type Errno = std::io::Error;
 
 /// What the listener binds and how long an idle connection lives.
 #[derive(Clone, Debug)]
@@ -84,6 +99,8 @@ pub struct ConnInfo {
     pub secure: bool,
     /// The accepted socket, valid while this connection's handlers run, for what reads its
     /// kernel state (`TCP_INFO`, the unacknowledged bytes); none where nothing accepted one.
+    /// Linux alone, with the kernel view that read is.
+    #[cfg(target_os = "linux")]
     pub fd: Option<std::os::fd::RawFd>,
 }
 
@@ -107,9 +124,21 @@ pub enum ListenError {
 
 impl ListenError {
     /// The errno of a failed bind, for a caller telling a taken port from the rest.
+    #[cfg(target_os = "linux")]
     pub fn errno(&self) -> Option<Errno> {
         match self {
             ListenError::Bind { errno, .. } => Some(*errno),
+            _ => None,
+        }
+    }
+
+    /// The errno of a failed bind, for a caller telling a taken port from the rest.
+    /// Off Linux the error is the standard library's, which has no copy: this hands the
+    /// bind's own error over.
+    #[cfg(not(target_os = "linux"))]
+    pub fn errno(self) -> Option<Errno> {
+        match self {
+            ListenError::Bind { errno, .. } => Some(errno),
             _ => None,
         }
     }
@@ -144,6 +173,7 @@ pub fn resolve_listen_addresses(addr: &str, port: u16) -> Result<Vec<SocketAddr>
 }
 
 /// One listening socket on `addr`: reusable, IPv6-only where IPv6, non-blocking.
+#[cfg(target_os = "linux")]
 fn bind_one(addr: &SocketAddr) -> Result<OwnedFd, Errno> {
     let family = if addr.is_ipv4() {
         AddressFamily::Inet
@@ -171,6 +201,16 @@ fn bind_one(addr: &SocketAddr) -> Result<OwnedFd, Errno> {
     Ok(fd)
 }
 
+/// One listening socket on `addr`: reusable, IPv6-only where IPv6, non-blocking. Off Linux
+/// the standard library's own bind serves the platform's rules, put in non-blocking mode for
+/// the runtime the listener hands it to.
+#[cfg(not(target_os = "linux"))]
+fn bind_one(addr: &SocketAddr) -> Result<std::net::TcpListener, Errno> {
+    let listener = std::net::TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
 /// Bind a listening socket on every address of `candidates` (what `addr` resolved to).
 ///
 /// `EADDRNOTAVAIL` and `EAFNOSUPPORT` are skipped with a warning while another binds; any
@@ -183,10 +223,25 @@ pub fn bind_listen_sockets(
     let mut skipped = Vec::new();
     for candidate in candidates {
         let place = format_sockaddr(candidate);
-        match bind_one(candidate) {
-            Ok(fd) => bound.push(std::net::TcpListener::from(fd)),
+        #[cfg(target_os = "linux")]
+        let attempt = bind_one(candidate).map(std::net::TcpListener::from);
+        #[cfg(not(target_os = "linux"))]
+        let attempt = bind_one(candidate);
+        match attempt {
+            Ok(listener) => bound.push(listener),
+            #[cfg(target_os = "linux")]
             Err(errno @ (Errno::EADDRNOTAVAIL | Errno::EAFNOSUPPORT)) => {
                 skipped.push(format!("{place} ({})", errno.desc()));
+            }
+            // An address the host does not carry, in the standard library's spelling.
+            #[cfg(not(target_os = "linux"))]
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+                ) =>
+            {
+                skipped.push(format!("{place} ({e})"));
             }
             Err(errno) => return Err(ListenError::Bind { place, errno }),
         }
@@ -208,6 +263,7 @@ pub fn bind_listen_sockets(
 /// path dead, since an error that does not prove it must not license removing it. The probe
 /// is non-blocking, so a listener with a full backlog reads as live rather than holding the
 /// caller.
+#[cfg(target_os = "linux")]
 pub fn unix_socket_is_live(path: &Path) -> bool {
     let probe = socket::socket(
         AddressFamily::Unix,
@@ -226,6 +282,7 @@ pub fn unix_socket_is_live(path: &Path) -> bool {
 
 /// Remove a leftover socket file so the bind cannot fail with `EADDRINUSE`; a path still in
 /// use, or occupied by anything that is not a socket, aborts the start instead.
+#[cfg(target_os = "linux")]
 pub fn clear_stale_unix_socket(path: &Path) -> Result<(), ListenError> {
     use std::os::unix::fs::FileTypeExt;
     let meta = match std::fs::symlink_metadata(path) {
@@ -262,6 +319,7 @@ pub fn clear_stale_unix_socket(path: &Path) -> Result<(), ListenError> {
 
 /// Drop this listener's socket file on shutdown; a path something is accepting on again
 /// belongs to another instance and is left alone.
+#[cfg(target_os = "linux")]
 pub fn remove_own_unix_socket(path: &Path) {
     use std::os::unix::fs::FileTypeExt;
     let Ok(meta) = std::fs::symlink_metadata(path) else {
@@ -272,6 +330,12 @@ pub fn remove_own_unix_socket(path: &Path) {
     }
     let _ = std::fs::remove_file(path);
 }
+
+/// Drop this listener's socket file on shutdown; a path something is accepting on again
+/// belongs to another instance and is left alone. No Unix socket is served off Linux, so
+/// there is no file to drop.
+#[cfg(not(target_os = "linux"))]
+pub fn remove_own_unix_socket(_path: &Path) {}
 
 /// The host of a `Host` header, lowercased, without port or brackets.
 fn host_name(headers: &HeaderMap) -> Option<String> {
@@ -461,12 +525,22 @@ fn site_name(addr: &SocketAddr, secure: bool) -> String {
 /// checks can each take a while.
 fn prepare(cfg: &ListenConfig) -> Result<Prepared, ListenError> {
     if !cfg.unix_socket.is_empty() {
-        let path = PathBuf::from(&cfg.unix_socket);
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)?;
+        #[cfg(target_os = "linux")]
+        {
+            let path = PathBuf::from(&cfg.unix_socket);
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            clear_stale_unix_socket(&path)?;
+            return Ok(Prepared::Unix(path));
         }
-        clear_stale_unix_socket(&path)?;
-        return Ok(Prepared::Unix(path));
+        // The Unix socket is a Linux feature; refusing a configured one tells the operator
+        // the setting took nothing rather than serving TCP beside their back.
+        #[cfg(not(target_os = "linux"))]
+        return Err(ListenError::UnixSocket(format!(
+            "a Unix socket is not served on this OS: '{}'",
+            cfg.unix_socket
+        )));
     }
     let candidates = resolve_listen_addresses(&cfg.addr, cfg.port)?;
     Ok(Prepared::Tcp(bind_listen_sockets(&cfg.addr, &candidates)?))
@@ -474,6 +548,7 @@ fn prepare(cfg: &ListenConfig) -> Result<Prepared, ListenError> {
 
 /// What [`prepare`] made ready for the runtime to take over.
 enum Prepared {
+    #[cfg(target_os = "linux")]
     Unix(PathBuf),
     Tcp(Vec<std::net::TcpListener>),
 }
@@ -520,6 +595,7 @@ async fn serve_prepared(
     let mut accepts = Vec::new();
     let mut local_addrs = Vec::new();
     let (endpoint, kind, unix_socket) = match prepared {
+        #[cfg(target_os = "linux")]
         Prepared::Unix(path) => {
             let listener = tokio::net::UnixListener::bind(&path)?;
             accepts.push(tokio::spawn(accept_unix(
@@ -588,6 +664,7 @@ async fn accept_tcp(
             local,
             remote: Some(remote),
             secure: tls.is_some(),
+            #[cfg(target_os = "linux")]
             fd: Some(std::os::fd::AsRawFd::as_raw_fd(&stream)),
         };
         tokio::spawn(serve_connection(
@@ -601,6 +678,7 @@ async fn accept_tcp(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn accept_unix(
     listener: tokio::net::UnixListener,
     router: Router,

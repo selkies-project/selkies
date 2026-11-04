@@ -26,13 +26,18 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use log::{error, info};
-use pcmflux::AudioPlayback;
+#[cfg(target_os = "linux")]
+use log::error;
+use log::info;
 use selkies_rtc::rtp::codecs::Codec;
 use selkies_rtc::rtp::receiver::ReceivedFrame;
 use selkies_rtc::signaling::ClientType;
 use tokio::sync::mpsc;
 
+#[cfg(target_os = "linux")]
+use pcmflux::AudioPlayback;
+
+#[cfg(target_os = "linux")]
 use crate::audio::microphone_playback_settings;
 use crate::core::Role;
 use crate::webcam::{VirtualWebcam, codec_by_name, shared_webcam, webcam_uplink_allowed};
@@ -114,6 +119,7 @@ fn on_mic(engine: &Arc<RtcEngine>, peer: &str, frame: ReceivedFrame) {
 }
 
 /// A peer's playback task: opens on the first packet and reopens after a failure.
+#[cfg(target_os = "linux")]
 fn spawn_playback(engine: Arc<RtcEngine>) -> mpsc::Sender<(Vec<u8>, Option<i64>)> {
     let (tx, mut rx) = mpsc::channel::<(Vec<u8>, Option<i64>)>(MIC_QUEUE);
     tokio::spawn(async move {
@@ -159,6 +165,24 @@ fn spawn_playback(engine: Arc<RtcEngine>) -> mpsc::Sender<(Vec<u8>, Option<i64>)
             tokio::task::spawn_blocking(move || {
                 playback.stop();
             });
+        }
+    });
+    tx
+}
+
+/// A peer's playback task where no sound server runs: the queue the packets land in drops
+/// them, one line saying so on the first, so the peer's microphone is answered with its
+/// absence rather than left queued.
+#[cfg(not(target_os = "linux"))]
+fn spawn_playback(_engine: Arc<RtcEngine>) -> mpsc::Sender<(Vec<u8>, Option<i64>)> {
+    let (tx, mut rx) = mpsc::channel::<(Vec<u8>, Option<i64>)>(MIC_QUEUE);
+    tokio::spawn(async move {
+        let mut said = false;
+        while rx.recv().await.is_some() {
+            if !said {
+                said = true;
+                info!(target: "webrtc", "Dropping microphone audio: no audio backend is wired for this OS.");
+            }
         }
     });
     tx

@@ -26,17 +26,19 @@
 //!   atomically. Transfers idle past [`UPLOAD_PART_TTL_SECONDS`] are expired on the next
 //!   chunked request.
 //!
-//! The write lands in a directory descriptor the confinement walked and verified
+//! The write lands in a directory the confinement walked and verified
 //! ([`FileRoot::open_dir_fd`](super::FileRoot::open_dir_fd)): every component down to it was
 //! opened relative to the one before and verified from the descriptor it opened to, so a
 //! symlink planted over an intermediate name after the request's path was validated cannot
 //! redirect the body or the final rename outside the root, and `O_NOFOLLOW` on the staging
-//! leaf does the same for the file itself. Both shapes carry the mode of a file of this user's
-//! they replace onto the replacement ([`carry_destination_mode`]) and are refused for
-//! view-only credentials. A chunked transfer is tracked by its destination, so a slice for a
-//! path whose staging file another slice is still writing is refused rather than interleaved.
+//! leaf does the same for the file itself. Off Linux the directory is the resolved path the
+//! string confinement verified ([`confine`'s module docs](super::confine)), and the staging
+//! leaf is refused where it is not a plain file, the same act by the name the check approved.
+//! Both shapes carry the mode of a file of this user's they replace onto the replacement
+//! ([`carry_destination_mode`]) and are refused for view-only credentials. A chunked transfer
+//! is tracked by its destination, so a slice for a path whose staging file another slice is
+//! still writing is refused rather than interleaved.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -45,14 +47,19 @@ use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
-use nix::fcntl::AtFlags;
-use nix::fcntl::{OFlag, openat, renameat};
-use nix::sys::stat::{FchmodatFlags, Mode, SFlag, fchmodat, fstatat};
-use nix::unistd::{UnlinkatFlags, unlinkat};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
-use super::confine::WalkError;
+#[cfg(target_os = "linux")]
+use nix::fcntl::{OFlag, openat, renameat};
+#[cfg(target_os = "linux")]
+use nix::sys::stat::{FchmodatFlags, Mode, SFlag, fchmodat, fstatat};
+#[cfg(target_os = "linux")]
+use nix::unistd::{UnlinkatFlags, unlinkat};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+use super::confine::{DirFd, WalkError};
 use super::pacing::{TRANSFER_MIN_GAUGED_BYTES, monotonic};
 use super::{ChunkState, FilesState, RequestAuth, json_error, strerror};
 
@@ -78,6 +85,7 @@ pub fn staging_leaf_name() -> String {
 /// the staging file's creation mode, and the set-ID and sticky bits are never carried: a file
 /// another account planted under the name must not leave the upload writable by it, or a
 /// set-ID program of this user's that it can run.
+#[cfg(target_os = "linux")]
 pub fn carry_destination_mode(dir_fd: &OwnedFd, staging: &str, dest: &str, euid: u32) {
     let Ok(st) = fstatat(Some(dir_fd.as_raw_fd()), dest, AtFlags::AT_SYMLINK_NOFOLLOW) else {
         return;
@@ -100,7 +108,8 @@ pub fn carry_destination_mode(dir_fd: &OwnedFd, staging: &str, dest: &str, euid:
 /// Rename the complete staged upload `staging` onto `dest`, both relative to `dir_fd`, the
 /// held descriptor of the directory they live in, carrying its mode over: the rename moves the
 /// object the confinement opened rather than re-walking a path that could have been swapped.
-pub fn finalize_upload(dir_fd: &OwnedFd, staging: &str, dest: &str) -> std::io::Result<()> {
+#[cfg(target_os = "linux")]
+pub fn finalize_upload(dir_fd: &DirFd, staging: &str, dest: &str) -> std::io::Result<()> {
     carry_destination_mode(dir_fd, staging, dest, nix::unistd::geteuid().as_raw());
     renameat(
         Some(dir_fd.as_raw_fd()),
@@ -111,9 +120,23 @@ pub fn finalize_upload(dir_fd: &OwnedFd, staging: &str, dest: &str) -> std::io::
     Ok(())
 }
 
+/// Rename the complete staged upload onto its destination, by the resolved path of their
+/// directory (module docs).
+#[cfg(not(target_os = "linux"))]
+pub fn finalize_upload(dir: &DirFd, staging: &str, dest: &str) -> std::io::Result<()> {
+    std::fs::rename(dir.join(staging), dir.join(dest))
+}
+
 /// Remove `leaf` under `dir_fd`, ignoring a file that is already gone or cannot go.
-fn remove_quietly(dir_fd: &OwnedFd, leaf: &str) {
+#[cfg(target_os = "linux")]
+fn remove_quietly(dir_fd: &DirFd, leaf: &str) {
     let _ = unlinkat(Some(dir_fd.as_raw_fd()), leaf, UnlinkatFlags::NoRemoveDir);
+}
+
+/// Remove `leaf` under `dir` (the Linux body's docs).
+#[cfg(not(target_os = "linux"))]
+fn remove_quietly(dir: &DirFd, leaf: &str) {
+    let _ = std::fs::remove_file(dir.join(leaf));
 }
 
 /// The leaf of a staging path.
@@ -440,12 +463,46 @@ fn expire_stale_chunked_uploads(state: &FilesState) {
     }
 }
 
-/// Stream a request body into the file `leaf` names in the open directory `dir_fd`.
+/// Open the staging file `leaf` names in the upload's directory: created refusing one that
+/// already exists, or appended to. On Linux it is opened `O_NOFOLLOW` relative to the held
+/// descriptor, so a symlink planted over the leaf's name is refused; off Linux it is the
+/// resolved path of that directory (module docs).
+#[cfg(target_os = "linux")]
+fn open_staged_file(dir: &Arc<DirFd>, leaf: &str, append: bool) -> std::io::Result<std::fs::File> {
+    let mut flags = OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    flags |= if append {
+        OFlag::O_APPEND
+    } else {
+        OFlag::O_EXCL
+    };
+    let raw = openat(
+        Some(dir.as_raw_fd()),
+        leaf,
+        flags,
+        Mode::from_bits_truncate(0o644),
+    )?;
+    Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) }))
+}
+
+/// Open the staging file `leaf` names in the upload's directory (the Linux body's docs).
+#[cfg(not(target_os = "linux"))]
+fn open_staged_file(dir: &Arc<DirFd>, leaf: &str, append: bool) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if append {
+        options.append(true);
+    } else {
+        options.create_new(true);
+    }
+    options.open(dir.join(leaf))
+}
+
+/// Stream a request body into the file `leaf` names in the upload's directory.
 ///
 /// Creates the file when `append` is false, refusing one that already exists, and appends when
-/// true. `O_NOFOLLOW` blocks a symlink planted over the leaf's name, and no component above it
-/// is re-walked by name. Enforces the declared `Content-Length`. Reads pace against two
-/// allowances: a paused read fills the server's flow-control buffer, the TCP window closes,
+/// true; the leaf is opened through the directory the confinement walked, so no component
+/// above it is re-walked by name. Enforces the declared `Content-Length`. Reads pace against
+/// two allowances: a paused read fills the server's flow-control buffer, the TCP window closes,
 /// and the client's uplink is freed for the input and feedback traffic the stream depends on.
 /// The operator's static cap is the shared `transfer_cap` bucket; congestion control is
 /// `upload_pacer` fed one gauge verdict per chunk, so the transfer takes whatever the uplink
@@ -463,7 +520,7 @@ async fn stream_upload_body(
     declared: Option<u64>,
     body: Body,
     leaf: &str,
-    dir_fd: &Arc<OwnedFd>,
+    dir_fd: &Arc<DirFd>,
     append: bool,
 ) -> Result<u64, String> {
     let cap = state
@@ -475,26 +532,12 @@ async fn stream_upload_body(
     } else {
         None
     };
-    let mut flags = OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
-    flags |= if append {
-        OFlag::O_APPEND
-    } else {
-        OFlag::O_EXCL
-    };
-    let (fd, leaf_name) = (dir_fd.clone(), leaf.to_string());
-    let raw = tokio::task::spawn_blocking(move || {
-        openat(
-            Some(fd.as_raw_fd()),
-            leaf_name.as_str(),
-            flags,
-            Mode::from_bits_truncate(0o644),
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
-    let std_file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
-    let mut file = tokio::fs::File::from_std(std_file);
+    let (dir, leaf_name) = (dir_fd.clone(), leaf.to_string());
+    let staged = tokio::task::spawn_blocking(move || open_staged_file(&dir, &leaf_name, append))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let mut file = tokio::fs::File::from_std(staged);
     let mut written = 0u64;
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
@@ -527,10 +570,12 @@ async fn stream_upload_body(
     Ok(written)
 }
 
+/// The upload's mode carry is a property of the Unix file mode; `tests/unit/test_upload_mode.py`.
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests {
-    //! `tests/unit/test_upload_mode.py`: an upload carries the mode of a file it replaces only
-    //! from this user's own file, never its set-ID or sticky bits.
+    //! An upload carries the mode of a file it replaces only from this user's own file, never
+    //! its set-ID or sticky bits.
 
     use super::*;
     use std::os::unix::fs::PermissionsExt;

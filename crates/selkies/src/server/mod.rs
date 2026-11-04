@@ -90,6 +90,7 @@ async fn wait_for_app_ready() {
 
 /// Resolve until the first of SIGTERM, SIGHUP, or Ctrl-C; later signals are absorbed while
 /// the teardown runs.
+#[cfg(target_os = "linux")]
 async fn shutdown_signal() -> &'static str {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).ok();
@@ -101,8 +102,18 @@ async fn shutdown_signal() -> &'static str {
     }
 }
 
+/// Resolve until Ctrl-C, the one signal the console carries on this OS; later signals are
+/// absorbed while the teardown runs.
+#[cfg(not(target_os = "linux"))]
+async fn shutdown_signal() -> &'static str {
+    let _ = tokio::signal::ctrl_c().await;
+    "Ctrl-C"
+}
+
 /// Bring the pixelflux compositor socket up on Wayland before any session app starts, so an
 /// early-launched app finds `WAYLAND_DISPLAY`.
+/// Linux alone: the compositor it brings up is the in-process Wayland one.
+#[cfg(target_os = "linux")]
 fn bring_up_wayland() {
     let (width, height, render, auto_gpu, cursor, host) = {
         let s = settings();
@@ -131,6 +142,10 @@ fn bring_up_wayland() {
         Err(e) => warn!(target: "server", "Wayland display not initialized: {e}"),
     }
 }
+
+/// Nothing to bring up where no compositor runs: the Wayland socket is Linux's.
+#[cfg(not(target_os = "linux"))]
+fn bring_up_wayland() {}
 
 /// Build the stream server, register its services, and run until a signal.
 pub async fn run() -> Result<(), String> {

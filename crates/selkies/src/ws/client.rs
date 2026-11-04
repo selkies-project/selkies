@@ -20,6 +20,8 @@
 //! peer stopped taking.
 
 use std::net::SocketAddr;
+/// The descriptor the kernel socket counters probe; the kernel's own, where it has one.
+#[cfg(target_os = "linux")]
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -132,10 +134,13 @@ pub trait SocketLink: Send + Sync {
 
 /// A TCP socket's kernel view, by its descriptor. The descriptor stays valid for as long as
 /// the connection it belongs to, which outlives every send that probes it.
+/// Linux alone: the socket counters it reads are the kernel's own.
+#[cfg(target_os = "linux")]
 pub struct TcpLink {
     fd: RawFd,
 }
 
+#[cfg(target_os = "linux")]
 impl TcpLink {
     pub fn new(fd: RawFd) -> TcpLink {
         TcpLink { fd }
@@ -143,10 +148,13 @@ impl TcpLink {
 }
 
 /// Offset of `tcpi_bytes_acked` in Linux's `struct tcp_info`.
+#[cfg(target_os = "linux")]
 const TCPI_BYTES_ACKED: usize = 120;
 /// Linux `SIOCOUTQNSD`.
+#[cfg(target_os = "linux")]
 const SIOCOUTQNSD: libc::c_ulong = 0x894B;
 
+#[cfg(target_os = "linux")]
 impl SocketLink for TcpLink {
     fn unsent_bytes(&self) -> Option<i64> {
         let mut unsent: libc::c_int = 0;

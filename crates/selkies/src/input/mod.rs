@@ -48,6 +48,15 @@
 //! the [`ClipboardSink`]. A transport answers what is its own before calling
 //! [`Dispatcher::receive`]: `_gz`, `START_VIDEO`, `STOP_VIDEO`, a viewer's `SETTINGS`, and the
 //! other verbs of its data plane.
+//!
+//! Off Linux the X server connection (`x11_link`) and the compositor keymap owner
+//! (`wayland_keymap`) gate with the display servers they speak to, and twins answer the
+//! surface the handler and the dispatcher reach: a connection that does not come up, a
+//! keymap with no keys, so both ladders fall through to their last rung exactly as a Linux
+//! session without those display servers does. The keyboard shim and the X thread
+//! (`x11_keyboard`, `x11_worker`) are written against the `XLink` contract and stay
+//! compiled, so their overlays and ordering hold their shape against the twin. The
+//! Windows injection milestone (SendInput) lands in the places the twins hold.
 
 pub mod authority;
 pub mod command;
@@ -58,11 +67,26 @@ pub mod keysym_names;
 pub mod keysyms;
 pub mod pointer;
 pub mod seat;
+/// The compositor keymap owner, gated with the compositor it compiles a keymap for.
+#[cfg(target_os = "linux")]
 pub mod wayland_keymap;
+/// The keymap owner's names where no compositor runs, as [`wayland_keymap`] off Linux.
+#[cfg(not(target_os = "linux"))]
+pub mod wayland_keymap_stub;
+#[cfg(not(target_os = "linux"))]
+pub use wayland_keymap_stub as wayland_keymap;
 pub mod x11_keyboard;
+/// The X server connection, gated with the X server it speaks to.
+#[cfg(target_os = "linux")]
 pub mod x11_link;
+/// The X server's names where no X server runs, as [`x11_link`] off Linux.
+#[cfg(not(target_os = "linux"))]
+pub mod x11_stub;
+#[cfg(not(target_os = "linux"))]
+pub use x11_stub as x11_link;
 pub mod x11_worker;
 
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests;
 

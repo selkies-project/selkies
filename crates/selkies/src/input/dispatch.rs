@@ -838,6 +838,7 @@ impl Dispatcher {
 
     /// Forward one pointer action to the uinput helper socket as the msgpack
     /// `{"args": [[type, code], value], "kwargs": {...}}` it reads.
+    #[cfg(target_os = "linux")]
     fn uinput_mouse_emit(&self, action: MouseAction) {
         #[derive(serde::Serialize)]
         struct Cmd {
@@ -874,6 +875,11 @@ impl Dispatcher {
             }
         }
     }
+
+    /// The uinput mouse helper rides a Unix datagram socket, which no off-Linux host serves,
+    /// so no pointer action reaches one; the XTEST ladder above is the portable rung.
+    #[cfg(not(target_os = "linux"))]
+    fn uinput_mouse_emit(&self, _action: MouseAction) {}
 
     /// Start or stop echoing the pointer to a trackpad page, which draws it from the echo:
     /// `pointer,<display>,<x>,<y>,<scale>,<seq>`, the position in that display's server pixels,

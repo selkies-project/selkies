@@ -43,9 +43,13 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
 
+/// The compositor bring-up probe this reads; Linux's, where the Wayland compositor
+/// renders through GBM and GL.
+#[cfg(target_os = "linux")]
 use pixelflux::WaylandGpuProbe;
 use regex::Regex;
 
+#[cfg(target_os = "linux")]
 use super::gpu_probe_helpers::{
     RealProbes, print_device_renderer, print_vulkan_window, print_window_test,
 };
@@ -76,6 +80,8 @@ pub const ZINK_ENV: [(&str, &str); 3] = [
 /// How long one helper or the throwaway X server may take.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const SYSFS_DRM: &str = "/sys/class/drm";
+/// The proprietary stack's device node, which the sysfs walk below asks after.
+#[cfg(target_os = "linux")]
 const NVIDIA_DEVICE: &str = "/dev/nvidiactl";
 
 /// The variables the probe exports, in the order they are printed.
@@ -159,6 +165,8 @@ pub fn session_gpu(node: &str, sysfs: &Path, nvidia_device: &Path) -> String {
 }
 
 /// The GPU a pixelflux probe report describes, as the variables a caller exports.
+/// Linux alone: the report it reads is of the compositor's GBM/GL bring-up.
+#[cfg(target_os = "linux")]
 pub fn facts(report: &WaylandGpuProbe) -> Facts {
     // The report echoes the node it was asked for, which a failed bring-up may say is not
     // there at all; that is no node to render on.
@@ -185,6 +193,8 @@ pub fn facts(report: &WaylandGpuProbe) -> Facts {
 }
 
 /// One line describing `found`, for a log, with the report's renderer name and error.
+/// Linux alone, with the report `facts` reads.
+#[cfg(target_os = "linux")]
 pub fn summary(report: &WaylandGpuProbe, found: &Facts) -> String {
     let node = found.get("SELKIES_GPU_RENDER_NODE");
     let where_ = if node.is_empty() {
@@ -427,6 +437,7 @@ pub fn client_facts(
 /// `--vulkan-window <node>` one of the helpers a probe runs in a child process; otherwise
 /// the probe itself, reading `render_dri` and `auto_gpu` from the installed settings and
 /// printing the facts. Returns the process exit code.
+#[cfg(target_os = "linux")]
 pub fn main(args: &[String]) -> i32 {
     let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
     match arg(0) {
@@ -450,6 +461,14 @@ pub fn main(args: &[String]) -> i32 {
         println!("{key}={value}");
     }
     0
+}
+
+/// The `selkies gpu-probe` command where no compositor bring-up exists to probe: the
+/// documented exit for a session that cannot have a report.
+#[cfg(not(target_os = "linux"))]
+pub fn main(_args: &[String]) -> i32 {
+    eprintln!("No GPU probe exists on this OS: no compositor bring-up to report.");
+    1
 }
 
 #[cfg(test)]

@@ -31,7 +31,6 @@ use serde_json::{Value as Json, json};
 
 use super::confine::realpath;
 use super::{FilesState, RequestAuth, body_bytes, query_param, text};
-
 /// A recorder status as JSON, one shape for status, start, and stop.
 pub fn status_json(s: &pixelflux::recorder::RecordingStatus) -> Json {
     json!({
@@ -62,13 +61,7 @@ pub fn recording_target(root: &Path, name: &str) -> Option<PathBuf> {
     }
     let base = realpath(root);
     let target = realpath(&base.join(name));
-    let mut prefix = base.into_os_string();
-    prefix.push("/");
-    if !target
-        .as_os_str()
-        .as_encoded_bytes()
-        .starts_with(prefix.as_encoded_bytes())
-    {
+    if target == base || !target.starts_with(&base) {
         return None;
     }
     Some(target)
@@ -186,6 +179,7 @@ fn refused(reason: &str) -> Response {
 /// The Ogg Opus socket a recording's audio track is read from, served by a pcmflux capture of
 /// the session's sink with no sink callback, so no frame passes through this process; empty
 /// for a video-only recording: audio off, or a capture that does not start.
+#[cfg(target_os = "linux")]
 async fn start_recording_audio(state: &Arc<FilesState>) -> String {
     let config = &state.config;
     if !config.audio_enabled {
@@ -246,12 +240,32 @@ async fn start_recording_audio(state: &Arc<FilesState>) -> String {
 }
 
 /// Stop the recording's audio capture, if one runs.
+#[cfg(target_os = "linux")]
 async fn stop_recording_audio(state: &Arc<FilesState>) {
     let capture = state.recording_audio.lock().await.take();
     if let Some(capture) = capture {
         let _ = tokio::task::spawn_blocking(move || capture.stop()).await;
     }
 }
+
+/// A recording's audio track where no sound server runs (module docs): the socket is empty, so
+/// the recording proceeds video-only, the shape a Linux recording whose capture does not start
+/// takes. The Windows audio milestone lands in the place this twin holds.
+#[cfg(not(target_os = "linux"))]
+async fn start_recording_audio(state: &Arc<FilesState>) -> String {
+    if !state.config.audio_enabled {
+        return String::new();
+    }
+    log::warn!(
+        target: "server",
+        "Recording without audio: no audio backend is wired for this OS"
+    );
+    String::new()
+}
+
+/// Nothing was started, so there is nothing to stop.
+#[cfg(not(target_os = "linux"))]
+async fn stop_recording_audio(_state: &Arc<FilesState>) {}
 
 /// `GET /api/screenshot?display=<name>` (module docs).
 pub async fn handle_screenshot(State(state): State<Arc<FilesState>>, request: Request) -> Response {
@@ -323,12 +337,16 @@ mod tests {
             recording_target(&root, "sub/take.mp4"),
             Some(root.join("sub/take.mp4"))
         );
-        std::os::unix::fs::symlink(root.parent().unwrap(), root.join("away")).unwrap();
-        assert_eq!(
-            recording_target(&root, "away/take.mp4"),
-            None,
-            "a symlinked parent pointing outside"
-        );
+        // A symlinked parent pointing outside is the Unix case.
+        #[cfg(target_os = "linux")]
+        {
+            std::os::unix::fs::symlink(root.parent().unwrap(), root.join("away")).unwrap();
+            assert_eq!(
+                recording_target(&root, "away/take.mp4"),
+                None,
+                "a symlinked parent pointing outside"
+            );
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
