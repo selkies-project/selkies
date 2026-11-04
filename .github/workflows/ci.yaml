@@ -2,8 +2,9 @@ name: CI
 
 # Single orchestrator for pushes to main: lint, build the wheel once for its
 # smoke test and the suites, then fan out to the image and native-package
-# builds, which build the server from source. Pushes that only touch docs or
-# devcontainer files skip CI (their own workflows cover them).
+# builds, which build the server from source, and publish what the run built
+# as the commit's pre-release. Pushes that only touch docs or devcontainer
+# files skip CI (their own workflows cover them).
 
 on:
   # Manual as well as automatic: a push whose run GitHub does not create leaves
@@ -191,3 +192,65 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/packages.yaml
+
+  pre-release:
+    name: Pre-release
+    # Every commit to main that passes its suites is published as a pre-release
+    # tagged with its short SHA, as pixelflux's and pcmflux's are, carrying the
+    # media a release carries: the wheels, the native packages, and the
+    # AppImages. A pre-release is never the latest release, so the badge, the
+    # `latest` images, and PyPI stay with tagged releases.
+    needs: [tests, wheel, wheel-smoke, packages]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # The files' build provenance, attested through the run's OIDC token
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download the wheels
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: selkies-wheel
+          path: pre-release-artifacts/
+      - name: Download the native packages and AppImages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{deb,rpm,apk,arch,appimage}-*"
+          path: pre-release-artifacts/
+          merge-multiple: true
+      - name: Collect the pre-release files
+        run: |
+          set -e
+          mkdir -p pre-release
+          # The conda package the AppImage is assembled from stays an artifact
+          # of the run, as it does for a release
+          find pre-release-artifacts -type f -name '*.conda' -delete
+          find pre-release-artifacts -type f -exec mv {} pre-release/ \;
+          # Every kind of media, so a pattern that matched nothing fails here
+          # rather than publishing a pre-release without it
+          for want in '*.whl' '*.deb' '*.rpm' '*.apk' '*.pkg.tar.zst' '*.AppImage'; do
+            ls pre-release/$want > /dev/null 2>&1 || { echo "::error::no ${want} in the run's artifacts"; exit 1; }
+          done
+          (cd pre-release && sha256sum -- * > SHA256SUMS)
+          ls -la pre-release/
+      - name: Attest the pre-release files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: pre-release/*
+      - name: Short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Create the pre-release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          tag_name: ${{ steps.sha.outputs.short }}
+          name: ${{ steps.sha.outputs.short }}
+          # A new tag at this commit rather than at the branch's head by the
+          # time the media have built
+          target_commitish: ${{ github.sha }}
+          body: ${{ github.event.head_commit.message }}
+          prerelease: true
+          make_latest: false
+          files: pre-release/*
