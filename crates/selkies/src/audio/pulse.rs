@@ -532,10 +532,22 @@ mod tests {
         .await
         .expect("connect to the sandbox sound server");
         assert!(backend.connected());
-        let sinks = backend.sink_list().await.expect("sink list");
         let sources = backend.source_list().await.expect("source list");
         assert!(sources.iter().all(|s| !s.name.is_empty()));
-        let (default_sink, _) = backend.server_defaults().await.expect("server info");
+        // Other tests load and unload sinks on the same server, and the server moves its
+        // default onto a new sink, so the list is read between two equal default reads.
+        let mut snapshot = None;
+        for _ in 0..50 {
+            let (before, _) = backend.server_defaults().await.expect("server info");
+            let sinks = backend.sink_list().await.expect("sink list");
+            let (after, _) = backend.server_defaults().await.expect("server info");
+            if before == after {
+                snapshot = Some((after, sinks));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (default_sink, sinks) = snapshot.expect("the default sink held still for one read");
         if let Some(default_sink) = default_sink {
             assert!(
                 sinks.iter().any(|s| s.name == default_sink),
