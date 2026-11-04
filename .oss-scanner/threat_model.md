@@ -18,7 +18,9 @@
   `input` (`Dispatcher::receive`, the input authority in `authority.rs`), `core` (`Role`).
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
   `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
-  write (planted names, FIFOs, set-ID files).
+  write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose
+  segment any local account could read and write, and shares its framebuffer (`SELKIES-FRAMEBUFFER`) only with a
+  local X client that may read the root, read-only.
 
 ## Components that matter most / least
 - Most: authentication and role checks (a viewer or slot token must never reach input, files, the clipboard or

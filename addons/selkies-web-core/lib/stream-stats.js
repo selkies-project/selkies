@@ -45,8 +45,8 @@ export const SERVER_FRESH_MS = 3000;
 /**
  * @typedef {Object} StreamInfo The server's description of the stream.
  * @property {string} backend `x11` or `wayland`.
- * @property {string} capture The capture path: `NvFBC`, `DRI3`, `XShm`,
- *     `dmabuf`, or `readback`.
+ * @property {string} capture The capture path: `NvFBC`, `DRI3`, `Framebuffer`,
+ *     `XShm`, `dmabuf`, or `readback`.
  * @property {boolean} zero_copy Whether frames reach the encoder without a copy.
  * @property {boolean} zero_copy_available Whether the display server offered the
  *     encoder a zero-copy path at all, so that a copy fell short of one.

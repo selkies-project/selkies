@@ -194,7 +194,7 @@ sudo mkdir -pm1777 /dev/input
 
 # Start a virtual X11 server if not already running, skip this line if an X server already exists or you are already using a display
 # (-s 0 -dpms keeps the server's own screen saver and DPMS from ever blanking the framebuffer, as the desktop container and the AppImage do; see the FAQ on screen locking)
-# Xvfb "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem >/tmp/Xvfb_selkies.log 2>&1 &
+# Xvfb "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset >/tmp/Xvfb_selkies.log 2>&1 &
 
 # Wait for X server to start
 # echo 'Waiting for X Socket' && until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done && echo 'X Server is ready'

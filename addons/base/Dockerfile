@@ -53,7 +53,10 @@ ARG DISTRIB_RELEASE="26.04"
 # through XFree86-VidModeExtension, which Mesa's glXGetMscRateOML reads, and
 # addons/base/patches/xvfb-zero-copy-semaphore.patch, which signals a GPU
 # semaphore the capture shares with glamor after its blit, so the encoder waits
-# for it on the GPU rather than on the CPU.
+# for it on the GPU rather than on the CPU, and
+# addons/base/patches/xvfb-zero-copy-shared-framebuffer.patch, which keeps a
+# system-memory screen in a memfd the capture reads in place, told where it
+# changed without a round trip.
 ARG WLROOTS_VERSION="0.19.3"
 ARG LABWC_VERSION="0.9.7"
 # Both come as the archives GitHub generates for their tags, with no tarball

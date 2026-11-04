@@ -22,7 +22,7 @@ if [ ! -S "${socket}" ]; then
     +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" \
     +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" \
     +extension "XFIXES" +extension "XTEST" +iglx +render \
-    -nolisten "tcp" -ac -noreset -shmem > "${TMPDIR:-/tmp}/Xvfb${E2E_DISPLAY#*:}.log" 2>&1 &
+    -nolisten "tcp" -ac -noreset > "${TMPDIR:-/tmp}/Xvfb${E2E_DISPLAY#*:}.log" 2>&1 &
   until [ -S "${socket}" ]; do sleep 0.5; done
 fi
 if ! pactl info > /dev/null 2>&1; then
