@@ -10,7 +10,7 @@ on:
   workflow_call:
     inputs:
       artifact_name:
-        description: Artifact name for the built wheel
+        description: Artifact name for the built wheels
         type: string
         default: selkies-wheel
       package_version:
@@ -23,16 +23,35 @@ permissions:
 
 env:
   NODE_VERSION: "26"
-  PYTHON_VERSION: "3.12"
 
 jobs:
   wheel:
-    name: Build wheel (with bundled web client)
-    runs-on: ubuntu-latest
+    name: Build wheel (${{ matrix.target.platform }}_${{ matrix.target.arch }}, with bundled web client)
+    # One wheel per platform pixelflux and pcmflux publish theirs for, each built
+    # in the image theirs are built in (infra/wheel/build.sh), on a native runner
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - arch: x86_64
+            runner: ubuntu-latest
+            platform: manylinux_2_28
+            # The sdist is the same file from any job, so one writes it
+            sdist: "1"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: manylinux_2_28
+          - arch: x86_64
+            runner: ubuntu-latest
+            platform: musllinux_1_2
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: musllinux_1_2
+    runs-on: ${{ matrix.target.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free disk space
-        # The tool cache is kept: setup-python and setup-node resolve from it
+        # The tool cache is kept: setup-node resolves from it
         uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
         with:
           remove_android: true
@@ -50,11 +69,6 @@ jobs:
           cache-dependency-path: |
             addons/selkies-web-core/package-lock.json
             addons/selkies-dashboard/package-lock.json
-      - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
       - name: Build the web client bundle
         env:
           # For the controller database's lookups (gendb.js)
@@ -62,17 +76,34 @@ jobs:
         run: ./scripts/ci/build-web.sh
       - name: Build the wheel
         env:
-          PACKAGE_VERSION: ${{ inputs.package_version }}
+          SELKIES_VERSION: ${{ inputs.package_version }}
+          SELKIES_SDIST: ${{ matrix.target.sdist }}
+          IMAGE: quay.io/pypa/${{ matrix.target.platform }}_${{ matrix.target.arch }}
         run: |
-          python3 -m pip install --upgrade build
-          sed -i "s|^version =.*|version = \"${PACKAGE_VERSION}\"|" pyproject.toml
-          python3 -m build && ls -la dist/
+          mkdir -p wheelhouse
+          docker run --rm -v "${PWD}:/repo:ro" -v "${PWD}/wheelhouse:/out" \
+            -e SELKIES_VERSION -e SELKIES_SDIST "${IMAGE}" sh /repo/infra/wheel/build.sh /out
+          ls -la wheelhouse/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ inputs.artifact_name || 'selkies-wheel' }}
-          path: dist/*
+          name: ${{ inputs.artifact_name || 'selkies-wheel' }}-${{ matrix.target.platform }}_${{ matrix.target.arch }}
+          path: wheelhouse/*
           # Already-compressed payloads: the artifact is a zip either way, and
           # re-deflating them spends CPU for a size that does not move.
           compression-level: 0
           if-no-files-found: error
+          retention-days: 1
+
+  # Every platform's wheel, and the sdist, as the one artifact callers name
+  merge:
+    name: Collect the wheels
+    needs: wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact/merge@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact_name || 'selkies-wheel' }}
+          pattern: ${{ inputs.artifact_name || 'selkies-wheel' }}-*
+          compression-level: 0
           retention-days: 14
+          delete-merged: true

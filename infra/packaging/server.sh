@@ -21,9 +21,21 @@
 # The web client is built once per run by scripts/ci/build-web.sh into
 # dist/web, which every channel installs as it is.
 #
-# Usage: server.sh <pkg-root>   (SELKIES_VERSION stamps the version)
+# With --wheel, maturin builds the selkies wheel from the same copy instead
+# (pyproject.toml, `bindings = "bin"`), with the release version as it is
+# spelled in the wheel's metadata and the web client staged as its data at
+# share/selkies/web; infra/wheel/build.sh repairs what it leaves in <out-dir>.
+# SELKIES_SDIST=1 writes the sdist of that copy beside it.
+#
+# Usage: server.sh <pkg-root>          (SELKIES_VERSION stamps the version)
+#        server.sh --wheel <out-dir>
 set -eux
-PKG_ROOT="${1:?usage: server.sh <pkg-root>}"
+WHEEL_OUT=""
+if [ "${1:-}" = --wheel ]; then
+    WHEEL_OUT="${2:?usage: server.sh --wheel <out-dir>}"
+else
+    PKG_ROOT="${1:?usage: server.sh <pkg-root>}"
+fi
 REPO="$(dirname "$(readlink -f "$0")")/../.."
 RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-1.99.1}"
 BUILD="${SELKIES_BUILD_DIR:-/build}"
@@ -74,6 +86,22 @@ PIXELFLUX="$(cargo metadata --locked --format-version 1 --manifest-path "${SRC}/
 "${REPO}/infra/packaging/codecs.sh" "${BUILD}/codecs" "$(dirname "${PIXELFLUX}")"
 # shellcheck disable=SC1091  # written by codecs.sh just above
 . "${BUILD}/codecs/env.sh"
+
+if [ -n "${WHEEL_OUT}" ]; then
+    cp -r "${REPO}/pyproject.toml" "${REPO}/README.md" "${REPO}/LICENSE" "${SRC}/"
+    mkdir -p "${SRC}/infra" "${SRC}/build/wheel/data/data/share/selkies"
+    cp -r "${REPO}/infra/wheel" "${SRC}/infra/wheel"
+    cp -r "${REPO}/dist/web" "${SRC}/build/wheel/data/data/share/selkies/web"
+    sed -i "s|^version =.*|version = \"${SELKIES_VERSION:-0.0.0.dev0}\"|" "${SRC}/pyproject.toml"
+    # The tag the repair checks the wheel against, not a promise made here
+    if [ "${libc}" = musl ]; then tag=musllinux_1_2; else tag=manylinux_2_28; fi
+    (cd "${SRC}" && CARGO_TARGET_DIR="${BUILD}/target" maturin build --release --locked \
+        --compatibility "${tag}" --auditwheel skip --out "${WHEEL_OUT}")
+    if [ -n "${SELKIES_SDIST:-}" ]; then
+        (cd "${SRC}" && maturin sdist --out "${WHEEL_OUT}")
+    fi
+    exit 0
+fi
 
 CARGO_TARGET_DIR="${BUILD}/target" cargo build --release --locked -p selkies \
     --manifest-path "${SRC}/Cargo.toml"

@@ -1,0 +1,61 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# The selkies wheel: the Rust server as the `selkies` executable, built by
+# maturin, with the web client installed at <prefix>/share/selkies/web beside
+# it. Nothing in it is Python but the Jupyter entry point below, so one wheel
+# per platform installs on every interpreter from 3.9. infra/wheel/build.sh
+# builds and repairs it.
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "selkies"
+version = "0.0.0.dev0"
+authors = [{name = "Selkies Project", email = "pypi@linuxserver.io"}]
+description = "Open-Source Low-Latency Linux WebRTC HTML5 Remote Desktop and 3D Graphics / Game Streaming Platform"
+readme = "README.md"
+license = "MPL-2.0"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+]
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+# The Jupyter launcher item and route: `pip install selkies[jupyter]` beside the
+# Jupyter server that should offer the desktop
+jupyter = [
+    "jupyter-server-proxy>=4.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/selkies-project/selkies"
+"Bug Tracker" = "https://github.com/selkies-project/selkies/issues"
+
+# Jupyter's server proxy reads this group: with jupyter-server-proxy installed
+# beside selkies, every Jupyter server gains a Selkies desktop at /selkies/
+[project.entry-points.jupyter_serverproxy_servers]
+selkies = "selkies.session:jupyter"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/selkies/Cargo.toml"
+# The entry point's module
+python-source = "infra/wheel"
+# infra/wheel/build.sh stages the web client here, as data/share/selkies/web
+data = "build/wheel/data"
+# What a wheel built from the sdist needs beyond the crates' own sources: the
+# vendored crate the workspace patches in, and the staged web client
+include = [
+    { path = "crates/selkies-rtc/vendor/**/*", format = "sdist" },
+    { path = "build/wheel/data/**/*", format = "sdist" },
+]

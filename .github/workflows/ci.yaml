@@ -139,14 +139,10 @@ jobs:
 
   wheel-smoke:
     name: Smoke test the wheel
-    # Installs the built wheel against the main-HEAD capture stack, which only
-    # this run's artifacts carry, so it waits for the job that puts them in reach.
-    needs: [wheel, pixelflux-pcmflux]
+    needs: [wheel]
     permissions:
       contents: read
     uses: ./.github/workflows/smoke-wheel.yaml
-    with:
-      wheels_ready: true
 
   pixelflux-pcmflux:
     name: Capture stack (main HEAD)

@@ -57,10 +57,10 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Take the wheel and the sdist off the release
+      - name: Take the wheels and the sdist off the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist --pattern "selkies-${TAG}-py3-none-any.whl" --pattern "selkies-${TAG}.tar.gz"
+        run: gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist --pattern "selkies-${TAG}-py3-none-*.whl" --pattern "selkies-${TAG}.tar.gz"
       - name: Publish them to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

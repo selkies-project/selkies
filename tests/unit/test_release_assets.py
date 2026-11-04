@@ -25,7 +25,8 @@ WORKFLOW = os.path.join(REPO, ".github", "workflows", "release.yaml")
 
 # One of each: what the jobs of a release run leave in the artifact tree.
 DELIVERED = (
-    ("the wheel", "selkies-2.0.0rc0-py3-none-any.whl"),
+    ("a manylinux wheel", "selkies-2.0.0rc0-py3-none-manylinux_2_28_x86_64.whl"),
+    ("a musllinux wheel", "selkies-2.0.0rc0-py3-none-musllinux_1_2_aarch64.whl"),
     ("the sdist", "selkies-2.0.0rc0.tar.gz"),
     ("the AppImage", "selkies-2.0.0rc0-x86_64.AppImage"),
     ("the deb", "selkies_2.0.0.rc0-1.ubuntu26.04_amd64.deb"),
