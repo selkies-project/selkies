@@ -342,7 +342,11 @@ on a DRM driver), where the server blits the root into dmabufs pixelflux allocat
 the server's own render node and wrapped as pixmaps, the blit is waited for with a one-pixel
 `GetImage`, the XFixes cursor is composited by the server through Render, and the hardware session
 imports each dmabuf in place through the same `encode_dmabuf` the Wayland zero-copy path uses; and
-the general XShm path otherwise. Each zero-copy backend is declined -- with one line saying why --
+the general path otherwise, which reads the screen in place where the server shares its framebuffer
+(`x11/framebuffer.rs`: the images' Xvfb holding the screen in system memory offers SELKIES-FRAMEBUFFER, a
+read-only memfd of the screen, a watch of the tiles drawn into it, and an eventfd, so a frame copies only
+the tiles its pool surface misses and waits on no request) and through XShm and XDamage on every other
+server. Each zero-copy backend is declined -- with one line saying why --
 for a codec its engine does not serve, software encoding, a server or device that does not qualify
 (DRI3 also asks that the server draw on the encode node's GPU and that the encoder read the first frame),
 and NvFBC for a non-NVIDIA encode node, a watermark, a driver without it, a 10-bit request NVENC lacks
@@ -354,7 +358,7 @@ setting either way: the server's and the driver's own answers decide, and a host
 pays about 7 ms once per capture start to find that out.
 All three publish a change as it lands rather than on the next tick: NvFBC because the driver
 generates a frame on damage and the grab waits for it, DRI3 and XShm because the X server's
-DAMAGE reports end the wait early. How far any of them may come early is the frame pacing the
+DAMAGE reports end the wait early, and a shared framebuffer because its watch's eventfd does. How far any of them may come early is the frame pacing the
 Wayland backend also keeps (`pace.rs`), so the rate stays the configured one. NvFBC's driver says
 only that a frame is new; how much of it changed comes from a hash of its bands on the GPU
 (`band_hash`, in the convert's module, read back as one word a band), the XShm path's band damage

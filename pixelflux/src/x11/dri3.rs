@@ -210,7 +210,7 @@ fn intel_compressed(modifier: u64) -> bool {
 
 /// Why the DRI3 path was not taken, for the one line that says so.
 fn declined(reason: &str) -> Option<GpuCapture> {
-    println!("[X11] Zero-copy capture (DRI3) unavailable: {reason}; capturing through XShm.");
+    println!("[X11] Zero-copy capture (DRI3) unavailable: {reason}.");
     crate::report::capture_declined("DRI3", reason);
     None
 }

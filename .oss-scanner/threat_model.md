@@ -12,7 +12,9 @@
   - other local accounts, through the webcam interposer and recording tap Unix sockets (`webcam/server.rs`,
     `recording_sink.rs`), whose directory falls back to `/tmp`;
   - Wayland clients of the compositor (`wayland/`): buffers, dmabufs, keymaps, clipboard;
-  - values the X server and GPU drivers report (geometry, plane lengths, strides), trusted after `dlopen`.
+  - values the X server and GPU drivers report (geometry, plane lengths, strides), trusted after `dlopen`, and
+    the framebuffer and watch memfds a server sharing its framebuffer hands over (`x11/framebuffer.rs`), mapped
+    only once sealed against shrinking and agreeing with the reply's geometry.
 - The Python embedding (Selkies) has full authority by design.
 
 ## Components that matter most / least

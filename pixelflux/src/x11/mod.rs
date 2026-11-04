@@ -16,7 +16,9 @@
 //! server blit the root into dmabufs the hardware encoder reads in place, and [`nvfbc`] on an
 //! NVIDIA X server has the driver composite the screen straight into video memory and registers
 //! that buffer with NVENC in place. `run_capture` tries them in that order and falls back here
-//! otherwise.
+//! otherwise. Here a server that shares its framebuffer (`framebuffer`, the images' Xvfb with
+//! the screen in system memory) is read in place, each frame copying only the tiles its surface
+//! misses, with no request a frame, and XShm with XDamage serves every other server.
 //!
 //! `run_capture` splits the work across two threads because grabbing the next frame and encoding
 //! the previous one have no reason to wait on each other: the caller's thread grabs frames and owns
@@ -58,7 +60,10 @@ use crate::recording_sink::RecordingSink;
 pub mod computer_use;
 pub mod cursor;
 pub mod dri3;
+mod framebuffer;
 pub mod nvfbc;
+
+use framebuffer::{FramebufferGrab, Opened, SharedFramebuffer};
 
 /// Cross-thread controls for a running capture: a bag of atomics (plus two mutex-guarded
 /// payloads) the owning `ScreenCapture` pyclass flips from the Python thread and the capture thread
@@ -548,6 +553,76 @@ fn wait_for_frame(
             return TickTrigger::Timer;
         }
     }
+}
+
+/// [`wait_for_frame`] on a shared framebuffer's watch (`framebuffer`): a drawing operation the
+/// server signals on it ends the wait as a reported change would, with no round trip, and so
+/// does a resize retiring it.
+fn wait_for_framebuffer(fb: &SharedFramebuffer, pace: &FramePace, period: Duration) -> TickTrigger {
+    let now = Instant::now();
+    let due = pace.next_due(period, now);
+    if let Some(wait) = pace
+        .pull_at(TickTrigger::Damage, period, now)
+        .min(due)
+        .checked_duration_since(Instant::now())
+    {
+        thread::sleep(wait);
+    }
+    match due.checked_duration_since(Instant::now()) {
+        Some(wait) if fb.wait(wait) => TickTrigger::Damage,
+        None if fb.wait(Duration::ZERO) => TickTrigger::Damage,
+        _ => TickTrigger::Timer,
+    }
+}
+
+/// The shared framebuffer of `root`'s screen (`framebuffer`), where the server offers one and
+/// its pixels over the capture `region` read as an XShm grab of it into `surface` does, or
+/// `None`, saying why where the server offers one that is not used. The comparison is tried a
+/// few times, since the screen may change between the grab and the read.
+fn open_framebuffer(
+    conn: &RustConnection,
+    root: Window,
+    surface: &mut ShmSurface,
+    region: (i16, i16, u16, u16),
+    surfaces: usize,
+) -> Option<FramebufferGrab> {
+    let fb = match SharedFramebuffer::open(conn, root) {
+        Opened::Watch(fb) => fb,
+        Opened::Absent => return None,
+        Opened::Declined(reason) => {
+            println!("[X11] Shared framebuffer not used: {reason}");
+            crate::report::capture_declined("Framebuffer", &reason);
+            return None;
+        }
+    };
+    let (x, y, w, h) = region;
+    let mut grab = FramebufferGrab::new(fb, surfaces);
+    let mut read = vec![0u8; surface.size];
+    let matches = (0..3).any(|_| {
+        grab.invalidate();
+        grab_frame(conn, root, surface, x, y, w, h).is_ok()
+            && grab.read(
+                0,
+                &mut read,
+                surface.stride,
+                (x as u32, y as u32, w as u32, h as u32),
+            )
+            && read == surface.as_slice()
+    });
+    if !matches {
+        let reason = "its pixels differ from what GetImage returns";
+        println!("[X11] Shared framebuffer not used: {reason}");
+        crate::report::capture_declined("Framebuffer", reason);
+        grab.fb.close(conn);
+        return None;
+    }
+    grab.invalidate();
+    println!(
+        "[X11] Reading the screen in place from the X server's shared framebuffer ({}x{})",
+        grab.fb.width, grab.fb.height
+    );
+    crate::report::capture("Framebuffer", false);
+    Some(grab)
 }
 
 /// One `shm_get_image` request is atomic — the server never interleaves another client
@@ -1190,8 +1265,12 @@ where
 ///      fast flap) and recreating at a stale size would make the next `shm_get_image` exceed the root;
 ///      a fully-reverted flap keeps its surfaces as-is. A stop that races the drain breaks out to
 ///      teardown.
-///    - **Grab**: acquire a pooled surface (blocks until the encoder frees one), then `shm_get_image`
-///      the region into it synchronously (`reply()` waits).
+///    - **Grab**: acquire a pooled surface (blocks until the encoder frees one), then bring it up
+///      to the screen: from a shared framebuffer, the tiles drawn since the surface last held
+///      the screen, and the cursor's and the watermark's, whose wait ends on the watch rather
+///      than on DAMAGE (`framebuffer`); else, or where no whole read comes, `shm_get_image` of
+///      the region synchronously (`reply()` waits). A framebuffer a resize retired, or one of a
+///      server that went away, is watched again on the next grab.
 ///    - **Overlays**: composite the XFixes cursor (drawn at its hotspot-offset origin; live-toggleable)
 ///      and the watermark onto the BGRA pixels on the CPU.
 ///    - **Publish**: hand the finished frame to the encode thread (blocks until the slot is free;
@@ -1223,7 +1302,6 @@ where
         .map_err(|e| format!("xfixes_query_version: {e}"))?
         .reply()
         .map_err(|e| format!("XFixes unavailable: {e}"))?;
-    let mut damage = RootDamage::create(&conn, root);
 
     let geo = conn
         .get_geometry(root)
@@ -1244,6 +1322,22 @@ where
     for _ in 0..POOL_N {
         surfaces.push(ShmSurface::create(&conn, cap_w, cap_h)?);
     }
+    let mut shared = open_framebuffer(
+        &conn,
+        root,
+        &mut surfaces[0],
+        (cap_x, cap_y, cap_w, cap_h),
+        POOL_N,
+    );
+    let mut damage = if shared.is_none() {
+        println!("[X11] Capturing through XShm ({cap_w}x{cap_h})");
+        RootDamage::create(&conn, root)
+    } else {
+        None
+    };
+    // A shared framebuffer that retired, or whose server went away, is watched again on the next
+    // grab, the XShm path's damage standing in where that fails.
+    let mut rewatch = false;
     // Consecutive channel rebuilds without one good grab in between: geometry
     // errors can burn out the grab budget repeatedly under a dead region, so
     // recovery only gets a bounded number of channel rebuilds.
@@ -1296,8 +1390,18 @@ where
             if pace.next_due(frame_dur, Instant::now()) <= Instant::now() {
                 thread::yield_now();
             }
-            let trigger = wait_for_frame(&conn, damage.as_ref(), &pace, frame_dur);
+            let trigger = match &shared {
+                Some(grab) => wait_for_framebuffer(&grab.fb, &pace, frame_dur),
+                None => wait_for_frame(&conn, damage.as_ref(), &pace, frame_dur),
+            };
             let woke = Instant::now();
+            if shared.as_ref().is_some_and(|grab| grab.fb.retired()) {
+                if let Some(grab) = shared.take() {
+                    grab.fb.close(&conn);
+                }
+                rewatch = true;
+                geometry_check = 0;
+            }
             // Every grab is published; without Damage the still check never matters, since
             // nothing pulls a frame forward.
             pace.record_tick(trigger, frame_dur, woke, true);
@@ -1317,6 +1421,9 @@ where
                 rsettings.auto_adjust_screen_capture_size = nw <= 0 || nh <= 0;
                 cap_x = clamp_offset(nx, root_w);
                 cap_y = clamp_offset(ny, root_h);
+                if let Some(grab) = shared.as_mut() {
+                    grab.invalidate();
+                }
                 if let Some(g) = conn.get_geometry(root).ok().and_then(|c| c.reply().ok()) {
                     root_w = g.width;
                     root_h = g.height;
@@ -1337,6 +1444,9 @@ where
                             surfaces.push(ShmSurface::create(&conn, cap_w, cap_h)?);
                         }
                         pool.bump_generation();
+                        if let Some(grab) = shared.as_mut() {
+                            grab.invalidate();
+                        }
                     }
                 }
             }
@@ -1359,8 +1469,14 @@ where
                     // the new edge; re-clamp it against the live root.
                     root_w = g.width;
                     root_h = g.height;
+                    let (px, py) = (cap_x, cap_y);
                     cap_x = clamp_offset(rsettings.capture_x, root_w);
                     cap_y = clamp_offset(rsettings.capture_y, root_h);
+                    if (px, py) != (cap_x, cap_y)
+                        && let Some(grab) = shared.as_mut()
+                    {
+                        grab.invalidate();
+                    }
                     let (nw, nh) = resolve_dims(g.width, g.height, &rsettings);
                     if nw != cap_w || nh != cap_h {
                         if !pool.drain_for_resize(POOL_N, &controls.stop) {
@@ -1383,6 +1499,12 @@ where
                                 surfaces.push(ShmSurface::create(&conn, cap_w, cap_h)?);
                             }
                             pool.bump_generation();
+                            if let Some(grab) = shared.as_mut() {
+                                grab.invalidate();
+                            }
+                            if let Some(grab) = shared.as_mut() {
+                                grab.invalidate();
+                            }
                         }
                     }
                 }
@@ -1392,12 +1514,38 @@ where
                 Some(i) => i,
                 None => break,
             };
-            if let Some(d) = damage.as_ref() {
-                d.clear(&conn);
+            if std::mem::take(&mut rewatch) {
+                shared = open_framebuffer(
+                    &conn,
+                    root,
+                    &mut surfaces[idx],
+                    (cap_x, cap_y, cap_w, cap_h),
+                    POOL_N,
+                );
+                if shared.is_none() && damage.is_none() {
+                    damage = RootDamage::create(&conn, root);
+                }
             }
             let grab_result = {
                 let surface = &mut surfaces[idx];
-                grab_frame(&conn, root, surface, cap_x, cap_y, cap_w, cap_h)
+                let stride = surface.stride;
+                let region = (cap_x as u32, cap_y as u32, cap_w as u32, cap_h as u32);
+                match shared.as_mut() {
+                    Some(grab) => {
+                        if grab.read(idx, surface.as_mut_slice(), stride, region) {
+                            Ok(())
+                        } else {
+                            grab_frame(&conn, root, surface, cap_x, cap_y, cap_w, cap_h)
+                                .map(|()| grab.grabbed(idx))
+                        }
+                    }
+                    None => {
+                        if let Some(d) = damage.as_ref() {
+                            d.clear(&conn);
+                        }
+                        grab_frame(&conn, root, surface, cap_x, cap_y, cap_w, cap_h)
+                    }
+                }
             };
             if let Err(e) = grab_result {
                 // Most likely an external root resize between geometry polls made
@@ -1435,8 +1583,11 @@ where
                             &controls.stop,
                         ) {
                             Ok(()) => {
-                                // The reported region belonged to the server that went away.
+                                // The reported region and the framebuffer belonged to the
+                                // server that went away.
                                 damage = RootDamage::create(&conn, root);
+                                shared = None;
+                                rewatch = true;
                                 recovered = true;
                                 break;
                             }
@@ -1494,11 +1645,31 @@ where
                     img_x,
                     img_y,
                 );
+                if let Some(grab) = shared.as_mut() {
+                    grab.overlaid(
+                        idx,
+                        img_x + cap_x as i32,
+                        img_y + cap_y as i32,
+                        c.width as i32,
+                        c.height as i32,
+                    );
+                }
             }
 
             if watermark.is_active() {
                 watermark.update_position(frame_w, frame_h, settings.watermark_location_enum);
                 watermark.blend_bgra(buf, stride, frame_w, frame_h);
+                if let (Some(grab), Some(r)) =
+                    (shared.as_mut(), watermark.damage_rect(frame_w, frame_h))
+                {
+                    grab.overlaid(
+                        idx,
+                        r.loc.x + cap_x as i32,
+                        r.loc.y + cap_y as i32,
+                        r.size.w,
+                        r.size.h,
+                    );
+                }
             }
 
             let published = pool.publish(
@@ -1523,6 +1694,9 @@ where
 
     pool.shutdown();
     let _ = encode_thread.join();
+    if let Some(grab) = shared.take() {
+        grab.fb.close(&conn);
+    }
     for s in surfaces.iter_mut() {
         s.destroy(&conn);
     }
@@ -1894,7 +2068,8 @@ mod cursor_tests {
 #[cfg(test)]
 mod damage_tests {
     //! The `x11_damage` tests need an X server of their own, quiet enough that nothing else
-    //! repaints it: `DISPLAY=:N cargo test x11_damage -- --ignored --nocapture`.
+    //! repaints it: `DISPLAY=:N cargo test x11_damage -- --ignored --nocapture`; the
+    //! `x11_framebuffer` ones one that shares its framebuffer, as the images' Xvfb does.
 
     use super::*;
     use crate::pipeline::Damage as Changed;
@@ -2119,6 +2294,287 @@ mod damage_tests {
         println!(
             "repaint at 0.6 of a period published after {:.0}ms",
             waited.as_secs_f64() * 1000.0
+        );
+    }
+
+    /// The same, read off a shared framebuffer's watch: a change ends the wait without a round
+    /// trip. Needs the images' Xvfb, which shares its framebuffer.
+    #[test]
+    #[ignore]
+    fn x11_framebuffer_publishes_a_change_before_the_next_tick() {
+        let (conn, screen) = x11rb::connect(None).expect("connect");
+        let root = conn.setup().roots[screen].root;
+        let Opened::Watch(fb) = SharedFramebuffer::open(&conn, root) else {
+            panic!("the server shares no framebuffer");
+        };
+        let mut pace = FramePace::windowed();
+        let mut grab = FramebufferGrab::new(fb, 1);
+        let mut frame = vec![0u8; grab.fb.width as usize * grab.fb.height as usize * 4];
+        let region = (0, 0, grab.fb.width, grab.fb.height);
+        assert!(grab.read(0, &mut frame, grab.fb.width as usize * 4, region));
+
+        pace.ticked(TickTrigger::Timer, PERIOD, Instant::now(), false);
+        let start = Instant::now();
+        let quiet = wait_for_framebuffer(&grab.fb, &pace, PERIOD);
+        assert_eq!(
+            quiet,
+            TickTrigger::Timer,
+            "a quiet screen is the timer's to pace"
+        );
+        assert!(start.elapsed() >= PERIOD.mul_f64(0.9));
+
+        pace.ticked(TickTrigger::Timer, PERIOD, Instant::now(), false);
+        let brush = Painter::connect();
+        let painter = thread::spawn(move || {
+            thread::sleep(PERIOD.mul_f64(0.6));
+            brush.fill(0x0020_4060, 0, 0, 64, 64);
+        });
+        let start = Instant::now();
+        let pulled = wait_for_framebuffer(&grab.fb, &pace, PERIOD);
+        let waited = start.elapsed();
+        painter.join().expect("painter");
+        assert_eq!(
+            pulled,
+            TickTrigger::Damage,
+            "the repaint is what asked for the frame"
+        );
+        assert!(
+            waited < PERIOD.mul_f64(0.9),
+            "the repaint was published after {waited:?}"
+        );
+        assert!(grab.read(0, &mut frame, grab.fb.width as usize * 4, region));
+        assert_eq!(
+            &frame[..4],
+            &0x0020_4060u32.to_le_bytes(),
+            "and the frame read after it holds it"
+        );
+        println!(
+            "repaint at 0.6 of a period published after {:.2}ms",
+            waited.as_secs_f64() * 1000.0
+        );
+        grab.fb.close(&conn);
+    }
+
+    /// Over a server that shares its framebuffer, a capture reads the screen in place, says
+    /// so, and a repaint reaches the frames it sends.
+    #[test]
+    #[ignore]
+    fn x11_framebuffer_capture_reads_the_screen_in_place() {
+        use crate::encoders::codec::{Codec, VIDEO_HEADER_LEN};
+        use crate::webcam::decode::{Codec as DecCodec, VideoDecoder};
+        use crate::x11::gpu_test_support::{decoded_mean, painted_ycbcr};
+        let (conn, screen) = x11rb::connect(None).expect("connect");
+        let (width, height) = (
+            conn.setup().roots[screen].width_in_pixels,
+            conn.setup().roots[screen].height_in_pixels,
+        );
+        let settings = CaptureSettings {
+            codec: Codec::H264,
+            use_cpu: true,
+            video_fullframe: true,
+            video_streaming_mode: true,
+            target_fps: 30.0,
+            capture_cursor: true,
+            ..Default::default()
+        };
+        let controls = Arc::new(Controls::new(&settings));
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (tid_tx, _tid_rx) = std::sync::mpsc::channel();
+        let capture = {
+            let controls = controls.clone();
+            thread::spawn(move || {
+                run_capture(settings, controls, tid_tx, move |stripes| {
+                    for s in stripes {
+                        let _ = tx.send(s.data.to_vec());
+                    }
+                })
+            })
+        };
+        thread::sleep(Duration::from_millis(500));
+        const PAINTED: (u8, u8, u8) = (0xc0, 0x40, 0x20);
+        fill(0x00c0_4020, 0, 0, width, height);
+        thread::sleep(Duration::from_millis(500));
+        controls.stop.store(true, Ordering::Relaxed);
+        capture.join().expect("capture").expect("capture ran");
+        let mut dec = VideoDecoder::new(DecCodec::H264).expect("H.264 decoder");
+        let mut mean = [0.0; 3];
+        for pkt in rx.try_iter() {
+            mean = decoded_mean(&mut dec, &pkt[VIDEO_HEADER_LEN..]);
+        }
+        let info = controls.report.info();
+        assert_eq!(info.capture, "Framebuffer", "{}", info.capture_reason);
+        let want = painted_ycbcr(PAINTED);
+        for (got, want) in mean.iter().zip(want) {
+            assert!(
+                (got - want).abs() < 2.0,
+                "decoded {mean:?}, painted {want:?}"
+            );
+        }
+    }
+
+    /// CPU seconds a process has run, user and system, read from `/proc/<pid>/stat`.
+    fn cpu_seconds(pid: &str) -> f64 {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
+        let fields: Vec<&str> = stat
+            .rsplit(')')
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        let ticks: f64 = fields[11].parse::<f64>().unwrap() + fields[12].parse::<f64>().unwrap();
+        ticks / unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64
+    }
+
+    /// What a capture costs the X server and the capture process: the root of `$DISPLAY` at
+    /// its own size, x264, a box of `PF_BENCH_BOX` pixels (0 for the whole screen, unset for
+    /// none) repainted every frame at 60 fps for five seconds. `PF_BENCH_XPID` names the
+    /// server's pid. Run once against a server that shares its framebuffer and once against
+    /// one that does not, to compare the read in place with XShm. Prints rather than asserts.
+    #[test]
+    #[ignore]
+    fn x11_framebuffer_bench_capture_cost() {
+        use crate::encoders::codec::Codec;
+        let xpid = std::env::var("PF_BENCH_XPID").expect("PF_BENCH_XPID");
+        let boxed: Option<u16> = std::env::var("PF_BENCH_BOX")
+            .ok()
+            .and_then(|v| v.parse().ok());
+        let (conn, screen) = x11rb::connect(None).expect("connect");
+        let (width, height) = (
+            conn.setup().roots[screen].width_in_pixels,
+            conn.setup().roots[screen].height_in_pixels,
+        );
+        let settings = CaptureSettings {
+            codec: Codec::H264,
+            use_cpu: true,
+            video_fullframe: true,
+            target_fps: 60.0,
+            width: width as i32,
+            height: height as i32,
+            capture_cursor: true,
+            ..Default::default()
+        };
+        let controls = Arc::new(Controls::new(&settings));
+        let frames = Arc::new(AtomicU64::new(0));
+        let (tid_tx, _tid_rx) = std::sync::mpsc::channel();
+        let capture = {
+            let (controls, frames) = (controls.clone(), frames.clone());
+            thread::spawn(move || {
+                run_capture(settings, controls, tid_tx, move |stripes| {
+                    if !stripes.is_empty() {
+                        frames.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+        };
+        thread::sleep(Duration::from_secs(2));
+        let painter = Painter::connect();
+        let (x0, s0, f0) = (
+            cpu_seconds(&xpid),
+            cpu_seconds("self"),
+            frames.load(Ordering::Relaxed),
+        );
+        let start = Instant::now();
+        let mut n = 0u32;
+        while start.elapsed() < Duration::from_secs(5) {
+            if let Some(size) = boxed {
+                let color = 0x0010_2030u32.wrapping_mul(n + 1) & 0x00ff_ffff;
+                match size {
+                    0 => painter.fill(color, 0, 0, width, height),
+                    _ => painter.fill(color, 64, 64, size, size),
+                }
+            }
+            n += 1;
+            thread::sleep(Duration::from_secs_f64(1.0 / 60.0));
+        }
+        let secs = start.elapsed().as_secs_f64();
+        let (x1, s1, f1) = (
+            cpu_seconds(&xpid),
+            cpu_seconds("self"),
+            frames.load(Ordering::Relaxed),
+        );
+        controls.stop.store(true, Ordering::Relaxed);
+        capture.join().expect("capture").expect("capture ran");
+        println!(
+            "{} {}x{} box {:?}: {:.1} fps sent, X server {:.3} cores, capture {:.3} cores",
+            controls.report.info().capture,
+            width,
+            height,
+            boxed,
+            (f1 - f0) as f64 / secs,
+            (x1 - x0) / secs,
+            (s1 - s0) / secs
+        );
+    }
+
+    /// How long a change takes from landing on the screen of `$DISPLAY` to leaving the capture
+    /// as a frame: a box of `PF_BENCH_BOX` pixels (default 256, 0 for the whole screen) painted
+    /// every 100 ms on an otherwise still screen, x264, 60 fps, 60 paints. Prints the median and
+    /// the 99th percentile rather than asserting.
+    #[test]
+    #[ignore]
+    fn x11_framebuffer_bench_change_latency() {
+        use crate::encoders::codec::Codec;
+        let size: u16 = std::env::var("PF_BENCH_BOX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256);
+        let (conn, screen) = x11rb::connect(None).expect("connect");
+        let (width, height) = (
+            conn.setup().roots[screen].width_in_pixels,
+            conn.setup().roots[screen].height_in_pixels,
+        );
+        let settings = CaptureSettings {
+            codec: Codec::H264,
+            use_cpu: true,
+            video_fullframe: true,
+            target_fps: 60.0,
+            width: width as i32,
+            height: height as i32,
+            use_paint_over_quality: false,
+            ..Default::default()
+        };
+        let controls = Arc::new(Controls::new(&settings));
+        let (tx, rx) = std::sync::mpsc::channel::<Instant>();
+        let (tid_tx, _tid_rx) = std::sync::mpsc::channel();
+        let capture = {
+            let controls = controls.clone();
+            thread::spawn(move || {
+                run_capture(settings, controls, tid_tx, move |stripes| {
+                    if !stripes.is_empty() {
+                        let _ = tx.send(Instant::now());
+                    }
+                })
+            })
+        };
+        thread::sleep(Duration::from_secs(2));
+        while rx.try_recv().is_ok() {}
+        let painter = Painter::connect();
+        let mut waits = Vec::new();
+        for n in 0..60u32 {
+            let color = 0x0010_2030u32.wrapping_mul(n + 1) & 0x00ff_ffff;
+            match size {
+                0 => painter.fill(color, 0, 0, width, height),
+                _ => painter.fill(color, 64, 64, size, size),
+            }
+            let painted = Instant::now();
+            if let Ok(sent) = rx.recv_timeout(Duration::from_millis(100)) {
+                waits.push(sent.saturating_duration_since(painted).as_secs_f64() * 1000.0);
+            }
+            thread::sleep(Duration::from_millis(100));
+            while rx.try_recv().is_ok() {}
+        }
+        controls.stop.store(true, Ordering::Relaxed);
+        capture.join().expect("capture").expect("capture ran");
+        waits.sort_by(f64::total_cmp);
+        let at = |q: f64| waits[((waits.len() - 1) as f64 * q).round() as usize];
+        println!(
+            "{} {}x{} box {size}: change to frame p50 {:.2} ms, p99 {:.2} ms over {} changes",
+            controls.report.info().capture,
+            width,
+            height,
+            at(0.5),
+            at(0.99),
+            waits.len()
         );
     }
 }
