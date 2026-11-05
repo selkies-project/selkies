@@ -16,6 +16,13 @@
 //! an anchor older than it, at `ANCHOR_PRESET`. Any other session leaves the references to the library, and a
 //! frame a client lost costs the key frame the caller codes on the refusal, which SVT-AV1
 //! before 2.0 codes only from a re-open as well.
+//!
+//! The session refines no blocks (`FrameEncoder::refines`): the library's region map sets a
+//! segment's quantizer under a constant quantizer alone, its constant rate never setting up
+//! segmentation, and the mode decision keeps the frame's lambda for every segment, so a still
+//! block skips whatever its segment's quantizer. Half a still 720p picture mapped 150 quantizer
+//! index steps finer than its qp 50 key frame came out at the map's 17 bytes a frame more, at
+//! presets 4 to 11 (SVT-AV1 2.3).
 
 use std::ffi::CString;
 use std::ptr;

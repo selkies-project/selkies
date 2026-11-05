@@ -281,7 +281,8 @@ through its map of a delta a tree block, and VA-API's H.264 through the driver's
 interest, a region a run of blocks along a row and at most ten steps finer than the frame, on X11 (XShm, the shared framebuffer, DRI3) and Wayland; a
 constant rate whose frames already run over it refines nothing. NvFBC, whose driver says only
 that a frame is new, VP9, which skips a block whose source has not changed whatever its
-quantizer, VA-API's HEVC, whose regions Intel's iHD codes into a worse picture, SVT-AV1, and the
+quantizer, VA-API's HEVC, whose regions Intel's iHD codes into a worse picture, SVT-AV1, whose
+mode decision skips a still block whatever its segment's quantizer, and the
 other encoders keep the region-wide cleanup alone. Under a constant quality the cleanup moves the session's quality to the
 paint-over one until the region moves again (`pipeline::decide_constant_quality`, and the stripe's
 rate factor in `encode_cpu`), as main's paint-over did, so every encoder codes the cleanup key
