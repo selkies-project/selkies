@@ -878,11 +878,16 @@ impl Settings {
             .unwrap_or("")
             .trim()
             .to_lowercase();
-        if !matches!(clip.as_str(), "true" | "false" | "in" | "out") {
+        let clip = match clip.as_str() {
+            "1" => "true",
+            "0" => "false",
+            mode => mode,
+        };
+        if !matches!(clip, "true" | "false" | "in" | "out") {
             warn!(target: "settings", "Invalid enable_clipboard value {:?}; using 'true'.", self.str_value("enable_clipboard"));
             self.set_str("enable_clipboard", "true".into());
         } else {
-            self.set_str("enable_clipboard", clip);
+            self.set_str("enable_clipboard", clip.into());
         }
 
         for name in ["microphone_on_start", "webcam_on_start"] {
@@ -1774,6 +1779,20 @@ mod tests {
         assert!(!s.microphone_enabled().on);
         let s = parse(&["--microphone-on-start", "1"], &[]);
         assert_eq!(s.microphone_on_start(), "true");
+    }
+
+    #[test]
+    fn clipboard_accepts_boolean_spellings() {
+        for (value, expected) in [
+            ("0", "false"),
+            ("1", "true"),
+            ("0|locked", "false"),
+            (" False ", "false"),
+            ("out", "out"),
+        ] {
+            let s = parse(&[], &[("SELKIES_ENABLE_CLIPBOARD", value)]);
+            assert_eq!(s.enable_clipboard(), expected, "value: {value:?}");
+        }
     }
 
     #[test]
