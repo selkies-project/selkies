@@ -758,6 +758,10 @@ struct RawFrame {
     /// Where the frame changed since the one before, in its own coordinates, as the server
     /// reported it and the overlays moved; empty where the server cannot say.
     changed: Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>>,
+    /// Whether `changed` holds every change: the shared framebuffer's watch, which the server
+    /// fills as it draws (`X11Pipeline::process_reported`), where XDamage can miss directly
+    /// rendered GL.
+    complete: bool,
 }
 /// `RawFrame` is `Send`: its raw pointer addresses a pooled shm surface that the pool
 /// guarantees is not reused until the encode thread recycles this frame, so the handle is safe to
@@ -1076,7 +1080,11 @@ fn encode_loop<F>(
         let buf = unsafe { std::slice::from_raw_parts(frame.ptr, frame.len) };
         let encode_start_ns = crate::wayland::host::now_ns();
         pl.set_link_rate(controls.link_kbps.load(Ordering::Relaxed));
-        let mut stripes = pl.process_damaged(buf, frame.stride, &frame.changed);
+        let mut stripes = if frame.complete {
+            pl.process_reported(buf, frame.stride, &frame.changed)
+        } else {
+            pl.process_damaged(buf, frame.stride, &frame.changed)
+        };
         FrameTiming::stamp(&mut stripes, frame.captured_ns, encode_start_ns);
         controls.codec.store(pl.codec().id(), Ordering::Relaxed);
         pool.recycle(frame.idx);
@@ -1370,6 +1378,9 @@ where
     // Where the cursor and the watermark were drawn onto the last frame published.
     let mut last_overlays: Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>> =
         Vec::new();
+    // The XFixes serial of the cursor image drawn onto the last frame published: a cursor that
+    // changes its image in place changes no overlay rectangle.
+    let mut last_cursor_serial = None;
     // Consecutive channel rebuilds without one good grab in between: geometry
     // errors can burn out the grab budget repeatedly under a dead region, so
     // recovery only gets a bounded number of channel rebuilds.
@@ -1657,6 +1668,7 @@ where
             let stride = surface.stride;
             let buf = surface.as_mut_slice();
             let mut overlays = Vec::new();
+            let mut cursor_serial = None;
 
             if controls.capture_cursor.load(Ordering::Relaxed)
                 && let Some(c) = conn
@@ -1672,6 +1684,7 @@ where
                 // settings — those go stale on the first live region move.
                 let (img_x, img_y) =
                     cursor_image_origin(c.x, c.y, c.xhot, c.yhot, cap_x as i32, cap_y as i32);
+                cursor_serial = Some(c.cursor_serial);
                 overlay_cursor(
                     buf,
                     stride,
@@ -1714,11 +1727,13 @@ where
                 }
             }
 
-            // The overlays moved: where they were and where they are now changed with them.
-            if overlays != last_overlays {
+            // The overlays moved, or the cursor changed its image: where they were and where
+            // they are now changed with them.
+            if overlays != last_overlays || cursor_serial != last_cursor_serial {
                 changed.extend(last_overlays.iter().copied());
                 changed.extend(overlays.iter().copied());
                 last_overlays = overlays;
+                last_cursor_serial = cursor_serial;
             }
             let published = pool.publish(
                 RawFrame {
@@ -1731,6 +1746,7 @@ where
                     generation: pool.generation(),
                     captured_ns: crate::wayland::host::now_ns(),
                     changed,
+                    complete: shared.is_some(),
                 },
                 &controls.stop,
             );
@@ -1850,6 +1866,7 @@ mod pool_tests {
             generation: 0,
             captured_ns: 0,
             changed: Vec::new(),
+            complete: false,
         }
     }
 
@@ -2462,6 +2479,84 @@ mod damage_tests {
         }
     }
 
+    /// A cursor that changes its image without moving reaches the frames sent, though no
+    /// rectangle moved and, over a shared framebuffer, no hash is taken: each change of the
+    /// root's cursor to the same arrow in another color, on a still screen, sends a frame.
+    #[test]
+    #[ignore]
+    fn x11_framebuffer_publishes_a_cursor_that_changes_its_image() {
+        use crate::encoders::codec::Codec;
+        use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt as _};
+        const XC_LEFT_PTR: u16 = 68;
+        let (conn, screen) = x11rb::connect(None).expect("connect");
+        let root = conn.setup().roots[screen].root;
+        let (width, height) = (
+            conn.setup().roots[screen].width_in_pixels,
+            conn.setup().roots[screen].height_in_pixels,
+        );
+        let font = conn.generate_id().expect("id");
+        conn.open_font(font, b"cursor").expect("cursor font");
+        let arrow = |red: u16| {
+            let cursor = conn.generate_id().expect("id");
+            conn.create_glyph_cursor(
+                cursor,
+                font,
+                font,
+                XC_LEFT_PTR,
+                XC_LEFT_PTR + 1,
+                red,
+                0,
+                0,
+                0xffff,
+                0xffff,
+                0xffff,
+            )
+            .expect("cursor");
+            cursor
+        };
+        let shapes = [arrow(0xffff), arrow(0)];
+        let settings = CaptureSettings {
+            codec: Codec::H264,
+            use_cpu: true,
+            video_fullframe: true,
+            target_fps: 30.0,
+            width: width as i32,
+            height: height as i32,
+            capture_cursor: true,
+            use_paint_over_quality: false,
+            ..Default::default()
+        };
+        let controls = Arc::new(Controls::new(&settings));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let (tid_tx, _tid_rx) = std::sync::mpsc::channel();
+        let capture = {
+            let controls = controls.clone();
+            thread::spawn(move || {
+                run_capture(settings, controls, tid_tx, move |stripes| {
+                    if !stripes.is_empty() {
+                        let _ = tx.send(());
+                    }
+                })
+            })
+        };
+        thread::sleep(Duration::from_millis(800));
+        while rx.try_recv().is_ok() {}
+        let mut sent = 0;
+        for &cursor in shapes.iter().cycle().take(4) {
+            conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().cursor(cursor))
+                .expect("cursor")
+                .check()
+                .expect("set cursor");
+            thread::sleep(Duration::from_millis(300));
+            sent += usize::from(rx.try_iter().count() > 0);
+        }
+        controls.stop.store(true, Ordering::Relaxed);
+        capture.join().expect("capture").expect("capture ran");
+        let info = controls.report.info();
+        assert_eq!(info.capture, "Framebuffer", "{}", info.capture_reason);
+        assert_eq!(sent, 4, "a frame for each change of the cursor's image");
+    }
+
     /// CPU seconds a process has run, user and system, read from `/proc/<pid>/stat`.
     fn cpu_seconds(pid: &str) -> f64 {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
@@ -2545,11 +2640,16 @@ mod damage_tests {
         controls.stop.store(true, Ordering::Relaxed);
         capture.join().expect("capture").expect("capture ran");
         println!(
-            "{} {}x{} box {:?}: {:.1} fps sent, X server {:.3} cores, capture {:.3} cores",
+            "{} {}x{} box {:?}: {:.1} fps painted, {:.1} fps sent, X server {:.3} cores, capture {:.3} cores",
             controls.report.info().capture,
             width,
             height,
             boxed,
+            if boxed.is_some() {
+                n as f64 / secs
+            } else {
+                0.0
+            },
             (f1 - f0) as f64 / secs,
             (x1 - x0) / secs,
             (s1 - s0) / secs
@@ -2558,8 +2658,10 @@ mod damage_tests {
 
     /// How long a change takes from landing on the screen of `$DISPLAY` to leaving the capture
     /// as a frame: a box of `PF_BENCH_BOX` pixels (default 256, 0 for the whole screen) painted
-    /// every 100 ms on an otherwise still screen, x264, 60 fps, 60 paints. Prints the median and
-    /// the 99th percentile rather than asserting.
+    /// every 100 ms on an otherwise still screen, 60 fps, 60 paints, through the full-frame
+    /// session of `PF_BENCH_CODEC` (h264 by default) on the software encoder, or on the
+    /// hardware one where `PF_BENCH_CPU` is 0. Prints the median and the 99th percentile rather
+    /// than asserting.
     #[test]
     #[ignore]
     fn x11_framebuffer_bench_change_latency() {
@@ -2573,9 +2675,13 @@ mod damage_tests {
             conn.setup().roots[screen].width_in_pixels,
             conn.setup().roots[screen].height_in_pixels,
         );
+        let codec = std::env::var("PF_BENCH_CODEC")
+            .ok()
+            .and_then(|c| Codec::parse(&c))
+            .unwrap_or(Codec::H264);
         let settings = CaptureSettings {
-            codec: Codec::H264,
-            use_cpu: true,
+            codec,
+            use_cpu: std::env::var("PF_BENCH_CPU").map_or(true, |v| v != "0"),
             video_fullframe: true,
             target_fps: 60.0,
             width: width as i32,

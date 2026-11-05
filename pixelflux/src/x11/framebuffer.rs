@@ -15,7 +15,9 @@
 //! once a drawing operation ends. A frame is then the tiles drawn since the surface it lands in
 //! last held the screen: the capture's pool rotates its surfaces, so each keeps the tiles it
 //! is missing ([`FramebufferGrab`]), and the cursor and the watermark composited onto one count
-//! among them.
+//! among them. The server sets a tile for every drawing that reaches the screen, so the tiles
+//! drawn since the last frame, with the overlays that moved or changed their image, are the
+//! frame's whole change, which the pipeline takes in place of a content hash.
 //!
 //! The framebuffer's head counts drawing operations, odd while one runs, so a read is whole
 //! where the count stood even before it and unchanged after it; one an operation ran across
@@ -531,12 +533,14 @@ impl FramebufferGrab {
         rects
     }
 
-    /// Mark the whole screen missing from every surface (a region moved, the surfaces were
-    /// recreated).
+    /// Mark the whole screen missing from every surface and drawn since the last frame (a
+    /// region moved, the surfaces were recreated): the next frame differs from the one before
+    /// wherever it lies, which no drawing reported.
     pub(crate) fn invalidate(&mut self) {
         for p in self.pending.iter_mut() {
             p.fill(u64::MAX);
         }
+        self.drawn.fill(u64::MAX);
     }
 
     /// Mark the area at (`x`, `y`), `width` x `height`, in screen coordinates, missing from

@@ -1669,10 +1669,11 @@ fn cpu_list(list: &str) -> Option<libc::cpu_set_t> {
 
 /// Everything the X11 host-ARGB path has to remember between frames.
 ///
-/// Unlike the Wayland backend, X11 capture has no compositor to report what changed, so this
-/// context exists to hold the state that stands in for that missing damage signal: the per-stripe
+/// Unlike the Wayland backend, X11 capture over XShm has no compositor to report every change, so
+/// this context holds the state that stands in for that missing damage signal: the per-stripe
 /// hashes and the persistent encoder session that let `process()` discover damage by comparing
-/// content frame-to-frame. A full-frame encoder runs through `decide_hw_fullframe`; the striped
+/// content frame-to-frame. A source that does report every change (the shared framebuffer's
+/// watch) is read through `process_reported` instead, as Wayland's compositor damage is. A full-frame encoder runs through `decide_hw_fullframe`; the striped
 /// software path (JPEG, striped or full-frame software H.264) runs through `encode_cpu` with
 /// `hash_damage=true`.
 ///
@@ -1695,6 +1696,10 @@ pub struct X11Pipeline {
     /// The bands the content hash found changed in the frame before this one, which a Turbo
     /// frame reads (`process`); empty until the first hash.
     turbo_dirty: Vec<bool>,
+    /// Whether the next frame whose source reports every change (`process_reported`) counts as
+    /// changed whole whatever it reports: the first this pipeline codes, or the first at a new
+    /// size, which the source reports against a picture the pipeline never had.
+    report_whole: bool,
     frame_counter: u16,
     pending_force_idr: bool,
     /// Consecutive hardware encode failures and whether this pipeline already spent its one
@@ -1729,6 +1734,7 @@ impl X11Pipeline {
             bands: Vec::new(),
             checked: Vec::new(),
             turbo_dirty: Vec::new(),
+            report_whole: true,
             frame_counter: 0,
             pending_force_idr: false,
             hw_error_streak: 0,
@@ -1900,6 +1906,7 @@ impl X11Pipeline {
     pub fn reshape(&mut self, settings: &CaptureSettings, size_changed: bool) -> bool {
         // A demotion (`recover_hw`) holds for the pipeline's life.
         let demoted = self.settings.use_cpu;
+        self.report_whole |= size_changed;
         if !size_changed {
             if let Some(FrameEncoder::Nvenc(enc)) = &mut self.hw {
                 enc.release_pinned_hosts();
@@ -2003,15 +2010,47 @@ impl X11Pipeline {
         stride: usize,
         changed: &[Rectangle<i32, Physical>],
     ) -> Vec<EncodedStripe> {
+        self.process_frame(argb, stride, changed, false)
+    }
+
+    /// [`Self::process`] for a frame whose source reports every change it made (`changed`):
+    /// the rectangles decide what changed, as a compositor's damage does on Wayland, and no
+    /// content hash is taken. Hashing the frame only to learn what the source already said cost
+    /// 0.84 ms of every 2560x1600 frame on the capture's critical path.
+    pub fn process_reported(
+        &mut self,
+        argb: &[u8],
+        stride: usize,
+        changed: &[Rectangle<i32, Physical>],
+    ) -> Vec<EncodedStripe> {
+        self.process_frame(argb, stride, changed, true)
+    }
+
+    /// [`Self::process_damaged`], or [`Self::process_reported`] where `reported`.
+    fn process_frame(
+        &mut self,
+        argb: &[u8],
+        stride: usize,
+        changed: &[Rectangle<i32, Physical>],
+        reported: bool,
+    ) -> Vec<EncodedStripe> {
         let width = self.settings.width;
         let height = self.settings.height;
+        let whole = [Rectangle::new((0, 0).into(), (width, height).into())];
+        let changed = if reported && std::mem::take(&mut self.report_whole) {
+            &whole[..]
+        } else {
+            changed
+        };
         let requested = self.pending_force_idr;
         let threshold = self.settings.damage_block_threshold;
         let duration = self.settings.damage_block_duration as i32;
 
         let out = if self.hw.is_some() {
             let turbo = self.settings.video_streaming_mode;
-            let damage = if turbo {
+            let damage = if reported {
+                Damage::of_rects(changed, width, height)
+            } else if turbo {
                 band_damage(&self.turbo_dirty)
             } else {
                 hash_damage(
@@ -2051,6 +2090,7 @@ impl X11Pipeline {
             let decided = (d.cleanup_quality(normal), d.force_idr);
             let mut hashed = None;
             let on_device = turbo
+                && !reported
                 && self.settings.cleans_up()
                 && d.send
                 && self
@@ -2059,6 +2099,7 @@ impl X11Pipeline {
                     .unwrap()
                     .hash_next_upload(DAMAGE_BAND_ROWS as u32);
             if turbo
+                && !reported
                 && self.settings.cleans_up()
                 && d.send
                 && (d.cleanup_quality(normal).is_some() || d.cap.is_some() && d.hold_band.is_none())
@@ -2116,7 +2157,7 @@ impl X11Pipeline {
                 // A Turbo paint-over reads the bands the frame before changed: hashed on the
                 // device where NVENC uploads the frame, beside its encode, else on a thread
                 // beside it (`hash_beside`).
-                let beside = hashed.is_none() && turbo && self.settings.cleans_up();
+                let beside = hashed.is_none() && turbo && !reported && self.settings.cleans_up();
                 let mut encode = || {
                     if d.send {
                         enc.encode_host(argb, stride, false, fc, d.target_qp, force_idr)
@@ -2216,7 +2257,7 @@ impl X11Pipeline {
                 width as usize * 4,
                 "software encode path assumes tightly-packed rows (stride == width*4)"
             );
-            if self.settings.codec.is_video() && self.settings.video_streaming_mode {
+            if self.settings.codec.is_video() && self.settings.video_streaming_mode && !reported {
                 // As a full frame above: a frame that codes a stripe at the paint-over quality
                 // while it holds still is hashed before it is encoded, and decided on its own
                 // change as well as the one before.
@@ -2293,7 +2334,7 @@ impl X11Pipeline {
                     &self.settings,
                     self.frame_counter,
                     false,
-                    true,
+                    !reported,
                     requested,
                 )
             }
@@ -5111,6 +5152,45 @@ mod tests {
                     crate::encoders::session_full_range(None, &settings),
                 ),
                 "X11 and Wayland must describe the same session identically"
+            );
+        }
+    }
+
+    /// A frame whose source reports every change is decided on its rectangles alone, on the
+    /// striped path and a full-frame session alike: the first a pipeline codes is sent whole
+    /// whatever it reports, a change the rectangles name is sent, and one they do not name is
+    /// not, since no hash is taken.
+    #[test]
+    fn a_reported_frame_is_decided_on_its_rectangles() {
+        for codec in [Codec::H264, Codec::Vp8] {
+            let mut p = X11Pipeline::new(CaptureSettings {
+                width: 64,
+                height: 64,
+                codec,
+                use_cpu: true,
+                video_fullframe: true,
+                use_paint_over_quality: false,
+                ..Default::default()
+            });
+            let mut pixels = vec![0x80u8; 64 * 64 * 4];
+            let rect = [Rectangle::new((0, 0).into(), (16, 16).into())];
+            assert!(
+                !p.process_reported(&pixels, 256, &[]).is_empty(),
+                "{codec:?} first"
+            );
+            assert!(
+                p.process_reported(&pixels, 256, &[]).is_empty(),
+                "{codec:?} still"
+            );
+            pixels[0] = 0;
+            assert!(
+                p.process_reported(&pixels, 256, &[]).is_empty(),
+                "{codec:?} unnamed"
+            );
+            pixels[4] = 0;
+            assert!(
+                !p.process_reported(&pixels, 256, &rect).is_empty(),
+                "{codec:?} named"
             );
         }
     }

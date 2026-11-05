@@ -360,7 +360,8 @@ imports each dmabuf in place through the same `encode_dmabuf` the Wayland zero-c
 the general path otherwise, which reads the screen in place where the server shares its framebuffer
 (`x11/framebuffer.rs`: the images' Xvfb holding the screen in system memory offers SELKIES-FRAMEBUFFER, a
 read-only memfd of the screen, a watch of the tiles drawn into it, and an eventfd, so a frame copies only
-the tiles its pool surface misses and waits on no request) and through XShm and XDamage on every other
+the tiles its pool surface misses, waits on no request, and is decided on those tiles and the overlays drawn onto it
+with no content hash, `X11Pipeline::process_reported`) and through XShm and XDamage on every other
 server. Each zero-copy backend is declined -- with one line saying why --
 for a codec its engine does not serve, software encoding, a server or device that does not qualify
 (DRI3 also asks that the server draw on the encode node's GPU and that the encoder read the first frame),
