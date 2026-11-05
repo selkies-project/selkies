@@ -55,6 +55,12 @@ const INPUT_BORROW_REFILL: f64 = 1.0 / 32.0;
 /// still renders its own frames instead of landing just behind a timer frame and waiting a
 /// period.
 const TIMER_GRACE_AFTER_PULL: f64 = 0.25;
+/// The share of a frame period before the next window opens in which a change, paced in windows,
+/// takes that window's frame at once rather than waiting for it to open. One frame a window
+/// still holds the rate at the cadence; a source drawing at the cadence whose frames end just
+/// short of the boundary otherwise waits for it every frame (a 60 fps full-screen animation on
+/// Xvfb waited 0.8 ms a frame on average, in some phases of its clock against the windows').
+const WINDOW_EARLY_FRACTION: f64 = 0.25;
 /// The periods without a reported change after which the screen counts as still
 /// (`FramePace::still`): more than the timer waits after a change's frame.
 const STILL_PERIODS: f64 = 1.5;
@@ -125,7 +131,8 @@ impl FramePace {
     /// period is a window holding one frame at most. A change takes its window's frame as it
     /// lands; a window no change took ends on the timer's frame. The rate never rises above the
     /// cadence, and a change is published at once unless a change already took its window, in
-    /// which case it waits only for the next window to open: the NvFBC capture's schedule,
+    /// which case it waits for the next window, taking it `WINDOW_EARLY_FRACTION` of a period
+    /// before it opens: the NvFBC capture's schedule,
     /// whose driver pushes frames the same way. Without windows a change could come forward no
     /// earlier than half a period after the last frame, and one landing just after a timer
     /// frame waited that long.
@@ -375,8 +382,11 @@ impl FramePace {
     /// then need not test `due` again, since a budget only grows with time.
     pub fn pull_at(&self, trigger: TickTrigger, period: Duration, now: Instant) -> Instant {
         if self.windowed {
-            // The window after the one the last frame closed is open from its start.
-            return self.window_end.unwrap_or(now);
+            // The window after the one the last frame closed is open from its start, and a
+            // change that close to it takes its frame now.
+            return self
+                .window_end
+                .map_or(now, |end| end - period.mul_f64(WINDOW_EARLY_FRACTION));
         }
         self.last_tick.map_or(now, |last| {
             last + period.saturating_sub(self.budget(trigger, period, now))
@@ -481,7 +491,7 @@ mod pacing_tests {
     }
 
     /// A second change in a window a change already took waits for the next window, and is
-    /// taken as it opens.
+    /// taken `WINDOW_EARLY_FRACTION` of a period before it opens.
     #[test]
     fn a_second_change_in_a_window_waits_for_the_next() {
         let base = Instant::now();
@@ -490,7 +500,7 @@ mod pacing_tests {
         pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 3), true);
         assert_eq!(
             pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 5)),
-            at(base, 20)
+            at(base, 15)
         );
         assert_eq!(
             pace.next_due(PERIOD, at(base, 5)),
@@ -500,7 +510,7 @@ mod pacing_tests {
         pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 20), true);
         assert_eq!(
             pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 21)),
-            at(base, 40)
+            at(base, 35)
         );
     }
 
@@ -553,7 +563,7 @@ mod pacing_tests {
         assert_eq!(pace.next_due(PERIOD, at(base, 200)), at(base, 220));
         assert_eq!(
             pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 207)),
-            at(base, 200)
+            at(base, 195)
         );
         pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 207), true);
         assert_eq!(pace.next_due(PERIOD, at(base, 207)), at(base, 240));
@@ -570,12 +580,12 @@ mod pacing_tests {
         assert!(pace.due(TickTrigger::Damage, PERIOD, at(base, 3)));
         assert!(pace.due(TickTrigger::Input, PERIOD, at(base, 3)));
         assert!(!pace.due(TickTrigger::Timer, PERIOD, at(base, 3)));
-        // A change takes it; the next change waits for the next window to open, at 20 ms.
+        // A change takes it; the next change waits for the next window, taking it from 15 ms.
         pace.ticked(TickTrigger::Damage, PERIOD, at(base, 3), false);
         assert!(!pace.due(TickTrigger::Damage, PERIOD, at(base, 12)));
         assert_eq!(
             pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 12)),
-            at(base, 20)
+            at(base, 15)
         );
         assert!(pace.due(TickTrigger::Damage, PERIOD, at(base, 20)));
         // The timer skips the window the change took and ends the next one, at 40 ms, a
@@ -643,13 +653,14 @@ mod pacing_tests {
 
     /// A client that waits for its callback goes quiet after its commit, so only the timer can
     /// take a commit that landed in a window a frame already took: it wakes as each window opens,
-    /// and the client keeps the cadence however early in the period it commits.
+    /// and the client keeps the cadence however early in the period it commits. A commit taken
+    /// ahead of its window may take the one that ends just past the run, one frame more.
     #[test]
     fn a_client_drawing_on_frame_callbacks_keeps_the_cadence() {
         for draws_us in [100, 2_000, 10_000, 19_000] {
             let frames = frames_of_a_callback_client(Duration::from_micros(draws_us));
             assert!(
-                (99..=101).contains(&frames),
+                (99..=102).contains(&frames),
                 "{frames} frames in two seconds at 50 fps, drawing {draws_us} us"
             );
         }
@@ -678,11 +689,11 @@ mod pacing_tests {
         let mut pace = FramePace::windowed();
         pace.ticked(TickTrigger::Timer, PERIOD, base, false);
         assert_eq!(pace.next_wake(PERIOD, at(base, 1), false), at(base, 20));
-        assert_eq!(pace.next_wake(PERIOD, at(base, 1), true), base);
+        assert!(pace.next_wake(PERIOD, at(base, 1), true) <= at(base, 1));
         pace.ticked(TickTrigger::Damage, PERIOD, at(base, 3), false);
-        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 20));
+        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 15));
         pace.defer(at(base, 70));
-        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 20));
+        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 15));
         assert_eq!(pace.next_wake(PERIOD, at(base, 21), false), at(base, 70));
     }
 
