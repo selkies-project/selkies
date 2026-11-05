@@ -1497,9 +1497,10 @@ fn ledger_frame(
 ///      and frames inside `encode_host_argb` with the same header layout, and encodes a 4:4:4
 ///      request 4:2:0 (said once per process). The live CBR budget is recomputed here from the
 ///      bitrate/fps (`rate_control`) so it rescales with live changes.
-/// 7. **Dispatch**: H.264 runs inline with `h264_fullframe_threads` encode threads (x264 with a
-///    single-band color conversion; OpenH264 adds four slices and a four-band conversion of its
-///    own). The slice threads keep the in-frame encode latency inside the frame budget at high
+/// 7. **Dispatch**: H.264 runs inline with `h264_fullframe_threads` encode threads, its color
+///    conversion split into as many bands (x264: a whole 2560x1600 frame took 0.98 ms on one
+///    thread and 0.62 on four; OpenH264 adds four slices and a four-band conversion of its own),
+///    or none where the capture hands over the planes ([`encode_cpu_from`]). The slice threads keep the in-frame encode latency inside the frame budget at high
 ///    resolutions; the cap is four because `zerolatency` makes x264 slice-threaded and more than
 ///    four slices trips decode glitches in some Chromium builds, and the minus-one leaves
 ///    headroom for the capture thread. JPEG stripes instead run across the rayon pool, or one
@@ -1508,6 +1509,50 @@ fn ledger_frame(
 pub fn encode_cpu(
     stripes: &mut Vec<StripeState>,
     raw_pixels: &[u8],
+    width: i32,
+    height: i32,
+    damage_rects: &[Rectangle<i32, Physical>],
+    settings: &CaptureSettings,
+    frame_counter: u16,
+    use_gpu: bool,
+    hash_damage: bool,
+    requested_idr: bool,
+) -> Vec<EncodedStripe> {
+    encode_cpu_from(
+        stripes,
+        raw_pixels,
+        None,
+        width,
+        height,
+        damage_rects,
+        settings,
+        frame_counter,
+        use_gpu,
+        hash_damage,
+        requested_idr,
+    )
+}
+
+/// 8-bit 4:2:0 planes of a whole frame that its capture converted itself, `y_stride` and
+/// `uv_stride` bytes a row: the x264 session encodes them in place of converting the packed
+/// frame (`encode_cpu_from`).
+#[derive(Clone, Copy)]
+pub struct HostI420<'a> {
+    pub y: &'a [u8],
+    pub u: &'a [u8],
+    pub v: &'a [u8],
+    pub y_stride: usize,
+    pub uv_stride: usize,
+}
+
+/// [`encode_cpu`] with the frame's planes already converted (`planes`): an 8-bit 4:2:0 x264
+/// session encodes them and leaves `raw_pixels` unread, which a capture converting straight from
+/// the screen's memory never wrote.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_cpu_from(
+    stripes: &mut Vec<StripeState>,
+    raw_pixels: &[u8],
+    planes: Option<HostI420<'_>>,
     width: i32,
     height: i32,
     damage_rects: &[Rectangle<i32, Physical>],
@@ -1681,7 +1726,7 @@ pub fn encode_cpu(
     #[cfg(not(feature = "gpl"))]
     let empty_bytes = 0;
     #[cfg(feature = "gpl")]
-    let csc_bands = 1;
+    let csc_bands = h264_threads.max(1) as usize;
     if video && video_fullcolor && !crate::encoders::software_fullcolor(Codec::H264) {
         static FULLCOLOR_LOGGED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
@@ -2005,7 +2050,12 @@ pub fn encode_cpu(
                     let uv_stride =
                         (if video_fullcolor { width_usize } else { width_usize / 2 }) as i32;
                     let wide = bit_depth > 8;
-                    let conversion_result = if wide {
+                    let planes = planes.filter(|_| {
+                        !wide && !video_fullcolor && y_start == 0 && actual_height == height as usize
+                    });
+                    let conversion_result = if planes.is_some() {
+                        Ok(())
+                    } else if wide {
                         let [y16, u16, v16] = &mut stripe_state.yuv16;
                         y16.resize(y_size, 0);
                         u16.resize(uv_size, 0);
@@ -2063,7 +2113,11 @@ pub fn encode_cpu(
                     let bytes = |plane: &[u16]| unsafe {
                         std::slice::from_raw_parts(plane.as_ptr().cast::<u8>(), plane.len() * 2)
                     };
-                    let (y, u, v, scale) = if wide {
+                    let (y_stride, uv_stride) = planes
+                        .map_or((y_stride, uv_stride), |p| (p.y_stride as i32, p.uv_stride as i32));
+                    let (y, u, v, scale) = if let Some(p) = planes {
+                        (p.y, p.u, p.v, 1)
+                    } else if wide {
                         let [y16, u16, v16] = &stripe_state.yuv16;
                         (bytes(y16), bytes(u16), bytes(v16), 2)
                     } else {

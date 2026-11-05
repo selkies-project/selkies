@@ -108,6 +108,10 @@ pub struct Controls {
     /// The codec the pipeline streams, as `Codec::id`, once one has been built; the
     /// selection ladder may have demoted the requested one. `u32::MAX` until then.
     pub codec: AtomicU32,
+    /// Whether the pipeline encodes planes the capture converts itself
+    /// (`X11Pipeline::takes_host_planes`), which a capture reading the shared framebuffer then
+    /// converts straight from the screen in place of copying it.
+    pub takes_planes: AtomicBool,
     pub region_dirty: AtomicBool,
     pub region: Mutex<(i32, i32, i32, i32)>,
     /// What this capture streams and how, for `ScreenCapture::stream_info`.
@@ -132,6 +136,7 @@ impl Controls {
             tunables: Mutex::new(None),
             capture_cursor: AtomicBool::new(s.capture_cursor),
             codec: AtomicU32::new(u32::MAX),
+            takes_planes: AtomicBool::new(false),
             region_dirty: AtomicBool::new(false),
             region: Mutex::new((s.capture_x, s.capture_y, s.width, s.height)),
             report: crate::report::StreamReport::new("x11"),
@@ -762,6 +767,9 @@ struct RawFrame {
     /// fills as it draws (`X11Pipeline::process_reported`), where XDamage can miss directly
     /// rendered GL.
     complete: bool,
+    /// The frame's planes where the capture converted it from the shared framebuffer instead of
+    /// copying its pixels (`FramePlanes` of the surface's index), which `ptr` then does not hold.
+    planes: Option<*const framebuffer::FramePlanes>,
 }
 /// `RawFrame` is `Send`: its raw pointer addresses a pooled shm surface that the pool
 /// guarantees is not reused until the encode thread recycles this frame, so the handle is safe to
@@ -1043,6 +1051,11 @@ fn encode_loop<F>(
             pw = fw;
             ph = fh;
             pgen = frame.generation;
+            if let Some(pl) = &pipeline {
+                controls
+                    .takes_planes
+                    .store(pl.takes_host_planes(), Ordering::Relaxed);
+            }
         }
         let pl = pipeline.as_mut().unwrap();
 
@@ -1074,7 +1087,19 @@ fn encode_loop<F>(
         let buf = unsafe { std::slice::from_raw_parts(frame.ptr, frame.len) };
         let encode_start_ns = crate::wayland::host::now_ns();
         pl.set_link_rate(controls.link_kbps.load(Ordering::Relaxed));
-        let mut stripes = if frame.complete {
+        // SAFETY: the planes belong to the surface this frame holds, which the capture does not
+        // touch again until the frame is recycled below.
+        let planes = frame.planes.map(|p| unsafe { &*p });
+        let mut stripes = if let Some(p) = planes.filter(|_| pl.takes_host_planes()) {
+            let i420 = crate::encoders::software::HostI420 {
+                y: &p.y,
+                u: &p.u,
+                v: &p.v,
+                y_stride: p.y_stride,
+                uv_stride: p.uv_stride,
+            };
+            pl.process_reported_planes(buf, frame.stride, i420, &frame.changed)
+        } else if frame.complete {
             pl.process_reported(buf, frame.stride, &frame.changed)
         } else {
             pl.process_damaged(buf, frame.stride, &frame.changed)
@@ -1301,7 +1326,10 @@ where
 ///      the screen, and the cursor's and the watermark's, whose wait ends on the watch rather
 ///      than on DAMAGE (`framebuffer`); else, or where no whole read comes, `shm_get_image` of
 ///      the region synchronously (`reply()` waits). A framebuffer a resize retired, or one of a
-///      server that went away, is watched again on the next grab.
+///      server that went away, is watched again on the next grab. Where the encode thread's
+///      pipeline takes 8-bit 4:2:0 planes (`Controls::takes_planes`) and no overlay is drawn,
+///      the surface's planes are converted from the shared framebuffer in place of copying its
+///      pixels (`FramebufferGrab::convert`), and the frame carries them.
 ///    - **Overlays**: composite the XFixes cursor (drawn at its hotspot-offset origin; live-toggleable)
 ///      and the watermark onto the BGRA pixels on the CPU.
 ///    - **Publish**: hand the finished frame to the encode thread (blocks until the slot is free;
@@ -1415,6 +1443,12 @@ where
 
     // One frame a period at most, a change taking its period's frame as it lands (FramePace::windowed).
     let mut pace = FramePace::windowed();
+    // Each pool surface's planes, where the pipeline takes them (`Controls::takes_planes`), and
+    // whether the last frame was converted into them rather than copied.
+    let csc_bands = crate::encoders::session::h264_fullframe_threads(&rsettings).max(1) as usize;
+    let mut planes_pool: Vec<framebuffer::FramePlanes> = Vec::new();
+    let mut planes_dims = (0u16, 0u16);
+    let mut planes_mode = false;
     // Frames between root-geometry polls (auto-adjust); ~0.5s at 60fps.
     const GEOMETRY_POLL_FRAMES: i32 = 30;
     let mut geometry_check = 0i32;
@@ -1564,11 +1598,62 @@ where
                     damage = RootDamage::create(&conn, root);
                 }
             }
+            // A session taking planes converts them straight from the shared framebuffer, unless
+            // the cursor or the watermark is drawn onto the pixels; a switch either way leaves the
+            // other form stale, so it starts over from the whole screen.
+            let use_planes = shared.is_some()
+                && controls.takes_planes.load(Ordering::Relaxed)
+                && !controls.capture_cursor.load(Ordering::Relaxed)
+                && !watermark.is_active();
+            let fresh =
+                use_planes && (planes_pool.len() != POOL_N || planes_dims != (cap_w, cap_h));
+            if fresh {
+                planes_pool = (0..POOL_N)
+                    .map(|_| framebuffer::FramePlanes::new(cap_w as usize, cap_h as usize))
+                    .collect();
+                planes_dims = (cap_w, cap_h);
+            }
+            if fresh || use_planes != planes_mode {
+                planes_mode = use_planes;
+                if let Some(grab) = shared.as_mut() {
+                    grab.invalidate();
+                }
+            }
             let grab_result = {
                 let surface = &mut surfaces[idx];
                 let stride = surface.stride;
                 let region = (cap_x as u32, cap_y as u32, cap_w as u32, cap_h as u32);
                 match shared.as_mut() {
+                    Some(grab) if use_planes => {
+                        let planes = &mut planes_pool[idx];
+                        if grab.convert(idx, planes, region, csc_bands) {
+                            Ok(())
+                        } else {
+                            grab_frame(&conn, root, surface, cap_x, cap_y, cap_w, cap_h).and_then(
+                                |()| {
+                                    let (ys, uvs) = (planes.y_stride, planes.uv_stride);
+                                    crate::encoders::software::convert_to_yuv_mt(
+                                        surface.as_mut_slice(),
+                                        stride as u32,
+                                        cap_w as usize,
+                                        cap_h as usize,
+                                        false,
+                                        false,
+                                        false,
+                                        false,
+                                        &mut planes.y,
+                                        &mut planes.u,
+                                        &mut planes.v,
+                                        (ys, uvs),
+                                        csc_bands,
+                                    )
+                                    .map_err(|e| format!("convert: {e:?}"))?;
+                                    grab.grabbed(idx);
+                                    Ok(())
+                                },
+                            )
+                        }
+                    }
                     Some(grab) => {
                         if grab.read(idx, surface.as_mut_slice(), stride, region) {
                             Ok(())
@@ -1741,6 +1826,8 @@ where
                     captured_ns: crate::wayland::host::now_ns(),
                     changed,
                     complete: shared.is_some(),
+                    planes: use_planes
+                        .then(|| &planes_pool[idx] as *const framebuffer::FramePlanes),
                 },
                 &controls.stop,
             );
@@ -1861,6 +1948,7 @@ mod pool_tests {
             captured_ns: 0,
             changed: Vec::new(),
             complete: false,
+            planes: None,
         }
     }
 

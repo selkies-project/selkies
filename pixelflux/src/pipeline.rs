@@ -12,8 +12,8 @@
 
 use crate::CaptureSettings;
 use crate::encoders::software::{
-    EncodedStripe, StripeState, acknowledge_reference, encode_cpu, invalidate_reference,
-    stripes_held_still,
+    EncodedStripe, HostI420, StripeState, acknowledge_reference, encode_cpu, encode_cpu_from,
+    invalidate_reference, stripes_held_still,
 };
 use crate::encoders::{self, Codec, FrameEncoder, FrameSource};
 use smithay::utils::{Physical, Rectangle};
@@ -2006,7 +2006,7 @@ impl X11Pipeline {
         stride: usize,
         changed: &[Rectangle<i32, Physical>],
     ) -> Vec<EncodedStripe> {
-        self.process_frame(argb, stride, changed, false)
+        self.process_frame(argb, stride, None, changed, false)
     }
 
     /// [`Self::process`] for a frame whose source reports every change it made (`changed`):
@@ -2019,14 +2019,38 @@ impl X11Pipeline {
         stride: usize,
         changed: &[Rectangle<i32, Physical>],
     ) -> Vec<EncodedStripe> {
-        self.process_frame(argb, stride, changed, true)
+        self.process_frame(argb, stride, None, changed, true)
     }
 
-    /// [`Self::process_damaged`], or [`Self::process_reported`] where `reported`.
+    /// [`Self::process_reported`] for a frame its capture already converted to the planes the
+    /// session encodes (`planes`, where [`Self::takes_host_planes`]); `argb` is left unread.
+    pub fn process_reported_planes(
+        &mut self,
+        argb: &[u8],
+        stride: usize,
+        planes: HostI420<'_>,
+        changed: &[Rectangle<i32, Physical>],
+    ) -> Vec<EncodedStripe> {
+        self.process_frame(argb, stride, Some(planes), changed, true)
+    }
+
+    /// Whether this pipeline encodes 8-bit 4:2:0 planes a capture converts itself: the x264
+    /// session of the CPU path.
+    pub fn takes_host_planes(&self) -> bool {
+        cfg!(feature = "gpl")
+            && self.hw.is_none()
+            && self.settings.codec == Codec::H264
+            && !self.settings.video_fullcolor
+            && encoders::software::h264_bit_depth(&self.settings) == 8
+    }
+
+    /// [`Self::process_damaged`], or [`Self::process_reported`] where `reported`, from `planes`
+    /// where the capture converted the frame itself.
     fn process_frame(
         &mut self,
         argb: &[u8],
         stride: usize,
+        planes: Option<HostI420<'_>>,
         changed: &[Rectangle<i32, Physical>],
         reported: bool,
     ) -> Vec<EncodedStripe> {
@@ -2315,9 +2339,10 @@ impl X11Pipeline {
                     encode()
                 }
             } else {
-                encode_cpu(
+                encode_cpu_from(
                     &mut self.stripes,
                     argb,
+                    planes,
                     width,
                     height,
                     changed,
