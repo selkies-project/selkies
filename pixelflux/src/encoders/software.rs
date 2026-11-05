@@ -1187,6 +1187,9 @@ pub struct StripeState {
     pub consecutive_changes: u32,
     pub in_damage_block: bool,
     pub damage_block_frames_remaining: i32,
+    /// Whether the last `content_dirty` hashed the region and found it changed: a damage block's
+    /// other frames read dirty without a hash.
+    pub hash_changed: bool,
     /// The region's blocks, which held still and which are clean (`ledger`), for refining the
     /// ones that held still while others move.
     pub ledger: BlockLedger,
@@ -1253,6 +1256,7 @@ impl StripeState {
     }
 
     fn dirty_by(&mut self, fast_hash: impl FnOnce() -> u64, threshold: u32, duration: i32) -> bool {
+        self.hash_changed = false;
         if self.in_damage_block {
             self.damage_block_frames_remaining -= 1;
             if self.damage_block_frames_remaining == 1 {
@@ -1260,6 +1264,7 @@ impl StripeState {
             } else if self.damage_block_frames_remaining <= 0 {
                 let h = fast_hash();
                 if h != self.last_hash {
+                    self.hash_changed = true;
                     self.damage_block_frames_remaining = duration;
                 } else {
                     self.in_damage_block = false;
@@ -1272,6 +1277,7 @@ impl StripeState {
         let h = fast_hash();
         let changed = h != self.last_hash;
         self.last_hash = h;
+        self.hash_changed = changed;
         if changed {
             self.consecutive_changes += 1;
             if self.consecutive_changes >= threshold {
@@ -1396,25 +1402,21 @@ pub fn stripes_held_still(stripes: &[StripeState], settings: &CaptureSettings) -
 }
 
 /// One frame of a stripe's `ledger`, the stripe at rows `y` to `y + height`: the rectangles of
-/// `changed` that reach it, in its own coordinates, or the whole stripe where it changed
-/// (`dirty`) and none reaches it, a change its hash caught that the source did not report.
+/// `changed` that reach it, in its own coordinates, read with whether it changed (`dirty`) and
+/// whether its hash saw it change (`observed`, `BlockLedger::frame_reported`).
 fn ledger_frame(
     ledger: &mut BlockLedger,
     changed: &[Rectangle<i32, Physical>],
-    y: i32,
-    height: i32,
+    (y, height): (i32, i32),
     dirty: bool,
+    observed: bool,
 ) {
     let local: Vec<Rectangle<i32, Physical>> = changed
         .iter()
         .filter(|r| r.loc.y < y + height && r.loc.y + r.size.h > y)
         .map(|r| Rectangle::new((r.loc.x, r.loc.y - y).into(), r.size))
         .collect();
-    if dirty && local.is_empty() {
-        ledger.frame_all();
-    } else {
-        ledger.frame(&local);
-    }
+    ledger.frame_reported(&local, dirty, observed);
 }
 
 /// The software encoder's per-frame entry point: split the frame into horizontal stripes,
@@ -1757,12 +1759,17 @@ pub fn encode_cpu(
             stripe_state.content_dirty(stripe_bytes, damage_block_threshold, damage_block_duration)
         };
         stripe_state.ledger.fit(width, actual_height as i32);
+        let observed = if hash_damage {
+            stripe_state.hash_changed
+        } else {
+            is_dirty
+        };
         ledger_frame(
             &mut stripe_state.ledger,
             damage_rects,
-            y_start as i32,
-            actual_height as i32,
+            (y_start as i32, actual_height as i32),
             is_dirty,
+            observed,
         );
         let armed = paint_over_armed(stripe_state);
         let cleanup = crate::pipeline::cleanup_due(

@@ -267,8 +267,8 @@ A still screen is cleaned up by one policy (`pipeline::cleanup_due`, run per fra
 compositor damage, the X server's report, a content hash (NvFBC's on the GPU) — never from what was sent,
 so Turbo (`video_streaming_mode`) sees the screen go still like any other mode: a refresh at the
 paint-over quantizer once the region holds still for the trigger, a key frame at it once a large
-change has held still for four times that, and the same cleanup for a region that keeps changing
-only a little. Within a region that keeps changing, a block ledger (`ledger.rs`) refines the blocks that
+change has held still for four times that where the block ledger below has not refined most of
+the region, and the same cleanup for a region that keeps changing only a little. Within a region that keeps changing, a block ledger (`ledger.rs`) refines the blocks that
 held still for the trigger and are not clean through the encoder's per-block quantizer, as many
 steps finer than the paint-over quantizer as the encoder needs to come to what its own cleanup
 reaches (six for x264 and x265, three for NVENC and VA-API, none for VP8 and kvazaar), a turn of them a frame sized to what the rate control has

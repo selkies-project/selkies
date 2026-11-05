@@ -16,6 +16,8 @@
 //! `KEYFRAME_S` (the scheduled key-frame interval), `W`, `H`, `FPS`, `MOTION` and `STILL` (frames), `STEP` (rows the scroll moves a frame, 4), `CARET`
 //! (frames per caret toggle, 0 none), `VIDEO` (`WxH`, a box at the bottom right repainted with a
 //! moving picture every frame for the whole run, the PSNR then measured outside it),
+//! `VIDEO_STOP` (frames into the still phase the video freezes on its last picture, the PSNR
+//! then measured over the whole screen and the bytes from there reported apart),
 //! `RESUME` (frames of motion after the still phase), `TRIGGER` (paint-over trigger frames),
 //! `PRESTILL` (frames held still before the measured phase, which then opens with the screen
 //! moving `JUMP` rows at once: a window opening on a clean still screen), `IDR_AT` and `IDR_EVERY`
@@ -396,6 +398,9 @@ fn cleanup_bench() {
             vh.min(h),
         ))
     });
+    let video_stop: Option<usize> = std::env::var("PF_BENCH_VIDEO_STOP")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let canvas = Canvas::for_bench(w, h);
     let mut p = X11Pipeline::new(settings.clone());
     let codec = p.codec();
@@ -440,6 +445,7 @@ fn cleanup_bench() {
     let mut frame = vec![0u8; w * 4 * h];
     let mut previous = vec![0u8; w * 4 * h];
     let mut video_psnr: Vec<(i64, f64)> = Vec::new();
+    let (mut stopped_bytes, mut stopped_keys, mut stopped_max) = (0usize, 0usize, (0usize, 0i64));
     for t in 0..total {
         let scroll = if t < motion {
             t * step
@@ -452,8 +458,10 @@ fn cleanup_bench() {
         };
         let caret = caret_period > 0 && t >= stop && ((t - stop) / caret_period).is_multiple_of(2);
         canvas.frame(&mut frame, h, scroll, caret);
+        let frozen = video_stop.map(|v| stop + v);
+        let video_plays = frozen.is_none_or(|f| t < f);
         if let Some(area) = video {
-            paint_video(&mut frame, w, area, t);
+            paint_video(&mut frame, w, area, frozen.map_or(t, |f| t.min(f)));
         }
         let since = t as i64 - stop as i64 - idr_at;
         if idr_at > 0 && since >= 0 && (since == 0 || (idr_every > 0 && since % idr_every == 0)) {
@@ -529,14 +537,21 @@ fn cleanup_bench() {
         if t >= stop + still {
             resume_bytes += bytes;
         }
+        if in_still && !video_plays {
+            stopped_bytes += bytes;
+            stopped_keys += usize::from(kinds.contains('K'));
+            if bytes > stopped_max.0 {
+                stopped_max = (bytes, rel);
+            }
+        }
         let measure = !out.is_empty() || rel % 30 == 0 || t + 1 == total || rel == 0;
         if measure {
             let src = source_luma(&frame, codec);
-            last_psnr = match video {
+            last_psnr = match video.filter(|_| video_plays) {
                 Some(area) => psnr_outside(&shown, &src, w, area),
                 None => psnr(&shown, &src),
             };
-            if let Some(area) = video.filter(|_| in_still) {
+            if let Some(area) = video.filter(|_| in_still && video_plays) {
                 video_psnr.push((rel, psnr_inside(&shown, &src, w, area)));
             }
             last_ssim = if ssim_all || rel >= -1 {
@@ -635,6 +650,14 @@ fn cleanup_bench() {
                 println!("  video t={t:+} {v:.2}");
             }
         }
+    }
+    if let Some(v) = video_stop {
+        println!(
+            "  after the video stopped (t={v:+}): {:.1} kB, {stopped_keys} key frames, largest {:.1} kB at t={:+}",
+            stopped_bytes as f64 / 1000.0,
+            stopped_max.0 as f64 / 1000.0,
+            stopped_max.1
+        );
     }
     println!(
         "summary codec={} turbo={} cbr={} kbps={} {}x{} first_key={:?} keys={still_keys} max_kB={:.1}@{} still_kB={:.1} still_kbps={:.0} resume_kB={:.1} end_psnr={:.2} end_ssim={:.5} to_end-1dB={} to_end-0.5dB={} to_target({target:.2})={} link_wait_ms={}",

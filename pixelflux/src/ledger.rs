@@ -208,8 +208,14 @@ pub struct BlockLedger {
     still: Vec<u16>,
     /// Whether each block's last coding was at the paint-over quality or finer.
     clean: Vec<bool>,
+    /// Whether each block was refined (`refined`) since it last changed: coded at the target a
+    /// key-frame cleanup reaches, which a refresh at the paint-over quality does not.
+    refined: Vec<bool>,
     /// The block the next plan starts its turn from.
     next: usize,
+    /// Whether the region's source was last seen to leave a change unreported
+    /// (`frame_reported`).
+    unreported: bool,
 }
 
 impl BlockLedger {
@@ -224,7 +230,9 @@ impl BlockLedger {
             rows,
             still: vec![0; cols * rows],
             clean: vec![false; cols * rows],
+            refined: vec![false; cols * rows],
             next: 0,
+            unreported: true,
         }
     }
 
@@ -253,8 +261,33 @@ impl BlockLedger {
                     let i = row * self.cols + col;
                     self.still[i] = 0;
                     self.clean[i] = false;
+                    self.refined[i] = false;
                 }
             }
+        }
+    }
+
+    /// One frame of a region whose source reports where it changed (`rects`) and whose content
+    /// hash says whether it did (`dirty`): the blocks `rects` cover changed, and where none does
+    /// the whole region did, while the source was last seen to leave a change unreported. A
+    /// frame the hash checked and found changed (`observed`) says which: without a rectangle
+    /// the source missed it, as the X server's DAMAGE misses directly rendered GL. A hash that
+    /// keeps a region dirty for a run of frames after it moved checks only the run's last, so
+    /// read as a change, the frames after a video stopped beside clean text dropped every block
+    /// the ledger had refined.
+    pub fn frame_reported(
+        &mut self,
+        rects: &[Rectangle<i32, Physical>],
+        dirty: bool,
+        observed: bool,
+    ) {
+        if observed {
+            self.unreported = rects.is_empty();
+        }
+        if rects.is_empty() && dirty && self.unreported {
+            self.frame_all();
+        } else {
+            self.frame(rects);
         }
     }
 
@@ -262,12 +295,14 @@ impl BlockLedger {
     pub fn frame_all(&mut self) {
         self.still.fill(0);
         self.clean.fill(false);
+        self.refined.fill(false);
     }
 
     /// The frame just coded the whole region at the rate control's quality where it was clean
     /// (a key frame a consumer asked for): every block is unclean again.
     pub fn coarsened(&mut self) {
         self.clean.fill(false);
+        self.refined.fill(false);
     }
 
     /// The frame just coded the whole region at the paint-over quality or finer: every block
@@ -344,9 +379,21 @@ impl BlockLedger {
             for col in 0..self.cols.min(plan.cols) {
                 if plan.refines(col, row) {
                     self.clean[row * self.cols + col] = true;
+                    self.refined[row * self.cols + col] = true;
                 }
             }
         }
+    }
+
+    /// The share of the region's blocks not refined since they last changed: what a key-frame
+    /// cleanup has left to do (`pipeline::cleanup_due`), the whole region on a session that does
+    /// not refine.
+    pub fn unrefined_share(&self) -> f32 {
+        if self.refined.is_empty() {
+            return 1.0;
+        }
+        let unrefined = self.refined.iter().filter(|&&r| !r).count();
+        unrefined as f32 / self.refined.len() as f32
     }
 
     /// The number of blocks in the region.
@@ -358,6 +405,38 @@ impl BlockLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame the content hash keeps dirty without a rectangle drops nothing a source that
+    /// reports its changes refined; a change the hash saw and the source did not report drops it
+    /// all, and so does every dirty frame without a rectangle after it.
+    #[test]
+    fn a_dirty_frame_without_a_change_keeps_what_was_refined() {
+        let mut ledger = BlockLedger::new(64, 64);
+        let rect = [Rectangle::new((0, 0).into(), (16, 16).into())];
+        ledger.frame_reported(&rect, true, true);
+        let plan = ledger.plan(0, usize::MAX, usize::MAX).unwrap();
+        ledger.refined(&plan);
+        assert_eq!(ledger.unrefined_share(), 0.0);
+        ledger.frame_reported(&[], true, false);
+        assert_eq!(ledger.unrefined_share(), 0.0);
+        ledger.frame_reported(&[], true, true);
+        assert_eq!(ledger.unrefined_share(), 1.0);
+        let plan = ledger.plan(0, usize::MAX, usize::MAX).unwrap();
+        ledger.refined(&plan);
+        ledger.frame_reported(&[], true, false);
+        assert_eq!(ledger.unrefined_share(), 1.0);
+    }
+
+    /// A refresh at the paint-over quality cleans the blocks that held still without refining
+    /// them: a key-frame cleanup still has them to do.
+    #[test]
+    fn a_refresh_cleans_without_refining() {
+        let mut ledger = BlockLedger::new(64, 64);
+        ledger.frame([]);
+        ledger.cleaned();
+        assert!(ledger.settled());
+        assert_eq!(ledger.unrefined_share(), 1.0);
+    }
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
         Rectangle::new((x, y).into(), (w, h).into())

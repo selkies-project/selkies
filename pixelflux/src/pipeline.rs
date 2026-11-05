@@ -188,7 +188,10 @@ pub enum Cleanup {
 /// periods, it is cleaned up by a key frame, which leaves nothing of the motion behind and
 /// resynchronizes every viewer, but costs a whole picture: so it waits for a screen still long
 /// enough that the user is reading it, and a caret or a clock, which change little, never pays
-/// for one. A region that keeps changing never holds still, so once `LOW_MOTION_TRIGGERS`
+/// for one. Nor does a region whose block ledger refined all but `KEY_CLEANUP_MASS` of it since
+/// the change (`BlockLedger::unrefined_share`): a video stopping beside text the ledger held
+/// clean was keyed at 99 frame budgets at 1080p and 8 Mbit/s, into a picture 2.4 dB worse than
+/// the refined one it replaced. A region that keeps changing never holds still, so once `LOW_MOTION_TRIGGERS`
 /// trigger periods have passed since it first changed and at most a quarter of its recent frames
 /// carried more than a small change (a blinking caret, a ticking clock) it is cleaned up then,
 /// by a key frame when the change adds up to one.
@@ -334,6 +337,7 @@ fn due_cleanup(
         && motion <= LOW_MOTION_SHARE;
     if keys
         && st.change_mass >= KEY_CLEANUP_MASS
+        && st.ledger.unrefined_share() >= KEY_CLEANUP_MASS
         && (still >= trigger * KEY_STILL_TRIGGERS || low_motion)
     {
         Cleanup::Key
@@ -646,8 +650,9 @@ impl HwFrameDecision {
 
 /// The block ledger's part of a full-frame decision `d` (`ledger`): take this frame's change
 /// into `st`'s ledger, from where the source says it changed (`changed`, in the frame's
-/// coordinates), or the whole frame where the source cannot say and `damage` says something
-/// changed; and where the frame goes at the session's own quality while the region moves, on a
+/// coordinates, read with whether the region's hash saw it change, `StripeState::hash_changed`,
+/// through `BlockLedger::frame_reported`), or the whole frame where the source cannot say and
+/// `damage` says something changed; and where the frame goes at the session's own quality while the region moves, on a
 /// session that refines (`refines`, how: `ledger::Refiner`) with the cleanup armed, name the
 /// blocks it refines, the offset taken from the quality index the rate control last coded at
 /// (`last`) or, at a constant quality, the session's.
@@ -662,9 +667,11 @@ pub fn plan_refinement(
 ) {
     st.ledger.fit(settings.width, settings.height);
     match changed {
-        Some(rects) if !(rects.is_empty() && damage.is_dirty()) => st.ledger.frame(rects),
-        _ if damage.is_dirty() => st.ledger.frame_all(),
-        _ => st.ledger.frame([]),
+        Some(rects) => st
+            .ledger
+            .frame_reported(rects, damage.is_dirty(), st.hash_changed),
+        None if damage.is_dirty() => st.ledger.frame_all(),
+        None => st.ledger.frame([]),
     }
     let normal = settings.video_crf as u32;
     let Some(refiner) = refines else {
@@ -2084,6 +2091,11 @@ impl X11Pipeline {
             {
                 self.hold = [decided, (d.cleanup_quality(normal), d.force_idr)];
             }
+            self.hw_state.hash_changed = self
+                .bands
+                .iter()
+                .chain(&self.checked)
+                .any(|band| band.hash_changed);
             {
                 let enc = self.hw.as_ref().unwrap();
                 plan_refinement(
@@ -2947,6 +2959,36 @@ mod tests {
             (silent - CONVERGE_S).abs() < 1.0,
             "one that says no quantizer gets the shorter window"
         );
+    }
+
+    /// A region whose change adds up to a key-frame cleanup is keyed once it holds still, unless
+    /// its block ledger refined all but a small share of it, where its refresh is the cleanup.
+    #[test]
+    fn a_key_cleanup_skips_a_region_its_ledger_refined() {
+        let cleanups = |refined: bool| {
+            let mut st = StripeState {
+                ledger: crate::ledger::BlockLedger::new(64, 64),
+                ..Default::default()
+            };
+            let trigger = 4;
+            let due = |st: &mut StripeState, damage| {
+                cleanup_due(st, trigger, trigger, true, true, true, damage)
+            };
+            for _ in 0..20 {
+                due(&mut st, Damage::Area(0.5));
+            }
+            if refined {
+                let plan = st.ledger.plan(0, usize::MAX, usize::MAX).unwrap();
+                st.ledger.refined(&plan);
+            }
+            (0..trigger * KEY_STILL_TRIGGERS + 1)
+                .map(|_| due(&mut st, Damage::None))
+                .collect::<Vec<_>>()
+        };
+        assert!(cleanups(false).contains(&Cleanup::Key));
+        let refined = cleanups(true);
+        assert!(!refined.contains(&Cleanup::Key));
+        assert!(refined.contains(&Cleanup::Refresh));
     }
 
     /// Such a session whose frames run small has nothing left to refine: the cleanup ends, and
