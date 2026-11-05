@@ -636,7 +636,7 @@ dependencies = [
 [[package]]
 name = "codec-sys"
 version = "0.1.0"
-source = "git+https://github.com/selkies-project/pixelflux?rev=265c06a1ec994b4e5d5721d0a48624e990c40d72#265c06a1ec994b4e5d5721d0a48624e990c40d72"
+source = "git+https://github.com/selkies-project/pixelflux?rev=600f00cb0c8cd2329ae3f24700aaa2715349eaa6#600f00cb0c8cd2329ae3f24700aaa2715349eaa6"
 dependencies = [
  "bindgen 0.73.2",
  "pkg-config",
@@ -1080,7 +1080,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2296,7 +2296,7 @@ dependencies = [
 [[package]]
 name = "nvcodec-sys"
 version = "0.1.0"
-source = "git+https://github.com/selkies-project/pixelflux?rev=265c06a1ec994b4e5d5721d0a48624e990c40d72#265c06a1ec994b4e5d5721d0a48624e990c40d72"
+source = "git+https://github.com/selkies-project/pixelflux?rev=600f00cb0c8cd2329ae3f24700aaa2715349eaa6#600f00cb0c8cd2329ae3f24700aaa2715349eaa6"
 
 [[package]]
 name = "nvml-wrapper"
@@ -2472,7 +2472,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pixelflux"
 version = "2.2.3"
-source = "git+https://github.com/selkies-project/pixelflux?rev=265c06a1ec994b4e5d5721d0a48624e990c40d72#265c06a1ec994b4e5d5721d0a48624e990c40d72"
+source = "git+https://github.com/selkies-project/pixelflux?rev=600f00cb0c8cd2329ae3f24700aaa2715349eaa6#600f00cb0c8cd2329ae3f24700aaa2715349eaa6"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.2",
@@ -3266,7 +3266,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3279,7 +3279,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3888,7 +3888,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4334,7 +4334,7 @@ dependencies = [
 [[package]]
 name = "va-sys"
 version = "0.1.0"
-source = "git+https://github.com/selkies-project/pixelflux?rev=265c06a1ec994b4e5d5721d0a48624e990c40d72#265c06a1ec994b4e5d5721d0a48624e990c40d72"
+source = "git+https://github.com/selkies-project/pixelflux?rev=600f00cb0c8cd2329ae3f24700aaa2715349eaa6#600f00cb0c8cd2329ae3f24700aaa2715349eaa6"
 dependencies = [
  "libloading 0.9.0",
 ]
@@ -4585,7 +4585,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4731,15 +4731,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]
