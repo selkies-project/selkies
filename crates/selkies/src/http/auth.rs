@@ -14,7 +14,8 @@
 //! in front already owns; a control request not so authenticated is held to the Origin rule a
 //! browser's cached Basic credentials would otherwise ride past; in secure mode every other API
 //! route takes a session token (Bearer header, `?token=`, or the client's cookie), the only
-//! credential when Basic auth is off and one accepted beside it when on; a cookie-carried
+//! credential when Basic auth is off and one accepted beside it when on, where a Basic login
+//! without a valid token is a viewer; a cookie-carried
 //! token on a state-changing request is held to the Origin rule too; with a master token set,
 //! the WebSocket handshakes skip Basic, since a browser cannot attach fresh Basic credentials to
 //! one; and everything else falls through to Basic Auth when it is enabled. Without a master
@@ -544,7 +545,9 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
         return Verdict::Refused(forbidden_origin());
     }
 
-    if secure && !is_ws_handshake && !token_path && route.is_some_and(|r| r.starts_with("/api/")) {
+    let token_bound =
+        secure && !is_ws_handshake && !token_path && route.is_some_and(|r| r.starts_with("/api/"));
+    if token_bound {
         if let Some((ceiling, source)) = session_token_verdict(state, headers, query) {
             if source == TokenSource::Cookie
                 && method != Method::GET
@@ -600,7 +603,7 @@ fn authorize(state: &AppState, request: &Request) -> Verdict {
         log::warn!(target: "server", "Invalid credentials provided for user: {}", config.basic_auth_user);
         return Verdict::Refused(basic_challenge(headers, "Invalid Credentials"));
     }
-    Verdict::Basic(if viewonly_ok && !main_ok {
+    Verdict::Basic(if (viewonly_ok && !main_ok) || token_bound {
         Role::Viewer
     } else {
         Role::Controller

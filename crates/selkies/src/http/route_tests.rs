@@ -620,8 +620,42 @@ async fn secure_basic_on() {
         )
         .await;
     assert!(
+        r.status == 403 && r.body == "viewer",
+        "Basic+token: Basic credentials without a token count as a viewer and cannot upload"
+    );
+    assert_eq!(
+        app.call(
+            "GET",
+            "/api/files/",
+            &[("authorization", &basic("user", "secret"))],
+        )
+        .await
+        .status,
+        403,
+        "Basic+token: Basic credentials without a token cannot list files"
+    );
+    let proxy = basic("user", "secret");
+    let r = app
+        .call(
+            "POST",
+            "/api/upload",
+            &[("authorization", &proxy), ("cookie", &cookie(CTRL))],
+        )
+        .await;
+    assert!(
         r.status == 200 && r.body == "controller",
-        "Basic+token: Basic credentials upload"
+        "Basic+token: a proxy's Basic login beside a controller's cookie uploads as controller"
+    );
+    let r = app
+        .call(
+            "GET",
+            "/api/files/",
+            &[("authorization", &proxy), ("cookie", &cookie(VIEW))],
+        )
+        .await;
+    assert!(
+        r.status == 403 && r.body == "viewer",
+        "Basic+token: a proxy's Basic login beside a viewer's cookie lists no files"
     );
     let r = app
         .call("POST", "/api/upload", &[("authorization", &bearer(CTRL))])
@@ -693,8 +727,8 @@ async fn secure_basic_on() {
         )
         .await
         .status,
-        200,
-        "Basic+token: Basic credentials switch modes as before"
+        403,
+        "Basic+token: Basic credentials without a token cannot switch modes"
     );
     assert_eq!(
         app.call(
