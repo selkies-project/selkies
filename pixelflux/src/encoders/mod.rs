@@ -1348,18 +1348,25 @@ impl FrameEncoder {
         }
     }
 
-    /// Where the session refines blocks of a frame of its rate control's at a quality of their
-    /// own (`refine_blocks`), the quality index steps finer than the paint-over one it codes them
-    /// at, so a refined block comes to what the region's own cleanup reaches; `None` where it
-    /// does not: NVENC's H.264, HEVC, and AV1 through the QP delta map
-    /// (`nvenc::REFINE_FINER`), libvpx's VP8 through its region-of-interest map
-    /// (`vpx::REFINE_FINER`, which says why not VP9). x264's striped sessions refine within `software::encode_cpu`
-    /// (`ledger::REFINE_FINER`).
-    pub fn refines(&self) -> Option<u32> {
+    /// How the session refines blocks of a frame of its rate control's at a quality of their
+    /// own (`refine_blocks`, `ledger::Refiner`), so a refined block comes to what the region's
+    /// own cleanup reaches; `None` where it does not: NVENC's H.264, HEVC, and AV1 through the
+    /// QP delta map (`nvenc::REFINE_FINER`), libvpx's VP8 through its region-of-interest map
+    /// (`vpx::REFINE_FINER`, which says why not VP9), x265 through its per-block quantizer
+    /// offsets and kvazaar through its per-tree-block map (`HevcEncoder::refine_finer`). x264's
+    /// striped sessions refine within
+    /// `software::encode_cpu` (`ledger::REFINE_FINER`).
+    pub fn refines(&self) -> Option<crate::ledger::Refiner> {
+        use crate::ledger::Refiner;
         match self {
-            FrameEncoder::Nvenc(enc) => enc.refines().then_some(nvenc::REFINE_FINER),
-            FrameEncoder::Vpx(enc) => (enc.codec() == Codec::Vp8).then_some(vpx::REFINE_FINER),
-            FrameEncoder::Hevc(enc) => enc.refines().then_some(hevc::REFINE_FINER),
+            FrameEncoder::Nvenc(enc) => {
+                enc.refines().then_some(Refiner::finer(nvenc::REFINE_FINER))
+            }
+            FrameEncoder::Vpx(enc) => {
+                (enc.codec() == Codec::Vp8).then_some(Refiner::finer(vpx::REFINE_FINER))
+            }
+            FrameEncoder::Hevc(enc) => enc.refines().then(|| Refiner::finer(enc.refine_finer())),
+            FrameEncoder::Vaapi(enc) => enc.refines(),
             _ => None,
         }
     }
@@ -1371,6 +1378,7 @@ impl FrameEncoder {
             FrameEncoder::Nvenc(enc) => enc.refine_blocks(refinement),
             FrameEncoder::Vpx(enc) => enc.refine_blocks(refinement),
             FrameEncoder::Hevc(enc) => enc.refine_blocks(refinement),
+            FrameEncoder::Vaapi(enc) => enc.refine_blocks(refinement),
             _ => {}
         }
     }

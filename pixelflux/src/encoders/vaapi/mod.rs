@@ -853,6 +853,10 @@ pub(super) struct Negotiated {
     /// The highest H.264 level the driver is told (`Device::h264_driver_level`); the
     /// packed SPS still declares the level the stream needs.
     pub h264_driver_level: u32,
+    /// The regions of interest a frame may name with a quantizer delta
+    /// (`VAConfigAttribEncROI`), 0 where the driver takes none, or none under its rate control
+    /// at a constant rate.
+    pub roi_regions: u32,
 }
 
 /// One frame as the codec arms see it: what it is, where its reconstruction and coded output
@@ -970,6 +974,20 @@ struct HostUpload {
 /// The dmabuf imports a zero-copy session keeps, past the few buffers any capture cycles.
 const DMABUF_IMPORTS: usize = 8;
 
+/// Quality index steps finer than the paint-over one a refined block is coded at
+/// (`VaapiEncoder::refines`): on Intel's iHD (N97) 1080p H.264 text beside a video went from
+/// 41.3 dB to 44.1, 45.4, and 47.1 at a constant quantizer at 0, 3, and 6 steps finer, where the
+/// driver's cleanup of the still screen reaches 46.2; at a constant rate, held to `REFINE_REACH`,
+/// from 31.0 to 33.3 at 8 Mbit/s and from 19.0 to 21.1 at 2, the video unchanged.
+const REFINE_FINER: u32 = 3;
+
+/// The most quantizer steps off the frame's own a refined region is coded at
+/// (`VaapiEncoder::refines`): on Intel's iHD (N97, H.264 on the low-power entry point, 3 Mbit/s
+/// CBR at 1080p60) a region 10 finer came out at a quantizer 7 under the rest with the rate held,
+/// 25 finer at 20 under it at 54 Mbit/s, the rate control lost; 5 finer, a delta the driver
+/// codes natively, moved nothing.
+const REFINE_REACH: u32 = 10;
+
 /// One VA-API encoder session, hardware, for one capture.
 pub struct VaapiEncoder {
     codec: Codec,
@@ -1009,6 +1027,10 @@ pub struct VaapiEncoder {
     qp: u32,
     /// The quantizer the next frame is held at (`hold_quantizer`).
     held: Option<u32>,
+    /// The blocks the next frame of the rate control's refines (`refine_blocks`), and the
+    /// regions of interest of the frame being issued (`roi_parameter`).
+    refinement: Option<crate::ledger::Refinement>,
+    roi: Vec<VAEncROI>,
     /// Whether the driver caps each coded frame at the size a constant-rate session names.
     frame_cap: bool,
     /// The bytes of the last coded frame, padding aside.
@@ -1323,6 +1345,16 @@ impl VaapiEncoder {
                 },
                 unit_qp_deltas,
                 h264_driver_level: device.h264_driver_level(),
+                roi_regions: device
+                    .attribute(profile, entrypoint, VAConfigAttribEncROI)
+                    .map_or(0, |v| {
+                        let qp_deltas_under_rate_control = v & (1 << 9) != 0;
+                        if rate.cbr && !qp_deltas_under_rate_control {
+                            0
+                        } else {
+                            v & 0xff
+                        }
+                    }),
             },
             fourcc,
             rt_format,
@@ -1343,6 +1375,8 @@ impl VaapiEncoder {
             rate,
             qp: codec.hardware_quantizer(device.hardware(), settings.video_crf),
             held: None,
+            refinement: None,
+            roi: Vec::new(),
             frame_cap: false,
             last_bytes: None,
             cleanup_bps: None,
@@ -1952,6 +1986,74 @@ impl VaapiEncoder {
     /// says no there. A key frame held there, the cleanup of a session whose rate control
     /// cannot refine (`ends_cleanup_on_key`), is coded with the budget `held_key_bits` gives it,
     /// sent with the picture.
+    /// How the session refines blocks of a frame of its rate control's (`refine_blocks`): an
+    /// H.264 session whose driver takes regions of interest with a quantizer delta, one region a
+    /// run of blocks along a row (`Negotiated::roi_regions`), each at most `REFINE_REACH` steps
+    /// off the frame's quality. HEVC takes none: on Intel's iHD (N97) refined regions took 1080p
+    /// text beside a video from 41.4 dB to 25.4 at 8 Mbit/s and the video from 34.7 to 30.3, and
+    /// from 47.6 to 44.5 at a constant quantizer, where the driver's HEVC path carries the
+    /// regions as a delta map it lays out wrong.
+    pub fn refines(&self) -> Option<crate::ledger::Refiner> {
+        (self.codec == Codec::H264 && self.negotiated.roi_regions > 0).then_some(
+            crate::ledger::Refiner {
+                finer: REFINE_FINER,
+                reach: REFINE_REACH,
+                runs: self.negotiated.roi_regions as usize,
+            },
+        )
+    }
+
+    /// Code the blocks `refinement` names in the next frame of the rate control's at its target
+    /// quality, as regions of interest (`roi_parameter`).
+    pub fn refine_blocks(&mut self, refinement: &crate::ledger::Refinement) {
+        self.refinement = self.refines().map(|_| refinement.clone());
+    }
+
+    /// The regions of interest of `refinement` into `out`: a rectangle a run of its blocks
+    /// along a row, each at the quantizer delta from the rate control's last to the target,
+    /// within `REFINE_REACH`. The driver reads the rectangles through the parameter's pointer
+    /// when the picture is issued, so they live in the session until then.
+    fn roi_parameter(&mut self, refinement: &crate::ledger::Refinement, out: &mut Buffers) {
+        use crate::ledger::BLOCK;
+        let hw = |index: i32| self.codec.hardware_quantizer(self.device.hardware(), index) as i32;
+        let delta =
+            (hw(refinement.target) - hw(refinement.from)).clamp(-(REFINE_REACH as i32), 0) as i8;
+        let plan = &refinement.plan;
+        let (width, height) = (self.negotiated.width as i32, self.negotiated.height as i32);
+        self.roi.clear();
+        for row in 0..plan.rows {
+            let mut col = 0;
+            while col < plan.cols {
+                if !plan.refines(col, row) {
+                    col += 1;
+                    continue;
+                }
+                let start = col;
+                while col < plan.cols && plan.refines(col, row) {
+                    col += 1;
+                }
+                let (x, y) = (start as i32 * BLOCK, row as i32 * BLOCK);
+                self.roi.push(VAEncROI {
+                    roi_rectangle: VARectangle {
+                        x: x as i16,
+                        y: y as i16,
+                        width: ((col as i32 * BLOCK).min(width) - x) as u16,
+                        height: (BLOCK.min(height - y)) as u16,
+                    },
+                    roi_value: delta,
+                });
+            }
+        }
+        self.roi.truncate(self.negotiated.roi_regions as usize);
+        let mut parameter: VAEncMiscParameterBufferROI = unsafe { std::mem::zeroed() };
+        parameter.num_roi = self.roi.len() as u32;
+        parameter.max_delta_qp = 51;
+        parameter.min_delta_qp = -51;
+        parameter.roi = self.roi.as_mut_ptr();
+        unsafe { parameter.roi_flags.bits.set_roi_value_is_qp_delta(1) };
+        out.push_misc(VAEncMiscParameterTypeROI, &parameter);
+    }
+
     pub fn hold_quantizer(&mut self, crf: u32) {
         self.held = Some(
             self.codec
@@ -2495,6 +2597,10 @@ impl VaapiEncoder {
             self.sent_bps = bps;
         }
         self.arm.picture(&self.negotiated, &frame, &mut out)?;
+        let refinement = self.refinement.take().filter(|_| !key && held_qp.is_none());
+        if let Some(refinement) = &refinement {
+            self.roi_parameter(refinement, &mut out);
+        }
         let header_len = if self.omit_headers {
             0
         } else {

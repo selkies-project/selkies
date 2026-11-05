@@ -269,17 +269,20 @@ so Turbo (`video_streaming_mode`) sees the screen go still like any other mode: 
 paint-over quantizer once the region holds still for the trigger, a key frame at it once a large
 change has held still for four times that, and the same cleanup for a region that keeps changing
 only a little. Within a region that keeps changing, a block ledger (`ledger.rs`) refines the blocks that
-held still for the trigger and are not clean through the encoder's per-block quantizer, six steps
-finer than the paint-over quantizer as the encoder needs to come to what its own cleanup
-reaches (six for x264 and x265, three for NVENC, none for VP8), a turn of them a frame sized to what the rate control has
+held still for the trigger and are not clean through the encoder's per-block quantizer, as many
+steps finer than the paint-over quantizer as the encoder needs to come to what its own cleanup
+reaches (six for x264 and x265, three for NVENC and VA-API, none for VP8 and kvazaar), a turn of them a frame sized to what the rate control has
 room for, a block counting clean once its frame came out at that quantizer: a video playing in
 one window no longer holds the text around it at motion quality. x264's sessions take it as
 macroblock quantizer offsets, under adaptive quantization at a strength that moves no quantizer
 itself, NVENC's H.264, HEVC, and AV1 through the QP delta map under the rate control, and libvpx's
-VP8 through its region-of-interest map, x265 through its per-block quantizer offsets, on X11 (XShm, the shared framebuffer, DRI3) and Wayland; a
+VP8 through its region-of-interest map, x265 through its per-block quantizer offsets, kvazaar
+through its map of a delta a tree block, and VA-API's H.264 through the driver's regions of
+interest, a region a run of blocks along a row and at most ten steps finer than the frame, on X11 (XShm, the shared framebuffer, DRI3) and Wayland; a
 constant rate whose frames already run over it refines nothing. NvFBC, whose driver says only
 that a frame is new, VP9, which skips a block whose source has not changed whatever its
-quantizer, and the other encoders keep the region-wide cleanup alone. Under a constant quality the cleanup moves the session's quality to the
+quantizer, VA-API's HEVC, whose regions Intel's iHD codes into a worse picture, SVT-AV1, and the
+other encoders keep the region-wide cleanup alone. Under a constant quality the cleanup moves the session's quality to the
 paint-over one until the region moves again (`pipeline::decide_constant_quality`, and the stripe's
 rate factor in `encode_cpu`), as main's paint-over did, so every encoder codes the cleanup key
 frame the way it codes one at that quality, with its own intra offset. Under a constant rate,

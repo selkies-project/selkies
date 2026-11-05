@@ -648,16 +648,16 @@ impl HwFrameDecision {
 /// into `st`'s ledger, from where the source says it changed (`changed`, in the frame's
 /// coordinates), or the whole frame where the source cannot say and `damage` says something
 /// changed; and where the frame goes at the session's own quality while the region moves, on a
-/// session that refines (`refines`, the steps finer than the paint-over quality it refines at)
-/// with the cleanup armed, name the blocks it refines, the offset taken from the quality index
-/// the rate control last coded at (`last`) or, at a constant quality, the session's.
+/// session that refines (`refines`, how: `ledger::Refiner`) with the cleanup armed, name the
+/// blocks it refines, the offset taken from the quality index the rate control last coded at
+/// (`last`) or, at a constant quality, the session's.
 pub fn plan_refinement(
     st: &mut StripeState,
     settings: &CaptureSettings,
     d: &mut HwFrameDecision,
     damage: Damage,
     changed: Option<&[Rectangle<i32, Physical>]>,
-    refines: Option<u32>,
+    refines: Option<crate::ledger::Refiner>,
     last: Option<u32>,
 ) {
     st.ledger.fit(settings.width, settings.height);
@@ -667,7 +667,7 @@ pub fn plan_refinement(
         _ => st.ledger.frame([]),
     }
     let normal = settings.video_crf as u32;
-    let Some(finer) = refines else {
+    let Some(refiner) = refines else {
         return;
     };
     if !(settings.cleans_up()
@@ -681,15 +681,19 @@ pub fn plan_refinement(
     }
     let blocks = st.ledger.blocks();
     let most = st.refine.most(blocks, settings.video_cbr_mode);
-    if let Some(plan) = st.ledger.plan(settings.paint_over_trigger(), most) {
+    if let Some(plan) = st
+        .ledger
+        .plan(settings.paint_over_trigger(), most, refiner.runs)
+    {
         let from = match (settings.video_cbr_mode, last) {
             (true, Some(q)) => q as i32,
             _ => normal as i32,
         };
         d.refine = Some(crate::ledger::Refinement {
             plan,
-            target: settings.video_paintover_crf - finer as i32,
+            target: settings.video_paintover_crf - refiner.finer as i32,
             from,
+            reach: refiner.reach,
         });
     }
 }

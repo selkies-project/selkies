@@ -57,19 +57,44 @@ const REFINE_RISE: i32 = 2;
 /// at 2 Mbit/s at 1080p x264 sent the refinement at twice the rate.
 const REFINE_OVER: f64 = 1.5;
 
+/// How an encoder refines blocks (`FrameEncoder::refines`): the quality index steps finer than
+/// the paint-over one it codes them at, so a refined block comes to what the region's own
+/// cleanup reaches (`finer`); the most steps off the frame's own quality one frame may code a
+/// block at (`reach`), past which its rate control loses the rate; and the most runs of blocks
+/// along a row one frame may refine (`runs`), where the encoder takes regions rather than a map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Refiner {
+    pub finer: u32,
+    pub reach: u32,
+    pub runs: usize,
+}
+
+impl Refiner {
+    /// A refiner `finer` steps past the paint-over quality, with no bound on its reach or runs.
+    pub const fn finer(finer: u32) -> Self {
+        Self {
+            finer,
+            reach: u32::MAX,
+            runs: usize::MAX,
+        }
+    }
+}
+
 /// A frame's refinement: the blocks (`plan`), the quality index they are coded at (`target`),
-/// and the rate control's index the offset to it was taken from (`from`).
+/// the rate control's index the offset to it was taken from (`from`), and the most steps the
+/// offset may take (`reach`, `Refiner::reach`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Refinement {
     pub plan: BlockPlan,
     pub target: i32,
     pub from: i32,
+    pub reach: u32,
 }
 
 impl Refinement {
     /// The quality index steps the refined blocks are coded off the frame's own.
     pub fn offset(&self) -> i32 {
-        (self.target - self.from).min(0)
+        (self.target - self.from).clamp(-(self.reach.min(i32::MAX as u32) as i32), 0)
     }
 }
 
@@ -262,21 +287,31 @@ impl BlockLedger {
     }
 
     /// The blocks to refine this frame: those still for `trigger` frames or more and not
-    /// clean, at most `max`, in turn from where the last plan stopped; `None` where there are
-    /// none.
-    pub fn plan(&mut self, trigger: u32, max: usize) -> Option<BlockPlan> {
+    /// clean, at most `max` in at most `runs` runs along a row, in turn from where the last
+    /// plan stopped; `None` where there are none.
+    pub fn plan(&mut self, trigger: u32, max: usize, runs: usize) -> Option<BlockPlan> {
         let n = self.cols * self.rows;
         if n == 0 || max == 0 {
             return None;
         }
         let trigger = trigger.min(u16::MAX as u32) as u16;
         let mut refine = vec![0u64; n.div_ceil(64)];
-        let mut count = 0;
+        let (mut count, mut started) = (0, 0);
+        let mut last: Option<usize> = None;
         let start = self.next % n;
         for k in 0..n {
             let i = (start + k) % n;
             if self.still[i] >= trigger && !self.clean[i] {
+                let continues = last.is_some_and(|l| l + 1 == i && !i.is_multiple_of(self.cols));
+                if !continues {
+                    if started == runs {
+                        self.next = i;
+                        break;
+                    }
+                    started += 1;
+                }
                 refine[i / 64] |= 1 << (i % 64);
+                last = Some(i);
                 count += 1;
                 if count == max {
                     self.next = i + 1;
@@ -297,7 +332,8 @@ impl BlockLedger {
     /// codes the rows a refinement overspends coarser, and a block it left short is refined again
     /// on its next turn, from the index it now codes at.
     pub fn refinement_coded(&mut self, refinement: &Refinement, coded: i32) {
-        if coded + refinement.offset() <= refinement.target {
+        let at_reach = refinement.offset() <= -(refinement.reach.min(i32::MAX as u32) as i32);
+        if coded + refinement.offset() <= refinement.target || at_reach {
             self.refined(&refinement.plan);
         }
     }
@@ -334,12 +370,16 @@ mod tests {
         for _ in 0..3 {
             ledger.frame([&video]);
         }
-        let plan = ledger.plan(3, usize::MAX).expect("a plan");
+        let plan = ledger.plan(3, usize::MAX, usize::MAX).expect("a plan");
         assert_eq!(plan.count, 4, "the two still columns of two rows");
         assert!(plan.refines(0, 0) && plan.refines(1, 1) && !plan.refines(2, 0));
         ledger.refined(&plan);
         ledger.frame([&video]);
-        assert_eq!(ledger.plan(3, usize::MAX), None, "nothing left to refine");
+        assert_eq!(
+            ledger.plan(3, usize::MAX, usize::MAX),
+            None,
+            "nothing left to refine"
+        );
         assert!(ledger.settled());
     }
 
@@ -347,16 +387,16 @@ mod tests {
     fn a_large_set_is_refined_in_turn() {
         let mut ledger = BlockLedger::new(64, 64);
         ledger.frame([]);
-        let first = ledger.plan(1, 6).unwrap();
+        let first = ledger.plan(1, 6, usize::MAX).unwrap();
         ledger.refined(&first);
-        let second = ledger.plan(1, 6).unwrap();
+        let second = ledger.plan(1, 6, usize::MAX).unwrap();
         assert_eq!((first.count, second.count), (6, 6));
         assert!(
             first.refines(0, 0) && second.refines(2, 1),
             "the second takes up where the first stopped"
         );
         ledger.refined(&second);
-        let rest = ledger.plan(1, 16).unwrap();
+        let rest = ledger.plan(1, 16, usize::MAX).unwrap();
         assert_eq!(rest.count, 4);
     }
 
@@ -370,17 +410,17 @@ mod tests {
         assert!(ledger.settled(), "a block that just changed is not due");
         ledger.frame([]);
         assert!(!ledger.settled());
-        assert_eq!(ledger.plan(1, 8).unwrap().count, 1);
+        assert_eq!(ledger.plan(1, 8, usize::MAX).unwrap().count, 1);
         ledger.cleaned();
         ledger.coarsened();
-        assert_eq!(ledger.plan(1, 8).unwrap().count, 4);
+        assert_eq!(ledger.plan(1, 8, usize::MAX).unwrap().count, 4);
     }
 
     #[test]
     fn a_coarser_map_unit_refines_where_it_holds_a_refined_block() {
         let mut ledger = BlockLedger::new(64, 64);
         ledger.frame([&rect(0, 0, 64, 48)]);
-        let plan = ledger.plan(1, usize::MAX).unwrap();
+        let plan = ledger.plan(1, usize::MAX, usize::MAX).unwrap();
         assert!(!plan.refines_area(0, 0, 32, 32));
         assert!(
             plan.refines_area(32, 32, 32, 32),
@@ -410,12 +450,56 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_keeps_to_the_runs_an_encoder_takes() {
+        let mut ledger = BlockLedger::new(64, 64);
+        ledger.frame([&rect(16, 0, 16, 64)]);
+        ledger.frame([&rect(16, 0, 16, 64)]);
+        let plan = ledger.plan(1, usize::MAX, 3).unwrap();
+        assert_eq!(
+            plan.count, 4,
+            "column 0 and columns 2 and 3 of row 0, then column 0 of row 1"
+        );
+        assert!(
+            plan.refines(0, 0) && plan.refines(2, 0) && plan.refines(3, 0) && plan.refines(0, 1)
+        );
+        assert!(!plan.refines(2, 1));
+    }
+
+    #[test]
+    fn a_block_refined_at_the_encoders_reach_counts_clean() {
+        let mut ledger = BlockLedger::new(16, 16);
+        ledger.frame([]);
+        let plan = ledger.plan(1, 8, usize::MAX).unwrap();
+        let reached = Refinement {
+            plan: plan.clone(),
+            target: 10,
+            from: 40,
+            reach: 10,
+        };
+        assert_eq!(reached.offset(), -10);
+        ledger.refinement_coded(&reached, 40);
+        assert!(ledger.settled(), "it could go no finer in one frame");
+        ledger.coarsened();
+        let short = Refinement {
+            plan,
+            target: 10,
+            from: 40,
+            reach: u32::MAX,
+        };
+        ledger.refinement_coded(&short, 45);
+        assert!(!ledger.settled(), "the frame came out coarser than planned");
+    }
+
+    #[test]
     fn a_resize_starts_the_ledger_over() {
         let mut ledger = BlockLedger::new(32, 32);
         ledger.frame([]);
         ledger.cleaned();
         ledger.fit(48, 32);
         assert_eq!(ledger.blocks(), 6);
-        assert!(ledger.plan(0, 8).is_some(), "every block unclean");
+        assert!(
+            ledger.plan(0, 8, usize::MAX).is_some(),
+            "every block unclean"
+        );
     }
 }

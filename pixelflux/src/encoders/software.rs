@@ -1992,7 +1992,7 @@ pub fn encode_cpu(
                     .then(|| {
                         let blocks = stripe_state.ledger.blocks();
                         let most = stripe_state.refine.most(blocks, video_cbr);
-                        stripe_state.ledger.plan(trigger_frames, most)
+                        stripe_state.ledger.plan(trigger_frames, most, usize::MAX)
                     })
                     .flatten();
                 if let Some(ref mut enc) = stripe_state.h264_encoder {
@@ -2003,6 +2003,7 @@ pub fn encode_cpu(
                         let refinement = crate::ledger::Refinement {
                             plan,
                             target: video_po_crf - crate::ledger::REFINE_FINER as i32,
+                            reach: u32::MAX,
                             from: if video_cbr {
                                 enc.last_qp().map_or(video_crf, |q| q as i32)
                             } else {

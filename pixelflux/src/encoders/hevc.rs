@@ -54,14 +54,6 @@ unsafe impl Send for HevcEncoder {}
 /// quantizer at 2 Mbit/s whatever the cleanup asks (44.8-46.8 dB either way).
 const HEVC_REACH_FINER: u32 = 6;
 
-/// Quality index steps finer than the paint-over one x265 codes a refined block at
-/// (`FrameEncoder::refines`). Its ultrafast analysis settles many a still block on its merge
-/// candidate before the offset's quantizer counts, so refining takes 1080p text beside a video
-/// less far than its cleanup of the still screen does, and every step finer gains: at 8 Mbit/s
-/// from 31.1 dB to 34.2, 35.5, and 36.3 at 0, 3, and 6 steps finer, against 46.4 still; at a
-/// constant quality from 37.7 to 40.7, 41.6, and 42.7, against 49.6; the video losing 0.3 dB.
-pub const REFINE_FINER: u32 = 6;
-
 /// Whether the build's software HEVC encoder codes 10 bits: x265 where it was built with its
 /// 10-bit encoder linked in.
 pub fn ten_bit() -> bool {
@@ -164,9 +156,16 @@ impl HevcEncoder {
     }
 
     /// Whether the session refines blocks of a frame of its rate control's (`refine_blocks`):
-    /// x265, through its per-block quantizer offsets; kvazaar takes none.
+    /// x265, through its per-block quantizer offsets, and kvazaar, through its map of a delta a
+    /// 64x64 tree block, the finest of the blocks it holds.
     pub fn refines(&self) -> bool {
         Backend::REFINES
+    }
+
+    /// Quality index steps finer than the paint-over one a refined block is coded at
+    /// (`FrameEncoder::refines`): the library's (`Backend::REFINE_FINER`).
+    pub fn refine_finer(&self) -> u32 {
+        Backend::REFINE_FINER
     }
 
     /// Code the blocks `refinement` names in the next frame of the rate control's at its target
@@ -374,6 +373,13 @@ mod x265 {
         pub const KEY_ON_REQUEST: bool = true;
         pub const HOLDS_QUANTIZER: bool = true;
         pub const REFINES: bool = true;
+        /// Quality index steps finer than the paint-over one x265 codes a refined block at
+        /// (`FrameEncoder::refines`). Its ultrafast analysis settles many a still block on its merge
+        /// candidate before the offset's quantizer counts, so refining takes 1080p text beside a video
+        /// less far than its cleanup of the still screen does, and every step finer gains: at 8 Mbit/s
+        /// from 31.1 dB to 34.2, 35.5, and 36.3 at 0, 3, and 6 steps finer, against 46.4 still; at a
+        /// constant quality from 37.7 to 40.7, 41.6, and 42.7, against 49.6; the video losing 0.3 dB.
+        pub const REFINE_FINER: u32 = 6;
 
         /// The frame rate the library was configured at, as `(num, den)`.
         #[cfg(test)]
@@ -647,7 +653,14 @@ mod kvazaar {
         }
         pub const KEY_ON_REQUEST: bool = false;
         pub const HOLDS_QUANTIZER: bool = false;
-        pub const REFINES: bool = false;
+        pub const REFINES: bool = true;
+        /// Quality index steps finer than the paint-over one kvazaar codes a refined block at
+        /// (`FrameEncoder::refines`): 1080p text beside a video went from 38.5 dB to 43.2, 45.8,
+        /// and 48.0 at a constant quality at 0, 3, and 6 steps finer, where kvazaar's cleanup of
+        /// the still screen reaches 44.3. At a constant rate the refined tree blocks take the
+        /// frame's quantizer off its rate control, which spends what they save elsewhere: 31.8
+        /// dB with the map and without at 8 Mbit/s.
+        pub const REFINE_FINER: u32 = 0;
 
         /// The frame rate the library was configured at, as `(num, den)`.
         #[cfg(test)]
@@ -750,13 +763,43 @@ mod kvazaar {
             pts: u64,
             _key: bool,
             _held: Option<u32>,
-            _offsets: Option<&mut [f32]>,
+            offsets: Option<&mut [f32]>,
         ) -> Result<Option<Coded>, String> {
             let api = unsafe { &*self.api };
             let pic =
                 unsafe { (api.picture_alloc.unwrap())(planes.width as i32, planes.height as i32) };
             if pic.is_null() {
                 return Err("kvazaar allocated no picture".into());
+            }
+            // kvazaar decides at the key frame whether the stream carries a quantizer delta per
+            // coding unit, from whether that picture has a map, so every picture carries one,
+            // 0 where nothing is refined; it frees the map with the picture.
+            if let Some(offsets) = offsets {
+                let (cols16, cols, rows) = (
+                    planes.width.div_ceil(16),
+                    planes.width.div_ceil(64),
+                    planes.height.div_ceil(64),
+                );
+                let rows16 = planes.height.div_ceil(16);
+                let map = unsafe { libc::malloc(cols * rows) as *mut i8 };
+                if !map.is_null() {
+                    for row in 0..rows {
+                        for col in 0..cols {
+                            let mut dqp = 0f32;
+                            for r in row * 4..(row * 4 + 4).min(rows16) {
+                                for c in col * 4..(col * 4 + 4).min(cols16) {
+                                    dqp = dqp.min(offsets[r * cols16 + c]);
+                                }
+                            }
+                            unsafe { *map.add(row * cols + col) = dqp.round() as i8 };
+                        }
+                    }
+                    unsafe {
+                        (*pic).roi.width = cols as i32;
+                        (*pic).roi.height = rows as i32;
+                        (*pic).roi.roi_array = map;
+                    }
+                }
             }
             let result = unsafe {
                 let p = &mut *pic;

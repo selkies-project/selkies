@@ -2369,3 +2369,72 @@ fn hevc_predicts_in_the_direction_the_driver_takes() {
         });
     }
 }
+
+/// A driver that takes regions of interest with a quantizer delta under its rate control
+/// (`VAConfigAttribEncROI`) is handed a refinement as a region a run of blocks along a row, each
+/// at the delta to the target within `REFINE_REACH`; one that takes none under a constant rate
+/// refines nothing, and a key frame carries no regions.
+#[test]
+fn a_refinement_reaches_the_driver_as_regions_of_interest() {
+    use crate::ledger::{BlockLedger, Refinement};
+    let regions = || {
+        mock::with(|d| {
+            d.last_misc()
+                .into_iter()
+                .find(|m| m.0 == VAEncMiscParameterTypeROI)
+                .map(|m| unsafe {
+                    let p = ptr::read_unaligned(m.1.as_ptr() as *const VAEncMiscParameterBufferROI);
+                    std::slice::from_raw_parts(p.roi, p.num_roi as usize)
+                        .iter()
+                        .map(|r| {
+                            let rect = r.roi_rectangle;
+                            (rect.x, rect.y, rect.width, rect.height, r.roi_value)
+                        })
+                        .collect::<Vec<_>>()
+                })
+        })
+    };
+    let mut driver = Driver::generous();
+    driver.attributes.push((VAConfigAttribEncROI, 0x210));
+    mock::reset(driver);
+    let mut enc = session(Codec::H264, true);
+    let refiner = enc.refines().expect("the driver takes regions");
+    assert_eq!(refiner.runs, 16);
+    let mut ledger = BlockLedger::new(W, H);
+    ledger.frame([&smithay::utils::Rectangle::new(
+        (32, 0).into(),
+        (16, H).into(),
+    )]);
+    ledger.frame([&smithay::utils::Rectangle::new(
+        (32, 0).into(),
+        (16, H).into(),
+    )]);
+    let plan = ledger.plan(1, 5, refiner.runs).unwrap();
+    let refinement = Refinement {
+        plan,
+        target: 12,
+        from: 40,
+        reach: refiner.reach,
+    };
+    enc.refine_blocks(&refinement);
+    encode(&mut enc, 0, true);
+    assert_eq!(regions(), None, "a key frame carries none");
+    enc.refine_blocks(&refinement);
+    encode(&mut enc, 1, false);
+    assert_eq!(
+        regions(),
+        Some(vec![(0, 0, 32, 16, -10), (48, 0, 48, 16, -10)]),
+        "two runs, the delta held to the reach"
+    );
+    encode(&mut enc, 2, false);
+    assert_eq!(regions(), None, "a frame not refining carries none");
+
+    let mut driver = Driver::generous();
+    driver.attributes.push((VAConfigAttribEncROI, 0x010));
+    mock::reset(driver);
+    assert!(
+        session(Codec::H264, true).refines().is_none(),
+        "no quantizer delta under the rate control"
+    );
+    assert!(session(Codec::H264, false).refines().is_some());
+}
