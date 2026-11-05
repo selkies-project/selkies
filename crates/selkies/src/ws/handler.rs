@@ -1002,17 +1002,20 @@ impl Connection {
             let mut st = service.st.lock();
             let seeds = st.seeds.clone();
             let entry = DisplayState::new(&seeds, self.tab_id.clone(), video_active, Some(dpi));
-            // A steered display starts at the rate its path last carried for this page.
+            // A steered display starts at the rate its path last carried for this page, else
+            // climbs to its target from `START_KBPS`.
             if settings().congestion_control().on && seeds.rc_mode == "cbr" {
                 let (lo, hi) = settings().video_bitrate();
-                let seeded = crate::ws::steer::start_kbps(
-                    parsed.cc_start_kbps.as_ref(),
-                    lo.as_f64(),
-                    hi.as_f64(),
-                );
-                if let Some(seeded) = seeded.filter(|s| *s < seeds.video_bitrate) {
+                let remembered = parsed.cc_start_kbps.as_ref();
+                let seeded = crate::ws::steer::start_kbps(remembered, lo.as_f64(), hi.as_f64());
+                if seeded < seeds.video_bitrate {
                     link.link_kbps = Some(seeded);
-                    info!(target: "ws", "Congestion control[{display_id}]: starting at {seeded:.0} kbps, from the rate its page last held");
+                    let from = if crate::ws::steer::remembered_kbps(remembered).is_some() {
+                        "from the rate its page last held"
+                    } else {
+                        "climbing to its target"
+                    };
+                    info!(target: "ws", "Congestion control[{display_id}]: starting at {seeded:.0} kbps, {from}");
                 }
             }
             st.displays.insert(display_id.to_string(), entry);

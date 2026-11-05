@@ -56,7 +56,9 @@ use crate::webrtc::peer::{AudioSample, Peer};
 use crate::webrtc::pipeline::{MediaPipeline, PipelineConfig, PipelineHost};
 use crate::ws::host::Input;
 use crate::ws::state::{DisplayState, Seeds, display_settings, with_live_stream_settings};
-use crate::ws::steer::{CongestionSteer, LinkAllowance, PathProbe, RateHold, start_kbps};
+use crate::ws::steer::{
+    CongestionSteer, LinkAllowance, PathProbe, RateHold, remembered_kbps, start_kbps,
+};
 
 /// Seconds a first capture of the primary waits for its page's size (module docblock).
 pub const PRIMARY_SIZE_WAIT_S: f64 = 2.0;
@@ -693,9 +695,7 @@ impl WebRtcService {
             id != peer_id && p.client_type == ClientType::Controller && p.display_id == display_id
         });
         let (lo, hi) = bitrate_range();
-        let Some(seeded) = start_kbps(remembered.as_ref(), lo, hi) else {
-            return;
-        };
+        let seeded = start_kbps(remembered.as_ref(), lo, hi);
         if others {
             return;
         }
@@ -707,7 +707,12 @@ impl WebRtcService {
             .map_or(hi, |d| d.video_bitrate);
         let seeded = seeded.min(ceiling);
         if seeded.round() < pipeline.video_bitrate().round() {
-            info!(target: "webrtc", "Congestion control[{display_id}]: starting at {seeded:.0} kbps, from the rate its page last held");
+            let from = if remembered_kbps(remembered.as_ref()).is_some() {
+                "from the rate its page last held"
+            } else {
+                "climbing to its target"
+            };
+            info!(target: "webrtc", "Congestion control[{display_id}]: starting at {seeded:.0} kbps, {from}");
             pipeline.set_video_bitrate(seeded.round()).await;
         }
     }

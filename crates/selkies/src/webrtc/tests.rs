@@ -37,7 +37,7 @@ use crate::webrtc::pipeline::{
 use crate::webrtc::service::{Timings, WebRtcService};
 use crate::webrtc::wiring::RtcClipboardHost;
 use crate::ws::host::{CaptureHandle, LayoutOutcome};
-use crate::ws::steer::{RateHold, start_kbps};
+use crate::ws::steer::{RateHold, START_KBPS, start_kbps};
 use crate::ws::testkit::{
     FakeCapture, FakeClipboard, FakeInput, FakeStats, FakeSupervisor, FakeTokens, FakeWebcam,
     settings_installed,
@@ -1180,9 +1180,9 @@ fn start_rate_hold_and_remembered_rate() {
         .collect();
     assert_eq!(told, [None, None, None, Some(2300)]);
     let (lo, hi) = (100.0, 100_000.0);
-    assert_eq!(start_kbps(Some(&json!(2500)), lo, hi), Some(2500.0));
-    assert_eq!(start_kbps(Some(&json!(40)), lo, hi), Some(lo));
-    assert_eq!(start_kbps(Some(&json!(5_000_000)), lo, hi), Some(hi));
+    assert_eq!(start_kbps(Some(&json!(2500)), lo, hi), 2500.0);
+    assert_eq!(start_kbps(Some(&json!(40)), lo, hi), lo);
+    assert_eq!(start_kbps(Some(&json!(5_000_000)), lo, hi), hi);
     for bad in [
         json!(null),
         json!("fast"),
@@ -1190,7 +1190,7 @@ fn start_rate_hold_and_remembered_rate() {
         json!(0),
         json!([2000]),
     ] {
-        assert_eq!(start_kbps(Some(&bad), lo, hi), None, "{bad}");
+        assert_eq!(start_kbps(Some(&bad), lo, hi), START_KBPS, "{bad}");
     }
 }
 

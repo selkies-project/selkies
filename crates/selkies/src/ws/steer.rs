@@ -40,19 +40,26 @@ pub struct SteerTick {
 /// A tick carries two kinds of evidence: the queue standing on the path (over WebSockets
 /// measured from the display's frame round trip, over WebRTC from one-way delay) and the loss
 /// the receiver reported (WebRTC alone). A standing queue backs the target off on the first
-/// tick that shows it, to `HEADROOM` of what the path delivered while it stood, and lower
-/// while the queue already written ahead drains: at the depth that empties it in `DRAIN_S`,
-/// never under `DRAIN_FLOOR` of the capacity, for as long as that takes. No cut follows until
-/// the drain and `SETTLE_S` more have passed, because the draining queue reads as a queue
-/// meanwhile; the target returns to `HEADROOM` of the capacity on the first clean tick past
-/// the drain. Without a measured delivery the backoff is `BACKOFF` of the target, held for
+/// tick that shows it, once, to `HEADROOM` of what the path delivered while it stood, and the
+/// queue already written ahead drains through that headroom: no cut follows until it has had
+/// the time to, at most `DRAIN_MAX_S`, and `SETTLE_S` more, because the draining queue reads as
+/// a queue meanwhile and cutting on each such tick would compound the backoff. Only a backlog
+/// deeper than `BACKLOG_S` (a start at a rate far over the path's, a link that slowed) drains
+/// faster, the target dipping by what lies past it per `DRAIN_S`, never under `DRAIN_FLOOR` of
+/// the capacity, and back to `HEADROOM` of it once that has drained: a target held under the
+/// path's rate streams a worse picture than the path carries for as long as it is held, so the
+/// queue of an ordinary overshoot is not drained that way (through 15% headroom a 4 s backlog
+/// took 20 s, at 2.7 s round trips; a 150 ms overshoot drains in one). Without a measured delivery the backoff is `BACKOFF` of the target, held for
 /// `HOLD_S`. A tick whose stream offered under `APP_LIMITED` of the target while the path
 /// delivered at least `APP_LIMITED_DELIVERED` of it (a still screen's trickle) cuts nothing
 /// on a queue; where delivery is measured by acked frames, the offer compared is what the
 /// stream sent of those frames (`acked_offered_bps`), since the tick's offer counts a burst's
 /// unacked tail. Loss backs off only on the second lossy tick in a row, by `BACKOFF`, held for
-/// `HOLD_S`. A clean tick outside a hold raises by `STEP` a second far from the last capacity
-/// and by `STEP_NEAR` within `NEAR` of it; a path delivering clear past the capacity forgets
+/// `HOLD_S`. A stream that has met no queue yet, opening at [`START_KBPS`] under its ceiling,
+/// climbs `START_STEP` a second. A clean tick outside a hold raises by `STEP` a second, returning a target a stall
+/// or a slower moment cut to the configured one in seconds, but no further than the last
+/// capacity while it stands under `NEAR` of it, and by `STEP_NEAR` a second from there, where
+/// the climb probes the path's own rate rather than overshooting it; a path delivering clear past the capacity forgets
 /// it; a tick that offered under `APP_LIMITED`, or measured no offer, stops its step at the
 /// capacity (or the current target where none is known). A still screen the transport padded
 /// up to the target ([`PathProbe`], `probed`) has nothing to show but the path, and climbs
@@ -96,16 +103,22 @@ pub struct CongestionSteer {
     clean_since: Option<f64>,
     /// Whether the last tick restored the target a stall cut, for the transports' log.
     pub restored: bool,
+    /// Whether a queue or loss has backed the target off yet; until then it climbs at
+    /// `START_STEP`.
+    congested: bool,
 }
 
 impl CongestionSteer {
     pub const LOSS: f64 = 0.10;
     pub const BACKOFF: f64 = 0.7;
     pub const HOLD_S: f64 = 2.0;
-    pub const STEP: f64 = 1.15;
+    pub const STEP: f64 = 1.5;
+    pub const START_STEP: f64 = 2.0;
     pub const STEP_NEAR: f64 = 1.05;
     pub const NEAR: f64 = 0.9;
     pub const HEADROOM: f64 = 0.85;
+    pub const DRAIN_MAX_S: f64 = 2.0;
+    pub const BACKLOG_S: f64 = 0.25;
     pub const DRAIN_S: f64 = 1.0;
     pub const DRAIN_FLOOR: f64 = 0.5;
     pub const SETTLE_S: f64 = 0.5;
@@ -242,22 +255,28 @@ impl CongestionSteer {
             self.strikes = 0;
             self.cruise_kbps = None;
             self.hold_until = now + Self::HOLD_S;
+            self.congested = true;
             return clamp(current * Self::BACKOFF);
         }
         self.strikes = 0;
         if now < self.hold_until {
             return clamp(current);
         }
-        let mut step = Self::STEP;
         let delivered = goodput_bps / 1_000.0;
-        if let Some(capacity) = self.capacity_kbps {
-            if delivered * Self::NEAR > capacity {
-                self.capacity_kbps = None;
-            } else if delivered >= capacity * Self::NEAR {
-                step = Self::STEP_NEAR;
-            }
+        if self
+            .capacity_kbps
+            .is_some_and(|capacity| delivered * Self::NEAR > capacity)
+        {
+            self.capacity_kbps = None;
         }
-        let mut raised = current * step.powf(dt);
+        let mut raised = match self.capacity_kbps {
+            Some(capacity) if current < capacity * Self::NEAR => {
+                (current * Self::STEP.powf(dt)).min(capacity)
+            }
+            Some(_) => current * Self::STEP_NEAR.powf(dt),
+            None if !self.congested => current * Self::START_STEP.powf(dt),
+            None => current * Self::STEP.powf(dt),
+        };
         let filled = offered_bps.is_some_and(|o| o >= current * 1_000.0 * Self::APP_LIMITED);
         if probed && filled {
             raised = raised.max(current * Self::PROBE_STEP.powf(dt));
@@ -270,14 +289,16 @@ impl CongestionSteer {
 
     /// The target a standing queue of `queue_s` backs off to, with the drain it plans.
     fn queue_backoff(&mut self, current: f64, delivered_kbps: f64, queue_s: f64, now: f64) -> f64 {
+        self.congested = true;
         if delivered_kbps <= 0.0 {
             self.cruise_kbps = None;
             self.hold_until = now + Self::HOLD_S;
             return current * Self::BACKOFF;
         }
         self.capacity_kbps = Some(delivered_kbps);
-        let fraction = Self::DRAIN_FLOOR.max(Self::HEADROOM - queue_s / Self::DRAIN_S);
-        self.drain_until = now + queue_s / (1.0 - fraction);
+        let backlog = (queue_s - Self::BACKLOG_S).max(0.0);
+        let fraction = Self::DRAIN_FLOOR.max(Self::HEADROOM - backlog / Self::DRAIN_S);
+        self.drain_until = now + (queue_s / (1.0 - fraction)).min(Self::DRAIN_MAX_S);
         self.cruise_kbps = Some(delivered_kbps * Self::HEADROOM);
         self.hold_until = self.drain_until + Self::SETTLE_S;
         current.min(delivered_kbps * fraction)
@@ -561,22 +582,33 @@ impl RateHold {
     }
 }
 
-/// The rate a steered stream starts at from the one its page remembered: within the
-/// configured range and under the ceiling, or `None` where the page sent no positive number.
-pub fn start_kbps(
-    remembered: Option<&serde_json::Value>,
-    lo_kbps: f64,
-    ceiling_kbps: f64,
-) -> Option<f64> {
+/// The rate a steered stream starts at where its page remembered none, in kbps.
+///
+/// A stream that opens at a ceiling over what its path carries writes seconds of queue before
+/// the first congestion tick reads one: the round trips it learns its floor from have already
+/// crossed that queue, so the queue reads as the path's own. 30 Mbit/s into a 5 Mbit/s path
+/// held round trips at 3 s and more for the first seconds of every session. Starting here and
+/// climbing at `CongestionSteer::START_STEP` reaches a 30 Mbit/s ceiling in two seconds on a
+/// path that carries it.
+pub const START_KBPS: f64 = 8000.0;
+
+/// The rate the page remembered (`ccStartKbps`), or `None` where it sent no positive number.
+pub fn remembered_kbps(remembered: Option<&serde_json::Value>) -> Option<f64> {
     let kbps = match remembered? {
         serde_json::Value::Number(n) => n.as_f64()?,
         serde_json::Value::String(s) => s.trim().parse::<f64>().ok()?,
         _ => return None,
     };
-    if kbps.is_nan() || kbps <= 0.0 || kbps.is_infinite() {
-        return None;
-    }
-    Some(kbps.min(ceiling_kbps).max(lo_kbps))
+    (kbps.is_finite() && kbps > 0.0).then_some(kbps)
+}
+
+/// The rate a steered stream starts at: the one its page remembered, else `START_KBPS`, within
+/// the configured range and under the ceiling.
+pub fn start_kbps(remembered: Option<&serde_json::Value>, lo_kbps: f64, ceiling_kbps: f64) -> f64 {
+    remembered_kbps(remembered)
+        .unwrap_or(START_KBPS)
+        .min(ceiling_kbps)
+        .max(lo_kbps)
 }
 
 /// Whether one page's connection is poor: the share of its display's frames that do not
@@ -738,7 +770,11 @@ pub(crate) mod tests {
             None,
             Some(5_600_000.0),
         );
-        assert_eq!(got.round(), 6440.0);
+        assert_eq!(
+            got.round(),
+            8000.0,
+            "past the hold the climb is STEP a second, to the ceiling"
+        );
 
         let mut steer = CongestionSteer::default();
         tick(&mut steer, 8000.0, GOODPUT, 0.2, 0.0, None, None);
@@ -765,7 +801,8 @@ pub(crate) mod tests {
                 None,
                 Some(1_000_000.0)
             ),
-            1150.0
+            2000.0,
+            "a stream no congestion has met climbs START_STEP"
         );
         assert_eq!(
             tick(&mut steer, 7500.0, GOODPUT, 0.0, 2.0, None, None),
@@ -780,6 +817,10 @@ pub(crate) mod tests {
         );
     }
 
+    /// An ordinary queue backs the target off once to `HEADROOM` of what the path delivered and
+    /// holds it while that headroom drains the queue; the climb then returns to the capacity at
+    /// `STEP` and probes past it at `STEP_NEAR`. Only a backlog past `BACKLOG_S` dips deeper, at
+    /// most to `DRAIN_FLOOR` and for at most `DRAIN_MAX_S`.
     #[test]
     fn a_standing_queue_backs_off_then_settles() {
         let mut steer = CongestionSteer::default();
@@ -789,14 +830,16 @@ pub(crate) mod tests {
         );
         assert_eq!(
             tick(&mut steer, 8000.0, DELIVERED, 0.0, 0.5, Some(0.1), None).round(),
-            3750.0
+            4250.0,
+            "one backoff to the headroom, no dip"
         );
         assert_eq!(
-            tick(&mut steer, 3750.0, DELIVERED, 0.0, 0.7, Some(0.15), None),
-            3750.0
+            tick(&mut steer, 4250.0, DELIVERED, 0.0, 0.7, Some(0.15), None),
+            4250.0,
+            "the draining queue cuts nothing more"
         );
         assert_eq!(
-            tick(&mut steer, 3750.0, 3_750_000.0, 0.0, 1.0, Some(0.0), None).round(),
+            tick(&mut steer, 4250.0, 3_750_000.0, 0.0, 1.0, Some(0.0), None).round(),
             4250.0
         );
         assert_eq!(
@@ -805,7 +848,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             tick(&mut steer, 4250.0, 3_600_000.0, 0.0, 2.2, Some(0.0), None).round(),
-            (4250.0_f64 * 1.15).round()
+            5000.0,
+            "back to the capacity at STEP, no further"
         );
         let got = tick(
             &mut steer,
@@ -816,7 +860,11 @@ pub(crate) mod tests {
             Some(0.0),
             Some(4_900_000.0),
         );
-        assert_eq!(got.round(), (4900.0_f64 * 1.05).round());
+        assert_eq!(
+            got.round(),
+            (4900.0_f64 * 1.05).round(),
+            "within NEAR of the capacity the climb probes"
+        );
         let got = tick(
             &mut steer,
             6000.0,
@@ -831,23 +879,26 @@ pub(crate) mod tests {
         let mut steer = CongestionSteer::default();
         assert_eq!(
             tick(&mut steer, 8000.0, DELIVERED, 0.0, 0.0, Some(1.5), None).round(),
+            2500.0,
+            "a backlog dips to the drain floor"
+        );
+        assert_eq!(
+            tick(&mut steer, 2500.0, DELIVERED, 0.0, 1.9, Some(0.9), None),
             2500.0
         );
         assert_eq!(
-            tick(&mut steer, 2500.0, DELIVERED, 0.0, 2.9, Some(0.9), None),
-            2500.0
-        );
-        assert_eq!(
-            tick(&mut steer, 2500.0, DELIVERED, 0.0, 3.0, Some(0.0), None).round(),
-            4250.0
+            tick(&mut steer, 2500.0, DELIVERED, 0.0, 2.1, Some(0.0), None).round(),
+            4250.0,
+            "back to the headroom once DRAIN_MAX_S has passed"
         );
 
         let mut steer = CongestionSteer::default();
         tick(&mut steer, 8000.0, DELIVERED, 0.0, 0.0, Some(0.1), None);
-        tick(&mut steer, 3750.0, DELIVERED, 0.0, 0.5, Some(0.0), None);
+        tick(&mut steer, 4250.0, DELIVERED, 0.0, 0.5, Some(0.0), None);
         assert_eq!(
-            tick(&mut steer, 4250.0, DELIVERED, 0.0, 1.0, Some(0.1), None).round(),
-            3750.0
+            tick(&mut steer, 4250.0, 4_000_000.0, 0.0, 1.3, Some(0.1), None).round(),
+            3400.0,
+            "a queue past the hold backs off from what the path delivers now"
         );
 
         let mut steer = CongestionSteer::default();
@@ -858,10 +909,14 @@ pub(crate) mod tests {
         );
         assert_eq!(
             tick(&mut steer, 1000.0, 0.0, 0.0, 2.0, Some(0.0), None).round(),
-            1150.0
+            1500.0
         );
         let got = tick(&mut steer, 1900.0, 1_900_000.0, 0.0, 2.5, Some(0.0), None);
-        assert_eq!(got.round(), (1900.0_f64 * 1.05_f64.powf(0.5)).round());
+        assert_eq!(
+            got.round(),
+            (1900.0_f64 * 1.05_f64.powf(0.5)).round(),
+            "within NEAR of the capacity the climb probes"
+        );
         let got = tick(
             &mut steer,
             2300.0,
@@ -872,8 +927,8 @@ pub(crate) mod tests {
             Some(2_300_000.0),
         );
         assert!(
-            steer.capacity_kbps.is_none() && got.round() == (2300.0_f64 * 1.15).round(),
-            "{got}"
+            steer.capacity_kbps.is_none() && got.round() == (2300.0_f64 * 1.5).round(),
+            "a path delivering past the capacity forgets it: {got}"
         );
 
         let mut steer = CongestionSteer::default();
@@ -917,7 +972,7 @@ pub(crate) mod tests {
                 Some(7_600_000.0)
             )
             .round(),
-            3750.0
+            4250.0
         );
         let mut steer = CongestionSteer::default();
         assert!(
@@ -983,7 +1038,7 @@ pub(crate) mod tests {
             [got, top, bottom, 6_000_000.0, 0.0, 43.0],
             [Some(0.0), Some(6_000_000.0), None, None],
         ));
-        assert!(steer.capacity_kbps.is_none() && got.round() == (5000.0_f64 * 1.05 * 1.15).round());
+        assert!(steer.capacity_kbps.is_none() && got.round() == (5000.0_f64 * 1.05 * 1.5).round());
 
         let mut steer = CongestionSteer::default();
         assert_eq!(
@@ -1000,7 +1055,8 @@ pub(crate) mod tests {
                     [Some(0.0), Some(4_900_000.0), None, None]
                 ))
                 .round(),
-            5750.0
+            10000.0,
+            "a stream no congestion has met climbs START_STEP once it fills"
         );
         let mut steer = CongestionSteer::default();
         steer.target(tick_of(
@@ -1044,12 +1100,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// A pending cruise through an ordinary measured-queue tick.
+    /// A pending cruise through a tick reading a backlog: a queue past `BACKLOG_S`, the one that
+    /// dips the target under the cruise while it drains.
     fn draining() -> (CongestionSteer, f64) {
         let mut steer = CongestionSteer::default();
         let current = steer.target(tick_of(
             [6000.0, 6000.0, 1000.0, 5_000_000.0, 0.0, 0.0],
-            [Some(0.1), Some(6_000_000.0), None, None],
+            [Some(0.5), Some(6_000_000.0), None, None],
         ));
         (steer, current)
     }
@@ -1072,7 +1129,7 @@ pub(crate) mod tests {
     #[test]
     fn a_pending_cruise_keeps_loss_handling() {
         let (mut steer, current) = draining();
-        assert_eq!(current, 3750.0);
+        assert_eq!(current, 3000.0);
         assert_eq!(
             cruise_tick(&mut steer, current, 0.2, 1.0, Some(0.0), 1000.0, 6000.0),
             current
@@ -1083,7 +1140,7 @@ pub(crate) mod tests {
         let current = cruise_tick(&mut steer, current, 0.2, 1.0, Some(0.0), 1000.0, 6000.0);
         assert_eq!(
             cruise_tick(&mut steer, current, 0.2, 2.0, Some(0.0), 1000.0, 6000.0),
-            2625.0
+            2100.0
         );
         assert_eq!(steer.strikes, 0);
         assert!(steer.cruise_kbps().is_none());
@@ -1102,7 +1159,7 @@ pub(crate) mod tests {
         let (mut steer, current) = draining();
         let current = cruise_tick(&mut steer, current, 0.2, 0.2, Some(0.0), 1000.0, 6000.0);
         assert_eq!(steer.strikes, 1);
-        let current = cruise_tick(&mut steer, current, 0.0, 1.0, Some(0.0), 1000.0, 6000.0);
+        let current = cruise_tick(&mut steer, current, 0.0, 1.3, Some(0.0), 1000.0, 6000.0);
         assert_eq!(current, 4250.0);
         assert_eq!(steer.strikes, 0);
         assert_eq!(
@@ -1112,7 +1169,7 @@ pub(crate) mod tests {
 
         let (mut steer, current) = draining();
         assert_eq!(
-            cruise_tick(&mut steer, current, 0.1, 1.0, Some(0.0), 1000.0, 6000.0),
+            cruise_tick(&mut steer, current, 0.1, 1.3, Some(0.0), 1000.0, 6000.0),
             4250.0,
             "threshold equality restores"
         );
@@ -1137,10 +1194,10 @@ pub(crate) mod tests {
             );
         }
         let (mut steer, current) = draining();
-        let current = cruise_tick(&mut steer, current, 0.0, 0.5, Some(0.0), 1000.0, 6000.0);
+        let current = cruise_tick(&mut steer, current, 0.0, 1.3, Some(0.0), 1000.0, 6000.0);
         assert_eq!(current, 4250.0);
         assert_eq!(
-            cruise_tick(&mut steer, current, 0.0, 0.6, Some(0.0), 1000.0, 6000.0),
+            cruise_tick(&mut steer, current, 0.0, 1.4, Some(0.0), 1000.0, 6000.0),
             current
         );
         let mut steer = CongestionSteer::default();
@@ -1161,7 +1218,7 @@ pub(crate) mod tests {
             [6000.0, 6000.0, 1000.0, 2_121_025.0, 351.0 / 596.0, 31.0],
             [Some(0.186_666_666_666_667_42), None, None, None],
         ));
-        assert_eq!(value.round(), 1407.0);
+        assert_eq!(value.round(), 1803.0);
         steer
     }
 
@@ -1186,76 +1243,39 @@ pub(crate) mod tests {
     fn a_pending_cruise_respects_a_standing_queue_and_the_limits() {
         let q = Some(0.188_416_666_666_665_12);
         let loss = 138.0 / 339.0;
+        let range = (1000.0, 6000.0);
         let mut steer = queued();
         assert_eq!(
-            queue_tick(
-                &mut steer,
-                32.0,
-                q,
-                1407.0,
-                1_797_770.0,
-                (1000.0, 6000.0),
-                loss
-            ),
-            1407
+            queue_tick(&mut steer, 32.0, q, 1803.0, 1_797_770.0, range, loss),
+            1803,
+            "the queue still draining cuts nothing more"
         );
         assert_eq!(
-            queue_tick(
-                &mut steer,
-                32.01,
-                q,
-                1407.0,
-                1_797_770.0,
-                (1000.0, 6000.0),
-                loss
-            ),
-            1407
+            queue_tick(&mut steer, 32.01, q, 1803.0, 1_797_770.0, range, loss),
+            1803
         );
 
         let mut steer = queued();
         let deadline = steer.drain_until();
+        let held = |steer: &mut CongestionSteer, now: f64| {
+            queue_tick(steer, now, q, 1803.0, 1_797_770.0, range, loss)
+        };
+        assert_eq!(held(&mut steer, deadline - 0.001), 1803);
         assert_eq!(
-            queue_tick(
-                &mut steer,
-                deadline - 0.001,
-                q,
-                1407.0,
-                1_797_770.0,
-                (1000.0, 6000.0),
-                loss
-            ),
-            1407
-        );
-        assert_eq!(
-            queue_tick(
-                &mut steer,
-                deadline,
-                q,
-                1407.0,
-                1_797_770.0,
-                (1000.0, 6000.0),
-                loss
-            ),
-            1407
+            held(&mut steer, deadline),
+            1803,
+            "the settle follows the drain"
         );
 
         let mut steer = queued();
-        let current = queue_tick(
-            &mut steer,
-            32.0,
-            q,
-            1407.0,
-            1_797_770.0,
-            (1000.0, 6000.0),
-            loss,
-        );
+        let current = queue_tick(&mut steer, 32.0, q, 1803.0, 1_797_770.0, range, loss);
         let resumed = queue_tick(
             &mut steer,
-            32.01,
+            32.3,
             Some(0.0),
             current as f64,
             1_797_770.0,
-            (1000.0, 6000.0),
+            range,
             0.0,
         );
         assert_eq!(resumed, 1803);
@@ -1263,11 +1283,11 @@ pub(crate) mod tests {
         assert_eq!(
             queue_tick(
                 &mut steer,
-                32.02,
+                32.31,
                 Some(0.0),
                 resumed as f64,
                 1_797_770.0,
-                (1000.0, 6000.0),
+                range,
                 0.0
             ),
             1803
@@ -1276,16 +1296,9 @@ pub(crate) mod tests {
         let mut steer = queued();
         let now = steer.hold_until;
         assert_eq!(
-            queue_tick(
-                &mut steer,
-                now,
-                q,
-                1407.0,
-                1_797_770.0,
-                (1000.0, 6000.0),
-                loss
-            ),
-            1189
+            queue_tick(&mut steer, now, q, 1803.0, 1_797_770.0, range, loss),
+            1528,
+            "a queue past the hold backs off to the headroom of what the path delivers now"
         );
         assert!(steer.drain_until() > now);
         assert!(steer.hold_until > steer.drain_until());
@@ -1293,21 +1306,13 @@ pub(crate) mod tests {
         let mut steer = queued();
         let now = steer.hold_until;
         assert_eq!(
-            queue_tick(&mut steer, now, q, 1407.0, 0.0, (1000.0, 6000.0), loss),
+            queue_tick(&mut steer, now, q, 1407.0, 0.0, range, loss),
             1000
         );
         assert!(steer.cruise_kbps().is_none());
 
         assert_eq!(
-            queue_tick(
-                &mut queued(),
-                32.0,
-                None,
-                1407.0,
-                1_797_770.0,
-                (1000.0, 6000.0),
-                0.0
-            ),
+            queue_tick(&mut queued(), 32.3, None, 1803.0, 1_797_770.0, range, 0.0),
             1803
         );
         assert_eq!(
@@ -1560,15 +1565,17 @@ pub(crate) mod tests {
         );
         assert_eq!(hold.note(2000.0, 30.0), None);
         assert_eq!(hold.note(2000.0, 31.0), Some(2000));
+        assert_eq!(start_kbps(Some(&json!("3000")), 100.0, 30000.0), 3000.0);
+        assert_eq!(start_kbps(Some(&json!(50)), 100.0, 30000.0), 100.0);
+        assert_eq!(start_kbps(Some(&json!(90000)), 100.0, 30000.0), 30000.0);
         assert_eq!(
-            start_kbps(Some(&json!("3000")), 100.0, 8000.0),
-            Some(3000.0)
+            start_kbps(Some(&json!("inf")), 100.0, 30000.0),
+            START_KBPS,
+            "a page that remembers no rate starts the climb"
         );
-        assert_eq!(start_kbps(Some(&json!(50)), 100.0, 8000.0), Some(100.0));
-        assert_eq!(start_kbps(Some(&json!(90000)), 100.0, 8000.0), Some(8000.0));
-        assert_eq!(start_kbps(Some(&json!("inf")), 100.0, 8000.0), None);
-        assert_eq!(start_kbps(Some(&json!(0)), 100.0, 8000.0), None);
-        assert_eq!(start_kbps(None, 100.0, 8000.0), None);
+        assert_eq!(start_kbps(Some(&json!(0)), 100.0, 30000.0), START_KBPS);
+        assert_eq!(start_kbps(None, 100.0, 30000.0), START_KBPS);
+        assert_eq!(start_kbps(None, 100.0, 4000.0), 4000.0, "under the ceiling");
     }
 
     /// One window per share, `frames` frames each, the missed ones spread through it; the
@@ -1801,7 +1808,7 @@ pub(crate) mod tests {
             [Some(0.3), None, None, None],
         ));
         let got = steer.target(tick_of(
-            [cur, CEILING, FLOOR, 1_700_000.0, 0.0, 1.0],
+            [cur, CEILING, FLOOR, 1_700_000.0, 0.0, 1.6],
             [Some(0.0), Some(1_700_000.0), None, None],
         ));
         assert!(
@@ -2182,9 +2189,21 @@ pub(crate) mod tests {
         );
     }
 
+    /// A steer a queue cut, holding the capacity it measured there: the state a padded probe
+    /// runs in, a still screen under a cut target.
+    fn cut_at(capacity_kbps: f64) -> CongestionSteer {
+        CongestionSteer {
+            congested: true,
+            capacity_kbps: Some(capacity_kbps),
+            ..Default::default()
+        }
+    }
+
+    /// Past the capacity a filled stream climbs `STEP_NEAR` a second, where a still screen the
+    /// transport padded climbs `PROBE_STEP`, since nothing but the probe tests the path.
     #[test]
     fn a_padded_still_screen_climbs_probe_step_a_second() {
-        let mut steer = CongestionSteer::default();
+        let mut steer = cut_at(1000.0);
         let got = at(
             &mut steer,
             [1000.0, CEILING, 1_000_000.0, 0.0, 0.0],
@@ -2197,7 +2216,7 @@ pub(crate) mod tests {
             1300.0,
             "a clean probed tick filled to the target"
         );
-        let mut steer = CongestionSteer::default();
+        let mut steer = cut_at(1000.0);
         at(
             &mut steer,
             [1000.0, CEILING, 1_000_000.0, 0.0, 0.0],
@@ -2214,10 +2233,10 @@ pub(crate) mod tests {
         );
         assert_eq!(
             got.round(),
-            (1000.0 * CongestionSteer::STEP.powf(0.5)).round(),
-            "an unprobed one the step"
+            (1000.0 * CongestionSteer::STEP_NEAR.powf(0.5)).round(),
+            "an unprobed one the near step"
         );
-        let mut steer = CongestionSteer::default();
+        let mut steer = cut_at(1000.0);
         at(
             &mut steer,
             [1000.0, CEILING, 100_000.0, 0.0, 0.0],
@@ -2236,33 +2255,6 @@ pub(crate) mod tests {
             got.round(),
             1000.0,
             "a probed tick the padding did not fill holds as a trickle does"
-        );
-
-        let climb = |tick_s: f64, probed: bool| {
-            let (mut steer, mut cur, mut t) = (CongestionSteer::default(), CEILING / 8.0, 0.0);
-            at(
-                &mut steer,
-                [cur, CEILING, cur * 1000.0, 0.0, t],
-                Some(0.0),
-                Some(cur * 1000.0),
-                probed,
-            );
-            while cur < CEILING && t < 60.0 {
-                t += tick_s;
-                cur = at(
-                    &mut steer,
-                    [cur, CEILING, cur * 1000.0, 0.0, t],
-                    Some(0.0),
-                    Some(cur * 1000.0),
-                    probed,
-                );
-            }
-            t
-        };
-        let got = [climb(0.5, true), climb(1.0, true), climb(0.5, false)];
-        assert!(
-            got[0] <= 8.5 && got[1] <= 9.0 && got[2] >= 14.0,
-            "a probe climbs an eighth of the rate to it in about 8 s at either tick, a filled stream about 15: {got:?}"
         );
     }
 
