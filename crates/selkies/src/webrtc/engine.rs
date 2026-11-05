@@ -2012,6 +2012,7 @@ impl SenderHooks for VideoSenderHooks {
         &mut self,
         timing: Option<selkies_rtc::rtp::FrameTiming>,
         size: usize,
+        packets: u32,
         keyframe: bool,
     ) {
         if let Some(timing) = timing {
@@ -2021,7 +2022,7 @@ impl SenderHooks for VideoSenderHooks {
                 encode_start_ns: timing.encode_start_ns,
                 encode_end_ns: timing.encode_end_ns,
                 bytes: size,
-                rtp_packets: 0,
+                rtp_packets: packets,
                 keyframe,
             });
         }

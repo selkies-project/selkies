@@ -2756,6 +2756,7 @@ impl WsService {
                         data: frame_bytes(frame),
                         frame_id: (frame.frame_id & 0xFFFF) as u16,
                         capture_ns: frame.timing.capture_ns,
+                        encode_start_ns: frame.timing.encode_start_ns,
                         encode_end_ns: frame.timing.encode_end_ns,
                     },
                 );
@@ -4338,7 +4339,7 @@ impl RelayHost for WsService {
         crate::stats::frame_log::record(crate::stats::frame_log::FrameRecord {
             kind: "ws",
             capture_ns: item.capture_ns,
-            encode_start_ns: item.encode_end_ns,
+            encode_start_ns: item.encode_start_ns,
             encode_end_ns: item.encode_end_ns,
             bytes: item.data.len(),
             rtp_packets: 1,

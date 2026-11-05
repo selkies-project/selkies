@@ -318,6 +318,7 @@ impl Harness {
                 timing: None,
                 captured_ns: 0,
                 size: 0,
+                packets: 0,
                 frame_id,
             },
         );
@@ -1564,6 +1565,7 @@ impl Still {
                 }),
                 captured_ns: 5,
                 size: 100,
+                packets: 0,
                 frame_id: None,
             },
         );
@@ -2703,6 +2705,7 @@ fn key_on_wire(h: &mut Harness, tag: u16, size: usize, acked: bool) {
             timing: None,
             captured_ns: 0,
             size,
+            packets: 0,
             frame_id: None,
         },
     );

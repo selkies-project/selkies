@@ -133,6 +133,8 @@ pub struct RelayItem {
     pub frame_id: u16,
     /// When the frame was captured, `CLOCK_MONOTONIC` nanoseconds, zero where unstamped.
     pub capture_ns: i64,
+    /// When its encode started, on the same clock.
+    pub encode_start_ns: i64,
     /// When its encode ended, on the same clock.
     pub encode_end_ns: i64,
 }
@@ -1038,6 +1040,7 @@ mod tests {
             data: Bytes::from(data),
             frame_id,
             capture_ns: 0,
+            encode_start_ns: 0,
             encode_end_ns: 0,
         }
     }
