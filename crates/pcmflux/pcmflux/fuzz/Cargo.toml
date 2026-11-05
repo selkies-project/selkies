@@ -1,0 +1,25 @@
+# Fuzz targets for pcmflux's parsers of what a client sends, built with `cargo fuzz` (nightly)
+# and run by ClusterFuzzLite (.clusterfuzzlite/, .github/workflows/fuzz.yml). A target
+# compiles the module it fuzzes from ../src on its own, so it needs none of the audio stack.
+[package]
+name = "pcmflux-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "red"
+path = "fuzz_targets/red.rs"
+test = false
+doc = false
+bench = false
+
+# A crate of its own, outside any workspace above it.
+[workspace]
+members = ["."]

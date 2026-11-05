@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "setuptools-rust"]
+build-backend = "setuptools.build_meta"
+
+[tool.cibuildwheel]
+archs = [ "x86_64", "aarch64" ]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+skip = "*t-*"
+
+[tool.cibuildwheel.environment]
+PATH = "$HOME/.cargo/bin:$PATH"
+
+[tool.cibuildwheel.linux]
+before-all = """
+    set -euxo pipefail
+    # Rust toolchain (the extension is pure Rust via setuptools-rust/PyO3): rustup's
+    # installer for this machine, checked against the SHA-256 published beside it,
+    # rather than the script that downloads it unchecked.
+    libc="$(if command -v apk > /dev/null; then echo musl; else echo gnu; fi)"
+    url="https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-${libc}/rustup-init"
+    curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 --retry-connrefused -o /tmp/rustup-init "${url}"
+    sum="$(curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 --retry-connrefused "${url}.sha256")"
+    echo "${sum%% *}  /tmp/rustup-init" | sha256sum -c -
+    chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal && rm -f /tmp/rustup-init
+    # libpulse (libpulse-sys links it) + libopus (opusic-sys builds the copy it vendors with
+    # cmake and links it statically). gcc/cmake cover the -sys build steps. All four come from
+    # the image's own repositories, so no third-party one (EPEL, RPM Fusion) is added.
+    if command -v dnf; then
+        dnf install -y \
+            pulseaudio-libs-devel \
+            gcc \
+            gcc-c++ \
+            cmake && \
+        ldconfig
+
+    elif command -v apk; then
+        apk add --no-cache \
+            build-base \
+            cmake \
+            pulseaudio-dev
+    else
+        echo "Unsupported package manager"
+        exit 1
+    fi
+"""
+
+# The manylinux policy leaves libX11 to the host, so the libxcb libpulse needs has to be the host's
+# as well: a bundled copy that loads first binds the host's libX11 to itself, and a library that then
+# calls the host's libxcb on an Xlib connection (the NVIDIA driver's NvFBC) reads another layout.
+[[tool.cibuildwheel.overrides]]
+select = "*-manylinux_*"
+repair-wheel-command = "auditwheel repair --exclude libxcb.so.1 -w {dest_dir} {wheel}"
+
+# Ruff runs as a bug-finder, not a style enforcer: only rule families that flag
+# defects (pyflakes, bugbear, pycodestyle errors, pylint errors) are enabled.
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E9", "F", "B", "PLE"]

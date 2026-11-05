@@ -1,0 +1,32 @@
+name: Licenses
+
+# License gate for the crate graph (LICENSES.md). cargo-deny resolves the
+# graph with `cargo metadata` and builds nothing, so no native packages are
+# installed.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Crate licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: cargo-deny
+        # deny.toml allows permissive licenses only; the native libpulse
+        # (LGPL-2.1-or-later) and libopus (BSD-3-Clause) are documented in
+        # LICENSES.md.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          manifest-path: pcmflux/Cargo.toml
+          arguments: --exclude-dev
+          command: check
+          command-arguments: licenses bans sources

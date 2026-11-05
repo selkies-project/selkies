@@ -1,0 +1,32 @@
+[package]
+name = "pcmflux"
+version = "2.2.1"
+edition = "2024"
+license = "MPL-2.0"
+# let-chains (stable in edition 2024 since 1.88) are the newest language feature used.
+rust-version = "1.88"
+
+[lib]
+name = "pcmflux"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+# `python` builds the Python bridge (src/python.rs) over the Rust API; without it the
+# crate links no interpreter. The Python build (setup.py) also asks for the extension
+# module; left off, the crate links the interpreter, which is what `cargo test
+# --features python` needs.
+python = ["dep:pyo3"]
+extension-module = ["python", "pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.30.1", optional = true }
+libpulse-binding = "2.30"
+opusic-sys = "0.7"
+bytemuck = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"

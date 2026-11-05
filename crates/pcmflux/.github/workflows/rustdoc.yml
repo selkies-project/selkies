@@ -1,0 +1,74 @@
+name: Docs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same ref supersedes its build; the one Pages site takes deployments
+# in turn, in the publish job, so a pull request's build never displaces main's.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpulse-dev libopus-dev
+
+      - name: Build docs
+        run: cargo doc --no-deps --document-private-items
+        working-directory: pcmflux
+
+      - name: Prepare site
+        # rustdoc writes the crate under its own directory and leaves a build
+        # lock behind; the site root redirects into it and the lock is dropped.
+        run: |
+          rm -f pcmflux/target/doc/.lock
+          cat > pcmflux/target/doc/index.html << 'EOF'
+          <!DOCTYPE html>
+          <meta http-equiv="refresh" content="0; url=pcmflux/index.html">
+          <a href="pcmflux/index.html">Redirecting...</a>
+          EOF
+
+      - name: Upload rustdoc artifacts
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: pcmflux/target/doc
+          retention-days: 1
+
+  publish:
+    name: Publish documentation
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # deploy-pages resolves the artifact through the Actions API
+      actions: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    if: ${{ github.ref == 'refs/heads/main' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -1,0 +1,10 @@
+include pcmflux/Cargo.toml
+include pcmflux/Cargo.lock
+recursive-include pcmflux/src *
+recursive-exclude pcmflux *.so *.pyc
+prune pcmflux/target
+include LICENSE
+include LICENSES.md
+include pyproject.toml
+include README.md
+include setup.py
