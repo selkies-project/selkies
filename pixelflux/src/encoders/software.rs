@@ -2369,9 +2369,18 @@ fn cleanup_vbv_kbit(settings: &CaptureSettings, bitrate_kbps: i32) -> i32 {
     frames.max(seconds).max(1) as i32
 }
 
+/// Frames of the target a constant-rate x264 session is given as its buffer where the caller
+/// names no `video_vbv_multiplier`. x264's row-level control prices each row against a slice's
+/// share of the buffer, so in the frame and a half the other encoders take it coded a moving
+/// 1080p window on a 2560x1600 screen at half its target: 1.95 Mbit/s of 4 at 30.4 dB, 2.96 in
+/// four frames, 3.52 at 34.6 dB in eight, 3.68 in fifteen, with no latency lost on a LAN (6.2 ms
+/// to draw and decode at 1.5 frames, 5.5 at 8). Eight frames hold a frame's worst case to 133 ms
+/// of the rate at 60 fps, where fifteen added queue on a slow link for 4% more of the target.
+const CBR_VBV_FRAMES: f64 = 8.0;
+
 /// The `(bitrate_kbps, vbv_kbit)` the software H.264 encoder is programmed with: the CBR
-/// target, or the peak of a CRF a positive `video_vbv_multiplier` caps. An uncapped CRF gets a
-/// buffer of 0.
+/// target, with a buffer of `CBR_VBV_FRAMES` unless `video_vbv_multiplier` names one, or the
+/// peak of a CRF a positive `video_vbv_multiplier` caps. An uncapped CRF gets a buffer of 0.
 fn rate_control(settings: &CaptureSettings) -> (i32, i32) {
     let bitrate = settings.video_bitrate_kbps.max(1);
     if !settings.video_cbr_mode && settings.video_vbv_multiplier <= 0.0 {
@@ -2381,7 +2390,11 @@ fn rate_control(settings: &CaptureSettings) -> (i32, i32) {
         (bitrate as u32).saturating_mul(1000),
         settings.target_fps,
         settings.keyframe_interval_s,
-        settings.video_vbv_multiplier,
+        if settings.video_cbr_mode && settings.video_vbv_multiplier <= 0.0 {
+            CBR_VBV_FRAMES
+        } else {
+            settings.video_vbv_multiplier
+        },
     ) / 1000)
         .max(1) as i32;
     (bitrate, vbv)
