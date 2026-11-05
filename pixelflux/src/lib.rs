@@ -9350,8 +9350,9 @@ impl ScreenCapture {
     }
 
     /// Where the Wayland compositor's pointer is, as `(x, y, scale, motion)`
-    /// (`WaylandBackend.pointer_location`), or None without a running compositor, before its
-    /// first pass, or under host capture. An X11 session reads its pointer from the X server.
+    /// (`WaylandBackend.pointer_location`), or None without a running compositor or before its
+    /// first pass. Under host capture the host's cursor answers, None before its first cursor
+    /// meta or where the host paints its cursor. An X11 session reads its pointer from the X server.
     pub fn pointer_location(&self) -> Option<(f64, f64, f64, u64)> {
         running_compositor().and_then(|be| be.pointer_location())
     }

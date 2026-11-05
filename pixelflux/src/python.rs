@@ -513,8 +513,9 @@ impl PyWaylandBackend {
     /// and the number of the last move applied (what `inject_mouse_move` and
     /// `inject_relative_mouse_move` return), so a caller can tell which of its moves the
     /// position includes. An app's warp is included too, since the position is read back
-    /// rather than summed from what was injected. None before the first pass and under host
-    /// capture, whose pointer is the host's. Never waits on the compositor.
+    /// rather than summed from what was injected. None before the first pass; under host
+    /// capture the host's cursor answers, None before its first cursor meta or where the host
+    /// paints its cursor. Never waits on the compositor.
     fn pointer_location(&self, py: Python<'_>) -> Option<(f64, f64, f64, u64)> {
         let c = self.0.clone();
         py.detach(move || c.pointer_location())
