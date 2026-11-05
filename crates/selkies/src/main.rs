@@ -85,6 +85,7 @@ fn main() -> ExitCode {
     if let Some(status) = selkies::commands::run(&std::env::args().collect::<Vec<_>>()) {
         return ExitCode::from(status.clamp(0, 255) as u8);
     }
+    selkies::log::configure(false);
     let resolved = Settings::parse(&args, &|name| std::env::var(name).ok());
     selkies::log::configure(resolved.debug().on);
     for token in &resolved.unknown_args {

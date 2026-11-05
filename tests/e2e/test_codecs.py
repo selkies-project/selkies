@@ -153,7 +153,7 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
                     else:
                         res.check(f"{tag}: the browser declined it, so the display moved to h264enc",
                                   C.wait_log("is not decoded by a WebRTC peer", timeout=10)
-                                  and C.wait_log("using 'h264enc'", timeout=10), "")
+                                  and C.wait_log('using "h264enc"', timeout=10), "")
                         line = wait_stream_mode("H264")
                         res.check(f"{tag}: the server streams H.264 instead",
                                   "Mode: H264" in line, TENC.encoder_field(line))

@@ -28,7 +28,8 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
@@ -110,9 +111,18 @@ impl PacedFilter {
 
 /// The server's logger: `LEVEL:target:message` lines on stderr.
 struct Logger {
-    debug: bool,
+    debug: AtomicBool,
     pace: PacedFilter,
 }
+
+/// The process's logger, installed before the settings are parsed so the warnings they raise
+/// reach the log, and told the debug flag once they are.
+static LOGGER: LazyLock<Logger> = LazyLock::new(|| Logger {
+    debug: AtomicBool::new(false),
+    pace: PacedFilter {
+        seen: Mutex::new(HashMap::new()),
+    },
+});
 
 impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
@@ -124,7 +134,7 @@ impl Log for Logger {
         if PACKET_TARGETS.contains(&target) {
             return level <= Level::Info;
         }
-        if self.debug {
+        if self.debug.load(Ordering::Relaxed) {
             return true;
         }
         level <= Level::Info
@@ -166,21 +176,16 @@ impl Log for Logger {
     }
 }
 
-/// Install the logger and the level policy for this process; a second call is ignored.
+/// Install the logger for this process at the level policy `debug` names; called again, as
+/// once the settings that hold the flag are parsed, it moves the policy.
 pub fn configure(debug: bool) {
-    let logger = Box::new(Logger {
-        debug,
-        pace: PacedFilter {
-            seen: Mutex::new(HashMap::new()),
-        },
+    let _ = log::set_logger(&*LOGGER);
+    LOGGER.debug.store(debug, Ordering::Relaxed);
+    log::set_max_level(if debug {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Info
     });
-    if log::set_boxed_logger(logger).is_ok() {
-        log::set_max_level(if debug {
-            LevelFilter::Debug
-        } else {
-            LevelFilter::Info
-        });
-    }
 }
 
 #[cfg(test)]
@@ -189,7 +194,7 @@ mod tests {
 
     fn logger(debug: bool) -> Logger {
         Logger {
-            debug,
+            debug: AtomicBool::new(debug),
             pace: PacedFilter {
                 seen: Mutex::new(HashMap::new()),
             },
