@@ -25,7 +25,7 @@ use crate::settings::{effective_cpu_encode_threading, settings, settings_mut};
 use crate::webrtc::peer::Peer;
 use crate::webrtc::service::{State, WebRtcService, bitrate_range};
 use crate::ws::state::{DisplayState, display_settings, json_f64};
-use crate::ws::steer::{LinkAllowance, SteerTick};
+use crate::ws::steer::{LinkAllowance, LinkProbeTick, SteerTick};
 
 /// Seconds of the cleanup's rate a still screen's cleanup frame comes to at most (pixelflux's
 /// `cleanup_cap`).
@@ -897,18 +897,38 @@ impl WebRtcService {
                     );
                 }
             }
-            // What the path carries, through each peer's pacer, sets the rate a still screen's
-            // cleanup runs at. A pacer reads the path's capacity, not what cross traffic leaves of
-            // it: a target backed off under the display's ceiling reads as no room.
-            let mut room = bucket.rooms.iter().copied().reduce(f64::min);
-            if target < ceiling.round() {
-                room = Some(0.0);
-            }
+            // What peers' burst delivery shows of the path bounds the cleanup, not a frame's
+            // round-trip crossing. Once the target is cut, the cleanup may probe that supported
+            // rate only on clean ticks it actually fills. A crowded moving stream or a trickle's
+            // under-filled window must not masquerade as spare path capacity.
+            let room = bucket.rooms.iter().copied().reduce(f64::min);
             let pace = bucket.paces.iter().copied().reduce(f64::min);
+            let filled = !crowded
+                && room.is_some_and(|bps| bps > 0.0)
+                && self
+                    .engine
+                    .video_budget_fill(&did)
+                    .is_some_and(|fill| fill >= LinkAllowance::SHARE);
             let allowance = {
                 let mut st = self.st.lock();
                 let allowance = st.link_allowances.entry(did.clone()).or_default();
-                let told = allowance.note(room, hi, pace);
+                let sample_in_history =
+                    queue_s.is_some_and(|q| q > 0.0) || allowance.kbps.unwrap_or(0) == 0 || filled;
+                let told = if cut {
+                    allowance.probe_tick(
+                        LinkProbeTick {
+                            measured_bps: room,
+                            sample_in_history,
+                            queue_s,
+                            filled,
+                            now,
+                        },
+                        ceiling,
+                        pace,
+                    )
+                } else {
+                    allowance.note(room, hi, pace)
+                };
                 let kbps = allowance.kbps.unwrap_or(0) as f64;
                 drop(st);
                 if let Some(told) = told {

@@ -228,6 +228,15 @@ impl<T: BridgeItem> PipelineBridge<T> {
         self.state.lock().invalidated
     }
 
+    /// Recent use of the frame budget, as a share of its buffered window. The same accounting
+    /// that admits frames drives this reading, so it cannot mistake a mere frame for a filled
+    /// allowance.
+    pub fn budget_fill(&self) -> Option<f64> {
+        let mut s = self.state.lock();
+        let bps = s.budget_bps?;
+        Some(s.budget_level(bps) / (bps / 8.0 * BUDGET_WINDOW_S))
+    }
+
     /// Frames dropped for the steered rate.
     pub fn over_budget(&self) -> u64 {
         self.state.lock().over_budget
@@ -900,6 +909,32 @@ mod tests {
             max_gap(&anchored, 1001, 1000, true) > BUDGET_RUN_MAX,
             "from one that keeps anchors, which predicts past any run, the budget drops longer runs"
         );
+    }
+
+    #[test]
+    fn budget_fill_is_used_capacity_not_frame_presence() {
+        let rig = Rig::new();
+        let bridge = rig.bridge(true);
+        assert_eq!(bridge.budget_fill(), None);
+        bridge.set_budget(Some(80_000.0));
+        assert_eq!(bridge.budget_fill(), Some(0.0));
+
+        bridge.set_data(tracked(0, None), true);
+        assert_eq!(drain(&bridge), ["F0"]);
+        bridge.set_data(
+            F {
+                size: 4000,
+                ..tracked(1, Some(0))
+            },
+            false,
+        );
+        assert_eq!(drain(&bridge), ["F1"]);
+        let fill = bridge.budget_fill().unwrap();
+        assert!(fill > 1.5 && fill < 1.7, "one filling frame: {fill}");
+        rig.step(0.5);
+        assert_eq!(bridge.budget_fill(), Some(0.0), "idle time refunds it");
+        bridge.set_budget(None);
+        assert_eq!(bridge.budget_fill(), None);
     }
 
     #[test]

@@ -588,6 +588,14 @@ impl RtcEngine {
             .map(|g| (g.video_bridge.over_budget(), g.video_bridge.passed()))
     }
 
+    /// Recent use of a display's frame budget as a share of its buffered window.
+    pub fn video_budget_fill(&self, display_id: &str) -> Option<f64> {
+        self.displays
+            .lock()
+            .get(display_id)
+            .and_then(|g| g.video_bridge.budget_fill())
+    }
+
     /// A display's dropped and invalidated frames, for the metrics.
     pub fn bridge_drops(&self) -> HashMap<String, (u64, u64)> {
         self.displays

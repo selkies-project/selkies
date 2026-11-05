@@ -47,7 +47,9 @@ use std::collections::VecDeque;
 
 use log::{debug, info, warn};
 
-use crate::ws::steer::{CongestionSteer, LinkAllowance, PathProbe, RateHold, SteerTick};
+use crate::ws::steer::{
+    CongestionSteer, LinkAllowance, LinkProbeTick, PathProbe, RateHold, SteerTick,
+};
 use crate::ws::uplink::FloorHistory;
 
 /// How much stream may stand queued past the path's own round trip before the gate stops a
@@ -483,6 +485,27 @@ pub fn path_rate(acks: &VecDeque<(f64, f64, u64)>, floor_ms: f64) -> Option<f64>
     Some(carried.max(fastest))
 }
 
+/// The delivery rate over completed frames after `after`, anchored at the latest earlier ack.
+/// Thus the first completed frame is included rather than shrinking the denominator around it;
+/// the first sample after starting may use zero. No earlier ack after that means no comparison.
+pub(crate) fn completed_delivery_bps(acks: &VecDeque<(f64, f64, u64)>, after: f64) -> Option<f64> {
+    let (at, _, bytes) = *acks.back()?;
+    if at <= after {
+        return None;
+    }
+    let before = acks
+        .iter()
+        .rev()
+        .find(|ack| ack.0 <= after)
+        .map(|ack| (ack.0, ack.2))
+        .or((after == 0.0).then_some((0.0, 0)))?;
+    let (since, acknowledged) = before;
+    if at <= since {
+        return None;
+    }
+    Some(bytes.saturating_sub(acknowledged) as f64 * 8.0 / (at - since))
+}
+
 /// The round trips of acked frames, each after the first less the time its own bytes took to
 /// cross a path carrying `bps`; none taken off where that is infinite or unknown.
 pub fn queued_round_trips(acks: &VecDeque<(f64, f64, u64)>, bps: Option<f64>) -> Vec<f64> {
@@ -657,17 +680,6 @@ impl DisplayLink {
         }
         let mut floor_ms = self.rtt_floor_ms.unwrap_or(0.0);
         let mut path_now = path_rate(&self.link_acks, floor_ms);
-        let told = self
-            .link_allowance
-            .get_or_insert_with(LinkAllowance::default)
-            .note(
-                if window.is_empty() { None } else { path_now },
-                hi_kbps,
-                None,
-            );
-        if let Some(kbps) = told {
-            encoder.update_link_rate(kbps);
-        }
         let mut queued_ms = queued_round_trips(&self.link_acks, path_now);
         let stand_len = window.len().max(2 * LINK_RISE_ACKS);
         let mut stand: Vec<f64> = queued_ms
@@ -694,6 +706,7 @@ impl DisplayLink {
         let mut acked_offered_bps = None;
         let mut capacity_bps = None;
         let mut measured_bps = None;
+        let mut completed_bps = None;
         let delivered_bps;
         let queue_s;
         if window.is_empty() {
@@ -709,6 +722,7 @@ impl DisplayLink {
                 0.0
             };
             measured_bps = (span > 0.0).then_some(delivered);
+            completed_bps = completed_delivery_bps(&self.link_acks, last_tick);
             let sent_span = span - (last.1 - first.1) / 1000.0;
             if sent_span > 0.0 && span > 0.0 {
                 acked_offered_bps = Some((last.2 - first.2) as f64 * 8.0 / sent_span);
@@ -838,6 +852,56 @@ impl DisplayLink {
             .round();
         let restored = steer.restored;
         self.link_kbps = Some(rate);
+        let cleanup_bps = path_now.filter(|bps| bps.is_infinite()).or(completed_bps);
+        let settled = now >= steer.hold_until;
+        let pad_sent = self
+            .pad_bytes
+            .saturating_sub(self.link_tick_pad.unwrap_or(self.pad_bytes));
+        let content_bps = offered_bps
+            .filter(|_| now > last_tick)
+            .map(|offered| (offered - pad_sent as f64 * 8.0 / (now - last_tick)).max(0.0));
+        let allowance_kbps = self
+            .link_allowance
+            .as_ref()
+            .and_then(|allowance| allowance.kbps);
+        let filled = settled
+            && allowance_kbps.is_some_and(|kbps| {
+                content_bps.is_some_and(|bps| bps >= kbps as f64 * 1000.0 * LinkAllowance::SHARE)
+            });
+        // path_rate remains the serialization evidence for queue detection and the established
+        // uncut baseline. In a cut, actual sustained completion governs the bounded probe, but
+        // an under-filled span must not refute that established capacity. Queued samples and
+        // ones which carried the current allowance remain valid honest floors.
+        let told = if rate < target {
+            let sample_in_history = queue_s > 0.0
+                || cleanup_bps.is_some_and(|bps| {
+                    allowance_kbps.is_none_or(|kbps| kbps == 0 || bps >= kbps as f64 * 1000.0)
+                });
+            self.link_allowance
+                .get_or_insert_with(LinkAllowance::default)
+                .probe_tick(
+                    LinkProbeTick {
+                        measured_bps: cleanup_bps,
+                        sample_in_history,
+                        queue_s: Some(queue_s),
+                        filled,
+                        now,
+                    },
+                    target,
+                    None,
+                )
+        } else {
+            self.link_allowance
+                .get_or_insert_with(LinkAllowance::default)
+                .note(
+                    if window.is_empty() { None } else { path_now },
+                    hi_kbps,
+                    None,
+                )
+        };
+        if let Some(kbps) = told {
+            encoder.update_link_rate(kbps);
+        }
         let tick = ProbeTick {
             ceiling: target,
             rate,
@@ -2628,6 +2692,23 @@ mod tests {
                 s.steer(free);
             }
         }
+    }
+
+    #[test]
+    fn completed_delivery_includes_the_first_completed_frame() {
+        let acks = VecDeque::from([(20.0, 20.0, 1000), (20.5, 20.0, 1500), (21.0, 20.0, 3000)]);
+        assert_eq!(completed_delivery_bps(&acks, 20.0), Some(16_000.0));
+        assert_eq!(
+            completed_delivery_bps(
+                &VecDeque::from([(20.5, 20.0, 1500), (21.0, 20.0, 3000)]),
+                20.0
+            ),
+            None,
+            "without an anchor there is no whole span to infer from"
+        );
+        assert_eq!(completed_delivery_bps(&acks, 21.0), None);
+        let first = VecDeque::from([(0.5, 20.0, 1000)]);
+        assert_eq!(completed_delivery_bps(&first, 0.0), Some(16_000.0));
     }
 
     #[test]
