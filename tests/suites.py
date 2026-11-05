@@ -81,6 +81,7 @@ SUITES: list = [
     {"path": "unit/test_release_assets.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_capture_stack.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_cursor_scaling.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_command_dispatch.py", "tier": "unit", "timeout": 120},
 
     # integration
     {"path": "integration/test_cursor_callback_handoff.py", "tier": "integration", "timeout": 300,
@@ -281,7 +282,10 @@ SUITES: list = [
     {"path": "e2e/test_ws_unix_socket.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_jupyter_proxy.py", "tier": "e2e", "timeout": 600},
 
+    {"path": "packaging/test_packaging.py", "tier": "integration", "timeout": 600},
+
     # on request
+    {"path": "perf/test_pacer.py", "tier": "perf", "timeout": 3600},
     {"path": "perf/test_transfer_saturation.py", "tier": "perf", "timeout": 1800},
     {"path": "soak/test_capture_api.py", "tier": "soak", "timeout": 2400},
     {"path": "soak/test_capture_api_extra.py", "tier": "soak", "timeout": 2400},
