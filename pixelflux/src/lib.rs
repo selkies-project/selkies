@@ -2524,7 +2524,7 @@ fn bootstrap_readback_pool(
 /// GPU refuses one.
 fn alloc_zero_copy_ring(
     gbm: &RawGbmDevice<std::fs::File>,
-    settings: &RustCaptureSettings,
+    settings: &CaptureSettings,
     display_id: u32,
 ) -> Option<Vec<(BufferObject<()>, Dmabuf)>> {
     let mut ring = Vec::with_capacity(WL_POOL_SURFACES);
@@ -9770,7 +9770,6 @@ impl ScreenCapture {
         crate::wayland::dcclient::watch(&app_socket_path(&display)?, watch).map_err(Error::Capture)
     }
 }
-
 
 /// Best-effort teardown: flag the capture thread to exit without joining.
 ///
