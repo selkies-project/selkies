@@ -808,6 +808,11 @@ impl WebRtcService {
         per_display.extend(by_owner);
         padded.extend(padded_owner);
         if !cc_on {
+            for bucket in per_display.values() {
+                for peer in &bucket.peers {
+                    peer.set_steered_bps(None);
+                }
+            }
             return;
         }
         let ticked: Vec<String> = per_display.keys().cloned().collect();
@@ -817,6 +822,9 @@ impl WebRtcService {
             };
             if pipeline.rc_mode() != "cbr" {
                 self.engine.set_video_budget(&did, None);
+                for peer in &bucket.peers {
+                    peer.set_steered_bps(None);
+                }
                 continue;
             }
             let Some(goodput) = bucket.goodputs.iter().copied().reduce(f64::min) else {
@@ -867,6 +875,9 @@ impl WebRtcService {
                 // answer it.
                 (target, steer.restored, steer.capacity_kbps.is_some())
             };
+            for peer in &bucket.peers {
+                peer.set_steered_bps(Some((target * 1000.0) as u64));
+            }
             let crowded = self.shed_frames(&did, pipeline.as_ref(), target, ceiling, queued);
             let cut = target < ceiling.round();
             for share in &bucket.audio {

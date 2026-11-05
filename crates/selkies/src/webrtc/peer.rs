@@ -172,6 +172,7 @@ enum Command {
     RedShed(Option<usize>),
     AudioFeed(RelayTrack<AudioSample>),
     EncoderBps(u64),
+    SteeredBps(Option<u64>),
     FrameFloor(usize),
     RepairBudget(Option<f64>, Option<f64>),
     Padding(f64, f64),
@@ -616,9 +617,14 @@ impl Peer {
         let _ = self.commands.send(Command::AudioFeed(feed));
     }
 
-    /// The display's configured rate, what the pacer paces at.
+    /// The display's configured ceiling, which keeps its queue capacity.
     pub fn set_encoder_bps(&self, bps: u64) {
         let _ = self.commands.send(Command::EncoderBps(bps));
+    }
+
+    /// The rate congestion control steers the display's encoder and pacing to.
+    pub fn set_steered_bps(&self, bps: Option<u64>) {
+        let _ = self.commands.send(Command::SteeredBps(bps));
     }
 
     /// The largest cleanup frame the pacer takes whole.
@@ -898,6 +904,12 @@ impl Media {
                 let now = clock::monotonic();
                 if let Some(pacer) = self.paced.pacer() {
                     pacer.set_encoder_bps(bps, now);
+                }
+            }
+            Command::SteeredBps(bps) => {
+                let now = clock::monotonic();
+                if let Some(pacer) = self.paced.pacer() {
+                    pacer.set_steered_bps(bps, now);
                 }
             }
             Command::FrameFloor(bytes) => {

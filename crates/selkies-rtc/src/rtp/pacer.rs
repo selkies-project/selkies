@@ -302,8 +302,9 @@ impl Pacer {
     }
 
     /// Set the congestion-controlled encoder target, or clear it to restore the configured
-    /// target. The configured rate continues to size queue capacity and link-headroom
-    /// thresholds. Clearing a target also clears an overflow brake.
+    /// target. The configured rate keeps the queue capacity; the active target sizes pacing,
+    /// link-headroom thresholds, and burst budgets. Clearing a target also clears an overflow
+    /// brake.
     pub fn set_steered_bps(&mut self, bps: Option<u64>, now: f64) {
         let bps = bps.map(|bps| bps.max(MIN_PACE_BPS));
         if bps == self.steered_bps {
