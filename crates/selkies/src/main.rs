@@ -70,7 +70,12 @@ fn main() -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    let known_command = args.first().is_some_and(|name| {
+        selkies::commands::COMMANDS
+            .iter()
+            .any(|command| command.name == name)
+    });
+    if !known_command && args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{}", Settings::help_text(&selkies::commands::help_epilog()));
         return ExitCode::SUCCESS;
     }
