@@ -22,13 +22,14 @@
 //!   become affordable and its class would wedge forever.
 //! - The burst budget follows the link, never the pace alone: `DEBT_WINDOW_S` of the pace
 //!   until transport-cc feedback typically shows the wire delivering frames' leading bursts
-//!   at twice the encoder's rate or more without loss, then what that link delivers in
-//!   `BURST_LINK_S` until it typically falls below 1.5 times the encoder's rate, loses a
-//!   packet, delivers less than the encoder makes, or goes unmeasured (`set_link_bps`).
+//!   at twice the active target or more without loss, then what that link delivers in
+//!   `BURST_LINK_S` until it typically falls below 1.5 times the active target, loses a
+//!   packet, delivers less than the target, or goes unmeasured (`set_link_bps`).
 //! - Video is the only droppable class; every other class is bounded by backpressure on
 //!   the sender instead (`data_blocked`).
-//! - The video queue budget is `max(CAP_MIN_MS of wire time, IDR_FLOOR_FACTOR x the largest
-//!   of the last IDR_WINDOW keyframes, the frame floor)`. A budget below one IDR truncates
+//! - The video queue budget is `max(CAP_MIN_MS of wire time at the configured pace,
+//!   IDR_FLOOR_FACTOR x the largest of the last IDR_WINDOW keyframes, the frame floor)`. A
+//!   budget below one IDR truncates
 //!   every keyframe under sustained congestion and breaks the reference chain permanently,
 //!   hence the sliding-window floor; the frame floor (`set_frame_floor`) lets a still
 //!   screen's cleanup frame in whole.
@@ -45,8 +46,8 @@
 //!   once one brake drops the pace below the encoder rate every further overflow is
 //!   self-inflicted. An overflow resets the GOP but sizes a brake only from a fresh goodput
 //!   estimate measured on a feedback window the wire cut in several places, at most one
-//!   brake per `BRAKE_HOLD_S`; recovery is +25%/s toward `PACE_FACTOR` x the encoder
-//!   target, and only a brake resets its clock.
+//!   brake per `BRAKE_HOLD_S`; recovery is +25%/s toward `PACE_FACTOR` x the steered target,
+//!   or the configured target without one, and only a brake resets its clock.
 
 use std::collections::VecDeque;
 
@@ -197,6 +198,8 @@ struct Queued {
 
 pub struct Pacer {
     encoder_bps: u64,
+    /// Congestion-controlled encoder target; the configured rate remains the capacity ceiling.
+    steered_bps: Option<u64>,
     goodput_bps: Option<u64>,
     goodput_at: f64,
     brake_hold_until: f64,
@@ -240,6 +243,7 @@ impl Pacer {
     pub fn new(encoder_bps: u64, now: f64) -> Self {
         let mut pacer = Self {
             encoder_bps: encoder_bps.max(100_000),
+            steered_bps: None,
             goodput_bps: None,
             goodput_at: 0.0,
             brake_hold_until: 0.0,
@@ -295,6 +299,26 @@ impl Pacer {
             self.encoder_bps = bps;
             self.refresh_windows(now);
         }
+    }
+
+    /// Set the congestion-controlled encoder target, or clear it to restore the configured
+    /// target. The configured rate continues to size queue capacity and link-headroom
+    /// thresholds. Clearing a target also clears an overflow brake.
+    pub fn set_steered_bps(&mut self, bps: Option<u64>, now: f64) {
+        let bps = bps.map(|bps| bps.max(MIN_PACE_BPS));
+        if bps == self.steered_bps {
+            return;
+        }
+        self.steered_bps = bps;
+        if bps.is_none() {
+            self.ever_overflowed = false;
+            self.last_pace_update_at = now;
+        }
+        self.refresh_windows(now);
+    }
+
+    fn target_bps(&self) -> u64 {
+        self.steered_bps.unwrap_or(self.encoder_bps)
     }
 
     /// The estimate is control input only at overflow events: braking on own-output
@@ -412,7 +436,7 @@ impl Pacer {
         };
         let target = MIN_PACE_BPS
             .max(est.saturating_sub(BYPASS_RESERVE_BPS))
-            .max((AIMD_FLOOR_FACTOR * self.encoder_bps as f64) as u64);
+            .max((AIMD_FLOOR_FACTOR * self.target_bps() as f64) as u64);
         if target < self.pace_bps {
             self.ever_overflowed = true;
             self.brake_hold_until = now + BRAKE_HOLD_S;
@@ -429,7 +453,7 @@ impl Pacer {
         if dt < 0.25 {
             return;
         }
-        let ceiling = PACE_FACTOR * self.encoder_bps as f64;
+        let ceiling = PACE_FACTOR * self.target_bps() as f64;
         self.last_pace_update_at = now;
         if self.link_bps.is_some_and(|l| l > 0.0) && now - self.link_at > LINK_MAX_AGE_S {
             self.link_bps = None;
@@ -448,12 +472,12 @@ impl Pacer {
     /// Re-derive the burst budget from the pace and the link, and clamp credit to it. The
     /// budget is `DEBT_WINDOW_S` of the pace while the link's room is unknown or short. A
     /// link the latest feedback showed delivering a frame's leading burst at
-    /// `LINK_HEADROOM_FACTOR` times the encoder's rate or faster, with nothing lost and the
+    /// `LINK_HEADROOM_FACTOR` times the active target or faster, with nothing lost and the
     /// pace not braked, takes what it delivers in `BURST_LINK_S`, at most libwebrtc's burst,
     /// so a frame leaves whole instead of trickling out at the pace behind its first
     /// packets. Room is judged on the median of the last `LINK_SAMPLES` estimates and kept
-    /// while that stays at `LINK_KEEP_FACTOR` times the encoder's rate or more, and a latest
-    /// estimate below the encoder's rate closes the room at once.
+    /// while that stays at `LINK_KEEP_FACTOR` times the active target or more, and a latest
+    /// estimate below the active target closes the room at once.
     fn apply_pace(&mut self, now: f64) {
         let pace_bytes = self.pace_bps as f64 / 8.0;
         let mut cap = (pace_bytes * DEBT_WINDOW_S).max(BURST_FLOOR_BYTES);
@@ -464,14 +488,14 @@ impl Pacer {
         } else {
             LINK_HEADROOM_FACTOR
         };
-        let encoder = self.encoder_bps as f64;
+        let target = self.target_bps() as f64;
         self.link_room = self.link_bps.is_some_and(|link| {
             link > 0.0
-                && link >= encoder
-                && typical >= factor * encoder
+                && link >= target
+                && typical >= factor * target
                 && now - self.link_at <= LINK_MAX_AGE_S
         });
-        if self.link_room && self.pace_bps >= (PACE_FACTOR * encoder) as u64 {
+        if self.link_room && self.pace_bps >= (PACE_FACTOR * target) as u64 {
             let link = self.link_bps.unwrap_or(0.0);
             cap = cap.max(
                 (link.min(typical) / 8.0 * BURST_LINK_S)
@@ -486,8 +510,8 @@ impl Pacer {
     }
 
     fn refresh_windows(&mut self, now: f64) {
-        let ceiling = (PACE_FACTOR * self.encoder_bps as f64) as u64;
-        // Until the first brake the encoder setting owns the pace; afterwards it can only
+        let ceiling = (PACE_FACTOR * self.target_bps() as f64) as u64;
+        // Until the first brake the active target owns the pace; afterwards it can only
         // clamp the AIMD-controlled pace.
         self.pace_bps = if self.ever_overflowed {
             self.pace_bps.min(ceiling)
@@ -499,7 +523,8 @@ impl Pacer {
     }
 
     fn video_cap_bytes(&self) -> usize {
-        let base = (self.pace_bps as f64 / 8.0 * CAP_MIN_MS / 1000.0) as usize;
+        let configured_pace = PACE_FACTOR * self.encoder_bps as f64;
+        let base = (configured_pace / 8.0 * CAP_MIN_MS / 1000.0) as usize;
         base.max(self.idr_floor_bytes).max(self.frame_floor_bytes)
     }
 
@@ -1114,6 +1139,146 @@ mod tests {
         for _ in 0..LINK_SAMPLES {
             pacer.set_link_bps(Some(bps), now);
         }
+    }
+
+    #[test]
+    fn a_steered_target_paces_without_shrinking_the_configured_queue() {
+        let now = 10.0;
+        let configured = 16_000_000;
+        let steered = 500_000;
+        let configured_pace = (PACE_FACTOR * configured as f64) as u64;
+        let steered_pace = (PACE_FACTOR * steered as f64) as u64;
+        let configured_burst = configured_pace as f64 / 8.0 * DEBT_WINDOW_S;
+        let steered_burst = (steered_pace as f64 / 8.0 * DEBT_WINDOW_S).max(BURST_FLOOR_BYTES);
+        let configured_cap = (configured_pace as f64 / 8.0 * CAP_MIN_MS / 1000.0) as usize;
+        let mut pacer = Pacer::new(configured, now);
+        let reference = Pacer::new(configured, now);
+
+        pacer.set_steered_bps(Some(steered), now);
+        assert_eq!(pacer.pace_bps(), steered_pace);
+        assert_eq!(pacer.burst_bytes(), steered_burst);
+        assert_eq!(pacer.video_cap(), configured_cap);
+        pacer.set_credit(steered_burst, now);
+        assert_eq!(pacer.burst_bytes(), steered_burst);
+        assert_eq!(
+            pacer.send(packet(), Class::Video, Some(1), now),
+            Verdict::SendNow,
+            "steered credit remains available at the lower pace"
+        );
+        assert_eq!(reference.pace_bps(), configured_pace);
+        let remaining_credit = steered_burst - 1200.0;
+
+        for _ in 0..64 {
+            pacer.maybe_recover_pace(now + 4.0);
+        }
+        assert_eq!(pacer.pace_bps(), steered_pace);
+        assert_eq!(pacer.burst_bytes(), steered_burst);
+        assert!((pacer.credit - remaining_credit).abs() < 1e-6);
+
+        pacer.set_steered_bps(None, now);
+        assert_eq!(pacer.pace_bps(), configured_pace);
+        assert_eq!(pacer.burst_bytes(), configured_burst);
+        assert_eq!(pacer.video_cap(), configured_cap);
+    }
+
+    #[test]
+    fn steered_headroom_widens_the_burst_against_the_steered_target() {
+        let now = 10.0;
+        let configured = 16_000_000;
+        let steered = 500_000;
+        let steered_pace = (PACE_FACTOR * steered as f64) as u64;
+        let steered_burst = steered_pace as f64 / 8.0 * BURST_WINDOW_S;
+        let mut pacer = Pacer::new(configured, now);
+
+        pacer.set_steered_bps(Some(steered), now);
+        steady(&mut pacer, 100_000_000.0, true, now);
+        assert_eq!(pacer.pace_bps(), steered_pace);
+        assert_eq!(pacer.burst_bytes(), steered_burst);
+        assert_eq!(
+            pacer.room_bps(now),
+            Some(CLEANUP_PACE_SHARE * steered_pace as f64)
+        );
+        pacer.set_credit(steered_burst, now);
+        pacer.send(packet(), Class::Video, None, now);
+        assert_eq!(pacer.burst_bytes(), steered_burst);
+
+        steady(&mut pacer, 700_000.0, true, now);
+        assert_eq!(pacer.burst_bytes(), BURST_FLOOR_BYTES);
+        steady(&mut pacer, 100_000_000.0, false, now);
+        assert_eq!(
+            pacer.burst_bytes(),
+            steered_burst,
+            "headroom returns against the steered demand rather than the configured rate"
+        );
+
+        pacer.set_steered_bps(None, now);
+        assert_eq!(pacer.burst_bytes(), MAX_BURST_BYTES);
+    }
+
+    #[test]
+    fn steered_overflow_recovery_and_forced_idr_keep_the_configured_floors() {
+        let mut now = 10.0;
+        let configured = 16_000_000;
+        let steered = 500_000;
+        let steered_pace = (PACE_FACTOR * steered as f64) as u64;
+        let configured_cap =
+            ((PACE_FACTOR * configured as f64) / 8.0 * CAP_MIN_MS / 1000.0) as usize;
+        let mut pacer = Pacer::new(configured, now);
+        for size in [100_000, 120_000, 80_000, 50_000] {
+            pacer.note_keyframe(size, true, now);
+        }
+        assert_eq!(pacer.snapshot().idr_floor_bytes, 264_000);
+        pacer.note_keyframe(60_000, true, now);
+        pacer.note_keyframe(70_000, true, now);
+        assert_eq!(
+            pacer.snapshot().idr_floor_bytes,
+            176_000,
+            "the natural-keyframe window retains its four most recent sizes"
+        );
+        pacer.set_frame_floor(160_000);
+        pacer.set_steered_bps(Some(steered), now);
+        assert_eq!(pacer.video_cap(), configured_cap);
+        assert!(
+            pacer.video_cap() > (steered_pace as f64 / 8.0 * CAP_MIN_MS / 1000.0) as usize,
+            "the configured budget stays out of the low-rate purge regime"
+        );
+
+        pacer.set_credit(0.0, now);
+        let queued_packets = configured_cap / 1200;
+        for tag in 0..queued_packets as u16 {
+            let verdict = pacer.send(packet(), Class::Video, Some(tag), now);
+            assert_eq!(verdict, Verdict::Queued);
+        }
+        now += GOODPUT_WARMUP_S + 1.0;
+        pacer.set_goodput_bps(Some(200_000), now);
+        let verdict = pacer.send(packet(), Class::Video, Some(queued_packets as u16), now);
+        assert_eq!(verdict, Verdict::Overflow { first_tag: Some(0) });
+        pacer.resolve_overflow(false, now);
+        assert!(pacer.pace_bps() < steered_pace);
+        assert_eq!(pacer.video_cap(), configured_cap);
+        assert_eq!(pacer.stats().gop_resets, 1);
+
+        now += BRAKE_HOLD_S;
+        pacer.note_keyframe(190_000, false, now);
+        assert!(!pacer.gop_dead());
+        let forced_floor = (190_000.0 * IDR_FLOOR_FACTOR) as usize;
+        assert_eq!(pacer.snapshot().idr_floor_bytes, forced_floor);
+        assert_eq!(pacer.video_cap(), configured_cap);
+        pacer.set_credit(0.0, now);
+        for tag in 501..660u16 {
+            let verdict = pacer.send(packet(), Class::Video, Some(tag), now);
+            assert_eq!(verdict, Verdict::Queued, "forced IDR packet {tag}");
+        }
+        now += 4.0;
+        pacer.maybe_recover_pace(now);
+        assert!(pacer.pace_bps() > MIN_PACE_BPS);
+        assert!(pacer.pace_bps() < steered_pace);
+        assert!(pacer.burst_bytes() >= steered_pace as f64 / 8.0 * DEBT_WINDOW_S);
+
+        assert_eq!(pacer.snapshot().idr_floor_bytes, forced_floor);
+        pacer.set_steered_bps(None, now);
+        assert_eq!(pacer.pace_bps(), (PACE_FACTOR * configured as f64) as u64);
+        assert_eq!(pacer.snapshot().idr_floor_bytes, forced_floor);
     }
 
     #[test]
