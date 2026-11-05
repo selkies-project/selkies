@@ -1,0 +1,26 @@
+# Fuzz targets for pixelflux's parsers of bytes it does not write itself, built with
+# `cargo fuzz` (nightly) and run by ClusterFuzzLite (.clusterfuzzlite/, .github/workflows/fuzz.yml).
+# A target compiles the modules it fuzzes from ../src on their own, so it needs none of the
+# capture stack's system libraries.
+[package]
+name = "pixelflux-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "sps"
+path = "fuzz_targets/sps.rs"
+test = false
+doc = false
+bench = false
+
+# A crate of its own, outside any workspace above it.
+[workspace]
+members = ["."]

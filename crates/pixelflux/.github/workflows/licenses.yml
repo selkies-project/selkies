@@ -1,0 +1,60 @@
+name: Licenses
+
+# License gate for both build configurations (LICENSES.md). Everything here
+# resolves the crate graph with `cargo metadata` and builds nothing, so no
+# native packages are installed.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Crate and native library licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Inventory check, default (GPL) and PIXELFLUX_ENABLE_GPL=0 builds
+        # Fails on a copyleft crate or native library outside the allowed
+        # list of its configuration, on missing license metadata, and on a
+        # native binding LICENSES.md does not describe.
+        run: python3 scripts/check-licenses.py
+
+      - name: cargo-deny, PIXELFLUX_ENABLE_GPL=0 build
+        # deny.toml resolves the non-GPL feature set: permissive licenses only,
+        # x264-sys banned.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          manifest-path: pixelflux/Cargo.toml
+          arguments: --exclude-dev
+          command: check
+          command-arguments: licenses bans sources
+
+      - name: cargo-deny, default (GPL) build
+        # Same allow list plus the x264-sys exception; the ban is the non-GPL
+        # gate and is not run here.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          manifest-path: pixelflux/Cargo.toml
+          arguments: --exclude-dev --features gpl
+          command: check
+          command-arguments: licenses sources
+
+      - name: cargo-deny advisories, default (GPL) build
+        # Network step: fetches the RustSec database and enforces the
+        # [advisories] policy in deny.toml (documented transitive ignores).
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          manifest-path: pixelflux/Cargo.toml
+          arguments: --exclude-dev --features gpl
+          command: check
+          command-arguments: advisories

@@ -1,0 +1,208 @@
+name: Release
+
+# A release is cut by running this workflow from the Actions tab with the tag,
+# or by pushing the tag. A run releases the commit it started from: a manual
+# run creates a new tag on it, cut from main, once the checks pass, and a tag
+# that already exists has to be on it, so an earlier commit's tag is released
+# by a run started from that tag. The latest input decides the "Latest" badge:
+# auto gives it to a release and not to a pre-release, never holds it back for
+# a fix to an older series, and always gives it to a pre-release too, which is
+# then released as a release since GitHub gives the badge to no pre-release.
+#
+# The tag is the version the wheels carry, a PEP 440 one: a pre-release such
+# as 2.1.0rc1 is released as one, with its own notes or those of the release
+# it leads to. The wheels go to PyPI as well when the release is designated
+# as the latest and is not a pre-release, or when a manual run says so,
+# through the trusted publisher registered there for this workflow file and
+# the `pypi` environment. PyPI keeps the first upload of a version, so a
+# re-release of one it holds fails there and changes the GitHub release
+# alone.
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, created on this run's commit when it is new (e.g. 2.1.0 or 2.1.0rc1)
+        type: string
+        required: true
+      latest:
+        description: Designate this release as the latest; auto does so for a release and not for a pre-release
+        type: choice
+        options: [auto, always, never]
+        default: auto
+      pypi:
+        description: Publish the wheels to PyPI; auto does so for a release designated as the latest and not for a pre-release
+        type: choice
+        options: [auto, always, never]
+        default: auto
+
+permissions:
+  contents: read
+
+env:
+  # The tag this run releases: the pushed one, or the one a manual run names
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  check:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      notes: ${{ steps.notes.outputs.path }}
+    steps:
+      - name: Check the tag is a version
+        # The tag is what the wheels are versioned as, so it has to be a PEP 440
+        # version spelled the way pip normalizes it
+        run: |
+          echo "${RELEASE_TAG}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+|\.post[0-9]+|\.dev[0-9]+)?$' \
+            || { echo "::error::${RELEASE_TAG} is not a version (2.1.0, 2.1.0rc1)"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the release notes
+        id: notes
+        run: |
+          # A pre-release carries the notes of the release it leads to unless it
+          # was given its own
+          path="release-notes/${RELEASE_TAG}.md"
+          [ -s "${path}" ] || path="release-notes/$(echo "${RELEASE_TAG}" | sed -E 's/((a|b|rc)[0-9]+|\.post[0-9]+|\.dev[0-9]+)$//').md"
+          [ -s "${path}" ] || { echo "::error::no release notes for ${RELEASE_TAG}"; exit 1; }
+          echo "path=${path}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag is on main
+        # A release is cut from main and its tags alone: a commit that is not on
+        # main is refused before anything is tagged, built, or released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq .status)"
+          case "${status}" in
+            identical|behind) ;;
+            *) echo "::error::${RELEASE_TAG} is on a commit that is not on main (${status:-unknown})"; exit 1 ;;
+          esac
+
+      - name: Tag the commit this run started from
+        # The checks above have passed, so a refused run leaves no tag behind. A
+        # new tag is cut from main; one that already exists, a pushed one
+        # included, has to be on this run's commit, which is what is built
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" > /dev/null 2>&1; then
+            status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${RELEASE_TAG}" --jq .status)"
+            [ "${status}" = identical ] \
+              || { echo "::error::${RELEASE_TAG} tags another commit than this run's; start the run from the tag (Use workflow from)"; exit 1; }
+            echo "${RELEASE_TAG} tags ${GITHUB_SHA}"
+          else
+            [ "${GITHUB_REF}" = refs/heads/main ] \
+              || { echo "::error::a new tag is cut from main; this run started from ${GITHUB_REF_NAME}"; exit 1; }
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${RELEASE_TAG}" -f sha="${GITHUB_SHA}" > /dev/null
+            echo "${RELEASE_TAG} now tags ${GITHUB_SHA}"
+          fi
+
+  build:
+    needs: check
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/wheels.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+
+  release:
+    name: Release
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      pypi: ${{ steps.kind.outputs.pypi }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Get release notes
+        id: notes
+        env:
+          NOTES: ${{ needs.check.outputs.notes }}
+        run: |
+          {
+            echo "content<<EOF"
+            cat "${NOTES}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Classify the tag
+        id: kind
+        env:
+          LATEST: ${{ inputs.latest }}
+          PYPI: ${{ inputs.pypi }}
+        run: |
+          # A release takes the "Latest" badge and a pre-release does not,
+          # unless a manual run says otherwise; GitHub gives the badge to no
+          # pre-release, so one designated takes it marked as a release.
+          # The wheels go to PyPI for a designated release that is no
+          # pre-release, again unless the run says otherwise.
+          is_prerelease() { echo "$1" | grep -qE '((a|b|rc)|\.dev)[0-9]+$'; }
+          case "${LATEST:-auto}" in
+            always) latest=true ;;
+            never) latest=false ;;
+            *) if is_prerelease "${RELEASE_TAG}"; then latest=false; else latest=true; fi ;;
+          esac
+          prerelease=false
+          if [ "${latest}" = false ] && is_prerelease "${RELEASE_TAG}"; then prerelease=true; fi
+          case "${PYPI:-auto}" in
+            always) pypi=true ;;
+            never) pypi=false ;;
+            *) if [ "${latest}" = true ] && ! is_prerelease "${RELEASE_TAG}"; then pypi=true; else pypi=false; fi ;;
+          esac
+          {
+            echo "prerelease=${prerelease}"
+            echo "make_latest=${latest}"
+            echo "pypi=${pypi}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create the release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          body: ${{ steps.notes.outputs.content }}
+          prerelease: ${{ steps.kind.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.kind.outputs.make_latest }}
+          files: wheelhouse/*.whl
+
+  publish:
+    needs: release
+    if: needs.release.outputs.pypi == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pixelflux/${{ env.RELEASE_TAG }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the wheels to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

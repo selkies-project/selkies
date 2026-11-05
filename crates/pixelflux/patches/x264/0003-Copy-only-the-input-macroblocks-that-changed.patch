@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Wed, 4 Nov 2026 23:38:11 -0500
+Subject: [PATCH 3/5] Copy only the input macroblocks that changed
+
+Input frames are recycled, so a recycled frame already holds the picture of the input frame it
+last took, and on a screen where little changes nearly all of it is still current. x264 keeps
+the input frame that last changed each macroblock, from the caller's mb_info
+(X264_MBINFO_CONSTANT; a frame without mb_info changes all of them), and each frame the input
+frame its planes hold, and copies planar 4:2:0 and 4:4:4 input only where a macroblock changed
+since: a run of them along a row at a time, through the C copies, since the SIMD ones store
+non-temporally to aligned addresses a run need not start at. Other formats, and a frame holding
+nothing of the stream, copy whole.
+
+Every stream the skip of constant macroblocks was checked on comes out bit for bit the same.
+At 2560x1600, a frame where a 256x256 area changed took 3.28 ms where it took 3.76 under CRF,
+and 3.72 against 4.11 under VBV; a frame that changed whole is unchanged.
+---
+ common/common.h   |  4 +++
+ common/frame.c    | 76 +++++++++++++++++++++++++++++++++++++++++++++++
+ common/frame.h    |  1 +
+ encoder/encoder.c |  1 +
+ 4 files changed, 82 insertions(+)
+
+diff --git a/common/common.h b/common/common.h
+index a22e224..429c33b 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -392,6 +392,10 @@ struct x264_t
+                                     * I frame and the next P or I frame, else -1 */
+ 
+         int i_input;    /* Number of input frames already accepted */
++        /* The input frame that last changed each macroblock, from the caller's mb_info, and
++         * the last to change all of them (one without mb_info). */
++        int *mb_input_changed;
++        int i_input_all_changed;
+ 
+         int i_max_dpb;  /* Number of frames allocated in the decoded picture buffer */
+         int i_max_ref0;
+diff --git a/common/frame.c b/common/frame.c
+index 7f19e1b..23b6e2f 100644
+--- a/common/frame.c
++++ b/common/frame.c
+@@ -79,6 +79,7 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
+ #endif
+ 
+     CHECKED_MALLOCZERO( frame, sizeof(x264_frame_t) );
++    frame->i_input_frame = -1;
+     PREALLOC_INIT
+ 
+     /* allocate frame data (+64 for extra data for me) */
+@@ -360,6 +361,79 @@ static int get_plane_ptr( x264_t *h, x264_picture_t *src, uint8_t **pix, int *st
+ 
+ #define get_plane_ptr(...) do { if( get_plane_ptr(__VA_ARGS__) < 0 ) return -1; } while( 0 )
+ 
++/* Copy into dst only the macroblocks of src that changed since the input frame dst's planes
++ * hold, for planar 4:2:0 and 4:4:4: the input frames are recycled, so on a screen where little
++ * changes most of a recycled frame already holds the picture. Which input frame last changed
++ * each macroblock comes from the caller's mb_info (X264_MBINFO_CONSTANT), a frame without it
++ * changing all of them. Returns 0, having copied nothing, where the whole picture is to be
++ * copied: another format, or a frame holding nothing of the stream. */
++static int frame_copy_changed( x264_t *h, x264_frame_t *dst, x264_picture_t *src, int i_csp )
++{
++    const int n = h->frames.i_input;
++    const int mb_w = h->mb.i_mb_width, mb_h = h->mb.i_mb_height;
++    uint8_t *info = h->param.analyse.b_mb_info ? src->prop.mb_info : NULL;
++    if( !h->frames.mb_input_changed )
++    {
++        h->frames.mb_input_changed = x264_malloc( mb_w * mb_h * sizeof(int) );
++        if( !h->frames.mb_input_changed )
++            return 0;
++        for( int i = 0; i < mb_w * mb_h; i++ )
++            h->frames.mb_input_changed[i] = -1;
++    }
++    int *changed = h->frames.mb_input_changed;
++    if( info )
++    {
++        for( int i = 0; i < mb_w * mb_h; i++ )
++            if( !(info[i] & X264_MBINFO_CONSTANT) )
++                changed[i] = n;
++    }
++    else
++        h->frames.i_input_all_changed = n;
++    int held = dst->i_input_frame;
++    dst->i_input_frame = n;
++    int planar420 = i_csp == X264_CSP_I420;
++    int planar444 = i_csp == X264_CSP_I444;
++    if( held < 0 || h->frames.i_input_all_changed > held || !(planar420 || planar444) )
++        return 0;
++
++    uint8_t *pix[3];
++    int stride[3];
++    get_plane_ptr( h, src, &pix[0], &stride[0], 0, 0, 0 );
++    get_plane_ptr( h, src, &pix[1], &stride[1], 1, planar420, planar420 );
++    get_plane_ptr( h, src, &pix[2], &stride[2], 2, planar420, planar420 );
++    for( int y = 0; y < mb_h; y++ )
++    {
++        int rows = X264_MIN( 16, h->param.i_height - 16*y );
++        for( int x = 0; x < mb_w; )
++        {
++            if( changed[x + y*mb_w] <= held )
++            {
++                x++;
++                continue;
++            }
++            int x0 = x;
++            while( x < mb_w && (changed[x + y*mb_w] > held) )
++                x++;
++            int cols = X264_MIN( 16*(x - x0), h->param.i_width - 16*x0 );
++            if( cols <= 0 || rows <= 0 )
++                continue;
++            /* The SIMD copies store non-temporally to aligned addresses a run need not start at. */
++            x264_plane_copy_c( dst->plane[0] + 16*x0 + 16*y*dst->i_stride[0], dst->i_stride[0],
++                              (pixel*)pix[0] + 16*x0 + 16*y*(stride[0]/SIZEOF_PIXEL), stride[0]/SIZEOF_PIXEL, cols, rows );
++            if( planar420 )
++                x264_plane_copy_interleave_c( dst->plane[1] + 16*x0 + 8*y*dst->i_stride[1], dst->i_stride[1],
++                                             (pixel*)pix[1] + 8*x0 + 8*y*(stride[1]/SIZEOF_PIXEL), stride[1]/SIZEOF_PIXEL,
++                                             (pixel*)pix[2] + 8*x0 + 8*y*(stride[2]/SIZEOF_PIXEL), stride[2]/SIZEOF_PIXEL,
++                                             (cols+1)>>1, (rows+1)>>1 );
++            else
++                for( int p = 1; p < 3; p++ )
++                    x264_plane_copy_c( dst->plane[p] + 16*x0 + 16*y*dst->i_stride[p], dst->i_stride[p],
++                                      (pixel*)pix[p] + 16*x0 + 16*y*(stride[p]/SIZEOF_PIXEL), stride[p]/SIZEOF_PIXEL, cols, rows );
++        }
++    }
++    return 1;
++}
++
+ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
+ {
+     int i_csp = src->img.i_csp & X264_CSP_MASK;
+@@ -409,6 +483,8 @@ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
+ 
+     uint8_t *pix[3];
+     int stride[3];
++    if( frame_copy_changed( h, dst, src, i_csp ) )
++        return 0;
+     if( i_csp == X264_CSP_YUYV || i_csp == X264_CSP_UYVY )
+     {
+         int p = i_csp == X264_CSP_UYVY;
+diff --git a/common/frame.h b/common/frame.h
+index c66bcc5..18cdcad 100644
+--- a/common/frame.h
++++ b/common/frame.h
+@@ -54,6 +54,7 @@ typedef struct x264_frame
+     x264_param_t *param;
+ 
+     int     i_frame;     /* Presentation frame number */
++    int     i_input_frame; /* The input frame whose pixels the planes hold, -1 for none */
+     int     i_coded;     /* Coded frame number */
+     int64_t i_field_cnt; /* Presentation field count */
+     int     i_frame_num; /* 7.4.3 frame_num */
+diff --git a/encoder/encoder.c b/encoder/encoder.c
+index 56f9821..b88ffca 100644
+--- a/encoder/encoder.c
++++ b/encoder/encoder.c
+@@ -4338,6 +4338,7 @@ void    x264_encoder_close  ( x264_t *h )
+                    || h->stat.i_mb_count[SLICE_TYPE_B][I_PCM];
+ 
+     x264_lookahead_delete( h );
++    x264_free( h->frames.mb_input_changed );
+ 
+ #if HAVE_OPENCL
+     x264_opencl_lookahead_delete( h );

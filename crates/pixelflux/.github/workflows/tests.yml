@@ -1,0 +1,114 @@
+name: Tests
+
+# The crate's own tests, on both architectures the wheels ship for. Nothing else
+# in CI compiles the tree -- CodeQL extracts without a build and the license gate
+# resolves the crate graph only -- so this is where a build error surfaces, and
+# the aarch64 job is the only one that compiles the Tegra encoder at all, that
+# module being gated to it.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflows:
+    name: Lint the workflow files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the workflow files
+        # actionlint checks the expressions and runs shellcheck over every `run:` block, the
+        # releases Selkies' CI lints its own with, each checked against its SHA-256 (a version
+        # bump takes the hash with it)
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          SHELLCHECK_VERSION: "0.11.0"
+          SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+        run: |
+          curl -fsSL --retry 5 -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 5 -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          printf '%s  %s\n' "${ACTIONLINT_SHA256}" actionlint.tar.gz "${SHELLCHECK_SHA256}" shellcheck.tar.xz | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          tar -xJf shellcheck.tar.xz --strip-components=1 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          PATH="${PWD}:${PATH}" ./actionlint -color
+
+  cargo:
+    name: cargo test (${{ matrix.target.arch }})
+    strategy:
+      # One architecture's failure is the other's information, and the Tegra
+      # path only exists on one of them.
+      fail-fast: false
+      matrix:
+        target:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.target.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Native libraries
+        # The distro's development packages, which is what a test build needs;
+        # the source-built codec libraries of the wheels are a release concern,
+        # not one the tests share. libx264 is the exception: pixelflux reads the
+        # API patches/x264 adds, so it is built with them.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake nasm libclang-dev python3-dev libx265-dev \
+            libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev \
+            libgbm-dev libdrm-dev libwayland-dev libinput-dev libudev-dev \
+            libxkbcommon-dev libpixman-1-dev
+          sudo sh scripts/build-x264.sh /usr/local
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: clippy
+
+      - name: cargo test
+        # Tests needing a GPU, a render node, or an encoder device mark themselves
+        # ignored, which is what a runner carrying none of them runs. The crate is
+        # tested as the Rust library it is by default and with the Python bridge on.
+        run: |
+          cargo test --manifest-path pixelflux/Cargo.toml
+          cargo test --manifest-path pixelflux/Cargo.toml --features python
+
+      - name: cargo clippy
+        run: |
+          cargo clippy --manifest-path pixelflux/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path pixelflux/Cargo.toml --all-targets --features python -- -D warnings
+
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt
+
+      - name: pre-commit
+        # clippy builds the crate, which the cargo jobs do
+        env:
+          SKIP: clippy
+        run: |
+          python3 -m pip install "pre-commit==4.6.*"
+          pre-commit run --all-files --show-diff-on-failure

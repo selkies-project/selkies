@@ -1,0 +1,9 @@
+[codespell]
+# The vendored headers (libva, the codec libraries, NVIDIA's), bindgen's
+# output, build output, and lockfiles are not ours to spell-check.
+skip = ./.git,./build,./dist,./pixelflux/target,./pixelflux/va-sys/headers,./pixelflux/codec-sys/headers,./pixelflux/nvcodec-sys/headers,./pixelflux/nvcodec-sys/src/bindgen,*.lock
+# ue: the exp-Golomb ue(v) syntax element. trun: the MP4 track run box.
+# renderD: the DRM render node prefix (renderD128). datas: PipeWire's
+# spa_buffer field (buffer->datas). parm: the v4l2_streamparm member.
+# re-declares and retuned are spelled as meant.
+ignore-words-list = ue,trun,renderd,datas,parm,re-declares,retuned
