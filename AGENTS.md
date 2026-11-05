@@ -283,7 +283,11 @@ Each is documented in full where named; read that before changing the subsystem.
   `crates/selkies-rtc/src/rtp/sender.rs`, the `lost_frame` hook, which the WebRTC engine answers). A stream whose
   encoder names no reference -- a session that cannot invalidate -- gets the key frame instead, and so does a run
   of drops the encoder never predicts past, or an H.264 loss covering the frame at the encoder's
-  `frame_num` wrap, which the browsers' FFmpeg decoder cannot be predicted past.
+  `frame_num` wrap, which the browsers' FFmpeg decoder cannot be predicted past. A WebSockets stream keeps one
+  reference frame (`video_reference_frames`, the WebSockets server's `capture_settings`): every client decodes
+  against the whole buffer on every frame, and TCP loses nothing, so there x264 and VA-API's H.264 and H.265
+  answer a drop with the key frame, while the encoders that keep a buffer of their own (NVENC, libvpx, SVT-AV1,
+  VA-API's VP8, VP9, and AV1) still predict past it.
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in the server
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `crates/selkies/src/webcam` module docblock,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).
