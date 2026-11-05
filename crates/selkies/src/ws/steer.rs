@@ -366,20 +366,89 @@ impl PathProbe {
     }
 }
 
+/// What one tick of a still-screen cleanup probe reads.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkProbeTick {
+    /// Sustained delivery over the tick's measurement span, in bits per second.
+    pub measured_bps: Option<f64>,
+    /// Whether the whole measurement span is valid for the supported-rate window.
+    pub sample_in_history: bool,
+    /// The queue standing on the path, as [`SteerTick::queue_s`].
+    pub queue_s: Option<f64>,
+    /// Whether the cleanup itself ran at the rate allowed for this tick.
+    pub filled: bool,
+    /// The tick's monotonic time.
+    pub now: f64,
+}
+
 /// The rate (kbps) a display's still-screen cleanup may run at over its path, which pixelflux
 /// is told (`update_link_rate`): `SHARE` of the least the path showed over its last `TICKS`
 /// congestion ticks that measured it, `ceiling` over a path too fast to tell, and 0 before a
 /// measurement or while one of no room stands among them. Where pacers drain the display,
 /// the rate they take a cleanup at bounds it.
-#[derive(Clone, Debug, Default)]
+///
+/// Once congestion has cut the display's target, [`LinkAllowance::probe_tick`] can instead
+/// raise that supported rate as [`PathProbe`] does: a filled, queue-free tick multiplies it by
+/// [`CongestionSteer::PROBE_STEP`] a second, never past the configured ceiling. A queue, or a
+/// new lower supported reading, snaps it back to the window's minimum. A queue immediately
+/// after a probe starts a quiet period, which doubles while successive probes end in queues.
+#[derive(Clone, Debug)]
 pub struct LinkAllowance {
     rates: std::collections::VecDeque<f64>,
     pub kbps: Option<i64>,
+    probe_at: Option<f64>,
+    probed: bool,
+    quiet_until: f64,
+    quiet_s: f64,
+}
+
+impl Default for LinkAllowance {
+    fn default() -> Self {
+        LinkAllowance {
+            rates: std::collections::VecDeque::new(),
+            kbps: None,
+            probe_at: None,
+            probed: false,
+            quiet_until: 0.0,
+            quiet_s: PathProbe::QUIET_S,
+        }
+    }
 }
 
 impl LinkAllowance {
     pub const SHARE: f64 = 0.9;
     pub const TICKS: usize = 20;
+
+    fn path_bps(&self, pace: Option<f64>) -> Option<f64> {
+        let mut path = self.rates.iter().copied().reduce(f64::min);
+        if let (Some(p), Some(pace)) = (path, pace)
+            && p > 0.0
+        {
+            path = Some(p.min(pace));
+        }
+        path
+    }
+
+    fn rate_kbps(path: Option<f64>, ceiling: f64) -> i64 {
+        match path {
+            None => 0,
+            Some(p) if p <= 0.0 => 0,
+            Some(p) if p.is_infinite() => ceiling as i64,
+            Some(p) => ((p * Self::SHARE / 1000.0).round() as i64).max(1),
+        }
+    }
+
+    fn supported_kbps(&self, ceiling: f64, pace: Option<f64>) -> i64 {
+        Self::rate_kbps(self.path_bps(pace), ceiling)
+    }
+
+    fn publish(&mut self, kbps: i64) -> Option<i64> {
+        if Some(kbps) == self.kbps {
+            return None;
+        }
+        self.kbps = Some(kbps);
+        Some(kbps)
+    }
 
     /// Fold in a tick's reading of the path (`None` where the tick measured none), within
     /// `pace` where pacers drain it; the allowance where it changed, for the encoder.
@@ -390,23 +459,72 @@ impl LinkAllowance {
                 self.rates.pop_front();
             }
         }
-        let mut path = self.rates.iter().copied().reduce(f64::min);
-        if let (Some(p), Some(pace)) = (path, pace)
-            && p > 0.0
-        {
-            path = Some(p.min(pace));
-        }
-        let kbps = match path {
-            None => 0,
-            Some(p) if p <= 0.0 => 0,
-            Some(p) if p.is_infinite() => ceiling as i64,
-            Some(p) => ((p * Self::SHARE / 1000.0).round() as i64).max(1),
+        let kbps = self.supported_kbps(ceiling, pace);
+        self.publish(kbps)
+    }
+
+    /// Probe the cleanup's allowance while congestion holds the display under its ceiling.
+    ///
+    /// `tick.measured_bps` is sustained delivery over the tick's measurement span, never a
+    /// frame's bytes divided by its round trip. Add it to the supported-rate window only when
+    /// `tick.sample_in_history` says the whole span is a valid path measurement; an app-limited
+    /// or otherwise under-filled span with that flag false cannot lower the allowance. Only a
+    /// measured zero or negative `tick.queue_s` is clean, and an unknown queue never grows the
+    /// probe. `tick.filled` means the cleanup itself ran at the rate allowed for this tick, not
+    /// that the producer emitted frames. `ceiling` is the ordinary configured video rate in
+    /// kbps, and `pace` the optional pacer bound in bits per second. The allowance is returned
+    /// where it changed.
+    pub fn probe_tick(
+        &mut self,
+        tick: LinkProbeTick,
+        ceiling: f64,
+        pace: Option<f64>,
+    ) -> Option<i64> {
+        let LinkProbeTick {
+            measured_bps,
+            sample_in_history,
+            queue_s,
+            filled,
+            now,
+        } = tick;
+        let dt = match self.probe_at {
+            None => 1.0,
+            Some(at) => (now - at).clamp(0.0, 2.0),
         };
-        if Some(kbps) == self.kbps {
-            return None;
+        self.probe_at = Some(now);
+        let previous = self.supported_kbps(ceiling, pace);
+        if sample_in_history && let Some(bps) = measured_bps {
+            self.rates.push_back(bps);
+            while self.rates.len() > Self::TICKS {
+                self.rates.pop_front();
+            }
         }
-        self.kbps = Some(kbps);
-        Some(kbps)
+        let supported = self.supported_kbps(ceiling, pace);
+        let lower_support = supported < previous;
+        let queued = queue_s.is_some_and(|q| q > 0.0);
+        let was_probed = std::mem::take(&mut self.probed);
+        let current = self.kbps.unwrap_or(0);
+        let mut next = if current == 0 { supported } else { current };
+        if queued || lower_support {
+            next = supported;
+            if queued && was_probed {
+                self.quiet_until = now + self.quiet_s;
+                self.quiet_s = (self.quiet_s * 2.0).min(PathProbe::QUIET_MAX_S);
+            }
+        } else if queue_s.is_some_and(|q| q <= 0.0) && filled && now >= self.quiet_until && next > 0
+        {
+            next = (next as f64 * CongestionSteer::PROBE_STEP.powf(dt)).round() as i64;
+            if next < ceiling as i64 {
+                self.probed = true;
+            } else {
+                self.quiet_s = PathProbe::QUIET_S;
+            }
+        }
+        next = next.min(ceiling as i64);
+        if let Some(pace) = pace {
+            next = next.min(Self::rate_kbps(Some(pace), ceiling));
+        }
+        self.publish(next.max(0))
     }
 }
 
@@ -1238,6 +1356,193 @@ pub(crate) mod tests {
         assert_eq!(
             paced.note(Some(16_000_000.0), 12000.0, Some(1_000_000.0)),
             Some(900)
+        );
+    }
+
+    fn cleanup_tick(
+        measured_bps: Option<f64>,
+        sample_in_history: bool,
+        queue_s: Option<f64>,
+        filled: bool,
+        now: f64,
+    ) -> LinkProbeTick {
+        LinkProbeTick {
+            measured_bps,
+            sample_in_history,
+            queue_s,
+            filled,
+            now,
+        }
+    }
+
+    #[test]
+    fn the_cleanup_probe_grows_gradually_only_on_filled_clean_ticks() {
+        let mut allowance = LinkAllowance::default();
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), true, 0.0),
+                12000.0,
+                None,
+            ),
+            Some(0),
+            "no observation is no allowance, not an unbounded one"
+        );
+        allowance.note(Some(1_000_000.0), 12000.0, None);
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), false, 1.0),
+                12000.0,
+                None,
+            ),
+            None,
+            "an unfilled tick tests nothing"
+        );
+        assert_eq!(
+            allowance.probe_tick(cleanup_tick(None, false, None, true, 2.0), 12000.0, None,),
+            None,
+            "an unknown queue tests nothing"
+        );
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), true, 3.0),
+                12000.0,
+                None,
+            ),
+            Some(1170),
+            "the first one-second rise is 1.3, not a jump to the ceiling"
+        );
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(-0.1), true, 4.0),
+                12000.0,
+                None,
+            ),
+            Some(1521),
+            "a measured negative queue is queue-free too"
+        );
+    }
+
+    #[test]
+    fn the_cleanup_probe_snaps_to_the_known_minimum_and_quiets_repeated_probes() {
+        let mut allowance = LinkAllowance::default();
+        allowance.note(Some(1_000_000.0), 12000.0, None);
+        for _ in 0..5 {
+            allowance.note(Some(4_000_000.0), 12000.0, None);
+        }
+        allowance.probe_tick(
+            cleanup_tick(None, false, Some(0.0), true, 0.0),
+            12000.0,
+            None,
+        );
+        assert_eq!(allowance.kbps, Some(1170));
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(Some(8_000_000.0), true, Some(0.2), true, 1.0),
+                12000.0,
+                None,
+            ),
+            Some(900),
+            "noisy high readings cannot refute the measured minimum"
+        );
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), true, 15.0),
+                12000.0,
+                None,
+            ),
+            None,
+            "a filled clean tick does not regrow during the quiet period"
+        );
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), true, 16.0),
+                12000.0,
+                None,
+            ),
+            Some(1170)
+        );
+        allowance.probe_tick(
+            cleanup_tick(None, false, Some(0.2), true, 17.0),
+            12000.0,
+            None,
+        );
+        assert_eq!(allowance.kbps, Some(900));
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), true, 46.0),
+                12000.0,
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), true, 47.0),
+                12000.0,
+                None,
+            ),
+            Some(1170),
+            "a second queuing probe doubles the quiet period"
+        );
+    }
+
+    #[test]
+    fn only_sound_history_samples_refute_a_cleanup_probe() {
+        let mut allowance = LinkAllowance::default();
+        allowance.note(Some(1_000_000.0), 12000.0, None);
+        allowance.probe_tick(
+            cleanup_tick(None, false, Some(0.0), true, 0.0),
+            12000.0,
+            None,
+        );
+        assert_eq!(allowance.kbps, Some(1170));
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(Some(100_000.0), false, Some(0.0), false, 1.0),
+                12000.0,
+                Some(16_000_000.0),
+            ),
+            None,
+            "an under-delivered clean paced tick stays out of the rate window"
+        );
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(Some(100_000.0), true, Some(0.0), false, 2.0),
+                12000.0,
+                Some(16_000_000.0),
+            ),
+            Some(90),
+            "a new sound lower minimum backs the probe off without waiting for a queue"
+        );
+    }
+
+    #[test]
+    fn the_cleanup_probe_stops_at_the_video_ceiling() {
+        let mut allowance = LinkAllowance::default();
+        allowance.note(Some(10_000_000.0), 12000.0, None);
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), true, 0.0),
+                12000.0,
+                None,
+            ),
+            Some(11700)
+        );
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), true, 1.0),
+                12000.0,
+                None,
+            ),
+            Some(12000)
+        );
+        assert_eq!(
+            allowance.probe_tick(
+                cleanup_tick(None, false, Some(0.0), true, 2.0),
+                12000.0,
+                None,
+            ),
+            None
         );
     }
 
