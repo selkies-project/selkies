@@ -271,12 +271,12 @@ change has held still for four times that, and the same cleanup for a region tha
 only a little. Within a region that keeps changing, a block ledger (`ledger.rs`) refines the blocks that
 held still for the trigger and are not clean through the encoder's per-block quantizer, six steps
 finer than the paint-over quantizer as the encoder needs to come to what its own cleanup
-reaches (six for x264, three for NVENC, none for VP8), a turn of them a frame sized to what the rate control has
+reaches (six for x264 and x265, three for NVENC, none for VP8), a turn of them a frame sized to what the rate control has
 room for, a block counting clean once its frame came out at that quantizer: a video playing in
 one window no longer holds the text around it at motion quality. x264's sessions take it as
 macroblock quantizer offsets, under adaptive quantization at a strength that moves no quantizer
 itself, NVENC's H.264, HEVC, and AV1 through the QP delta map under the rate control, and libvpx's
-VP8 through its region-of-interest map, on X11 (XShm, the shared framebuffer, DRI3) and Wayland; a
+VP8 through its region-of-interest map, x265 through its per-block quantizer offsets, on X11 (XShm, the shared framebuffer, DRI3) and Wayland; a
 constant rate whose frames already run over it refines nothing. NvFBC, whose driver says only
 that a frame is new, VP9, which skips a block whose source has not changed whatever its
 quantizer, and the other encoders keep the region-wide cleanup alone. Under a constant quality the cleanup moves the session's quality to the

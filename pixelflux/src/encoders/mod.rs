@@ -1359,6 +1359,7 @@ impl FrameEncoder {
         match self {
             FrameEncoder::Nvenc(enc) => enc.refines().then_some(nvenc::REFINE_FINER),
             FrameEncoder::Vpx(enc) => (enc.codec() == Codec::Vp8).then_some(vpx::REFINE_FINER),
+            FrameEncoder::Hevc(enc) => enc.refines().then_some(hevc::REFINE_FINER),
             _ => None,
         }
     }
@@ -1369,6 +1370,7 @@ impl FrameEncoder {
         match self {
             FrameEncoder::Nvenc(enc) => enc.refine_blocks(refinement),
             FrameEncoder::Vpx(enc) => enc.refine_blocks(refinement),
+            FrameEncoder::Hevc(enc) => enc.refine_blocks(refinement),
             _ => {}
         }
     }
