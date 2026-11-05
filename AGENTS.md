@@ -117,9 +117,8 @@ level ladders, and the bitstream reads that label frames. A session advertises i
 shared ladder at the current geometry (`codec.rs`), the lowest a decoder is asked to accept, so a hardware
 decoder that gates on the level — older Apple and Intel parts refuse a level above their ceiling even for a
 picture they could hold — takes the stream; NVENC re-declares it with a forced IDR on each in-place resize, and
-holds AV1 alone at the resize headroom's level, which NVENC validates its session against at init. JPEG and
-H.264 may stripe (`encoders/software.rs`);
-every other codec streams whole frames. Every session that can name what a frame predicts from
+holds AV1 alone at the resize headroom's level, which NVENC validates its session against at init. JPEG
+stripes (`encoders/software.rs`); every video codec streams whole frames. Every session that can name what a frame predicts from
 does (`encoders/reference.rs`, `StripeFrame.reference_frame_id`), and `invalidate_reference`
 leaves a frame a consumer lost out of the predictions so recovery costs no keyframe: libx264 and libvpx
 always (VP9 in libvpx's flexible reference mode, VP8 across its three buffers on a schedule `reference.rs`
@@ -190,9 +189,9 @@ without hardware. The software HEVC (x265 with the `gpl` feature, else kvazaar; 
 build time from the headers of the copies that are linked (`codec-sys`), so which library serves a codec is the
 build's (`encoders::software_encoder`, exported as `pixelflux.SOFTWARE_ENCODERS`). Software H.264 is
 resolved at build time, never by a setting: the default `gpl` feature makes libx264 the encoder behind every
-CPU H.264 session (striped and full-frame), and a build without it (`PIXELFLUX_ENABLE_GPL=0` →
-`--no-default-features --features openh264`) puts Cisco OpenH264 behind the same striped path
-(`encoders/oh264.rs`, one instance per stripe) with the same wire framing; selkies reads the exported names to
+CPU H.264 session, and a build without it (`PIXELFLUX_ENABLE_GPL=0` →
+`--no-default-features --features openh264`) puts Cisco OpenH264 behind the same CPU path
+(`encoders/oh264.rs`) with the same wire framing; selkies reads the exported names to
 name the encoder and to keep a WebRTC offer on OpenH264 at the 4:2:0 profile. Every session, on every backend,
 converts with the BT.709 matrix — the sRGB
 desktop's own primaries and transfer — at limited range for 4:2:0 and full range for the software
@@ -235,7 +234,7 @@ ultrafast, VP8 speed 16, VP9 speed 8 with screen tuning, SVT-AV1 preset 11 in it
 predicting from an anchor alone at preset 10, since preset 11 leaves some blocks the picture changed since the anchor
 as they stood in it (`ANCHOR_PRESET`), x265 ultrafast with wavefront threads; each full-frame software session, and the conversion ahead of it, on the
 threads `encoders::session::encode_threads` names, one less than the cores up to eight, four for H.264's slices,
-or one alone where `cpu_encode_threading` is off, which also codes the striped encoders' stripes one after another;
+or one alone where `cpu_encode_threading` is off, which also codes JPEG's stripes one after another;
 a Turbo frame keeps its hash beside the encode either way), NVENC at preset P3 with two-pass quarter-resolution rate control
 (`gpu_bench_tuning` measures the alternatives), and VA-API at the fastest quality level the driver takes, on the low-power entry point where the driver lists one, except H.264 on Skylake and Broxton, whose low-power encoder codes a picture as one slice whatever it is handed and reports nothing of it (told by the kernel's PCI id; the full entry point first, the low-power one in a single slice where the driver build carries no other); the VP8, VP9, and AV1 quantizer tables in `codec.rs`,
 and the hardware ones, were measured at those settings and must be re-measured whenever they change
@@ -272,7 +271,7 @@ the PEP 440 way (`2.1.0-rc.1` is `2.1.0rc1` to pip), and the release workflow st
 and the lock, so a build ahead of a release carries the series version and a release the tag's.
 
 A still screen is cleaned up by one policy (`pipeline::cleanup_due`, run per frame by
-`decide_hw_fullframe` and per stripe by `encode_cpu`) that reads what changed from the content —
+`decide_hw_fullframe` and per region by `encode_cpu`) that reads what changed from the content —
 compositor damage, the X server's report, a content hash (NvFBC's on the GPU) — never from what was sent,
 so Turbo (`video_streaming_mode`) sees the screen go still like any other mode: a refresh at the
 paint-over quantizer once the region holds still for the trigger, a key frame at it once a large
@@ -292,11 +291,11 @@ that a frame is new, VP9, which skips a block whose source has not changed whate
 quantizer, VA-API's HEVC, whose regions Intel's iHD codes into a worse picture, SVT-AV1, whose
 mode decision skips a still block whatever its segment's quantizer, and the
 other encoders keep the region-wide cleanup alone. Under a constant quality the cleanup moves the session's quality to the
-paint-over one until the region moves again (`pipeline::decide_constant_quality`, and the stripe's
+paint-over one until the region moves again (`pipeline::decide_constant_quality`, and x264's
 rate factor in `encode_cpu`), as main's paint-over did, so every encoder codes the cleanup key
 frame the way it codes one at that quality, with its own intra offset. Under a constant rate,
 a session that holds a quantizer and whose rate control reports the quantizer and the bytes of
-its frames (NVENC, and libx264 per stripe) is cleaned up through that rate
+its frames (NVENC, and libx264) is cleaned up through that rate
 control: the frames keep flowing, each within its budget, until it codes the region at the
 paint-over quantizer or finer in a small frame (`pipeline::convergence`), and no key frame is
 sent; only where NVENC's rate control stalls short of it (a low rate for the resolution) is the
@@ -328,8 +327,7 @@ the one before for `EMPTY_S` at a quantizer as coarse as the floor's, and any of
 `REFINE_S`. That cleanup then counts as settled, and only more than a small change arms another, so
 a caret on a clean screen costs its own frames. A session that reports no bytes (Tegra, a stateful
 V4L2 device) gets a refresh and its burst at the rate control's own quality. A constant-rate x264
-stripe
-is given a buffer of `CLEANUP_VBV_FRAMES` frames while it is cleaned up, since in a frame and a half
+session is given a buffer of `CLEANUP_VBV_FRAMES` frames while it is cleaned up, since in a frame and a half
 its row-level control coarsens the rows it names a fine quantizer for, and its cleanup ends once its
 frames have been slice headers alone for `EMPTY_S`: x264 keeps its quantizer on a screen that does
 not change. On Intel's iHD the VA-API rate control itself is bounded per codec

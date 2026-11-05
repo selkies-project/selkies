@@ -324,11 +324,10 @@ pub(crate) fn create_dmabuf_from_bo(bo: &BufferObject<()>) -> Dmabuf {
 /// The full set of capture + encode parameters a consumer hands the backend.
 ///
 /// A single value configures a capture session end to end: which display and backend, capture
-/// geometry and frame rate, the codec (striped JPEG, striped or full-frame H.264, or a
-/// full-frame video codec), the video quality and rate-control knobs, cursor and watermark
-/// options, the encode-device selection, and the optional recording socket. It derives
-/// `PartialEq` so the backend can detect when a live setting actually changed, and `Clone` so
-/// each capture pipeline can own its own copy. `Default` is the library's own baseline; the
+/// geometry and frame rate, the codec (striped JPEG or a full-frame video codec), the video
+/// quality and rate-control knobs, cursor and watermark options, the encode-device selection,
+/// and the optional recording socket. It derives `PartialEq` so the backend can detect when a
+/// live setting actually changed, and `Clone` so each capture pipeline can own its own copy. `Default` is the library's own baseline; the
 /// Python `CaptureSettings` class carries the defaults selkies sessions start from.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CaptureSettings {
@@ -369,7 +368,6 @@ pub struct CaptureSettings {
     /// Bits per sample asked of the encoder, 8 or 10; a session that cannot carry 10 stays at
     /// 8 (`encoders::session_bit_depth` says which it runs).
     pub video_bit_depth: i32,
-    pub video_fullframe: bool,
     pub video_streaming_mode: bool,
     pub capture_cursor: bool,
     /// Longest cursor edge the out-of-band cursor callback delivers; larger images are
@@ -380,8 +378,8 @@ pub struct CaptureSettings {
     pub encode_node_index: i32,
     pub use_cpu: bool,
     /// Whether a software session threads within a frame (`session::encode_threads`); off,
-    /// each software encoder codes and converts on one thread, the striped ones their stripes
-    /// one after another.
+    /// each software encoder codes and converts on one thread, and JPEG its stripes one after
+    /// another.
     pub cpu_encode_threading: bool,
     pub debug_logging: bool,
     pub auto_adjust_screen_capture_size: bool,
@@ -506,7 +504,6 @@ impl Default for CaptureSettings {
             video_paintover_burst_frames: 5,
             video_fullcolor: false,
             video_bit_depth: 8,
-            video_fullframe: false,
             video_streaming_mode: false,
             capture_cursor: false,
             cursor_size_cap: 128,
@@ -1376,7 +1373,7 @@ trait WlPayload: Send + 'static {
         force_idr: bool,
     ) -> Result<Vec<u8>, String>;
 
-    /// The rows, for the striped software path; `None` for a GPU buffer, which only a
+    /// The rows, for the CPU path; `None` for a GPU buffer, which only a
     /// hardware session reads.
     fn rows(&self) -> Option<&[u8]>;
 }
@@ -1431,8 +1428,8 @@ impl WlPayload for Dmabuf {
 
 /// Build the readback-mode frame encoder on the thread that will own and drive it: the shared
 /// ladder with host frames (`rgba` for a GLES readback, BGRA otherwise), with the GPU rungs
-/// skipped when `try_gpu` is off (the recovery ladder's demotion). `None` is the striped
-/// software path, where `encode_cpu` builds its own per-stripe state. A compatible NVENC
+/// skipped when `try_gpu` is off (the recovery ladder's demotion). `None` is the CPU path, where
+/// `encode_cpu` builds its own per-region state. A compatible NVENC
 /// session handed over from the previous encode thread is reconfigured in place rather than
 /// rebuilt, which would stall the stream.
 fn build_readback_encoders(
@@ -1471,8 +1468,8 @@ fn build_readback_encoders(
 ///    buffer in place, or the packed rows as they are (RGBA vs BGRA source chosen by the
 ///    renderer) — NVENC uploads and converts in hardware, a VA-API session uploads and converts
 ///    on the GPU, a software session converts on its encode threads; otherwise `encode_cpu`
-///    runs the striped software path with compositor damage — JPEG, or H.264 through the
-///    build's software encoder, striped or full-frame. The software H.264 path keeps an
+///    runs the CPU path with compositor damage — striped JPEG, or H.264 through the build's
+///    software encoder. The software H.264 path keeps an
 ///    infinite GOP, forcing an IDR only on an explicit request or the configured interval, and
 ///    an explicit request also forces a full JPEG resend for joiners.
 /// 3. **Recycle then deliver**: the capture buffer is recycled BEFORE delivery so a slow consumer
@@ -1508,7 +1505,7 @@ fn wayland_encode_loop<B: WlPayload>(
                     encoders::software_library(settings.codec)
                 );
             }
-            let n_stripes = wayland_stripe_count(&settings, video_encoder.is_some());
+            let n_stripes = encoders::software::stripe_count(settings.height, settings.codec);
             cfg.stats
                 .n_stripes
                 .store(n_stripes as u32, Ordering::Relaxed);
@@ -1523,8 +1520,6 @@ fn wayland_encode_loop<B: WlPayload>(
     let width = settings.width;
     let height = settings.height;
     let mut stripes: Vec<StripeState> = Vec::with_capacity(MAX_STRIPE_CAPACITY);
-    // Smoothed number of stripes carrying the encode budget (see stripe_rate_control).
-    let mut stripes_carrying: f32 = 1.0;
     let mut hw_state = StripeState::default();
     // Mid-stream recovery state for the hardware session.
     let mut hw_error_streak: u32 = 0;
@@ -1749,7 +1744,10 @@ fn wayland_encode_loop<B: WlPayload>(
                                 }
                                 hw_rebuilt = try_gpu && video_encoder.is_some();
                                 cfg.controls.force_idr.store(true, Ordering::Relaxed);
-                                let n = wayland_stripe_count(&settings, video_encoder.is_some());
+                                let n = encoders::software::stripe_count(
+                                    settings.height,
+                                    settings.codec,
+                                );
                                 cfg.stats.n_stripes.store(n as u32, Ordering::Relaxed);
                                 *cfg.stats.desc.lock().unwrap() = encoder_desc(
                                     &settings,
@@ -1776,7 +1774,6 @@ fn wayland_encode_loop<B: WlPayload>(
             let encode_start_ns = wayland::host::now_ns();
             out = encoders::software::encode_cpu(
                 &mut stripes,
-                &mut stripes_carrying,
                 rows,
                 width,
                 height,
@@ -1827,8 +1824,8 @@ fn wayland_encode_loop<B: WlPayload>(
     video_encoder
 }
 
-/// Compose the encoder half of the 1 s debug log line (backend, colorspace, frame mode, rate
-/// control) for whichever thread owns the encoders.
+/// Compose the encoder half of the 1 s debug log line (backend, colorspace, rate control) for
+/// whichever thread owns the encoders.
 fn encoder_desc(
     settings: &CaptureSettings,
     video_encoder: Option<&FrameEncoder>,
@@ -1850,35 +1847,16 @@ fn encoder_desc(
     } else {
         "LR"
     };
-    let frame_str = if video_encoder.is_some() || settings.video_fullframe {
-        "FF"
-    } else {
-        "Striped"
-    };
     format!(
-        "{} ({}) {} {} {} {}",
+        "{} ({}) {} {} {}",
         settings.codec.display(),
         backend,
         cs_str,
         range_str,
-        frame_str,
         encoders::rate_desc(
             settings,
             video_encoder.and_then(FrameEncoder::fixed_rate_control)
         )
-    )
-}
-
-/// How many horizontal stripes a frame is split into, for the settings line and the stats.
-///
-/// A full-frame session (`fullframe_encoder`: a HW encoder, or a forced `video_fullframe`) is
-/// one contiguous H.264 stream and so a single stripe. Everything else asks the encoder's own
-/// rule, so what is reported is what is encoded.
-fn wayland_stripe_count(settings: &CaptureSettings, fullframe_encoder: bool) -> usize {
-    crate::encoders::software::stripe_count(
-        settings.height,
-        settings.codec,
-        fullframe_encoder || settings.video_fullframe,
     )
 }
 
@@ -1906,8 +1884,7 @@ pub(crate) fn log_stream_settings(
 }
 
 /// The "Stream settings active" line for a backend named outright, `(name, hardware)`, where
-/// the session is not a `FrameEncoder` (NvFBC's own NVENC session); `None` is the striped
-/// software path, `fixed_rate` is the backend's one rate control where it has one
+/// the session is not a `FrameEncoder` (NvFBC's own NVENC session); `None` is the CPU path, `fixed_rate` is the backend's one rate control where it has one
 /// (`FrameEncoder::fixed_rate_control`), and `holds` says whether the session holds a cleanup
 /// at the quantizer asked for (`FrameEncoder::holds_quantizer`).
 #[allow(clippy::too_many_arguments)]
@@ -1966,12 +1943,6 @@ fn stream_settings_line(
             settings.codec.display(),
             encoder_type
         ));
-
-        if backend.is_some() || settings.video_fullframe {
-            log_msg.push_str(" FullFrame");
-        } else {
-            log_msg.push_str(" Striped");
-        }
 
         if settings.video_streaming_mode {
             log_msg.push_str(" Streaming");
@@ -6088,7 +6059,7 @@ fn gpu_exposed() -> bool {
 ///    even, because 4:2:0 needs even width and height.
 /// 5. **Encode-path choice + render loop**: only a same-GPU GLES session encodes zero-copy on this
 ///    calloop thread, because the dmabuf and its EGL context are calloop-affine; every readback
-///    flavor (striped software H.264/JPEG, Pixman, or a cross-GPU hardware encoder) builds its
+///    flavor (the CPU path's H.264 and JPEG, Pixman, or a cross-GPU hardware encoder) builds its
 ///    encoders on that display's dedicated encode thread instead. A shared timer (paced at the
 ///    fastest active capture) renders each capturing output — its windows, popups, and layers made
 ///    output-local, the cursor only on the pointer's output — applies the shared paint-over /

@@ -294,8 +294,8 @@ fn pace_idr_requests(shared: &RecShared, idr: &IdrRequester, interval_us: u64) {
     }
 }
 
-/// Enqueue one delivered frame for muxing. Only a single full-frame H.264 stripe is
-/// recordable; JPEG or striped output is counted and skipped so the surfaces can report a
+/// Enqueue one delivered frame for muxing. Only H.264 is recordable; JPEG or another codec is
+/// counted and skipped so the surfaces can report a
 /// clear "nothing recordable" error instead of writing a corrupt file.
 fn offer_frame(shared: &RecShared, tx: &Sender<Tap>, stripes: &[EncodedStripe]) {
     if stripes.is_empty() {
@@ -416,7 +416,7 @@ fn writer_thread(
     if final_stats.samples == 0 {
         shared.set_error(
             "no recordable H.264 frames received (the session must produce a single \
-             full-frame H.264 stream; JPEG and striped modes cannot be recorded)"
+             full-frame H.264 stream; JPEG and the other codecs cannot be recorded)"
                 .to_string(),
         );
         let _ = std::fs::remove_file(&path);
@@ -577,7 +577,6 @@ fn own_capture_settings(opts: &RecordOptions) -> Result<CaptureSettings, String>
             ..Default::default()
         },
     };
-    s.video_fullframe = true;
     s.recording_socket = String::new();
     if opts.fps > 0.0 {
         s.target_fps = opts.fps;

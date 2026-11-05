@@ -145,7 +145,6 @@ pub(crate) fn extract_settings(settings: &Bound<'_, PyAny>) -> PyResult<CaptureS
             .ok()
             .and_then(|v| v.extract::<i32>().ok())
             .unwrap_or(8),
-        video_fullframe: settings.getattr("video_fullframe")?.extract()?,
         video_streaming_mode: settings.getattr("video_streaming_mode")?.extract()?,
         capture_cursor: settings.getattr("capture_cursor")?.extract()?,
         cursor_size_cap: settings
@@ -388,7 +387,7 @@ impl Drop for PyCallable {
     }
 }
 
-/// The Python frame callback: `cb(frame: StripeFrame)` per stripe, under the GIL.
+/// The Python frame callback: `cb(frame: StripeFrame)` per frame or JPEG stripe, under the GIL.
 struct PyFrameSink(PyCallable);
 
 impl PyFrameSink {
@@ -989,8 +988,8 @@ struct PyCaptureSettings {
     damage_block_threshold: i32,
     #[pyo3(get, set)]
     damage_block_duration: i32,
-    /// The codec: "jpeg" (striped stills), "h264" (striped, or full-frame with
-    /// `video_fullframe`), or a full-frame video codec "h265", "vp8", "vp9", "av1".
+    /// The codec: "jpeg" (striped stills), or a full-frame video codec "h264", "h265", "vp8",
+    /// "vp9", "av1".
     #[pyo3(get, set)]
     codec: String,
     #[pyo3(get, set)]
@@ -1006,10 +1005,6 @@ struct PyCaptureSettings {
     /// engine does not, and 8 elsewhere.
     #[pyo3(get, set)]
     video_bit_depth: i32,
-    /// H.264 only: encode whole frames instead of stripes. Other video codecs are always
-    /// full-frame, and so is a hardware H.264 session.
-    #[pyo3(get, set)]
-    video_fullframe: bool,
     #[pyo3(get, set)]
     video_streaming_mode: bool,
     #[pyo3(get, set)]
@@ -1023,9 +1018,9 @@ struct PyCaptureSettings {
     #[pyo3(get, set)]
     use_cpu: bool,
     /// Software encoders thread within a frame: x264's and OpenH264's slices, x265's and
-    /// kvazaar's wavefront, libvpx's partitions and rows, SVT-AV1's processors, the striped
-    /// encoders' stripes, and the color conversion ahead of each. Off, every software session
-    /// codes on one thread, the stripes one after another.
+    /// kvazaar's wavefront, libvpx's partitions and rows, SVT-AV1's processors, JPEG's stripes,
+    /// and the color conversion ahead of each. Off, every software session codes on one thread,
+    /// the stripes one after another.
     #[pyo3(get, set)]
     cpu_encode_threading: bool,
     #[pyo3(get, set)]
@@ -1044,8 +1039,8 @@ struct PyCaptureSettings {
     video_max_qp: i32,
     #[pyo3(get, set)]
     auto_adjust_screen_capture_size: bool,
-    /// Emit the bare encoded payload without the wire header; with H.264 and `video_fullframe`
-    /// each frame is one Annex-B access unit and its metadata is on the `StripeFrame` attributes.
+    /// Emit the bare encoded payload without the wire header; with H.264 each frame is one
+    /// Annex-B access unit and its metadata is on the `StripeFrame` attributes.
     #[pyo3(get, set)]
     omit_stripe_headers: bool,
     /// The consumer acknowledges the frames every client holds (`acknowledge_reference`): an
@@ -1111,7 +1106,6 @@ impl PyCaptureSettings {
             video_paintover_burst_frames: 5,
             video_fullcolor: false,
             video_bit_depth: 8,
-            video_fullframe: false,
             video_streaming_mode: false,
             capture_cursor: false,
             watermark_path: py.None(),

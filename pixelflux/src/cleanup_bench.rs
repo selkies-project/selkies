@@ -10,7 +10,7 @@
 //! text and then holds still, optionally with a caret blinking in one place. Measurements to
 //! quote rather than assert; configured through `PF_BENCH_*`:
 //!
-//! `CODEC` (h264, h265, vp8, vp9, av1, jpeg), `CPU` (1 forces software), `FULLFRAME` (1),
+//! `CODEC` (h264, h265, vp8, vp9, av1, jpeg), `CPU` (1 forces software),
 //! `FULLCOLOR` (1 for 4:4:4), `DEPTH` (bits per sample),
 //! `TURBO` (1), `CBR` (1), `KBPS`, `CRF`, `PAINT_CRF`, `PAINT` (use_paint_over_quality, 1),
 //! `KEYFRAME_S` (the scheduled key-frame interval), `W`, `H`, `FPS`, `MOTION` and `STILL` (frames), `STEP` (rows the scroll moves a frame, 4), `CARET`
@@ -362,7 +362,6 @@ fn cleanup_bench() {
         target_fps: fps,
         codec,
         use_cpu: env("CPU", 0) == 1,
-        video_fullframe: env("FULLFRAME", 1) == 1,
         video_streaming_mode: env("TURBO", 1) == 1,
         video_cbr_mode: env("CBR", 1) == 1,
         video_bitrate_kbps: env("KBPS", 8000),
@@ -411,13 +410,8 @@ fn cleanup_bench() {
     let mut p = X11Pipeline::new(settings.clone());
     let codec = p.codec();
     println!(
-        "bench {} {} {}x{} turbo={} cbr={} kbps={} crf={} paint={}/{} caret={} prestill={prestill} jump={jump} encoder={}",
+        "bench {} {}x{} turbo={} cbr={} kbps={} crf={} paint={}/{} caret={} prestill={prestill} jump={jump} encoder={}",
         codec.display(),
-        if settings.video_fullframe {
-            "full"
-        } else {
-            "striped"
-        },
         w,
         h,
         settings.video_streaming_mode,
@@ -693,7 +687,7 @@ fn cleanup_bench() {
 }
 
 /// One session of the backend the settings select, driven directly: `x264` for the software
-/// H.264 session a full-frame capture runs (one stripe), else the ladder's full-frame encoder.
+/// H.264 session the CPU path runs, else the ladder's full-frame encoder.
 enum Session {
     #[cfg(feature = "gpl")]
     X264(
@@ -771,7 +765,7 @@ impl Session {
                 let mut out = Vec::new();
                 let cw = planes.chroma_width() as i32;
                 if !enc.encode_with_headers(
-                    &planes.y, &planes.u, &planes.v, w as i32, cw, cw, n as u16, 0, key, false,
+                    &planes.y, &planes.u, &planes.v, w as i32, cw, cw, n as u16, key, false,
                     &mut out,
                 ) {
                     return (Vec::new(), false);
@@ -812,7 +806,6 @@ fn cleanup_hold_experiment() {
         target_fps: fps,
         codec,
         use_cpu: env("CPU", 0) == 1,
-        video_fullframe: true,
         video_cbr_mode: env("CBR", 1) == 1,
         video_bitrate_kbps: env("KBPS", 8000),
         video_crf: env("CRF", 25),
@@ -920,7 +913,6 @@ fn still_blocks_beside_motion_are_refined() {
         target_fps: 60.0,
         codec: Codec::H264,
         use_cpu: true,
-        video_fullframe: true,
         video_streaming_mode: false,
         video_cbr_mode: false,
         video_crf: 35,

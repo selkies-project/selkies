@@ -6,9 +6,8 @@
 
 //! Software H.264 encoder built on Cisco's OpenH264: the software H.264 encoder of a
 //! build without the `gpl` feature, where it stands in for libx264 behind the same
-//! striped software path (`encode_cpu`) — one instance per stripe, or one full-frame
-//! instance when the session is full-frame — and emits the same wire framing, so a
-//! client cannot tell which library a GPL-free build encodes with. Cisco's BSD license
+//! software path (`encode_cpu`), one instance for the whole frame, and emits the same
+//! wire framing, so a client cannot tell which library a GPL-free build encodes with. Cisco's BSD license
 //! is what lets it ship redistributably; the price of admission is being 4:2:0-only
 //! (a 4:4:4 request is encoded 4:2:0) and Annex-B.
 //!
@@ -59,18 +58,16 @@ const INFINITE_INTRA_PERIOD: u32 = 300_000;
 ///    ceiling first is what lets `set_live_bitrate` move the target freely.
 const BITRATE_CEILING_BPS: u32 = 100_000_000;
 
-/// One stripe's (or one full frame's) worth of OpenH264 state, kept alive between frames because
+/// One session's worth of OpenH264 state, kept alive between frames because
 /// the encoder's reference chain and rate-control state must persist across the whole session —
 /// and the I420 plane buffers are reused every frame to keep the per-frame hot path free of
 /// allocation.
 ///
 /// Holds the live `Encoder`, the fixed dimensions, and the reusable I420 plane buffers
 /// (`y_buf` / `u_buf` / `v_buf`) that each frame's RGB-to-YUV conversion writes into before
-/// hand-off. `threads`, `slices`, and `csc_bands` are the parallelism policy fixed at open: a lone
-/// full-frame instance encodes with several threads over four slices and converts color in four
-/// bands (one thread and one band without `cpu_encode_threading`, the four slices kept), while a
-/// stripe of the striped path is single-threaded and single-slice, its parallelism coming from the
-/// stripes encoding concurrently. `is_cbr` selects the rate-control mode: `true` is
+/// hand-off. `threads`, `slices`, and `csc_bands` are the parallelism policy fixed at open: the
+/// instance encodes with several threads over four slices and converts color in four bands (one
+/// thread and one band without `cpu_encode_threading`, the four slices kept). `is_cbr` selects the rate-control mode: `true` is
 /// CBR (bitrate-mode RC driving a target bitrate), `false` is CRF/CQP (the same bitrate-mode RC but
 /// with the QP pinned to a single value). `omit_stripe_headers` drops the wire header for
 /// bare Annex-B output.
@@ -97,37 +94,33 @@ pub struct Openh264Encoder {
     qp_hysteresis_counter: u32,
     is_cbr: bool,
     omit_stripe_headers: bool,
-    /// A full-frame instance's long-term references, read off its own output.
-    refs: Option<LongTermRefs>,
+    /// The long-term references, read off the encoder's own output.
+    refs: LongTermRefs,
     last_reference: Reference,
 }
 
 impl Openh264Encoder {
-    /// Build a full-frame OpenH264 encoder from the capture settings (their width, height,
-    /// CRF, and bitrate), or `None` on init failure: `new_stripe` with the whole-frame policy.
+    /// Build an OpenH264 encoder from the capture settings (their width, height, CRF, and
+    /// bitrate), or `None` on init failure: `with_size` at the settings' own.
     pub fn new(settings: &CaptureSettings) -> Option<Self> {
-        Self::new_stripe(
+        Self::with_size(
             settings,
             settings.width.max(2) as usize,
             settings.height.max(2) as usize,
             settings.video_crf,
             settings.video_bitrate_kbps,
-            true,
         )
     }
 
-    /// Build the encoder behind one stripe of the striped software path (`encode_cpu`), or
-    /// `None` on init failure. Like the NVENC/VAAPI encoders, this one self-prepends the wire
-    /// header on the buffer it returns.
+    /// Build the encoder of the software H.264 session (`encode_cpu`), or `None` on init
+    /// failure. Like the NVENC/VAAPI encoders, this one self-prepends the wire header on the
+    /// buffer it returns.
     ///
-    /// `width` x `height` is the stripe's geometry, `crf` its constant quantizer, and `bitrate_kbps`
-    /// its own CBR budget — the per-stripe share `stripe_rate_control` hands out, since every stripe
-    /// runs its own rate control. `fullframe` selects the parallelism policy: a lone full-frame
-    /// stripe encodes with `h264_fullframe_threads` threads over four fixed slices (client decoders
-    /// slice-parallelize too) and converts color in four bands, so a whole frame never serializes
-    /// on one core, unless `cpu_encode_threading` is off, which leaves it one thread and one band;
-    /// one stripe of several is single-threaded and single-slice with a one-band conversion, its
-    /// parallelism coming from the stripes encoding concurrently.
+    /// `width` x `height` is the frame's geometry, `crf` its constant quantizer, and
+    /// `bitrate_kbps` its CBR budget. The instance encodes with `h264_fullframe_threads` threads
+    /// over four fixed slices (client decoders slice-parallelize too) and converts color in four
+    /// bands, so a frame never serializes on one core, unless `cpu_encode_threading` is off, which
+    /// leaves it one thread and one band.
     ///
     /// 1. **Geometry**: width and height are floored to even values (`& !1`, min 2) because 4:2:0
     ///    chroma subsampling requires it. A 4:4:4 request is encoded 4:2:0 regardless: OpenH264 is
@@ -138,19 +131,16 @@ impl Openh264Encoder {
     ///    substitute its screen-content defaults `[26, 35]`; explicit non-zero values are honored
     ///    (the library clips the min up to its own floor of 12).
     ///
-    /// 3. **Base config** (shared by both rate modes): screen-content real-time usage for a stripe
-    ///    of several, camera usage with long-term references for a full-frame instance (`refs`), low
-    ///    complexity, an effectively infinite intra period, a VUI declaring the conversion
+    /// 3. **Base config** (shared by both rate modes): camera usage with long-term references
+    ///    (`refs`), low complexity, an effectively infinite intra period, a VUI declaring the conversion
     ///    (BT.709 primaries, transfer, and matrix at limited range; without it a WebRTC receiver
     ///    infers the range from the SDP profile and can display the picture visibly darker), and
     ///    the thread count. Frame skip is **enabled** so the rate controller can actually hold
     ///    the target bitrate — skip-less bitrate control is only approximate. A skipped frame is not encoded
     ///    and the next P-frame references the last *encoded* frame, so the reference chain stays
     ///    intact. Adaptive quantization and background detection are set explicitly to `false` to
-    ///    silence the init warnings (both are auto-disabled for screen content anyway). Scene-change
-    ///    detection stays on for screen content, where `ParamValidation` force-enables it, so its
-    ///    content-adaptive IDRs are inherent there and the wire header labels them correctly; the
-    ///    camera usage turns it off. The internal stderr trace follows the capture's
+    ///    silence the init warnings, and scene-change detection is off, so no IDR comes unasked.
+    ///    The internal stderr trace follows the capture's
     ///    `debug_logging` flag (otherwise quiet).
     ///
     /// 4. **Rate control**:
@@ -164,27 +154,23 @@ impl Openh264Encoder {
     ///      CONSTQP / VAAPI CQP. Bitrate-mode with a pinned QP is what actually holds the QP
     ///      constant: RC_OFF ignores the QP range and RC_QUALITY rejects a `min == max` range.
     ///
-    /// A multi-threaded instance is then primed for its four fixed slices via `enable_slices`.
-    pub fn new_stripe(
+    /// The instance is then primed for its four fixed slices via `enable_slices`.
+    pub fn with_size(
         settings: &CaptureSettings,
         width: usize,
         height: usize,
         crf: i32,
         bitrate_kbps: i32,
-        fullframe: bool,
     ) -> Option<Self> {
         let width = width.max(2) & !1;
         let height = height.max(2) & !1;
         let bps = (bitrate_kbps.max(1) as u32).saturating_mul(1000);
         let fps = Self::clamp_fps(settings.target_fps);
         let crf = crf.clamp(1, 51);
-        let (threads, slices) = if fullframe {
-            (super::session::h264_fullframe_threads(settings) as u16, 4)
-        } else {
-            (1, 1)
-        };
+        let threads = super::session::h264_fullframe_threads(settings) as u16;
+        let slices = 4;
 
-        let encoder = Self::build_encoder(settings, fps, bps, crf as u8, threads, fullframe)?;
+        let encoder = Self::build_encoder(settings, fps, bps, crf as u8, threads)?;
 
         let (cw, ch) = (width / 2, height / 2);
         let mut me = Self {
@@ -205,7 +191,7 @@ impl Openh264Encoder {
             qp_hysteresis_counter: 0,
             is_cbr: settings.video_cbr_mode,
             omit_stripe_headers: settings.omit_stripe_headers,
-            refs: fullframe.then(LongTermRefs::new),
+            refs: LongTermRefs::new(),
             last_reference: Reference::Untracked,
         };
         me.enable_slices();
@@ -232,14 +218,14 @@ impl Openh264Encoder {
         }
     }
 
-    /// Build one configured OpenH264 encoder, as described by `new_stripe`'s steps 3 and 4.
-    /// Separate from `new_stripe` because `update_qp` rebuilds the encoder to move the pinned
+    /// Build one configured OpenH264 encoder, as described by `with_size`'s steps 3 and 4.
+    /// Separate from `with_size` because `update_qp` rebuilds the encoder to move the pinned
     /// CRF/CQP quantizer, and that rebuild has to reproduce the session's configuration exactly
     /// apart from the QP — hence the live `fps` / `bitrate_bps` / `crf` arguments rather than
     /// reading the construction settings for values a running session can have retuned.
     ///
-    /// With `long_term` the camera usage: OpenH264 predicts past a loss from a long-term reference
-    /// only there (its screen-content strategy with long-term references ignores the recovery
+    /// The usage is the camera one: OpenH264 predicts past a loss from a long-term reference only
+    /// there (its screen-content strategy with long-term references ignores the recovery
     /// request), and it codes a scrolling document as well (41.4 against 41.3 dB moving, 57.1 both
     /// still, 1080p at 8 Mbit/s).
     fn build_encoder(
@@ -248,24 +234,16 @@ impl Openh264Encoder {
         bitrate_bps: u32,
         crf: u8,
         threads: u16,
-        long_term: bool,
     ) -> Option<Encoder> {
-        let usage = if long_term {
-            UsageType::CameraVideoRealTime
-        } else {
-            UsageType::ScreenContentRealTime
-        };
         let base = EncoderConfig::new()
             .max_frame_rate(FrameRate::from_hz(fps))
-            .usage_type(usage)
-            .long_term_reference(long_term)
-            .scene_change_detect(!long_term)
+            .usage_type(UsageType::CameraVideoRealTime)
+            .long_term_reference(true)
+            .scene_change_detect(false)
             .complexity(Complexity::Low)
             .skip_frames(true)
             .adaptive_quantization(false)
             .background_detection(false)
-            // Scene-change detection stays on for screen content: OpenH264 forces it back on
-            // under ScreenContentRealTime and warns when asked for anything else.
             .debug(settings.debug_logging)
             .intra_frame_period(IntraFramePeriod::from_num_frames(INFINITE_INTRA_PERIOD))
             .vui(VuiConfig::bt709())
@@ -292,8 +270,7 @@ impl Openh264Encoder {
     /// Give every frame of a multi-threaded instance `slices` fixed slices, so its encoder
     /// threads and the client's decoder can parallelize within the frame; more than four slices
     /// upsets some Chromium decoders, so the count is pinned to four (`SM_FIXEDSLCNUM_SLICE`).
-    /// A single-threaded stripe instance keeps OpenH264's single slice and returns at once. The
-    /// same re-init shortens the long-term marking period (`LTR_MARK_PERIOD`), which the crate's
+    /// The same re-init shortens the long-term marking period (`LTR_MARK_PERIOD`), which the crate's
     /// config fixes at 30.
     ///
     /// The `openh264` crate initializes the underlying encoder lazily on the *first* encode and
@@ -304,9 +281,6 @@ impl Openh264Encoder {
     /// consumed the initial IDR, a final `force_intra_frame` guarantees the first *delivered* frame
     /// is still an IDR.
     fn enable_slices(&mut self) {
-        if self.slices <= 1 {
-            return;
-        }
         let slices = YUVSlices::new(
             (&self.y_buf, &self.u_buf, &self.v_buf),
             (self.width, self.height),
@@ -328,9 +302,7 @@ impl Openh264Encoder {
             params.sSpatialLayers[0].sSliceArgument.uiSliceMode =
                 openh264_sys2::SM_FIXEDSLCNUM_SLICE;
             params.sSpatialLayers[0].sSliceArgument.uiSliceNum = self.slices;
-            if self.refs.is_some() {
-                params.iLtrMarkPeriod = LTR_MARK_PERIOD;
-            }
+            params.iLtrMarkPeriod = LTR_MARK_PERIOD;
             let ret = raw.set_option(
                 openh264_sys2::ENCODER_OPTION_SVC_ENCODE_PARAM_EXT,
                 &mut params as *mut _ as *mut std::ffi::c_void,
@@ -352,8 +324,8 @@ impl Openh264Encoder {
     /// it actually differs from the current target; the CRF/CQP quantizer moves through `update_qp`
     /// instead. A framerate of at least 1 fps that differs from the live one is pushed via the
     /// frame-rate option and mirrored in `current_fps`, so a later `update_qp` rebuild keeps the
-    /// live rate. Both are self-gating, so the striped path's per-frame call is free when nothing
-    /// changed.
+    /// live rate. Both are self-gating, so the software path's per-frame call is free when
+    /// nothing changed.
     pub fn reconfigure_rate(&mut self, bitrate_kbps: i32, fps: f64) {
         if self.is_cbr {
             let bps = bitrate_kbps.max(1).saturating_mul(1000);
@@ -416,7 +388,6 @@ impl Openh264Encoder {
             self.current_bitrate_bps.max(1) as u32,
             qp as u8,
             self.threads,
-            self.refs.is_some(),
         ) {
             Some(encoder) => {
                 self.encoder = encoder;
@@ -505,21 +476,8 @@ impl Openh264Encoder {
         }
     }
 
-    /// Encode one full host frame: `encode_stripe_argb` at y-start 0, the framing the hardware
-    /// full-frame encoders emit.
-    pub fn encode_host_argb(
-        &mut self,
-        argb: &[u8],
-        stride: usize,
-        frame_number: u64,
-        force_idr: bool,
-        rgba_input: bool,
-    ) -> Result<Vec<u8>, String> {
-        self.encode_stripe_argb(argb, stride, frame_number, 0, force_idr, rgba_input)
-    }
-
-    /// Encode one stripe's rows (or the whole frame, at `y_start` 0) and return them framed
-    /// exactly like the x264 stripes and the hardware full-frame encoders, so the client demuxes
+    /// Encode one host frame and return it framed exactly like x264's and the hardware
+    /// encoders' frames, so the client demuxes
     /// this software path with the same code and cannot tell which library encoded it. Returns an
     /// empty buffer when the frame produced no payload.
     ///
@@ -537,12 +495,11 @@ impl Openh264Encoder {
     /// 5. **Empty payload**: if the encoder produced no bitstream (e.g. a skipped frame), an empty
     ///    vec is returned rather than a lone header — a header with no Annex-B behind it would be a
     ///    malformed frame to the client, and the pipeline reads empty as "nothing to send".
-    pub fn encode_stripe_argb(
+    pub fn encode_host_argb(
         &mut self,
         argb: &[u8],
         stride: usize,
         frame_number: u64,
-        y_start: u16,
         force_idr: bool,
         rgba_input: bool,
     ) -> Result<Vec<u8>, String> {
@@ -584,10 +541,7 @@ impl Openh264Encoder {
                 if body.is_empty() {
                     return Ok(Vec::new());
                 }
-                let (reference, anchor) = match self.refs.as_mut() {
-                    Some(refs) => refs.record(frame_number as u16, &body),
-                    None => (Reference::Untracked, false),
-                };
+                let (reference, anchor) = self.refs.record(frame_number as u16, &body);
                 self.last_reference = reference;
                 if self.omit_stripe_headers {
                     return Ok(body);
@@ -598,7 +552,7 @@ impl Openh264Encoder {
                     Codec::H264,
                     frame_type | if anchor { FRAME_ANCHOR } else { 0 },
                     frame_number as u16,
-                    y_start,
+                    0,
                     self.width as u16,
                     self.height as u16,
                     reference,
@@ -610,8 +564,7 @@ impl Openh264Encoder {
         }
     }
 
-    /// The frame the last encoded frame predicted from: tracked for a full-frame instance, which
-    /// keeps long-term references.
+    /// The frame the last encoded frame predicted from, tracked through the long-term references.
     pub fn last_reference(&self) -> Reference {
         self.last_reference
     }
@@ -620,23 +573,16 @@ impl Openh264Encoder {
     /// marked a long-term reference is confirmed to the encoder, which then takes it for a
     /// recovery and marks the next.
     pub fn acknowledge_reference(&mut self, frame_id: u16, held: bool) {
-        if let Some((idr_pic_id, frame_num)) = self
-            .refs
-            .as_mut()
-            .and_then(|r| r.acknowledge(frame_id, held))
-        {
+        if let Some((idr_pic_id, frame_num)) = self.refs.acknowledge(frame_id, held) {
             self.feedback(openh264_sys2::LTR_MARKING_SUCCESS, idr_pic_id, frame_num);
         }
     }
 
     /// A consumer lost frame `frame_id`: the next frame predicts from the confirmed long-term
-    /// reference where one precedes the loss. False where none does, or for a stripe of several,
-    /// which keeps none, and the caller codes a key frame instead.
+    /// reference where one precedes the loss. False where none does, and the caller codes a key
+    /// frame instead.
     pub fn invalidate_reference(&mut self, frame_id: u16) -> bool {
-        let Some(refs) = self.refs.as_mut() else {
-            return false;
-        };
-        let (recovery, failed) = refs.invalidate(frame_id);
+        let (recovery, failed) = self.refs.invalidate(frame_id);
         for (idr_pic_id, frame_num) in failed {
             self.feedback(openh264_sys2::LTR_MARKING_FAILED, idr_pic_id, frame_num);
         }
@@ -893,12 +839,11 @@ mod tests {
         assert_eq!(dec.color_tags(), Some(ColorTags::BT709_LIMITED));
     }
 
-    /// The stream bounds reordering at zero at a constant quantizer and a constant rate, whole
-    /// and striped.
+    /// The stream bounds reordering at zero at a constant quantizer and a constant rate.
     #[test]
     fn bounds_reordering_at_zero() {
         use crate::encoders::sps::fixtures::assert_no_reorder;
-        for (cbr, whole) in [(false, true), (true, true), (true, false)] {
+        for cbr in [false, true] {
             let s = CaptureSettings {
                 width: 320,
                 height: 192,
@@ -907,20 +852,11 @@ mod tests {
                 video_bitrate_kbps: 2000,
                 ..Default::default()
             };
-            let mut enc = if whole {
-                Openh264Encoder::new(&s)
-            } else {
-                Openh264Encoder::new_stripe(&s, 320, 64, s.video_crf, s.video_bitrate_kbps, false)
-            }
-            .expect("openh264 init");
-            let height = if whole { 192 } else { 64 };
+            let mut enc = Openh264Encoder::new(&s).expect("openh264 init");
             let idr = enc
-                .encode_host_argb(&busy_frame(320, height, 0), 320 * 4, 0, true, false)
+                .encode_host_argb(&busy_frame(320, 192, 0), 320 * 4, 0, true, false)
                 .expect("encode");
-            assert_no_reorder(
-                &idr[VIDEO_HEADER_LEN..],
-                &format!("OpenH264 cbr {cbr} whole {whole}"),
-            );
+            assert_no_reorder(&idr[VIDEO_HEADER_LEN..], &format!("OpenH264 cbr {cbr}"));
         }
     }
 
@@ -1285,53 +1221,6 @@ mod slice_tests {
             .expect("encode");
         let nals = count_nals(&out);
         assert!(nals >= 6, "expected 4-slice IDR (>=6 NALs), got {nals}");
-    }
-
-    /// One stripe of the striped path is a single-slice stream (SPS + PPS + one IDR slice:
-    /// three slices fewer than a four-slice full-frame IDR) whose wire header stamps the
-    /// caller's y-start, frame number, and the stripe geometry — exactly what the x264 stripes
-    /// send, so the client's per-stripe decoders cannot tell the builds apart.
-    #[test]
-    fn stripe_instance_is_single_slice_and_stamps_y_start() {
-        let s = CaptureSettings {
-            width: 640,
-            height: 480,
-            codec: Codec::H264,
-            video_bitrate_kbps: 2000,
-            video_cbr_mode: true,
-            ..Default::default()
-        };
-        let mut full = Openh264Encoder::new(&s).expect("full-frame");
-        let full_out = full
-            .encode_host_argb(&vec![0x80u8; 640 * 480 * 4], 640 * 4, 3, true, false)
-            .expect("encode");
-        let frame = vec![0x80u8; 640 * 64 * 4];
-        let mut stripe = Openh264Encoder::new_stripe(&s, 640, 64, 25, 2000, false).expect("stripe");
-        let out = stripe
-            .encode_stripe_argb(&frame, 640 * 4, 3, 320, true, false)
-            .expect("encode");
-        assert_eq!(out[0], 0x04);
-        assert_eq!(
-            out[1], 0x11,
-            "forced first stripe frame is an H.264 key frame"
-        );
-        assert_eq!(&out[2..4], &[0, 3], "frame number");
-        assert_eq!(&out[4..6], &320u16.to_be_bytes(), "y-start");
-        assert_eq!(&out[6..10], &[2, 128, 0, 64], "stripe geometry");
-        let (stripe_nals, full_nals) = (count_nals(&out), count_nals(&full_out));
-        assert!(
-            stripe_nals >= 3,
-            "SPS + PPS + IDR slice expected, got {stripe_nals}"
-        );
-        assert!(
-            stripe_nals + 3 <= full_nals,
-            "a stripe must be single-slice ({stripe_nals} NALs) against the four-slice full frame ({full_nals})"
-        );
-        let p = stripe
-            .encode_stripe_argb(&frame, 640 * 4, 4, 320, false, false)
-            .expect("encode");
-        assert_eq!(p[1], 0x10, "an unforced static frame is an H.264 delta");
-        assert_eq!(&p[4..6], &320u16.to_be_bytes(), "y-start rides every frame");
     }
 
     /// Build a deterministic per-frame noise image — the worst case for rate control

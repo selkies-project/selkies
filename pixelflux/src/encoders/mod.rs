@@ -35,8 +35,8 @@ pub mod overlay;
 pub mod reference;
 /// What the full-frame software sessions share: planar input, quantizer, rate settings.
 pub mod session;
-/// CPU-based striped H.264 (libx264 or OpenH264, by build) / JPEG encoder with per-stripe
-/// change detection.
+/// The CPU path: striped JPEG and whole-frame software H.264 (libx264 or OpenH264, by build),
+/// with per-region change detection.
 pub mod software;
 /// The color an H.264 stream declares: read from a sequence parameter set, and written into
 /// one for a device that converts without saying what it converted with.
@@ -258,8 +258,8 @@ pub fn software_library(codec: Codec) -> &'static str {
 ///
 /// Every one is fixed by the crate features: libx264 and x265 whenever `gpl` is on (it wins
 /// even if `openh264` is also enabled), Cisco OpenH264 and kvazaar for a GPL-free build; libvpx
-/// serves VP8 and VP9 and SVT-AV1 serves AV1 in both. H.264 is what the striped software
-/// path and the full-frame software fallback under NVENC/VA-API both encode with. Each
+/// serves VP8 and VP9 and SVT-AV1 serves AV1 in both. H.264 is what the CPU path encodes
+/// with, the software fallback under NVENC/VA-API included. Each
 /// full-frame encoder is opened on a frame in a forked child once, so one that takes its
 /// process down on this machine is one the build does not carry here.
 pub fn software_encoder(codec: Codec) -> Option<SoftwareEncoder> {
@@ -765,40 +765,36 @@ mod tests {
             "this build encodes video in software"
         );
         assert!(software_encoder(settings.codec).is_some());
-        // H.264 comes back as the caller's own striped path rather than a full-frame session.
+        // H.264 comes back as the caller's own CPU path rather than a full-frame session.
         assert!(encoder.is_some() || settings.codec == Codec::H264);
     }
 
     /// A codec with no path on this host falls through the video codecs it does serve, the
     /// encode node's hardware ones first and most efficient first, the software ones by encode
-    /// time, with software H.264 among them for a full-frame session alone.
+    /// time, software H.264 leading them.
     #[test]
     fn a_codec_without_a_path_falls_through_the_served_video_codecs() {
         let software: Vec<Codec> = SOFTWARE_ORDER
             .iter()
             .copied()
-            .filter(|&codec| {
-                codec != Codec::Av1 && codec != Codec::H264 && software_encoder(codec).is_some()
-            })
+            .filter(|&codec| codec != Codec::Av1 && software_encoder(codec).is_some())
             .collect();
-        assert_eq!(fallback_codecs(Codec::Av1, &[], false), software);
-        let mut h264_first = vec![Codec::H264];
-        h264_first.extend(software.iter().copied());
+        assert_eq!(software.first(), Some(&Codec::H264));
         assert_eq!(
-            fallback_codecs(Codec::Av1, &[], true),
-            h264_first,
-            "one x264 session leads the software rungs"
+            fallback_codecs(Codec::Av1, &[]),
+            software,
+            "software H.264 leads the software rungs"
         );
         assert_eq!(
-            fallback_codecs(Codec::Av1, &[Codec::H264], false),
-            h264_first,
+            fallback_codecs(Codec::Av1, &[Codec::H264]),
+            software,
             "an engine's H.264 leads either way"
         );
-        assert!(!fallback_codecs(Codec::Av1, &[Codec::Av1], true).contains(&Codec::Av1));
+        assert!(!fallback_codecs(Codec::Av1, &[Codec::Av1]).contains(&Codec::Av1));
         // An engine's codecs go most efficient first, whatever the build encodes in software.
         let engine = [Codec::H264, Codec::H265, Codec::Av1];
         assert_eq!(
-            &fallback_codecs(Codec::Vp8, &engine, true)[..3],
+            &fallback_codecs(Codec::Vp8, &engine)[..3],
             &[Codec::Av1, Codec::H265, Codec::H264]
         );
     }
@@ -998,7 +994,7 @@ mod tests {
     }
 
     /// A session's range is the session's to report, not something read off whether its
-    /// encoder is hardware. The two part on a striped 4:2:0 software session, which is
+    /// encoder is hardware. The two part on a 4:2:0 software H.264 session, which is
     /// limited range while the encoder is software, so a description taking the second for
     /// the first names a range the bitstream does not carry. All four pairings have a name
     /// of their own for that reason, rather than 4:2:0 falling through to one.
@@ -1016,7 +1012,7 @@ mod tests {
         };
         assert!(
             !session_full_range(None, &settings),
-            "striped 4:2:0 converts at limited range"
+            "software H.264 at 4:2:0 converts at limited range"
         );
         assert_eq!(
             colorspace_desc(
@@ -1030,7 +1026,7 @@ mod tests {
         assert_eq!(
             session_full_range(None, &settings),
             software_fullcolor(Codec::H264),
-            "striped 4:4:4 converts at full range where the build carries it"
+            "software H.264 at 4:4:4 converts at full range where the build carries it"
         );
     }
 }
@@ -1354,8 +1350,7 @@ impl FrameEncoder {
     /// QP delta map (`nvenc::REFINE_FINER`), libvpx's VP8 through its region-of-interest map
     /// (`vpx::REFINE_FINER`, which says why not VP9), x265 through its per-block quantizer
     /// offsets and kvazaar through its per-tree-block map (`HevcEncoder::refine_finer`). x264's
-    /// striped sessions refine within
-    /// `software::encode_cpu` (`ledger::REFINE_FINER`).
+    /// session refines within `software::encode_cpu` (`ledger::REFINE_FINER`).
     pub fn refines(&self) -> Option<crate::ledger::Refiner> {
         use crate::ledger::Refiner;
         match self {
@@ -1593,7 +1588,7 @@ pub fn software_session(
         Codec::H265 => FrameEncoder::Hevc(hevc::HevcEncoder::new(settings, rgba)?),
         Codec::Av1 => FrameEncoder::Av1(svtav1::SvtAv1Encoder::new(settings, rgba)?),
         Codec::H264 | Codec::Jpeg => {
-            return Err(format!("{} takes the striped path", codec.display()));
+            return Err(format!("{} takes the CPU path", codec.display()));
         }
     })
 }
@@ -1619,16 +1614,6 @@ pub enum FrameSource {
     Host { rgba: bool },
 }
 
-/// The threads a striped H.264 session encodes on: its stripes at once, one a rayon worker, or
-/// one after another where `cpu_encode_threading` is off.
-fn striped_threads(settings: &CaptureSettings) -> i32 {
-    if !settings.cpu_encode_threading {
-        return 1;
-    }
-    software::stripe_count(settings.height, settings.codec, false).min(rayon::current_num_threads())
-        as i32
-}
-
 /// How many threads a software session encodes on, for its `Encoder:` line.
 fn threads_desc(threads: i32) -> String {
     if threads == 1 {
@@ -1638,8 +1623,8 @@ fn threads_desc(threads: i32) -> String {
     }
 }
 
-/// Choose and build the full-frame encoder of a session, or `None` when the striped software
-/// path serves it. One ladder for X11, Wayland zero-copy, and Wayland readback, so the three
+/// Choose and build the full-frame encoder of a session, or `None` when the CPU path
+/// (`software::encode_cpu`) serves it: JPEG, or H.264 through the build's software encoder. One ladder for X11, Wayland zero-copy, and Wayland readback, so the three
 /// cannot pick differently for the same settings:
 ///
 /// 1. Unless software encoding is forced (`use_cpu`, or encode node `-1`), the hardware
@@ -1649,12 +1634,11 @@ fn threads_desc(threads: i32) -> String {
 ///    reconfigured in place instead of rebuilt. A hardware refusal is logged and falls through.
 /// 2. A dmabuf source stops here: software cannot read dmabufs, and the caller's readback path
 ///    then runs this ladder again with host frames.
-/// 3. The software encoder of the codec, except JPEG and H.264, whose software path is the
-///    striped one.
+/// 3. The software encoder of the codec, except JPEG and H.264, whose software path is the CPU
+///    path's.
 /// 4. Where the codec has no path at all, the other video codecs this host serves, the encode
-///    node's hardware ones before the build's software ones, software H.264 among the latter
-///    for a full-frame session, then the striped H.264 path, and JPEG only past all of them.
-///    `settings.codec` names what came up.
+///    node's hardware ones before the build's software ones, software H.264 among the latter,
+///    and JPEG only past all of them. `settings.codec` names what came up.
 pub fn select_frame_encoder(
     settings: &mut CaptureSettings,
     source: FrameSource,
@@ -1669,8 +1653,8 @@ pub fn select_frame_encoder(
         return Some(enc);
     }
     // A dmabuf source stops here, its readback path running the ladder again on host frames,
-    // and H.264 has come up on the striped path the caller encodes itself.
-    let FrameSource::Host { rgba } = source else {
+    // and H.264 has come up on the CPU path the caller encodes itself.
+    let FrameSource::Host { .. } = source else {
         return None;
     };
     if requested == Codec::H264 {
@@ -1688,24 +1672,15 @@ pub fn select_frame_encoder(
         "[{tag}] No {} path on this host; trying the video codecs it serves.",
         requested.display()
     );
-    for codec in fallback_codecs(requested, &hardware, settings.video_fullframe) {
+    for codec in fallback_codecs(requested, &hardware) {
         settings.codec = codec;
         if let Some(enc) = select_for_codec(settings, source, None, tag) {
             return Some(enc);
         }
-        // Software H.264 is the caller's own path, one x264 session for a full-frame capture.
-        if codec == Codec::H264
-            && settings.video_fullframe
-            && software_encoder(Codec::H264).is_some()
-        {
+        // Software H.264 is the caller's own path.
+        if codec == Codec::H264 && software_encoder(Codec::H264).is_some() {
             return None;
         }
-    }
-    // No full-frame codec came up: H.264's software path, the striped one, is the last video
-    // rung, and JPEG the leg past it.
-    settings.codec = Codec::H264;
-    if software_encoder(Codec::H264).is_some() {
-        return software_fallback(settings, rgba, tag);
     }
     eprintln!("[{tag}] No video encoder on this host. Encoding JPEG instead.");
     settings.codec = Codec::Jpeg;
@@ -1722,20 +1697,15 @@ const SOFTWARE_ORDER: [Codec; 5] = [Codec::H264, Codec::Av1, Codec::Vp8, Codec::
 
 /// The video codecs a capture falls through to where the one it asked for has no path on this
 /// host: those an engine on the encode node carries, named in `hardware`, in `HARDWARE_ORDER`,
-/// then those the build encodes in software, in `SOFTWARE_ORDER`. Software H.264 joins a
-/// full-frame session, where it is one x264 session; otherwise its software path is the
-/// striped one, which the ladder reaches only past every full-frame rung.
-fn fallback_codecs(requested: Codec, hardware: &[Codec], fullframe: bool) -> Vec<Codec> {
+/// then those the build encodes in software, in `SOFTWARE_ORDER`.
+fn fallback_codecs(requested: Codec, hardware: &[Codec]) -> Vec<Codec> {
     let mut codecs: Vec<Codec> = HARDWARE_ORDER
         .iter()
         .copied()
         .filter(|&codec| codec != requested && hardware.contains(&codec))
         .collect();
     codecs.extend(SOFTWARE_ORDER.iter().copied().filter(|&codec| {
-        codec != requested
-            && (codec != Codec::H264 || fullframe)
-            && !hardware.contains(&codec)
-            && software_encoder(codec).is_some()
+        codec != requested && !hardware.contains(&codec) && software_encoder(codec).is_some()
     }));
     codecs
 }
@@ -1969,8 +1939,9 @@ fn select_for_codec(
     software_fallback(settings, rgba, tag)
 }
 
-/// The codec's software encoder; `None` for H.264, whose software path is the striped one, and
-/// where the build carries none for the codec, which the ladder then falls through on.
+/// The codec's software encoder; `None` for H.264, whose software path is the CPU path the
+/// caller encodes itself, and where the build carries none for the codec, which the ladder then
+/// falls through on.
 fn software_fallback(
     settings: &mut CaptureSettings,
     rgba: bool,
@@ -1984,11 +1955,7 @@ fn software_fallback(
             software_library(Codec::H264),
             chroma_name(session_fullcolor(None, settings)),
             session_bit_depth(None, settings),
-            threads_desc(if settings.video_fullframe {
-                session::h264_fullframe_threads(settings)
-            } else {
-                striped_threads(settings)
-            })
+            threads_desc(session::h264_fullframe_threads(settings))
         );
         return None;
     }
@@ -3143,17 +3110,17 @@ pub fn session_fullcolor(encoder: Option<&FrameEncoder>, settings: &CaptureSetti
 }
 
 /// The bits per sample a session carries, which is not always what was asked for: a
-/// full-frame session's own answer, and for the striped path (`None`) what its H.264 encoder
+/// full-frame session's own answer, and for the CPU path (`None`) what its H.264 encoder
 /// opens at.
 pub fn session_bit_depth(encoder: Option<&FrameEncoder>, settings: &CaptureSettings) -> u32 {
     match encoder {
         Some(enc) => enc.bit_depth(),
-        None => software::stripe_bit_depth(settings),
+        None => software::h264_bit_depth(settings),
     }
 }
 
 /// Whether a session signals full range: a software 4:4:4 session of x264's kind, which the
-/// striped path (`None`) is whenever it carries 4:4:4, or a device that converted in fixed
+/// CPU path (`None`) is whenever it carries 4:4:4, or a device that converted in fixed
 /// function at a range it chose. The one answer every description of a session reads, so no
 /// two of them can disagree.
 pub fn session_full_range(encoder: Option<&FrameEncoder>, settings: &CaptureSettings) -> bool {

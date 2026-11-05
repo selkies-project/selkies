@@ -234,7 +234,7 @@ pub fn encoder_reason(reason: &str) {
 }
 
 /// What the stream settled on, from the same inputs as the `Stream settings active` line.
-/// `backend` is the full-frame session as `(name, hardware)`, `None` the striped software path.
+/// `backend` is the full-frame session as `(name, hardware)`, `None` the CPU path.
 pub fn stream(
     settings: &CaptureSettings,
     stripes: usize,

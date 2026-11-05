@@ -38,7 +38,7 @@ contains it.
 
 | Component | License | Category | Build | How used | Notes |
 | --- | --- | --- | --- | --- | --- |
-| libx264 (via `x264-sys`) | GPL-2.0-or-later | copyleft | GPL only | linked shared library (`NEEDED libx264.so.*`); auditwheel bundles it into the GPL wheels | Striped software H.264, built with the patches under `patches/x264` (GPL-2.0-or-later, as x264); the `x264-sys` crate is MIT but has no purpose without libx264. |
+| libx264 (via `x264-sys`) | GPL-2.0-or-later | copyleft | GPL only | linked shared library (`NEEDED libx264.so.*`); auditwheel bundles it into the GPL wheels | Software H.264, built with the patches under `patches/x264` (GPL-2.0-or-later, as x264); the `x264-sys` crate is MIT but has no purpose without libx264. |
 | Cisco OpenH264 2.6 (via `openh264-sys2`) | BSD-2-Clause | permissive | both | compiled from the source vendored in the crate (needs a C++ toolchain and nasm) and linked statically; no binary download | Its decoder is the virtual camera's H.264 decoder in every build; its encoder is the software H.264 of the non-GPL build. Cisco's royalty-covered binary module is irrelevant to a source build; the AVC patent pool applies to any H.264 codec and is the deployer's concern. Pulls `libstdc++` in as the only C++ code. |
 | x265 (via `codec-sys`, feature `x265`) | GPL-2.0-or-later | copyleft | GPL only | linked shared library (`NEEDED libx265.so.*`), bound at build time from its headers; bundled into the GPL wheels | software H.265 (incl. 4:4:4) |
 | kvazaar (via `codec-sys`, feature `kvazaar`) | BSD-3-Clause | permissive | non-GPL only | linked shared library, bound at build time from its headers; bundled into the non-GPL wheels | software H.265 of a GPL-free build (4:2:0) |

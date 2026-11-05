@@ -72,8 +72,6 @@ pub struct RecordingSink {
     ///
     /// [`should_force_idr`]: RecordingSink::should_force_idr
     client_connected: Arc<AtomicBool>,
-    /// One-time notice that the session's video frames are striped and unrecordable.
-    warned_unrecordable: AtomicBool,
     /// The capture frame rate an IVF header declares.
     fps: FrameRate,
 }
@@ -188,7 +186,6 @@ impl RecordingSink {
             clients,
             shutdown,
             client_connected,
-            warned_unrecordable: AtomicBool::new(false),
             fps,
         })
     }
@@ -199,36 +196,21 @@ impl RecordingSink {
         self.client_connected.swap(false, Ordering::Relaxed)
     }
 
-    /// Delivery-layer tap for one encoded frame. The socket carries a single elementary
-    /// stream, so only a lone full-height video stripe is recordable: striped CPU encodes
-    /// are N independent per-stripe streams, and interleaving them would produce an
-    /// undecodable file — those are skipped with a one-time notice (live streaming is
-    /// unaffected). The wire header is skipped via the queued offset, and the container
-    /// bytes the codec's stream needs are prefixed per client: an IVF file header on a
-    /// VP8/VP9 client's first frame and an IVF frame header on every one, a temporal
-    /// delimiter ahead of an AV1 unit that lacks one.
+    /// Delivery-layer tap for one encoded frame: its video frame, JPEG carrying none. The wire
+    /// header is skipped via the queued offset, and the container bytes the codec's stream needs
+    /// are prefixed per client: an IVF file header on a VP8/VP9 client's first frame and an IVF
+    /// frame header on every one, a temporal delimiter ahead of an AV1 unit that lacks one.
     ///
     /// Never blocks and never copies the payload: the `Arc` is cloned into each client's
     /// bounded queue with `try_send`, and a client whose queue is full or whose writer
     /// died is dropped.
     pub fn write_frame(&self, stripes: &[EncodedStripe], full_width: i32, full_height: i32) {
-        let mut video = stripes
+        let Some(stripe) = stripes
             .iter()
-            .filter(|s| s.codec.is_video() && !s.data.is_empty());
-        let Some(stripe) = video.next() else { return };
-        if video.next().is_some()
-            || stripe.stripe_y_start != 0
-            || stripe.stripe_height != full_height
-        {
-            if !self.warned_unrecordable.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "[recording_sink] WARNING: striped video frames are not recordable \
-                     (the socket carries one elementary stream); use a full-frame encoder \
-                     to record this session"
-                );
-            }
+            .find(|s| s.codec.is_video() && !s.data.is_empty())
+        else {
             return;
-        }
+        };
         let offset = if stripe.data.len() >= VIDEO_HEADER_LEN && stripe.data[0] == WIRE_VIDEO {
             VIDEO_HEADER_LEN
         } else {

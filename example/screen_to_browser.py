@@ -116,8 +116,6 @@ def build_capture_settings():
     cs.video_fullcolor = False
     # Bits per sample, 8 or 10: 10 where an encoder of the codec carries it, in software where the GPU does not.
     cs.video_bit_depth = 8
-    # Encode full frames instead of just changed stripes.
-    cs.video_fullframe = False
     # Flag the stream to be in streaming mode to bypass all vnc logic
     cs.video_streaming_mode = False
     # Encoder device index: -2 = auto-detect (lets AUTO_GPU pick), -1 = software encoding, 0+ = specific GPU.
@@ -284,9 +282,7 @@ async def websocket_handler(websocket):
         # live_rows: stripe rows (wire y_start) whose H.264 chain is intact
         # for this client. A row's deltas are deliverable only after its IDR;
         # an overflow drop clears the set, gating every row until a keyframe
-        # re-anchors it. One frame can mix IDR and delta stripes (per-stripe
-        # encoder re-init), so gating is per row, not per frame — the same
-        # rule as selkies' video relay. Full-frame encoders always emit row 0.
+        # re-anchors it. Video frames are whole, so they always arrive at row 0.
         relay_state = {'live_rows': set(), 'last_idr_req': 0.0}
 
         # --- 3. Create a unique callback (closure) for this client ---

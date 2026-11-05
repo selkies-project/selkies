@@ -941,8 +941,8 @@ impl FramePool {
 ///    generation changed. A generation change alone forces the rebuild path because recreated shm
 ///    segments often reuse the old virtual base addresses, so encoder state keyed to base pointers
 ///    (NVENC's pinned-host cache) must be dropped even at identical dimensions. An in-place
-///    [`X11Pipeline::reshape`] is preferred — NVENC reconfigures its live session and the striped
-///    software path just re-derives stripe state — so a resize never stalls on a full encoder
+///    [`X11Pipeline::reshape`] is preferred — NVENC reconfigures its live session and the CPU
+///    path just re-derives its region state — so a resize never stalls on a full encoder
 ///    re-init; encoders that cannot follow in place (VAAPI) report `false` and the pipeline
 ///    is rebuilt. On a rebuild the old pipeline (with its GPU session/surfaces) is dropped BEFORE the
 ///    new one is built, so an auto-adjust resize never holds two full encoder allocations at once
@@ -961,8 +961,8 @@ impl FramePool {
 ///
 /// The optional Unix-socket recording sink (parity with the Wayland path) is bound ONCE here and
 /// owned outside the pipeline, so pipeline rebuilds on resize keep the socket listener and any
-/// attached recorders alive. It can only carry a single full-frame H.264 stream, so configurations
-/// that cannot produce one (JPEG output, or a striped CPU encoder) are warned about up front.
+/// attached recorders alive. It can only carry a full-frame video stream, so JPEG output is
+/// warned about up front.
 fn encode_loop<F>(
     pool: &FramePool,
     controls: &Controls,
@@ -974,16 +974,10 @@ fn encode_loop<F>(
     let _report = crate::report::enter(&controls.report);
     let mut psettings = settings.clone();
     let recording_sink = RecordingSink::try_bind(&settings.recording_socket, settings.target_fps);
-    if recording_sink.is_some() {
-        if !settings.codec.is_video() {
-            eprintln!(
-                "[recording_sink] recording_socket set but the codec is JPEG; no recordable video stream."
-            );
-        } else if settings.use_cpu && !settings.video_fullframe {
-            eprintln!(
-                "[recording_sink] recording_socket set but the CPU encoder is striped; set video_fullframe=true for a recordable stream."
-            );
-        }
+    if recording_sink.is_some() && !settings.codec.is_video() {
+        eprintln!(
+            "[recording_sink] recording_socket set but the codec is JPEG; no recordable video stream."
+        );
     }
     let mut pipeline: Option<X11Pipeline> = None;
     let (mut pw, mut ph) = (0i32, 0i32);
@@ -2438,7 +2432,6 @@ mod damage_tests {
         let settings = CaptureSettings {
             codec: Codec::H264,
             use_cpu: true,
-            video_fullframe: true,
             video_streaming_mode: true,
             target_fps: 30.0,
             capture_cursor: true,
@@ -2518,7 +2511,6 @@ mod damage_tests {
         let settings = CaptureSettings {
             codec: Codec::H264,
             use_cpu: true,
-            video_fullframe: true,
             target_fps: 30.0,
             width: width as i32,
             height: height as i32,
@@ -2591,7 +2583,6 @@ mod damage_tests {
         let settings = CaptureSettings {
             codec: Codec::H264,
             use_cpu: true,
-            video_fullframe: true,
             target_fps: 60.0,
             width: width as i32,
             height: height as i32,
@@ -2682,7 +2673,6 @@ mod damage_tests {
         let settings = CaptureSettings {
             codec,
             use_cpu: std::env::var("PF_BENCH_CPU").map_or(true, |v| v != "0"),
-            video_fullframe: true,
             target_fps: 60.0,
             width: width as i32,
             height: height as i32,
@@ -2809,7 +2799,6 @@ mod damage_tests {
                     .and_then(|node| crate::render_node_index(&node))
                     .unwrap_or(0)
             },
-            video_fullframe: true,
             video_streaming_mode: false,
             video_cbr_mode: false,
             video_crf: 35,

@@ -9,8 +9,8 @@
 //! given geometry advertises, and the bitstream reads that label a frame on the wire.
 
 /// The picture codec of a capture session, and of a virtual-camera uplink. `Jpeg` is the
-/// striped still-image mode; the rest are video codecs, which stream as whole frames except
-/// H.264, whose software path may also stripe. The discriminants are the codec ids the
+/// striped still-image mode; the rest are video codecs, which stream as whole frames. The
+/// discriminants are the codec ids the
 /// Python API speaks (`VirtualCamera.CODEC_*`) and the video wire ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
@@ -36,9 +36,9 @@ use super::reference::{REFERENCE_FRAMES, Reference};
 
 /// Wire tag of a JPEG stripe: `u8 reserved`, `u16 frame id`, `u16 stripe Y`, JPEG data.
 pub const WIRE_JPEG: u8 = 0x03;
-/// Wire tag of an encoded video frame or stripe: a type byte whose low nibble is the
-/// frame kind and whose high nibble is the codec's [`Codec::wire_id`], then `u16 frame
-/// id`, `u16 stripe Y`, `u16 width`, `u16 height`, `u16 reference` (the frame it predicts
+/// Wire tag of an encoded video frame: a type byte whose low nibble is the frame kind and
+/// whose high nibble is the codec's [`Codec::wire_id`], then `u16 frame id`, `u16 y` (the
+/// frame's top row, 0), `u16 width`, `u16 height`, `u16 reference` (the frame it predicts
 /// from, its own id where it names none), and the codec's own bitstream.
 pub const WIRE_VIDEO: u8 = 0x04;
 /// Frame kinds in the low nibble of the video type byte: a decode entry point, an
@@ -50,7 +50,7 @@ pub const FRAME_DELTA: u8 = 0x00;
 /// it predicts from one every client holds (`ReferenceWindow::settle`), so every client can
 /// decode it.
 pub const FRAME_ANCHOR: u8 = 0x08;
-/// Bytes of the two stripe headers.
+/// Bytes of the JPEG stripe header and the video frame header.
 pub const JPEG_HEADER_LEN: usize = 6;
 pub const VIDEO_HEADER_LEN: usize = 12;
 
@@ -119,11 +119,10 @@ impl Codec {
         self != Codec::Jpeg
     }
 
-    /// Whether a frame of this codec may be cut into independently encoded stripes: the
-    /// still-image mode always is, H.264 is on its software path, and every other codec
-    /// streams whole frames.
+    /// Whether a frame of this codec is cut into independently encoded stripes: the
+    /// still-image mode is, and every video codec streams whole frames.
     pub fn stripes(self) -> bool {
-        matches!(self, Codec::Jpeg | Codec::H264)
+        self == Codec::Jpeg
     }
 
     /// The codec's identity in the high nibble of the video type byte: its id.
@@ -441,8 +440,8 @@ pub fn vpx_level(codec: Codec, qindex: u32) -> u32 {
     best as u32
 }
 
-/// Append the header of one encoded video frame or stripe: the tag, the codec and frame kind,
-/// then the frame id, the stripe's top row, its width and height, and the id of the frame it
+/// Append the header of one encoded video frame: the tag, the codec and frame kind, then the
+/// frame id, its top row, its width and height, and the id of the frame it
 /// predicts from, all big-endian u16. A frame that predicts from none, or whose encoder does
 /// not say, names itself there.
 #[allow(clippy::too_many_arguments)]
@@ -651,7 +650,7 @@ pub fn av1_level(width: u32, height: u32, fps: u32, bitrate_bps: u64) -> u32 {
 }
 
 /// Wire frame kind of one encoded H.264 access unit, read from the bitstream itself:
-/// IDR = key, intra-only non-IDR = intra, predicted = delta. The stripe header labels
+/// IDR = key, intra-only non-IDR = intra, predicted = delta. The video header labels
 /// real decode entry points, so the NAL and slice types the encoder actually produced
 /// decide, never what was requested of it. An access unit whose slices cannot be parsed
 /// is labeled delta: a false delta costs one skipped entry point, a false key breaks the
@@ -996,11 +995,11 @@ mod tests {
         assert_eq!(jpeg, [WIRE_JPEG, 0, 0, 3, 0, 64]);
     }
 
-    /// Only the striped codecs stripe; every other codec is a whole-frame stream.
+    /// Only the still-image mode stripes; every video codec is a whole-frame stream.
     #[test]
     fn striping_and_chroma_by_codec() {
-        assert!(Codec::Jpeg.stripes() && Codec::H264.stripes());
-        for codec in [Codec::H265, Codec::Vp8, Codec::Vp9, Codec::Av1] {
+        assert!(Codec::Jpeg.stripes());
+        for codec in Codec::VIDEO {
             assert!(!codec.stripes(), "{codec:?}");
             assert!(codec.is_video());
         }

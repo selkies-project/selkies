@@ -808,8 +808,8 @@ fn refresh_quality(settings: &CaptureSettings, encoder: EncoderQuality, spent: f
 ///
 /// The GOP is left infinite and an IDR is forced only when a consumer genuinely needs a fresh
 /// decode entry point or a still screen is cleaned up. Every full-frame encoder shares this one
-/// function so they cannot drift apart; the striped software path applies the same policy per
-/// stripe inside `encode_cpu`.
+/// function so they cannot drift apart; the CPU path applies the same policy per region inside
+/// `encode_cpu`.
 ///
 /// 1. **Cleanup** (`cleanup_due`): once the content stops changing, whatever Turbo sends, a
 ///    refresh and, after a large change and a longer stillness, a key frame where the encoder's
@@ -1534,7 +1534,7 @@ fn hash_damage(
 }
 
 /// The rows a band hash (`hash_bands`) found changed in a `width` x `height` frame, as
-/// full-width rectangles, one per run of changed bands: the striped path's dirty map. No bands
+/// full-width rectangles, one per run of changed bands: the CPU path's dirty map. No bands
 /// read yet is the whole frame.
 fn band_rects(dirty: &[bool], width: i32, height: i32) -> Vec<Rectangle<i32, Physical>> {
     if dirty.is_empty() {
@@ -1673,18 +1673,16 @@ fn cpu_list(list: &str) -> Option<libc::cpu_set_t> {
 /// this context holds the state that stands in for that missing damage signal: the per-stripe
 /// hashes and the persistent encoder session that let `process()` discover damage by comparing
 /// content frame-to-frame. A source that does report every change (the shared framebuffer's
-/// watch) is read through `process_reported` instead, as Wayland's compositor damage is. A full-frame encoder runs through `decide_hw_fullframe`; the striped
-/// software path (JPEG, striped or full-frame software H.264) runs through `encode_cpu` with
-/// `hash_damage=true`.
+/// watch) is read through `process_reported` instead, as Wayland's compositor damage is. A
+/// full-frame encoder runs through `decide_hw_fullframe`; the CPU path (striped JPEG, or software
+/// H.264) runs through `encode_cpu` with `hash_damage=true`.
 ///
 /// Recording fan-out (socket sink and MP4 recorder) is handled at the delivery layer; a
 /// consumer needing a keyframe goes through [`X11Pipeline::request_idr`] like everyone else.
 pub struct X11Pipeline {
     settings: CaptureSettings,
     stripes: Vec<StripeState>,
-    /// Smoothed number of stripes carrying the encode budget (see `stripe_rate_control`).
-    stripes_carrying: f32,
-    /// The full-frame encoder, or `None` for the striped software path.
+    /// The full-frame encoder, or `None` for the CPU path.
     hw: Option<FrameEncoder>,
     hw_state: StripeState,
     /// The content hashes of a full-frame session, one per band of `DAMAGE_BAND_ROWS` rows.
@@ -1715,7 +1713,7 @@ pub struct X11Pipeline {
 impl X11Pipeline {
     /// Build the context, choosing the full-frame encoder for the X11 host-BGRA path through
     /// the shared ladder (`select_frame_encoder`): the hardware backend the encode node's driver
-    /// selects, then the codec's software encoder, or the striped software path for JPEG and
+    /// selects, then the codec's software encoder, or the CPU path for JPEG and
     /// H.264. A codec no backend serves falls through to the video codecs the host does serve,
     /// JPEG last.
     pub fn new(mut settings: CaptureSettings) -> Self {
@@ -1728,7 +1726,6 @@ impl X11Pipeline {
         let pipeline = Self {
             settings,
             stripes: Vec::new(),
-            stripes_carrying: 1.0,
             hw,
             hw_state: StripeState::default(),
             bands: Vec::new(),
@@ -1748,10 +1745,9 @@ impl X11Pipeline {
 
     /// Put the session this pipeline settled on into the capture's report.
     fn record_stream(&self) {
-        let fullframe = self.hw.is_some() || self.settings.video_fullframe;
         crate::report::stream(
             &self.settings,
-            encoders::software::stripe_count(self.settings.height, self.settings.codec, fullframe),
+            encoders::software::stripe_count(self.settings.height, self.settings.codec),
             self.hw
                 .as_ref()
                 .map(|enc| (enc.backend_name(), enc.is_hardware())),
@@ -1843,7 +1839,7 @@ impl X11Pipeline {
     }
 
     /// The encoder's name for the stream log: the hardware backend, the software library of a
-    /// full-frame session, or `CPU` with the library of the striped software path.
+    /// full-frame session, or `CPU` with the library of the CPU path.
     pub fn encoder_name(&self) -> String {
         match &self.hw {
             Some(enc) if enc.is_hardware() => enc.backend_name().to_string(),
@@ -1900,7 +1896,7 @@ impl X11Pipeline {
     /// # Returns
     ///
     /// `true` if the pipeline was successfully adapted in place; `false` when the active encoder
-    /// cannot follow (VAAPI on resize), or the striped software path stands where an engine
+    /// cannot follow (VAAPI on resize), or the CPU path stands where an engine
     /// may take the new size (one that refused the old size, past its maximum), and the caller
     /// must rebuild.
     pub fn reshape(&mut self, settings: &CaptureSettings, size_changed: bool) -> bool {
@@ -1946,9 +1942,9 @@ impl X11Pipeline {
     /// Apply a runtime rate-control / framerate change: the CBR target bitrate + VBV (kbps /
     /// kb; ignored unless CBR is active) and the target fps. NVENC and libvpx reconfigure their
     /// live session, as x265 does unless the frame rate moved; x265 then re-opens, as kvazaar
-    /// and SVT-AV1 always do; a VA-API session starts a new sequence; the striped software path
-    /// picks the new values up on the next `process()` (encode_cpu reads the updated settings
-    /// and reconfigures each stripe's encoder).
+    /// and SVT-AV1 always do; a VA-API session starts a new sequence; the CPU path picks the new
+    /// values up on the next `process()` (encode_cpu reads the updated settings and
+    /// reconfigures its encoder).
     pub fn update_rate(&mut self, bitrate_kbps: i32, vbv_multiplier: f64, fps: f64) {
         self.settings.video_bitrate_kbps = bitrate_kbps;
         self.settings.video_vbv_multiplier = vbv_multiplier;
@@ -1982,8 +1978,8 @@ impl X11Pipeline {
     /// Damage is read from the content hash (`hash_bands`). Without Turbo the hash decides whether
     /// a frame (or a stripe) is sent, so it runs first. Turbo sends every video frame, and only
     /// its cleanup reads the damage, so there the frame's hash runs beside its encode
-    /// (`hash_beside`) and the cleanup reads the frame before's (`turbo_dirty`; the striped path
-    /// as the rows it maps onto its stripes): the hash, a millisecond and a half at 1080p and six
+    /// (`hash_beside`) and the cleanup reads the frame before's (`turbo_dirty`; the CPU path
+    /// as the rows it maps onto its regions): the hash, a millisecond and a half at 1080p and six
     /// at 4K, stays off the path to the client. A frame the cleanup codes at its own quality is
     /// hashed before its encode instead, so a change landing on it is coded at the session's.
     /// With the paint-over off nothing reads it, and Turbo hashes nothing.
@@ -2284,15 +2280,10 @@ impl X11Pipeline {
                     }
                     None => band_rects(&self.turbo_dirty, width, height),
                 };
-                let (stripes, carrying, settings) = (
-                    &mut self.stripes,
-                    &mut self.stripes_carrying,
-                    &self.settings,
-                );
+                let (stripes, settings) = (&mut self.stripes, &self.settings);
                 let mut encode = || {
                     encode_cpu(
                         stripes,
-                        carrying,
                         argb,
                         width,
                         height,
@@ -2326,7 +2317,6 @@ impl X11Pipeline {
             } else {
                 encode_cpu(
                     &mut self.stripes,
-                    &mut self.stripes_carrying,
                     argb,
                     width,
                     height,
@@ -4896,7 +4886,6 @@ mod tests {
             height: 384,
             codec: Codec::H264,
             use_cpu: true,
-            video_fullframe: true,
             video_cbr_mode: true,
             video_bitrate_kbps: 100,
             video_min_qp: 51,
@@ -5043,13 +5032,14 @@ mod tests {
         );
     }
 
-    /// The striped path decides each stripe's cleanup inside its encode (`encode_cpu`), so a
-    /// Turbo frame that codes a stripe of a constant-quality session at the paint-over quality
+    /// The CPU path decides its cleanup inside its encode (`encode_cpu`), so a Turbo frame that
+    /// codes a constant-quality software H.264 session at the paint-over quality
     /// while it holds still (`software::stripes_held_still`) is hashed before it is encoded: a
     /// change landing on its refresh, on a frame after it, or on its key frame is coded at the
     /// session's quality, as without Turbo.
     #[test]
-    fn a_turbo_stripe_at_the_paint_over_quality_codes_a_change_at_the_session_quality() {
+    fn a_turbo_software_h264_frame_at_the_paint_over_quality_codes_a_change_at_the_session_quality()
+    {
         use crate::encoders::codec::{FRAME_KEY, parse_video_type};
         let session = |turbo: bool| {
             let mut p = X11Pipeline::new(CaptureSettings {
@@ -5057,7 +5047,6 @@ mod tests {
                 height: 384,
                 codec: Codec::H264,
                 use_cpu: true,
-                video_fullframe: true,
                 video_cbr_mode: false,
                 video_crf: 25,
                 video_paintover_crf: 18,
@@ -5067,7 +5056,7 @@ mod tests {
                 target_fps: 60.0,
                 ..Default::default()
             });
-            assert!(p.hw.is_none(), "software H.264 runs striped");
+            assert!(p.hw.is_none(), "software H.264 runs on the CPU path");
             for i in 0..12u8 {
                 p.process(&noise(i), 640 * 4);
             }
@@ -5157,7 +5146,7 @@ mod tests {
     }
 
     /// A frame whose source reports every change is decided on its rectangles alone, on the
-    /// striped path and a full-frame session alike: the first a pipeline codes is sent whole
+    /// CPU path and a full-frame session alike: the first a pipeline codes is sent whole
     /// whatever it reports, a change the rectangles name is sent, and one they do not name is
     /// not, since no hash is taken.
     #[test]
@@ -5168,7 +5157,6 @@ mod tests {
                 height: 64,
                 codec,
                 use_cpu: true,
-                video_fullframe: true,
                 use_paint_over_quality: false,
                 ..Default::default()
             });
@@ -5206,7 +5194,6 @@ mod tests {
             height: 64,
             codec: Codec::H264,
             use_cpu: true,
-            video_fullframe: true,
             ..Default::default()
         });
         let info = report.info();
@@ -5236,7 +5223,7 @@ mod tests {
         assert!(totals.encode_ns >= 1_000_000 && totals.pipeline_ns >= 2_000_000);
     }
 
-    /// A striped H.264 session where no engine may take the stream reshapes in place on a resize:
+    /// A software H.264 session where no engine may take the stream reshapes in place on a resize:
     /// software forced, encoding off the node, and a demotion, which a reshape at the same size
     /// keeps.
     #[test]
