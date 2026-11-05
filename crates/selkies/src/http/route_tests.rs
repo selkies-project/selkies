@@ -887,9 +887,22 @@ async fn basic_challenge_schemes() {
         Some("same-origin"),
         Some("websocket"),
     ];
-    for (name, credentials) in [
-        ("no credentials", None),
-        ("wrong credentials", Some(wrong.as_str())),
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let wrong_user = basic("other", "secret");
+    let no_colon = format!("Basic {}", STANDARD.encode("user"));
+    let valid = basic("user", "secret");
+    for (name, credentials, accepted) in [
+        ("no credentials", None, false),
+        ("wrong password", Some(wrong.as_str()), false),
+        ("wrong user", Some(wrong_user.as_str()), false),
+        (
+            "decoded credentials without a colon",
+            Some(no_colon.as_str()),
+            false,
+        ),
+        ("undecodable credentials", Some("Basic not-base64"), false),
+        ("correct credentials", Some(valid.as_str()), true),
     ] {
         for mode in modes {
             let mut headers = Vec::new();
@@ -900,6 +913,13 @@ async fn basic_challenge_schemes() {
                 headers.push(("sec-fetch-mode", m));
             }
             let r = app.call("GET", "/", &headers).await;
+            if accepted {
+                assert!(
+                    r.status == 200 && r.header("www-authenticate").is_none(),
+                    "correct credentials are not challenged over {mode:?}"
+                );
+                continue;
+            }
             let scheme = match mode {
                 None | Some("navigate") | Some("nested-navigate") => "Basic",
                 Some(_) => "PageLogin",
@@ -916,20 +936,6 @@ async fn basic_challenge_schemes() {
             );
         }
     }
-    let r = app
-        .call(
-            "GET",
-            "/",
-            &[
-                ("authorization", &basic("user", "secret")),
-                ("sec-fetch-mode", "cors"),
-            ],
-        )
-        .await;
-    assert!(
-        r.status == 200 && r.header("www-authenticate").is_none(),
-        "an authenticated request is not challenged"
-    );
     app.stop().await;
 }
 
@@ -1095,6 +1101,18 @@ async fn basic_socket_cookie() {
     assert!(
         r.status == 200 && set_cookie(&r).is_none(),
         "a request carrying a fresh cookie for its role is not answered with another"
+    );
+    let c = carried(&viewer);
+    let r = app
+        .call(
+            "GET",
+            "/",
+            &[("authorization", &basic("user", "secret")), ("cookie", &c)],
+        )
+        .await;
+    assert!(
+        r.status == 200 && set_cookie(&r).is_some_and(|c| value_of(&c).starts_with("controller.")),
+        "a request carrying another role's cookie is answered with its own"
     );
     let r = app
         .call(
