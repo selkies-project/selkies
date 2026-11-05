@@ -16,11 +16,14 @@ sudo apt-get update
 # needed.
 sudo apt-get install -y \
   build-essential pkg-config cmake nasm clang libclang-dev curl ca-certificates \
-  libx264-dev libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev \
+  libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev \
   libva2 libdrm-dev libgbm-dev libpixman-1-dev libinput-dev libudev-dev \
   libwayland-dev libxkbcommon-dev \
   libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
   python3-dev python3-pip
+
+# libx264 with the API pixelflux reads, which patches/x264 adds.
+sudo sh "$(dirname "$0")/../scripts/build-x264.sh" /usr/local
 
 # firefox-esr (for end-to-end testing the stream in a browser)
 sudo apt install -y software-properties-common && sudo add-apt-repository ppa:mozillateam/ppa -y && sudo apt install -y firefox-esr

@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Thu, 5 Nov 2026 00:19:48 -0500
+Subject: [PATCH 5/5] Copy large changes whole and changed luma with the SIMD
+ copy
+
+The changed-macroblock copy took a frame that mostly changed through the C copies, at 0.62 ms
+for 2496x1536 of 2560x1600 where the whole-frame SIMD copy takes 0.36: a frame where more than
+half the macroblocks changed copies whole again. A luma run is widened to even macroblocks,
+which copies current pixels since the source holds the whole picture, and taken by the SIMD
+copy at the 32-byte alignment it stores at; the chroma interleave keeps the C copy, the SIMD
+one coming out different on a run.
+
+Every stream checked before comes out bit for bit the same. Alternating runs at 2560x1600: a
+frame changed but for a 32-pixel margin took a median 7.74 ms with the fallback against 8.01
+without, and a 256x256 change 2.86 against 2.83.
+---
+ common/frame.c | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/common/frame.c b/common/frame.c
+index 6014e2d..ea893c8 100644
+--- a/common/frame.c
++++ b/common/frame.c
+@@ -395,6 +395,12 @@ static int frame_copy_changed( x264_t *h, x264_frame_t *dst, x264_picture_t *src
+     int planar444 = i_csp == X264_CSP_I444;
+     if( held < 0 || h->frames.i_input_all_changed > held || !(planar420 || planar444) )
+         return 0;
++    /* Most of the picture changed: the whole-frame SIMD copy is the faster one. */
++    int stale = 0;
++    for( int i = 0; i < mb_w * mb_h; i++ )
++        stale += changed[i] > held;
++    if( 2*stale > mb_w * mb_h )
++        return 0;
+ 
+     uint8_t *pix[3];
+     int stride[3];
+@@ -411,14 +417,17 @@ static int frame_copy_changed( x264_t *h, x264_frame_t *dst, x264_picture_t *src
+                 x++;
+                 continue;
+             }
+-            int x0 = x;
++            /* The source holds the whole current picture, so a run widened to even macroblocks
++             * copies current pixels: the 32-byte alignment the SIMD luma copy stores at. The
++             * chroma interleave takes the C copy, the SIMD one coming out different on a run. */
++            int x0 = x & ~1;
+             while( x < mb_w && (changed[x + y*mb_w] > held) )
+                 x++;
++            x = X264_MIN( (x + 1) & ~1, mb_w );
+             int cols = X264_MIN( 16*(x - x0), h->param.i_width - 16*x0 );
+             if( cols <= 0 || rows <= 0 )
+                 continue;
+-            /* The SIMD copies store non-temporally to aligned addresses a run need not start at. */
+-            x264_plane_copy_c( dst->plane[0] + 16*x0 + 16*y*dst->i_stride[0], dst->i_stride[0],
++            h->mc.plane_copy( dst->plane[0] + 16*x0 + 16*y*dst->i_stride[0], dst->i_stride[0],
+                               (pixel*)pix[0] + 16*x0 + 16*y*(stride[0]/SIZEOF_PIXEL), stride[0]/SIZEOF_PIXEL, cols, rows );
+             if( planar420 )
+                 x264_plane_copy_interleave_c( dst->plane[1] + 16*x0 + 8*y*dst->i_stride[1], dst->i_stride[1],
+@@ -427,7 +436,7 @@ static int frame_copy_changed( x264_t *h, x264_frame_t *dst, x264_picture_t *src
+                                              (cols+1)>>1, (rows+1)>>1 );
+             else
+                 for( int p = 1; p < 3; p++ )
+-                    x264_plane_copy_c( dst->plane[p] + 16*x0 + 16*y*dst->i_stride[p], dst->i_stride[p],
++                    h->mc.plane_copy( dst->plane[p] + 16*x0 + 16*y*dst->i_stride[p], dst->i_stride[p],
+                                       (pixel*)pix[p] + 16*x0 + 16*y*(stride[p]/SIZEOF_PIXEL), stride[p]/SIZEOF_PIXEL, cols, rows );
+         }
+     }

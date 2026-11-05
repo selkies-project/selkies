@@ -396,6 +396,12 @@ impl BlockLedger {
         unrefined as f32 / self.refined.len() as f32
     }
 
+    /// Whether each block, in raster order, held still this frame: what the source reported
+    /// unchanged since the frame before.
+    pub fn unchanged(&self) -> impl Iterator<Item = bool> + '_ {
+        self.still.iter().map(|&s| s > 0)
+    }
+
     /// The number of blocks in the region.
     pub fn blocks(&self) -> usize {
         self.cols * self.rows

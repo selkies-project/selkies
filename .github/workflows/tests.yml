@@ -65,14 +65,16 @@ jobs:
       - name: Native libraries
         # The distro's development packages, which is what a test build needs;
         # the source-built codec libraries of the wheels are a release concern,
-        # not one the tests share.
+        # not one the tests share. libx264 is the exception: pixelflux reads the
+        # API patches/x264 adds, so it is built with them.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake nasm libclang-dev python3-dev libx264-dev libx265-dev \
+            cmake nasm libclang-dev python3-dev libx265-dev \
             libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev \
             libgbm-dev libdrm-dev libwayland-dev libinput-dev libudev-dev \
             libxkbcommon-dev libpixman-1-dev
+          sudo sh scripts/build-x264.sh /usr/local
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable

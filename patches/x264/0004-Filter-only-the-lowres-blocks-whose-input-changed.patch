@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Wed, 4 Nov 2026 23:53:28 -0500
+Subject: [PATCH 4/5] Filter only the lowres blocks whose input changed
+
+A recycled input frame's lowres planes hold the input frame they were filtered from (its
+i_lowres_frame), so only a block whose 16x16 macroblock, or the column or row of the next ones
+the filter reads, changed since (h->frames.mb_input_changed) is filtered again. After the copy
+of the changed macroblocks the planes hold the current picture everywhere, so each run is
+widened to eight blocks either side, the alignment the SIMD core loads and stores at from a
+row's start, and filtered there; a frame holding nothing, or one after a frame without mb_info,
+is filtered whole.
+
+Every stream checked before comes out bit for bit the same. At 2560x1600, a frame where a
+256x256 area changed took 2.80 ms where it took 3.28 under CRF; a frame whose change leaves a
+32-pixel margin took 7.71 against 7.78.
+---
+ common/frame.c |  2 +-
+ common/frame.h |  1 +
+ common/mc.c    | 40 ++++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/common/frame.c b/common/frame.c
+index 23b6e2f..6014e2d 100644
+--- a/common/frame.c
++++ b/common/frame.c
+@@ -79,7 +79,7 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
+ #endif
+ 
+     CHECKED_MALLOCZERO( frame, sizeof(x264_frame_t) );
+-    frame->i_input_frame = -1;
++    frame->i_input_frame = frame->i_lowres_frame = -1;
+     PREALLOC_INIT
+ 
+     /* allocate frame data (+64 for extra data for me) */
+diff --git a/common/frame.h b/common/frame.h
+index 18cdcad..380d17d 100644
+--- a/common/frame.h
++++ b/common/frame.h
+@@ -55,6 +55,7 @@ typedef struct x264_frame
+ 
+     int     i_frame;     /* Presentation frame number */
+     int     i_input_frame; /* The input frame whose pixels the planes hold, -1 for none */
++    int     i_lowres_frame; /* The input frame the lowres planes were filtered from, -1 for none */
+     int     i_coded;     /* Coded frame number */
+     int64_t i_field_cnt; /* Presentation field count */
+     int     i_frame_num; /* 7.4.3 frame_num */
+diff --git a/common/mc.c b/common/mc.c
+index ae81ce4..1097d8d 100644
+--- a/common/mc.c
++++ b/common/mc.c
+@@ -466,8 +466,44 @@ void x264_frame_init_lowres( x264_t *h, x264_frame_t *frame )
+     for( int y = 0; y < i_height; y++ )
+         src[i_width+y*i_stride] = src[i_width-1+y*i_stride];
+     memcpy( src+i_stride*i_height, src+i_stride*(i_height-1), (i_width+1) * SIZEOF_PIXEL );
+-    h->mc.frame_init_lowres_core( src, frame->lowres[0], frame->lowres[1], frame->lowres[2], frame->lowres[3],
+-                                  i_stride, frame->i_stride_lowres, frame->i_width_lowres, frame->i_lines_lowres );
++    /* A recycled frame's lowres planes hold the input frame they were filtered from: only the
++     * blocks whose 16x16 macroblock, or the column or row of the next ones the filter reads,
++     * changed since are filtered again. The planes hold the current picture everywhere, so a
++     * run widened to 8 blocks either side filters current pixels: that is the alignment the
++     * SIMD core reads and stores at, as from a row's start. */
++    int held = frame->i_lowres_frame;
++    int *changed = h->frames.mb_input_changed;
++    frame->i_lowres_frame = frame->i_input_frame;
++    if( held >= 0 && changed && frame->i_input_frame >= 0 && h->frames.i_input_all_changed <= held )
++    {
++        const int mb_w = h->mb.i_mb_width, mb_h = h->mb.i_mb_height;
++        const intptr_t dst_stride = frame->i_stride_lowres;
++#define LOWRES_STALE( x, y ) ( (x) < mb_w && (y) < mb_h && changed[(x) + (y)*mb_w] > held )
++#define BLOCK_STALE( x, y ) ( LOWRES_STALE( x, y ) || LOWRES_STALE( (x)+1, y ) || LOWRES_STALE( x, (y)+1 ) || LOWRES_STALE( (x)+1, (y)+1 ) )
++        for( int y = 0; y < mb_h; y++ )
++            for( int x = 0; x < mb_w; )
++            {
++                if( !BLOCK_STALE( x, y ) )
++                {
++                    x++;
++                    continue;
++                }
++                int x0 = x & ~7;
++                while( x < mb_w && BLOCK_STALE( x, y ) )
++                    x++;
++                x = X264_MIN( (x + 7) & ~7, mb_w );
++                intptr_t d = 8*x0 + 8*y*dst_stride;
++                h->mc.frame_init_lowres_core( src + 16*x0 + 16*y*i_stride, frame->lowres[0] + d, frame->lowres[1] + d,
++                                              frame->lowres[2] + d, frame->lowres[3] + d, i_stride, dst_stride,
++                                              x == mb_w ? frame->i_width_lowres - 8*x0 : 8*(x - x0),
++                                              X264_MIN( 8, frame->i_lines_lowres - 8*y ) );
++            }
++#undef BLOCK_STALE
++#undef LOWRES_STALE
++    }
++    else
++        h->mc.frame_init_lowres_core( src, frame->lowres[0], frame->lowres[1], frame->lowres[2], frame->lowres[3],
++                                      i_stride, frame->i_stride_lowres, frame->i_width_lowres, frame->i_lines_lowres );
+     x264_frame_expand_border_lowres( frame );
+ 
+     memset( frame->i_cost_est, -1, sizeof(frame->i_cost_est) );

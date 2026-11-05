@@ -16,6 +16,10 @@
 //! `KEYFRAME_S` (the scheduled key-frame interval), `W`, `H`, `FPS`, `MOTION` and `STILL` (frames), `STEP` (rows the scroll moves a frame, 4), `CARET`
 //! (frames per caret toggle, 0 none), `VIDEO` (`WxH`, a box at the bottom right repainted with a
 //! moving picture every frame for the whole run, the PSNR then measured outside it),
+//! `THREADS` (0 codes on one thread, as `cpu_encode_threading` off does, which makes a
+//! constant-rate x264 stream repeatable: its sliced threads' row control reads each other's
+//! progress), `REPORTED` (1 hands each frame's changed blocks over as a source that reports every change,
+//! `X11Pipeline::process_reported`, rather than for the content hash to confirm),
 //! `VIDEO_STOP` (frames into the still phase the video freezes on its last picture, the PSNR
 //! then measured over the whole screen and the bytes from there reported apart),
 //! `RESUME` (frames of motion after the still phase), `TRIGGER` (paint-over trigger frames),
@@ -375,6 +379,7 @@ fn cleanup_bench() {
         video_fullcolor: env("FULLCOLOR", 0) == 1,
         video_bit_depth: env("DEPTH", 8),
         keyframe_interval_s: env("KEYFRAME_S", 0.0),
+        cpu_encode_threading: env("THREADS", 1) == 1,
         ..Default::default()
     };
     let motion: usize = env("MOTION", 90);
@@ -398,6 +403,7 @@ fn cleanup_bench() {
             vh.min(h),
         ))
     });
+    let reported = env("REPORTED", 0) == 1;
     let video_stop: Option<usize> = std::env::var("PF_BENCH_VIDEO_STOP")
         .ok()
         .and_then(|v| v.parse().ok());
@@ -470,7 +476,11 @@ fn cleanup_bench() {
         let changed = changed_blocks(&frame, &previous, w, h);
         previous.copy_from_slice(&frame);
         let start = Instant::now();
-        let out = p.process_damaged(&frame, w * 4, &changed);
+        let out = if reported {
+            p.process_reported(&frame, w * 4, &changed)
+        } else {
+            p.process_damaged(&frame, w * 4, &changed)
+        };
         let ms = start.elapsed().as_secs_f64() * 1e3;
         let mut bytes = 0usize;
         let mut kinds = String::new();

@@ -258,6 +258,15 @@ the OpenH264 crates are dependencies of every build, since their decoder is the 
 so the OpenH264 encoder's tests run under the default build too. The
 wheel recipe (`pyproject.toml`) builds libvpx, SVT-AV1, dav1d, libde265, and x264 and x265 for the GPL wheel or
 kvazaar for the non-GPL one from source.
+libx264 is built from the commit the recipe pins with the patches under `patches/x264` applied, since pixelflux reads
+the API they add: every other build (CI, the devcontainer, the scanner image, Selkies' packaging) takes it from
+`scripts/build-x264.sh`, never from a distribution. The patches make x264 the screen encoder it is used as: the
+caller's per-macroblock quantizer offsets apply without adaptive quantization's variance pass (`rc.b_qp_offsets`),
+and the macroblocks the caller's `mb_info` marks unchanged (`H264EncoderWrapper::constant_blocks`, from the block
+ledger, given only where the source reports every change) are coded as skips without analysis, copied from the
+input, or filtered into the lowres picture again, each where the full path would code, copy, or filter them the same:
+a stream comes out bit for bit as without them. At 2560x1600 a 256x256 change took x264 2.0 ms of a frame where it
+took 4.1, and a frame that changed whole the same as before.
 The crate's `Cargo.toml` is the one place the version lives: `setup.py` reads it, spelling a semver pre-release
 the PEP 440 way (`2.1.0-rc.1` is `2.1.0rc1` to pip), and the release workflow stamps the tag into the manifest
 and the lock, so a build ahead of a release carries the series version and a release the tag's.
@@ -274,8 +283,7 @@ steps finer than the paint-over quantizer as the encoder needs to come to what i
 reaches (six for x264 and x265, three for NVENC and VA-API, none for VP8 and kvazaar), a turn of them a frame sized to what the rate control has
 room for, a block counting clean once its frame came out at that quantizer: a video playing in
 one window no longer holds the text around it at motion quality. x264's sessions take it as
-macroblock quantizer offsets, under adaptive quantization at a strength that moves no quantizer
-itself, NVENC's H.264, HEVC, and AV1 through the QP delta map under the rate control, and libvpx's
+macroblock quantizer offsets applied as given (`rc.b_qp_offsets`, below), NVENC's H.264, HEVC, and AV1 through the QP delta map under the rate control, and libvpx's
 VP8 through its region-of-interest map, x265 through its per-block quantizer offsets, kvazaar
 through its map of a delta a tree block, and VA-API's H.264 through the driver's regions of
 interest, a region a run of blocks along a row and at most ten steps finer than the frame, on X11 (XShm, the shared framebuffer, DRI3) and Wayland; a

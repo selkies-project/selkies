@@ -31,10 +31,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential pkg-config nasm clang libclang-dev \
-            libx264-dev libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev \
+            libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev \
             libudev-dev libdrm-dev libgbm-dev \
             libwayland-dev libxkbcommon-dev \
             libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev
+          sudo sh scripts/build-x264.sh /usr/local
 
       - name: Build docs
         run: cargo doc --no-deps

@@ -371,12 +371,6 @@ fn x264_frame_rate(fps: f64) -> FrameRate {
     FrameRate::of(if fps < 1.0 { 30.0 } else { fps })
 }
 
-/// The adaptive-quantization strength x264 sessions open at: the least that keeps it on, so
-/// per-macroblock offsets apply (`H264EncoderWrapper::refine_blocks`), with no quantizer moved
-/// by the picture's own variance.
-#[cfg(feature = "gpl")]
-const AQ_STRENGTH: f32 = 1e-4;
-
 /// One long-lived libx264 session for a stripe, holding the raw `x264_t` handle alongside a
 /// mirror of its live parameters so the encoder can be retuned per frame instead of rebuilt.
 ///
@@ -424,6 +418,9 @@ pub struct H264EncoderWrapper {
     /// The quantizer offset of each macroblock of the next frame, empty where it has none
     /// (`refine_blocks`).
     quant_offsets: Vec<f32>,
+    /// The next frame's macroblocks that did not change (`constant_blocks`), as x264's
+    /// `mb_info` flags; empty where the source cannot say.
+    mb_info: Vec<u8>,
 }
 
 #[cfg(feature = "gpl")]
@@ -676,11 +673,8 @@ impl H264EncoderWrapper {
             })
             .unwrap();
             x264_sys::x264_param_apply_profile(&mut param, profile.as_ptr());
-            // A frame's per-macroblock offsets (`refine_blocks`) reach the quantizer only under
-            // adaptive quantization, which x264 turns off at strength 0, so it runs at one that
-            // moves no macroblock's quantizer by itself.
-            param.rc.i_aq_mode = x264_sys::X264_AQ_VARIANCE as i32;
-            param.rc.f_aq_strength = AQ_STRENGTH;
+            param.rc.b_qp_offsets = 1;
+            param.analyse.b_mb_info = 1;
 
             param.i_threads = threads;
             param.b_repeat_headers = 1;
@@ -719,6 +713,7 @@ impl H264EncoderWrapper {
                     last_qp: None,
                     rf_constant: param.rc.f_rf_constant as f64,
                     quant_offsets: Vec::new(),
+                    mb_info: Vec::new(),
                 })
             }
         }
@@ -877,6 +872,20 @@ impl H264EncoderWrapper {
         }));
     }
 
+    /// Mark the macroblocks of the next frame that did not change since the frame before
+    /// (`unchanged`, in raster order), which x264 codes as skips without analysing them where
+    /// its reference holds them at the frame's quantizer or finer.
+    pub fn constant_blocks(&mut self, unchanged: impl Iterator<Item = bool>) {
+        self.mb_info.clear();
+        self.mb_info.extend(unchanged.map(|c| {
+            if c {
+                x264_sys::X264_MBINFO_CONSTANT as u8
+            } else {
+                0
+            }
+        }));
+    }
+
     /// Put the session's own rate and VBV buffer back after a held key frame.
     fn restore_rate(&mut self) {
         unsafe {
@@ -1008,6 +1017,10 @@ impl H264EncoderWrapper {
             // x264 reads the offsets as the frame is submitted, within this call.
             if !self.quant_offsets.is_empty() {
                 pic_in.prop.quant_offsets = self.quant_offsets.as_mut_ptr();
+            }
+            let blocks = (self.width as usize).div_ceil(16) * (self.height as usize).div_ceil(16);
+            if self.mb_info.len() == blocks {
+                pic_in.prop.mb_info = self.mb_info.as_mut_ptr();
             }
 
             let mut pic_out: x264_sys::x264_picture_t = std::mem::zeroed();
@@ -2020,6 +2033,11 @@ pub fn encode_cpu(
                         enc.refine_blocks(&refinement.plan, refinement.offset() as f32);
                         refinement
                     });
+                    if hash_damage {
+                        enc.constant_blocks(std::iter::empty());
+                    } else {
+                        enc.constant_blocks(stripe_state.ledger.unchanged());
+                    }
                     let y_size = width_usize * actual_height;
                     let uv_size = if video_fullcolor { y_size } else { y_size / 4 };
                     let y_stride = width_usize as i32;
