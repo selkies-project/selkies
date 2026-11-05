@@ -12,16 +12,16 @@
  * is read in a worker (`SOCKET_WORKER_SRC`, reached through
  * `WorkerWebSocket`), which passes audio straight to the decoder and the
  * playback worklet, routes video straight to the video worker while it
- * decodes -- full frames through one decoder, the striped modes decoded per
- * row and composited there, acked from the socket worker (received id for
- * full frames, presented id for stripes) -- and carries the microphone and
+ * decodes -- full frames through one decoder, JPEG's stripes decoded and
+ * composited there, acked from the socket worker (received id for full
+ * frames, presented id for stripes) -- and carries the microphone and
  * webcam encoders' frames out over their own ports: nothing occupying the
  * page's thread can interrupt any of them.
  * Binary messages are typed by their first byte. From the server: `0x01`
  * audio (Opus, with the RED redundancy layout documented on
  * extractOpusFrames), `0x03` a JPEG stripe (`u8 reserved`, `u16 frame id`,
- * `u16 stripe Y`, JPEG data), `0x04` a video stripe or full frame (`u8`
- * codec and frame kind, `u16 frame id`, `u16 stripe Y`, `u16 width`, `u16
+ * `u16 stripe Y`, JPEG data), `0x04` a full video frame (`u8` codec and
+ * frame kind, `u16 frame id`, `u16 stripe Y`, `u16 width`, `u16
  * height`, `u16` the id of the frame it predicts from -- its own id when it
  * predicts from nothing or the encoder does not say -- then the coded data),
  * `0x05` a gzip-wrapped control text once the client
@@ -52,15 +52,13 @@
  * `server_apps`, `pipeline_status`, `stream_resolution`, `stream_info`, and
  * `stream_stats` (lib/stream-stats.js).
  *
- * Video is decoded with WebCodecs: a JPEG stripe through ImageDecoder, an
- * H.264 stripe through a VideoDecoder per row offset -- in the video worker
- * while the divert holds, on the page as the fallback -- and a full frame --
- * controller or shared viewer alike -- in the video worker or through the
- * row-0 stripe decoder. Decoded frames reach the
- * screen through the first sink available: a track generator feeding a
- * `<video>`, the worker's OffscreenCanvas, or the page canvas, with the
- * striped modes composited on a back-buffer and blitted whole at frame
- * boundaries. Audio is decoded in a worker and played through an
+ * Video is decoded with WebCodecs: a JPEG stripe through ImageDecoder and a
+ * full frame through a VideoDecoder -- controller or shared viewer alike, in
+ * the video worker while the divert holds, on the page as the fallback.
+ * Decoded frames reach the screen through the first sink available: a track
+ * generator feeding a `<video>`, the worker's OffscreenCanvas, or the page
+ * canvas, with JPEG's stripes composited on a back-buffer and blitted whole
+ * at frame boundaries. Audio is decoded in a worker and played through an
  * AudioWorklet, the microphone is encoded to Opus in a worker, both on
  * libopus in WASM where the engine has no WebCodecs audio, and the webcam is
  * lib/webcam-capture.js.
@@ -289,8 +287,8 @@ window.currentAudioDropped = 0;
  * element (GPU-composited, no per-frame 2D-canvas draw) by
  * MediaStreamTrackGenerator on the main thread (Chromium) or the standard
  * worker-only VideoTrackGenerator whose track is transferred back here.
- * Full-frame H.264 modes only; striped and JPEG modes, and browsers with
- * neither generator, keep the canvas path.
+ * Full-frame video only; JPEG, and browsers with neither generator, keep the
+ * canvas path.
  */
 let videoElement = null;
 let videoFrameWriter = null;
@@ -339,7 +337,7 @@ let lastReceivedVideoFrameAt = 0;
 /** Newest id the page path acked, and when: an unchanged one repeats on the heartbeat. */
 let lastAckSentId = -1, lastAckSentAt = 0;
 /**
- * When a decoded video frame was last presented, on any path (worker or page, striped or
+ * When a decoded video frame was last presented, on any path (worker or page, JPEG or
  * full-frame). The no-output watchdog reads it to tell a decoder that produces nothing from
  * a still screen that sends nothing. `NO_OUTPUT_WATCHDOG_MS` is the grace it allows chunks to
  * flow with no frame out before it trips the software-decode retry.
@@ -561,15 +559,11 @@ let manual_width = null;
 let manual_height = null;
 let originalWindowResizeHandler = null;
 let handleResizeUI_globalRef = null;
-let vncStripeDecoders = {};
 /**
- * Chunks one stripe decoder may have outstanding before its deltas are
- * dropped. Past it the row is gated until its next IDR: decoding a backlog
- * late only deepens it, and a dropped delta breaks the row's reference chain.
- * A full-frame decoder, the page's or the video worker's, follows
- * lib/decode-gate.js instead.
+ * The page's full-frame video decoder, keyed by the stripe Y its frames
+ * carry, which for a full frame is always 0.
  */
-const STRIPE_DECODE_QUEUE_LIMIT = 8;
+let vncStripeDecoders = {};
 /**
  * A stripe is stale only when it trails the last drawn id by at most this
  * many frames. The id is a uint16, so a larger modular gap means the row sat
@@ -579,10 +573,11 @@ const STRIPE_DECODE_QUEUE_LIMIT = 8;
 const JPEG_STRIPE_REORDER_WINDOW = 256;
 let stripeDecodeSoftErrors = {};
 let wakeLockSentinel = null;
-let currentEncoderMode = 'h264enc-striped';
-/** Whether an encoder wire value streams whole video frames through one decoder. */
-const isFullFrameVideo = (mode) => mode !== 'jpeg' && mode !== 'h264enc-striped';
-/** Whether an encoder wire value streams video at all rather than JPEG stills. */
+let currentEncoderMode = 'h264enc';
+/**
+ * Whether an encoder wire value streams video, whole frames through one
+ * decoder, rather than JPEG stripes.
+ */
 const isVideoEncoder = (mode) => mode !== 'jpeg';
 let useCssScaling = false;
 /** Whether the server runs on Wayland, as the last display-config update named it. */
@@ -982,9 +977,8 @@ try {
  * Whether the one software-decode retry of this session is spent. It is spent
  * whether or not the engine honored the hint, so an engine that ignores it
  * cannot loop the retry. Errors within `SOFTWARE_DECODE_SETTLE_MS` of the
- * switch describe the path just torn down (the striped modes run a decoder
- * per stripe and they fail together) and are absorbed instead of reaching
- * the ladder.
+ * switch describe the path just torn down and are absorbed instead of
+ * reaching the ladder.
  */
 let softwareDecodeAttempted = preferSoftwareDecode;
 let softwareDecodeSwitchedAt = Number.NEGATIVE_INFINITY;
@@ -1163,7 +1157,7 @@ function followDecodePace(fps) {
   sendDecodePace();
 }
 setInterval(() => {
-  if (decodeInWorker || !isFullFrameVideo(currentEncoderMode)) return;
+  if (decodeInWorker || !isVideoEncoder(currentEncoderMode)) return;
   const fps = pagePace.second();
   if (fps !== undefined) followDecodePace(fps);
 }, 1000);
@@ -1399,8 +1393,8 @@ window.videoDivertOn = false;
 /** Stripe row layout the video worker is decoding while the divert holds. */
 window.videoStripeRows = {};
 let frameCount = 0;
-let uniqueStripedFrameIdsThisPeriod = new Set();
-let lastStripedFpsUpdateTime = performance.now();
+let uniqueWireFrameIdsThisPeriod = new Set();
+let lastWireFpsUpdateTime = performance.now();
 let lastFpsUpdateTime = performance.now();
 let statusDisplayElement;
 let playButtonElement;
@@ -1869,7 +1863,7 @@ let videoWorker = null;
  * canvas so the JPEG-stripe path is unaffected.
  */
 let videoWorkerCanvas = null;
-/** Composite striped-codec stripes in the worker; capability-gated at first use. */
+/** Composite JPEG stripes in the worker; capability-gated at first use. */
 let stripeCompositeEnabled = true;
 let videoWorkerActive = false;
 let videoWorkerReady = false;
@@ -1903,11 +1897,11 @@ let workerDecodeFailed = false;
 // Whether 0x03/0x04 currently bypass the page (see updateVideoDivert), and
 // the wire frames the video worker counted since the last metrics tick.
 let videoDivertOn = false;
-/** Whether the running divert is the striped one, which acks presented ids. */
+/** Whether the running divert is JPEG's, which acks presented ids. */
 let videoDivertStriped = false;
 let divertedWireFramesThisPeriod = 0;
-/** What the worker reported it can decode, for the striped divert gates. */
-let videoWorkerStripedDecode = false, videoWorkerJpegDecode = false;
+/** Whether the worker reported it can decode JPEG, for JPEG's divert gate. */
+let videoWorkerJpegDecode = false;
 /** Worker spawns attempted, capping respawn churn where Worker() cannot run. */
 let videoWorkerSpawnAttempts = 0;
 /**
@@ -2169,34 +2163,29 @@ let wireChunks = 0, wireFrames = 0, wireLastId = -1, wireStatsTimer = null, wire
 // share, which a stringified function would carry in here unresolved.
 ${wireCodecsSource.replace(/^export /gm, '')}
 
-// The striped modes (h264enc-striped, jpeg) decode, composite, and present in
-// here: a VideoDecoder per row offset or an in-worker JPEG decode, drawn onto
-// a persistent back-buffer so undamaged rows survive, presented by the page's
-// rule -- last row landed, or the socket and decoders proven quiet (the
-// stripe clock), else at the frame-id boundary -- with the presented id going
-// back over the wire port so the server paces against what reached the screen.
+// JPEG, the striped mode, decodes, composites, and presents in here: each
+// stripe decoded in the worker and drawn onto a persistent back-buffer so
+// undamaged rows survive, presented by the page's rule -- last row landed, or
+// the socket and decoders proven quiet (the stripe clock), else at the
+// frame-id boundary -- with the presented id going back over the wire port so
+// the server paces against what reached the screen.
 const createStripeClock = ${createStripeClock.toString()};
 const createChunkStamp = ${createChunkStamp.toString()};
 const createFrameFit = ${createFrameFit.toString()};
 const fitFrameToStream = createFrameFit();
 const chunkStamp = createChunkStamp();
-const STRIPE_DECODE_QUEUE_LIMIT = ${STRIPE_DECODE_QUEUE_LIMIT};
 const JPEG_STRIPE_REORDER_WINDOW = ${JPEG_STRIPE_REORDER_WINDOW};
 let stripedOn = false, wirePort = null;
-let stripeDecs = {}, jpegLastRowId = {}, jpegRowHeights = {}, jpegPending = 0;
+let jpegLastRowId = {}, jpegRowHeights = {}, jpegPending = 0;
 let stripeBack = null, stripeBackCtx = null;
 let stripeGeomW = 0, stripeGeomH = 0, stripeGeomKnown = false;
 let stripePendingId = null, stripeDirty = false, stripeBottom = false;
-let stripeSoftErrors = 0, stripeSoftWindowStart = 0, settleTimer = null;
+let settleTimer = null;
 let presentedFrames = 0, wireDimsW = 0, wireDimsH = 0;
 const stripeClock = createStripeClock();
 
 function closeStripeState() {
-  for (const y in stripeDecs) {
-    const info = stripeDecs[y];
-    try { if (info.dec.state !== 'closed') info.dec.close(); } catch (err) {}
-  }
-  stripeDecs = {}; jpegLastRowId = {}; jpegRowHeights = {}; jpegPending = 0;
+  jpegLastRowId = {}; jpegRowHeights = {}; jpegPending = 0;
   stripePendingId = null; stripeDirty = false; stripeBottom = false;
   if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
 }
@@ -2218,9 +2207,7 @@ function stripeEnsureBack(minW, minH) {
 }
 
 function stripeDrained() {
-  if (jpegPending > 0) return false;
-  for (const y in stripeDecs) { if (stripeDecs[y].meta.length > 0) return false; }
-  return true;
+  return jpegPending === 0;
 }
 
 function stripePresent() {
@@ -2232,7 +2219,7 @@ function stripePresent() {
   if (stripePendingId !== null && wirePort) {
     try { wirePort.postMessage({ presentedId: stripePendingId }); } catch (err) {}
   }
-  // A shared viewer learns striped geometry from the composite itself.
+  // A shared viewer learns JPEG's geometry from the composite itself.
   if (!stripeGeomKnown && (stripeBack.width !== wireDimsW || stripeBack.height !== wireDimsH)) {
     wireDimsW = stripeBack.width; wireDimsH = stripeBack.height;
     self.postMessage({ type: 'wireDims', w: wireDimsW, h: wireDimsH });
@@ -2294,90 +2281,6 @@ function stripeCompose(image, y, h, frameId, at) {
   stripeMaybePresent();
 }
 
-function onStripeError(y) {
-  const info = stripeDecs[y];
-  if (info) {
-    try { if (info.dec.state !== 'closed') info.dec.close(); } catch (err) {}
-    delete stripeDecs[y];
-  }
-  const now = Date.now();
-  if (now - stripeSoftWindowStart > 10000) { stripeSoftWindowStart = now; stripeSoftErrors = 0; }
-  // A burst of failures says decode should leave the worker for the page ladder.
-  if (++stripeSoftErrors > 12) { self.postMessage({ type: 'decoderError' }); return; }
-  sendNeedKey('stripe_error');
-}
-
-function onH264Stripe(buffer, at) {
-  if (buffer.byteLength < 13) return;
-  const head = new Uint8Array(buffer, 0, 12);
-  const key = wireFrameIsKey(head[1]);
-  const frameId = (head[2] << 8) | head[3];
-  const y = (head[4] << 8) | head[5];
-  const w = (head[6] << 8) | head[7];
-  const h = (head[8] << 8) | head[9];
-  wireChunks++;
-  if (frameId !== wireLastId) { wireFrames++; wireLastId = frameId; }
-  stripeClock.note(frameId);
-  const payload = buffer.slice(12);
-  if (payload.byteLength === 0) return;
-  let info = stripeDecs[y];
-  let codec = info ? info.codec : null;
-  const bytes = new Uint8Array(payload);
-  if (key) codec = codecStringFor(wireCodecName(head[1]), bytes, w, h, 0, false, wireChromium);
-  else if (!codec) codec = wireHint;
-  if (!codec) { sendNeedKey('no_codec'); return; }
-  const framed = avcFramed(codec);
-  const desc = key && framed ? avcDescription(bytes) : (info ? info.desc : null);
-  if (!info || info.dec.state !== 'configured' || info.w !== w || info.h !== h || info.codec !== codec
-      || info.range !== wireFullRange || (key && framed && !sameBytes(desc, info.desc))) {
-    // Only a keyframe may (re)configure a row: deltas against a lost state are noise.
-    if (!key) { sendNeedKey('no_key'); return; }
-    if (info) { try { if (info.dec.state !== 'closed') info.dec.close(); } catch (err) {} }
-    const rowY = y;
-    const dec = new VideoDecoder({
-      output: (f) => {
-        // The row decoder's own frame says what made it; the composite it joins is canvas-backed.
-        statsFormat = f.format;
-        tellFacts();
-        const rowInfo = stripeDecs[rowY];
-        const meta = rowInfo && rowInfo.meta.length ? rowInfo.meta.shift() : null;
-        stripeCompose(f, rowY, f.displayHeight, meta ? meta.frameId : wireLastId, meta ? meta.at : NaN);
-      },
-      error: () => onStripeError(rowY),
-    });
-    try {
-      const cfg = { codec: codec, codedWidth: w, codedHeight: h, optimizeForLatency: true };
-      if (wireSoftware) cfg.hardwareAcceleration = 'prefer-software';
-      if (desc) cfg.description = desc;
-      cfg.colorSpace = decoderColorSpace(codec, wireFullRange);
-      dec.configure(cfg);
-    } catch (err) {
-      try { if (dec.state !== 'closed') dec.close(); } catch (e2) {}
-      onStripeError(y);
-      return;
-    }
-    info = stripeDecs[y] = { dec: dec, w: w, h: h, codec: codec, desc: desc,
-                             range: wireFullRange, gotKey: false, meta: [] };
-    probeHardware(codec, w, h);
-  }
-  if (!key && !info.gotKey) { sendNeedKey('no_key'); return; }
-  if (!key && info.dec.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
-    // Deltas behind a backlog only deepen it; the row is gated until its next IDR.
-    info.gotKey = false;
-    sendNeedKey('overload');
-    return;
-  }
-  try {
-    info.meta.push({ frameId: frameId, at: at });
-    const data = framed ? annexbToAvcc(bytes) : payload;
-    info.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: chunkStamp(), data: data }));
-    if (key) info.gotKey = true;
-  } catch (err) {
-    info.meta.pop();
-    onStripeError(y);
-  }
-}
-
 function onJpegStripe(buffer, at) {
   if (buffer.byteLength < 7) return;
   const head = new Uint8Array(buffer, 0, 6);
@@ -2428,7 +2331,6 @@ function onWire(message) {
   if (stripedOn) {
     const type = new Uint8Array(buffer, 0, 1)[0];
     if (type === 0x03) onJpegStripe(buffer, at);
-    else if (type === 0x04) onH264Stripe(buffer, at);
     return;
   }
   if (buffer.byteLength < 13) return;
@@ -2460,8 +2362,7 @@ function onWire(message) {
   decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, chunkStamp(), frameId, reference, at);
 }
 
-const stripedCaps = {
-  stripedDecode: typeof VideoDecoder !== 'undefined',
+const jpegCaps = {
   jpegDecode: typeof ImageDecoder !== 'undefined' || typeof createImageBitmap === 'function',
 };
 if (typeof VideoTrackGenerator !== 'undefined') {
@@ -2469,10 +2370,10 @@ if (typeof VideoTrackGenerator !== 'undefined') {
     const g = new VideoTrackGenerator();
     writer = g.writable.getWriter();
     mode = 'vtg';
-    self.postMessage(Object.assign({ type: 'mode', mode: 'vtg', track: g.track }, stripedCaps), [g.track]);
-  } catch (e) { self.postMessage(Object.assign({ type: 'mode', mode: 'canvas' }, stripedCaps)); }
+    self.postMessage(Object.assign({ type: 'mode', mode: 'vtg', track: g.track }, jpegCaps), [g.track]);
+  } catch (e) { self.postMessage(Object.assign({ type: 'mode', mode: 'canvas' }, jpegCaps)); }
 } else {
-  self.postMessage(Object.assign({ type: 'mode', mode: 'canvas' }, stripedCaps));
+  self.postMessage(Object.assign({ type: 'mode', mode: 'canvas' }, jpegCaps));
 }
 
 self.onmessage = (e) => {
@@ -2513,8 +2414,7 @@ self.onmessage = (e) => {
         if (!wireChunks && !presentedFrames) return;
         const rows = {};
         if (stripedOn) {
-          for (const y in stripeDecs) rows[y] = stripeDecs[y].h;
-          for (const y in jpegRowHeights) if (!(y in rows)) rows[y] = jpegRowHeights[y];
+          for (const y in jpegRowHeights) rows[y] = jpegRowHeights[y];
         } else if (dec && wireH > 0) {
           rows[0] = wireH;
         }
@@ -2559,7 +2459,7 @@ self.onmessage = (e) => {
     if (m.software !== undefined) wireSoftware = !!m.software;
     if (m.fullRange !== undefined && !!m.fullRange !== wireFullRange) {
       wireFullRange = !!m.fullRange;
-      if (dec || Object.keys(stripeDecs).length) sendNeedKey('color_range');
+      if (dec) sendNeedKey('color_range');
     }
     if (m.chromium !== undefined) wireChromium = !!m.chromium;
     if (m.avcc !== undefined) wireAvcc = !!m.avcc;
@@ -2679,7 +2579,7 @@ function presentFrameToVideo(frame) {
     mstgLastGeom = null;
     mstgRendered = false;
     // Only one sink may be shown. The worker canvas holds the last composite of
-    // the striped mode just left, and it would cover this <video> until a reload.
+    // the JPEG mode just left, and it would cover this <video> until a reload.
     if (videoWorkerActive && videoWorkerMode !== 'vtg' && videoWorkerCanvas) {
       videoWorkerActive = false;
       videoWorkerRendered = false;
@@ -2735,7 +2635,7 @@ function presentFrameToVideo(frame) {
 
 /**
  * Tells the video worker the display geometry, which sizes the back-buffer
- * its striped composite persists on; the canvas buffer is stream-resolution
+ * its JPEG composite persists on; the canvas buffer is stream-resolution
  * physical pixels, exactly the space stripe offsets address.
  * @returns {void}
  */
@@ -2782,32 +2682,31 @@ function wireSocketToVideoWorker() {
 
 /**
  * Points the socket worker's divert at the current truth: on while the video
- * worker is the decoder for `h264enc` and healthy, or, in the striped modes,
- * while it can decode and composite them (any sink; gated off with the
- * worker escape hatch). Called wherever any input flips -- the worker's mode
- * reply, its deactivation or decoder failure, an encoder switch, a rebuilt
- * transport. Striped acks report the presented id, so a client that cannot
- * render sheds load exactly as the page path does.
+ * worker is the decoder for a full-frame video encoder and healthy, or, for
+ * JPEG's stripes, while it can decode and composite them (any sink; gated off
+ * with the worker escape hatch). Called wherever any input flips -- the
+ * worker's mode reply, its deactivation or decoder failure, an encoder
+ * switch, a rebuilt transport. Striped acks report the presented id, so a
+ * client that cannot render sheds load exactly as the page path does.
  * @param {boolean} [force] Resend even when the value is unchanged, for a
  *     transport whose worker started fresh and holds the default.
  * @returns {void}
  */
 function updateVideoDivert(force) {
-  // The next paint tick spawns the striped modes' worker and takes down the sink a mode left.
+  // The next paint tick spawns JPEG's worker and takes down the sink a mode left.
   wakePaintLoop();
-  const striped = currentEncoderMode === 'h264enc-striped' || currentEncoderMode === 'jpeg';
-  const stripedReady = USE_OFFSCREEN_WORKER && videoWorkerReady &&
-    (currentEncoderMode === 'jpeg' ? videoWorkerJpegDecode : videoWorkerStripedDecode);
+  const striped = currentEncoderMode === 'jpeg';
+  const stripedReady = USE_OFFSCREEN_WORKER && videoWorkerReady && videoWorkerJpegDecode;
   const on = !!(websocket && typeof websocket.setVideoDivert === 'function' &&
     videoWorkerReady && !workerDecodeFailed &&
-    (striped ? stripedReady : (decodeInWorker && isFullFrameVideo(currentEncoderMode))));
+    (striped ? stripedReady : decodeInWorker));
   if (videoWorker) {
     try {
       videoWorker.postMessage({ type: 'wireMode', striped, codec: striped ? null : codecOfEncoder(currentEncoderMode) });
     } catch (e) { /* respawns fresh */ }
   }
-  // The striped flag is part of the state: a full-frame divert rolling into a
-  // striped one keeps `on` but changes the ack source and the sink upkeep.
+  // The striped flag is part of the state: a full-frame divert rolling into
+  // JPEG's keeps `on` but changes the ack source and the sink upkeep.
   if (on === videoDivertOn && striped === videoDivertStriped && !force) return;
   videoDivertOn = on;
   videoDivertStriped = striped;
@@ -2820,7 +2719,7 @@ function updateVideoDivert(force) {
   // helpers that would normally reveal it never run; shown from here instead.
   if (on) {
     if (striped) {
-      // The worker decodes now; page-built row decoders would only sit
+      // The worker decodes now; a page-built decoder would only sit
       // configured behind it until the next resize or reconnect.
       clearAllVncStripeDecoders();
       cleanupJpegStripeQueue();
@@ -2938,10 +2837,9 @@ function ensureVideoWorker() {
       if (m.type === 'wireStats') {
         window.videoChunksReceived += m.chunks;
         if (m.chunks > 0) lastVideoChunkAt = performance.now();
-        const stripedNow = currentEncoderMode === 'h264enc-striped' || currentEncoderMode === 'jpeg';
-        // Striped fps means composites presented, exactly as on the page path;
+        // JPEG's fps means composites presented, exactly as on the page path;
         // full-frame rate stays a wire measure.
-        if (stripedNow) frameCount += (m.presents || 0);
+        if (currentEncoderMode === 'jpeg') frameCount += (m.presents || 0);
         else divertedWireFramesThisPeriod += m.frames;
         if ((m.presents || 0) > 0) lastVideoOutputAt = performance.now();
         if (m.lastId >= 0) { lastReceivedVideoFrameId = m.lastId; lastReceivedVideoFrameAt = performance.now(); }
@@ -2970,7 +2868,6 @@ function ensureVideoWorker() {
         return;
       }
       if (m.type === 'mode') {
-        videoWorkerStripedDecode = !!m.stripedDecode;
         videoWorkerJpegDecode = !!m.jpegDecode;
         if (m.mode === 'vtg' && m.track) {
           if (!videoElement) { deactivateVideoWorker(); return; }
@@ -2987,7 +2884,7 @@ function ensureVideoWorker() {
           syncWireGeom();
           updateVideoDivert();
         } else if (supportsWindowMSTG &&
-            isFullFrameVideo(currentEncoderMode)) {
+            isVideoEncoder(currentEncoderMode)) {
           // No worker generator, but the page has one: it feeds a <video>
           // element, which beats compositing a canvas by hand.
           announceSink('MediaStreamTrackGenerator on the page — '
@@ -2997,8 +2894,8 @@ function ensureVideoWorker() {
         } else {
           videoWorkerMode = 'canvas';
           announceSink(supportsWindowMSTG
-            ? 'OffscreenCanvas in the video worker for the striped '
-              + 'codecs; full-frame H.264 presents through the page MediaStreamTrackGenerator.'
+            ? 'OffscreenCanvas in the video worker for JPEG; '
+              + 'full-frame video presents through the page MediaStreamTrackGenerator.'
             : 'OffscreenCanvas in the video worker — '
               + 'this browser exposes no VideoTrackGenerator to a worker and no '
               + 'MediaStreamTrackGenerator on the page, so frames are composited rather '
@@ -3009,7 +2906,7 @@ function ensureVideoWorker() {
             videoWorkerCanvasTransferred = true;
             videoWorker.postMessage({ canvas: off }, [off]);
           } catch (err) { console.warn('OffscreenCanvas transfer failed:', err); deactivateVideoWorker(); return; }
-          // With a page generator the worker serves only the striped divert;
+          // With a page generator the worker serves only the JPEG divert;
           // full-frame decode stays on the page feeding that generator.
           decodeInWorker = !supportsWindowMSTG;
           videoWorkerReady = true;
@@ -3044,7 +2941,7 @@ function deactivateVideoWorker() {
   const wasTransferred = videoWorkerCanvasTransferred;
   videoWorkerActive = false; videoWorkerReady = false; videoWorkerMode = null;
   decodeInWorker = false;
-  videoWorkerStripedDecode = false; videoWorkerJpegDecode = false;
+  videoWorkerJpegDecode = false;
   workerSinkInertSince = 0;
   updateVideoDivert();
   videoWorkerInFlight = 0; videoWorkerCanvasTransferred = false;
@@ -3515,13 +3412,12 @@ const refusedCodecs = new Set();
 /**
  * The rungs a refusal walks when the server does not restrict the encoder: the full-frame
  * video codecs by the measured time per frame of their software encoders (x264, SVT-AV1,
- * libvpx VP8, x265, libvpx VP9), then the striped H.264 path, which no full-frame codec is
- * given up for, and JPEG, whose stripes need no `VideoDecoder`, last of all. `nextRung` lifts
- * the codecs the server encodes in hardware above the full-frame ones it encodes in software,
- * in `HARDWARE_ORDER`. The server walks the same orders, its `ENCODER_LADDER` and
- * `HARDWARE_LADDER`, for the menu's replacement pick and the WebRTC offer.
+ * libvpx VP8, x265, libvpx VP9), then JPEG, whose stripes need no `VideoDecoder`, last of
+ * all. `nextRung` lifts the codecs the server encodes in hardware above the ones it encodes
+ * in software, in `HARDWARE_ORDER`. The server walks the same orders, its `ENCODER_LADDER`
+ * and `HARDWARE_LADDER`, for the menu's replacement pick and the WebRTC offer.
  */
-const LADDER_ORDER = ['h264enc', 'av1enc', 'vp8enc', 'h265enc', 'vp9enc', 'h264enc-striped', 'jpeg'];
+const LADDER_ORDER = ['h264enc', 'av1enc', 'vp8enc', 'h265enc', 'vp9enc', 'jpeg'];
 /** The full-frame codecs by compression efficiency: the order the server's hardware codecs are asked for in. */
 const HARDWARE_ORDER = ['av1enc', 'h265enc', 'vp9enc', 'h264enc', 'vp8enc'];
 
@@ -3541,9 +3437,8 @@ function nextRung(refused, leaving = currentEncoderMode) {
     const allowed = Array.isArray(encoderAllowed) && encoderAllowed.length ? encoderAllowed : LADDER_ORDER;
     const rungs = LADDER_ORDER.filter((e) => allowed.includes(e));
     // A codec the server has an engine for costs it no CPU, so it is asked for before the ones
-    // it would encode in software, the most efficient first; the striped rungs keep their
-    // place at the end.
-    const accelerated = (enc) => isFullFrameVideo(enc)
+    // it would encode in software, the most efficient first; JPEG keeps its place at the end.
+    const accelerated = (enc) => isVideoEncoder(enc)
         && !!(encoderBackends && (encoderBackends[codecOfEncoder(enc)] || {}).hardware);
     const hardware = HARDWARE_ORDER.filter((e) => rungs.includes(e) && accelerated(e));
     for (const enc of [...hardware, ...rungs.filter((e) => !accelerated(e))]) {
@@ -4352,7 +4247,7 @@ const STRIPE_SOFT_ERROR_WINDOW_MS = 10000;
  * @param {number} vncStripeYStart The stripe's row offset, which keys its decoder.
  */
 function handleStripeDecodeError(e, vncStripeYStart) {
-    if (decodeInWorker && !workerDecodeFailed && isFullFrameVideo(currentEncoderMode)) {
+    if (decodeInWorker && !workerDecodeFailed && isVideoEncoder(currentEncoderMode)) {
         const now = performance.now();
         const prev = stripeDecodeSoftErrors[vncStripeYStart];
         const soft = (prev && now - prev.last <= STRIPE_SOFT_ERROR_WINDOW_MS) ? prev.count + 1 : 1;
@@ -4369,20 +4264,6 @@ function handleStripeDecodeError(e, vncStripeYStart) {
         }
     }
     initiateFallback(e, `stripe_decoder_Y=${vncStripeYStart}`);
-}
-
-/**
- * Whether every stripe chunk handed to a stripe decoder has come back out.
- * @returns {boolean}
- */
-function stripeDecodesDrained() {
-  for (const key in vncStripeDecoders) {
-    const info = vncStripeDecoders[key];
-    if (!info || !info.decoder) continue;
-    if (info.decoder.decodeQueueSize > 0) return false;
-    if (info.pendingChunks && info.pendingChunks.length > 0) return false;
-  }
-  return true;
 }
 
 /**
@@ -4410,28 +4291,25 @@ function processPendingChunksForStripe(stripe_y_start) {
   }
 }
 
-let decodedStripesQueue = [];
 /** Asks the paint loop for a tick; `schedulePaintVideoFrame` once the connection code is up. */
 let wakePaintLoop = () => {};
 /**
- * Main-thread back-buffer of the striped paths (h264enc-striped, jpeg).
- * Stripes accumulate here so damage-gated undamaged rows persist, and the
- * whole frame is blitted to the visible canvas once its last row has landed
- * or the stripe clock says it is complete — or, while stripes still flow, at
- * the frame-id boundary that proves it — so the display never shows a seam
- * between frame ids. Full-frame
- * h264enc presents one decoded frame atomically through the video sinks
- * instead.
+ * Main-thread back-buffer of the JPEG stripes. Stripes accumulate here so
+ * damage-gated undamaged rows persist, and the whole frame is blitted to the
+ * visible canvas once its last row has landed or the stripe clock says it is
+ * complete — or, while stripes still flow, at the frame-id boundary that
+ * proves it — so the display never shows a seam between frame ids. Full-frame
+ * video presents one decoded frame atomically through the video sinks instead.
  */
 let stripeBackCanvas = null;
 let stripeBackCtx = null;
 let stripePendingFrameId = null;
 let stripePendingDirty = false;
-/** Newest frame id the striped composite has put on screen. */
+/** Newest frame id the JPEG composite has put on screen. */
 let lastPresentedVideoFrameId = null;
 /** When that id was presented, for the same reason as `lastReceivedVideoFrameAt`. */
 let lastPresentedVideoFrameAt = 0;
-/** When the striped composite holds a whole frame; see lib/stripe-clock.js. */
+/** When the JPEG composite holds a whole frame; see lib/stripe-clock.js. */
 const stripeClock = createStripeClock();
 /** The timestamps of the chunks the page hands a decoder, its own or the video worker's (lib/chunk-stamp.js). */
 const chunkStamp = createChunkStamp();
@@ -4514,7 +4392,7 @@ function ensureStripeWorker() {
     stripeWorker = null;
     return false;
   }
-  console.info('[Selkies] striped codecs: compositing on an OffscreenCanvas in a worker.');
+  console.info('[Selkies] JPEG stripes: compositing on an OffscreenCanvas in a worker.');
   stripeWorker.onerror = () => deactivateStripeWorker();
   stripeWorker.onmessage = (ev) => {
     const m = ev.data;
@@ -4566,9 +4444,9 @@ function stripeCompositeDraw(stripe, yPos) {
 
 /**
  * Presents the composited frame: the worker commits an ImageBitmap, the main
- * thread blits its back-buffer. Counted as the striped modes' displayed frame,
- * which is what `window.fps` reports for them. While the stats are open the
- * composite is dated by the arrival of its newest stripe (`compositeArrival`).
+ * thread blits its back-buffer. Counted as JPEG's displayed frame, which is
+ * what `window.fps` reports for it. While the stats are open the composite is
+ * dated by the arrival of its newest stripe (`compositeArrival`).
  */
 function stripeCompositePresent() {
   frameCount++;
@@ -4691,54 +4569,40 @@ function armSharedStallWatchdog() {
 }
 
 /**
- * Output callback of the stripe decoders. A full-frame h264enc frame (the
- * single decoder at row 0) is presented the instant it decodes, for the lowest
- * glass-to-glass latency, superseding anything still queued: through the
+ * Output callback of the page's full-frame decoder. A frame is presented the
+ * instant it decodes, for the lowest glass-to-glass latency: through the
  * main-thread track generator, else the worker sink, else the canvas.
- * h264enc-striped composites partial-height stripes and drains through the
- * rAF queue instead.
- * @param {number} yPos The stripe's row offset.
+ * @param {number} yPos The stripe Y its frames carry, which keys the decoder.
  * @param {VideoFrame} frame
  */
 function handleDecodedVncStripeFrame(yPos, frame) {
   if (codecRefusalUnanswerable) endCodecRefusal();
   pageDecode.format = frame.format;
   if (streamStats.open) notePageDecoded(frame);
-  if (isFullFrameVideo(currentEncoderMode) && yPos === 0) {
-    pagePace.decoded();
-    if (document.hidden || (clientMode === 'websockets' && !isSharedMode && !isVideoPipelineActive)) {
-      try { frame.close(); } catch (e) {}
-      return;
-    }
-    if (decodedStripesQueue.length > 0) {
-      for (const stale of decodedStripesQueue) { try { stale.frame.close(); } catch (e) {} }
-      if (streamStats.open) pageShown.superseded(decodedStripesQueue.length);
-      decodedStripesQueue.length = 0;
-    }
-    const row = vncStripeDecoders[0];
-    if (row) frame = fitFrameToStream(frame, row.width, row.height);
-    if (supportsWindowMSTG && presentFrameToVideo(frame)) {
-      // Handed to the main-thread track generator.
-    } else if (USE_OFFSCREEN_WORKER && presentFrameToWorker(frame)) {
-      // Handed to the worker sink.
-    } else {
-      if (canvas && canvasContext && canvas.width > 0 && canvas.height > 0) {
-        canvasContext.drawImage(frame, 0, 0);
-        if (streamStats.open) pageShown.drawn(takeArrival(frame.timestamp));
-      }
-      try { frame.close(); } catch (e) {}
-    }
-    lastVideoOutputAt = performance.now();
-    if (!streamStarted) startStream();
+  if (!isVideoEncoder(currentEncoderMode)) {
+    try { frame.close(); } catch (e) {}
     return;
   }
-  decodedStripesQueue.push({
-    yPos,
-    frame,
-    frameId: frame.timestamp,
-    at: streamStats.open ? pageDecode.arrivals.get(frame.timestamp) : NaN,
-  });
-  wakePaintLoop();
+  pagePace.decoded();
+  if (document.hidden || (clientMode === 'websockets' && !isSharedMode && !isVideoPipelineActive)) {
+    try { frame.close(); } catch (e) {}
+    return;
+  }
+  const row = vncStripeDecoders[yPos];
+  if (row) frame = fitFrameToStream(frame, row.width, row.height);
+  if (supportsWindowMSTG && presentFrameToVideo(frame)) {
+    // Handed to the main-thread track generator.
+  } else if (USE_OFFSCREEN_WORKER && presentFrameToWorker(frame)) {
+    // Handed to the worker sink.
+  } else {
+    if (canvas && canvasContext && canvas.width > 0 && canvas.height > 0) {
+      canvasContext.drawImage(frame, 0, 0);
+      if (streamStats.open) pageShown.drawn(takeArrival(frame.timestamp));
+    }
+    try { frame.close(); } catch (e) {}
+  }
+  lastVideoOutputAt = performance.now();
+  if (!streamStarted) startStream();
 }
 
 /** HTTP uploads and the drag-drop/file-picker plumbing (lib/file-upload.js); shared viewers never upload. */
@@ -5024,9 +4888,9 @@ const initializeInput = () => {
    * the canvas. Skipped in shared and manual mode, and on the primary when
    * `enable_resize=false` pins its resolution server-side (a secondary's
    * resize is its layout bring-up and stays allowed, matching the server).
-   * Stripe decoders are closed first, since rows that vanish on shrink would
-   * keep a live decoder nothing feeds, and the divergence flag is reset for
-   * stream_resolution to re-flag.
+   * The page's decoder is closed first, to be rebuilt by the key frame at
+   * the new geometry, and the divergence flag is reset for stream_resolution
+   * to re-flag.
    */
   const handleResizeUI = () => {
     if (!initializationComplete) {
@@ -6023,11 +5887,8 @@ function handleSettingsMessage(settings, fromServer, send = true) {
         updateVideoDivert();
         storeString('encoder', currentEncoderMode);
         settingsChanged = true;
-        if (newEncoderSetting !== 'h264enc-striped') {
-            clearAllVncStripeDecoders();
-        }
+        clearAllVncStripeDecoders();
         cleanupJpegStripeQueue();
-        clearDecodedStripesQueue();
         setTimeout(() => {
             if (websocket && websocket.readyState === WebSocket.OPEN) {
                 try {
@@ -6591,10 +6452,9 @@ function initWebsockets() {
   let paintScheduled = false;
   /**
    * Schedules the next paint tick, at most one at a time. The chain runs only
-   * while the page's own path holds a stripe to composite or a composite to
-   * present: a frame the track generator or the video worker takes never waits
-   * on it, and a chain kept alive with nothing to do would still wake the page
-   * at every display refresh.
+   * while the page's own path holds a JPEG stripe to composite or a composite
+   * to present: a full frame never waits on it, and a chain kept alive with
+   * nothing to do would still wake the page at every display refresh.
    */
   function schedulePaintVideoFrame() {
     if (paintScheduled) return;
@@ -6607,15 +6467,14 @@ function initWebsockets() {
   wakePaintLoop = schedulePaintVideoFrame;
 
   /**
-   * The paint tick. Full-frame h264enc presents only the newest queued
-   * frame; the striped modes composite their stripes and present the whole
-   * frame as soon as its last row lands (the server emits a frame's stripes
-   * in ascending order, so the last row proves it complete) or the socket and
-   * the decoders go quiet (the stripe clock), falling back to presenting at
-   * frame-id boundaries while stripes still flow; JPEG skips stripes that
-   * decoded out of order. Leaving a full-frame mode tears both video sinks
-   * down symmetrically, or a worker canvas would stay shown over the striped
-   * content.
+   * The paint tick, which serves JPEG alone: a full frame is presented as it
+   * decodes. JPEG composites its stripes and presents the whole frame as soon
+   * as its last row lands (the server emits a frame's stripes in ascending
+   * order, so the last row proves it complete) or the socket and the decoders
+   * go quiet (the stripe clock), falling back to presenting at frame-id
+   * boundaries while stripes still flow, and skips stripes that decoded out of
+   * order. Leaving a full-frame mode tears both video sinks down
+   * symmetrically, or a worker canvas would stay shown over the stripes.
    */
   function paintVideoFrame() {
     if (!canvas || !canvasContext) {
@@ -6624,10 +6483,10 @@ function initWebsockets() {
     }
 
     if (mstgActive || videoWorkerActive) {
-      const fullFrameMode = isFullFrameVideo(currentEncoderMode);
+      const fullFrameMode = isVideoEncoder(currentEncoderMode);
       if (mstgActive && !fullFrameMode) deactivateMstg();
-      // Diverted striped modes present through the worker sink; only an
-      // undiverted striped mode reclaims the page canvas from it.
+      // Diverted JPEG presents through the worker sink; only undiverted JPEG
+      // reclaims the page canvas from it.
       if (videoWorkerActive && !fullFrameMode && !videoDivertOn) deactivateVideoWorker();
     }
 
@@ -6646,71 +6505,7 @@ function initWebsockets() {
 
     let jpegPaintedThisFrame = false;
 
-    if (isFullFrameVideo(currentEncoderMode)) {
-      let paintedSomethingThisCycle = false;
-      if (decodedStripesQueue.length > 0) {
-        // Index math rather than repeated shift(), which re-indexes the array each time.
-        const lastIdx = decodedStripesQueue.length - 1;
-        for (let i = 0; i < lastIdx; i++) {
-          try { decodedStripesQueue[i].frame.close(); } catch (e) {}
-        }
-        if (streamStats.open) pageShown.superseded(lastIdx);
-        const frame = decodedStripesQueue[lastIdx].frame;
-        decodedStripesQueue.length = 0;
-        lastVideoOutputAt = performance.now();
-        if (supportsWindowMSTG && presentFrameToVideo(frame)) {
-          // Handed to the main-thread track generator.
-        } else if (USE_OFFSCREEN_WORKER && presentFrameToWorker(frame)) {
-          // Handed to the worker sink.
-        } else {
-          if (canvas.width > 0 && canvas.height > 0) {
-            canvasContext.drawImage(frame, 0, 0);
-            if (streamStats.open) pageShown.drawn(takeArrival(frame.timestamp));
-          }
-          try { frame.close(); } catch (e) {}
-        }
-        paintedSomethingThisCycle = true;
-      }
-      if (paintedSomethingThisCycle && !streamStarted) {
-        startStream();
-      }
-    } else if (currentEncoderMode === 'h264enc-striped') {
-      if (USE_OFFSCREEN_WORKER && !videoWorker && !workerDecodeFailed && videoWorkerSpawnAttempts < 3) {
-        ensureVideoWorker();
-      }
-      let paintedSomethingThisCycle = false;
-      const ready = stripeCompositeBegin();
-      const drained = stripeDecodesDrained();
-      const settled = drained && stripeClock.settled();
-      let bottomDrawn = false;
-      if (ready) {
-        for (const stripeData of decodedStripesQueue) {
-          const fid = stripeData.frameId;
-          if (!settled && stripePendingFrameId !== null && fid !== stripePendingFrameId && stripePendingDirty) {
-            stripeCompositePresent();
-            stripePendingDirty = false;
-            paintedSomethingThisCycle = true;
-          }
-          stripePendingFrameId = fid;
-          if (stripeData.yPos + stripeData.frame.displayHeight >= canvas.height) bottomDrawn = true;
-          stripeCompositeDraw(stripeData.frame, stripeData.yPos);
-          if (stripeData.at > compositeArrival) compositeArrival = stripeData.at;
-          stripePendingDirty = true;
-        }
-      } else {
-        for (const stripeData of decodedStripesQueue) { try { stripeData.frame.close(); } catch (e) {} }
-      }
-      decodedStripesQueue = [];
-      if (drained && (settled || bottomDrawn) && stripePendingDirty
-          && canvas.width > 0 && canvas.height > 0) {
-        stripeCompositePresent();
-        stripePendingDirty = false;
-        paintedSomethingThisCycle = true;
-      }
-      if (paintedSomethingThisCycle && !streamStarted) {
-        startStream();
-      }
-    } else if (currentEncoderMode === 'jpeg') {
+    if (currentEncoderMode === 'jpeg') {
       if (USE_OFFSCREEN_WORKER && !videoWorker && !workerDecodeFailed && videoWorkerSpawnAttempts < 3) {
         ensureVideoWorker();
       }
@@ -6786,7 +6581,7 @@ function initWebsockets() {
     }
     // What this tick drew goes out with this frame, not the next.
     if (streamStats.open) pageShown.land();
-    if (decodedStripesQueue.length > 0 || jpegStripeRenderQueue.length > 0 || stripePendingDirty) {
+    if (jpegStripeRenderQueue.length > 0 || stripePendingDirty) {
       schedulePaintVideoFrame();
     }
   }
@@ -6859,9 +6654,9 @@ let webcamChainBroken = false;
 // Video divert: 0x03/0x04 go straight to the video worker while the page
 // keeps this on, and the newest frame id is acked from here on the same
 // cadence the page would use, so pacing and RTT stay honest through a stall.
-// Full frames ack on receipt; the striped modes ack the id the video worker
-// reports presented, so a client that cannot render sheds load. An unchanged
-// id is repeated on the heartbeat cadence, as the page path does.
+// Full frames ack on receipt; JPEG acks the id the video worker reports
+// presented, so a client that cannot render sheds load. An unchanged id is
+// repeated on the heartbeat cadence, as the page path does.
 let videoPort = null, videoDivert = false, videoAck = false, videoAckSource = 'receive';
 let videoLastId = -1, videoLastIdAt = 0, videoAckedId = -1, videoAckSentAt = 0, videoAckTimer = null;
 // While the page has its stats open, each message is dated with its arrival
@@ -7171,9 +6966,9 @@ class WorkerWebSocket {
   /**
    * Turns the video divert on or off; while on, the worker also acks the
    * newest frame id itself unless this page is a shared viewer, whose acks
-   * the server ignores. Full frames ack on receipt; the striped modes ack
-   * what the video worker reports presented, and either repeats an
-   * unchanged id every ACK_HEARTBEAT_MS.
+   * the server ignores. Full frames ack on receipt; JPEG acks what the video
+   * worker reports presented, and either repeats an unchanged id every
+   * ACK_HEARTBEAT_MS.
    * @param {boolean} divert
    * @param {string} [ackSource] `receive` (default) or `present`.
    * @returns {void}
@@ -7773,12 +7568,11 @@ class WorkerWebSocket {
 
   /**
    * Acks the newest video frame the client is done with, so the server can
-   * pace its sends against what this client actually keeps up with. The
-   * striped modes composite on the page and ack what reached the screen; a
-   * client whose rendering falls behind is then throttled instead of being
-   * sent frames it will never show. Full-frame h264enc presents through sinks
-   * the page cannot observe, so there the newest received id is the best the
-   * client knows. An unchanged id is repeated every ACK_HEARTBEAT_MS, the
+   * pace its sends against what this client actually keeps up with. JPEG
+   * composites on the page and acks what reached the screen; a client whose
+   * rendering falls behind is then throttled instead of being sent frames it
+   * will never show. Full-frame video presents through sinks the page cannot
+   * observe, so there the newest received id is the best the client knows. An unchanged id is repeated every ACK_HEARTBEAT_MS, the
    * liveness signal an idle damage-gated stream otherwise lacks.
    */
   const sendBackpressureAck = () => {
@@ -7787,8 +7581,7 @@ class WorkerWebSocket {
     if (videoDivertOn) return;
     if (websocket && websocket.readyState === WebSocket.OPEN) {
       try {
-        const striped = (currentEncoderMode === 'jpeg' || currentEncoderMode === 'h264enc-striped');
-        const fromPresent = striped && lastPresentedVideoFrameId !== null;
+        const fromPresent = currentEncoderMode === 'jpeg' && lastPresentedVideoFrameId !== null;
         const acked = fromPresent ? lastPresentedVideoFrameId : lastReceivedVideoFrameId;
         const at = fromPresent ? lastPresentedVideoFrameAt : lastReceivedVideoFrameAt;
         const now = performance.now();
@@ -7808,10 +7601,10 @@ class WorkerWebSocket {
 
   /**
    * Metrics tick: refreshes the audio buffer depth the backpressure gates
-   * read and publishes `window.fps` — composites presented per second in the
-   * striped modes, and the wire's frame ids per second for full-frame h264enc,
-   * whose sinks present outside the page — independent of whether a dashboard
-   * is open.
+   * read and publishes `window.fps` — composites presented per second for
+   * JPEG, and the wire's frame ids per second for full-frame video, whose
+   * sinks present outside the page — independent of whether a dashboard is
+   * open.
    */
   const sendClientMetrics = () => {
     if (audioWorkletProcessorPort) {
@@ -7824,18 +7617,17 @@ class WorkerWebSocket {
     if (isSharedMode) return;
 
     const now = performance.now();
-    const elapsedStriped = now - lastStripedFpsUpdateTime;
+    const elapsedWire = now - lastWireFpsUpdateTime;
     const elapsedFullFrame = now - lastFpsUpdateTime;
     const fpsUpdateInterval = 1000;
 
-    const wireFrameIds = uniqueStripedFrameIdsThisPeriod.size + divertedWireFramesThisPeriod;
+    const wireFrameIds = uniqueWireFrameIdsThisPeriod.size + divertedWireFramesThisPeriod;
     if (wireFrameIds > 0) {
-      if (elapsedStriped >= fpsUpdateInterval) {
-        const stripedFps = (wireFrameIds * 1000) / elapsedStriped;
-        window.fps = Math.round(stripedFps);
-        uniqueStripedFrameIdsThisPeriod.clear();
+      if (elapsedWire >= fpsUpdateInterval) {
+        window.fps = Math.round((wireFrameIds * 1000) / elapsedWire);
+        uniqueWireFrameIdsThisPeriod.clear();
         divertedWireFramesThisPeriod = 0;
-        lastStripedFpsUpdateTime = now;
+        lastWireFpsUpdateTime = now;
         frameCount = 0;
         lastFpsUpdateTime = now;
       }
@@ -7845,13 +7637,13 @@ class WorkerWebSocket {
         window.fps = Math.round(fullFrameFps);
         frameCount = 0;
         lastFpsUpdateTime = now;
-        lastStripedFpsUpdateTime = now;
+        lastWireFpsUpdateTime = now;
       }
     } else {
-      if (elapsedStriped >= fpsUpdateInterval || elapsedFullFrame >= fpsUpdateInterval) {
+      if (elapsedWire >= fpsUpdateInterval || elapsedFullFrame >= fpsUpdateInterval) {
         window.fps = 0;
         lastFpsUpdateTime = now;
-        lastStripedFpsUpdateTime = now;
+        lastWireFpsUpdateTime = now;
       }
     }
 
@@ -8188,11 +7980,9 @@ class WorkerWebSocket {
         if (!isSharedMode) {
             lastReceivedVideoFrameId = vncFrameID;
             lastReceivedVideoFrameAt = performance.now();
-            // Full-frame h264enc presents through sinks the page cannot count, so its
-            // rate is measured off the wire; the striped modes count what they composite.
-            if (currentEncoderMode !== 'h264enc-striped') {
-                uniqueStripedFrameIdsThisPeriod.add(lastReceivedVideoFrameId);
-            }
+            // Full-frame video presents through sinks the page cannot count, so its
+            // rate is measured off the wire.
+            uniqueWireFrameIdsThisPeriod.add(lastReceivedVideoFrameId);
         }
         const vncStripeYStart = dataView.getUint16(4, false);
         const stripeWidth = dataView.getUint16(6, false);
@@ -8202,8 +7992,7 @@ class WorkerWebSocket {
 
         // A shared viewer sends no SETTINGS, so the stream geometry is learned
         // from the frame header itself; the canvas box the sinks mirror follows.
-        if (isSharedMode && currentEncoderMode !== 'h264enc-striped' &&
-            stripeWidth > 0 && stripeHeight > 0 &&
+        if (isSharedMode && stripeWidth > 0 && stripeHeight > 0 &&
             (manual_width !== stripeWidth || manual_height !== stripeHeight)) {
             manual_width = stripeWidth;
             manual_height = stripeHeight;
@@ -8232,7 +8021,7 @@ class WorkerWebSocket {
             codecRefusalPending = null;
         }
 
-        if (decodeInWorker && isFullFrameVideo(currentEncoderMode) && (isSharedMode || isVideoPipelineActive)) {
+        if (decodeInWorker && isVideoEncoder(currentEncoderMode) && (isSharedMode || isVideoPipelineActive)) {
             if (h264Payload.byteLength === 0) return;
             if (isKeyFrame) {
                 const keyCodec = wireCodecString(video_frame_type_byte, h264Payload, stripeWidth, stripeHeight);
@@ -8246,8 +8035,8 @@ class WorkerWebSocket {
             }
         }
 
-        // A full-frame video encoder is the stripe path with a single decoder at
-        // row 0, for a shared viewer exactly as for the primary.
+        // The page decodes a full frame through its decoder at row 0, for a
+        // shared viewer exactly as for the primary.
         const canProcessVncStripe =
             isVideoEncoder(currentEncoderMode) &&
             (isSharedMode || isVideoPipelineActive);
@@ -8277,7 +8066,7 @@ class WorkerWebSocket {
                     error: (e) => handleStripeDecodeError(e, vncStripeYStart)
                 });
                 if (vncStripeYStart === 0) pageGate.configured();
-                if (isFullFrameVideo(currentEncoderMode) && pagePace.cap !== null && !decodeInWorker && decoderInfo
+                if (pagePace.cap !== null && !decodeInWorker && decoderInfo
                     && (decoderInfo.width !== stripeWidth || decoderInfo.height !== stripeHeight)) {
                     pagePace.reset();
                     followDecodePace(null);
@@ -8336,32 +8125,22 @@ class WorkerWebSocket {
                     requestKeyframe();
                     return;
                 }
-                const fullFrame = isFullFrameVideo(currentEncoderMode);
                 if (chunkType === 'key') decoderInfo.hasReceivedKeyframe = true;
-                if (fullFrame) {
-                    // A frame naming its reference is let go and named, so the encoder
-                    // predicts past it; a key frame is asked for only where that cannot help.
-                    const queued = decoderInfo.decoder.decodeQueueSize;
-                    const decision = pageGate.decide(chunkType === 'key', vncFrameID, referenceFrameId, queued);
-                    pagePace.decided(queued, decision === 'lost' || decision === 'overload');
-                    if (decision === 'lost') {
-                        sendLostFrame(vncFrameID);
-                        return;
-                    }
-                    if (decision === 'no_key' || decision === 'overload') {
-                        decoderInfo.hasReceivedKeyframe = false;
-                        requestKeyframe();
-                        return;
-                    }
-                } else if (chunkType === 'delta' && decoderInfo.decoder.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
+                // A frame naming its reference is let go and named, so the encoder
+                // predicts past it; a key frame is asked for only where that cannot help.
+                const queued = decoderInfo.decoder.decodeQueueSize;
+                const decision = pageGate.decide(chunkType === 'key', vncFrameID, referenceFrameId, queued);
+                pagePace.decided(queued, decision === 'lost' || decision === 'overload');
+                if (decision === 'lost') {
+                    sendLostFrame(vncFrameID);
+                    return;
+                }
+                if (decision === 'no_key' || decision === 'overload') {
                     decoderInfo.hasReceivedKeyframe = false;
                     requestKeyframe();
                     return;
                 }
-                // Striped H.264 carries the frame id in the timestamp so the paint
-                // loop can present whole frames; full-frame keeps a monotonic clock.
-                const chunkTimestamp = (currentEncoderMode === 'h264enc-striped')
-                    ? vncFrameID : chunkStamp();
+                const chunkTimestamp = chunkStamp();
                 const chunkData = {
                     type: chunkType,
                     timestamp: chunkTimestamp,
@@ -8370,7 +8149,7 @@ class WorkerWebSocket {
                 if (decoderInfo.decoder.state === "configured") {
                     const chunk = new EncodedVideoChunk(chunkData);
                     if (streamStats.open) {
-                        if (isFullFrameVideo(currentEncoderMode)) pageDecode.starts.set(chunkTimestamp, performance.now());
+                        pageDecode.starts.set(chunkTimestamp, performance.now());
                         pageDecode.arrivals.set(Math.trunc(chunkTimestamp), arrival);
                     }
                     try {
@@ -8573,7 +8352,6 @@ class WorkerWebSocket {
 
         clearAllVncStripeDecoders();
         cleanupJpegStripeQueue();
-        clearDecodedStripesQueue();
 
         if (!isSharedMode) {
             stopMicrophoneCapture();
@@ -8691,11 +8469,8 @@ class WorkerWebSocket {
                   console.log(`Server settings switch encoder ${currentEncoderMode} -> ${newEnc}.`);
                   currentEncoderMode = newEnc;
                   updateVideoDivert();
-                  if (newEnc !== 'h264enc-striped') {
-                      clearAllVncStripeDecoders();
-                  }
+                  clearAllVncStripeDecoders();
                   cleanupJpegStripeQueue();
-                  clearDecodedStripesQueue();
               }
               if (Number.isFinite(parseFloat(window['framerate']))) {
                   framerate = parseFloat(window['framerate']);
@@ -8898,7 +8673,7 @@ class WorkerWebSocket {
              if (appliedWidth > 0 && appliedHeight > 0) {
                // The realized resolution can differ from the request (encoder
                // alignment, RandR cell snapping, a rejected mode-set); canvas,
-               // stripe decoders, and input mapping follow it.
+               // decoder, and input mapping follow it.
                const dprUsed = window.manual_resolution ? 1 : streamDensity();
                const bufferWidth = alignResolution(appliedWidth);
                const bufferHeight = alignResolution(appliedHeight);
@@ -9290,7 +9065,8 @@ class WorkerWebSocket {
     lastReceivedVideoFrameId = -1;
     lastPresentedVideoFrameId = null;
     lastAckSentId = -1;
-    clearDecodedStripesQueue();
+    stripePendingFrameId = null;
+    stripePendingDirty = false;
     wsGzTx = false;
     if (!superseded) {
       // Shown again until the next socket's first frame hides it, after the
@@ -9468,19 +9244,6 @@ function cleanupJpegStripeQueue() {
   stripePendingDirty = false;
 }
 
-/** Closes every decoded stripe awaiting the paint loop. */
-function clearDecodedStripesQueue() {
-  while (decodedStripesQueue.length > 0) {
-    const stripeData = decodedStripesQueue.shift();
-    try {
-      if (stripeData && stripeData.frame) stripeData.frame.close();
-    } catch (e) {
-      /* ignore */
-    }
-  }
-  stripePendingFrameId = null;
-  stripePendingDirty = false;
-}
 
 /**
  * Multistream Opus layouts for surround: the decoder needs an OpusHead
@@ -10493,7 +10256,6 @@ function performServerInitiatedVideoReset(reason = "unknown") {
   console.log(`  Reset lastReceivedVideoFrameId to ${lastReceivedVideoFrameId}.`);
 
   cleanupJpegStripeQueue();
-  clearDecodedStripesQueue();
 
   if (isVideoEncoder(currentEncoderMode)) {
     clearAllVncStripeDecoders();
@@ -10601,7 +10363,7 @@ function initiateFallback(error, context) {
     // way a refused configuration does, rather than reloading into the crash
     // count.
     const codec = codecOfEncoder(currentEncoderMode);
-    if (!isSharedMode && isFullFrameVideo(currentEncoderMode) && codec !== 'h264') {
+    if (!isSharedMode && isVideoEncoder(currentEncoderMode) && codec !== 'h264') {
         if (codecRefusalPending) return;
         answerRefusedCodec(`${codec} (refused at decode)`, codec);
         if (codecRefusalPending) {

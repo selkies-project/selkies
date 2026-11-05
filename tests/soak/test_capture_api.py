@@ -90,7 +90,7 @@ def make_settings(encoder: str, w: int = 1024, h: int = 640, **kw):
     """Build a CaptureSettings for the encoder, with overrides applied last.
 
     Args:
-        encoder: ``jpeg``, ``h264enc``, ``h264enc-striped``, or ``nvenc``.
+        encoder: ``jpeg``, ``h264enc``, or ``nvenc``.
         w: Capture width in pixels.
         h: Capture height in pixels.
         **kw: Extra CaptureSettings attributes set verbatim.
@@ -114,12 +114,7 @@ def make_settings(encoder: str, w: int = 1024, h: int = 640, **kw):
     cs.damage_block_threshold = 10
     cs.damage_block_duration = 20
     cs.jpeg_quality = 90
-    if encoder == "jpeg":
-        cs.codec = "jpeg"
-        cs.video_fullframe = False
-    else:
-        cs.codec = "h264"
-        cs.video_fullframe = encoder in ("h264enc", "nvenc")
+    cs.codec = "jpeg" if encoder == "jpeg" else "h264"
     for k, v in kw.items():
         setattr(cs, k, v)
     return cs
@@ -204,7 +199,7 @@ def main() -> "H.Results":
     subprocess.run(["xsetroot", "-solid", "#3366cc"],
                    env={"DISPLAY": TEST_DISPLAY, "PATH": os.environ.get("PATH", "")}, capture_output=True)
 
-    for enc in ["h264enc", "h264enc-striped", "jpeg"]:
+    for enc in ["h264enc", "jpeg"]:
         try:
             before, after = run_x11(enc)
             res.check(f"x11 {enc}: frames flow", before["n"] >= 6, before["n"])

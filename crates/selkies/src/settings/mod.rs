@@ -210,7 +210,7 @@ pub const WS_MESSAGE_SIZE_HARD_CAP: usize = 32 * 1024 * 1024;
 pub const WS_MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Encoders the WebRTC pipeline can produce: the full-frame codecs its RTP stack
-/// packetizes; the jpeg and striped framings are a websockets-stream concept.
+/// packetizes; the jpeg framing is a websockets-stream concept.
 pub const WEBRTC_ENCODER_CHOICES: &[&str] = &["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"];
 /// Spellings base images still ship in `SELKIES_ENCODER`; both mean full-frame H.264.
 const ENCODER_ALIASES: &[(&str, &str)] = &[("x264enc", "h264enc"), ("openh264enc", "h264enc")];
@@ -218,7 +218,6 @@ const ENCODER_ALIASES: &[(&str, &str)] = &[("x264enc", "h264enc"), ("openh264enc
 pub const ENCODER_CODECS: &[(&str, &str)] = &[
     ("jpeg", "jpeg"),
     ("h264enc", "h264"),
-    ("h264enc-striped", "h264"),
     ("h265enc", "h265"),
     ("vp8enc", "vp8"),
     ("vp9enc", "vp9"),
@@ -234,7 +233,7 @@ pub const CODEC_LABELS: &[(&str, &str)] = &[
     ("av1", "AV1"),
 ];
 /// Encoders with no hardware path: selecting one implies software encoding.
-pub const CPU_ONLY_ENCODERS: &[&str] = &["jpeg", "h264enc-striped"];
+pub const CPU_ONLY_ENCODERS: &[&str] = &["jpeg"];
 /// What a display streams with, as `SETTINGS` carries it: a controller beside the display's
 /// owner changes these by its user's pick alone.
 pub const STREAM_SETTINGS: &[&str] = &[
@@ -256,16 +255,8 @@ pub const STREAM_SETTINGS: &[&str] = &[
     "audio_bitrate",
 ];
 /// The fallback ladder, one order on both transports: the full-frame codecs by the measured
-/// time per frame of their software encoders, then striped H.264, and JPEG last.
-pub const ENCODER_LADDER: &[&str] = &[
-    "h264enc",
-    "av1enc",
-    "vp8enc",
-    "h265enc",
-    "vp9enc",
-    "h264enc-striped",
-    "jpeg",
-];
+/// time per frame of their software encoders, and JPEG last.
+pub const ENCODER_LADDER: &[&str] = &["h264enc", "av1enc", "vp8enc", "h265enc", "vp9enc", "jpeg"];
 /// The full-frame codecs by compression efficiency, the order a host with an engine for
 /// them takes them in.
 pub const HARDWARE_LADDER: &[&str] = &["av1enc", "h265enc", "vp9enc", "h264enc", "vp8enc"];
@@ -285,7 +276,7 @@ const INT_SETTING_DEFAULT_MIN: f64 = -1_000_000.0;
 pub fn encoder_for_codec(codec: &str) -> &'static str {
     ENCODER_CODECS
         .iter()
-        .find(|(enc, streamed)| *streamed == codec && *enc != "h264enc-striped")
+        .find(|(_, streamed)| *streamed == codec)
         .map(|(enc, _)| *enc)
         .unwrap_or("h264enc")
 }
@@ -375,14 +366,10 @@ pub fn hardware_probe(encode_node_index: i32, auto_gpu: &str) -> HardwareProbe {
     probe
 }
 
-/// Whether a session with this encoder is known to encode video on the CPU: the striped
-/// encoder has no hardware path; a full-frame encoder encodes in software when forced.
+/// Whether a session with this encoder is known to encode video on the CPU: a video encoder
+/// encodes in software when forced; JPEG is no video.
 pub fn software_video_path(encoder: &str, use_cpu: bool) -> bool {
-    let encoder = canonical_encoder(encoder);
-    if encoder == "jpeg" {
-        return false;
-    }
-    encoder == "h264enc-striped" || use_cpu
+    canonical_encoder(encoder) != "jpeg" && use_cpu
 }
 
 /// Derive whether a display's software encoder threads within a frame: a client's own
@@ -1063,13 +1050,13 @@ impl Settings {
     }
 
     /// Whether a `video_fullcolor` session on this encoder streams 4:4:4 from this host: by
-    /// the encode node's engine where the codec has one and software is not forced or
-    /// striped, else by the build's software encoder. A VA-API engine refuses a 4:4:4 it
-    /// lacks rather than streaming 4:2:0, so that session is the software encoder's too.
+    /// the encode node's engine where the codec has one and software is not forced, else by
+    /// the build's software encoder. A VA-API engine refuses a 4:4:4 it lacks rather than
+    /// streaming 4:2:0, so that session is the software encoder's too.
     pub fn encoder_fullcolor(&self, encoder: &str, use_cpu: bool) -> Option<bool> {
         let backends = self.encoder_backends()?;
         let served = backends.get(codec_for_encoder(&canonical_encoder(encoder)))?;
-        if use_cpu || CPU_ONLY_ENCODERS.contains(&encoder) || served.hardware.is_none() {
+        if use_cpu || served.hardware.is_none() {
             return served.fullcolor.software;
         }
         if served.fullcolor.hardware == Some(false)
@@ -1096,7 +1083,7 @@ impl Settings {
         };
         let software = carried(&served.ten_bit.software, served.fullcolor.software);
         let hardware = carried(&served.ten_bit.hardware, served.fullcolor.hardware);
-        if use_cpu || CPU_ONLY_ENCODERS.contains(&encoder) || served.hardware.is_none() {
+        if use_cpu || served.hardware.is_none() {
             return software;
         }
         if fullcolor
@@ -1130,8 +1117,6 @@ impl Settings {
     /// Where an encoder sits on the fallback ladder, lowest taken first.
     pub fn encoder_rung(&self, encoder: &str) -> (usize, usize) {
         let group = if encoder == "jpeg" {
-            3
-        } else if CPU_ONLY_ENCODERS.contains(&encoder) {
             2
         } else {
             let hw = self.encoder_backends().and_then(|b| {
@@ -1722,6 +1707,19 @@ mod tests {
         assert_eq!(s.encoder(), "h264enc");
         assert!(!s.was_provided("encoder"));
         assert!(s.enum_allowed("encoder").len() > 2);
+    }
+
+    /// An operator or a stored client setting naming an encoder off the menu, such as
+    /// `h264enc-striped`, gets the server's encoder.
+    #[test]
+    fn an_encoder_off_the_menu_falls_back_to_the_server_value() {
+        let s = parse(&["--encoder", "h264enc-striped"], &[]);
+        assert_eq!(s.encoder(), "h264enc");
+        assert!(!s.was_provided("encoder"));
+        assert_eq!(
+            s.sanitize_client_setting("encoder", Some(&json!("h264enc-striped")), "ws"),
+            Some(json!("h264enc"))
+        );
     }
 
     #[test]

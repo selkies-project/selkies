@@ -87,7 +87,6 @@ export const DISPLAY_LABELS = {
     vp8enc: "VP8",
     vp9enc: "VP9",
     av1enc: "AV1",
-    "h264enc-striped": "H.264 (Striped)",
     jpeg: "JPEG (Striped)",
     cbr: "CBR (Constant Bitrate)",
     crf: "CRF (Constant Quality)",

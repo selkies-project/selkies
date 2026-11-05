@@ -26,7 +26,6 @@ export const WIRE_CODECS = { 1: 'h264', 2: 'vp8', 3: 'vp9', 4: 'av1', 5: 'h265' 
 export const ENCODER_CODECS = {
   jpeg: 'jpeg',
   h264enc: 'h264',
-  'h264enc-striped': 'h264',
   h265enc: 'h265',
   vp8enc: 'vp8',
   vp9enc: 'vp9',

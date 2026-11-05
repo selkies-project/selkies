@@ -15,8 +15,8 @@ from image_lib import pattern_matches, chroma_kept, TD
 
 ITEM = 1
 TITLE = "encoders, CRF/CBR, paint-over, Turbo, 4:4:4, CPU"
-CODEC = {"h264enc": "h264", "h264enc-striped": "h264", "h265enc": "h265", "vp8enc": "vp8",
-         "vp9enc": "vp9", "av1enc": "av1", "jpeg": "jpeg"}
+CODEC = {"h264enc": "h264", "h265enc": "h265", "vp8enc": "vp8", "vp9enc": "vp9", "av1enc": "av1",
+         "jpeg": "jpeg"}
 
 # Playwright's WebKit, a GStreamer port, hands WebRTC VP8 to libwebrtc's decoder
 # where GStreamer's best is vp8dec, and stamps those frames with their render

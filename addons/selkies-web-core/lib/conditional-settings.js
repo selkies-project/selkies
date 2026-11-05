@@ -48,10 +48,10 @@ import { codecOfEncoder } from "./wire-codecs.js";
 
 /**
  * Whether the CPU encode threading switch does anything for a session on an
- * encoder: the session codes in software, on a CPU-only encoder (whose
- * stripes it codes one after another), where software is forced on a codec
- * that has a software encoder, where the host encodes the codec in software
- * alone, or where the hardware engine hands a full color or 10-bit stream to
+ * encoder: the session codes in software, on JPEG (whose stripes it codes
+ * one after another), where software is forced on a codec that has a software
+ * encoder, where the host encodes the codec in software alone, or where the
+ * hardware engine hands a full color or 10-bit stream to
  * its software encoder. A hardware engine has no such threads. Without a
  * backend table it cannot be told, and reads as applying.
  * @param {string} encoder Encoder wire value.
@@ -63,7 +63,7 @@ import { codecOfEncoder } from "./wire-codecs.js";
  * @returns {boolean}
  */
 export function cpuEncodeThreadingApplies(encoder, encoderBackends, useCpu, fullColor, tenBit) {
-    if (encoder === "jpeg" || encoder === "h264enc-striped" || !encoderBackends) return true;
+    if (encoder === "jpeg" || !encoderBackends) return true;
     const backends = encoderBackends[codecOfEncoder(encoder)];
     if (!backends || !backends.hardware || (useCpu && backends.software)) return true;
     if (fullColor && backends.fullcolor && backends.fullcolor.hardware === false && backends.fullcolor.software) {
@@ -77,16 +77,16 @@ export function cpuEncodeThreadingApplies(encoder, encoderBackends, useCpu, full
  * Whether the software-encoding switch changes anything for an encoder: its
  * codec has both a hardware backend on the server's encode node and a
  * software encoder in its pixelflux build, so the switch moves the session
- * between them. Never for the CPU-only encoders. Without a backend table (a
- * server whose hardware side could not be probed) only H.264 is read as
- * served both ways.
+ * between them. Never for JPEG, which codes on the CPU alone. Without a
+ * backend table (a server whose hardware side could not be probed) only H.264
+ * is read as served both ways.
  * @param {string} encoder Encoder wire value.
  * @param {Object<string, {hardware: (string|null), software: (string|null)}>|undefined} encoderBackends
  *     The server's `encoder_backends` payload entry, keyed by codec name.
  * @returns {boolean}
  */
 export function softwareChoiceAvailable(encoder, encoderBackends) {
-    if (encoder === "jpeg" || encoder === "h264enc-striped") return false;
+    if (encoder === "jpeg") return false;
     if (!encoderBackends) return encoder === "h264enc";
     const backends = encoderBackends[codecOfEncoder(encoder)];
     return !!(backends && backends.hardware && backends.software);
@@ -119,7 +119,7 @@ export function tenBitStream(encoder, encoderBackends, useCpu, fullColor) {
         const fullcolor = !!(fullColor && backends.fullcolor && backends.fullcolor[side]);
         return table && table[fullcolor ? "444" : "420"] ? { fullcolor, software: side === "software" } : null;
     };
-    if (useCpu || encoder === "h264enc-striped" || !backends.hardware) return carries("software");
+    if (useCpu || !backends.hardware) return carries("software");
     if (fullColor && backends.fullcolor && backends.fullcolor.hardware === false && backends.fullcolor.software) {
         return carries("software");
     }

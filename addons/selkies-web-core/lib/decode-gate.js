@@ -13,9 +13,9 @@
  * each frame predicts from, the cheapest repair is to drop the frame, tell the
  * server which one went, and hold back only what predicts from it: the encoder
  * predicts past it and decoding resumes on its next frame, no key frame on the
- * wire. Where the encoder says nothing -- a stripe of a striped stream, a codec
- * whose session does not track its references -- the only repair is a key
- * frame, so the gate asks for one instead. A run of drops that the encoder
+ * wire. Where the encoder says nothing -- a codec whose session does not track
+ * its references -- the only repair is a key frame, so the gate asks for one
+ * instead. A run of drops that the encoder
  * never predicts past is the same case and ends in that request too. A key
  * frame that finds the decoder behind is decoded in place of everything queued
  * ahead of it, all of which predicts from before it and would only be shown

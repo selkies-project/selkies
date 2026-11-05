@@ -122,13 +122,13 @@ export const RESOLUTION_PRESETS = [
     "1024x768", "800x600", "640x480", "320x240",
 ];
 
-const encoderOptions = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped", "jpeg"];
+const encoderOptions = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "jpeg"];
 /** WebRTC encoders offered until the server payload arrives; its `encoder` allowed list is already filtered. */
 const encoderOptionsRTC = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"];
 /** `webcam_encoder` values; labels come from `displayLabel`. */
 export const WEBCAM_ENCODER_OPTIONS = ["auto", "h264", "h265", "vp8", "vp9", "av1", "mjpeg"];
 /** Encoders that support both CBR and CRF (constant-QP) rate control. */
-const VIDEO_ENCODERS = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped"];
+const VIDEO_ENCODERS = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"];
 
 const readStored = (key: string) => localStorage.getItem(getPrefixedKey(key));
 

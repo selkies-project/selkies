@@ -60,7 +60,8 @@ export const SERVER_FRESH_MS = 3000;
  * @property {string} codec
  * @property {boolean} fullcolor Whether the stream is 4:4:4.
  * @property {number} [bit_depth] Bits per sample of the stream, 8 or 10.
- * @property {boolean} striped
+ * @property {boolean} striped Whether a frame is coded as more than one stripe,
+ *     which only JPEG does.
  * @property {string} gpu The GPU a hardware session encodes on.
  * @property {string} driver Its kernel driver.
  * @property {string} encode_node Its render node.

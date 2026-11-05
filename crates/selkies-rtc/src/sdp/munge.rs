@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 /// others encode 4:2:0 whatever is asked.
 pub fn fullcolor_codec(encoder: &str) -> Option<&'static str> {
     match encoder {
-        "h264enc" | "h264enc-striped" => Some("h264"),
+        "h264enc" => Some("h264"),
         "h265enc" => Some("h265"),
         "vp9enc" => Some("vp9"),
         _ => None,

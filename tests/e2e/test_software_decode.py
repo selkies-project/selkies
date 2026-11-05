@@ -30,7 +30,7 @@ sent to it must not read as a silent decoder and take it through the retry and t
 reloads to JPEG, and a page whose socket opens hidden (a reload or a reconnect in a background
 tab) pauses its video as a hide would have, and resumes it when shown.
 
-Usage: python3 tests/e2e/test_software_decode.py [retry|nosoftware|nostart|persisted|newtab|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|hidden|all]
+Usage: python3 tests/e2e/test_software_decode.py [retry|nosoftware|nostart|persisted|newtab|ladder|healthy|silent|nowebcodecs|cleared|broken|held|hidden|all]
 """
 import json
 import os
@@ -459,41 +459,6 @@ def block_healthy(r: "H.Results") -> None:
         H.server_stop()
 
 
-def block_striped(r: "H.Results") -> None:
-    """The striped encoder runs a decoder per stripe and they fail together, so
-    the errors still in flight when the switch happens must not reach the
-    ladder.
-
-    The failure shim only reaches page-scope decoders, so the video worker is
-    disabled with its own escape hatch and the page striped ladder — still the
-    fallback whenever the worker cannot divert — is what is exercised."""
-    from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
-    try:
-        with sync_playwright() as pw:
-            browser, page = open_client(pw, fail_mode="hardware",
-                                        encoder="h264enc-striped",
-                                        query="offscreen_worker=false")
-            try:
-                state = wait_for(page, lambda s: s["decoded"] > 0
-                                 and "prefer-software" in s["cfgs"], timeout=40)
-                r.check("more than one decoder was in play",
-                        len(state["cfgs"]) > 2, len(state["cfgs"]))
-                r.check("switched to software decode",
-                        "prefer-software" in state["cfgs"], state["cfgs"][:4])
-                r.check("stripes decode after the switch", state["decoded"] > 0,
-                        state["decoded"])
-                time.sleep(6)
-                after = read_state(page)
-                r.check("page never reloaded", after["navs"] == 1, after["navs"])
-                r.check("still decoding", after["decoded"] > state["decoded"],
-                        (state["decoded"], after["decoded"]))
-            finally:
-                browser.close()
-    finally:
-        H.server_stop()
-
-
 def block_nowebcodecs(r: "H.Results") -> None:
     """No WebCodecs at all: the stream comes up as striped JPEG without a reload,
     the encoder is pinned to jpeg for the session, and the dashboard's
@@ -811,7 +776,7 @@ BLOCKS = {"retry": block_retry, "nosoftware": block_nosoftware, "nostart": block
           "persisted": block_persisted, "newtab": block_newtab,
           "ladder": block_ladder, "healthy": block_healthy,
           "silent": block_silent,
-          "striped": block_striped, "nowebcodecs": block_nowebcodecs,
+          "nowebcodecs": block_nowebcodecs,
           "cleared": block_cleared, "broken": block_broken, "held": block_held,
           "hidden": block_hidden}
 

@@ -31,15 +31,7 @@ fn parse(env: &[(&str, &str)]) -> Settings {
 
 #[test]
 fn rate_control_defaults_to_cbr_and_an_operator_pin_wins() {
-    for encoder in [
-        "h264enc",
-        "h264enc-striped",
-        "jpeg",
-        "h265enc",
-        "vp8enc",
-        "vp9enc",
-        "av1enc",
-    ] {
+    for encoder in ["h264enc", "jpeg", "h265enc", "vp8enc", "vp9enc", "av1enc"] {
         let s = parse(&[("SELKIES_MODE", "websockets"), ("SELKIES_ENCODER", encoder)]);
         assert_eq!(s.rate_control_mode(), "cbr", "{encoder}");
     }
@@ -101,15 +93,7 @@ fn encoder_aliases_and_the_published_menu() {
     }
     assert_eq!(
         s.enum_allowed("encoder"),
-        vec![
-            "h264enc",
-            "h265enc",
-            "vp8enc",
-            "vp9enc",
-            "av1enc",
-            "h264enc-striped",
-            "jpeg"
-        ]
+        vec!["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "jpeg"]
     );
     let webrtc = parse(&[("SELKIES_MODE", "webrtc"), ("SELKIES_ENCODER", "jpeg")]);
     assert_eq!(
@@ -253,7 +237,6 @@ fn software_encode_threading() {
     for (encoder, requested, default, provided, want) in [
         ("vp8enc", None, true, false, false),
         ("vp9enc", None, true, false, true),
-        ("h264enc-striped", None, true, false, true),
         ("vp8enc", Some(true), true, false, true),
         ("h264enc", Some(false), true, false, false),
         ("vp8enc", None, true, true, true),
@@ -319,7 +302,6 @@ fn encoder_names_and_their_codecs() {
     for (encoder, codec) in [
         ("jpeg", "jpeg"),
         ("h264enc", "h264"),
-        ("h264enc-striped", "h264"),
         ("h265enc", "h265"),
         ("vp8enc", "vp8"),
         ("vp9enc", "vp9"),
@@ -333,7 +315,6 @@ fn encoder_names_and_their_codecs() {
         !software_video_path("jpeg", true),
         "jpeg is never a software video path"
     );
-    assert!(software_video_path("h264enc-striped", false));
     for encoder in ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"] {
         assert!(
             !software_video_path(encoder, false) && software_video_path(encoder, true),
@@ -395,8 +376,8 @@ fn the_encode_node_and_the_backends_the_host_serves() {
         );
     }
     assert!(
-        s.encoder_served("jpeg") && s.encoder_served("h264enc-striped"),
-        "CPU-only encoders are always served"
+        s.encoder_served("jpeg"),
+        "a CPU-only encoder is always served"
     );
     let payload = s.client_payload();
     assert!(payload.contains_key("encoder_backends"));

@@ -201,9 +201,8 @@ check('and rides the transfer list, so the page gets a live one',
       !!(mode && mode.transfer && mode.transfer.includes(mode.msg.track)),
       mode && mode.transfer);
 check('the writer comes from writable, never readable', !withGen.readReadable, '');
-check('the striped and jpeg capabilities ride the same reply',
-      !!(mode && mode.msg.stripedDecode === true && 'jpegDecode' in mode.msg),
-      mode && [mode.msg.stripedDecode, mode.msg.jpegDecode]);
+check('the jpeg capability rides the same reply',
+      !!(mode && mode.msg.jpegDecode === true), mode && mode.msg.jpegDecode);
 check('the worker is left listening', typeof withGen.onmessage === 'function', '');
 
 const without = runWorker({ withGenerator: false });

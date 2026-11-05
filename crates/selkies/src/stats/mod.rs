@@ -123,8 +123,8 @@ pub fn gpu_present() -> bool {
 }
 
 /// Whether a session with this encoder should be encoding on a GPU: there is one, it has an
-/// engine for the codec, and the session asked for it, which JPEG and the striped encoder
-/// never do and any other does unless software encoding is on.
+/// engine for the codec, and the session asked for it, which JPEG never does and any other
+/// does unless software encoding is on.
 ///
 /// `backends` is the startup probe's `Settings::encoder_backends`. A codec the probe found
 /// no hardware backend for is encoded in software by the codec's choice, as a server with no
@@ -148,7 +148,7 @@ pub fn hardware_expected(
 
 /// The `stream_info` object of a capture's report, keyed as the pages read it: pixelflux's
 /// description, `encode_node` as the device path of a hardware session (empty otherwise),
-/// `striped` for more than one stripe, and a Wayland capture's renderer beside it.
+/// `striped` for more than one stripe (JPEG's), and a Wayland capture's renderer beside it.
 pub fn stream_info_message(report: &StreamInfo) -> Map<String, Json> {
     let info = &report.info;
     let mut map = Map::new();
@@ -707,10 +707,6 @@ mod tests {
             "unless software encoding is on"
         );
         assert!(
-            !hardware_expected("h264enc-striped", false, true, None),
-            "the striped encoder never does"
-        );
-        assert!(
             !hardware_expected("jpeg", false, true, None),
             "nor does JPEG"
         );
@@ -770,6 +766,7 @@ mod tests {
         assert_eq!(info["striped"], false);
         assert!(!info.contains_key("renderer"));
         report.info.hardware = false;
+        report.info.codec = "jpeg";
         report.info.stripes = 4;
         report.renderer = Some(pixelflux::report::Renderer {
             kind: "gl",

@@ -109,7 +109,7 @@ All messages sent to the client must be JavaScript objects with a `type` propert
         *   `rate_control_mode` (String): `'crf'` or `'cbr'`.
         *   `video_bitrate` (Number): Target bitrate in kbps (used if CBR; e.g. `8000` for 8 Mbps).
         *   `video_crf` (Number): Constant Rate Factor for H.264 (used if CRF).
-        *   `encoder` (String): Video encoder (e.g., `'h264enc'`, `'jpeg'`, `'h264enc-striped'`).
+        *   `encoder` (String): Video encoder (e.g., `'h264enc'`, `'av1enc'`, `'jpeg'`).
         *   `audio_bitrate` (Number): Audio bitrate in bps (e.g., 320000).
         *   `scaling_dpi` (Number): Custom DPI scaling for the remote desktop.
         *   `enable_binary_clipboard` (Boolean): Enables image (binary) copy/pasting. The matching `clipboard_in_enabled` / `clipboard_out_enabled` flags toggle paste-into-session and copy-from-session.

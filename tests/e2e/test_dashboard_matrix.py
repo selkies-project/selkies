@@ -34,9 +34,9 @@ from playwright.sync_api import sync_playwright
 WL_SOCKET = "wayland-1"
 CELLS = ("wish-webrtc-x11", "wish-ws-wl", "wish-webrtc-wl",
          "gates-webrtc-x11", "gates-ws-wl", "gates-webrtc-wl")
-# Encoders in the order a switch away from the default prefers them: the
-# striped H.264 mode keeps the WebCodecs path, JPEG needs no decoder at all.
-ENCODER_PREFERENCE = ["h264enc-striped", "jpeg", "h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"]
+# Encoders in the order a switch away from the default prefers them: JPEG
+# needs no decoder at all.
+ENCODER_PREFERENCE = ["jpeg", "h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"]
 
 # Records the core's clipboard messages (a push that arrives while the panel
 # is closed) and the server settings payload the dashboard renders from.

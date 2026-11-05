@@ -80,7 +80,6 @@ def settings(pixelflux, encoder: str, cpu: bool, wayland: bool):
         cs.codec = "jpeg" if encoder == "jpeg" else "h264"
     else:
         cs.output_mode = 0 if encoder == "jpeg" else 1
-    cs.video_fullframe = encoder == "h264enc"
     return cs
 
 

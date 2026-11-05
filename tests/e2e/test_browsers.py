@@ -255,20 +255,13 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
 
 
 def striped_block(engine: str) -> "H.Results":
-    """The striped encoder on one engine: the video worker decodes, composites,
-    and presents it off the page where the engine allows.
-
-    chromium and firefox take the divert (fps counts the worker's composites,
-    the worker canvas is the visible sink). Playwright's WebKit claims support
-    for striped decoder configs but every decode fails (`EncodingError`), in
-    the worker and on the page ladder alike, leaving its software-decode retry
-    cycling; so there the checks stop at the wire flowing without page errors,
-    and real Safari cannot be exercised in this harness.
-    """
+    """Striped JPEG on one engine: the video worker decodes, composites, and
+    presents it off the page, fps counting the worker's composites and the
+    worker canvas the visible sink."""
     tag = f"{engine}-striped"
     res = H.Results(tag)
     H.server_start(mode="websockets", wayland=False,
-                   extra_env={"SELKIES_ENCODER": "h264enc-striped"})
+                   extra_env={"SELKIES_ENCODER": "jpeg"})
     with sync_playwright() as p:
         browser, ctx = engine_launch(p, engine)
         ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
@@ -281,11 +274,11 @@ def striped_block(engine: str) -> "H.Results":
         # decode failure flips between them while the stream is coming up. The
         # worker's own rows and composites are what settle it, and they trail
         # the first chunks by as long as its decoders take to come up.
-        settled = ("() => (window.videoChunksReceived || 0) > 0" if engine == "webkit" else """() => {
+        settled = """() => {
           const c = document.getElementById('videoWorkerCanvas');
           return !!window.videoDivertOn && Object.keys(window.videoStripeRows || {}).length > 1
             && (window.fps || 0) > 0 && !!c && c.width >= 640;
-        }""")
+        }"""
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(1.0)
@@ -308,18 +301,14 @@ def striped_block(engine: str) -> "H.Results":
               })(),
             })""")
             res.check("striped stream reaches the client",
-                      state["enc"] == "h264enc-striped" and state["chunks"] > 0, state)
-            if engine == "webkit":
-                res.skip("worker decode assertions",
-                         "Playwright WebKit fails decoding stripe streams outright")
-            else:
-                res.check("the video worker takes the striped divert",
-                          state["divert"] and state["rows"] > 1, state)
-                res.check("the worker presents (fps counts its composites)",
-                          state["fps"] > 0, state)
-                res.check("the worker canvas is the visible sink",
-                          bool(state["workerCanvas"]) and state["workerCanvas"]["shown"]
-                          and state["workerCanvas"]["w"] >= 640 and not state["mainShown"], state)
+                      state["enc"] == "jpeg" and state["chunks"] > 0, state)
+            res.check("the video worker takes the striped divert",
+                      state["divert"] and state["rows"] > 1, state)
+            res.check("the worker presents (fps counts its composites)",
+                      state["fps"] > 0, state)
+            res.check("the worker canvas is the visible sink",
+                      bool(state["workerCanvas"]) and state["workerCanvas"]["shown"]
+                      and state["workerCanvas"]["w"] >= 640 and not state["mainShown"], state)
             res.check("no page errors", not page_errors, "; ".join(page_errors)[:160])
         finally:
             if browser:

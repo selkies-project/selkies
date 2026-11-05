@@ -268,7 +268,7 @@ class Native(NamedTuple):
 NATIVE: Dict[str, Native] = {
     "x264-sys": Native(
         "libx264", "GPL-2.0-or-later", COPYLEFT,
-        "linked shared library, through pixelflux's `gpl` feature; striped and fallback software H.264"),
+        "linked shared library, through pixelflux's `gpl` feature; software H.264"),
     "codec-sys": Native(
         "libvpx, SVT-AV1, dav1d, and libde265 in every build; x265 in the GPL build, kvazaar in the non-GPL one",
         "BSD-3-Clause (libvpx, kvazaar; SVT-AV1 with the Alliance for Open Media patent license), "

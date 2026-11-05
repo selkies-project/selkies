@@ -16,8 +16,7 @@ WebCodecs decodes them, and a stream that opened at 10 bits never showed one.
 The host's encoders decide how much a run covers: a codec the encode node
 carries no 10 bits for runs on the build's software encoder where that codes
 them, and at 8 bits where neither does, and the run holds whichever applies. A
-`-cpu` suffix forces the software encoder, and `striped` is the striped H.264
-path. `ws-refused` and `wr-refused` drive an engine whose decoder gives
+`-cpu` suffix forces the software encoder. `ws-refused` and `wr-refused` drive an engine whose decoder gives
 no 10-bit picture back, whatever this one's really does, and `ws-default` the
 server's own unlocked default against it.
 
@@ -35,7 +34,7 @@ import test_encoders as TENC
 from playwright.sync_api import sync_playwright
 
 CODECS = {"av1": ("av1enc", "AV1"), "vp9": ("vp9enc", "VP9"), "h265": ("h265enc", "H265"),
-          "h264": ("h264enc", "H264"), "striped": ("h264enc-striped", "H264")}
+          "h264": ("h264enc", "H264")}
 
 STORED_JS = """() => {
   const k = (location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -85,9 +84,8 @@ def host_carries(codec: str, software: bool = False) -> bool:
     """Whether this host encodes `codec` at 10 bits, 4:2:0: on its encode node, or failing
     that in the build's software encoder, which is where such a session then runs."""
     import pixelflux
-    name = "h264" if codec == "striped" else codec
-    return ((not software and "420-10" in dict(pixelflux.hardware_formats()).get(name, []))
-            or "420-10" in dict(pixelflux.SOFTWARE_FORMATS).get(name, []))
+    return ((not software and "420-10" in dict(pixelflux.hardware_formats()).get(codec, []))
+            or "420-10" in dict(pixelflux.SOFTWARE_FORMATS).get(codec, []))
 
 
 def encoder_lines() -> List[str]:

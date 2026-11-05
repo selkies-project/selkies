@@ -10,7 +10,7 @@ This server provides the backend infrastructure for establishing and managing in
 
 1.  **Dual-Mode Streaming Architecture:**
     *   **WebRTC Mode:** Facilitates full peer-to-peer (P2P) interactive streaming. This mode manages the complete WebRTC lifecycle, including signaling, media transport negotiation (SRTP), and data channel communication for low-latency interaction.
-    *   **WebSockets Streaming Mode:** Offers an alternative, server-relayed streaming approach. Media is streamed directly over WebSockets, supporting specialized, efficient protocols such as `jpeg-striped` and `h264enc-striped` (akin to the `pixelflux` methodology). This mode is advantageous in scenarios where P2P WebRTC is constrained or a simpler, direct stream is preferred.
+    *   **WebSockets Streaming Mode:** Offers an alternative, server-relayed streaming approach. Media is streamed directly over WebSockets, supporting specialized, efficient protocols such as striped JPEG (akin to the `pixelflux` methodology). This mode is advantageous in scenarios where P2P WebRTC is constrained or a simpler, direct stream is preferred.
 
 2.  **WebRTC Connection Management (WebRTC Mode):**
     *   Handles Session Description Protocol (SDP) offer/answer exchanges.
@@ -20,7 +20,7 @@ This server provides the backend infrastructure for establishing and managing in
 3.  **Audio/Video Processing and Delivery:**
     *   Captures, encodes, and streams audio and video from the server.
     *   Captures and encodes media through the in-tree `pixelflux` (video) and `pcmflux` (audio) modules, supporting multiple encoders selected by name (e.g., `h264enc`).
-    *   Delivers media via SRTP in WebRTC mode or custom WebSocket protocols (`jpeg-striped`, `h264enc-striped`) in WebSockets mode.
+    *   Delivers media via SRTP in WebRTC mode or custom WebSocket protocols (full-frame video, striped JPEG) in WebSockets mode.
     *   Supports dynamic adjustments to streaming parameters such as bitrate and framerate.
 
 4.  **Remote Input Handling:**

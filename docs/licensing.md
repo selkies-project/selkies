@@ -26,7 +26,7 @@ GPL-licensed libraries into every release build:
 
 | Source | GPL component | How it gets in | How to leave it out |
 | --- | --- | --- | --- |
-| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used: the `h264enc` fallback and `h264enc-striped` alike; and x265 (GPL-2.0-or-later) behind `h265enc` in the same case | the `gpl` Cargo feature of pixelflux, which the workspace's `Cargo.toml` turns on, so the server links libx264 and x265 in every release build | name pixelflux's `openh264` feature in place of `gpl` in the workspace's `Cargo.toml`: BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The check under [How this is kept up to date](#how-this-is-kept-up-to-date) holds that build copyleft-free; pixelflux's own inventory is its [LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md). |
+| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used, as the `h264enc` fallback; and x265 (GPL-2.0-or-later) behind `h265enc` in the same case | the `gpl` Cargo feature of pixelflux, which the workspace's `Cargo.toml` turns on, so the server links libx264 and x265 in every release build | name pixelflux's `openh264` feature in place of `gpl` in the workspace's `Cargo.toml`: BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The check under [How this is kept up to date](#how-this-is-kept-up-to-date) holds that build copyleft-free; pixelflux's own inventory is its [LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md). |
 
 pixelflux and pcmflux encode and decode the video and audio through the codec
 libraries they link, and the RTP layer packetizes their output through an
@@ -85,7 +85,7 @@ contains the crate: the default GPL one, or the non-GPL one with pixelflux's
 
 | Native library | Crate | License | Category | Build | How used |
 | --- | --- | --- | --- | --- | --- |
-| libx264 | `x264-sys` | GPL-2.0-or-later | copyleft | GPL only | linked shared library, through pixelflux's `gpl` feature; striped and fallback software H.264 |
+| libx264 | `x264-sys` | GPL-2.0-or-later | copyleft | GPL only | linked shared library, through pixelflux's `gpl` feature; software H.264 |
 | libvpx, SVT-AV1, dav1d, and libde265 in every build; x265 in the GPL build, kvazaar in the non-GPL one | `codec-sys` | BSD-3-Clause (libvpx, kvazaar; SVT-AV1 with the Alliance for Open Media patent license), BSD-2-Clause (dav1d), LGPL-3.0-or-later (libde265), GPL-2.0-or-later (x265) | weak copyleft (copyleft in the GPL build) | both | linked shared libraries, through pixelflux; the software HEVC, VP8, VP9, and AV1 encoders and the virtual camera's decoders |
 | Cisco OpenH264, and libstdc++ for its C++ | `openh264-sys2` | BSD-2-Clause (OpenH264), GPL-3.0-or-later WITH GCC-exception-3.1 (libstdc++) | permissive | both | compiled from the source vendored in the crate and linked statically, through pixelflux, libstdc++ as a shared library; full-frame software H.264 of the non-GPL build and the virtual camera's H.264 decoder |
 | libjpeg-turbo | `turbojpeg-sys` | IJG AND BSD-3-Clause AND Zlib | permissive | both | compiled from the source vendored in the crate and linked statically, through pixelflux; JPEG |

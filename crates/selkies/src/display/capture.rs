@@ -195,7 +195,6 @@ pub fn populate_capture_settings(cs: &mut CaptureSettings, server: &Settings, p:
     cs.video_fullcolor = p.fullcolor;
     cs.video_bit_depth = if p.ten_bit { 10 } else { 8 };
     cs.video_streaming_mode = p.streaming;
-    cs.video_fullframe = p.encoder != "h264enc-striped";
     cs.video_cbr_mode = p.cbr;
     cs.video_bitrate_kbps = p.bitrate_kbps.round() as i32;
     // 0 = infinite GOP (on-demand keyframes only); 0 QP bounds = encoder default.
@@ -258,13 +257,11 @@ pub fn populate_capture_settings(cs: &mut CaptureSettings, server: &Settings, p:
 }
 
 /// Whether two capture settings agree on everything structural, so a running capture is kept
-/// across a reconfiguration: the codec, the encoder path, its threading, the framing, the
-/// chroma, the bit depth, and the rate-control mode. Everything else applies live.
+/// across a reconfiguration: the codec, the encoder path, its threading, the chroma, the bit depth, and the rate-control mode. Everything else applies live.
 pub fn structurally_same(a: &CaptureSettings, b: &CaptureSettings) -> bool {
     a.codec == b.codec
         && a.use_cpu == b.use_cpu
         && a.cpu_encode_threading == b.cpu_encode_threading
-        && a.video_fullframe == b.video_fullframe
         && a.video_fullcolor == b.video_fullcolor
         && a.video_bit_depth == b.video_bit_depth
         && a.video_cbr_mode == b.video_cbr_mode
@@ -397,12 +394,7 @@ mod tests {
         populate_capture_settings(&mut cs, &server, &display);
         assert_eq!(cs.codec, Codec::Vp9);
         assert_eq!(cs.target_fps, 72.0);
-        assert!(
-            cs.video_fullframe
-                && cs.video_cbr_mode
-                && cs.video_fullcolor
-                && cs.video_streaming_mode
-        );
+        assert!(cs.video_cbr_mode && cs.video_fullcolor && cs.video_streaming_mode);
         assert_eq!(
             (cs.video_bit_depth, cs.video_bitrate_kbps, cs.video_crf),
             (10, 8000, 30)
@@ -425,16 +417,15 @@ mod tests {
             "no node named leaves pixelflux's pick"
         );
 
-        let striped = DisplayCapture {
-            encoder: "h264enc-striped".into(),
+        let x11 = DisplayCapture {
+            encoder: "h264enc".into(),
             is_wayland: false,
             cursor_size_cap_hint: 96,
             ..display
         };
         let mut cs = CaptureSettings::default();
-        populate_capture_settings(&mut cs, &server, &striped);
+        populate_capture_settings(&mut cs, &server, &x11);
         assert_eq!(cs.codec, Codec::H264);
-        assert!(!cs.video_fullframe);
         assert_eq!(cs.use_wayland, Some(false));
         assert_eq!(cs.cursor_size_cap, 96);
         assert_eq!(cs.display_id, 0, "X11 keeps the default output");

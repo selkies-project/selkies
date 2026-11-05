@@ -267,9 +267,8 @@ Each is documented in full where named; read that before changing the subsystem.
   That ladder is one order on both transports (`ENCODER_LADDER` and `encoder_rung` in
   `crates/selkies/src/settings`, `LADDER_ORDER` and `nextRung` in the core): the full-frame codecs the host encodes
   in hardware, most efficient first, then those it encodes in software by their encoders' measured time per frame,
-  then striped H.264, and JPEG last. Over WebSockets the client walks it through the encoders it decodes; over
-  WebRTC the offer lists it behind the display's codec (`video_preferences`) and the display follows the codec the
-  answer took. 10 bits (`video_10bit`) follow the same rule with one difference: the client is asked by decoding a
+  and JPEG last. Over WebSockets the client walks it through the encoders it decodes; over WebRTC the offer lists
+  it behind the display's codec (`video_preferences`) and the display follows the codec the answer took. 10 bits (`video_10bit`) follow the same rule with one difference: the client is asked by decoding a
   10-bit key frame of the format, never by its decoder's word, since engines accept 10-bit configurations they then
   fail to decode (`util.canDecodeTenBit`); the server says which formats its encode node and its software encoders
   carry (`encoder_backends`' `ten_bit`, from pixelflux's hardware formats and `software_formats`), a format the
@@ -282,8 +281,8 @@ Each is documented in full where named; read that before changing the subsystem.
   gate names it (`addons/selkies-web-core/lib/decode-gate.js` module docblock, the `LOST_FRAME` verb); over
   WebRTC a second NACK for a packet the sender still holds does (`RtpSender::retransmit` in
   `crates/selkies-rtc/src/rtp/sender.rs`, the `lost_frame` hook, which the WebRTC engine answers). A stream whose
-  encoder names no reference -- a stripe, a session that cannot invalidate -- gets the key frame instead, and so
-  does a run of drops the encoder never predicts past, or an H.264 loss covering the frame at the encoder's
+  encoder names no reference -- a session that cannot invalidate -- gets the key frame instead, and so does a run
+  of drops the encoder never predicts past, or an H.264 loss covering the frame at the encoder's
   `frame_num` wrap, which the browsers' FFmpeg decoder cannot be predicted past.
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in the server
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `crates/selkies/src/webcam` module docblock,
