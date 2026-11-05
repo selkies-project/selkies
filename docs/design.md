@@ -71,4 +71,12 @@ For the opt-in WebRTC transport, Selkies carries its own WebRTC stack, the `selk
 
 Therefore, Selkies is meant from the start to be a community-built project, where developers from all backgrounds can easily contribute to or expand upon.
 
+### HTTP and media stack choices
+
+Axum fits the server's Tower-native architecture: authentication, file routes, and both streaming signaling paths compose as one service, while direct Hyper connections preserve custom TLS, Unix-socket, listener, and WebSocket-upgrade behavior. Encoded buffers reach Axum's `Message::Binary` through shared `Bytes` handles. [Salvo](https://github.com/salvo-rs/salvo) also supports asynchronous `Bytes` bodies and WebSocket streams, so zero-copy is not exclusive to Axum; its integrated HTTP/3 and WebTransport support is a future advantage. Retaining Axum avoids translating well-tested middleware and listener contracts with no demonstrated latency benefit, and preserves the workspace's Rust-toolchain floor. A later WebTransport implementation can reassess the serving architecture independently.
+
+`selkies-rtc` is currently the lower-risk WebRTC implementation for Selkies, not a claim that a custom stack is inherently faster or more mature. Selkies needs interleaved FEC, per-peer reference invalidation and resume, dependency descriptors, absolute capture time, cleanup-frame pacing, shared ICE muxes, and encoded Opus/RED and camera/microphone delivery without transcoding. Keeping those semantics takes a small Rust send path plus a bounded vendored SCTP patch; it does not require new modifications to the much larger native libwebrtc engine.
+
+[LiveKit's libwebrtc binding](https://github.com/livekit/rust-sdks/tree/main/webrtc-sys/libwebrtc) does support pre-encoded H.264, H.265, VP8, VP9, and AV1. Codec passthrough is therefore not the blocker. The open questions are encoded audio, arbitrary per-peer dependency recovery, exact FEC/pacer controls, shared ICE topology, and whether bounded public APIs can expose them without a permanent C++ fork. Musl, C++ toolchain, glibc-floor, binary-size, and every-platform release artifacts also need proof. After parity is stable, a narrow upstream feasibility prototype should answer those questions and compare wire behavior, artifacts, latency, CPU, and frame rate. Replacing `selkies-rtc` is justified only if every existing behavior survives and the measured maintenance or performance tradeoff improves.
+
 **Head to [Getting Started](start.md) to deploy your own instance.**

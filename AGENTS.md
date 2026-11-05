@@ -188,8 +188,9 @@ what runs where.
   regression or can validate it.
 - Screen async code in Rust and JavaScript, and thread usage in every language, so nothing hangs or lags: no
   blocking call or long computation on a tokio worker (it goes to `spawn_blocking` or a thread of its own), no lock
-  held across an `.await`, and no work on a hot path the frame does not need. Zero-copy and latency-reducing
-  measures are always worth preserving or adding.
+  held across an `.await`, and no work on a hot path the frame does not need. There is no server-wide GIL: thread
+  independent capture, encoding, transport, display, and peer work where that improves latency, unrestricted frame
+  rate, zero-copy pipelines, or reasonable CPU consumption without adding queueing or contention.
 - End-to-end latency and an unrestricted frame rate are separate goals, not two ends of one dial: neither is
   spent to buy the other, and a change that trades one away has not improved the other.
 - A change never drops a capability or falls back to an older implementation to make itself simpler. Where one
