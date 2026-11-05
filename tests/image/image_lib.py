@@ -367,6 +367,8 @@ def install_site(target: Any) -> bool:
     with a clip (a moving picture and a tone) made by whichever side has ffmpeg."""
     site = os.path.join(HERE, "site")
     for name in os.listdir(site):
+        if not os.path.isfile(os.path.join(site, name)):
+            continue
         with open(os.path.join(site, name), "rb") as f:
             target.put(f"{SITE_ROOT}/site/{name}", f.read())
     clip = os.path.join(H.WORKDIR, "av.webm")
