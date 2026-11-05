@@ -490,7 +490,13 @@ impl Arm {
             pic.reference_frames[i] = picture(pts, surface);
         }
         pic.coded_buf = frame.coded;
-        pic.collocated_ref_pic_index = if t.temporal_mvp { 0 } else { 0xff };
+        // A key frame names no co-located picture: iHD reads the reference the index names
+        // whatever the frame's type, and reference 0 of a key frame is invalid.
+        pic.collocated_ref_pic_index = if t.temporal_mvp && !frame.key {
+            0
+        } else {
+            0xff
+        };
         pic.pic_init_qp = self.pic_init_qp as u8;
         pic.diff_cu_qp_delta_depth = if self.cu_qp_delta {
             self.cu_qp_delta_depth as u8
@@ -604,7 +610,7 @@ impl Arm {
             unsafe {
                 let f = &mut slice.slice_fields.bits;
                 f.set_last_slice_of_pic_flag(last as u32);
-                f.set_slice_temporal_mvp_enabled_flag(t.temporal_mvp as u32);
+                f.set_slice_temporal_mvp_enabled_flag((t.temporal_mvp && !frame.key) as u32);
                 f.set_slice_sao_luma_flag(t.sao as u32);
                 f.set_slice_sao_chroma_flag(t.sao as u32);
                 f.set_collocated_from_l0_flag(1);

@@ -2438,3 +2438,36 @@ fn a_refinement_reaches_the_driver_as_regions_of_interest() {
     );
     assert!(session(Codec::H264, false).refines().is_some());
 }
+
+/// A driver offering HEVC temporal motion-vector prediction is told it on predicted frames, with
+/// the reference it takes the co-located picture from, and never on a key frame, whose reference
+/// list holds none: iHD reads the reference the index names whatever the frame's type, past the
+/// end of its table where it is invalid.
+#[test]
+fn an_hevc_key_frame_names_no_collocated_picture() {
+    let mut driver = Driver::generous();
+    for (kind, value) in driver.attributes.iter_mut() {
+        if *kind == VAConfigAttribEncHEVCFeatures {
+            let mut features = VAConfigAttribValEncHEVCFeatures { value: *value };
+            unsafe { features.bits.set_temporal_mvp(1) };
+            *value = unsafe { features.value };
+        }
+    }
+    mock::reset(driver);
+    let mut enc = session(Codec::H265, true);
+    let coded = |enc: &mut VaapiEncoder, t: u64, key: bool| {
+        encode(enc, t, key);
+        mock::with(|d| {
+            let pic: VAEncPictureParameterBufferHEVC = d
+                .last_param(VAEncPictureParameterBufferType)
+                .expect("a picture");
+            let slice: VAEncSliceParameterBufferHEVC = d
+                .last_param(VAEncSliceParameterBufferType)
+                .expect("a slice");
+            let mvp = unsafe { slice.slice_fields.bits.slice_temporal_mvp_enabled_flag() };
+            (pic.collocated_ref_pic_index, mvp)
+        })
+    };
+    assert_eq!(coded(&mut enc, 0, true), (0xff, 0), "the key frame");
+    assert_eq!(coded(&mut enc, 1, false), (0, 1), "a predicted frame");
+}
