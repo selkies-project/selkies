@@ -1394,7 +1394,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
     SettingDef {
         name: "video_streaming_mode",
         kind: Kind::Bool,
-        default: "True",
+        default: "False",
         help: "Enable video streaming mode (Turbo: encode every frame like a traditional video encoder) for pixelflux encoders.",
         env_vars: &[],
         allowed: &[],

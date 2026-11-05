@@ -7,7 +7,9 @@ server would read a second of the client's own timer as network latency and
 report it for as long as the smoothing window holds those samples -- the
 "latency sits near 1000 ms for ten seconds after coming back to the tab"
 report. Held acks are replayed here with and without the hold, over the real
-websocket, and the reported figure has to follow the path either way.
+websocket, and the reported figure has to follow the path either way. The
+server runs Turbo, so frames keep coming off the still test display and every
+round has a fresh id to hold.
 
 Usage: python3 tests/integration/test_ack_latency.py
 """
@@ -113,7 +115,8 @@ async def drive(res: "H.Results") -> None:
 
 def run() -> "H.Results":
     res = H.Results("ack-latency")
-    H.server_start(mode="websockets", extra_env={"SELKIES_USE_CPU": "true"})
+    H.server_start(mode="websockets", extra_env={"SELKIES_USE_CPU": "true",
+                                                 "SELKIES_VIDEO_STREAMING_MODE": "true"})
     try:
         asyncio.run(drive(res))
     finally:

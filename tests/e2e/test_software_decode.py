@@ -30,6 +30,9 @@ sent to it must not read as a silent decoder and take it through the retry and t
 reloads to JPEG, and a page whose socket opens hidden (a reload or a reconnect in a background
 tab) pauses its video as a hide would have, and resumes it when shown.
 
+Every server runs Turbo, so the still test display keeps sending the frames the
+blocks count as decoded.
+
 Usage: python3 tests/e2e/test_software_decode.py [retry|nosoftware|nostart|persisted|newtab|ladder|healthy|silent|nowebcodecs|cleared|broken|held|hidden|all]
 """
 import json
@@ -43,6 +46,8 @@ import helpers as H
 import core_lib as C
 
 from typing import Callable, Optional
+
+TURBO = {"SELKIES_VIDEO_STREAMING_MODE": "true"}
 
 # Storage namespace the client derives from origin + pathname.
 STORAGE_KEY_JS = (
@@ -243,7 +248,7 @@ def block_retry(r: "H.Results") -> None:
     """Hardware decode fails: the client switches to software in place, keeps
     decoding, and does not reload."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="hardware")
@@ -280,7 +285,7 @@ def block_nosoftware(r: "H.Results") -> None:
     on, where reading the refused preference as a refused codec would step the stream down
     the ladder for the rest of the tab's life."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="once", soft_h264="no")
@@ -312,7 +317,7 @@ def block_nostart(r: "H.Results") -> None:
     the engine picks gets the stream back without a reload, where the crash ladder would
     reload the page on its safe settings and count a crash toward JPEG."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="once", soft_h264="claims")
@@ -345,7 +350,7 @@ def block_persisted(r: "H.Results") -> None:
     """A tab's remembered preference is applied to the first decoder of its next
     load, so a reload on a broken hardware path pays no failed decode."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="hardware", seed_preference=True)
@@ -371,7 +376,7 @@ def block_newtab(r: "H.Results") -> None:
     """Hardware decode fails in one tab, which switches to software: a new tab of the same
     profile, the fault gone, configures a hardware decoder first and stores no preference."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="hardware")
@@ -382,7 +387,7 @@ def block_newtab(r: "H.Results") -> None:
                 storage = page.context.storage_state()
                 page.context.close()
                 # A fresh server, so the new tab is the display's only client.
-                H.server_start(mode="websockets")
+                H.server_start(mode="websockets", extra_env=TURBO)
                 fresh = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                                             device_scale_factor=1)
                 fresh.add_init_script(NAV_JS)
@@ -404,7 +409,7 @@ def block_ladder(r: "H.Results") -> None:
     """Software decode fails too: the ladder still runs, and the preference is
     dropped so the next load re-probes hardware."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="all")
@@ -440,7 +445,7 @@ def block_healthy(r: "H.Results") -> None:
     """Nothing is injected: the retry must be invisible — no software decoder and
     no stored preference on a client whose hardware decoder works."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="none")
@@ -467,7 +472,7 @@ def block_nowebcodecs(r: "H.Results") -> None:
     browser update brings it, stream video."""
     from playwright.sync_api import sync_playwright
     import test_dashboards as TD
-    H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST)
+    H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST, extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)
@@ -512,7 +517,7 @@ def block_nowebcodecs(r: "H.Results") -> None:
                         state["codec"])
                 other.close()
                 # A fresh server, so what the later visit streams comes from its own storage.
-                H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST)
+                H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST, extra_env=TURBO)
                 later = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                                             device_scale_factor=1)
                 later.add_init_script(NAV_JS)
@@ -534,7 +539,7 @@ def block_cleared(r: "H.Results") -> None:
     which holds for that tab alone, so a new tab of the profile streams video again. The
     page decodes on the main thread, where the shim reaches its decoders."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)
@@ -561,7 +566,7 @@ def block_cleared(r: "H.Results") -> None:
                 storage = ctx.storage_state()
                 ctx.close()
                 # A fresh server, so what the new tab streams comes from its own storage.
-                H.server_start(mode="websockets")
+                H.server_start(mode="websockets", extra_env=TURBO)
                 fresh = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                                             device_scale_factor=1)
                 fresh.add_init_script(NAV_JS)
@@ -599,7 +604,7 @@ def block_held(r: "H.Results") -> None:
     on the ladder's safe values, a quality picked again there stays picked, and a new tab of
     the profile has the rest of the user's settings back."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)
@@ -620,7 +625,7 @@ def block_held(r: "H.Results") -> None:
                 storage = ctx.storage_state()
                 ctx.close()
                 # A fresh server, so what the new tab streams comes from its own storage.
-                H.server_start(mode="websockets")
+                H.server_start(mode="websockets", extra_env=TURBO)
                 fresh = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                                             device_scale_factor=1)
                 fresh.add_init_script(NAV_JS)
@@ -644,7 +649,7 @@ def block_broken(r: "H.Results") -> None:
     on JPEG and stays there, and a new tab of the profile, the fault still there, takes JPEG
     at its first crash rather than walking the ladder again."""
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)
@@ -653,7 +658,7 @@ def block_broken(r: "H.Results") -> None:
                 for tab, loads in (("the first tab", 4), ("a new tab", 2)):
                     if storage is not None:
                         # A fresh server, so what the new tab streams comes from its own storage.
-                        H.server_start(mode="websockets")
+                        H.server_start(mode="websockets", extra_env=TURBO)
                     ctx = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                                               device_scale_factor=1)
                     ctx.add_init_script(NAV_JS)
@@ -682,7 +687,7 @@ def block_silent(r: "H.Results") -> None:
     full-frame page decoder, whose silent stall nothing else would report, is what is exercised.
     """
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="silent",
@@ -718,7 +723,7 @@ def block_hidden(r: "H.Results") -> None:
     worker is disabled, as in ``silent``.
     """
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, encoder="h264enc", query="offscreen_worker=false")

@@ -262,7 +262,7 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
         # encoder and full color again and then send a key frame the engine
         # refuses again; the refusal stands and is not reported a second time.
         page.evaluate(
-            "window.postMessage({ type: 'settings', settings: { video_streaming_mode: true } }, window.location.origin)")
+            "window.postMessage({ type: 'settings', settings: { cpu_encode_threading: false } }, window.location.origin)")
         page.wait_for_timeout(8000)
         again = [t for t in said if "which this browser cannot decode" in t]
         res.check("[pinned] and not again when the server announces the same",

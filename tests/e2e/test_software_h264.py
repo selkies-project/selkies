@@ -104,13 +104,14 @@ def wait_state(page, predicate, timeout: float = 30) -> dict:
 
 def run_block(r: "H.Results", wayland: bool) -> None:
     """Stream software H.264 on one backend and check that the build's encoder is
-    named in the logs and decodes in the browser."""
+    named in the logs and decodes in the browser. The server runs Turbo, so the still test display
+    keeps sending the frames counted."""
     encoder = server_software_encoder()
     r.check("server pixelflux names its software H.264 encoder",
             encoder in ("x264", "openh264"), encoder)
     from playwright.sync_api import sync_playwright
     H.server_start(mode="websockets", wayland=wayland,
-                   extra_env={"SELKIES_USE_CPU": "true"})
+                   extra_env={"SELKIES_USE_CPU": "true", "SELKIES_VIDEO_STREAMING_MODE": "true"})
     try:
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)

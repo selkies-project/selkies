@@ -17,7 +17,9 @@ H.264 and the display moves to ``h264enc``, logged by the server.
 
 The picture is a known color the test paints on the server, sampled from the
 decoded frame in the page, exactly as ``test_encoders.py`` does; over WebRTC
-the <video> must then keep presenting frames while the screen changes.
+the <video> must then keep presenting frames while the screen changes. The
+server runs Turbo, so the frame rate read over WebSockets is the stream's while
+the painted picture holds still.
 
     python3 tests/e2e/test_codecs.py ws-x11|ws-wl|wr-x11 [chromium|firefox|webkit|all]
 
@@ -128,7 +130,7 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
             if engine == "webkit" and encoder == "vp8enc" else "")
     # The codec under test is the default; the ladder's rungs stay allowed.
     H.server_start(mode=mode, wayland=wayland,
-                   extra_env={"SELKIES_ENCODER": f"{encoder},h264enc,jpeg"})
+                   extra_env={"SELKIES_ENCODER": f"{encoder},h264enc,jpeg", **TENC.TURBO})
     picture = TENC.Picture(wayland, live=mode == "webrtc")
     try:
         picture.paint()

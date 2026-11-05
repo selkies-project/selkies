@@ -2509,11 +2509,14 @@ function playSinkVideo() {
  * Starts what the browser held back for want of a user gesture: a paused
  * `<video>` sink and a suspended audio context. Listens in the capture phase
  * on the window, so the stream overlay's own handlers cannot keep the press
- * from it.
+ * from it. A sink started this way shows only frames written after it, so a
+ * refused one asks for a key frame as it plays: a still screen would not send
+ * one on its own, and the sink's play promise waits for a frame to show.
  */
 function playOnGesture() {
   if (videoElement && videoElement.paused && videoElement.srcObject) {
     const p = videoElement.play();
+    if (sinkPlayRefused) requestKeyframe();
     if (p && p.then) {
       p.then(() => {
         if (!sinkPlayRefused) return;

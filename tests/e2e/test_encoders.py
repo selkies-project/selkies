@@ -19,7 +19,9 @@ the test display, or the Wayland observer surface filled with one and carrying
 the other, sampled from the decoded frame in the page. Over WebSockets the page
 runs in Chromium; over WebRTC each block runs in Chromium, Firefox and WebKit,
 whose own RTP receivers decode and paint the stream, and the <video> must keep
-presenting frames while the screen changes.
+presenting frames while the screen changes. The cpu and switch servers run
+Turbo, so the H.264 frames read off the wire keep coming while the painted
+picture holds still.
 
     python3 tests/e2e/test_encoders.py ws-x11|wr-x11|ws-wl|wr-wl
 """
@@ -36,6 +38,7 @@ import test_dashboards as TD
 from playwright.sync_api import sync_playwright
 
 WL_SOCKET = "wayland-1"
+TURBO = {"SELKIES_VIDEO_STREAMING_MODE": "true"}
 # The color painted on the server, and how far a decoded sample may stray
 # from it (4:2:0 chroma, limited range, and two codecs' rounding).
 PAINT = (40, 120, 220)
@@ -404,7 +407,7 @@ def block_cpu(mode: str, wayland: bool, res: "H.Results", engine: str = "chromiu
                  "run tests/tools/fetch-openh264.sh to cover H.264 in Firefox")
         return
     H.server_start(mode=mode, wayland=wayland,
-                   extra_env={"SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true"})
+                   extra_env={"SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true", **TURBO})
     picture = Picture(wayland, live=mode == "webrtc")
     try:
         picture.paint()
@@ -432,7 +435,7 @@ def block_cpu(mode: str, wayland: bool, res: "H.Results", engine: str = "chromiu
 
 def block_switch(mode: str, wayland: bool, res: "H.Results", engine: str = "chromium") -> None:
     tag = "switch" if engine == "chromium" else "switch " + engine
-    H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST)
+    H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, extra_env=TURBO)
     picture = Picture(wayland)
     try:
         picture.paint()

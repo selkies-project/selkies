@@ -78,6 +78,9 @@ def hold(page, key: str):
 def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
     """Run the flow/input/clipboard/resize checklist on one browser engine.
 
+    The server runs Turbo, so the still test display keeps sending the frames
+    the WebSockets block counts.
+
     Args:
         engine: Playwright engine name: ``chromium``, ``firefox``, or ``webkit``.
         mode: Transport mode, ``websockets`` or ``webrtc``.
@@ -87,7 +90,7 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
     """
     tag = f"{engine}-{mode}"
     res = H.Results(tag)
-    H.server_start(mode=mode, wayland=False)
+    H.server_start(mode=mode, wayland=False, extra_env={"SELKIES_VIDEO_STREAMING_MODE": "true"})
     with sync_playwright() as p:
         browser, ctx = engine_launch(p, engine)
         ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
@@ -398,7 +401,9 @@ def gesture_block(engine: str) -> "H.Results":
     starts on the next press over the stream, as Safari asks of a page under
     its default autoplay setting. Chromium stands in, with playback refused
     the way Safari refuses it, since its generator sink feeds a `<video>` as
-    Safari's does and Playwright's WebKit has no generator sink at all."""
+    Safari's does and Playwright's WebKit has no generator sink at all. The
+    still test display sent its frames while the sink was paused, so what the
+    started sink shows is the key frame the press asks for."""
     res = H.Results(f"gesture-{engine}")
     H.server_start(mode="websockets", wayland=False)
     try:
@@ -431,7 +436,7 @@ def gesture_block(engine: str) -> "H.Results":
                 time.sleep(2)
                 later = page.evaluate(VIDEO_SINK_JS)
                 res.check(f"[{engine}] and frames are shown",
-                          later is not None and later["frames"] > after["frames"], (after, later))
+                          later is not None and later["frames"] > before["frames"], (before, later))
                 res.check(f"[{engine}] the start is said",
                           any("Video playback started on a user gesture" in t for t in said), "")
             finally:

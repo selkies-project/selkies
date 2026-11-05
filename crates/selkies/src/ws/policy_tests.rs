@@ -160,39 +160,61 @@ fn a_live_transport_switch_round_trips_the_pin_and_the_pick() {
 }
 
 #[test]
+fn turbo_starts_off_unless_the_operator_turns_it_on() {
+    let turbo = |env: &[(&str, &str)]| {
+        let b = parse(env).video_streaming_mode();
+        (b.on, b.locked)
+    };
+    for mode in ["websockets", "webrtc"] {
+        assert_eq!(turbo(&[("SELKIES_MODE", mode)]), (false, false), "{mode}");
+        assert_eq!(
+            turbo(&[
+                ("SELKIES_MODE", mode),
+                ("SELKIES_VIDEO_STREAMING_MODE", "true")
+            ]),
+            (true, false),
+            "{mode}"
+        );
+    }
+}
+
+#[test]
 fn paint_over_follows_turbo_and_the_encoder() {
     let on = |env: &[(&str, &str)]| parse(env).use_paint_over_quality().on;
     for mode in ["websockets", "webrtc"] {
         assert!(
-            !on(&[("SELKIES_MODE", mode)]),
-            "{mode} defaults it off under Turbo"
+            on(&[("SELKIES_MODE", mode)]),
+            "{mode} defaults it on without Turbo"
         );
         assert!(
-            on(&[
+            !on(&[
                 ("SELKIES_MODE", mode),
-                ("SELKIES_VIDEO_STREAMING_MODE", "false")
+                ("SELKIES_VIDEO_STREAMING_MODE", "true")
             ]),
-            "{mode} on without Turbo"
+            "{mode} off under Turbo"
         );
-        assert!(!on(&[
+        assert!(on(&[
             ("SELKIES_MODE", mode),
             ("SELKIES_RATE_CONTROL_MODE", "crf")
         ]));
         assert!(
             on(&[
                 ("SELKIES_MODE", mode),
+                ("SELKIES_VIDEO_STREAMING_MODE", "true"),
                 ("SELKIES_USE_PAINT_OVER_QUALITY", "true")
             ]),
             "an operator's stands"
         );
         assert!(!on(&[
             ("SELKIES_MODE", mode),
-            ("SELKIES_VIDEO_STREAMING_MODE", "false"),
             ("SELKIES_USE_PAINT_OVER_QUALITY", "false")
         ]));
     }
     assert!(
-        on(&[("SELKIES_ENCODER", "jpeg")]),
+        on(&[
+            ("SELKIES_ENCODER", "jpeg"),
+            ("SELKIES_VIDEO_STREAMING_MODE", "true")
+        ]),
         "jpeg defaults paint-over on under Turbo"
     );
 }

@@ -722,6 +722,9 @@ def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
 def dash_block(dashboard: str) -> "H.Results":
     """Exercise one layout's settings loop and mode-switch round trip.
 
+    The server runs Turbo, so the still test display keeps sending the frames
+    the stats strip times on their way to the wire.
+
     Args:
         dashboard: The layout, ``default`` or ``wish``.
 
@@ -729,7 +732,8 @@ def dash_block(dashboard: str) -> "H.Results":
         The Results accumulator for this layout's checks.
     """
     res = H.Results(f"dash-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
+                   extra_env={"SELKIES_VIDEO_STREAMING_MODE": "true"})
     # The served document names the tab. Left to the client script, the browser
     # shows the host URL there until the bundle runs.
     shell = H.curl("/")[1].decode("utf-8", "replace")
@@ -1544,7 +1548,9 @@ def cpu_threading_block(dashboard: str) -> "H.Results":
 
     A session with software encoding forced shows the switch, on as the server
     defaults it; turning it off stores the choice, the server rebuilds the
-    capture on the encoder reopened with one thread, and video keeps coming.
+    capture on the encoder reopened with one thread, and video comes from it,
+    counted from before the switch since a still screen sends the restart's key
+    frame alone.
     A VP8 session shows it off, the server's default for VP8, and pixelflux
     codes on one thread; turned on it runs threaded, and a reload keeps the
     pick. An operator's true keeps VP8 threaded, a locked value hides the
@@ -1644,6 +1650,7 @@ def cpu_threading_block(dashboard: str) -> "H.Results":
                     if switch.count():
                         res.check("on, as the server defaults it", switch_on(switch.first), "")
                         restarts = open(H.LOG, errors="replace").read().count("Video parameters changed for 'primary'")
+                        before = page.evaluate("window.videoChunksReceived || 0")
                         switch.first.click(timeout=5000)
                         time.sleep(3.0)
                         res.check("turning it off reads off and is stored off", not switch_on(switch.first)
@@ -1652,10 +1659,8 @@ def cpu_threading_block(dashboard: str) -> "H.Results":
                         log = open(H.LOG, errors="replace").read()
                         res.check("the server rebuilds the capture for it",
                                   log.count("Video parameters changed for 'primary'") > restarts, H.tail(H.LOG, 6))
-                        before = page.evaluate("window.videoChunksReceived || 0")
-                        time.sleep(3.0)
                         after = page.evaluate("window.videoChunksReceived || 0")
-                        res.check("and video keeps coming on the reopened encoder", after > before, (before, after))
+                        res.check("and video comes from the reopened encoder", after > before, (before, after))
                 C.close_browser(browser)
         finally:
             H.server_stop()
@@ -1671,11 +1676,11 @@ def switch_on(switch) -> bool:
 def paint_over_block(dashboard: str, engine: str) -> "H.Results":
     """Paint-over follows Turbo where nothing pins it, at a constant quality.
 
-    A video encoder under Turbo sends every frame and leaves no still screen to
-    clean up, so the dashboard shows paint-over off under Turbo and on without
-    it, as the server defaults it, and sends the server each value it derives
-    that differs from the server's. A pick the user makes, or an operator's
-    value, holds through a Turbo change. Under CBR, the default, a still screen
+    Turbo starts off. A video encoder under Turbo sends every frame and leaves
+    no still screen to clean up, so the dashboard shows paint-over off under
+    Turbo and on without it, as the server defaults it, and sends the server
+    each value it derives that differs from the server's. A pick the user
+    makes, or an operator's value, holds through a Turbo change. Under CBR, the default, a still screen
     is cleaned up to the paint-over quality whatever the switch says, so the
     dashboard hides the switch there and shows that quality.
     """
@@ -1724,30 +1729,30 @@ def paint_over_block(dashboard: str, engine: str) -> "H.Results":
                 C.wait_ws_video(page, timeout=45)
                 time.sleep(2.0)
                 turbo, paint = paint_over_switches(page, dashboard)
-                res.check(f"{who}: Turbo starts on", switch_on(turbo), "")
+                res.check(f"{who}: Turbo starts off", not switch_on(turbo), "")
                 if operator:
-                    res.check(f"{who}: paint-over shows the operator's value under Turbo", switch_on(paint), "")
+                    res.check(f"{who}: paint-over shows the operator's value", switch_on(paint), "")
                     flip(turbo)
+                    res.check(f"{who}: Turbo on leaves it on", switch_on(paint), "")
                     flip(turbo)
-                    res.check(f"{who}: a Turbo change leaves it on", switch_on(paint), "")
                     res.check(f"{who}: and never sends it off", False not in pushed(), pushed())
                 else:
-                    res.check(f"{who}: paint-over defaults off under Turbo", not switch_on(paint), "")
+                    res.check(f"{who}: paint-over defaults on without Turbo", switch_on(paint), "")
                     served = page.evaluate("window.use_paint_over_quality")
-                    res.check(f"{who}: as the server defaults it, so nothing turns it on there",
-                              served is False and True not in pushed(), (served, pushed()))
+                    res.check(f"{who}: as the server defaults it, so nothing turns it off there",
+                              served is True and False not in pushed(), (served, pushed()))
                     flip(turbo)
-                    res.check(f"{who}: turning Turbo off turns paint-over on", switch_on(paint), "")
-                    res.check(f"{who}: and sends it on", pushed()[-1:] == [True], pushed())
-                    flip(turbo)
-                    res.check(f"{who}: turning Turbo on turns it off again", not switch_on(paint), "")
+                    res.check(f"{who}: turning Turbo on turns paint-over off", not switch_on(paint), "")
                     res.check(f"{who}: and sends it off", pushed()[-1:] == [False], pushed())
+                    flip(turbo)
+                    res.check(f"{who}: turning Turbo off turns it on again", switch_on(paint), "")
+                    res.check(f"{who}: and sends it on", pushed()[-1:] == [True], pushed())
                     flip(paint)
                     mark = len(pushed())
                     flip(turbo)
                     flip(turbo)
-                    res.check(f"{who}: a user's pick holds through a Turbo change", switch_on(paint), "")
-                    res.check(f"{who}: and nothing sends it off after", False not in pushed()[mark:], pushed())
+                    res.check(f"{who}: a user's pick holds through a Turbo change", not switch_on(paint), "")
+                    res.check(f"{who}: and nothing sends it on after", True not in pushed()[mark:], pushed())
                 C.close_browser(browser)
         finally:
             H.server_stop()
