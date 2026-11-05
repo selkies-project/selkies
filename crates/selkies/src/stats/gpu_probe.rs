@@ -864,6 +864,7 @@ mod tests {
         assert_eq!(summary(&report, &f), "GPU: none here");
         let mut present = f.clone();
         present.set("SELKIES_GPU_PRESENT", "true");
+        present.set("SELKIES_GPU_DRIVER", "");
         assert_eq!(
             summary(&report, &present),
             "GPU: unknown, unusable: No render node"
