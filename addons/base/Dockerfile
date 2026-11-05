@@ -30,7 +30,7 @@
 #     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
 #   - The Selkies server, built from this tree's crates with the pixelflux and
-#     pcmflux commits Cargo.toml pins, and the web client it serves
+#     pcmflux commits Cargo.lock records, and the web client it serves
 #
 # Supported bases: Ubuntu 26.04 and Debian Trixie, and later releases of both
 # (select with --build-arg DISTRIB_IMAGE=ubuntu|debian DISTRIB_RELEASE=26.04|trixie).

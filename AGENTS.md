@@ -199,15 +199,15 @@ what runs where.
   Gate on capabilities, never on versions: prefer the API that already encapsulates the difference, else probe the
   feature itself (a symbol resolved at run time, a capability the driver reports, an error the API returns) —
   never compare a version number.
-- The capture stack is pinned, not detected: every Selkies build and release names the pixelflux and pcmflux
-  commit it goes with (the `rev` of their git dependencies in the workspace's `Cargo.toml`, which `Cargo.lock`
-  records), so the two are never mixed across versions. Backward compatibility measures against a sibling are
-  unwanted for that reason: a probe for an API a newer one adds, or a suite that skips because the build lacks an
-  API, hedges a combination that never ships and hides the path it was meant to measure. Call the sibling API
-  directly, push its commit first, and move the `rev` to it, so the run here builds against it. A sibling checked
+- The capture stack is locked, not detected: the workspace's `Cargo.toml` follows the `main` branch of pixelflux
+  and pcmflux, and every Selkies build names the commit of each it goes with in `Cargo.lock` (`cargo update -p
+  pixelflux -p pcmflux` moves it), so the two are never mixed across versions. Backward compatibility measures
+  against a sibling are unwanted for that reason: a probe for an API a newer one adds, or a suite that skips because
+  the build lacks an API, hedges a combination that never ships and hides the path it was meant to measure. Call the sibling API
+  directly, push its commit first, and move the lock to it, so the run here builds against it. A sibling checked
   out beside this tree is built through a `[patch]` of its repository's URL in a Cargo configuration outside the
   repository, never a `path` in `Cargo.toml`, and the `Cargo.lock` that patch rewrites is never committed. What
-  a pinned build was compiled with (software H.264, below) is still read, as is the host's CUDA range above.
+  a locked build was compiled with (software H.264, below) is still read, as is the host's CUDA range above.
 
 ## Cross-cutting invariants
 

@@ -3,7 +3,7 @@ title: pixelflux
 description: The screen capture and video encoding library behind every Selkies session, and where its own documentation lives.
 ---
 
-Screen capture and video encoding are performed by [`pixelflux`](https://github.com/selkies-project/pixelflux), a Rust library the `selkies` server links as a crate, pinned to a commit of its repository in the workspace's `Cargo.toml`. Its Rust reference, the API a session is driven through, is published at <https://pixelflux.selkies.io>; this page is what a Selkies deployment needs to know of it.
+Screen capture and video encoding are performed by [`pixelflux`](https://github.com/selkies-project/pixelflux), a Rust library the `selkies` server links as a crate, following the `main` branch of its repository at the commit the workspace's `Cargo.lock` records. Its Rust reference, the API a session is driven through, is published at <https://pixelflux.selkies.io>; this page is what a Selkies deployment needs to know of it.
 
 ## Codecs and Engines
 
@@ -29,4 +29,4 @@ The software encoders of `pixelflux` are chosen when it is built, never by a Sel
 
 ## Building Against a Development Checkout
 
-Selkies builds the `pixelflux` commit the `rev` in the workspace's `Cargo.toml` names, and every build and release carries that commit. A change tried locally is built into the server through a `[patch]` of the `pixelflux` repository's URL with the path of the checkout, in a Cargo configuration outside the repository; [Development](../development.md#agentic-development) describes the loop and the order the pins move in.
+Selkies builds the `pixelflux` commit the workspace's `Cargo.lock` records, which follows the repository's `main` branch (`cargo update -p pixelflux` moves it), and every build and release carries that commit. A change tried locally is built into the server through a `[patch]` of the `pixelflux` repository's URL with the path of the checkout, in a Cargo configuration outside the repository; [Development](../development.md#agentic-development) describes the loop and the order the commits move in.

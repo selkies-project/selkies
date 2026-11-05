@@ -4,7 +4,7 @@ name: Capture stack wheels
 # drive the capture stack through its Python modules beside the server that
 # links it, ride wheels this run holds rather than an index. The build is the
 # commit of selkies-project/pixelflux and selkies-project/pcmflux that the
-# workspace's Cargo.toml pins, the one the server is built against, so the
+# workspace's Cargo.lock records, the one the server is built against, so the
 # suites never mix two versions of it. Both projects attach the wheels their
 # own CI built to the pre-release they cut for every commit of their main
 # branch, so naming one fetches exactly what shipped. A commit whose
@@ -33,7 +33,7 @@ jobs:
       pixelflux_ref: ${{ steps.probe.outputs.pixelflux_ref }}
       pcmflux_ref: ${{ steps.probe.outputs.pcmflux_ref }}
     steps:
-      # The pins live in this repository's Cargo.toml
+      # The locked commits live in this repository's Cargo.lock
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -50,10 +50,10 @@ jobs:
           fetch="[]"
           for project in pixelflux pcmflux; do
             repo="${OWNER}/${project}"
-            # The rev of the workspace's git dependency on the project
-            sha="$(sed -n "s/^${project} = {.* rev = \"\([0-9a-f]*\)\".*/\1/p" Cargo.toml)"
+            # The commit Cargo.lock records for the workspace's git dependency on the project
+            sha="$(sed -n "s|^source = \"git+https://github.com/[^/]*/${project}?[^#]*#\([0-9a-f]*\)\"\$|\1|p" Cargo.lock | head -1)"
             if [ -z "${sha}" ]; then
-              echo "::error::Cargo.toml pins no ${project} commit"
+              echo "::error::Cargo.lock records no ${project} commit"
               exit 1
             fi
             deadline=$((SECONDS + WAIT_S))

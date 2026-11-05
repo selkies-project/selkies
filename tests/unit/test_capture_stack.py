@@ -4,10 +4,10 @@
 The suites install the capture stack's Python modules from wheels the run holds
 rather than from an index, and the `locate` step of
 `build-pixelflux-pcmflux-wheels.yaml` is what names them: each project's
-per-commit pre-release of the commit the workspace's `Cargo.toml` pins, which is
-the commit the server under test links. It reads the pins out of `Cargo.toml`,
-so a pin spelled in a way it cannot read is a run whose suites drive a capture
-stack the server was not built against. It waits for a pre-release its
+per-commit pre-release of the commit the workspace's `Cargo.lock` records for
+each project's `main`, which is the commit the server under test links. It
+reads the commits out of `Cargo.lock`, so a lock spelled in a way it cannot read
+is a run whose suites drive a capture stack the server was not built against. It waits for a pre-release its
 project's CI is still building rather than building the same wheels a second
 time, and builds what no pre-release will cover. What it builds, the image jobs
 prepare from the recipe the plan read out of each project: they check nothing
@@ -83,25 +83,36 @@ case "$1" in
 esac
 """
 
-# The workspace's own pins, which is what every run resolves
-PINS = dict(re.findall(r'^(pixelflux|pcmflux) = \{.* rev = "([0-9a-f]+)"',
-                       open(os.path.join(REPO, "Cargo.toml")).read(), re.M))
-check("both capture-stack pins are commits in Cargo.toml",
+# The workspace's own locked commits, which is what every run resolves
+PINS = dict(re.findall(r'^source = "git\+https://github\.com/[^/]+/(pixelflux|pcmflux)\?[^#]*#([0-9a-f]+)"$',
+                       open(os.path.join(REPO, "Cargo.lock")).read(), re.M))
+check("both capture-stack commits are locked in Cargo.lock",
       set(PINS) == {"pixelflux", "pcmflux"} and all(len(sha) == 40 for sha in PINS.values()), str(PINS))
+check("Cargo.toml follows both repositories' main",
+      len(re.findall(r'^(?:pixelflux|pcmflux) = \{ git = "[^"]+", branch = "main"',
+                     open(os.path.join(REPO, "Cargo.toml")).read(), re.M)) == 2)
 
 
 def manifest(pins: dict) -> str:
-    """A workspace manifest carrying `pins`, spelled as the repository's is."""
-    deps = "".join(f'{project} = {{ git = "https://github.com/{OWNER}/{project}", rev = "{sha}", '
-                   f'default-features = false }}\n' for project, sha in pins.items())
+    """A workspace manifest following `main` of each project in `pins`, spelled as the repository's is."""
+    deps = "".join(f'{project} = {{ git = "https://github.com/{OWNER}/{project}", branch = "main", '
+                   f'default-features = false }}\n' for project in pins)
     return f'[workspace]\nmembers = []\n\n[workspace.dependencies]\n{deps}'
+
+
+def lockfile(pins: dict) -> str:
+    """A Cargo.lock recording `pins` as the commits of their `main`, spelled as Cargo writes it."""
+    return "version = 4\n\n" + "".join(
+        f'[[package]]\nname = "{project}"\nversion = "0.0.0"\n'
+        f'source = "git+https://github.com/{OWNER}/{project}?branch=main#{sha}"\n\n'
+        for project, sha in pins.items())
 
 
 def probe(pins=None, **stub) -> tuple:
     """The locate step, run against a stubbed `gh`: `(accepted, step outputs)`.
 
-    `pins` writes a Cargo.toml carrying them; without it the step reads the
-    repository's own.
+    `pins` writes a Cargo.toml and a Cargo.lock locking them; without it the
+    step reads the repository's own.
     """
     with tempfile.TemporaryDirectory() as tmp:
         os.mkdir(os.path.join(tmp, "bin"))
@@ -113,6 +124,7 @@ def probe(pins=None, **stub) -> tuple:
         else:
             cwd = tmp
             open(os.path.join(tmp, "Cargo.toml"), "w").write(manifest(pins))
+            open(os.path.join(tmp, "Cargo.lock"), "w").write(lockfile(pins))
         out = os.path.join(tmp, "github_output")
         open(out, "w").close()
         env = dict(os.environ, GITHUB_OUTPUT=out, PATH=os.path.join(tmp, "bin") + os.pathsep + os.environ["PATH"],
@@ -143,15 +155,15 @@ for project, sha in PINS.items():
     check(f"{project}'s four platforms are fetched", fetched(out, project) == 4, out.get("fetch", "<unset>"))
 
 ok, _ = probe(pins={"pcmflux": "0" * 40})
-check("a missing pin fails the run rather than guessing one", not ok)
+check("a missing locked commit fails the run rather than guessing one", not ok)
 
 # Pre-releases are tagged with an abbreviated SHA
 SHA = "a3290fdc0ffee0000000000000000000000000de"
 OTHER = {"pcmflux": "57995fb" + "0" * 33}
 _, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="97ef61d a3290fd 57995fb")
-check("the pre-release of the pinned commit is taken",
+check("the pre-release of the locked commit is taken",
       out.get("pixelflux") == "a3290fd" and fetched(out, "pixelflux") == 4, out.get("pixelflux", "<unset>"))
-check("a build checks out the pinned commit", out.get("pixelflux_ref") == SHA,
+check("a build checks out the locked commit", out.get("pixelflux_ref") == SHA,
       out.get("pixelflux_ref", "<unset>"))
 _, out = probe(pins={"pixelflux": SHA, **OTHER}, tags="97ef61d a3290fd", tags_after=3, runs="in_progress",
                done_after=5, wait=60)

@@ -22,10 +22,10 @@ PATH="${CARGO_HOME:-${HOME}/.cargo}/bin:${PATH}"
 cargo build --release --locked -p selkies
 
 # The suites' own dependencies, and the pixelflux and pcmflux they drive beside
-# the server: the wheels of the commits Cargo.toml pins, from the pre-release
+# the server: the wheels of the commits Cargo.lock records, from the pre-release
 # each project cuts per commit (tagged with its abbreviated SHA)
 WHEELS="$(mktemp -d)"
-pin() { sed -n "s/^$1 = {.* rev = \"\([0-9a-f]\{7\}\)[0-9a-f]*\".*/\1/p" Cargo.toml; }
+pin() { sed -n "s|^source = \"git+https://github.com/[^/]*/$1?[^#]*#\([0-9a-f]\{7\}\)[0-9a-f]*\"\$|\1|p" Cargo.lock | head -1; }
 .devcontainer/features/desktop-selkies/src/fetch-release-wheels.sh "${WHEELS}" none \
   "$(pin pixelflux)" "$(pin pcmflux)"
 PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --retries 5 --timeout 60 --user -r tests/requirements.txt

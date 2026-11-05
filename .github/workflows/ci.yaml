@@ -165,7 +165,7 @@ jobs:
 
   pixelflux-pcmflux:
     name: Capture stack (pinned commits)
-    # The per-commit pre-release of the commit Cargo.toml pins when it is
+    # The per-commit pre-release of the commit Cargo.lock records when it is
     # published, a build when it is not. Either way the wheels land in this
     # run's artifacts, which is where the suites read them, and running it here
     # rather than inside each caller keeps it to one resolution per run.

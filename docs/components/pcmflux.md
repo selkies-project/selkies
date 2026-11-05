@@ -3,7 +3,7 @@ title: pcmflux
 description: The audio capture and Opus encoding library behind every Selkies session, and where its own documentation lives.
 ---
 
-Audio capture and encoding are performed by [`pcmflux`](https://github.com/selkies-project/pcmflux), a companion Rust library the `selkies` server links as a crate, pinned like `pixelflux` in the workspace's `Cargo.toml`. Its Rust reference is published at <https://pcmflux.selkies.io>.
+Audio capture and encoding are performed by [`pcmflux`](https://github.com/selkies-project/pcmflux), a companion Rust library the `selkies` server links as a crate, following its `main` branch like `pixelflux`, at the commit the workspace's `Cargo.lock` records. Its Rust reference is published at <https://pcmflux.selkies.io>.
 
 ## What it does
 
@@ -15,4 +15,4 @@ Whatever starts off is not captured at all until it is turned on: no capture run
 
 ## Building Against a Development Checkout
 
-As for [pixelflux](pixelflux.md#building-against-a-development-checkout): the server builds the commit the `rev` in `Cargo.toml` names, and a local change is built into it through a `[patch]` of the `pcmflux` repository's URL in a Cargo configuration outside the repository.
+As for [pixelflux](pixelflux.md#building-against-a-development-checkout): the server builds the commit `Cargo.lock` records, and a local change is built into it through a `[patch]` of the `pcmflux` repository's URL in a Cargo configuration outside the repository.

@@ -318,7 +318,7 @@ jobs:
         run: |
           Xvfb -help 2>&1 | grep -q -- 'CRTCs per screen (default: 4)'
       # Whichever jobs built them left the selkies wheel and the pixelflux and
-      # pcmflux wheels of the commits Cargo.toml pins here.
+      # pcmflux wheels of the commits Cargo.lock records here.
       - name: Download the selkies wheel
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

@@ -268,7 +268,7 @@ python3 scripts/check-licenses.py --write
 
 cargo-deny audits the shipped graph on its own (`cargo deny --exclude-dev check`):
 crate licenses against a permissive allow list plus MPL-2.0, with x264-sys's
-GPL as the one exception; crates.io and the pinned pixelflux, pcmflux, and
+GPL as the one exception; crates.io and the locked pixelflux, pcmflux, and
 smithay repositories as the only sources; and the RustSec advisories, every one
 it ignores listed in `deny.toml` with the reason. pixelflux and pcmflux carry
 the same gate over their own graphs (pixelflux's
