@@ -22,7 +22,7 @@ retry() {
 retry apk add --no-cache \
     abuild build-base pkgconf linux-headers pipewire-dev ca-certificates curl git \
     cmake nasm clang \
-    x264-dev x265-dev libvpx-dev svt-av1-dev dav1d-dev libde265-dev \
+    x265-dev libvpx-dev svt-av1-dev dav1d-dev libde265-dev \
     libva-dev libdrm-dev mesa-dev wayland-dev libinput-dev eudev-dev libxkbcommon-dev \
     pixman-dev libxcb-dev pulseaudio-dev
 # bindgen opens libclang at run time, and Alpine names that package after the

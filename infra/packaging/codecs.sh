@@ -8,7 +8,8 @@
 # the environment that points the build at them.
 #
 # pixelflux binds libx264, x265, libvpx, SVT-AV1, dav1d, and libde265 from the
-# copies it links. Each one the distribution carries at the floor pixelflux's
+# copies it links. libx264 is always built here, with the patches pixelflux
+# carries (its patches/x264), since pixelflux reads the API they add. Each one the distribution carries at the floor pixelflux's
 # codec-sys names (pkg-config answers for it) is linked from the distribution
 # and becomes a package dependency; each one it lacks (x264, x265, and
 # libde265 on Fedora, all of them on EL and on the AppImage's glibc floor) is
@@ -86,8 +87,10 @@ cmake_static() {
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF "$@"
 }
 
+# pixelflux reads the API its patches add, so x264 is always built, with them.
 build_x264() {
     fetch x264
+    git -C "${PREFIX}/src/x264" apply "${CRATE}"/../patches/x264/*.patch
     (cd "${PREFIX}/src/x264" && ./configure --prefix="${PREFIX}" --enable-static --enable-pic \
         --disable-cli --disable-opencl && make -j"${JOBS}" && make install)
 }
@@ -160,7 +163,7 @@ for entry in x264:x264:SYSTEM_DEPS_X264_LINK=static x265:x265:X265_STATIC=1 \
     pkg="${rest%%:*}"
     static="${rest#*:}"
     min="$(floor "${pkg}")"
-    if pkg-config --exists "${pkg}" && pkg-config --atleast-version="${min:-0}" "${pkg}"; then
+    if [ "${name}" != x264 ] && pkg-config --exists "${pkg}" && pkg-config --atleast-version="${min:-0}" "${pkg}"; then
         echo "codecs: ${pkg} $(pkg-config --modversion "${pkg}") from the distribution"
         continue
     fi

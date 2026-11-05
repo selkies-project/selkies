@@ -15,7 +15,9 @@
 # beside it, which puts cargo in ${CARGO_HOME:-~/.cargo}/bin. The codec
 # libraries are the distribution's: pixelflux's codec-sys names their floors,
 # and a release that falls short fails the build at pkg-config, naming the
-# library. Root runs apt-get itself, anyone else through sudo.
+# library. libx264 is the exception, built under /usr/local with the patches
+# whose API the pinned pixelflux reads (infra/packaging/x264.sh). Root runs
+# apt-get and that install itself, anyone else through sudo.
 #
 # Usage: server-build-deps.sh
 set -eu
@@ -29,7 +31,7 @@ export DEBIAN_FRONTEND=noninteractive
 ${SUDO} apt-get update
 ${SUDO} apt-get install -y --no-install-recommends \
     ca-certificates curl git build-essential pkg-config cmake nasm clang libclang-dev \
-    libx264-dev libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
+    libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
     libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
     libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
     libxcb-xfixes0-dev libpulse-dev
@@ -49,3 +51,4 @@ else
         --component rustfmt,clippy
 fi
 cargo --version
+SUDO="${SUDO}" "${REPO}/infra/packaging/x264.sh" /usr/local

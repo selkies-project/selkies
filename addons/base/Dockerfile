@@ -288,13 +288,15 @@ RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
 # library the binary links are recorded for the final stage, so the image
 # declares what the server needs rather than inheriting it from whatever else
 # happens to pull those libraries in. pixelflux and pcmflux are fetched at the
-# commits the workspace pins, never from a clone in the build context.
+# commits the workspace pins, never from a clone in the build context. libx264
+# is built from the pinned pixelflux's scripts/build-x264.sh, with the patches
+# whose API pixelflux reads, and linked in statically.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS server
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG RUST_TOOLCHAIN="1.99.1"
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git build-essential pkg-config cmake nasm clang libclang-dev \
-        libx264-dev libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
+        libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
         libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
         libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
         libxcb-xfixes0-dev libpulse-dev && \
@@ -314,7 +316,11 @@ COPY crates ./crates
 RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/src/target \
     set -e; \
-    cargo build --release --locked -p selkies; \
+    cargo fetch --locked; \
+    pixelflux="$(cargo metadata --locked --format-version 1 \
+        | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"; \
+    sh "$(dirname "$(dirname "${pixelflux}")")/scripts/build-x264.sh" /usr/local; \
+    SYSTEM_DEPS_X264_LINK=static cargo build --release --locked -p selkies; \
     install -Dm755 target/release/selkies /out/selkies; \
     ldd /out/selkies | awk '/=>/ {print $3}' | xargs -r readlink -f | xargs -r dpkg -S | \
         cut -d: -f1 | sort -u > /out/runtime-packages; \
