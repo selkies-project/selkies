@@ -472,9 +472,16 @@ impl H264EncoderWrapper {
     ///    carry, and the matching `high444` / `baseline` profile.
     /// 5. **Coding tools**: CABAC and the 8x8 transform are disabled, matching the low-latency
     ///    baseline profile — CAVLC entropy coding with no 8x8 DCT — for minimal encode cost.
+    ///    Motion search is the uneven multi-hexagon one over 64 pixels in place of `ultrafast`'s
+    ///    diamond over 16, which misses a scroll or a moved window wherever its starting
+    ///    prediction is poor (a slice's first row, the edge of a still region) and codes the
+    ///    shifted pixels as new: at 2560x1600 it took a scrolling full-screen change from 5.0 to
+    ///    3.5 Mbit/s at the same PSNR for 0.14 ms more of encode, and a quarter of the screen from
+    ///    5.0 to 4.4 for 0.09 ms, the search running only on the macroblocks `mb_info` leaves.
     /// 6. **Output**: repeated headers (SPS/PPS before each keyframe) and Annex-B framing, with
     ///    x264's own logging silenced.
-    /// 7. **References**: a decoded picture buffer of `REFERENCE_FRAMES` (`i_dpb_size`), declaring
+    /// 7. **References**: a decoded picture buffer of `REFERENCE_FRAMES` (`i_dpb_size`), or of
+    ///    `reference_frames` where the caller caps it (`video_reference_frames`), declaring
     ///    the lowest level up to 5.2 that holds them (`h264_reference_level`: 5.0 at 1080p, where
     ///    4.2 holds four), so `invalidate_reference` can leave a frame a client lost out of the
     ///    predictions with earlier frames still there to predict from, for a report up to eight
@@ -673,6 +680,8 @@ impl H264EncoderWrapper {
             x264_sys::x264_param_apply_profile(&mut param, profile.as_ptr());
             param.rc.b_qp_offsets = 1;
             param.analyse.b_mb_info = 1;
+            param.analyse.i_me_method = x264_sys::X264_ME_UMH as i32;
+            param.analyse.i_me_range = 64;
 
             param.i_threads = threads;
             param.b_repeat_headers = 1;

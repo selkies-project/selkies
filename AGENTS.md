@@ -230,7 +230,8 @@ in display order; the unit tests hold each encoder to it. Every session takes th
 it names (`encoders::frame_rate`: 59.94 is 60000/1001), never a whole number, so its rate control and the timing its
 stream declares hold to the rate the capture is paced at. Encoder settings are chosen by measured latency first, frame rate second, quality third, and
 bitrate last: every software encoder runs at the fastest setting its library offers in real time (x264
-ultrafast, VP8 speed 16, VP9 speed 8 with screen tuning, SVT-AV1 preset 11 in its real-time mode, a frame
+ultrafast, with the uneven multi-hexagon motion search in place of its diamond, which costs a tenth of a
+millisecond and finds the scrolls and moved windows the diamond codes as new pixels, VP8 speed 16, VP9 speed 8 with screen tuning, SVT-AV1 preset 11 in its real-time mode, a frame
 predicting from an anchor alone at preset 10, since preset 11 leaves some blocks the picture changed since the anchor
 as they stood in it (`ANCHOR_PRESET`), x265 ultrafast with wavefront threads; each full-frame software session, and the conversion ahead of it, on the
 threads `encoders::session::encode_threads` names, one less than the cores up to eight, four for H.264's slices,
