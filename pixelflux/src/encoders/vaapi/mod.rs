@@ -3060,14 +3060,15 @@ mod tests {
     /// Encode `moving_picture` for 120 frames, reporting a loss `depth` frames back every
     /// `every` frames from frame `from`, and decode it twice, once without the frames lost:
     /// the frames predicted past a loss, those from an anchor among them, the key frames after
-    /// the first, how far the second decoder's pictures come from the first's at most, and the
-    /// worst average distance of a picture from its source.
+    /// the first, how far the second decoder's pictures come from the first's at most, the
+    /// worst average distance of a picture from its source, and whether the device keeps
+    /// anchors (`keeps_anchors`).
     fn predict_past_losses(
         codec: Codec,
         from: usize,
         every: usize,
         depth: usize,
-    ) -> Option<(usize, usize, usize, f64, f64)> {
+    ) -> Option<(usize, usize, usize, f64, f64, bool)> {
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h) = (1280usize, 720usize);
         let settings = CaptureSettings {
@@ -3140,7 +3141,14 @@ mod tests {
         println!(
             "{codec:?}: {past} frames predicted past a loss ({anchored} from an anchor), {keys} key frames; the lossy decoder at most {apart:.0} levels from the whole one, {worst:.1} on average from the source at worst"
         );
-        Some((past, anchored, keys, apart, worst))
+        Some((
+            past,
+            anchored,
+            keys,
+            apart,
+            worst,
+            enc.device.keeps_anchors(),
+        ))
     }
 
     /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`): a loss reported every
@@ -3150,7 +3158,7 @@ mod tests {
     #[ignore]
     fn vaapi_predicts_past_a_lost_frame() {
         for codec in [Codec::H264, Codec::H265] {
-            if let Some((past, _, keys, apart, worst)) = predict_past_losses(codec, 13, 13, 4) {
+            if let Some((past, _, keys, apart, worst, _)) = predict_past_losses(codec, 13, 13, 4) {
                 assert!(past >= 5, "{codec:?}: {past} predicted past a loss");
                 assert_eq!(keys, 0, "{codec:?}");
                 assert!(
@@ -3168,7 +3176,9 @@ mod tests {
     /// anchor at 48 from the recent frame before it, the lost anchor listed long-term while held;
     /// either way the decoder that never saw the lost frames shows every later picture as one
     /// that saw them all does. (Deeper, a gap FFmpeg fills would push that frame out of a
-    /// browser's decoder, and the window codes a key frame: `forget_stale`.)
+    /// browser's decoder, and the window codes a key frame: `forget_stale`.) On one that keeps
+    /// none (iHD) the loss older than the recent frames is answered with a key frame, and the
+    /// one four frames deep is predicted past from a recent frame, with no key frame.
     #[test]
     #[ignore]
     fn vaapi_predicts_from_an_anchor() {
@@ -3177,14 +3187,26 @@ mod tests {
             (Codec::H264, 52, 1000, 4, 0),
             (Codec::H265, 70, 40, 12, 2),
         ] {
-            if let Some((past, anchored, keys, apart, worst)) =
+            if let Some((past, anchored, keys, apart, worst, anchors)) =
                 predict_past_losses(codec, from, every, depth)
             {
-                assert!(
-                    past >= 1 && anchored == want.min(past),
-                    "{codec:?}: {anchored} of {past} from an anchor"
-                );
-                assert_eq!(keys, 0);
+                if anchors {
+                    assert!(
+                        past >= 1 && anchored == want.min(past),
+                        "{codec:?}: {anchored} of {past} from an anchor"
+                    );
+                    assert_eq!(keys, 0);
+                } else if want > 0 {
+                    assert!(
+                        anchored == 0 && keys >= 1,
+                        "{codec:?}: a loss past the recent frames took {keys} key frames"
+                    );
+                } else {
+                    assert!(
+                        past >= 1 && keys == 0,
+                        "{codec:?}: {past} predicted past the loss, {keys} key frames"
+                    );
+                }
                 assert!(
                     apart < 2.0,
                     "the decoder without the lost frames is {apart} off"
