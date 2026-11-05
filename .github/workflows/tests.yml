@@ -106,9 +106,9 @@ jobs:
           components: rustfmt
 
       - name: pre-commit
-        # clippy builds the crate, which the cargo jobs do
+        # clippy builds the crate, which the cargo jobs do in both configurations
         env:
-          SKIP: clippy
+          SKIP: clippy,clippy-python
         run: |
           python3 -m pip install "pre-commit==4.6.*"
           pre-commit run --all-files --show-diff-on-failure

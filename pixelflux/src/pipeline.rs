@@ -4900,6 +4900,23 @@ mod tests {
             .collect()
     }
 
+    /// A 640x384 screen of hashed bytes at `seed`, which no motion search predicts from another.
+    ///
+    /// `noise` repeats every 64 pixels, so a change of its seed is a shift x264's 64-pixel search
+    /// finds, and what that costs depends on the motion predictors the session's history left.
+    fn scattered(seed: u8) -> Vec<u8> {
+        (0..640 * 4 * 384u32)
+            .map(|i| {
+                let mut x = i ^ (seed as u32).wrapping_mul(0x9e37_79b9);
+                x ^= x >> 16;
+                x = x.wrapping_mul(0x7feb_352d);
+                x ^= x >> 15;
+                x = x.wrapping_mul(0x846c_a68b);
+                (x ^ (x >> 16)) as u8
+            })
+            .collect()
+    }
+
     /// A still screen x264 refines nothing more of at a constant rate, its frames slice headers
     /// alone, ends its cleanup after `EMPTY_S` of them rather than `CONVERGE_S`. The quantizer
     /// floor holds x264 at its coarsest, as at 0.1 Mbit/s, on every run and thread count.
@@ -5061,7 +5078,8 @@ mod tests {
     /// codes a constant-quality software H.264 session at the paint-over quality
     /// while it holds still (`software::stripes_held_still`) is hashed before it is encoded: a
     /// change landing on its refresh, on a frame after it, or on its key frame is coded at the
-    /// session's quality, as without Turbo.
+    /// session's quality, as without Turbo. The change is `scattered`, so its size reads the
+    /// quantizer it was coded at rather than what the motion search found.
     #[test]
     fn a_turbo_software_h264_frame_at_the_paint_over_quality_codes_a_change_at_the_session_quality()
     {
@@ -5110,7 +5128,7 @@ mod tests {
                 for _ in 0..at {
                     p.process(&noise(42), 640 * 4);
                 }
-                p.process(&noise(9), 640 * 4)
+                p.process(&scattered(9), 640 * 4)
                     .iter()
                     .map(|e| e.data.len())
                     .sum()
