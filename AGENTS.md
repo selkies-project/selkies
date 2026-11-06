@@ -265,8 +265,10 @@ caller's per-macroblock quantizer offsets apply without adaptive quantization's 
 and the macroblocks the caller's `mb_info` marks unchanged (`H264EncoderWrapper::constant_blocks`, from the block
 ledger, given only where the source reports every change) are coded as skips without analysis, copied from the
 input, filtered into the lowres picture again, or costed again by the lookahead, each where the full path would
-code, copy, filter, or cost them the same: a stream comes out bit for bit as without them. At 2560x1600 a 256x256
-change took x264 2.0 ms of a frame where it took 4.1, and a frame that changed whole the same as before.
+code, copy, filter, or cost them the same: a stream comes out bit for bit as without them; and the lowres planes are
+filtered on the idle threads of the synchronous lookahead, their border expanded again only where an edge block
+changed. At 2560x1600 a 256x256 change took x264 2.0 ms of a frame where it took 4.1, and a frame that changed whole
+the same as before.
 An 8-bit 4:2:0 picture reaches x264 as NV12 laid out as its own frames (`Nv12Planes`, from
 `x264_param_input_layout`), which it encodes where it lies instead of copying it (`X264_CSP_IN_PLACE`) and reads through the
 next encode as the previous input, so the CPU path converts into two pictures in turn and the X11 capture keeps that
