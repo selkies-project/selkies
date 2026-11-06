@@ -1,0 +1,486 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Fri, 6 Nov 2026 11:14:51 -0500
+Subject: [PATCH] Code the macroblocks a caller names copies of the previous input
+
+A page scroll moves most of a frame whole, and x264 found each moved macroblock again by a search:
+UMH over 64 samples at full resolution, which finds a 24-sample scroll and codes a 120-sample one
+as new picture. The caller can now name a macroblock a copy of the previous input picture at a
+whole-sample vector (X264_MBINFO_COPY in mb_info, the vector in mb_copy, one a macroblock). x264
+takes it as a candidate: where it still holds the previous input (a picture passed in place, until
+the next x264_encoder_encode returns or x264_encoder_release_input) it compares the macroblock with
+that picture at the vector (x264_mb_copy_check: the luma always, the chroma at an even vector,
+since an odd one moves the chroma sites), and codes a macroblock that matches as the reference at
+that vector without a search; one that differs, or whose vector reaches past the picture or the
+level's range, or of a picture x264 no longer holds, is coded as without the flag. A macroblock
+matched whole whose P_SKIP vector is the hint is a P_SKIP, on the run path of the
+constant-macroblock skip (mb_predict_mv_pskip_frame reads the prediction from the frame's arrays);
+one matched in luma alone is a P_SKIP where x264's own probe finds the residual quantizes away,
+else a 16x16 block at the vector. The reference's effective QP is read over the macroblocks the
+copy reads, as the constant skip reads it for one. The lookahead keeps its own search, so the
+rate control plans the frame as it did without hints: scoring a hinted block at its vector made a
+CRF session code a scroll at QP 21.5 in place of 32.3, half again the bytes.
+
+Measured with four sliced threads on four pinned cores of an idle Ryzen 9 5950X at 2560x1600, NV12
+in place, the vectors from the content's known motion, against the same frames without them. At
+one quantizer (25) a 24-sample scroll took 0.95 ms of a frame where it took 1.38, at the same
+bytes; a 120-sample scroll 2.42 ms and 29.2 kB where it took 2.76 and 57.3; a window dragged by an
+odd vector 0.90 where 0.85. At CRF 25 the 24-sample scroll took 2.32 ms where it took 2.59 at the
+same QP and bytes, and the 120-sample one coded in 25.8 kB a frame where it took 42.1. Without
+the flag every stream comes out bit for bit as before (the 126 runs of the previous patch), and
+with it the run path codes the stream the full path codes (18 runs: CRF at one and four threads
+and VBV at one, the two scrolls and the drag, at CRF 25 and at QP 25).
+---
+ common/common.h     |   3 +
+ common/frame.c      |   1 +
+ common/frame.h      |   1 +
+ common/macroblock.c |  52 +++++++++++++++
+ common/macroblock.h |   4 ++
+ encoder/analyse.c   |  25 ++++---
+ encoder/encoder.c   | 159 +++++++++++++++++++++++++++++++++++---------
+ x264.h              |  12 ++++
+ 8 files changed, 219 insertions(+), 38 deletions(-)
+
+diff --git a/common/common.h b/common/common.h
+index 586a28c..db59443 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -400,6 +400,9 @@ struct x264_t
+         /* The frame whose planes point at the caller's picture (X264_CSP_IN_PLACE), kept so
+          * until the end of the next x264_encoder_encode, while it is the previous input. */
+         x264_frame_t *in_place;
++        /* While x264_encoder_encode runs, the frame passed in place before it, whose planes
++         * still hold the previous input picture, else NULL (x264_mb_copy_check). */
++        x264_frame_t *in_place_prev;
+ 
+         int i_max_dpb;  /* Number of frames allocated in the decoded picture buffer */
+         int i_max_ref0;
+diff --git a/common/frame.c b/common/frame.c
+index e9c9df5..859c11f 100644
+--- a/common/frame.c
++++ b/common/frame.c
+@@ -570,6 +570,7 @@ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
+     dst->opaque     = src->opaque;
+     dst->mb_info    = h->param.analyse.b_mb_info ? src->prop.mb_info : NULL;
+     dst->mb_info_free = h->param.analyse.b_mb_info ? src->prop.mb_info_free : NULL;
++    dst->mb_copy    = h->param.analyse.b_mb_info ? src->prop.mb_copy : NULL;
+ 
+     uint8_t *pix[3];
+     int stride[3];
+diff --git a/common/frame.h b/common/frame.h
+index 1c76661..09e36e0 100644
+--- a/common/frame.h
++++ b/common/frame.h
+@@ -185,6 +185,7 @@ typedef struct x264_frame
+     /* user frame properties */
+     uint8_t *mb_info;
+     void (*mb_info_free)( void* );
++    int16_t (*mb_copy)[2];
+ 
+ #if HAVE_OPENCL
+     x264_frame_opencl_t opencl;
+diff --git a/common/macroblock.c b/common/macroblock.c
+index 2e91b9b..09a88e6 100644
+--- a/common/macroblock.c
++++ b/common/macroblock.c
+@@ -1677,6 +1677,58 @@ static ALWAYS_INLINE void macroblock_backup_intra( x264_t *h, int mb_x, int mb_y
+     }
+ }
+ 
++/* Whether the macroblock at (mb_x, mb_y), which the caller's mb_info marks X264_MBINFO_COPY, is
++ * the previous input picture's at the vector mb_copy names for it: compared where x264 still
++ * holds that picture (h->frames.in_place_prev), the luma always and the chroma at an even vector,
++ * since an odd one moves the chroma sites. Sets mv to the vector in quarter samples. Returns 0
++ * where they differ, the vector reaches past the picture or the level's range, or the picture
++ * is gone; 1 where the luma matches at an odd vector; 2 where the macroblock matches whole. */
++int x264_mb_copy_check( x264_t *h, int mb_x, int mb_y, int16_t mv[2] )
++{
++    x264_frame_t *prev = h->frames.in_place_prev;
++    x264_frame_t *fenc = h->fenc;
++    if( !prev || !h->fdec->mb_copy || CHROMA_FORMAT != CHROMA_420 || prev->i_csp != fenc->i_csp )
++        return 0;
++    const int mb_xy = mb_x + mb_y * h->mb.i_mb_stride;
++    const int dx = h->fdec->mb_copy[mb_xy][0];
++    const int dy = h->fdec->mb_copy[mb_xy][1];
++    const int x = 16 * mb_x, y = 16 * mb_y, sx = x + dx, sy = y + dy;
++    const int range = h->param.analyse.i_mv_range;
++    if( x + 16 > h->param.i_width || y + 16 > h->param.i_height || sx < 0 || sy < 0
++        || sx + 16 > h->param.i_width || sy + 16 > h->param.i_height
++        || abs(dx) >= range || abs(dy) >= range )
++        return 0;
++    const pixel *cur = fenc->plane[0] + y * fenc->i_stride[0] + x;
++    const pixel *src = prev->plane[0] + sy * prev->i_stride[0] + sx;
++    for( int j = 0; j < 16; j++ )
++        if( memcmp( cur + j * fenc->i_stride[0], src + j * prev->i_stride[0], 16 * SIZEOF_PIXEL ) )
++            return 0;
++    mv[0] = 4 * dx;
++    mv[1] = 4 * dy;
++    if( (dx | dy) & 1 )
++        return 1;
++    cur = fenc->plane[1] + (y >> 1) * fenc->i_stride[1] + x;
++    src = prev->plane[1] + (sy >> 1) * prev->i_stride[1] + sx;
++    for( int j = 0; j < 8; j++ )
++        if( memcmp( cur + j * fenc->i_stride[1], src + j * prev->i_stride[1], 16 * SIZEOF_PIXEL ) )
++            return 1;
++    return 2;
++}
++
++/* The coarsest effective QP among the reference's macroblocks a copy of the macroblock at
++ * (mb_x, mb_y) from the vector mv (quarter samples) reads. */
++int x264_mb_copy_source_qp( x264_t *h, int mb_x, int mb_y, const int16_t mv[2] )
++{
++    const int sx = 16 * mb_x + (mv[0] >> 2), sy = 16 * mb_y + (mv[1] >> 2);
++    const int x0 = sx >> 4, x1 = (sx + 15) >> 4, y0 = sy >> 4, y1 = (sy + 15) >> 4;
++    const uint8_t *effective_qp = h->fref[0][0]->effective_qp;
++    int qp = 0;
++    for( int y = y0; y <= y1; y++ )
++        for( int x = x0; x <= x1; x++ )
++            qp = X264_MAX( qp, effective_qp[x + y * h->mb.i_mb_stride] );
++    return qp;
++}
++
+ void x264_macroblock_cache_save( x264_t *h )
+ {
+     const int i_mb_xy = h->mb.i_mb_xy;
+diff --git a/common/macroblock.h b/common/macroblock.h
+index 1cdb03b..466451d 100644
+--- a/common/macroblock.h
++++ b/common/macroblock.h
+@@ -322,6 +322,10 @@ void x264_macroblock_cache_load_interlaced( x264_t *h, int mb_x, int mb_y );
+ void x264_macroblock_deblock_strength( x264_t *h );
+ #define x264_macroblock_cache_save x264_template(macroblock_cache_save)
+ void x264_macroblock_cache_save( x264_t *h );
++#define x264_mb_copy_check x264_template(mb_copy_check)
++int x264_mb_copy_check( x264_t *h, int mb_x, int mb_y, int16_t mv[2] );
++#define x264_mb_copy_source_qp x264_template(mb_copy_source_qp)
++int x264_mb_copy_source_qp( x264_t *h, int mb_x, int mb_y, const int16_t mv[2] );
+ 
+ #define x264_macroblock_bipred_init x264_template(macroblock_bipred_init)
+ void x264_macroblock_bipred_init( x264_t *h );
+diff --git a/encoder/analyse.c b/encoder/analyse.c
+index adb63e1..48b8234 100644
+--- a/encoder/analyse.c
++++ b/encoder/analyse.c
+@@ -2967,15 +2967,24 @@ intra_analysis:
+         }
+         else
+         {
+-            /* Special fast-skip logic using information from mb_info. */
+-            if( h->fdec->mb_info && (h->fdec->mb_info[h->mb.i_mb_xy]&X264_MBINFO_CONSTANT) )
+-            {
+-                if( !SLICE_MBAFF && (h->fdec->i_frame - h->fref[0][0]->i_frame) == 1 && !h->sh.b_weighted_pred &&
+-                    h->fref[0][0]->effective_qp[h->mb.i_mb_xy] <= h->mb.i_qp )
++            /* Special fast-skip logic using information from mb_info: a constant macroblock, or
++             * one that is the previous input's at the vector mb_copy names (x264_mb_copy_check),
++             * predicts from the reference there without a search: as a P_SKIP where that is the
++             * P_SKIP vector (a macroblock matched whole; one matched in luma alone, at an odd
++             * vector that moved the chroma sites, where its residual quantizes away), else as a
++             * 16x16 block. */
++            if( h->fdec->mb_info && (h->fdec->mb_info[h->mb.i_mb_xy] & (X264_MBINFO_CONSTANT|X264_MBINFO_COPY)) )
++            {
++                int info = h->fdec->mb_info[h->mb.i_mb_xy];
++                ALIGNED_4( int16_t mv[2] ) = {0, 0};
++                int copy = info & X264_MBINFO_CONSTANT ? 2 : x264_mb_copy_check( h, h->mb.i_mb_x, h->mb.i_mb_y, mv );
++                if( copy && !SLICE_MBAFF && (h->fdec->i_frame - h->fref[0][0]->i_frame) == 1 && !h->sh.b_weighted_pred &&
++                    (M32( mv ) ? x264_mb_copy_source_qp( h, h->mb.i_mb_x, h->mb.i_mb_y, mv )
++                               : h->fref[0][0]->effective_qp[h->mb.i_mb_xy]) <= h->mb.i_qp )
+                 {
+                     h->mb.i_partition = D_16x16;
+                     /* Use the P-SKIP MV if we can... */
+-                    if( !M32(h->mb.cache.pskip_mv) )
++                    if( M32( h->mb.cache.pskip_mv ) == M32( mv ) && (copy == 2 || x264_macroblock_probe_pskip( h )) )
+                     {
+                         b_skip = 1;
+                         h->mb.i_type = P_SKIP;
+@@ -2985,12 +2994,12 @@ intra_analysis:
+                     {
+                         h->mb.i_type = P_L0;
+                         analysis.l0.me16x16.i_ref = 0;
+-                        M32( analysis.l0.me16x16.mv ) = 0;
++                        CP32( analysis.l0.me16x16.mv, mv );
+                     }
+                     goto skip_analysis;
+                 }
+                 /* Reset the information accordingly */
+-                else if( h->param.analyse.b_mb_info_update )
++                else if( h->param.analyse.b_mb_info_update && (info & X264_MBINFO_CONSTANT) )
+                     h->fdec->mb_info[h->mb.i_mb_xy] &= ~X264_MBINFO_CONSTANT;
+             }
+ 
+diff --git a/encoder/encoder.c b/encoder/encoder.c
+index cea5a5a..6093527 100644
+--- a/encoder/encoder.c
++++ b/encoder/encoder.c
+@@ -2756,14 +2756,90 @@ static ALWAYS_INLINE void bitstream_restore( x264_t *h, x264_bs_bak_t *bak, int
+     }
+ }
+ 
++/* x264_mb_predict_mv_pskip for the macroblock at (mb_x, mb_y) of the slice starting at first,
++ * read from the frame's arrays before its cache is loaded, as x264_macroblock_cache_load would
++ * fill it for a progressive frame. */
++static void mb_predict_mv_pskip_frame( x264_t *h, int mb_x, int mb_y, int first, int16_t mv[2] )
++{
++    const int s8x8 = h->mb.i_b8_stride;
++    const int s4x4 = h->mb.i_b4_stride;
++    const int mb_xy = mb_x + mb_y * h->mb.i_mb_stride;
++    const int b8_xy = 2*(mb_y * s8x8 + mb_x);
++    const int b4_xy = 4*(mb_y * s4x4 + mb_x);
++    const int top_row = mb_y > h->i_threadslice_start;
++    const int left     = mb_x > 0 && h->mb.slice_table[mb_xy - 1] == first;
++    const int top      = top_row && h->mb.slice_table[mb_xy - h->mb.i_mb_stride] == first;
++    const int topright = top_row && mb_x < h->mb.i_mb_width - 1 && h->mb.slice_table[mb_xy - h->mb.i_mb_stride + 1] == first;
++    const int topleft  = top_row && mb_x > 0 && h->mb.slice_table[mb_xy - h->mb.i_mb_stride - 1] == first;
++    ALIGNED_4( int16_t zero[2] ) = {0, 0};
++    int refa = left ? h->mb.ref[0][b8_xy - 1] : -2;
++    int refb = top ? h->mb.ref[0][b8_xy - s8x8] : -2;
++    int16_t *mva = left ? h->mb.mv[0][b4_xy - 1] : zero;
++    int16_t *mvb = top ? h->mb.mv[0][b4_xy - s4x4] : zero;
++    if( refa == -2 || refb == -2 || !( (uint32_t)refa | M32( mva ) ) || !( (uint32_t)refb | M32( mvb ) ) )
++    {
++        M32( mv ) = 0;
++        return;
++    }
++    int refc = -2;
++    int16_t *mvc = zero;
++    if( topright )
++    {
++        refc = h->mb.ref[0][b8_xy - s8x8 + 2];
++        mvc = h->mb.mv[0][b4_xy - s4x4 + 4];
++    }
++    else if( topleft )
++    {
++        refc = h->mb.ref[0][b8_xy - s8x8 - 1];
++        mvc = h->mb.mv[0][b4_xy - s4x4 - 1];
++    }
++    int count = (refa == 0) + (refb == 0) + (refc == 0);
++    if( count > 1 )
++        x264_median_mv( mv, mva, mvb, mvc );
++    else if( count == 1 )
++        CP32( mv, refa == 0 ? mva : refb == 0 ? mvb : mvc );
++    else if( refb == -2 && refc == -2 && refa != -2 )
++        CP32( mv, mva );
++    else
++        x264_median_mv( mv, mva, mvb, mvc );
++}
++
++/* Copy the reconstruction of the reference at the vector mv (quarter samples, whole) into the
++ * macroblocks x0 to x1 of row mb_y of the frame being reconstructed. */
++static void mb_copy_run( x264_t *h, int x0, int x1, int mb_y, const int16_t mv[2] )
++{
++    const int n = x1 - x0;
++    if( n <= 0 )
++        return;
++    const int dx = mv[0] >> 2, dy = mv[1] >> 2;
++    for( int p = 0; p < (CHROMA444 ? 3 : 1); p++ )
++    {
++        int stride = h->fdec->i_stride[p];
++        pixel *dst = &h->fdec->plane[p][16 * x0 + 16 * mb_y * stride];
++        const pixel *src = &h->fref[0][0]->plane[p][16 * x0 + dx + (16 * mb_y + dy) * stride];
++        for( int j = 0; j < 16; j++ )
++            memcpy( dst + j*stride, src + j*stride, 16*n*SIZEOF_PIXEL );
++    }
++    if( CHROMA_FORMAT && !CHROMA444 )
++    {
++        int height = 16 >> CHROMA_V_SHIFT;
++        int stride = h->fdec->i_stride[1];
++        pixel *dst = &h->fdec->plane[1][16 * x0 + height * mb_y * stride];
++        const pixel *src = &h->fref[0][0]->plane[1][16 * x0 + dx + (height * mb_y + (dy >> CHROMA_V_SHIFT)) * stride];
++        for( int j = 0; j < height; j++ )
++            memcpy( dst + j*stride, src + j*stride, 16*n*SIZEOF_PIXEL );
++    }
++}
++
+ /* Code the run of macroblocks from (mb_x, mb_y) to the end of its row, or to the slice's last
+  * macroblock, as the P_SKIP analysis would take each of them, without loading, analysing, or
+- * encoding them: the ones the caller's mb_info marks constant, where the mb_info fast skip in
+- * x264_macroblock_analyse holds (the reference is the previous frame, at the macroblock's
+- * analysis QP or finer, without weighted prediction) and the P_SKIP vector is zero. A row's
+- * first macroblock always takes the full path, whose analysis sets the row's vertical vector
+- * limits every later macroblock of the row searches and compensates within. The reference's
+- * pixels are the reconstruction, copied for the run at once, and each macroblock's state is
++ * encoding them: the ones the caller's mb_info marks constant, or copies of the previous input
++ * at an even vector (x264_mb_copy_check), where the mb_info fast skip in x264_macroblock_analyse
++ * holds (the reference is the previous frame, at the macroblock's analysis QP or finer where it
++ * is read, without weighted prediction) and the vector is the P_SKIP vector. A row's first
++ * macroblock always takes the full path, whose analysis sets the row's vertical vector limits
++ * every later macroblock of the row searches and compensates within. The reference's pixels are
++ * the reconstruction, copied for each run of one vector at once, and each macroblock's state is
+  * left as x264_macroblock_cache_save leaves a P_SKIP's: the per-macroblock arrays its neighbours
+  * and the next frame read, the intra border backup, and, for the run's last, the right column of
+  * the cache the next macroblock takes its left neighbour from. The stream comes out bit for bit
+@@ -2778,25 +2854,40 @@ static int macroblock_skip_constant_run( x264_t *h, int mb_x, int mb_y )
+     const int first = h->sh.i_first_mb;
+     const int row = mb_y * h->mb.i_mb_stride;
+     const int end_x = X264_MIN( h->mb.i_mb_width, h->sh.i_last_mb - row + 1 );
++    ALIGNED_4( int16_t run_mv[2] ) = {0, 0};
++    int run_x = mb_x;
+     int x = mb_x;
+     for( ; x < end_x; x++ )
+     {
+         const int mb_xy = row + x;
+-        if( !(h->fdec->mb_info[mb_xy] & X264_MBINFO_CONSTANT) )
++        const int info = h->fdec->mb_info[mb_xy];
++        ALIGNED_4( int16_t mv[2] ) = {0, 0};
++        if( !(info & X264_MBINFO_CONSTANT)
++            && ( !(info & X264_MBINFO_COPY) || x264_mb_copy_check( h, x, mb_y, mv ) != 2 ) )
+             break;
+         const int b8_xy = 2*(mb_y * s8x8 + x);
+         const int b4_xy = 4*(mb_y * s4x4 + x);
+ 
+-        /* P_SKIP's vector is zero where a neighbour is unavailable or one predicts from reference
+-         * 0 with a zero vector (x264_mb_predict_mv_pskip); a median that comes to zero takes the
+-         * full path. */
+-        int zero = h->mb.slice_table[mb_xy - 1] != first
+-                || mb_y == 0 || h->mb.slice_table[mb_xy - h->mb.i_mb_stride] != first;
+-        if( !zero )
+-            zero = !( h->mb.ref[0][b8_xy - 1] | M32( h->mb.mv[0][b4_xy - 1] ) )
+-                || !( h->mb.ref[0][b8_xy - s8x8] | M32( h->mb.mv[0][b4_xy - s4x4] ) );
+-        if( !zero )
+-            break;
++        if( !M32( mv ) )
++        {
++            /* P_SKIP's vector is zero where a neighbour is unavailable or one predicts from
++             * reference 0 with a zero vector (x264_mb_predict_mv_pskip); a median that comes to
++             * zero takes the full path. */
++            int zero = h->mb.slice_table[mb_xy - 1] != first
++                    || mb_y == 0 || h->mb.slice_table[mb_xy - h->mb.i_mb_stride] != first;
++            if( !zero )
++                zero = !( h->mb.ref[0][b8_xy - 1] | M32( h->mb.mv[0][b4_xy - 1] ) )
++                    || !( h->mb.ref[0][b8_xy - s8x8] | M32( h->mb.mv[0][b4_xy - s4x4] ) );
++            if( !zero )
++                break;
++        }
++        else
++        {
++            ALIGNED_4( int16_t pskip[2] );
++            mb_predict_mv_pskip_frame( h, x, mb_y, first, pskip );
++            if( M32( pskip ) != M32( mv ) )
++                break;
++        }
+ 
+         h->mb.i_mb_x = x;
+         h->mb.i_mb_y = mb_y;
+@@ -2806,10 +2897,18 @@ static int macroblock_skip_constant_run( x264_t *h, int mb_x, int mb_y )
+         int qp = x264_ratecontrol_mb_qp( h );
+         if( h->param.rc.i_aq_mode && h->param.analyse.i_subpel_refine < 10 )
+             qp = abs(qp - h->mb.i_last_qp) == 1 ? h->mb.i_last_qp : qp;
+-        if( h->fref[0][0]->effective_qp[mb_xy] > qp )
++        int source_qp = M32( mv ) ? x264_mb_copy_source_qp( h, x, mb_y, mv ) : h->fref[0][0]->effective_qp[mb_xy];
++        if( source_qp > qp )
+             break;
+         h->fdec->effective_qp[mb_xy] = qp;
+ 
++        if( M32( mv ) != M32( run_mv ) )
++        {
++            mb_copy_run( h, run_x, x, mb_y, run_mv );
++            run_x = x;
++            CP32( run_mv, mv );
++        }
++
+         h->mb.type[mb_xy] = P_SKIP;
+         h->mb.slice_table[mb_xy] = first;
+         h->mb.partition[mb_xy] = D_16x16;
+@@ -2822,14 +2921,17 @@ static int macroblock_skip_constant_run( x264_t *h, int mb_x, int mb_y )
+         M16( &h->mb.ref[0][b8_xy] ) = 0;
+         M16( &h->mb.ref[0][b8_xy + s8x8] ) = 0;
+         for( int j = 0; j < 4; j++ )
+-            M128( &h->mb.mv[0][b4_xy + j*s4x4] ) = M128_ZERO;
+-        /* The 16x16 vectors later macroblocks and the next frame predict motion from. */
++            for( int i = 0; i < 4; i++ )
++                CP32( h->mb.mv[0][b4_xy + j*s4x4 + i], mv );
++        /* The 16x16 vectors later macroblocks and the next frame predict motion from, which the
++         * full path leaves zero for a P_SKIP. */
+         for( int i = 0; i < h->i_ref[0]; i++ )
+             M32( h->mb.mvr[0][i][mb_xy] ) = 0;
+     }
+     const int n = x - mb_x;
+     if( !n )
+         return 0;
++    mb_copy_run( h, run_x, x, mb_y, run_mv );
+     const int last_x = x - 1;
+     h->mb.i_mb_x = last_x;
+     h->mb.i_mb_y = mb_y;
+@@ -2847,11 +2949,7 @@ static int macroblock_skip_constant_run( x264_t *h, int mb_x, int mb_y )
+     for( int p = 0; p < (CHROMA444 ? 3 : 1); p++ )
+     {
+         int stride = h->fdec->i_stride[p];
+-        int off = 16 * mb_x + 16 * mb_y * stride;
+-        pixel *dst = &h->fdec->plane[p][off];
+-        const pixel *src = &h->fref[0][0]->plane[p][off];
+-        for( int j = 0; j < 16; j++ )
+-            memcpy( dst + j*stride, src + j*stride, 16*n*SIZEOF_PIXEL );
++        const pixel *dst = &h->fdec->plane[p][16 * mb_x + 16 * mb_y * stride];
+         memcpy( &h->intra_border_backup[mb_y&1][p][mb_x*16], dst + 15*stride, 16*n*SIZEOF_PIXEL );
+         const pixel *last = dst + 16*(n-1);
+         for( int j = 0; j < 16; j++ )
+@@ -2861,11 +2959,7 @@ static int macroblock_skip_constant_run( x264_t *h, int mb_x, int mb_y )
+     {
+         int height = 16 >> CHROMA_V_SHIFT;
+         int stride = h->fdec->i_stride[1];
+-        int off = 16 * mb_x + height * mb_y * stride;
+-        pixel *dst = &h->fdec->plane[1][off];
+-        const pixel *src = &h->fref[0][0]->plane[1][off];
+-        for( int j = 0; j < height; j++ )
+-            memcpy( dst + j*stride, src + j*stride, 16*n*SIZEOF_PIXEL );
++        const pixel *dst = &h->fdec->plane[1][16 * mb_x + height * mb_y * stride];
+         const pixel *bottom = dst + (height - 1) * stride;
+         for( int i = 0; i < n; i++ )
+         {
+@@ -3721,8 +3815,10 @@ static int encoder_encode( x264_t *h,
+ 
+     h->fdec->mb_info = h->fenc->mb_info;
+     h->fdec->mb_info_free = h->fenc->mb_info_free;
++    h->fdec->mb_copy = h->fenc->mb_copy;
+     h->fenc->mb_info = NULL;
+     h->fenc->mb_info_free = NULL;
++    h->fenc->mb_copy = NULL;
+ 
+     h->fdec->i_pts = h->fenc->i_pts;
+     if( h->frames.i_bframe_delay )
+@@ -4136,6 +4232,7 @@ static int encoder_frame_end( x264_t *h, x264_t *thread_current,
+         h->fdec->mb_info = NULL;
+         h->fdec->mb_info_free = NULL;
+     }
++    h->fdec->mb_copy = NULL;
+ 
+     x264_frame_push_unused( thread_current, h->fenc );
+ 
+@@ -4364,7 +4461,9 @@ int x264_encoder_encode( x264_t *h, x264_nal_t **pp_nal, int *pi_nal, x264_pictu
+ {
+     x264_frame_t *previous = h->frames.in_place;
+     h->frames.in_place = NULL;
++    h->frames.in_place_prev = previous;
+     int ret = encoder_encode( h, pp_nal, pi_nal, pic_in, pic_out );
++    h->frames.in_place_prev = NULL;
+     if( previous && previous != h->frames.in_place )
+         x264_frame_restore_planes( previous );
+     return ret;
+diff --git a/x264.h b/x264.h
+index 811ce6e..ef8c2ee 100644
+--- a/x264.h
++++ b/x264.h
+@@ -849,9 +849,21 @@ typedef struct x264_image_properties_t
+     uint8_t *mb_info;
+     /* In: optional callback to free mb_info when used. */
+     void (*mb_info_free)( void* );
++    /* In: one vector a macroblock, in whole luma samples, for each macroblock mb_info marks
++     *     X264_MBINFO_COPY: its pixel at (x, y) is the previous input picture's at
++     *     (x + mb_copy[i][0], y + mb_copy[i][1]). */
++    int16_t (*mb_copy)[2];
+ 
+     /* The macroblock is constant and remains unchanged from the previous frame. */
+     #define X264_MBINFO_CONSTANT   (1U<<0)
++    /* The macroblock's pixels are the previous input picture's at the vector mb_copy names
++     * for it, moved whole as a page scrolls or a window moves. Where x264 still holds that
++     * picture (one passed in place, until the next x264_encoder_encode returns or
++     * x264_encoder_release_input) it compares them, and codes a macroblock that matches as
++     * the reconstruction at that vector without a search, as it codes a constant one; a
++     * macroblock that differs, or of a picture it no longer holds, is coded as without the
++     * flag. */
++    #define X264_MBINFO_COPY       (1U<<1)
+     /* More flags may be added in the future. */
+ 
+     /* Out: SSIM of the the frame luma (if x264_param_t.b_ssim is set) */
+-- 
+2.47.3
+
