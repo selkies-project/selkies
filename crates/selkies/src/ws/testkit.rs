@@ -52,6 +52,8 @@ pub struct FakeCapture {
     pub geometry: Mutex<RealizedGeometry>,
     /// The recorded `(state, last_error)`.
     pub state: Mutex<(String, Option<String>)>,
+    /// The encoder the fake capture settled on.
+    pub info: Mutex<Option<StreamInfo>>,
 }
 
 impl Default for FakeCapture {
@@ -65,6 +67,7 @@ impl Default for FakeCapture {
             fail_start: Mutex::default(),
             geometry: Mutex::new(Ok(None)),
             state: Mutex::new(("running".into(), None)),
+            info: Mutex::new(None),
         }
     }
 }
@@ -116,7 +119,7 @@ impl FakeCapture {
 
 impl StreamSource for FakeCapture {
     fn stream_info(&self) -> Option<StreamInfo> {
-        None
+        self.info.lock().clone()
     }
 
     fn stream_stats(&self) -> Option<StreamStats> {

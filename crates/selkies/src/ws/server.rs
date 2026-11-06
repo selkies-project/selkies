@@ -2300,8 +2300,9 @@ impl WsService {
     /// back to its session default, which a viewer-driven primary capture runs on entirely.
     /// `None` for an unknown secondary.
     ///
-    /// Software and VA-API streams keep one reference frame (`video_reference_frames`); NVENC
-    /// keeps its acknowledged references for loss recovery. A deeper buffer lets the encoder
+    /// Software, VA-API/Intel, V4L2, and Tegra streams keep one reference frame
+    /// (`video_reference_frames`); NVENC keeps its acknowledged references for loss recovery.
+    /// A deeper buffer lets the encoder
     /// predict past a frame a page dropped (`LOST_FRAME`, a relay's thinned run) instead of
     /// coding a key frame, but every client
     /// decodes against all of it on every frame: at 2560x1600 eight frames cost FFmpeg's decoder
@@ -2315,7 +2316,7 @@ impl WsService {
         layout: Layout,
     ) -> Option<CaptureSettings> {
         let cap = self.input().map(|i| i.cursor_size_cap()).unwrap_or(0);
-        let (d, capture_cursor) = {
+        let (d, capture_cursor, current_reference_frames) = {
             let st = self.st.lock();
             let d = match st.displays.get(display_id) {
                 Some(d) => d.clone(),
@@ -2324,7 +2325,16 @@ impl WsService {
                 }
                 None => return None,
             };
-            (d, st.capture_cursor)
+            let current = st
+                .instances
+                .get(display_id)
+                .map(|i| i.settings.video_reference_frames)
+                .or_else(|| {
+                    st.starting
+                        .get(display_id)
+                        .map(|cs| cs.video_reference_frames)
+                });
+            (d, st.capture_cursor, current)
         };
         let bitrate = self.video_bitrate_kbps(display_id, d.video_bitrate);
         let mut cs = CaptureSettings {
@@ -2371,7 +2381,10 @@ impl WsService {
         // NVENC uses its deeper buffer and acknowledged long-term references to repair a
         // thinned page without an IDR. Only the software and VA-API paths take the latency
         // trade-off of one reference; an unknown hardware path follows the software fallback.
-        if hardware.as_deref() != Some("nvenc") {
+        // A live reconfiguration keeps the policy reconciled to the encoder actually running.
+        if let Some(frames) = current_reference_frames {
+            cs.video_reference_frames = frames;
+        } else if hardware.as_deref() != Some("nvenc") {
             cs.video_reference_frames = 1;
         }
         Some(cs)
@@ -2383,7 +2396,7 @@ impl WsService {
     pub(crate) async fn start_capture_for_display(&self, display_id: &str, layout: Layout) -> bool {
         let started = {
             let _guard = self.video_capture_lock.lock().await;
-            self.start_capture_locked(display_id, layout).await
+            self.start_capture_locked(display_id, layout, None).await
         };
         if started && self.refresh_second_screen_capacity().await {
             self.broadcast_live_server_settings(display_id).await;
@@ -2393,8 +2406,14 @@ impl WsService {
 
     /// Start a capture instance; a capturing existing one is left alone (an IDR is nudged for
     /// rejoining clients) and a stale one is rebuilt. False on failure, so callers do not ack a
-    /// false `VIDEO_STARTED`.
-    async fn start_capture_locked(&self, display_id: &str, layout: Layout) -> bool {
+    /// false `VIDEO_STARTED`. `reference_frames` is the reconciler's override for the encoder
+    /// known to be running; ordinary starts infer the policy from their startup selection.
+    async fn start_capture_locked(
+        &self,
+        display_id: &str,
+        layout: Layout,
+        reference_frames: Option<u32>,
+    ) -> bool {
         if self.st.lock().instances.contains_key(display_id) {
             let existing = self.capture_of(display_id);
             match existing {
@@ -2419,10 +2438,13 @@ impl WsService {
                 .unwrap_or(1.0);
             self.deps.display.wayland_scale_screen(scale).await;
         }
-        let Some(cs) = self.capture_settings(display_id, layout) else {
+        let Some(mut cs) = self.capture_settings(display_id, layout) else {
             error!(target: "ws", "Cannot get capture settings for unknown display_id '{display_id}'");
             return false;
         };
+        if let Some(frames) = reference_frames {
+            cs.video_reference_frames = frames;
+        }
         let capture = self.ensure_persistent_capture(display_id);
         capture.set_cursor_sink(Some(self.cursor_sink()));
         // Subscribed ahead of the start, so the first frame finds its fan-out.
@@ -2632,6 +2654,73 @@ impl WsService {
             &encoder,
             use_cpu,
         );
+    }
+
+    /// Re-read the encoder behind a changed stream report on its own task. The stream watch
+    /// that called this is stopped and replaced if the capture has to be reopened.
+    fn schedule_reference_reconcile(&self, display_id: &str) {
+        let service = self.arc();
+        let did = display_id.to_string();
+        tokio::spawn(async move {
+            service.reconcile_reference_frames(&did).await;
+        });
+    }
+
+    /// Keep the one-reference WebSocket cap on every actual encoder except NVENC. The startup
+    /// probe is only a selection hint: a capture can open software for an unsupported format,
+    /// or demote to it after hardware errors. Native reference depth is structural, so a changed
+    /// actual class takes the ordinary capture restart and decoder-reset path exactly once.
+    async fn reconcile_reference_frames(&self, display_id: &str) {
+        let _guard = self.video_capture_lock.lock().await;
+        if !self.reg.lock().running.contains(display_id) {
+            return;
+        }
+        let Some(capture) = self.capture_of(display_id) else {
+            return;
+        };
+        let actual = tokio::task::spawn_blocking({
+            let capture = capture.clone();
+            move || capture.stream_info()
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(actual) = actual else {
+            return;
+        };
+        let wanted = if actual.info.hardware && actual.info.encoder == "NVENC" {
+            0
+        } else {
+            1
+        };
+        let (current, layout) = {
+            let st = self.st.lock();
+            (
+                st.instances
+                    .get(display_id)
+                    .map(|instance| instance.settings.video_reference_frames),
+                st.layouts.get(display_id).copied(),
+            )
+        };
+        if current == Some(wanted) {
+            return;
+        }
+        let Some(layout) = layout else {
+            return;
+        };
+        info!(
+            target: "ws",
+            "Display '{display_id}' actually encodes with {} (hardware: {}); restarting with {wanted} reference frame(s).",
+            actual.info.encoder,
+            actual.info.hardware,
+        );
+        self.stop_capture_locked(display_id).await;
+        if self
+            .start_capture_locked(display_id, layout, Some(wanted))
+            .await
+        {
+            self.start_backpressure_task(display_id);
+        }
     }
 
     fn cursor_sink(&self) -> Arc<dyn CursorSink> {
@@ -3072,6 +3161,9 @@ impl WsService {
 
     /// Tell a display's controller what its capture streams and how.
     pub(crate) async fn publish_stream_info(&self, display_id: &str, info: Map<String, Json>) {
+        if info.get("encoder").and_then(Json::as_str).is_some() {
+            self.schedule_reference_reconcile(display_id);
+        }
         if let Some(client) = self.controller_socket(display_id) {
             self.send_stream_message(
                 client,

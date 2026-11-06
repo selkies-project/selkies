@@ -1147,6 +1147,142 @@ async fn a_demoted_codec_reaches_the_pages() {
     );
 }
 
+fn settled_encoder(name: &str, hardware: bool) -> pixelflux::StreamInfo {
+    pixelflux::StreamInfo {
+        info: pixelflux::report::StreamInfo {
+            encoder: name.into(),
+            hardware,
+            codec: "h264",
+            ..Default::default()
+        },
+        renderer: None,
+    }
+}
+
+#[tokio::test]
+async fn an_nvenc_planned_capture_that_settles_on_software_restores_one_reference() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    rig.service
+        .st
+        .lock()
+        .instances
+        .get_mut(PRIMARY_DISPLAY)
+        .unwrap()
+        .settings
+        .video_reference_frames = 0;
+    let nvenc = settled_encoder("NVENC", true);
+    *capture.info.lock() = Some(nvenc.clone());
+    let starts = capture.count("start");
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&nvenc))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(capture.count("start"), starts);
+
+    // Mid-stream failure demotion reports the same actual software encoder as startup fallback.
+    let actual = settled_encoder("x264", false);
+    *capture.info.lock() = Some(actual.clone());
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let starts_now = capture.starts.lock();
+    assert_eq!(
+        starts_now.len(),
+        starts + 1,
+        "the actual software session is reopened with the WebSocket cap"
+    );
+    assert_eq!(starts_now.last().unwrap().video_reference_frames, 1);
+    assert_eq!(
+        rig.service.st.lock().instances[PRIMARY_DISPLAY]
+            .settings
+            .video_reference_frames,
+        1
+    );
+    assert_eq!(
+        rig.service
+            .capture_settings(PRIMARY_DISPLAY, rig.layout(PRIMARY_DISPLAY).unwrap())
+            .unwrap()
+            .video_reference_frames,
+        1,
+        "a later live settings refresh does not reapply the startup hint"
+    );
+}
+
+#[tokio::test]
+async fn an_actual_nvenc_session_keeps_its_reference_window_without_a_restart() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    rig.service
+        .st
+        .lock()
+        .instances
+        .get_mut(PRIMARY_DISPLAY)
+        .unwrap()
+        .settings
+        .video_reference_frames = 0;
+    let actual = settled_encoder("NVENC", true);
+    *capture.info.lock() = Some(actual.clone());
+    let starts = capture.count("start");
+
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(capture.count("start"), starts);
+    assert_eq!(
+        rig.service.st.lock().instances[PRIMARY_DISPLAY]
+            .settings
+            .video_reference_frames,
+        0
+    );
+}
+
+#[tokio::test]
+async fn actual_non_nvenc_sessions_keep_their_existing_reference_cap() {
+    for (encoder, hardware) in [
+        ("x264", false),
+        ("VAAPI", true),
+        ("V4L2M2M", true),
+        ("TEGRA", true),
+    ] {
+        let rig = Rig::new();
+        let _owner = rig.owner("a").await;
+        settle().await;
+        let capture = rig.primary_capture();
+        assert_eq!(
+            rig.service.st.lock().instances[PRIMARY_DISPLAY]
+                .settings
+                .video_reference_frames,
+            1
+        );
+        let actual = settled_encoder(encoder, hardware);
+        *capture.info.lock() = Some(actual.clone());
+        let starts = capture.count("start");
+
+        rig.service
+            .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(capture.count("start"), starts, "{encoder}");
+        assert_eq!(
+            rig.service.st.lock().instances[PRIMARY_DISPLAY]
+                .settings
+                .video_reference_frames,
+            1,
+            "{encoder}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_rate_control_and_quality_verbs_apply() {
     let rig = Rig::new();
