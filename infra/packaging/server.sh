@@ -72,12 +72,12 @@ chmod -R u+w "${SRC}"
 # Every public crate carries the release version. Each native crate also keeps
 # its own manifest and lock for a standalone wheel build, while the root lock
 # covers both that build and this workspace build under `--locked`.
-sed -i "0,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|" "${SRC}/Cargo.toml"
+sed -i "1,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|" "${SRC}/Cargo.toml"
 for member in selkies selkies-rtc pixelflux pcmflux; do
     sed -i "/^name = \"${member}\"$/{n;s|^version = .*|version = \"${CRATE_VERSION}\"|}" "${SRC}/Cargo.lock"
 done
 for component in pixelflux pcmflux; do
-    sed -i "0,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|" "${SRC}/crates/${component}/Cargo.toml"
+    sed -i "1,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|" "${SRC}/crates/${component}/Cargo.toml"
     sed -i "/^name = \"${component}\"$/{n;s|^version = .*|version = \"${CRATE_VERSION}\"|}" \
         "${SRC}/crates/${component}/Cargo.lock"
 done
