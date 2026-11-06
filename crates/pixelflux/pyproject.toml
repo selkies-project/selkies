@@ -95,7 +95,7 @@ before-all = """
             clone_source b35605ace3ddf7c1a5d67a2eb553f034aef41d55 - x264 \
                 https://code.videolan.org/videolan/x264.git https://github.com/mirror/x264.git && \
             cd x264 && \
-            git apply {project}/patches/x264/*.patch && \
+            git apply {package}/patches/x264/*.patch && \
             ./configure --prefix=/usr/local --enable-shared --disable-cli && \
             make -j$(nproc) && \
             make install)

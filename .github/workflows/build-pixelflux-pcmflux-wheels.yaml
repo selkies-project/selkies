@@ -75,17 +75,23 @@ jobs:
         image: ${{ fromJSON(needs.plan.outputs.images) }}
     runs-on: ${{ matrix.image.runner }}
     steps:
+      # The recipe reads files of its crate, such as pixelflux's x264 patches
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build the image
         env:
           BASE: ${{ matrix.image.base }}
           IMAGE: ${{ matrix.image.image }}
           PLATFORM: ${{ matrix.image.platform }}
+          PROJECT: ${{ matrix.image.project }}
           RECIPE: ${{ matrix.image.recipe }}
         run: |
           printf '%s\n' "${RECIPE}" > "${RUNNER_TEMP}/recipe.sh"
           # The sources and build trees the recipe leaves are no part of the image
           docker run --name deps --env PIXELFLUX_ENABLE_GPL --workdir /tmp \
-            --volume "${RUNNER_TEMP}/recipe.sh:/recipe.sh:ro" "${BASE}" \
+            --volume "${RUNNER_TEMP}/recipe.sh:/recipe.sh:ro" \
+            --volume "${PWD}/crates/${PROJECT}:/package:ro" "${BASE}" \
             bash -c 'bash /recipe.sh && rm -rf /tmp/* /root/.cache && { ! command -v dnf || dnf clean all; }'
           docker commit deps "${IMAGE}:${PLATFORM}"
           docker save "${IMAGE}:${PLATFORM}" | zstd -T0 > "${RUNNER_TEMP}/image.tar.zst"

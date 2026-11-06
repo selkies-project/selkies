@@ -18,7 +18,8 @@ within a week.
 
 ``recipe`` prints the ``before-all`` of ``pyproject.toml`` as a script, under
 the environment cibuildwheel would run it in, so an image carrying the native
-dependencies is built by the same recipe a plain cibuildwheel run uses.
+dependencies is built by the same recipe a plain cibuildwheel run uses. Its
+``{package}`` is ``/package``, where the image build mounts the crate.
 """
 
 import configparser
@@ -49,7 +50,7 @@ def recipe():
     if any("before-all" in override for override in settings.get("overrides", [])):
         sys.exit("an override's before-all would be left out of the image")
     exports = "".join(f'export {name}="{value}"\n' for name, value in settings.get("environment", {}).items())
-    return exports + settings["linux"]["before-all"] + "\n"
+    return exports + settings["linux"]["before-all"].replace("{package}", "/package") + "\n"
 
 
 def cached(keys):
