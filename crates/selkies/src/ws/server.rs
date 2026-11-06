@@ -2300,9 +2300,10 @@ impl WsService {
     /// back to its session default, which a viewer-driven primary capture runs on entirely.
     /// `None` for an unknown secondary.
     ///
-    /// The stream keeps one reference frame (`video_reference_frames`, which x264 and VA-API's
-    /// H.264 and H.265 read). A deeper buffer lets the encoder predict past a frame a page dropped
-    /// (`LOST_FRAME`, a relay's thinned run) instead of coding a key frame, but every client
+    /// Software and VA-API streams keep one reference frame (`video_reference_frames`); NVENC
+    /// keeps its acknowledged references for loss recovery. A deeper buffer lets the encoder
+    /// predict past a frame a page dropped (`LOST_FRAME`, a relay's thinned run) instead of
+    /// coding a key frame, but every client
     /// decodes against all of it on every frame: at 2560x1600 eight frames cost FFmpeg's decoder
     /// 0.3 ms a frame over one, and a decoder that holds its whole buffer before showing a picture
     /// shows each that many frames later. TCP loses nothing, so over WebSockets a drop is rare and
@@ -2357,8 +2358,22 @@ impl WsService {
             cursor_size_cap_hint: cap,
             cpu_encode_threading: d.cpu_encode_threading,
         };
+        let hardware = if d.use_cpu {
+            None
+        } else {
+            settings().encoder_backends().and_then(|backends| {
+                backends
+                    .get(codec_for_encoder(&d.encoder))
+                    .and_then(|served| served.hardware.clone())
+            })
+        };
         populate_capture_settings(&mut cs, &settings(), &params);
-        cs.video_reference_frames = 1;
+        // NVENC uses its deeper buffer and acknowledged long-term references to repair a
+        // thinned page without an IDR. Only the software and VA-API paths take the latency
+        // trade-off of one reference; an unknown hardware path follows the software fallback.
+        if hardware.as_deref() != Some("nvenc") {
+            cs.video_reference_frames = 1;
+        }
         Some(cs)
     }
 
