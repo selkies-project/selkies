@@ -267,19 +267,7 @@ code, copy, filter, or cost them the same: a stream comes out bit for bit as wit
 filtered on the idle threads of the synchronous lookahead, their border expanded again only where an edge block
 changed. At 2560x1600 a 256x256 change took x264 2.0 ms of a frame where it took 4.1, and a frame that changed whole
 the same as before. A row's run of constant macroblocks is coded at once, the reference's pixels copied for the run
-and only its last macroblock's column cached (a still 2560x1600 frame 0.27 ms where it took 0.41). The macroblocks a
-page scroll moved whole are named to x264 as copies (`X264_MBINFO_COPY` with a vector a macroblock in `mb_copy`;
-`H264EncoderWrapper::copy_hints`) by `encoders/copyhint.rs`, which hashes the luma rows of a few narrow strips of
-each picture and votes, per strip, for the shift that maps its changed rows onto the previous picture's; a hint is
-a candidate, which x264 compares with the previous input it still holds in place before it codes a copy, so a wrong
-one costs that compare alone, and a picture it copied takes none. A macroblock matched whole at an even vector is
-coded as a P_SKIP without analysis where that is the P_SKIP vector, on the same run path as a constant one; one
-matched in luma alone, at an odd vector that moved the chroma sites, is coded as a 16x16 block at the vector, or a
-P_SKIP where x264's own probe finds its residual quantizes away. The lookahead keeps its own search, so the rate
-control sees the frame it saw without hints (its lowres search reads a scroll as new picture and a constant-quality
-session codes it coarse, which holds the bandwidth of a scroll where a hinted estimate raised it by half). At one
-quantizer a 24-pixel scroll took x264 0.95 ms of a frame where it took 1.38, and a 120-pixel one, past the search's
-reach, 2.42 ms and 29 kB where it took 2.76 and 57; the stream's level bounds the vectors, so a capture whose level admits 128 rows takes no hint past that.
+and only its last macroblock's column cached (a still 2560x1600 frame 0.27 ms where it took 0.41).
 An 8-bit 4:2:0 picture reaches x264 as NV12 laid out as its own frames (`Nv12Planes`, from
 `x264_param_input_layout`), which it encodes where it lies instead of copying it (`X264_CSP_IN_PLACE`) and reads through the
 next encode as the previous input, so the CPU path converts into two pictures in turn and the X11 capture keeps that

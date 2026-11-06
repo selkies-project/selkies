@@ -21,8 +21,6 @@ use super::codec::{
     push_video_header,
 };
 #[cfg(feature = "gpl")]
-use super::copyhint;
-#[cfg(feature = "gpl")]
 use super::frame_rate::FrameRate;
 use super::reference::Reference;
 #[cfg(feature = "gpl")]
@@ -490,8 +488,6 @@ pub struct H264EncoderWrapper {
     /// The next frame's macroblocks that did not change (`constant_blocks`), as x264's
     /// `mb_info` flags; empty where the source cannot say.
     mb_info: Vec<u8>,
-    /// The vector of each macroblock `mb_info` marks a copy (`copy_hints`), for the next encode.
-    mb_copy: Vec<[i16; 2]>,
     /// The picture x264 still reads after its last encode (`held_input`).
     held_input: Option<*const u8>,
 }
@@ -807,7 +803,6 @@ impl H264EncoderWrapper {
                     rf_constant: param.rc.f_rf_constant as f64,
                     quant_offsets: Vec::new(),
                     mb_info: Vec::new(),
-                    mb_copy: Vec::new(),
                     held_input: None,
                 })
             }
@@ -979,34 +974,6 @@ impl H264EncoderWrapper {
                 0
             }
         }));
-    }
-
-    /// Name the macroblocks of the next frame whose picture is the previous input's moved by a
-    /// whole-pixel vector (`vectors`, in raster order, as `copyhint::macroblock_vectors` fills
-    /// them), which x264 compares with the picture it holds in place (`held_input`) and codes as
-    /// copies of its reconstruction at that vector without a search where they match, as it
-    /// codes constant ones. Follows `constant_blocks`, whose macroblocks take no vector, or
-    /// stands alone where the source reports no change; the hints last one encode.
-    pub fn copy_hints(&mut self, vectors: &[Option<(i16, i16)>]) {
-        self.mb_copy.clear();
-        if self.mb_info.is_empty() {
-            self.mb_info.resize(vectors.len(), 0);
-        }
-        if vectors.len() != self.mb_info.len() {
-            return;
-        }
-        self.mb_copy.extend(
-            vectors
-                .iter()
-                .zip(&mut self.mb_info)
-                .map(|(v, info)| match v {
-                    Some((dx, dy)) if *info == 0 => {
-                        *info = x264_sys::X264_MBINFO_COPY as u8;
-                        [*dx, *dy]
-                    }
-                    _ => [0, 0],
-                }),
-        );
     }
 
     /// Put the session's own rate and VBV buffer back after a held key frame.
@@ -1196,9 +1163,6 @@ impl H264EncoderWrapper {
             let blocks = (self.width as usize).div_ceil(16) * (self.height as usize).div_ceil(16);
             if self.mb_info.len() == blocks {
                 pic_in.prop.mb_info = self.mb_info.as_mut_ptr();
-                if self.mb_copy.len() == blocks {
-                    pic_in.prop.mb_copy = self.mb_copy.as_mut_ptr();
-                }
             }
 
             let mut pic_out: x264_sys::x264_picture_t = std::mem::zeroed();
@@ -1213,7 +1177,6 @@ impl H264EncoderWrapper {
                 &mut pic_out,
             );
             self.quant_offsets.clear();
-            self.mb_copy.clear();
 
             if frame_size > 0 {
                 // x264 says the quantizer it planned the frame at, while its row-level control
@@ -1380,12 +1343,6 @@ pub struct StripeState {
     /// reading the one before through the next encode (`H264EncoderWrapper::held_input`).
     #[cfg(feature = "gpl")]
     pub nv12: Vec<Nv12Planes>,
-    /// Finds the page scrolls in an 8-bit 4:2:0 x264 session's pictures, and the copy hint of
-    /// each macroblock they give (`copyhint`).
-    #[cfg(feature = "gpl")]
-    pub scroll: copyhint::ScrollDetector,
-    #[cfg(feature = "gpl")]
-    pub hints: Vec<Option<(i16, i16)>>,
     pub packet_buf: Vec<u8>,
     pub last_hash: u64,
     pub consecutive_changes: u32,
@@ -2436,31 +2393,6 @@ pub fn encode_cpu_from(
                             width_usize, actual_height, e
                         );
                         return None;
-                    }
-
-                    // A picture x264 encodes in place is searched for the page scrolls it
-                    // carries, whose macroblocks x264 then codes as copies rather than searching
-                    // for them, verifying each against the picture it holds.
-                    if let Some(p) = planes.or(own.map(|i| &stripe_state.nv12[i])) {
-                        let changed = (!hash_damage).then(|| {
-                            stripe_state.ledger.unchanged().map(|u| !u).collect::<Vec<bool>>()
-                        });
-                        let (luma, _) = p.planes();
-                        stripe_state.scroll.detect(
-                            luma,
-                            p.stride[0],
-                            p.width,
-                            p.height,
-                            changed.as_deref(),
-                        );
-                        copyhint::macroblock_vectors(
-                            p.width,
-                            p.height,
-                            changed.as_deref(),
-                            &stripe_state.scroll,
-                            &mut stripe_state.hints,
-                        );
-                        enc.copy_hints(&stripe_state.hints);
                     }
 
                     let bytes = |plane: &[u16]| unsafe {
@@ -3862,94 +3794,6 @@ mod tests {
             );
         }
         assert!(a == b, "the stream the copy codes");
-    }
-
-    /// x264 codes the macroblocks a copy hint names, checked against the picture it holds in
-    /// place, as copies of its reconstruction at that vector: a page of rows unlike one another
-    /// over a blank one, scrolled further than the search reaches but within the level's vector
-    /// range, codes in a fraction of the bytes at the same quantizer once the detector hints the
-    /// scroll, since the rows the scroll brings in are blank, and decodes as close to the source.
-    #[cfg(feature = "gpl")]
-    #[test]
-    fn x264_codes_hinted_scrolls_as_copies() {
-        use super::{H264EncoderWrapper, Nv12Planes};
-        use crate::encoders::copyhint::{ScrollDetector, macroblock_vectors, page, window};
-        use openh264::decoder::Decoder;
-        use openh264::formats::YUVSource;
-        let (w, h) = (1280usize, 720usize);
-        let mut doc = page(w, 2 * h, 21);
-        doc[w * h..].fill(128);
-        let tops = [0usize, 80, 240, 480];
-        let blocks = (w / 16) * (h / 16);
-        let encode = |hinted: bool| -> (usize, f64) {
-            let mut enc =
-                H264EncoderWrapper::new(w as i32, h as i32, 25, false, 30.0, 1, false, 0, 0, 0, 0)
-                    .expect("x264 init");
-            let mut pictures = [Nv12Planes::new(w, h), Nv12Planes::new(w, h)];
-            let mut detector = ScrollDetector::default();
-            let mut hints = Vec::new();
-            let (mut bytes, mut stream) = (0usize, Vec::new());
-            for (n, &top) in tops.iter().enumerate() {
-                let luma = window(&doc, w, top, h);
-                let picture = &mut pictures[n % 2];
-                let stride = picture.stride[0];
-                let (y, uv) = picture.planes_mut();
-                for row in 0..h {
-                    y[row * stride..row * stride + w]
-                        .copy_from_slice(&luma[row * w..(row + 1) * w]);
-                }
-                uv.fill(128);
-                let picture = &pictures[n % 2];
-                enc.constant_blocks(std::iter::repeat_n(false, blocks));
-                if hinted {
-                    let (y, _) = picture.planes();
-                    detector.detect(y, stride, w, h, None);
-                    let hinted = macroblock_vectors(w, h, None, &detector, &mut hints);
-                    assert!(n == 0 || hinted > blocks / 2, "frame {n}: {hinted} hints");
-                    enc.copy_hints(&hints);
-                }
-                enc.hold_quantizer(25);
-                let mut out = Vec::new();
-                assert!(enc.encode_nv12_with_headers(picture, n as u16, n == 0, true, &mut out));
-                if n > 0 {
-                    bytes += out.len();
-                }
-                stream.extend_from_slice(&out);
-            }
-            let mut dec = Decoder::new().expect("decoder");
-            let mut last = None;
-            for nal in openh264::nal_units(&stream) {
-                if let Ok(Some(frame)) = dec.decode(nal) {
-                    let (fw, fh) = frame.dimensions();
-                    let mut luma = vec![0u8; fw * fh];
-                    let (ys, _, _) = frame.strides();
-                    for row in 0..fh {
-                        luma[row * fw..(row + 1) * fw]
-                            .copy_from_slice(&frame.y()[row * ys..row * ys + fw]);
-                    }
-                    last = Some(luma);
-                }
-            }
-            let last = last.expect("a decoded frame");
-            let source = window(&doc, w, tops[tops.len() - 1], h);
-            let mse = last
-                .iter()
-                .zip(&source)
-                .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-                .sum::<f64>()
-                / (w * h) as f64;
-            (bytes, 10.0 * (255.0f64 * 255.0 / mse).log10())
-        };
-        let (searched, searched_psnr) = encode(false);
-        let (hinted, hinted_psnr) = encode(true);
-        assert!(
-            hinted * 8 < searched,
-            "hinted {hinted} bytes against {searched} searched"
-        );
-        assert!(
-            hinted_psnr > searched_psnr - 1.0 && hinted_psnr > 30.0,
-            "hinted {hinted_psnr:.1} dB against {searched_psnr:.1} searched"
-        );
     }
 }
 
