@@ -318,7 +318,7 @@ pub trait SenderTransport {
     }
 
     /// Protect and send one padding packet `padding_room` admitted, on the pacer's credit.
-    fn send_padding(&mut self, _packet: Datagram<'_>, _now: f64) {}
+    fn send_padding(&mut self, _packet: Datagram<'_>, _twcc_seq: u16, _now: f64) {}
 }
 
 /// What the engine learns from a sender and answers it. Every method has a default that
@@ -717,7 +717,7 @@ impl RtpSender {
                 payload: packet.payload.pieces(),
             };
             sent += datagram.len();
-            transport.send_padding(datagram, now);
+            transport.send_padding(datagram, seq, now);
             self.header_buf = header;
         }
         sent
