@@ -52,6 +52,12 @@ pub struct FakeCapture {
     pub geometry: Mutex<RealizedGeometry>,
     /// The recorded `(state, last_error)`.
     pub state: Mutex<(String, Option<String>)>,
+    /// The encoder the fake capture settled on.
+    pub info: Mutex<Option<StreamInfo>>,
+    /// Select the encoder afresh from every start's settings.
+    pub reselect_backend: Mutex<bool>,
+    /// Delay the actual encoder report read.
+    pub info_delay: Mutex<Duration>,
 }
 
 impl Default for FakeCapture {
@@ -65,6 +71,9 @@ impl Default for FakeCapture {
             fail_start: Mutex::default(),
             geometry: Mutex::new(Ok(None)),
             state: Mutex::new(("running".into(), None)),
+            info: Mutex::new(None),
+            reselect_backend: Mutex::new(false),
+            info_delay: Mutex::new(Duration::ZERO),
         }
     }
 }
@@ -116,7 +125,8 @@ impl FakeCapture {
 
 impl StreamSource for FakeCapture {
     fn stream_info(&self) -> Option<StreamInfo> {
-        None
+        std::thread::sleep(*self.info_delay.lock());
+        self.info.lock().clone()
     }
 
     fn stream_stats(&self) -> Option<StreamStats> {
@@ -130,6 +140,26 @@ impl CaptureHandle for FakeCapture {
             return Err("no encoder".into());
         }
         self.note(format!("start {}x{}", settings.width, settings.height));
+        if *self.reselect_backend.lock() {
+            let software = settings.use_cpu
+                || settings.encode_node_index == -1
+                || settings.video_bit_depth >= 10;
+            *self.info.lock() = Some(StreamInfo {
+                info: pixelflux::report::StreamInfo {
+                    encoder: if software { "x264" } else { "NVENC" }.into(),
+                    hardware: !software,
+                    encoder_reason: if software {
+                        "simulated software fallback".into()
+                    } else {
+                        String::new()
+                    },
+                    codec: "h264",
+                    bit_depth: settings.video_bit_depth as u32,
+                    ..Default::default()
+                },
+                renderer: None,
+            });
+        }
         self.starts.lock().push(settings);
         *self.capturing.lock() = true;
         Ok(())

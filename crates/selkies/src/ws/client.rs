@@ -817,6 +817,7 @@ pub(crate) mod testing {
     /// a transport's flow control; the far side takes `rate` bytes a second.
     pub struct FakeSocket {
         pub client: Arc<Client>,
+        pub hold_stream_info: Arc<AtomicBool>,
         pub writes: Writes,
         task: tokio::task::JoinHandle<()>,
     }
@@ -845,6 +846,8 @@ pub(crate) mod testing {
                 liveness,
             );
             let writes = Arc::new(Mutex::new(Vec::new()));
+            let hold_stream_info = Arc::new(AtomicBool::new(false));
+            let task_hold_stream_info = hold_stream_info.clone();
             let task_writes = writes.clone();
             let task_link = link.clone();
             let task_client = client.clone();
@@ -890,6 +893,11 @@ pub(crate) mod testing {
                             break Ok(());
                         }
                     };
+                    while matches!(&out.frame, Frame::Text(t) if t.contains("\"stream_info\""))
+                        && task_hold_stream_info.load(Ordering::Relaxed)
+                    {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
                     if let Some(done) = out.done {
                         let _ = done.send(result);
                     }
@@ -907,6 +915,7 @@ pub(crate) mod testing {
             });
             FakeSocket {
                 client,
+                hold_stream_info,
                 writes,
                 task,
             }
