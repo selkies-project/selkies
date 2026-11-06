@@ -37,7 +37,10 @@ use std::ffi::CString;
 #[cfg(feature = "gpl")]
 use std::ptr;
 use std::sync::Arc;
-use yuv::{BufferStoreMut, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix};
+use yuv::{
+    BufferStoreMut, YuvBiPlanarImageMut, YuvConversionMode, YuvPlanarImageMut, YuvRange,
+    YuvStandardMatrix,
+};
 
 /// Upper bound on the horizontal stripes the CPU encoder splits a frame into, so the
 /// persistent per-stripe state vector can be reserved to a fixed capacity once, up front.
@@ -150,21 +153,15 @@ pub(crate) fn convert_to_yuv_mt(
         }
     };
 
-    let band_h = ((height / bands.max(1)) & !1).max(2);
-    if bands <= 1 || height <= band_h {
+    let heights = band_heights(height, bands);
+    if heights.len() <= 1 {
         return convert_band(src, y_buf, u_buf, v_buf, height);
     }
 
     let uv_rows = |rows: usize| if i444 { rows } else { rows / 2 };
     let mut jobs = Vec::new();
     let (mut src_rest, mut y_rest, mut u_rest, mut v_rest) = (src, y_buf, u_buf, v_buf);
-    let mut row = 0;
-    while row < height {
-        let h = if height - row < band_h + 2 {
-            height - row
-        } else {
-            band_h
-        };
+    for h in heights {
         let (src_band, s_next) = src_rest.split_at(h * src_stride as usize);
         let (y_band, y_next) = y_rest.split_at_mut(h * y_stride);
         let (u_band, u_next) = u_rest.split_at_mut(uv_rows(h) * uv_stride);
@@ -173,13 +170,90 @@ pub(crate) fn convert_to_yuv_mt(
         y_rest = y_next;
         u_rest = u_next;
         v_rest = v_next;
-        row += h;
         jobs.push((src_band, y_band, u_band, v_band, h));
     }
     jobs.into_par_iter()
         .map(|(src_band, y_band, u_band, v_band, h)| {
             convert_band(src_band, y_band, u_band, v_band, h)
         })
+        .collect::<Result<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+/// The rows of each band a conversion of `height` rows splits into for up to `bands` threads
+/// (`convert_to_yuv_mt`): `height / bands` floored to an even number and at least 2, the last band
+/// taking the rest wherever fewer than a band and 2 rows would be left after it. One band where
+/// `bands <= 1` or the image fits one.
+fn band_heights(height: usize, bands: usize) -> Vec<usize> {
+    let band_h = ((height / bands.max(1)) & !1).max(2);
+    if bands <= 1 || height <= band_h {
+        return vec![height];
+    }
+    let mut heights = Vec::with_capacity(bands + 1);
+    let mut row = 0;
+    while row < height {
+        let h = if height - row < band_h + 2 {
+            height - row
+        } else {
+            band_h
+        };
+        heights.push(h);
+        row += h;
+    }
+    heights
+}
+
+/// Convert a packed BGRA buffer to 8-bit 4:2:0 BT.709 limited range as NV12, a luma plane and
+/// an interleaved chroma one `strides` bytes a row, the picture x264 encodes in place
+/// (`Nv12Planes`), in the bands `convert_to_yuv_mt` splits it into. Its samples are the ones
+/// `convert_to_yuv_mt` writes to I420, the chroma interleaved.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn convert_to_nv12_mt(
+    src: &[u8],
+    src_stride: u32,
+    width: usize,
+    height: usize,
+    y_buf: &mut [u8],
+    uv_buf: &mut [u8],
+    strides: (usize, usize),
+    bands: usize,
+) -> Result<(), yuv::YuvError> {
+    let (y_stride, uv_stride) = strides;
+    let convert_band = |src_band: &[u8], y: &mut [u8], uv: &mut [u8], h: usize| {
+        let mut img = YuvBiPlanarImageMut {
+            y_plane: BufferStoreMut::Borrowed(y),
+            y_stride: y_stride as u32,
+            uv_plane: BufferStoreMut::Borrowed(uv),
+            uv_stride: uv_stride as u32,
+            width: width as u32,
+            height: h as u32,
+        };
+        yuv::bgra_to_yuv_nv12(
+            &mut img,
+            src_band,
+            src_stride,
+            YuvRange::Limited,
+            YuvStandardMatrix::Bt709,
+            YuvConversionMode::Fast,
+        )
+    };
+    let heights = band_heights(height, bands);
+    if heights.len() <= 1 {
+        return convert_band(src, y_buf, uv_buf, height);
+    }
+    let mut jobs = Vec::with_capacity(heights.len());
+    let (mut src_rest, mut y_rest, mut uv_rest) = (src, y_buf, uv_buf);
+    for h in heights {
+        let (src_band, s_next) = src_rest.split_at(h * src_stride as usize);
+        let (y_band, y_next) = y_rest.split_at_mut(h * y_stride);
+        let (uv_band, uv_next) = uv_rest.split_at_mut(h / 2 * uv_stride);
+        src_rest = s_next;
+        y_rest = y_next;
+        uv_rest = uv_next;
+        jobs.push((src_band, y_band, uv_band, h));
+    }
+    jobs.into_par_iter()
+        .map(|(src_band, y_band, uv_band, h)| convert_band(src_band, y_band, uv_band, h))
         .collect::<Result<Vec<()>, _>>()
         .map(|_| ())
 }
@@ -297,8 +371,8 @@ pub(crate) fn convert_to_yuv10_mt(
         }
     };
 
-    let band_h = ((height / bands.max(1)) & !1).max(2);
-    if bands <= 1 || height <= band_h {
+    let heights = band_heights(height, bands);
+    if heights.len() <= 1 {
         convert_band(src, y_buf, u_buf, v_buf, height);
         return;
     }
@@ -306,12 +380,7 @@ pub(crate) fn convert_to_yuv10_mt(
     let mut jobs = Vec::new();
     let (mut src_rest, mut y_rest, mut u_rest, mut v_rest) = (src, y_buf, u_buf, v_buf);
     let mut row = 0;
-    while row < height {
-        let h = if height - row < band_h + 2 {
-            height - row
-        } else {
-            band_h
-        };
+    for h in heights {
         let last = row + h >= height;
         let take = |len: usize, rows: usize, stride: usize| if last { len } else { rows * stride };
         let (src_band, s_next) = src_rest.split_at(take(src_rest.len(), h, src_stride));
@@ -419,6 +488,19 @@ pub struct H264EncoderWrapper {
     /// The next frame's macroblocks that did not change (`constant_blocks`), as x264's
     /// `mb_info` flags; empty where the source cannot say.
     mb_info: Vec<u8>,
+    /// The picture x264 still reads after its last encode (`held_input`).
+    held_input: Option<*const u8>,
+}
+
+/// The planes of a picture handed to x264: 4:2:0 or 4:4:4 planes of either depth, each its
+/// stride in bytes, or an 8-bit 4:2:0 picture as NV12.
+#[cfg(feature = "gpl")]
+enum Input<'a> {
+    Planar {
+        planes: [&'a [u8]; 3],
+        strides: [i32; 3],
+    },
+    Nv12(&'a Nv12Planes),
 }
 
 #[cfg(feature = "gpl")]
@@ -721,6 +803,7 @@ impl H264EncoderWrapper {
                     rf_constant: param.rc.f_rf_constant as f64,
                     quant_offsets: Vec::new(),
                     mb_info: Vec::new(),
+                    held_input: None,
                 })
             }
         }
@@ -954,36 +1037,73 @@ impl H264EncoderWrapper {
         omit_headers: bool,
         output_buf: &mut Vec<u8>,
     ) -> bool {
-        let key_budget =
-            self.is_cbr && force_idr && self.held_qp.is_some() && self.open_for_held_key();
-        let coded = self.encode_picture(
-            y,
-            u,
-            v,
-            y_stride,
-            u_stride,
-            v_stride,
+        self.encode_input(
+            Input::Planar {
+                planes: [y, u, v],
+                strides: [y_stride, u_stride, v_stride],
+            },
             frame_id,
             force_idr,
             omit_headers,
             output_buf,
-        );
+        )
+    }
+
+    /// `encode_with_headers` for an 8-bit 4:2:0 session's NV12 picture, which x264 encodes in
+    /// place where it is laid out for it: x264 reads it through the next encode, which takes it
+    /// as the previous input, so it is left unchanged until that encode returns or until
+    /// `release_input` (`held_input`).
+    pub fn encode_nv12_with_headers(
+        &mut self,
+        planes: &Nv12Planes,
+        frame_id: u16,
+        force_idr: bool,
+        omit_headers: bool,
+        output_buf: &mut Vec<u8>,
+    ) -> bool {
+        self.encode_input(
+            Input::Nv12(planes),
+            frame_id,
+            force_idr,
+            omit_headers,
+            output_buf,
+        )
+    }
+
+    /// The picture x264 still reads, as the previous input, after its last encode returned: the
+    /// [`Nv12Planes::id`] of the last one it was handed in place, `None` where the last encode
+    /// copied its picture.
+    pub fn held_input(&self) -> Option<*const u8> {
+        self.held_input
+    }
+
+    /// Stop x264 reading the picture it holds (`held_input`), so its buffers can change.
+    pub fn release_input(&mut self) {
+        unsafe { x264_sys::x264_encoder_release_input(self.encoder) };
+        self.held_input = None;
+    }
+
+    fn encode_input(
+        &mut self,
+        input: Input<'_>,
+        frame_id: u16,
+        force_idr: bool,
+        omit_headers: bool,
+        output_buf: &mut Vec<u8>,
+    ) -> bool {
+        let key_budget =
+            self.is_cbr && force_idr && self.held_qp.is_some() && self.open_for_held_key();
+        let coded = self.encode_picture(input, frame_id, force_idr, omit_headers, output_buf);
         if key_budget {
             self.restore_rate();
         }
         coded
     }
 
-    /// `encode_with_headers` past the choice of session.
-    #[allow(clippy::too_many_arguments)]
+    /// `encode_input` past the choice of session.
     fn encode_picture(
         &mut self,
-        y: &[u8],
-        u: &[u8],
-        v: &[u8],
-        y_stride: i32,
-        u_stride: i32,
-        v_stride: i32,
+        input: Input<'_>,
         frame_id: u16,
         force_idr: bool,
         omit_headers: bool,
@@ -993,22 +1113,40 @@ impl H264EncoderWrapper {
             let mut pic_in: x264_sys::x264_picture_t = std::mem::zeroed();
             x264_sys::x264_picture_init(&mut pic_in);
 
-            pic_in.img.i_csp = (if self.is_i444 {
-                x264_sys::X264_CSP_I444
-            } else {
-                x264_sys::X264_CSP_I420
-            } | if self.bit_depth > 8 {
-                x264_sys::X264_CSP_HIGH_DEPTH
-            } else {
-                0
-            }) as i32;
-            pic_in.img.i_plane = 3;
-            pic_in.img.plane[0] = y.as_ptr() as *mut u8;
-            pic_in.img.plane[1] = u.as_ptr() as *mut u8;
-            pic_in.img.plane[2] = v.as_ptr() as *mut u8;
-            pic_in.img.i_stride[0] = y_stride;
-            pic_in.img.i_stride[1] = u_stride;
-            pic_in.img.i_stride[2] = v_stride;
+            self.held_input = None;
+            match input {
+                Input::Planar { planes, strides } => {
+                    pic_in.img.i_csp = (if self.is_i444 {
+                        x264_sys::X264_CSP_I444
+                    } else {
+                        x264_sys::X264_CSP_I420
+                    } | if self.bit_depth > 8 {
+                        x264_sys::X264_CSP_HIGH_DEPTH
+                    } else {
+                        0
+                    }) as i32;
+                    pic_in.img.i_plane = 3;
+                    for p in 0..3 {
+                        pic_in.img.plane[p] = planes[p].as_ptr() as *mut u8;
+                        pic_in.img.i_stride[p] = strides[p];
+                    }
+                }
+                Input::Nv12(nv12) => {
+                    let in_place = if nv12.in_place {
+                        x264_sys::X264_CSP_IN_PLACE
+                    } else {
+                        0
+                    };
+                    pic_in.img.i_csp = (x264_sys::X264_CSP_NV12 | in_place) as i32;
+                    pic_in.img.i_plane = 2;
+                    let (y, uv) = nv12.planes();
+                    pic_in.img.plane[0] = y.as_ptr() as *mut u8;
+                    pic_in.img.plane[1] = uv.as_ptr() as *mut u8;
+                    pic_in.img.i_stride[0] = nv12.stride[0] as i32;
+                    pic_in.img.i_stride[1] = nv12.stride[1] as i32;
+                    self.held_input = nv12.in_place.then(|| nv12.id());
+                }
+            }
             pic_in.i_pts = self.references.next_pts() as i64;
             pic_in.i_type = if force_idr || !self.references.has_reference() {
                 x264_sys::X264_TYPE_IDR
@@ -1111,8 +1249,9 @@ impl H264EncoderWrapper {
 /// unchanged one is skipped on its own, which only works if each carries its *own* cross-frame
 /// history. So one instance lives per region for the whole session and nothing in it is rebuilt or
 /// recomputed from scratch each frame:
-/// - **Reused buffers**: `y_buf` / `u_buf` / `v_buf` hold the frame's YUV planes and `packet_buf`
-///   the encoded output, grown in place rather than reallocated per frame.
+/// - **Reused buffers**: `nv12` holds an 8-bit 4:2:0 x264 frame's pictures, `y_buf` / `u_buf` /
+///   `v_buf` and `yuv16` another frame's YUV planes, and `packet_buf` the encoded output, grown
+///   in place rather than reallocated per frame.
 /// - **Encoder**: `h264_encoder` is the software H.264 session — libx264 in a `gpl` build,
 ///   OpenH264 otherwise — reused until its geometry (or, for x264, chroma format) changes.
 /// - **Cleanup / recovery**: `no_motion_frame_count` counts consecutive static frames,
@@ -1200,6 +1339,10 @@ pub struct StripeState {
     /// The planes of a 10-bit frame, as 16-bit samples.
     #[cfg(feature = "gpl")]
     pub yuv16: [Vec<u16>; 3],
+    /// The two pictures an 8-bit 4:2:0 x264 session converts its frames into in turn, x264
+    /// reading the one before through the next encode (`H264EncoderWrapper::held_input`).
+    #[cfg(feature = "gpl")]
+    pub nv12: Vec<Nv12Planes>,
     pub packet_buf: Vec<u8>,
     pub last_hash: u64,
     pub consecutive_changes: u32,
@@ -1502,7 +1645,10 @@ fn ledger_frame(
 ///    - **H.264**: the encoder is reused unless the width, height, or (x264) chroma format or
 ///      depth changed, in which case it is rebuilt and an IDR forced; otherwise CRF and rate are
 ///      reconfigured live. With libx264, ARGB is converted to YUV here (a conversion failure skips
-///      the frame rather than encoding garbage) and the video header is emitted; OpenH264 converts
+///      the frame rather than encoding garbage) and the video header is emitted; an 8-bit 4:2:0
+///      frame is converted to NV12 laid out as x264's own frames, which x264 encodes where it
+///      lies instead of copying it, into the session's two pictures in turn, since x264 reads the
+///      one before through the next encode; OpenH264 converts
 ///      and frames inside `encode_host_argb` with the same header layout, and encodes a 4:4:4
 ///      request 4:2:0 (said once per process). The live CBR budget is recomputed here from the
 ///      bitrate/fps (`rate_control`) so it rescales with live changes.
@@ -1542,26 +1688,126 @@ pub fn encode_cpu(
     )
 }
 
-/// 8-bit 4:2:0 planes of a whole frame that its capture converted itself, `y_stride` and
-/// `uv_stride` bytes a row: the x264 session encodes them in place of converting the packed
-/// frame (`encode_cpu_from`).
-#[derive(Clone, Copy)]
-pub struct HostI420<'a> {
-    pub y: &'a [u8],
-    pub u: &'a [u8],
-    pub v: &'a [u8],
-    pub y_stride: usize,
-    pub uv_stride: usize,
+/// A frame's 8-bit 4:2:0 picture as NV12, a luma plane and an interleaved chroma one, laid out
+/// as an x264 session encodes it in place (`x264_param_input_layout`): each plane `stride` bytes
+/// a row within a buffer padded and aligned as x264's own frames are, which x264 reads without
+/// copying it and writes the padding of. Tightly packed where the build has no x264, whose
+/// OpenH264 session takes no such picture.
+pub struct Nv12Planes {
+    buf: Vec<u8>,
+    start: [usize; 2],
+    pub stride: [usize; 2],
+    pub width: usize,
+    pub height: usize,
+    #[cfg(feature = "gpl")]
+    in_place: bool,
 }
 
-/// [`encode_cpu`] with the frame's planes already converted (`planes`): an 8-bit 4:2:0 x264
-/// session encodes them and leaves `raw_pixels` unread, which a capture converting straight from
-/// the screen's memory never wrote.
+impl Nv12Planes {
+    /// Black planes for a `width` x `height` picture, both even.
+    pub fn new(width: usize, height: usize) -> Self {
+        let layout = x264_input_layout(width, height);
+        #[cfg(feature = "gpl")]
+        let in_place = layout.is_some();
+        let layout = layout.unwrap_or(InputLayout {
+            stride: [width, width],
+            offset: [0, 0],
+            size: [width * height, width * height / 2],
+        });
+        const ALIGN: usize = 64;
+        let luma = layout.size[0].next_multiple_of(ALIGN);
+        let mut buf = vec![128u8; ALIGN + luma + layout.size[1]];
+        let base = buf.as_ptr().align_offset(ALIGN);
+        buf[base..base + layout.size[0]].fill(16);
+        Self {
+            buf,
+            start: [base + layout.offset[0], base + luma + layout.offset[1]],
+            stride: layout.stride,
+            width,
+            height,
+            #[cfg(feature = "gpl")]
+            in_place,
+        }
+    }
+
+    /// The luma and chroma planes from their first pixel, `stride` bytes a row for the picture's
+    /// rows.
+    pub fn planes(&self) -> (&[u8], &[u8]) {
+        let (y, uv) = self.extents();
+        (&self.buf[y], &self.buf[uv])
+    }
+
+    /// [`Self::planes`], to write.
+    pub fn planes_mut(&mut self) -> (&mut [u8], &mut [u8]) {
+        let (y, uv) = self.extents();
+        let (head, tail) = self.buf.split_at_mut(uv.start);
+        (&mut head[y], &mut tail[..uv.len()])
+    }
+
+    /// The address of the first luma pixel, which names the picture to the session holding it
+    /// (`H264EncoderWrapper::held_input`).
+    pub fn id(&self) -> *const u8 {
+        self.buf[self.start[0]..].as_ptr()
+    }
+
+    fn extents(&self) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+        let y = self.start[0]..self.start[0] + self.stride[0] * self.height;
+        let uv = self.start[1]..self.start[1] + self.stride[1] * self.height / 2;
+        (y, uv)
+    }
+}
+
+/// Where each plane of an NV12 picture lies in its buffer: `stride` bytes a row, the first pixel
+/// `offset` bytes in, the buffer `size` bytes.
+struct InputLayout {
+    stride: [usize; 2],
+    offset: [usize; 2],
+    size: [usize; 2],
+}
+
+/// The planes an 8-bit 4:2:0 x264 session of `width` x `height` encodes in place, which the
+/// library lays out for the CPU it runs on.
+#[cfg(feature = "gpl")]
+fn x264_input_layout(width: usize, height: usize) -> Option<InputLayout> {
+    unsafe {
+        let mut param: x264_sys::x264_param_t = std::mem::zeroed();
+        x264_sys::x264_param_default(&mut param);
+        param.i_width = width as i32;
+        param.i_height = height as i32;
+        param.i_csp = x264_sys::X264_CSP_I420 as i32;
+        param.i_bitdepth = 8;
+        let (mut stride, mut offset, mut size) = ([0i32; 2], [0i32; 2], [0i64; 2]);
+        if x264_sys::x264_param_input_layout(
+            &param,
+            stride.as_mut_ptr(),
+            offset.as_mut_ptr(),
+            size.as_mut_ptr(),
+        ) < 0
+        {
+            return None;
+        }
+        Some(InputLayout {
+            stride: stride.map(|v| v as usize),
+            offset: offset.map(|v| v as usize),
+            size: size.map(|v| v as usize),
+        })
+    }
+}
+
+#[cfg(not(feature = "gpl"))]
+fn x264_input_layout(_width: usize, _height: usize) -> Option<InputLayout> {
+    None
+}
+
+/// [`encode_cpu`] with the frame's picture already converted (`planes`): an 8-bit 4:2:0 x264
+/// session encodes it in place and leaves `raw_pixels` unread, which a capture converting straight
+/// from the screen's memory never wrote. x264 reads the picture through the next encode
+/// ([`held_input`]).
 #[allow(clippy::too_many_arguments)]
 pub fn encode_cpu_from(
     stripes: &mut Vec<StripeState>,
     raw_pixels: &[u8],
-    planes: Option<HostI420<'_>>,
+    planes: Option<&Nv12Planes>,
     width: i32,
     height: i32,
     damage_rects: &[Rectangle<i32, Physical>],
@@ -1571,6 +1817,8 @@ pub fn encode_cpu_from(
     hash_damage: bool,
     requested_idr: bool,
 ) -> Vec<EncodedStripe> {
+    #[cfg(not(feature = "gpl"))]
+    let _ = planes;
     let codec = settings.codec;
     let scheduled = codec.is_video() && crate::pipeline::periodic_idr_due(settings, frame_counter);
     let n_processing_stripes = stripe_count(height, codec);
@@ -2059,11 +2307,39 @@ pub fn encode_cpu_from(
                     let uv_stride =
                         (if video_fullcolor { width_usize } else { width_usize / 2 }) as i32;
                     let wide = bit_depth > 8;
-                    let planes = planes.filter(|_| {
-                        !wide && !video_fullcolor && y_start == 0 && actual_height == height as usize
+                    let nv12 = !wide && !video_fullcolor;
+                    let planes = planes.filter(|p| {
+                        nv12 && y_start == 0 && p.width == width_usize && p.height == actual_height
                     });
+                    // x264 reads the picture it encoded last through this encode, so the frame
+                    // is converted into the session's other one.
+                    let own = if nv12 && planes.is_none() {
+                        let held = enc.held_input();
+                        let buffers = &mut stripe_state.nv12;
+                        buffers.retain(|p| p.width == width_usize && p.height == actual_height);
+                        while buffers.len() < 2 {
+                            buffers.push(Nv12Planes::new(width_usize, actual_height));
+                        }
+                        Some(usize::from(held == Some(buffers[0].id())))
+                    } else {
+                        None
+                    };
                     let conversion_result = if planes.is_some() {
                         Ok(())
+                    } else if let Some(i) = own {
+                        let target = &mut stripe_state.nv12[i];
+                        let strides = (target.stride[0], target.stride[1]);
+                        let (y, uv) = target.planes_mut();
+                        convert_to_nv12_mt(
+                            stripe_bytes,
+                            (width_usize * 4) as u32,
+                            width_usize,
+                            actual_height,
+                            y,
+                            uv,
+                            strides,
+                            csc_bands,
+                        )
                     } else if wide {
                         let [y16, u16, v16] = &mut stripe_state.yuv16;
                         y16.resize(y_size, 0);
@@ -2122,33 +2398,40 @@ pub fn encode_cpu_from(
                     let bytes = |plane: &[u16]| unsafe {
                         std::slice::from_raw_parts(plane.as_ptr().cast::<u8>(), plane.len() * 2)
                     };
-                    let (y_stride, uv_stride) = planes
-                        .map_or((y_stride, uv_stride), |p| (p.y_stride as i32, p.uv_stride as i32));
-                    let (y, u, v, scale) = if let Some(p) = planes {
-                        (p.y, p.u, p.v, 1)
-                    } else if wide {
-                        let [y16, u16, v16] = &stripe_state.yuv16;
-                        (bytes(y16), bytes(u16), bytes(v16), 2)
+                    let coded = if let Some(p) = planes.or(own.map(|i| &stripe_state.nv12[i])) {
+                        enc.encode_nv12_with_headers(
+                            p,
+                            frame_counter,
+                            force_idr,
+                            omit_headers,
+                            &mut stripe_state.packet_buf,
+                        )
                     } else {
-                        (
-                            stripe_state.y_buf.as_slice(),
-                            stripe_state.u_buf.as_slice(),
-                            stripe_state.v_buf.as_slice(),
-                            1,
+                        let (y, u, v, scale) = if wide {
+                            let [y16, u16, v16] = &stripe_state.yuv16;
+                            (bytes(y16), bytes(u16), bytes(v16), 2)
+                        } else {
+                            (
+                                stripe_state.y_buf.as_slice(),
+                                stripe_state.u_buf.as_slice(),
+                                stripe_state.v_buf.as_slice(),
+                                1,
+                            )
+                        };
+                        enc.encode_with_headers(
+                            y,
+                            u,
+                            v,
+                            y_stride * scale,
+                            uv_stride * scale,
+                            uv_stride * scale,
+                            frame_counter,
+                            force_idr,
+                            omit_headers,
+                            &mut stripe_state.packet_buf,
                         )
                     };
-                    if enc.encode_with_headers(
-                        y,
-                        u,
-                        v,
-                        y_stride * scale,
-                        uv_stride * scale,
-                        uv_stride * scale,
-                        frame_counter,
-                        force_idr,
-                        omit_headers,
-                        &mut stripe_state.packet_buf,
-                    ) {
+                    if coded {
                         if hold.is_none() || !video_cbr {
                             stripe_state.rc_bytes = stripe_state.packet_buf.len();
                         }
@@ -2299,6 +2582,31 @@ pub fn invalidate_reference(stripes: &mut [StripeState], frame_id: u16) -> bool 
         forgotten &= enc.invalidate_reference(frame_id);
     }
     forgotten
+}
+
+/// The picture the software H.264 session still reads after its last encode returned
+/// (`H264EncoderWrapper::held_input`), which its owner leaves unchanged: `None` for any other
+/// session.
+pub fn held_input(stripes: &[StripeState]) -> Option<*const u8> {
+    #[cfg(feature = "gpl")]
+    return stripes
+        .iter()
+        .find_map(|s| s.h264_encoder.as_ref()?.held_input());
+    #[cfg(not(feature = "gpl"))]
+    {
+        let _ = stripes;
+        None
+    }
+}
+
+/// Stop the software H.264 session reading the picture it holds ([`held_input`]).
+pub fn release_input(stripes: &mut [StripeState]) {
+    #[cfg(feature = "gpl")]
+    for enc in stripes.iter_mut().filter_map(|s| s.h264_encoder.as_mut()) {
+        enc.release_input();
+    }
+    #[cfg(not(feature = "gpl"))]
+    let _ = stripes;
 }
 
 /// Every consumer holds frame `frame_id`, or where not `held` was sent it: OpenH264 confirms the
@@ -3334,6 +3642,158 @@ mod tests {
                 .expect("a sequence parameter set");
             assert_eq!(sps[1], profile, "the profile declared");
         }
+    }
+
+    /// The NV12 conversion x264 encodes in place writes the samples the I420 one does, its
+    /// chroma interleaved, at any band count and into padded rows.
+    #[test]
+    fn the_nv12_convert_writes_the_i420_samples_interleaved() {
+        use super::{Nv12Planes, convert_to_nv12_mt, convert_to_yuv_mt};
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for (w, h) in [(64usize, 64usize), (130, 66), (1920, 1080)] {
+            let bgra: Vec<u8> = (0..w * h * 4)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    seed as u8
+                })
+                .collect();
+            let (mut yp, mut up, mut vp) =
+                (vec![0u8; w * h], vec![0u8; w * h / 4], vec![0u8; w * h / 4]);
+            convert_to_yuv_mt(
+                &bgra,
+                (w * 4) as u32,
+                w,
+                h,
+                false,
+                false,
+                false,
+                false,
+                &mut yp,
+                &mut up,
+                &mut vp,
+                (w, w / 2),
+                1,
+            )
+            .expect("I420");
+            for bands in [1usize, 4, 7] {
+                let mut nv12 = Nv12Planes::new(w, h);
+                let strides = (nv12.stride[0], nv12.stride[1]);
+                let (y, uv) = nv12.planes_mut();
+                convert_to_nv12_mt(&bgra, (w * 4) as u32, w, h, y, uv, strides, bands)
+                    .expect("NV12");
+                let (y, uv) = nv12.planes();
+                for row in 0..h {
+                    assert_eq!(
+                        &y[row * strides.0..][..w],
+                        &yp[row * w..][..w],
+                        "{w}x{h} luma row {row}"
+                    );
+                }
+                for row in 0..h / 2 {
+                    let line = &uv[row * strides.1..][..w];
+                    let (u, v) = (&up[row * w / 2..][..w / 2], &vp[row * w / 2..][..w / 2]);
+                    assert!(
+                        line.chunks(2)
+                            .zip(u.iter().zip(v))
+                            .all(|(c, (u, v))| c == [*u, *v]),
+                        "{w}x{h} {bands} bands: chroma row {row}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An NV12 picture laid out as x264 asks is encoded where it lies, reading through the next
+    /// encode the picture before (`held_input`), and codes the stream the same planes copied
+    /// as I420 code, across a release.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_encodes_an_nv12_picture_in_place_as_it_codes_a_copy() {
+        use super::{H264EncoderWrapper, Nv12Planes, convert_to_nv12_mt, convert_to_yuv_mt};
+        let (w, h) = (200usize, 120usize);
+        let frames: Vec<Vec<u8>> = (0..6)
+            .map(|f| {
+                (0..w * h * 4)
+                    .map(|i| {
+                        let (x, y) = ((i / 4) % w, (i / 4) / w);
+                        ((x + 3 * f) * 7 + y * 3 + (i % 4) * 50) as u8
+                    })
+                    .collect()
+            })
+            .collect();
+        let open = || {
+            H264EncoderWrapper::new(w as i32, h as i32, 25, false, 30.0, 4, false, 0, 0, 0, 0)
+                .expect("x264 init")
+        };
+        let (mut copied, mut in_place) = (open(), open());
+        let mut pictures = [Nv12Planes::new(w, h), Nv12Planes::new(w, h)];
+        assert!(
+            pictures[0].in_place,
+            "the linked libx264 lays out a picture to encode in place"
+        );
+        for p in &pictures {
+            let (y, uv) = p.planes();
+            assert!(y.as_ptr().addr() % 64 == 0 && uv.as_ptr().addr() % 64 == 0);
+        }
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for (n, bgra) in frames.iter().enumerate() {
+            let (mut yp, mut up, mut vp) =
+                (vec![0u8; w * h], vec![0u8; w * h / 4], vec![0u8; w * h / 4]);
+            convert_to_yuv_mt(
+                bgra,
+                (w * 4) as u32,
+                w,
+                h,
+                false,
+                false,
+                false,
+                false,
+                &mut yp,
+                &mut up,
+                &mut vp,
+                (w, w / 2),
+                1,
+            )
+            .unwrap();
+            let mut out = Vec::new();
+            assert!(copied.encode_with_headers(
+                &yp,
+                &up,
+                &vp,
+                w as i32,
+                (w / 2) as i32,
+                (w / 2) as i32,
+                n as u16,
+                false,
+                true,
+                &mut out,
+            ));
+            a.extend_from_slice(&out);
+
+            let mb_w = w.div_ceil(16) * 16;
+            let picture = &mut pictures[n % 2];
+            let strides = (picture.stride[0], picture.stride[1]);
+            let (y, uv) = picture.planes_mut();
+            convert_to_nv12_mt(bgra, (w * 4) as u32, w, h, y, uv, strides, 2).unwrap();
+            y[mb_w] = !y[w - 1];
+            if n == 4 {
+                in_place.release_input();
+                assert_eq!(in_place.held_input(), None);
+            }
+            let picture = &pictures[n % 2];
+            assert!(in_place.encode_nv12_with_headers(picture, n as u16, false, true, &mut out));
+            b.extend_from_slice(&out);
+            assert_eq!(in_place.held_input(), Some(picture.id()));
+            let (y, _) = picture.planes();
+            assert_eq!(
+                y[mb_w],
+                y[w - 1],
+                "x264 padded the picture where it lies, past its last macroblock"
+            );
+        }
+        assert!(a == b, "the stream the copy codes");
     }
 }
 

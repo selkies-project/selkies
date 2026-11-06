@@ -53,7 +53,7 @@ use crate::pace::{FramePace, TickTrigger};
 
 use crate::CaptureSettings;
 use crate::encoders::overlay::blend_pixel_premultiplied;
-use crate::encoders::software::{EncodedStripe, FrameTiming};
+use crate::encoders::software::{EncodedStripe, FrameTiming, Nv12Planes};
 use crate::pipeline::X11Pipeline;
 use crate::recording_sink::RecordingSink;
 
@@ -767,21 +767,28 @@ struct RawFrame {
     /// fills as it draws (`X11Pipeline::process_reported`), where XDamage can miss directly
     /// rendered GL.
     complete: bool,
-    /// The frame's planes where the capture converted it from the shared framebuffer instead of
-    /// copying its pixels (`FramePlanes` of the surface's index), which `ptr` then does not hold.
-    planes: Option<*const framebuffer::FramePlanes>,
+    /// The frame's picture where the capture converted it from the shared framebuffer instead of
+    /// copying its pixels (the `Nv12Planes` of the surface's index), which `ptr` then does not
+    /// hold.
+    planes: Option<*const Nv12Planes>,
 }
 /// `RawFrame` is `Send`: its raw pointer addresses a pooled shm surface that the pool
 /// guarantees is not reused until the encode thread recycles this frame, so the handle is safe to
 /// move across the capture -> encode thread boundary.
 unsafe impl Send for RawFrame {}
 
-/// Mutex-guarded interior of `FramePool`: the free-surface index list and the single
-/// capture -> encode handoff slot, under one lock so moving a surface between them — acquire,
-/// publish, take, recycle — is always a single atomic step.
+/// Mutex-guarded interior of `FramePool`: the free-surface index list, the single
+/// capture -> encode handoff slot, and the surface the encoder still reads, under one lock so
+/// moving a surface between them — acquire, publish, take, recycle, settle — is always a single
+/// atomic step.
 struct PoolInner {
     free: Vec<usize>,
     slot: Option<RawFrame>,
+    /// The surface whose picture the encoder reads through its next encode, out of `free`
+    /// until a later encode stops reading it (`settle`).
+    held: Option<usize>,
+    /// Whether `drain_for_resize` asks the encode thread to stop reading `held` and return it.
+    release: bool,
 }
 
 /// Demand-driven capture -> encode handoff: a bounded single-slot channel over a fixed set of
@@ -795,6 +802,11 @@ struct PoolInner {
 /// would be discarded, while the next capture still overlaps the current encode (the throughput win).
 /// The encoder therefore only ever sees a contiguous frame stream, keeping the H.264 reference chain
 /// valid.
+///
+/// An x264 session encoding a surface's picture in place reads it through the next encode as
+/// well, so the encode thread keeps that surface (`held`) until an encode no longer reads it: of
+/// the `POOL_N` surfaces one is then held, one encoded, and the third left for the capture to
+/// convert the next frame into while the encode runs, the capture still one frame ahead.
 ///
 /// `generation` is bumped by the capture thread each time the backing shm surfaces are destroyed and
 /// recreated. Published frames carry it so the encode thread rebuilds its pipeline — dropping encoder
@@ -814,6 +826,8 @@ impl FramePool {
             inner: Mutex::new(PoolInner {
                 free: (0..n).collect(),
                 slot: None,
+                held: None,
+                release: false,
             }),
             cv: Condvar::new(),
             stop: AtomicBool::new(false),
@@ -877,12 +891,24 @@ impl FramePool {
     /// Encode: block until a frame is available (`Some`) or stop is signaled (`None`).
     ///
     /// The wait is bounded (re-checking `stop` every 20ms) as defense-in-depth against a lost wakeup,
-    /// so a stop that races the park can never leave the encode thread blocked forever.
-    fn take(&self) -> Option<RawFrame> {
+    /// so a stop that races the park can never leave the encode thread blocked forever. A drain
+    /// waiting for the held surface is answered here: `release` stops the encoder reading it,
+    /// with the lock dropped, and the surface returns to the free list.
+    fn take(&self, mut release: impl FnMut()) -> Option<RawFrame> {
         let mut g = self.inner.lock().unwrap();
         loop {
             if let Some(f) = g.slot.take() {
                 return Some(f);
+            }
+            if std::mem::take(&mut g.release) {
+                drop(g);
+                release();
+                g = self.inner.lock().unwrap();
+                if let Some(idx) = g.held.take() {
+                    g.free.push(idx);
+                }
+                self.cv.notify_all();
+                continue;
             }
             if self.stop.load(Ordering::Acquire) {
                 return None;
@@ -899,12 +925,23 @@ impl FramePool {
         self.cv.notify_all();
     }
 
+    /// Encode: after a frame's encode, return the surfaces `back` to the free list and keep
+    /// `held`, the one whose picture the encoder reads through its next encode, out of it.
+    fn settle(&self, back: &[usize], held: Option<usize>) {
+        let mut g = self.inner.lock().unwrap();
+        g.free.extend_from_slice(back);
+        g.held = held;
+        drop(g);
+        self.cv.notify_all();
+    }
+
     /// Capture: before recreating surfaces (auto-adjust / region resize), reclaim the pending
     /// slot and wait until every surface is back in the free list, so no surface is destroyed while
     /// the encode thread is still reading it.
     ///
     /// Reclaiming the slot returns any un-taken frame to the free list; the loop then waits until
-    /// `free.len() == n`, i.e. the encode thread has finished any in-flight frame. The wait is bounded
+    /// `free.len() == n`, i.e. the encode thread has finished any in-flight frame and, asked
+    /// through `release`, returned the surface its encoder held. The wait is bounded
     /// and also breaks on stop — pool shutdown OR the external `stop` — so a panicked or dead encode
     /// thread that never recycles cannot wedge the capture thread here forever; a requested stop
     /// unblocks it. Returns `true` if it fully drained (safe to recreate surfaces), or `false` if it
@@ -918,6 +955,10 @@ impl FramePool {
         while g.free.len() < n {
             if self.stop.load(Ordering::Acquire) || stop.load(Ordering::Relaxed) {
                 return false;
+            }
+            if g.held.is_some() && !g.release {
+                g.release = true;
+                self.cv.notify_all();
             }
             let (gg, _) = self.cv.wait_timeout(g, Duration::from_millis(20)).unwrap();
             g = gg;
@@ -994,7 +1035,15 @@ fn encode_loop<F>(
     let mut frame_count: u64 = 0;
     let mut stripe_count: u64 = 0;
 
-    while let Some(frame) = pool.take() {
+    // The surface whose picture the session reads through its next encode, and that picture.
+    let mut held: Option<(usize, *const u8)> = None;
+
+    while let Some(frame) = pool.take(|| {
+        if let Some(pl) = pipeline.as_mut() {
+            pl.release_input();
+        }
+        held = None;
+    }) {
         let (fw, fh) = (frame.width as i32, frame.height as i32);
         if pipeline.is_none() || pw != fw || ph != fh || pgen != frame.generation {
             let size_changed = pw != fw || ph != fh;
@@ -1088,17 +1137,14 @@ fn encode_loop<F>(
         let encode_start_ns = crate::wayland::host::now_ns();
         pl.set_link_rate(controls.link_kbps.load(Ordering::Relaxed));
         // SAFETY: the planes belong to the surface this frame holds, which the capture does not
-        // touch again until the frame is recycled below.
-        let planes = frame.planes.map(|p| unsafe { &*p });
-        let mut stripes = if let Some(p) = planes.filter(|_| pl.takes_host_planes()) {
-            let i420 = crate::encoders::software::HostI420 {
-                y: &p.y,
-                u: &p.u,
-                v: &p.v,
-                y_stride: p.y_stride,
-                uv_stride: p.uv_stride,
-            };
-            pl.process_reported_planes(buf, frame.stride, i420, &frame.changed)
+        // touch again until `settle` below returns it, or a later one once the session stops
+        // reading its picture.
+        let planes = frame
+            .planes
+            .map(|p| unsafe { &*p })
+            .filter(|_| pl.takes_host_planes());
+        let mut stripes = if let Some(p) = planes {
+            pl.process_reported_planes(buf, frame.stride, p, &frame.changed)
         } else if frame.complete {
             pl.process_reported(buf, frame.stride, &frame.changed)
         } else {
@@ -1106,7 +1152,20 @@ fn encode_loop<F>(
         };
         FrameTiming::stamp(&mut stripes, frame.captured_ns, encode_start_ns);
         controls.codec.store(pl.codec().id(), Ordering::Relaxed);
-        pool.recycle(frame.idx);
+        let reading = pl.held_input();
+        let keep = match reading {
+            Some(id) if planes.map(Nv12Planes::id) == Some(id) => Some((frame.idx, id)),
+            Some(id) if held.is_some_and(|(_, h)| h == id) => held,
+            _ => None,
+        };
+        let mut back = Vec::with_capacity(2);
+        for idx in std::iter::once(frame.idx).chain(held.map(|(idx, _)| idx)) {
+            if keep.is_none_or(|(k, _)| k != idx) && !back.contains(&idx) {
+                back.push(idx);
+            }
+        }
+        pool.settle(&back, keep.map(|(idx, _)| idx));
+        held = keep;
         if !stripes.is_empty() {
             frame_count += 1;
             stripe_count += stripes.len() as u64;
@@ -1446,7 +1505,7 @@ where
     // Each pool surface's planes, where the pipeline takes them (`Controls::takes_planes`), and
     // whether the last frame was converted into them rather than copied.
     let csc_bands = crate::encoders::session::h264_fullframe_threads(&rsettings).max(1) as usize;
-    let mut planes_pool: Vec<framebuffer::FramePlanes> = Vec::new();
+    let mut planes_pool: Vec<Nv12Planes> = Vec::new();
     let mut planes_dims = (0u16, 0u16);
     let mut planes_mode = false;
     // Frames between root-geometry polls (auto-adjust); ~0.5s at 60fps.
@@ -1609,7 +1668,7 @@ where
                 use_planes && (planes_pool.len() != POOL_N || planes_dims != (cap_w, cap_h));
             if fresh {
                 planes_pool = (0..POOL_N)
-                    .map(|_| framebuffer::FramePlanes::new(cap_w as usize, cap_h as usize))
+                    .map(|_| Nv12Planes::new(cap_w as usize, cap_h as usize))
                     .collect();
                 planes_dims = (cap_w, cap_h);
             }
@@ -1631,20 +1690,16 @@ where
                         } else {
                             grab_frame(&conn, root, surface, cap_x, cap_y, cap_w, cap_h).and_then(
                                 |()| {
-                                    let (ys, uvs) = (planes.y_stride, planes.uv_stride);
-                                    crate::encoders::software::convert_to_yuv_mt(
+                                    let strides = (planes.stride[0], planes.stride[1]);
+                                    let (y, uv) = planes.planes_mut();
+                                    crate::encoders::software::convert_to_nv12_mt(
                                         surface.as_mut_slice(),
                                         stride as u32,
                                         cap_w as usize,
                                         cap_h as usize,
-                                        false,
-                                        false,
-                                        false,
-                                        false,
-                                        &mut planes.y,
-                                        &mut planes.u,
-                                        &mut planes.v,
-                                        (ys, uvs),
+                                        y,
+                                        uv,
+                                        strides,
                                         csc_bands,
                                     )
                                     .map_err(|e| format!("convert: {e:?}"))?;
@@ -1826,8 +1881,7 @@ where
                     captured_ns: crate::wayland::host::now_ns(),
                     changed,
                     complete: shared.is_some(),
-                    planes: use_planes
-                        .then(|| &planes_pool[idx] as *const framebuffer::FramePlanes),
+                    planes: use_planes.then(|| &planes_pool[idx] as *const Nv12Planes),
                 },
                 &controls.stop,
             );
@@ -1960,7 +2014,7 @@ mod pool_tests {
         let stop = AtomicBool::new(false);
         let a = p.acquire(&stop).unwrap();
         assert!(p.publish(dummy(a), &stop));
-        let f = p.take().unwrap();
+        let f = p.take(|| {}).unwrap();
         assert_eq!(f.idx, a);
         p.recycle(f.idx);
         let (x, y, z) = (
@@ -2020,6 +2074,56 @@ mod pool_tests {
         assert!(p.acquire(&stop).is_some());
     }
 
+    /// The surface the encoder still reads stays out of the free list while the others return,
+    /// and comes back once a later encode no longer reads it.
+    #[test]
+    fn a_held_surface_stays_out_until_settled() {
+        let p = FramePool::new(3);
+        let stop = AtomicBool::new(false);
+        let (a, b, c) = (
+            p.acquire(&stop).unwrap(),
+            p.acquire(&stop).unwrap(),
+            p.acquire(&stop).unwrap(),
+        );
+        p.settle(&[b, c], Some(a));
+        let (x, y) = (p.acquire(&stop).unwrap(), p.acquire(&stop).unwrap());
+        assert!(![x, y].contains(&a));
+        stop.store(true, Ordering::Relaxed);
+        assert!(p.acquire(&stop).is_none(), "the held surface is not free");
+        stop.store(false, Ordering::Relaxed);
+        p.settle(&[a, x], Some(y));
+        assert!(p.acquire(&stop).is_some() && p.acquire(&stop).is_some());
+        p.recycle(a);
+        stop.store(true, Ordering::Relaxed);
+        assert!(
+            p.acquire(&stop).is_some() && p.acquire(&stop).is_none(),
+            "a recycle by the capture leaves the held surface held"
+        );
+    }
+
+    /// A drain asks the encode thread, parked in `take`, to stop its encoder reading the held
+    /// surface, which then returns, so the drain completes instead of waiting for a frame that
+    /// cannot come.
+    #[test]
+    fn drain_for_resize_releases_the_held_surface() {
+        let p = Arc::new(FramePool::new(3));
+        let stop = AtomicBool::new(false);
+        let a = p.acquire(&stop).unwrap();
+        p.settle(&[], Some(a));
+        let p2 = p.clone();
+        let drain = thread::spawn(move || {
+            let drained = p2.drain_for_resize(3, &AtomicBool::new(false));
+            let b = p2.acquire(&AtomicBool::new(false)).unwrap();
+            assert!(p2.publish(dummy(b), &AtomicBool::new(false)));
+            drained
+        });
+        let mut released = 0;
+        let f = p.take(|| released += 1).unwrap();
+        assert!(drain.join().unwrap());
+        assert_eq!(released, 1);
+        p.recycle(f.idx);
+    }
+
     /// A surface is held and never recycled (as a dead encode thread would leave it): setting
     /// `stop` unblocks the bounded drain, which reports it did NOT fully drain instead of hanging.
     #[test]
@@ -2049,7 +2153,7 @@ mod pool_tests {
             },
             &stop
         ));
-        let f = p.take().unwrap();
+        let f = p.take(|| {}).unwrap();
         let (last_gen, last_dims) = (f.generation, (f.width, f.height));
         p.recycle(f.idx);
         assert!(p.drain_for_resize(3, &stop));
@@ -2076,7 +2180,7 @@ mod pool_tests {
             },
             &stop
         ));
-        let g = p.take().unwrap();
+        let g = p.take(|| {}).unwrap();
         assert_eq!(
             (g.width, g.height),
             last_dims,
@@ -2104,7 +2208,7 @@ mod pool_tests {
             },
             &stop
         ));
-        let f = p.take().unwrap();
+        let f = p.take(|| {}).unwrap();
         assert_eq!(f.generation, 0);
         p.recycle(f.idx);
         p.bump_generation();
@@ -2116,7 +2220,7 @@ mod pool_tests {
             },
             &stop
         ));
-        assert_eq!(p.take().unwrap().generation, 1);
+        assert_eq!(p.take(|| {}).unwrap().generation, 1);
     }
 }
 
