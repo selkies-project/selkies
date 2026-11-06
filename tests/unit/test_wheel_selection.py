@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from packaging.tags import Tag, sys_tags
+from packaging.utils import parse_wheel_filename
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
@@ -67,7 +68,8 @@ assets = (
 selected = subprocess.run(
     [sys.executable, SELECTOR, "pcmflux"], input=assets, check=True, capture_output=True, text=True
 ).stdout.splitlines()
-expected = [f"https://example.invalid/{PCM} sha256:123"] if "manylinux" in platform else []
+expected = ([f"https://example.invalid/{PCM} sha256:123"]
+            if not parse_wheel_filename(PCM)[3].isdisjoint(sys_tags()) else [])
 check("the CLI preserves only compatible release assets and digests", selected == expected,
       f"running platform {platform}")
 
