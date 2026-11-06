@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  labwc's right-click menu on the desktop, installed as /etc/xdg/labwc/menu.xml;
+  a user's ~/.config/labwc/menu.xml replaces it. It mirrors Openbox's
+  (/etc/xdg/openbox/menu.xml), so the desktop offers the same menu on either
+  backend, with the icons labwc resolves from the icon theme by name. There is
+  no Exit: the compositor is a service of the container, and leaving it only
+  has it started again.
+-->
+<openbox_menu>
+  <menu id="root-menu">
+    <item label="Terminal" icon="utilities-terminal">
+      <action name="Execute"><command>x-terminal-emulator</command></action>
+    </item>
+    <item label="Files" icon="system-file-manager">
+      <action name="Execute"><command>selkies-desktop --files</command></action>
+    </item>
+    <item label="Firefox" icon="firefox">
+      <action name="Execute"><command>firefox</command></action>
+    </item>
+    <item label="Google Chrome" icon="google-chrome">
+      <action name="Execute"><command>google-chrome</command></action>
+    </item>
+    <item label="Text Editor" icon="org.xfce.mousepad">
+      <action name="Execute"><command>mousepad</command></action>
+    </item>
+    <separator />
+    <menu id="selkies-applications" label="Applications" icon="applications-all" execute="selkies-wm-menu --icons" />
+    <menu id="client-list-combined-menu" icon="preferences-system-windows" />
+    <separator />
+    <item label="Show Desktop" icon="user-desktop">
+      <action name="Execute"><command>selkies-desktop --show-desktop</command></action>
+    </item>
+    <item label="Reload Desktop" icon="view-refresh">
+      <action name="Execute"><command>selkies-desktop --reload</command></action>
+    </item>
+    <item label="Reconfigure Window Manager" icon="configure">
+      <action name="Reconfigure" />
+    </item>
+  </menu>
+</openbox_menu>

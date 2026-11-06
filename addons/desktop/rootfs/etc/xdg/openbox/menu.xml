@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  Openbox's right-click menu on the desktop, installed as
+  /etc/xdg/openbox/menu.xml; a user's ~/.config/openbox/menu.xml replaces it.
+  It mirrors labwc's (/etc/xdg/labwc/menu.xml), so the desktop offers the same
+  menu on either backend: the everyday applications, every installed one by
+  category through selkies-wm-menu, the open windows, and the desktop's own
+  commands. There is no Exit: the window manager is a service of the container,
+  and leaving it only has it started again.
+-->
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="selkies-applications" label="Applications" execute="selkies-wm-menu" />
+  <menu id="root-menu" label="Selkies">
+    <item label="Terminal">
+      <action name="Execute"><command>x-terminal-emulator</command></action>
+    </item>
+    <item label="Files">
+      <action name="Execute"><command>selkies-desktop --files</command></action>
+    </item>
+    <item label="Firefox">
+      <action name="Execute"><command>firefox</command></action>
+    </item>
+    <item label="Google Chrome">
+      <action name="Execute"><command>google-chrome</command></action>
+    </item>
+    <item label="Text Editor">
+      <action name="Execute"><command>mousepad</command></action>
+    </item>
+    <separator />
+    <menu id="selkies-applications" />
+    <menu id="client-list-combined-menu" />
+    <separator />
+    <item label="Show Desktop">
+      <action name="Execute"><command>selkies-desktop --show-desktop</command></action>
+    </item>
+    <item label="Reload Desktop">
+      <action name="Execute"><command>selkies-desktop --reload</command></action>
+    </item>
+    <item label="Reconfigure Window Manager">
+      <action name="Reconfigure" />
+    </item>
+  </menu>
+</openbox_menu>

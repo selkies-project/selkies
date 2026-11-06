@@ -1,0 +1,40 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The applications the session opens a file or a link with, for xdg-open and
+# selkies-desktop's file manager alike; a user's ~/.config/mimeapps.list,
+# which "Open With" writes, comes first. Without it the choice falls to
+# whichever installed entry the desktop database lists first for a type,
+# which for plain text is a terminal editor and for an image a browser.
+# Types that derive from these (source code, shell scripts, and logs from
+# text/plain) follow their parent.
+[Default Applications]
+text/plain=org.xfce.mousepad.desktop;
+text/markdown=org.xfce.mousepad.desktop;
+text/x-log=org.xfce.mousepad.desktop;
+application/json=org.xfce.mousepad.desktop;
+application/xml=org.xfce.mousepad.desktop;
+application/x-yaml=org.xfce.mousepad.desktop;
+application/x-shellscript=org.xfce.mousepad.desktop;
+image/png=org.xfce.ristretto.desktop;
+image/jpeg=org.xfce.ristretto.desktop;
+image/gif=org.xfce.ristretto.desktop;
+image/webp=org.xfce.ristretto.desktop;
+image/bmp=org.xfce.ristretto.desktop;
+image/tiff=org.xfce.ristretto.desktop;
+image/avif=org.xfce.ristretto.desktop;
+image/svg+xml=org.xfce.ristretto.desktop;
+application/zip=xarchiver.desktop;
+application/x-tar=xarchiver.desktop;
+application/x-compressed-tar=xarchiver.desktop;
+application/x-bzip2-compressed-tar=xarchiver.desktop;
+application/x-xz-compressed-tar=xarchiver.desktop;
+application/x-zstd-compressed-tar=xarchiver.desktop;
+application/gzip=xarchiver.desktop;
+application/x-7z-compressed=xarchiver.desktop;
+application/vnd.rar=xarchiver.desktop;
+application/pdf=firefox.desktop;
+text/html=firefox.desktop;
+x-scheme-handler/http=firefox.desktop;
+x-scheme-handler/https=firefox.desktop;

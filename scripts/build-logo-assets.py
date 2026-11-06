@@ -32,7 +32,8 @@ the icon to a circle crops nothing and one that does not still gets a shape
 rather than a floating mark. That plate belongs to the installed-app icon
 alone: a browser tab draws its icon on its own strip, where the bare mark is
 the one that reads, so the dashboards keep both and point each consumer at
-the right one.
+the right one. The desktop image's start button and default wallpaper are the
+bare mark too, at a size a wallpaper can center.
 """
 
 import argparse
@@ -73,6 +74,7 @@ RENDERS = [
     (HORIZONTAL, 480, 139, "docs/assets/logo/horizontal-480.png"),
     (VERTICAL, 480, 537, "docs/assets/logo/vertical.png"),
     (MARK, 180, 180, "addons/selkies-dashboard/public/icon.png"),
+    (MARK, 512, 512, "docs/assets/logo/mark-512x512.png"),
 ]
 
 # Single-image 256x256 containers, which is what every consumer here expects.

@@ -72,5 +72,16 @@ fi
 # shell's file manager lists and its desktop maps launchers from: the one XDG
 # autostart entry the image carries, which no session manager runs here.
 xdg-user-dirs-update 2>/dev/null || true
+# proot-apps and its tools in ~/.local/bin, which everything the desktop starts
+# finds on its PATH, and proot's bubblewrap stand-in where a sandboxing runtime
+# that honors BWRAP (Steam's) looks first; selkies-proot documents both.
+selkies-proot link 2>/dev/null || true
+case ":${PATH}:" in
+  *":${HOME}/.local/bin:"*) ;;
+  *) export PATH="${HOME}/.local/bin:${PATH}" ;;
+esac
+if [ -z "${BWRAP:-}" ] && [ -L "${HOME}/.local/bin/bwrap" ]; then
+  export BWRAP="${HOME}/.local/bin/bwrap"
+fi
 echo "[desktop] selkies-desktop on ${WAYLAND_DISPLAY:-${DISPLAY}}"
 exec dbus-launch --exit-with-session selkies-desktop

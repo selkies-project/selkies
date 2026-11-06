@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  xfce4-terminal's defaults for the session, the terminal on the X11 backend.
+  xfconfd reads this directory under each of XDG_CONFIG_DIRS as the channel's
+  system defaults, and what a user changes in the terminal's preferences is
+  kept under their home in front of it. The font, scrollback, and palette are
+  foot's on Wayland (/etc/xdg/foot/foot.ini), so a terminal looks the same on
+  either backend.
+-->
+<channel name="xfce4-terminal" version="1.0">
+  <property name="font-use-system" type="bool" value="false"/>
+  <property name="font-name" type="string" value="Monospace 11"/>
+  <property name="misc-default-geometry" type="string" value="100x30"/>
+  <property name="scrolling-lines" type="uint" value="10000"/>
+  <property name="misc-show-unsafe-paste-dialog" type="bool" value="false"/>
+  <property name="color-use-theme" type="bool" value="false"/>
+  <property name="color-background" type="string" value="#15121f"/>
+  <property name="color-foreground" type="string" value="#e4def0"/>
+  <property name="color-cursor-use-default" type="bool" value="false"/>
+  <property name="color-cursor" type="string" value="#d5499a"/>
+  <property name="color-selection-use-default" type="bool" value="false"/>
+  <property name="color-selection" type="string" value="#ffffff"/>
+  <property name="color-selection-background" type="string" value="#7967c5"/>
+  <property name="color-bold-use-default" type="bool" value="true"/>
+  <property name="color-palette" type="string" value="#1f1b2e;#ff5f87;#5fd7a0;#f0c674;#7aa2f7;#d5499a;#46e5e5;#c8c3d6;#4b4563;#ff87a8;#87f0c0;#ffd98a;#9cb8ff;#e57ab8;#8af2f2;#ffffff"/>
+</channel>
