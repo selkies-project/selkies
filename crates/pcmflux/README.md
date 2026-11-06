@@ -10,9 +10,9 @@ It is designed to capture system audio using PulseAudio, encode it into the Opus
 
 ## Installation
 
-Every release on the [GitHub Releases page](https://github.com/selkies-project/selkies/releases) carries wheels (`manylinux_2_28` and `musllinux`, x86_64 and aarch64, CPython 3.9 and newer), the pre-releases cut per commit included; take the one for your interpreter and platform:
+Every release on the [GitHub Releases page](https://github.com/selkies-project/selkies/releases) carries one `cp311-abi3` wheel per platform (`manylinux_2_28` and `musllinux_1_2`, x86_64 and aarch64), the pre-releases cut per commit included. A wheel installs on GIL-enabled CPython 3.11 and newer on its own libc and architecture; free-threaded CPython is not supported by ordinary abi3 wheels. The stable ABI covers only the CPython extension interface, not the native Opus, PulseAudio, Rust, libc, OS, or CPU-architecture interfaces. Native releases publish wheels only: on CPython 3.9/3.10, build the full-CPython-API extension from a source tree with `pip wheel . --no-deps` (or `pip install .`). Package `Requires-Python: >=3.9` covers that source build; it does not make a `cp311-abi3` wheel compatible with an older interpreter.
 ```bash
-pip install ./pcmflux-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
+pip install ./pcmflux-<version>-cp311-abi3-manylinux_2_28_x86_64.whl
 ```
 
 A wheel carries the PulseAudio client library it links, so all a host needs is a PulseAudio server, or PipeWire through `pipewire-pulse`, to capture from and play into.
@@ -48,7 +48,7 @@ pcmflux = { git = "https://github.com/selkies-project/selkies", tag = "<release>
 - **Mic-Uplink Playback:** An `AudioPlayback` class decodes an inbound Opus stream (with optional RED recovery via `write_red`) and plays it into a PulseAudio sink — the reverse of capture, for client microphone audio. Playback is mono/stereo, and `write` / `write_red` take any bytes-like object (`bytes`, `memoryview`, `bytearray`, ...). Queued audio that stays unplayed through a whole second (after a burst, a stalled client, a sink that resumed late, or a client clock running fast of the sink's) is cut from the head of the queue with a 2 ms crossfade, so the uplink's delay returns to the sink's own buffer (`latency_ms`) instead of standing up to `max_buffer_bytes`.
 - **Live Bitrate Updates:** Thread-safe `update_audio_bitrate()` adjusts the Opus bitrate during an active session.
 - **Observable Lifecycle:** `state` (`"idle"` / `"starting"` / `"running"` / `"failed"`) and `last_error` on both `AudioCapture` and `AudioPlayback`, so a capture that fails after `start_capture` returned (PulseAudio took longer than the start handshake, or dropped out mid-run and could not be reconnected) is visible to the caller. Invalid settings raise `ValueError` before a thread is spawned.
-- **Two Bridges, One Engine:** The Rust crate (`AudioCapture`, `AudioPlayback`, the settings, `AudioFrame`, the `AudioSink` trait) is the library; the `python` feature adds the native `pcmflux` extension module (full CPython API, not Limited/abi3) as thin wrappers over it, and `setuptools-rust` builds and packages that module.
+- **Two Bridges, One Engine:** The Rust crate (`AudioCapture`, `AudioPlayback`, the settings, `AudioFrame`, the `AudioSink` trait) is the library; the `python` feature adds the native `pcmflux` extension module (CPython 3.11 Limited API / abi3 for release wheels; ordinary source builds and the plain `python` test feature retain the full API) as thin wrappers over it, and `setuptools-rust` builds and packages that module.
 
 ## Usage
 
@@ -190,7 +190,7 @@ ffmpeg -i unix:/run/user/1000/audio.sock -c:a copy capture.opus
 
 `AGENTS.md` carries the conventions and the invariants of this tree, for contributors and coding agents alike. `cargo test --lib` covers the capture, encode, and assembly paths without an interpreter, `cargo test --lib --features python` adds the Python bridge, and `cargo test --release bench_emit_assembly -- --ignored --nocapture` prints the assembly measurement. `pip wheel . --no-deps` builds the extension the way the released wheels are built, and that wheel installed into a [selkies](https://github.com/selkies-project/selkies) checkout set up as its development documentation describes puts the change under the end-to-end audio suites.
 
-Selkies' [Release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) workflow builds pcmflux from `crates/pcmflux` and attaches its CPython 3.9+ wheels beside the server artifacts. The tag stamps this crate's literal Cargo version, its standalone lock, and the root lock together. `release-published.yaml` uploads the wheels through PyPI trusted publishing. Before the standalone repository and its Pages site can be archived, a maintainer must register the pcmflux trusted publisher for Selkies' `release-published.yaml` and `pypi` environment and migrate the old documentation destination; neither external registration nor archival is performed by this source tree.
+Selkies' [Release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) workflow builds pcmflux from `crates/pcmflux` and attaches its CPython 3.11+ `cp311-abi3` wheels beside the server artifacts. The tag stamps this crate's literal Cargo version, its standalone lock, and the root lock together. `release-published.yaml` uploads the wheels through PyPI trusted publishing. Before the standalone repository and its Pages site can be archived, a maintainer must register the pcmflux trusted publisher for Selkies' `release-published.yaml` and `pypi` environment and migrate the old documentation destination; neither external registration nor archival is performed by this source tree.
 
 ## License
 

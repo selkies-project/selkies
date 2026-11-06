@@ -347,17 +347,17 @@ jobs:
           python -m pip install -r tests/requirements.txt
           # Install the exact local native wheels downloaded above.
           mkdir -p capture-wheels
-          ABI="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
-          WHEEL_GLOB="*${ABI}-*manylinux*$(uname -m)*.whl"
+          SELECTOR="${GITHUB_WORKSPACE}/.devcontainer/features/desktop-selkies/src/select-compatible-wheels.py"
           # Fatal rather than a note: a run that quietly took an index's copy
           # tests a capture stack the server does not link, and reports it as a pass.
           for project in pixelflux pcmflux; do
-            found="$(find capture-wheels -maxdepth 1 -name "${project}-${WHEEL_GLOB}" 2>/dev/null || true)"
-            if [ -z "${found}" ]; then
-              echo "::error::No local ${project} wheel matching ${WHEEL_GLOB}"
+            mapfile -t found < <(find capture-wheels -maxdepth 1 -name "${project}-*.whl" -print \
+              | python "${SELECTOR}" "${project}")
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "::error::Expected one compatible local ${project} wheel, found ${#found[@]}"
               exit 1
             fi
-            echo "${found}" | xargs python -m pip install --force-reinstall --no-deps
+            python -m pip install --force-reinstall --no-deps "${found[0]}"
           done
           python -c 'import pixelflux, pcmflux; print("capture stack:", pixelflux.__file__)'
       - name: Build the web client

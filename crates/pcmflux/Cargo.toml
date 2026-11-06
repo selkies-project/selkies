@@ -18,6 +18,8 @@ crate-type = ["rlib", "cdylib"]
 # --features python` needs.
 python = ["dep:pyo3"]
 extension-module = ["python", "pyo3/extension-module"]
+# Only release wheels opt into the limited API; ordinary builds retain the full API.
+abi3-extension-module = ["extension-module", "pyo3/abi3-py311"]
 
 [dependencies]
 pyo3 = { version = "0.30.1", optional = true }

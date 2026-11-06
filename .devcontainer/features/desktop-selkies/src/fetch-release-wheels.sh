@@ -29,7 +29,8 @@ release_asset() {  # <project> <tag, or latest> <asset name pattern>: the asset'
         api="${api}/tags/$2"
     fi
     curl -fsSL --retry 5 --connect-timeout 30 "${AUTH[@]}" "${api}" \
-        | jq -r --arg p "$3" "${query}" | head -n 1 | grep .
+        | jq -r --arg p "$3" "${query}" \
+        | python3 "$(dirname "$0")/select-compatible-wheels.py" "$1" | head -n 1 | grep .
 }
 
 fetch_wheel() {  # <project> <tag, or latest> <asset name pattern>
@@ -50,10 +51,9 @@ mkdir -p "${DEST}"
 [ "${RELEASE}" = "none" ] || fetch_wheel selkies "${RELEASE}" "^selkies-.*-py3-none-(manylinux_.*_$(uname -m)|any)\\.whl$" \
     || echo "warning: no selkies wheel for $(uname -m) in the ${RELEASE} release; the index is the fallback" >&2
 if [ "$#" -ge 4 ]; then
-    ABI="cp$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
     for project in pixelflux pcmflux; do
         case "${project}" in pixelflux) tag="$3" ;; pcmflux) tag="$4" ;; esac
-        fetch_wheel "${project}" "${tag}" "^${project}-.*-${ABI}-.*manylinux.*$(uname -m)\\.whl$" \
-            || echo "warning: no ${project} wheel for ${ABI} $(uname -m) in its ${tag} release" >&2
+        fetch_wheel "${project}" "${tag}" "^${project}-.*-.*manylinux.*$(uname -m)\\.whl$" \
+            || echo "warning: no compatible ${project} wheel for $(python3 --version) $(uname -m) in its ${tag} release" >&2
     done
 fi
