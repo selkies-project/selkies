@@ -43,10 +43,12 @@
 //! rate, so each feedback (`process_feedback`) publishes an `Estimate` and accumulates
 //! into a control interval that `take_window` drains: the interval is the measurement, and
 //! an interval that carried no feedback steers nothing. A missing status is provisional (the
-//! packet may still be in transit): its history is kept until a positive acknowledgment or
-//! expiry, the negative counted once, and a late positive restores its bytes and retracts
-//! the negative only from an interval not yet drained. A packet the pacer dropped
-//! (`dropped`) was never on the wire to lose and contributes neither loss nor delivery.
+//! packet may still be queued or in transit): its history is kept until a positive
+//! acknowledgment or expiry. Only successful socket writes (`released`) can become losses;
+//! an interior gap also needs an acknowledged later sequence released after it. A justified
+//! negative is counted once, and a late positive restores its bytes and retracts the negative
+//! only from an interval not yet drained. A packet the pacer dropped (`dropped`) was never on
+//! the wire to lose and contributes neither loss nor delivery.
 //!
 //! The deltas chain arrival times from the feedback's reference time, 64 ms units on the
 //! receiver's clock wrapping at 24 bits, so every arrival sits on that one clock and an
@@ -241,8 +243,11 @@ pub struct Window {
 #[derive(Clone, Copy)]
 struct Sent {
     size: usize,
+    /// Registration time until `released`, then the successful socket-write time.
     at: f64,
     generation: u64,
+    /// Monotonic socket-release order; `None` while the packet waits in the pacer.
+    released: Option<u64>,
 }
 
 struct Stand {
@@ -251,14 +256,21 @@ struct Stand {
     lossless: f64,
 }
 
+#[derive(Clone, Copy)]
+struct Arrived {
+    at: f64,
+    released: Option<u64>,
+}
+
 /// The send side of transport-wide congestion control for one transport.
 pub struct TwccSender {
     seq: u16,
     history: HashMap<u16, Sent>,
     order: VecDeque<(u16, f64, u64)>,
     generation: u64,
+    release_order: u64,
     missing: HashMap<u16, u64>,
-    arrived: HashMap<u16, f64>,
+    arrived: HashMap<u16, Arrived>,
     arrived_order: VecDeque<(u16, f64)>,
     window_id: u64,
     estimate: Option<Estimate>,
@@ -281,6 +293,7 @@ impl TwccSender {
             history: HashMap::with_capacity(4096),
             order: VecDeque::with_capacity(4096),
             generation: 0,
+            release_order: 0,
             missing: HashMap::new(),
             arrived: HashMap::new(),
             arrived_order: VecDeque::new(),
@@ -300,9 +313,9 @@ impl TwccSender {
     }
 
     /// Allocate the next transport-wide sequence number and record the packet's size and
-    /// send time for matching against the receiver's feedback. Bounded by age, not count: a
-    /// retransmission storm allocates thousands of numbers a second, and one let go before
-    /// its feedback arrives would read as wire loss.
+    /// registration time for matching against the receiver's feedback. Bounded by age, not
+    /// count: a retransmission storm allocates thousands of numbers a second, and one let go
+    /// before its feedback arrives would read as wire loss.
     pub fn next(&mut self, size: usize, now: f64) -> u16 {
         let seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
@@ -314,6 +327,7 @@ impl TwccSender {
                 size,
                 at: now,
                 generation: self.generation,
+                released: None,
             },
         );
         self.missing.remove(&seq);
@@ -345,6 +359,17 @@ impl TwccSender {
             self.order.pop_front();
         }
         seq
+    }
+
+    /// Record a successful socket write, separately from packet registration. Feedback
+    /// compares these release positions across transport sequences, so a bypass cannot make
+    /// an earlier sequence still waiting in the pacer look lost.
+    pub fn released(&mut self, seq: u16, now: f64) {
+        self.release_order += 1;
+        if let Some(sent) = self.history.get_mut(&seq) {
+            sent.at = now;
+            sent.released = Some(self.release_order);
+        }
     }
 
     /// Whether feedback reported the packet sent under `seq` received within `TWCC_ARRIVED_S`.
@@ -464,8 +489,8 @@ impl TwccSender {
         if statuses.len() < status_count || statuses.contains(&3) {
             return None;
         }
-        let mut arrivals: Vec<(u16, f64)> = Vec::with_capacity(status_count);
-        let mut missing: Vec<u16> = Vec::new();
+        let mut arrivals: Vec<(u16, usize, f64)> = Vec::with_capacity(status_count);
+        let mut missing: Vec<(usize, u16)> = Vec::new();
         let mut at_us = reference as f64 * 64_000.0;
         for (i, &symbol) in statuses.iter().enumerate() {
             let seq = base_seq.wrapping_add(i as u16);
@@ -485,31 +510,57 @@ impl TwccSender {
                     pos += 2;
                 }
                 _ => {
-                    missing.push(seq);
+                    missing.push((i, seq));
                     continue;
                 }
             }
-            arrivals.push((seq, at_us));
+            arrivals.push((seq, i, at_us));
         }
         if statuses.is_empty() {
             return None;
         }
         self.reference = Some(reference);
-        // A packet the pacer dropped was never on the wire to lose. Loss the wire spread
-        // through the window says it is short of room; one run of it is an outage.
+        // A packet the pacer dropped or still holds was never on the wire to lose. An
+        // interior gap needs a later sequence released after it and acknowledged; otherwise
+        // a bypass can acknowledge the later sequence before the gap reaches the socket.
         let mut lost = 0usize;
         let mut runs = 0usize;
         let mut previous: Option<u16> = None;
-        for &seq in &missing {
+        let mut next_arrival = arrivals.len();
+        let mut released_after = None;
+        let mut known_after = false;
+        for &(index, seq) in missing.iter().rev() {
+            while next_arrival > 0 && arrivals[next_arrival - 1].1 > index {
+                next_arrival -= 1;
+                let later_seq = arrivals[next_arrival].0;
+                if let Some(released) = self
+                    .history
+                    .get(&later_seq)
+                    .map(|sent| sent.released)
+                    .or_else(|| self.arrived.get(&later_seq).map(|arrived| arrived.released))
+                {
+                    known_after = true;
+                    if let Some(order) = released {
+                        released_after =
+                            Some(released_after.map_or(order, |old: u64| old.max(order)));
+                    }
+                }
+            }
             let Some(sent) = self.history.get(&seq) else {
                 continue;
             };
-            if sent.size == 0 || self.missing.contains_key(&seq) {
+            let has_later_arrival = arrivals.last().is_some_and(|&(_, later, _)| later > index);
+            let release_proves_loss = sent.released.is_some_and(|order| {
+                !has_later_arrival
+                    || !known_after
+                    || released_after.is_some_and(|later| later > order)
+            });
+            if sent.size == 0 || !release_proves_loss || self.missing.contains_key(&seq) {
                 continue;
             }
             self.missing.insert(seq, self.window_id);
             lost += 1;
-            if previous.is_none_or(|p| seq.wrapping_sub(p) != 1) {
+            if previous.is_none_or(|p| p.wrapping_sub(seq) != 1) {
                 runs += 1;
             }
             previous = Some(seq);
@@ -520,21 +571,37 @@ impl TwccSender {
         let mut in_order: Vec<(f64, f64, usize)> = Vec::with_capacity(arrivals.len());
         let mut delay_min: Option<f64> = None;
         let mut delay_last: Option<f64> = None;
-        for &(seq, _) in &arrivals {
-            self.arrived.insert(seq, now);
+        for &(seq, _, _) in &arrivals {
+            let released = self.history.get(&seq).map(|sent| sent.released);
+            self.arrived
+                .entry(seq)
+                .and_modify(|arrived| {
+                    arrived.at = now;
+                    if let Some(released) = released {
+                        arrived.released = released;
+                    }
+                })
+                .or_insert(Arrived {
+                    at: now,
+                    released: released.flatten(),
+                });
             self.arrived_order.push_back((seq, now));
         }
         while let Some(&(seq, at)) = self.arrived_order.front() {
             if now - at > TWCC_ARRIVED_S {
                 self.arrived_order.pop_front();
-                if self.arrived.get(&seq).is_some_and(|t| *t == at) {
+                if self
+                    .arrived
+                    .get(&seq)
+                    .is_some_and(|arrived| arrived.at == at)
+                {
                     self.arrived.remove(&seq);
                 }
             } else {
                 break;
             }
         }
-        for &(seq, at) in &arrivals {
+        for &(seq, _, at) in &arrivals {
             let sent = self.history.remove(&seq);
             self.unmark_missing(seq);
             if let Some(sent) = sent.filter(|s| s.size > 0) {
@@ -770,12 +837,14 @@ impl TwccSender {
     #[cfg(test)]
     pub(crate) fn seed_sent(&mut self, seq: u16, size: usize, at: f64) {
         self.generation += 1;
+        self.release_order += 1;
         self.history.insert(
             seq,
             Sent {
                 size,
                 at,
                 generation: self.generation,
+                released: Some(self.release_order),
             },
         );
         self.order.push_back((seq, at, self.generation));
@@ -789,7 +858,8 @@ impl TwccSender {
 
     #[cfg(test)]
     pub(crate) fn mark_arrived(&mut self, seq: u16, now: f64) {
-        self.arrived.insert(seq, now);
+        let released = self.history.get(&seq).and_then(|sent| sent.released);
+        self.arrived.insert(seq, Arrived { at: now, released });
         self.arrived_order.push_back((seq, now));
     }
 
@@ -997,6 +1067,30 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_positive_retains_release_order_for_a_delayed_gap() {
+        let mut tr = TwccSender::new(0.0);
+        assert_eq!(tr.next(1000, 0.0), 0);
+        tr.released(0, 0.0);
+        assert_eq!(tr.next(1100, 0.001), 1);
+        tr.released(1, 0.001);
+
+        feedback(&mut tr, 1, &[t(10.0)]);
+        tr.take_window(0.0);
+        assert_eq!(tr.history_seqs(), vec![0]);
+        assert!(feedback(&mut tr, 1, &[t(10.0)]).is_none());
+        assert!(tr.take_window(0.0).is_none());
+
+        feedback(&mut tr, 0, &[None, t(20.0)]);
+        let lost = tr
+            .take_window(0.0)
+            .expect("the retained later release proves the earlier gap was lost");
+        assert_eq!((lost.received, lost.lost), (0, 1));
+        feedback(&mut tr, 0, &[t(30.0)]);
+        let retracted = tr.take_window(0.0).unwrap();
+        assert_eq!((retracted.received, retracted.lost), (1, 0));
+    }
+
+    #[test]
     fn unknown_feedback_is_not_network_evidence() {
         let mut tr = transport();
         feedback(&mut tr, 90, &[t(10.0), None, t(20.0)]);
@@ -1057,7 +1151,9 @@ mod tests {
         );
         tr.set_seq(65535);
         assert_eq!(tr.next(900, 0.0), 65535);
+        tr.released(65535, 0.0);
         assert_eq!(tr.next(1000, 0.0), 0);
+        tr.released(0, 0.0);
         tr.process_feedback(&missing(65535, 2), 0.0, 12_500.0);
         assert_eq!(tr.window().lost, 2);
     }
@@ -1069,6 +1165,7 @@ mod tests {
         tr.take_window(0.0);
         tr.set_seq(101);
         assert_eq!(tr.next(900, 0.0), 101);
+        tr.released(101, 0.0);
         tr.process_feedback(&missing(101, 1), 0.0, 12_500.0);
         assert_eq!(tr.window().lost, 1);
         feedback(&mut tr, 101, &[t(100.0)]);
@@ -1079,7 +1176,8 @@ mod tests {
     fn history_expiry_bounds_auxiliary_state_after_reuse() {
         let mut tr = TwccSender::new(1.0);
         for _ in 0..2050 {
-            tr.next(100, 1.0);
+            let seq = tr.next(100, 1.0);
+            tr.released(seq, 1.0);
         }
         tr.process_feedback(&missing(0, 2050), 1.0, 12_500.0);
         tr.take_window(1.0);

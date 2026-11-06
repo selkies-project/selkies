@@ -2148,20 +2148,20 @@ mod tests {
         let t = s.flat(320.0, t, 0.5, Some(3000.0));
         assert_eq!(
             s.rates(),
-            vec![1650],
-            "the first queued window backs off to the headroom less the drain"
+            vec![2400],
+            "the first queued window backs off to the headroom, less what drains its backlog"
         );
-        assert_eq!(s.current(), 1650.0);
+        assert_eq!(s.current(), 2400.0);
         let t = s.flat(250.0, t, 0.5, Some(3000.0));
         assert_eq!(
             s.rates(),
-            vec![1650],
+            vec![2400],
             "a window while that queue drains cuts nothing more"
         );
-        let t = s.flat(20.0, t, 0.5, Some(3000.0));
+        let t = s.flat(20.0, t, 1.0, Some(3000.0));
         assert_eq!(
             s.rates(),
-            vec![1650, 2550],
+            vec![2400, 2550],
             "the drain over, the rate settles at the headroom"
         );
         s.flat(20.0, t, 12.0, None);
@@ -2254,7 +2254,7 @@ mod tests {
         s.flat(220.0, t, 0.5, Some(3000.0));
         assert_eq!(
             s.rates(),
-            vec![1950],
+            vec![2550],
             "frames from before the gate shut still arriving are measured"
         );
 
@@ -2281,7 +2281,7 @@ mod tests {
         );
         assert_eq!(
             s.rates(),
-            vec![1950],
+            vec![2550],
             "a queue still building reads as one before the window stands"
         );
     }
@@ -2427,7 +2427,7 @@ mod tests {
         s.flat(120.0, t, 0.5, Some(4500.0));
         assert_eq!(
             s.rates(),
-            vec![3375],
+            vec![3825],
             "a queue behind an encoder running over its target reads as one"
         );
 
@@ -2559,7 +2559,7 @@ mod tests {
         s.flat(320.0, t, 0.5, Some(1000.0));
         assert_eq!(
             s.rates(),
-            vec![2200],
+            vec![3200],
             "a stall's late acks, the gate shut meanwhile, back off from what the path just delivered"
         );
 
@@ -2653,7 +2653,7 @@ mod tests {
         );
         assert_eq!(
             s.rates(),
-            vec![2200],
+            vec![3200],
             "a tick the gate held part of is not taken for a trickle"
         );
 
@@ -2889,28 +2889,28 @@ mod tests {
         s.steer(((burst_at + 0.25) * 1000.0).round() / 1000.0);
         let rates = s.rates();
         assert!(
-            !rates.is_empty() && *rates.last().unwrap() >= 6000,
-            "{rates:?}"
+            rates.iter().all(|&r| r >= 6000),
+            "the burst's queue is measured against what the path carried through it, near 10 Mbit/s, not the trickle's 0.2: {rates:?}"
         );
     }
 
     #[test]
     fn the_steer_keeps_a_cruise_and_a_queued_target_through_the_tick() {
-        // A clean WebSockets tick restores the cruise.
+        // A clean WebSockets tick past a backlog's drain restores the cruise.
         let mut steer = CongestionSteer::default();
         let current = steer.target(crate::ws::steer::tests::tick_of(
             [6000.0, 6000.0, 1000.0, 5_000_000.0, 0.0, 0.0],
-            [Some(0.1), Some(6_000_000.0), None, None],
+            [Some(0.5), Some(6_000_000.0), None, None],
         ));
         let module = Module::default();
         let mut state = DisplayLink::new();
         state.link_kbps = Some(current);
-        state.link_tick_at = Some(0.5);
+        state.link_tick_at = Some(0.8);
         state.rtt_floor_ms = Some(20.0);
         state.link_acks = (1..=10)
             .map(|i| {
                 (
-                    0.5 + i as f64 * 0.05,
+                    0.8 + i as f64 * 0.05,
                     20.0,
                     (i as f64 * 0.05 * 5_000_000.0 / 8.0) as u64,
                 )
@@ -2922,7 +2922,7 @@ mod tests {
         state.link_tick_sent = Some(0);
         state.steer_bitrate_to_link(
             "primary",
-            1.0,
+            1.3,
             6000.0,
             (1000.0, 12000.0),
             Some(&module),
@@ -2937,10 +2937,10 @@ mod tests {
             [6000.0, 6000.0, 1000.0, 2_121_025.0, 351.0 / 596.0, 31.0],
             [Some(0.186_666_666_666_667_42), None, None, None],
         ));
-        assert_eq!(value.round(), 1407.0);
+        assert_eq!(value.round(), 1803.0);
         let module = Module::default();
         let mut state = DisplayLink::new();
-        state.link_kbps = Some(1407.0);
+        state.link_kbps = Some(1803.0);
         state.link_tick_at = Some(31.5);
         state.sent_bytes = (0.5 * 1_797_770.0 / 8.0) as u64;
         state.link_tick_sent = Some(0);
@@ -2964,7 +2964,7 @@ mod tests {
             Some(&module),
             PadPermit::default(),
         );
-        assert_eq!(state.link_kbps, Some(1407.0));
+        assert_eq!(state.link_kbps, Some(1803.0));
         assert!(module.rates.borrow().is_empty());
     }
 

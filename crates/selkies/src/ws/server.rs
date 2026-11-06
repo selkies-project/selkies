@@ -2299,6 +2299,15 @@ impl WsService {
     /// A pixelflux `CaptureSettings` for a display region: per-display tunables win, each falling
     /// back to its session default, which a viewer-driven primary capture runs on entirely.
     /// `None` for an unknown secondary.
+    ///
+    /// The stream keeps one reference frame (`video_reference_frames`, which x264 and VA-API's
+    /// H.264 and H.265 read). A deeper buffer lets the encoder predict past a frame a page dropped
+    /// (`LOST_FRAME`, a relay's thinned run) instead of coding a key frame, but every client
+    /// decodes against all of it on every frame: at 2560x1600 eight frames cost FFmpeg's decoder
+    /// 0.3 ms a frame over one, and a decoder that holds its whole buffer before showing a picture
+    /// shows each that many frames later. TCP loses nothing, so over WebSockets a drop is rare and
+    /// repaired by a key frame; the WebRTC pipeline keeps the depth for the losses its NACK and FEC
+    /// leave.
     pub(crate) fn capture_settings(
         &self,
         display_id: &str,
@@ -2349,6 +2358,7 @@ impl WsService {
             cpu_encode_threading: d.cpu_encode_threading,
         };
         populate_capture_settings(&mut cs, &settings(), &params);
+        cs.video_reference_frames = 1;
         Some(cs)
     }
 

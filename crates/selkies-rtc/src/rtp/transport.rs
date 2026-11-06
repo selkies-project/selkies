@@ -93,6 +93,8 @@ impl<S: PacketSink> PacedTransport<S> {
                 pacer.wire_failed(item.tag, now);
                 failed = true;
                 next = None;
+            } else if let Some(seq) = item.tag {
+                self.twcc.released(seq, now);
             }
         }
         self.released = released;
@@ -121,18 +123,30 @@ impl<S: PacketSink> SenderTransport for PacedTransport<S> {
         now: f64,
     ) -> Verdict {
         let Some(pacer) = self.pacer.as_mut() else {
-            if let Err(e) = self.sink.send_rtp(&packet.to_vec()) {
-                log::debug!(target: "webrtc", "send failed: {e}");
+            match self.sink.send_rtp(&packet.to_vec()) {
+                Ok(()) => {
+                    if let Some(seq) = twcc_seq {
+                        self.twcc.released(seq, now);
+                    }
+                }
+                Err(e) => log::debug!(target: "webrtc", "send failed: {e}"),
             }
             return Verdict::SendNow;
         };
         let data = Bytes::from(packet.to_vec());
         let verdict = pacer.send(data.clone(), class, twcc_seq, now);
-        if verdict == Verdict::SendNow
-            && let Err(e) = self.sink.send_rtp(&data)
-        {
-            log::warn!(target: "webrtc", "pacer: send failed: {e}");
-            pacer.wire_failed(twcc_seq, now);
+        if verdict == Verdict::SendNow {
+            match self.sink.send_rtp(&data) {
+                Ok(()) => {
+                    if let Some(seq) = twcc_seq {
+                        self.twcc.released(seq, now);
+                    }
+                }
+                Err(e) => {
+                    log::warn!(target: "webrtc", "pacer: send failed: {e}");
+                    pacer.wire_failed(twcc_seq, now);
+                }
+            }
         }
         verdict
     }
@@ -161,14 +175,204 @@ impl<S: PacketSink> SenderTransport for PacedTransport<S> {
             .is_some_and(|p| p.padding_room(size + SRTP_PADDING_OVERHEAD, now))
     }
 
-    fn send_padding(&mut self, packet: Datagram<'_>, now: f64) {
+    fn send_padding(&mut self, packet: Datagram<'_>, twcc_seq: u16, now: f64) {
         let Some(pacer) = self.pacer.as_mut() else {
             return;
         };
         pacer.take_padding(packet.len() + SRTP_PADDING_OVERHEAD);
-        if let Err(e) = self.sink.send_rtp(&packet.to_vec()) {
-            log::debug!(target: "webrtc", "padding send failed: {e}");
-            pacer.wire_failed(None, now);
+        match self.sink.send_rtp(&packet.to_vec()) {
+            Ok(()) => self.twcc.released(twcc_seq, now),
+            Err(e) => {
+                log::debug!(target: "webrtc", "padding send failed: {e}");
+                pacer.wire_failed(None, now);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rtp::rtcp::pack_twcc_fci;
+
+    #[derive(Default)]
+    struct TestSink {
+        rtp: Vec<Vec<u8>>,
+    }
+
+    impl PacketSink for TestSink {
+        fn send_rtp(&mut self, packet: &[u8]) -> Result<(), SinkError> {
+            self.rtp.push(packet.to_vec());
+            Ok(())
+        }
+
+        fn send_rtcp(&mut self, _compound: &[u8]) -> Result<(), SinkError> {
+            Ok(())
+        }
+
+        fn send_data(&mut self, _packet: &[u8]) -> Result<(), SinkError> {
+            Ok(())
+        }
+
+        fn peer_heard_at(&self) -> f64 {
+            0.0
+        }
+    }
+
+    fn send(transport: &mut PacedTransport<TestSink>, class: Class, seq: u16, now: f64) -> Verdict {
+        let data = vec![0x80; 100];
+        let datagram = Datagram {
+            header: &data,
+            payload: &[],
+        };
+        transport.send_rtp(datagram, class, Some(seq), now)
+    }
+
+    #[test]
+    fn queued_video_gap_is_pending_when_bypassed_audio_is_acknowledged() {
+        let mut transport = PacedTransport::new(TestSink::default(), Some(100_000), 0.0);
+        transport.pacer().unwrap().set_credit(0.0, 0.0);
+        let video = transport.twcc_state().next(1200, 0.0);
+        assert_eq!(
+            send(&mut transport, Class::Video, video, 0.0),
+            Verdict::Queued
+        );
+        let audio = transport.twcc_state().next(100, 0.001);
+        assert_eq!(
+            send(&mut transport, Class::Rtcp, audio, 0.001),
+            Verdict::SendNow
+        );
+        assert_eq!(transport.sink().rtp.len(), 1);
+        assert_eq!(transport.pacer().unwrap().bytes_queued(), 100);
+
+        transport.twcc_state().process_feedback(
+            &pack_twcc_fci(video, &[None, Some(10.0)], 0),
+            0.1,
+            0.0,
+        );
+        let window = transport.twcc_state().take_window(0.1).unwrap();
+        assert_eq!(
+            (window.received, window.lost),
+            (1, 0),
+            "the acknowledged audio bypassed video that has not reached the socket"
+        );
+
+        transport.pacer().unwrap().set_credit(1000.0, 0.1);
+        assert_eq!(transport.drain(0.1), None);
+        assert_eq!(transport.sink().rtp.len(), 2);
+        transport
+            .twcc_state()
+            .process_feedback(&pack_twcc_fci(video, &[Some(20.0)], 0), 0.2, 0.0);
+        let late = transport.twcc_state().take_window(0.2).unwrap();
+        assert_eq!((late.received, late.lost), (1, 0));
+    }
+
+    #[test]
+    fn released_video_gap_is_loss_when_later_audio_is_acknowledged() {
+        let mut transport = PacedTransport::new(TestSink::default(), Some(100_000), 0.0);
+        transport.pacer().unwrap().set_credit(10_000.0, 0.0);
+        let video = transport.twcc_state().next(1200, 0.0);
+        send(&mut transport, Class::Video, video, 0.0);
+        let audio = transport.twcc_state().next(100, 0.001);
+        send(&mut transport, Class::Rtcp, audio, 0.001);
+        assert_eq!(transport.sink().rtp.len(), 2);
+
+        transport.twcc_state().process_feedback(
+            &pack_twcc_fci(video, &[None, Some(10.0)], 0),
+            0.1,
+            0.0,
+        );
+        let window = transport.twcc_state().take_window(0.1).unwrap();
+        assert_eq!((window.received, window.lost), (1, 1));
+    }
+
+    #[test]
+    fn release_ordered_ack_resolves_a_pending_gap_and_a_late_positive_retracts_it() {
+        let mut transport = PacedTransport::new(TestSink::default(), Some(100_000), 0.0);
+        transport.pacer().unwrap().set_credit(0.0, 0.0);
+        let video = transport.twcc_state().next(1200, 0.0);
+        assert_eq!(
+            send(&mut transport, Class::Video, video, 0.0),
+            Verdict::Queued
+        );
+        let audio = transport.twcc_state().next(100, 0.001);
+        send(&mut transport, Class::Rtcp, audio, 0.001);
+        let bypass_feedback = pack_twcc_fci(video, &[None, Some(10.0)], 0);
+        transport
+            .twcc_state()
+            .process_feedback(&bypass_feedback, 0.1, 0.0);
+        transport.twcc_state().take_window(0.1).unwrap();
+
+        transport.pacer().unwrap().set_credit(1000.0, 0.1);
+        transport.drain(0.1);
+        assert!(
+            transport
+                .twcc_state()
+                .process_feedback(&bypass_feedback, 0.2, 0.0)
+                .is_none(),
+            "the audio's retained release position still precedes the video"
+        );
+        assert!(transport.twcc_state().take_window(0.2).is_none());
+
+        transport.pacer().unwrap().set_credit(1000.0, 0.2);
+        let later_video = transport.twcc_state().next(1200, 0.2);
+        assert_eq!(
+            send(&mut transport, Class::Video, later_video, 0.2),
+            Verdict::SendNow
+        );
+        transport.twcc_state().process_feedback(
+            &pack_twcc_fci(video, &[None, Some(10.0), Some(30.0)], 0),
+            0.3,
+            0.0,
+        );
+        let loss = transport.twcc_state().take_window(0.3).unwrap();
+        assert_eq!((loss.received, loss.lost), (1, 1));
+
+        transport
+            .twcc_state()
+            .process_feedback(&pack_twcc_fci(video, &[Some(40.0)], 0), 0.4, 0.0);
+        let retracted = transport.twcc_state().take_window(0.4).unwrap();
+        assert_eq!((retracted.received, retracted.lost), (1, 0));
+    }
+
+    fn all_missing(base: u16) -> Vec<u8> {
+        let mut fci = base.to_be_bytes().to_vec();
+        fci.extend_from_slice(&1u16.to_be_bytes());
+        fci.extend_from_slice(&[0; 4]);
+        fci.extend_from_slice(&1u16.to_be_bytes());
+        fci
+    }
+
+    #[test]
+    fn unpaced_media_is_marked_released() {
+        let mut transport = PacedTransport::new(TestSink::default(), None, 0.0);
+        let video = transport.twcc_state().next(1200, 0.0);
+        assert_eq!(
+            send(&mut transport, Class::Video, video, 0.0),
+            Verdict::SendNow
+        );
+        transport
+            .twcc_state()
+            .process_feedback(&all_missing(video), 0.1, 0.0);
+        let window = transport.twcc_state().take_window(0.1).unwrap();
+        assert_eq!((window.received, window.lost), (0, 1));
+    }
+
+    #[test]
+    fn padding_is_marked_released_without_changing_its_accounting() {
+        let mut transport = PacedTransport::new(TestSink::default(), Some(100_000), 0.0);
+        let padding = transport.twcc_state().next_padding(100, 0.0);
+        let data = vec![0x80; 100];
+        let datagram = Datagram {
+            header: &data,
+            payload: &[],
+        };
+        transport.send_padding(datagram, padding, 0.0);
+        transport
+            .twcc_state()
+            .process_feedback(&all_missing(padding), 0.1, 0.0);
+        let window = transport.twcc_state().take_window(0.1).unwrap();
+        assert_eq!((window.received, window.lost), (0, 1));
+        assert!(window.padding_bps > 0);
     }
 }

@@ -95,6 +95,11 @@ impl SenderTransport for FakeTransport {
         if matches!(verdict, Verdict::SendNow | Verdict::Queued) {
             self.rtp.push(data);
         }
+        if verdict == Verdict::SendNow
+            && let Some(seq) = twcc_seq
+        {
+            self.twcc.released(seq, now);
+        }
         verdict
     }
 
@@ -139,8 +144,9 @@ impl SenderTransport for FakeTransport {
         admitted
     }
 
-    fn send_padding(&mut self, packet: Datagram<'_>, _now: f64) {
+    fn send_padding(&mut self, packet: Datagram<'_>, twcc_seq: u16, now: f64) {
         self.padded.push(packet.to_vec());
+        self.twcc.released(twcc_seq, now);
     }
 }
 
