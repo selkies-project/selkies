@@ -572,8 +572,19 @@ impl TwccSender {
         let mut delay_min: Option<f64> = None;
         let mut delay_last: Option<f64> = None;
         for &(seq, _, _) in &arrivals {
-            let released = self.history.get(&seq).and_then(|sent| sent.released);
-            self.arrived.insert(seq, Arrived { at: now, released });
+            let released = self.history.get(&seq).map(|sent| sent.released);
+            self.arrived
+                .entry(seq)
+                .and_modify(|arrived| {
+                    arrived.at = now;
+                    if let Some(released) = released {
+                        arrived.released = released;
+                    }
+                })
+                .or_insert(Arrived {
+                    at: now,
+                    released: released.flatten(),
+                });
             self.arrived_order.push_back((seq, now));
         }
         while let Some(&(seq, at)) = self.arrived_order.front() {
@@ -1053,6 +1064,30 @@ mod tests {
             saved,
             "a stale negative after a positive is inert"
         );
+    }
+
+    #[test]
+    fn duplicate_positive_retains_release_order_for_a_delayed_gap() {
+        let mut tr = TwccSender::new(0.0);
+        assert_eq!(tr.next(1000, 0.0), 0);
+        tr.released(0, 0.0);
+        assert_eq!(tr.next(1100, 0.001), 1);
+        tr.released(1, 0.001);
+
+        feedback(&mut tr, 1, &[t(10.0)]);
+        tr.take_window(0.0);
+        assert_eq!(tr.history_seqs(), vec![0]);
+        assert!(feedback(&mut tr, 1, &[t(10.0)]).is_none());
+        assert!(tr.take_window(0.0).is_none());
+
+        feedback(&mut tr, 0, &[None, t(20.0)]);
+        let lost = tr
+            .take_window(0.0)
+            .expect("the retained later release proves the earlier gap was lost");
+        assert_eq!((lost.received, lost.lost), (0, 1));
+        feedback(&mut tr, 0, &[t(30.0)]);
+        let retracted = tr.take_window(0.0).unwrap();
+        assert_eq!((retracted.received, retracted.lost), (1, 0));
     }
 
     #[test]
