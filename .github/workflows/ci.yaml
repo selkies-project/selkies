@@ -132,9 +132,22 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the native toolchain and libraries
+        # kvazaar, the non-GPL build's HEVC encoder, is built at the release the
+        # wheel recipe pins where the distribution does not carry it
         run: |
           scripts/ci/server-build-deps.sh
-          sudo apt-get install -y --no-install-recommends libkvazaar-dev python3-dev
+          sudo apt-get install -y --no-install-recommends python3-dev
+          if apt-cache show libkvazaar-dev > /dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends libkvazaar-dev
+          else
+            tag="$(sed -n 's/.*clone_source [0-9a-f]* \(v[0-9.]*\) kvazaar.*/\1/p' crates/pixelflux/pyproject.toml)"
+            git clone --depth 1 --branch "${tag}" https://github.com/ultravideo/kvazaar.git "${RUNNER_TEMP}/kvazaar"
+            cmake -S "${RUNNER_TEMP}/kvazaar" -B "${RUNNER_TEMP}/kvazaar/build" -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON
+            cmake --build "${RUNNER_TEMP}/kvazaar/build" -j"$(nproc)"
+            sudo cmake --install "${RUNNER_TEMP}/kvazaar/build"
+            sudo ldconfig
+          fi
       - name: Test the Rust and Python bridge configurations
         # GPU, render-node, encoder-device, and sound-server tests remain
         # explicitly ignored on runners without those devices.
