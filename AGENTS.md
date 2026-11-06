@@ -264,9 +264,9 @@ the API they add: every other build (CI, the devcontainer, the scanner image, Se
 caller's per-macroblock quantizer offsets apply without adaptive quantization's variance pass (`rc.b_qp_offsets`),
 and the macroblocks the caller's `mb_info` marks unchanged (`H264EncoderWrapper::constant_blocks`, from the block
 ledger, given only where the source reports every change) are coded as skips without analysis, copied from the
-input, or filtered into the lowres picture again, each where the full path would code, copy, or filter them the same:
-a stream comes out bit for bit as without them. At 2560x1600 a 256x256 change took x264 2.0 ms of a frame where it
-took 4.1, and a frame that changed whole the same as before.
+input, filtered into the lowres picture again, or costed again by the lookahead, each where the full path would
+code, copy, filter, or cost them the same: a stream comes out bit for bit as without them. At 2560x1600 a 256x256
+change took x264 2.0 ms of a frame where it took 4.1, and a frame that changed whole the same as before.
 The crate's `Cargo.toml` is the one place the version lives: `setup.py` reads it, spelling a semver pre-release
 the PEP 440 way (`2.1.0-rc.1` is `2.1.0rc1` to pip), and the release workflow stamps the tag into the manifest
 and the lock, so a build ahead of a release carries the series version and a release the tag's.
