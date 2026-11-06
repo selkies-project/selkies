@@ -319,6 +319,9 @@ RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt
     pixelflux="$(cargo metadata --locked --format-version 1 \
         | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"; \
     sh "$(dirname "${pixelflux}")/scripts/build-x264.sh" /usr/local; \
+    # x264-sys binds the installed x264.h without watching it, so the cached
+    # target would keep bindings from before a change to patches/x264
+    cargo clean --release -p x264-sys; \
     SYSTEM_DEPS_X264_LINK=static cargo build --release --locked -p selkies; \
     install -Dm755 target/release/selkies /out/selkies; \
     ldd /out/selkies | awk '/=>/ {print $3}' | xargs -r readlink -f | xargs -r dpkg -S | \
