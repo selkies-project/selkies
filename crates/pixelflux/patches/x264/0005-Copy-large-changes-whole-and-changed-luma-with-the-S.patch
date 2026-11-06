@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: thelamer <ryankuba@gmail.com>
 Date: Thu, 5 Nov 2026 00:19:48 -0500
-Subject: [PATCH 5/5] Copy large changes whole and changed luma with the SIMD
- copy
+Subject: [PATCH] Copy large changes whole and changed luma with the SIMD copy
 
 The changed-macroblock copy took a frame that mostly changed through the C copies, at 0.62 ms
 for 2496x1536 of 2560x1600 where the whole-frame SIMD copy takes 0.36: a frame where more than
@@ -65,3 +64,6 @@ index 6014e2d..ea893c8 100644
                                        (pixel*)pix[p] + 16*x0 + 16*y*(stride[p]/SIZEOF_PIXEL), stride[p]/SIZEOF_PIXEL, cols, rows );
          }
      }
+-- 
+2.47.3
+

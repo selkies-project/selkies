@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: thelamer <ryankuba@gmail.com>
 Date: Wed, 4 Nov 2026 22:07:43 -0500
-Subject: [PATCH 1/5] Apply caller QP offsets without adaptive quantization
+Subject: [PATCH] Apply caller QP offsets without adaptive quantization
  (rc.b_qp_offsets)
 
 ---
@@ -41,3 +41,6 @@ index cc22f05..177d2c7 100644
          int         b_mb_tree;      /* Macroblock-tree ratecontrol. */
          int         i_lookahead;
  
+-- 
+2.47.3
+

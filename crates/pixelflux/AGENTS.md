@@ -262,9 +262,29 @@ the API they add: every other build (CI, the devcontainer, the scanner image, Se
 caller's per-macroblock quantizer offsets apply without adaptive quantization's variance pass (`rc.b_qp_offsets`),
 and the macroblocks the caller's `mb_info` marks unchanged (`H264EncoderWrapper::constant_blocks`, from the block
 ledger, given only where the source reports every change) are coded as skips without analysis, copied from the
-input, or filtered into the lowres picture again, each where the full path would code, copy, or filter them the same:
-a stream comes out bit for bit as without them. At 2560x1600 a 256x256 change took x264 2.0 ms of a frame where it
-took 4.1, and a frame that changed whole the same as before.
+input, filtered into the lowres picture again, or costed again by the lookahead, each where the full path would
+code, copy, filter, or cost them the same: a stream comes out bit for bit as without them; and the lowres planes are
+filtered on the idle threads of the synchronous lookahead, their border expanded again only where an edge block
+changed. At 2560x1600 a 256x256 change took x264 2.0 ms of a frame where it took 4.1, and a frame that changed whole
+the same as before. A row's run of constant macroblocks is coded at once, the reference's pixels copied for the run
+and only its last macroblock's column cached (a still 2560x1600 frame 0.27 ms where it took 0.41). The macroblocks a
+page scroll moved whole are named to x264 as copies (`X264_MBINFO_COPY` with a vector a macroblock in `mb_copy`;
+`H264EncoderWrapper::copy_hints`) by `encoders/copyhint.rs`, which hashes the luma rows of a few narrow strips of
+each picture and votes, per strip, for the shift that maps its changed rows onto the previous picture's; a hint is
+a candidate, which x264 compares with the previous input it still holds in place before it codes a copy, so a wrong
+one costs that compare alone, and a picture it copied takes none. A macroblock matched whole at an even vector is
+coded as a P_SKIP without analysis where that is the P_SKIP vector, on the same run path as a constant one; one
+matched in luma alone, at an odd vector that moved the chroma sites, is coded as a 16x16 block at the vector, or a
+P_SKIP where x264's own probe finds its residual quantizes away. The lookahead keeps its own search, so the rate
+control sees the frame it saw without hints (its lowres search reads a scroll as new picture and a constant-quality
+session codes it coarse, which holds the bandwidth of a scroll where a hinted estimate raised it by half). At one
+quantizer a 24-pixel scroll took x264 0.95 ms of a frame where it took 1.38, and a 120-pixel one, past the search's
+reach, 2.42 ms and 29 kB where it took 2.76 and 57; the stream's level bounds the vectors, so a capture whose level admits 128 rows takes no hint past that.
+An 8-bit 4:2:0 picture reaches x264 as NV12 laid out as its own frames (`Nv12Planes`, from
+`x264_param_input_layout`), which it encodes where it lies instead of copying it (`X264_CSP_IN_PLACE`) and reads through the
+next encode as the previous input, so the CPU path converts into two pictures in turn and the X11 capture keeps that
+pool surface out of its pool until an encode no longer reads it (`x264_encoder_release_input` frees it for a resize):
+a 2560x1600 scroll took 6.7 ms of a frame where it took 7.4.
 The crate's `Cargo.toml` is the one place the version lives: `setup.py` reads it, spelling a semver pre-release
 the PEP 440 way (`2.1.0-rc.1` is `2.1.0rc1` to pip), and the release workflow stamps the tag into the manifest
 and the lock, so a build ahead of a release carries the series version and a release the tag's.
@@ -366,7 +386,7 @@ the general path otherwise, which reads the screen in place where the server sha
 (`x11/framebuffer.rs`: the images' Xvfb holding the screen in system memory offers SELKIES-FRAMEBUFFER, a
 read-only memfd of the screen, a watch of the tiles drawn into it, and an eventfd, so a frame copies only
 the tiles its pool surface misses, or for an 8-bit 4:2:0 x264 session with no overlay drawn converts them
-straight into the surface's planes (`FramebufferGrab::convert`), waits on no request, and is decided on those tiles and the overlays drawn onto it
+straight into the surface's NV12 planes, which x264 encodes in place (`FramebufferGrab::convert`), waits on no request, and is decided on those tiles and the overlays drawn onto it
 with no content hash, `X11Pipeline::process_reported`) and through XShm and XDamage on every other
 server. Each zero-copy backend is declined -- with one line saying why --
 for a codec its engine does not serve, software encoding, a server or device that does not qualify

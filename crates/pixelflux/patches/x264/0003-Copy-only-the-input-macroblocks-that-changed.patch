@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: thelamer <ryankuba@gmail.com>
 Date: Wed, 4 Nov 2026 23:38:11 -0500
-Subject: [PATCH 3/5] Copy only the input macroblocks that changed
+Subject: [PATCH] Copy only the input macroblocks that changed
 
 Input frames are recycled, so a recycled frame already holds the picture of the input frame it
 last took, and on a screen where little changes nearly all of it is still current. x264 keeps
@@ -151,7 +151,7 @@ index c66bcc5..18cdcad 100644
      int64_t i_field_cnt; /* Presentation field count */
      int     i_frame_num; /* 7.4.3 frame_num */
 diff --git a/encoder/encoder.c b/encoder/encoder.c
-index 56f9821..b88ffca 100644
+index 9c014a0..86e194c 100644
 --- a/encoder/encoder.c
 +++ b/encoder/encoder.c
 @@ -4338,6 +4338,7 @@ void    x264_encoder_close  ( x264_t *h )
@@ -162,3 +162,6 @@ index 56f9821..b88ffca 100644
  
  #if HAVE_OPENCL
      x264_opencl_lookahead_delete( h );
+-- 
+2.47.3
+

@@ -1,0 +1,300 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Fri, 6 Nov 2026 10:56:26 -0500
+Subject: [PATCH] Code a row's run of constant macroblocks at once
+
+The constant-macroblock skip coded each macroblock the caller's mb_info marks constant on its
+own: a 16x16 copy of the reference, the intra border backup and the cache's right column stored
+per macroblock, and x264_ratecontrol_mb called for each, about 70 ns a macroblock, which is what a
+still 2560x1600 frame of 16000 of them spent its slices on. A run of them along a row is now coded
+at once: the per-macroblock checks (the constant flag, the zero P_SKIP vector, the analysis QP
+against the reference's effective QP) and the state its neighbours and the next frame read stay per
+macroblock, the reference's pixels are copied for the run in one pass a row, the border backup is
+one copy for the run, only the last macroblock's right column is cached, and the rate control
+accumulates the run in one call (x264_ratecontrol_mb_skip_run). A row's first macroblock keeps the
+full path, which sets the row's vector limits.
+
+Measured with four sliced threads on four pinned cores of a Ryzen 9 5950X at 2560x1600 (CRF 25,
+pixelflux's settings), a still frame took 0.27 ms where it took 0.41, a frame with a 256x256
+change 0.56 where 0.68, and a full-screen scroll the same. Every stream comes out bit for bit the
+same: CRF at one and four threads and VBV at one, 1080p and 2560x1600, a scroll, a moved window, a
+small change, a still screen, forced IDRs, and frames without mb_info (126 runs), the version SEI
+left out.
+---
+ encoder/encoder.c     | 183 +++++++++++++++++++++++++-----------------
+ encoder/ratecontrol.c |   8 ++
+ encoder/ratecontrol.h |   2 +
+ 3 files changed, 118 insertions(+), 75 deletions(-)
+
+diff --git a/encoder/encoder.c b/encoder/encoder.c
+index 9ee10a6..cea5a5a 100644
+--- a/encoder/encoder.c
++++ b/encoder/encoder.c
+@@ -2756,60 +2756,106 @@ static ALWAYS_INLINE void bitstream_restore( x264_t *h, x264_bs_bak_t *bak, int
+     }
+ }
+ 
+-/* Code the macroblock at (mb_x, mb_y) as the P_SKIP analysis would take for it, without
+- * loading, analysing, or encoding it: one the caller's mb_info marks constant, where the
+- * mb_info fast skip in x264_macroblock_analyse holds (the reference is the previous frame, at
+- * this macroblock's analysis QP or finer, without weighted prediction) and the P_SKIP vector
+- * is zero. A row's first macroblock always takes the full path, whose analysis sets the
+- * row's vertical vector limits every later macroblock of the row searches and compensates
+- * within. The reference's pixels are the reconstruction, and the macroblock's state is left
+- * as x264_macroblock_cache_save leaves a P_SKIP's: the per-macroblock arrays its neighbours
+- * and the next frame read, the intra border backup, and the right column of the cache the next
+- * macroblock takes its left neighbour from. The stream comes out bit for bit as the full path
+- * codes it; returns 0, leaving everything untouched, wherever the full path would decide. */
+-static int macroblock_skip_constant( x264_t *h, int mb_x, int mb_y )
++/* Code the run of macroblocks from (mb_x, mb_y) to the end of its row, or to the slice's last
++ * macroblock, as the P_SKIP analysis would take each of them, without loading, analysing, or
++ * encoding them: the ones the caller's mb_info marks constant, where the mb_info fast skip in
++ * x264_macroblock_analyse holds (the reference is the previous frame, at the macroblock's
++ * analysis QP or finer, without weighted prediction) and the P_SKIP vector is zero. A row's
++ * first macroblock always takes the full path, whose analysis sets the row's vertical vector
++ * limits every later macroblock of the row searches and compensates within. The reference's
++ * pixels are the reconstruction, copied for the run at once, and each macroblock's state is
++ * left as x264_macroblock_cache_save leaves a P_SKIP's: the per-macroblock arrays its neighbours
++ * and the next frame read, the intra border backup, and, for the run's last, the right column of
++ * the cache the next macroblock takes its left neighbour from. The stream comes out bit for bit
++ * as the full path codes it; returns how many macroblocks were coded, 0 where the first would
++ * take the full path, with h->mb naming the last. */
++static int macroblock_skip_constant_run( x264_t *h, int mb_x, int mb_y )
+ {
+-    const int mb_xy = mb_x + mb_y * h->mb.i_mb_stride;
+-    if( mb_x == 0 || !(h->fdec->mb_info[mb_xy] & X264_MBINFO_CONSTANT) )
++    if( mb_x == 0 )
+         return 0;
+     const int s8x8 = h->mb.i_b8_stride;
+     const int s4x4 = h->mb.i_b4_stride;
+-    const int b8_xy = 2*(mb_y * s8x8 + mb_x);
+-    const int b4_xy = 4*(mb_y * s4x4 + mb_x);
+     const int first = h->sh.i_first_mb;
++    const int row = mb_y * h->mb.i_mb_stride;
++    const int end_x = X264_MIN( h->mb.i_mb_width, h->sh.i_last_mb - row + 1 );
++    int x = mb_x;
++    for( ; x < end_x; x++ )
++    {
++        const int mb_xy = row + x;
++        if( !(h->fdec->mb_info[mb_xy] & X264_MBINFO_CONSTANT) )
++            break;
++        const int b8_xy = 2*(mb_y * s8x8 + x);
++        const int b4_xy = 4*(mb_y * s4x4 + x);
++
++        /* P_SKIP's vector is zero where a neighbour is unavailable or one predicts from reference
++         * 0 with a zero vector (x264_mb_predict_mv_pskip); a median that comes to zero takes the
++         * full path. */
++        int zero = h->mb.slice_table[mb_xy - 1] != first
++                || mb_y == 0 || h->mb.slice_table[mb_xy - h->mb.i_mb_stride] != first;
++        if( !zero )
++            zero = !( h->mb.ref[0][b8_xy - 1] | M32( h->mb.mv[0][b4_xy - 1] ) )
++                || !( h->mb.ref[0][b8_xy - s8x8] | M32( h->mb.mv[0][b4_xy - s4x4] ) );
++        if( !zero )
++            break;
+ 
+-    /* P_SKIP's vector is zero where a neighbour is unavailable or one predicts from reference 0
+-     * with a zero vector (x264_mb_predict_mv_pskip); a median that comes to zero takes the full
+-     * path. */
+-    int zero = h->mb.slice_table[mb_xy - 1] != first
+-            || mb_y == 0 || h->mb.slice_table[mb_xy - h->mb.i_mb_stride] != first;
+-    if( !zero )
+-        zero = !( h->mb.ref[0][b8_xy - 1] | M32( h->mb.mv[0][b4_xy - 1] ) )
+-            || !( h->mb.ref[0][b8_xy - s8x8] | M32( h->mb.mv[0][b4_xy - s4x4] ) );
+-    if( !zero )
++        h->mb.i_mb_x = x;
++        h->mb.i_mb_y = mb_y;
++        h->mb.i_mb_xy = mb_xy;
++        h->mb.i_b8_xy = b8_xy;
++        h->mb.i_b4_xy = b4_xy;
++        int qp = x264_ratecontrol_mb_qp( h );
++        if( h->param.rc.i_aq_mode && h->param.analyse.i_subpel_refine < 10 )
++            qp = abs(qp - h->mb.i_last_qp) == 1 ? h->mb.i_last_qp : qp;
++        if( h->fref[0][0]->effective_qp[mb_xy] > qp )
++            break;
++        h->fdec->effective_qp[mb_xy] = qp;
++
++        h->mb.type[mb_xy] = P_SKIP;
++        h->mb.slice_table[mb_xy] = first;
++        h->mb.partition[mb_xy] = D_16x16;
++        M64( h->mb.intra4x4_pred_mode[mb_xy] ) = h->param.b_constrained_intra
++            ? (uint8_t)(-1) * 0x0101010101010101ULL : I_PRED_4x4_DC * 0x0101010101010101ULL;
++        h->mb.qp[mb_xy] = h->mb.i_last_qp;
++        memset( h->mb.non_zero_count[mb_xy], 0, sizeof(h->mb.non_zero_count[0]) );
++        h->mb.cbp[mb_xy] = 0;
++        h->mb.mb_transform_size[mb_xy] = 0;
++        M16( &h->mb.ref[0][b8_xy] ) = 0;
++        M16( &h->mb.ref[0][b8_xy + s8x8] ) = 0;
++        for( int j = 0; j < 4; j++ )
++            M128( &h->mb.mv[0][b4_xy + j*s4x4] ) = M128_ZERO;
++        /* The 16x16 vectors later macroblocks and the next frame predict motion from. */
++        for( int i = 0; i < h->i_ref[0]; i++ )
++            M32( h->mb.mvr[0][i][mb_xy] ) = 0;
++    }
++    const int n = x - mb_x;
++    if( !n )
+         return 0;
+-
+-    h->mb.i_mb_x = mb_x;
++    const int last_x = x - 1;
++    h->mb.i_mb_x = last_x;
+     h->mb.i_mb_y = mb_y;
+-    h->mb.i_mb_xy = mb_xy;
+-    h->mb.i_b8_xy = b8_xy;
+-    h->mb.i_b4_xy = b4_xy;
+-    int qp = x264_ratecontrol_mb_qp( h );
+-    if( h->param.rc.i_aq_mode && h->param.analyse.i_subpel_refine < 10 )
+-        qp = abs(qp - h->mb.i_last_qp) == 1 ? h->mb.i_last_qp : qp;
+-    if( h->fref[0][0]->effective_qp[mb_xy] > qp )
+-        return 0;
+-    h->fdec->effective_qp[mb_xy] = qp;
++    h->mb.i_mb_xy = row + last_x;
++    h->mb.i_b8_xy = 2*(mb_y * s8x8 + last_x);
++    h->mb.i_b4_xy = 4*(mb_y * s4x4 + last_x);
++    h->mb.i_mb_prev_xy = h->mb.i_mb_xy;
++    h->mb.i_type = P_SKIP;
++    h->mb.i_partition = D_16x16;
++    h->mb.i_cbp_luma = h->mb.i_cbp_chroma = 0;
++    h->mb.b_transform_8x8 = 0;
++    h->mb.i_qp = h->mb.i_last_qp;
++    h->mb.i_last_dqp = 0;
+ 
+     for( int p = 0; p < (CHROMA444 ? 3 : 1); p++ )
+     {
+         int stride = h->fdec->i_stride[p];
+         int off = 16 * mb_x + 16 * mb_y * stride;
+         pixel *dst = &h->fdec->plane[p][off];
+-        h->mc.copy[PIXEL_16x16]( dst, stride, &h->fref[0][0]->plane[p][off], stride, 16 );
+-        memcpy( &h->intra_border_backup[mb_y&1][p][mb_x*16], dst + 15*stride, 16*SIZEOF_PIXEL );
++        const pixel *src = &h->fref[0][0]->plane[p][off];
++        for( int j = 0; j < 16; j++ )
++            memcpy( dst + j*stride, src + j*stride, 16*n*SIZEOF_PIXEL );
++        memcpy( &h->intra_border_backup[mb_y&1][p][mb_x*16], dst + 15*stride, 16*n*SIZEOF_PIXEL );
++        const pixel *last = dst + 16*(n-1);
+         for( int j = 0; j < 16; j++ )
+-            h->mb.pic.p_fdec[p][15 + j*FDEC_STRIDE] = dst[15 + j*stride];
++            h->mb.pic.p_fdec[p][15 + j*FDEC_STRIDE] = last[15 + j*stride];
+     }
+     if( CHROMA_FORMAT && !CHROMA444 )
+     {
+@@ -2817,44 +2863,28 @@ static int macroblock_skip_constant( x264_t *h, int mb_x, int mb_y )
+         int stride = h->fdec->i_stride[1];
+         int off = 16 * mb_x + height * mb_y * stride;
+         pixel *dst = &h->fdec->plane[1][off];
+-        h->mc.copy[PIXEL_16x16]( dst, stride, &h->fref[0][0]->plane[1][off], stride, height );
+-        pixel *last = dst + (height - 1) * stride;
+-        for( int i = 0; i < 8; i++ )
++        const pixel *src = &h->fref[0][0]->plane[1][off];
++        for( int j = 0; j < height; j++ )
++            memcpy( dst + j*stride, src + j*stride, 16*n*SIZEOF_PIXEL );
++        const pixel *bottom = dst + (height - 1) * stride;
++        for( int i = 0; i < n; i++ )
+         {
+-            h->intra_border_backup[mb_y&1][1][mb_x*16 + i] = last[2*i];
+-            h->intra_border_backup[mb_y&1][1][mb_x*16 + 8 + i] = last[2*i + 1];
++            pixel *backup = &h->intra_border_backup[mb_y&1][1][(mb_x + i)*16];
++            const pixel *row16 = bottom + 16*i;
++            for( int k = 0; k < 8; k++ )
++            {
++                backup[k] = row16[2*k];
++                backup[8 + k] = row16[2*k + 1];
++            }
+         }
++        const pixel *last = dst + 16*(n-1);
+         for( int j = 0; j < height; j++ )
+         {
+-            h->mb.pic.p_fdec[1][7 + j*FDEC_STRIDE] = dst[14 + j*stride];
+-            h->mb.pic.p_fdec[2][7 + j*FDEC_STRIDE] = dst[15 + j*stride];
++            h->mb.pic.p_fdec[1][7 + j*FDEC_STRIDE] = last[14 + j*stride];
++            h->mb.pic.p_fdec[2][7 + j*FDEC_STRIDE] = last[15 + j*stride];
+         }
+     }
+-
+-    h->mb.i_type = P_SKIP;
+-    h->mb.i_partition = D_16x16;
+-    h->mb.i_cbp_luma = h->mb.i_cbp_chroma = 0;
+-    h->mb.b_transform_8x8 = 0;
+-    h->mb.type[mb_xy] = P_SKIP;
+-    h->mb.slice_table[mb_xy] = first;
+-    h->mb.partition[mb_xy] = D_16x16;
+-    h->mb.i_mb_prev_xy = mb_xy;
+-    M64( h->mb.intra4x4_pred_mode[mb_xy] ) = h->param.b_constrained_intra
+-        ? (uint8_t)(-1) * 0x0101010101010101ULL : I_PRED_4x4_DC * 0x0101010101010101ULL;
+-    h->mb.i_qp = h->mb.i_last_qp;
+-    h->mb.qp[mb_xy] = h->mb.i_qp;
+-    h->mb.i_last_dqp = 0;
+-    memset( h->mb.non_zero_count[mb_xy], 0, sizeof(h->mb.non_zero_count[0]) );
+-    h->mb.cbp[mb_xy] = 0;
+-    h->mb.mb_transform_size[mb_xy] = 0;
+-    M16( &h->mb.ref[0][b8_xy] ) = 0;
+-    M16( &h->mb.ref[0][b8_xy + s8x8] ) = 0;
+-    for( int j = 0; j < 4; j++ )
+-        M128( &h->mb.mv[0][b4_xy + j*s4x4] ) = M128_ZERO;
+-    /* The 16x16 vectors later macroblocks and the next frame predict motion from. */
+-    for( int i = 0; i < h->i_ref[0]; i++ )
+-        M32( h->mb.mvr[0][i][mb_xy] ) = 0;
+-    return 1;
++    return n;
+ }
+ 
+ static intptr_t slice_write( x264_t *h )
+@@ -2964,10 +2994,11 @@ static intptr_t slice_write( x264_t *h )
+             h->mb.field[mb_xy] = MB_INTERLACED;
+         }
+ 
+-        if( b_skip_constant && !h->mb.b_reencode_mb && macroblock_skip_constant( h, i_mb_x, i_mb_y ) )
++        int i_skip_run = b_skip_constant && !h->mb.b_reencode_mb ? macroblock_skip_constant_run( h, i_mb_x, i_mb_y ) : 0;
++        if( i_skip_run )
+         {
+-            i_skip++;
+-            if( x264_ratecontrol_mb( h, 0 ) < 0 )
++            i_skip += i_skip_run;
++            if( x264_ratecontrol_mb_skip_run( h, i_skip_run ) < 0 )
+             {
+                 bitstream_restore( h, &bs_bak[BS_BAK_ROW_VBV], &i_skip, 1 );
+                 h->mb.b_reencode_mb = 1;
+@@ -2976,7 +3007,9 @@ static intptr_t slice_write( x264_t *h )
+                 h->sh.i_last_mb = orig_last_mb;
+                 continue;
+             }
+-            h->stat.frame.i_mb_count[P_SKIP]++;
++            h->stat.frame.i_mb_count[P_SKIP] += i_skip_run;
++            i_mb_x += i_skip_run - 1;
++            mb_xy += i_skip_run - 1;
+             if( mb_xy == h->sh.i_last_mb )
+                 break;
+             if( ++i_mb_x == h->mb.i_mb_width )
+diff --git a/encoder/ratecontrol.c b/encoder/ratecontrol.c
+index a42305c..e510fa0 100644
+--- a/encoder/ratecontrol.c
++++ b/encoder/ratecontrol.c
+@@ -1767,6 +1767,14 @@ int x264_ratecontrol_mb_qp( x264_t *h )
+     return x264_clip3( qp + 0.5f, h->param.rc.i_qp_min, h->param.rc.i_qp_max );
+ }
+ 
++/* x264_ratecontrol_mb for a run of n macroblocks coded without bits, at the QP of the last of
++ * them, which h->mb names. */
++int x264_ratecontrol_mb_skip_run( x264_t *h, int n )
++{
++    h->rc->qpa_aq += h->mb.i_qp * (n - 1);
++    return x264_ratecontrol_mb( h, 0 );
++}
++
+ /* In 2pass, force the same frame types as in the 1st pass */
+ int x264_ratecontrol_slice_type( x264_t *h, int frame_num )
+ {
+diff --git a/encoder/ratecontrol.h b/encoder/ratecontrol.h
+index 2ff4fb4..85d3310 100644
+--- a/encoder/ratecontrol.h
++++ b/encoder/ratecontrol.h
+@@ -67,6 +67,8 @@ int  x264_ratecontrol_slice_type( x264_t *, int i_frame );
+ void x264_ratecontrol_set_weights( x264_t *h, x264_frame_t *frm );
+ #define x264_ratecontrol_mb x264_template(ratecontrol_mb)
+ int  x264_ratecontrol_mb( x264_t *, int bits );
++#define x264_ratecontrol_mb_skip_run x264_template(ratecontrol_mb_skip_run)
++int  x264_ratecontrol_mb_skip_run( x264_t *, int n );
+ #define x264_ratecontrol_qp x264_template(ratecontrol_qp)
+ int  x264_ratecontrol_qp( x264_t * );
+ #define x264_ratecontrol_mb_qp x264_template(ratecontrol_mb_qp)
+-- 
+2.47.3
+
