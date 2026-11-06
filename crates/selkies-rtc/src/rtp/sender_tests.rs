@@ -1397,6 +1397,70 @@ fn a_held_resync_defers_only_one_repair_window() {
 }
 
 #[test]
+fn quiet_feedback_advances_deferred_and_pending_key_runs() {
+    for queued in [true, false] {
+        for kind in 0..=2 {
+            let mut h = Harness::selective();
+            h.send(1, None, 10, true, false);
+            h.send(2, Some(1), 20, false, true);
+            h.s.key_sent_at = queued.then_some(h.clock);
+            h.behind(RESYNC_FAR_FRAMES, 3.0);
+            assert_eq!(h.send(3, Some(2), 0, false, false), None);
+            let step = RESYNC_ANCHORED_S + 0.01;
+            h.clock += step;
+            assert_eq!(h.send(4, Some(3), 0, false, false), None);
+            let before = usize::from(!queued);
+            assert_eq!(plis(&h), before, "setup for queued={queued}, kind={kind}");
+            assert!(h.s.resync_since.is_some());
+            h.clock += step;
+            match kind {
+                2 => h.nack(&[9999]),
+                _ => {
+                    let packet = RtcpPacket::Psfb(PsfbPacket {
+                        fmt: if kind == 0 {
+                            RTCP_PSFB_PLI
+                        } else {
+                            RTCP_PSFB_FIR
+                        },
+                        ssrc: 1,
+                        media_ssrc: 2,
+                        fci: vec![],
+                    });
+                    h.s.handle_rtcp(&packet, &mut h.tr, h.clock);
+                }
+            }
+            assert_eq!(
+                plis(&h),
+                before + 1,
+                "quiet feedback must advance the expired run: queued={queued}, kind={kind}"
+            );
+            assert!(h.s.resync_since.is_some());
+            match kind {
+                2 => h.nack(&[9999]),
+                _ => {
+                    let packet = RtcpPacket::Psfb(PsfbPacket {
+                        fmt: if kind == 0 {
+                            RTCP_PSFB_PLI
+                        } else {
+                            RTCP_PSFB_FIR
+                        },
+                        ssrc: 1,
+                        media_ssrc: 2,
+                        fci: vec![],
+                    });
+                    h.s.handle_rtcp(&packet, &mut h.tr, h.clock);
+                }
+            }
+            assert_eq!(
+                plis(&h),
+                before + 1,
+                "nested repair must not duplicate the outer request: queued={queued}, kind={kind}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_loss_past_repair_is_resynced_from_the_newest_frame_held() {
     let frames = |h: &mut Harness| {
         for n in 1..6 {

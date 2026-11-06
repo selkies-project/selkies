@@ -1262,6 +1262,7 @@ impl RtpSender {
             return false;
         }
         if self.resync_since.is_some() {
+            self.repair(transport, now);
             return true;
         }
         if self.held.is_empty() {
