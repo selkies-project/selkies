@@ -213,7 +213,8 @@ jobs:
             wl-clipboard libsdl2-2.0-0 openbox kwin-x11 kwin-wayland kwin-common \
             pulseaudio pulseaudio-utils \
             dbus pipewire pipewire-pulse wireplumber xdg-desktop-portal xdg-desktop-portal-kde qtwayland5 qt6-wayland \
-            mutter python3-gi python3-xlib gir1.2-gtk-3.0 libudev-dev \
+            mutter python3-gi python3-xlib gir1.2-gtk-3.0 \
+            libudev-dev libpipewire-0.3-dev ffmpeg v4l-utils \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
             libgl1 libegl1 libegl-mesa0 libgl1-mesa-dri libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
@@ -387,9 +388,15 @@ jobs:
       - name: Build the test tools
         run: make -C tests/tools
       # The same stack a development sandbox starts, on the display the
-      # workflow names
+      # workflow names. VirtualCamera publishes a PipeWire node as well as
+      # listening on its socket, so the webcam suite needs a reachable daemon.
       - name: Start the display server and audio
-        run: scripts/ci/test-stack.sh
+        run: |
+          scripts/ci/test-stack.sh
+          if ! pw-cli info 0 > /dev/null 2>&1; then
+            dbus-run-session -- /usr/bin/pipewire > /tmp/selkies-pipewire.log 2>&1 &
+            until pw-cli info 0 > /dev/null 2>&1; do sleep 0.5; done
+          fi
       # The integration tier drives Chromium as well, for the gamepad and
       # WebRTC-transport suites; only the browser matrix needs the other engines
       - name: Install Chromium
