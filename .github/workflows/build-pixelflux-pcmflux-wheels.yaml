@@ -155,7 +155,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.group.project }}-wheels-${{ matrix.group.name }}
-          path: crates/${{ matrix.group.project }}/wheelhouse/*.whl
+          # Cibuildwheel writes to the checkout-root wheelhouse, not package-dir.
+          path: wheelhouse/*.whl
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
