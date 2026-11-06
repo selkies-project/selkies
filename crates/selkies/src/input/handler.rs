@@ -388,7 +388,7 @@ impl Dispatcher {
     pub fn set_system_dpi(&self, dpi: f64) {
         let mut st = self.state.lock();
         st.system_dpi = dpi;
-        st.cursor_size_cap = (self.max_cursor_size() as f64 * dpi / 96.0) as u32;
+        st.cursor_size_cap = (self.max_cursor_size() as f64 * dpi / 96.0).round() as u32;
     }
 
     /// The remote-cursor cap at unity: the configured maximum, or the operator's cursor size above it.

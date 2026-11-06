@@ -22,6 +22,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
+import core_lib as C
 import websockets
 
 TOLD = "the encoder predicts past it"
@@ -86,6 +87,8 @@ async def lost_frame_answers(res: "H.Results") -> None:
     predicts past the loss as VP9 does. Its delta frames tell the two apart: a session that
     tracks its references names the frame each predicts from, one that does not repeats its id.
     """
+    churn = C.Churn()
+    churn.start()
     uri = f"ws://localhost:{H.PORT}/api/websockets"
     async with websockets.connect(uri, max_size=None) as ws:
         await asyncio.wait_for(ws.recv(), timeout=10)
@@ -118,6 +121,7 @@ async def lost_frame_answers(res: "H.Results") -> None:
                 res.check(f"{name}: a session that cannot predict past it is repaired with a key frame",
                           keys > 0, detail)
         pump.cancel()
+    churn.stop()
 
 
 async def drive() -> "H.Results":

@@ -2118,6 +2118,12 @@ fn a_synced_dpi_scales_the_cursor_cap() {
     h.set_system_dpi(192.0);
     assert_eq!(h.cursor_metrics(), (192.0, 64));
     assert_eq!(AppCompositor::system_dpi(&*h), 192.0);
+    h.set_system_dpi(95.25);
+    assert_eq!(
+        h.cursor_metrics(),
+        (95.25, 32),
+        "a fractional host DPI does not shrink the cap"
+    );
     h.set_system_dpi(96.0);
     assert_eq!(h.cursor_metrics(), (96.0, 32), "and comes back");
 }

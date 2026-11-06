@@ -19,6 +19,7 @@ SRC="$(mktemp -d)"
 trap 'rm -rf "${SRC}"' EXIT
 
 # The commit and mirrors the recipe's clone_source names for x264.
+# shellcheck disable=SC2046  # awk emits the commit and URLs as separate arguments
 set -- $(awk '
     $1 == "clone_source" && $4 == "x264" { commit = $2; next }
     commit != "" { sub(/ *&&.*/, ""); sub(/^ +/, ""); print commit " " $0; exit }

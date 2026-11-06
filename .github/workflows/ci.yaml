@@ -111,7 +111,8 @@ jobs:
           python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
           pre-commit run --all-files --show-diff-on-failure rustfmt
           pre-commit run --all-files --show-diff-on-failure clippy
-          pre-commit run --all-files --show-diff-on-failure clippy-pixelflux-python clippy-pcmflux-python
+          pre-commit run --all-files --show-diff-on-failure clippy-pixelflux-python
+          pre-commit run --all-files --show-diff-on-failure clippy-pcmflux-python
 
   native-tests:
     name: Native capture tests (${{ matrix.arch }})
@@ -271,6 +272,7 @@ jobs:
           # Every kind of media, so a pattern that matched nothing fails here
           # rather than publishing a pre-release without it
           for want in '*.whl' '*.deb' '*.rpm' '*.apk' '*.pkg.tar.zst' '*.AppImage'; do
+            # shellcheck disable=SC2086  # want is the media glob expanded above
             ls pre-release/$want > /dev/null 2>&1 || { echo "::error::no ${want} in the run's artifacts"; exit 1; }
           done
           (cd pre-release && sha256sum -- * > SHA256SUMS)

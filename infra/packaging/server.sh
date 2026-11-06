@@ -68,6 +68,7 @@ SRC="${BUILD}/server"
 rm -rf "${SRC}"
 mkdir -p "${SRC}"
 cp -r "${REPO}/Cargo.toml" "${REPO}/Cargo.lock" "${REPO}/crates" "${SRC}/"
+chmod -R u+w "${SRC}"
 # Every public crate carries the release version. Each native crate also keeps
 # its own manifest and lock for a standalone wheel build, while the root lock
 # covers both that build and this workspace build under `--locked`.

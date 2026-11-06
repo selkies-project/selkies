@@ -349,7 +349,7 @@ class Role(NamedTuple):
     notes: str = ""
 
 
-# Every direct dependency of the workspace's crates, in the order the page lists them; a
+# Every direct dependency of the server crates, in the order the page lists them; a
 # new one fails the check until it is placed here.
 ROLES: Tuple[Role, ...] = (
     Role(("pixelflux",), "screen capture and video encoding, over the native libraries below",
@@ -406,11 +406,13 @@ class Crate(NamedTuple):
     manifest: str
 
 
-def cargo_metadata(manifest: str, locked: bool = True) -> dict:
+def cargo_metadata(manifest: str, locked: bool = True, no_default_features: bool = False) -> dict:
     """Resolve the graph of ``manifest`` over the release targets from the lockfile beside it."""
     cmd = ["cargo", "metadata", "--format-version", "1", "--manifest-path", manifest]
     if locked:
         cmd.append("--locked")
+    if no_default_features:
+        cmd.append("--no-default-features")
     for target in TARGETS:
         cmd += ["--filter-platform", target]
     try:
@@ -447,7 +449,7 @@ def resolve(set_name: str) -> dict:
             f.write(swapped)
         shutil.copyfile(LOCKFILE, os.path.join(tmp, "Cargo.lock"))
         os.symlink(os.path.join(REPO, "crates"), os.path.join(tmp, "crates"))
-        meta = cargo_metadata(os.path.join(tmp, "Cargo.toml"), locked=False)
+        meta = cargo_metadata(os.path.join(tmp, "Cargo.toml"), locked=False, no_default_features=True)
         unpinned = lock_packages(os.path.join(tmp, "Cargo.lock")) - lock_packages(LOCKFILE)
     if os.path.realpath(meta["workspace_root"]) == os.path.realpath(REPO):
         sys.exit("cargo resolved the committed workspace in place of the non-GPL copy")
@@ -469,10 +471,10 @@ def lock_packages(path: str) -> Set[Tuple[str, str, str]]:
 
 
 def normal_closure(meta: dict) -> List[dict]:
-    """The packages reachable from the workspace members over normal (non-build, non-dev) edges."""
+    """The packages the server links, without feature-unifying other workspace members."""
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
-    seen = set(meta["workspace_members"])
+    seen = {member for member in meta["workspace_members"] if packages[member]["name"] == "selkies"}
     stack = list(seen)
     while stack:
         for dep in nodes[stack.pop()]["deps"]:
@@ -483,11 +485,13 @@ def normal_closure(meta: dict) -> List[dict]:
 
 
 def direct_dependencies(meta: dict) -> Set[str]:
-    """The names of the workspace members' normal dependencies, a member another depends on included."""
+    """The server crates' normal dependencies, whose roles the page describes."""
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     names = set()
     for member in meta["workspace_members"]:
+        if packages[member]["name"] not in ("selkies", "selkies-rtc"):
+            continue
         for dep in nodes[member]["deps"]:
             if any(k["kind"] is None for k in dep["dep_kinds"]):
                 names.add(packages[dep["pkg"]]["name"])
