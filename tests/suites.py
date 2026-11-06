@@ -79,6 +79,7 @@ SUITES: list = [
     {"path": "unit/test_v4l2_staging_layout.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_release_assets.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_wheel_selection.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_capture_stack.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_cursor_scaling.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_command_dispatch.py", "tier": "unit", "timeout": 120},

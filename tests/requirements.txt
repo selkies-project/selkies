@@ -6,6 +6,7 @@
 # --with-deps chromium firefox webkit`; WebKit on Linux also needs GStreamer's
 # opengl plugin (gstreamer1.0-gl), or its video sink falls back.
 pytest
+packaging
 playwright
 websockets
 pywayland
