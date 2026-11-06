@@ -135,7 +135,7 @@ jobs:
         run: |
           set -e
           crate="$(echo "${RELEASE_TAG}" | sed -E 's/rc([0-9]+)$/-rc.\1/; s/a([0-9]+)$/-alpha.\1/; s/b([0-9]+)$/-beta.\1/; s/\.post([0-9]+)$/-post.\1/; s/\.dev([0-9]+)$/-dev.\1/')"
-          sed -i "0,/^version = /s|^version = .*|version = \"${crate}\"|" "crates/${PROJECT}/Cargo.toml"
+          sed -i "1,/^version = /s|^version = .*|version = \"${crate}\"|" "crates/${PROJECT}/Cargo.toml"
           sed -i "/^name = \"${PROJECT}\"$/{n;s|^version = .*|version = \"${crate}\"|}" "crates/${PROJECT}/Cargo.lock"
           sed -i "/^name = \"${PROJECT}\"$/{n;s|^version = .*|version = \"${crate}\"|}" Cargo.lock
           grep -q "^version = \"${crate}\"$" "crates/${PROJECT}/Cargo.toml"
