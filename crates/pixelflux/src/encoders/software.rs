@@ -472,9 +472,16 @@ impl H264EncoderWrapper {
     ///    carry, and the matching `high444` / `baseline` profile.
     /// 5. **Coding tools**: CABAC and the 8x8 transform are disabled, matching the low-latency
     ///    baseline profile — CAVLC entropy coding with no 8x8 DCT — for minimal encode cost.
+    ///    Motion search is the uneven multi-hexagon one over 64 pixels in place of `ultrafast`'s
+    ///    diamond over 16, which misses a scroll or a moved window wherever its starting
+    ///    prediction is poor (a slice's first row, the edge of a still region) and codes the
+    ///    shifted pixels as new: at 2560x1600 it took a scrolling full-screen change from 5.0 to
+    ///    3.5 Mbit/s at the same PSNR for 0.14 ms more of encode, and a quarter of the screen from
+    ///    5.0 to 4.4 for 0.09 ms, the search running only on the macroblocks `mb_info` leaves.
     /// 6. **Output**: repeated headers (SPS/PPS before each keyframe) and Annex-B framing, with
     ///    x264's own logging silenced.
-    /// 7. **References**: a decoded picture buffer of `REFERENCE_FRAMES` (`i_dpb_size`), declaring
+    /// 7. **References**: a decoded picture buffer of `REFERENCE_FRAMES` (`i_dpb_size`), or of
+    ///    `reference_frames` where the caller caps it (`video_reference_frames`), declaring
     ///    the lowest level up to 5.2 that holds them (`h264_reference_level`: 5.0 at 1080p, where
     ///    4.2 holds four), so `invalidate_reference` can leave a frame a client lost out of the
     ///    predictions with earlier frames still there to predict from, for a report up to eight
@@ -673,6 +680,8 @@ impl H264EncoderWrapper {
             x264_sys::x264_param_apply_profile(&mut param, profile.as_ptr());
             param.rc.b_qp_offsets = 1;
             param.analyse.b_mb_info = 1;
+            param.analyse.i_me_method = x264_sys::X264_ME_UMH as i32;
+            param.analyse.i_me_range = 64;
 
             param.i_threads = threads;
             param.b_repeat_headers = 1;
@@ -1497,9 +1506,10 @@ fn ledger_frame(
 ///      and frames inside `encode_host_argb` with the same header layout, and encodes a 4:4:4
 ///      request 4:2:0 (said once per process). The live CBR budget is recomputed here from the
 ///      bitrate/fps (`rate_control`) so it rescales with live changes.
-/// 7. **Dispatch**: H.264 runs inline with `h264_fullframe_threads` encode threads (x264 with a
-///    single-band color conversion; OpenH264 adds four slices and a four-band conversion of its
-///    own). The slice threads keep the in-frame encode latency inside the frame budget at high
+/// 7. **Dispatch**: H.264 runs inline with `h264_fullframe_threads` encode threads, its color
+///    conversion split into as many bands (x264: a whole 2560x1600 frame took 0.98 ms on one
+///    thread and 0.62 on four; OpenH264 adds four slices and a four-band conversion of its own),
+///    or none where the capture hands over the planes ([`encode_cpu_from`]). The slice threads keep the in-frame encode latency inside the frame budget at high
 ///    resolutions; the cap is four because `zerolatency` makes x264 slice-threaded and more than
 ///    four slices trips decode glitches in some Chromium builds, and the minus-one leaves
 ///    headroom for the capture thread. JPEG stripes instead run across the rayon pool, or one
@@ -1508,6 +1518,50 @@ fn ledger_frame(
 pub fn encode_cpu(
     stripes: &mut Vec<StripeState>,
     raw_pixels: &[u8],
+    width: i32,
+    height: i32,
+    damage_rects: &[Rectangle<i32, Physical>],
+    settings: &CaptureSettings,
+    frame_counter: u16,
+    use_gpu: bool,
+    hash_damage: bool,
+    requested_idr: bool,
+) -> Vec<EncodedStripe> {
+    encode_cpu_from(
+        stripes,
+        raw_pixels,
+        None,
+        width,
+        height,
+        damage_rects,
+        settings,
+        frame_counter,
+        use_gpu,
+        hash_damage,
+        requested_idr,
+    )
+}
+
+/// 8-bit 4:2:0 planes of a whole frame that its capture converted itself, `y_stride` and
+/// `uv_stride` bytes a row: the x264 session encodes them in place of converting the packed
+/// frame (`encode_cpu_from`).
+#[derive(Clone, Copy)]
+pub struct HostI420<'a> {
+    pub y: &'a [u8],
+    pub u: &'a [u8],
+    pub v: &'a [u8],
+    pub y_stride: usize,
+    pub uv_stride: usize,
+}
+
+/// [`encode_cpu`] with the frame's planes already converted (`planes`): an 8-bit 4:2:0 x264
+/// session encodes them and leaves `raw_pixels` unread, which a capture converting straight from
+/// the screen's memory never wrote.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_cpu_from(
+    stripes: &mut Vec<StripeState>,
+    raw_pixels: &[u8],
+    planes: Option<HostI420<'_>>,
     width: i32,
     height: i32,
     damage_rects: &[Rectangle<i32, Physical>],
@@ -1681,7 +1735,7 @@ pub fn encode_cpu(
     #[cfg(not(feature = "gpl"))]
     let empty_bytes = 0;
     #[cfg(feature = "gpl")]
-    let csc_bands = 1;
+    let csc_bands = h264_threads.max(1) as usize;
     if video && video_fullcolor && !crate::encoders::software_fullcolor(Codec::H264) {
         static FULLCOLOR_LOGGED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
@@ -2005,7 +2059,12 @@ pub fn encode_cpu(
                     let uv_stride =
                         (if video_fullcolor { width_usize } else { width_usize / 2 }) as i32;
                     let wide = bit_depth > 8;
-                    let conversion_result = if wide {
+                    let planes = planes.filter(|_| {
+                        !wide && !video_fullcolor && y_start == 0 && actual_height == height as usize
+                    });
+                    let conversion_result = if planes.is_some() {
+                        Ok(())
+                    } else if wide {
                         let [y16, u16, v16] = &mut stripe_state.yuv16;
                         y16.resize(y_size, 0);
                         u16.resize(uv_size, 0);
@@ -2063,7 +2122,11 @@ pub fn encode_cpu(
                     let bytes = |plane: &[u16]| unsafe {
                         std::slice::from_raw_parts(plane.as_ptr().cast::<u8>(), plane.len() * 2)
                     };
-                    let (y, u, v, scale) = if wide {
+                    let (y_stride, uv_stride) = planes
+                        .map_or((y_stride, uv_stride), |p| (p.y_stride as i32, p.uv_stride as i32));
+                    let (y, u, v, scale) = if let Some(p) = planes {
+                        (p.y, p.u, p.v, 1)
+                    } else if wide {
                         let [y16, u16, v16] = &stripe_state.yuv16;
                         (bytes(y16), bytes(u16), bytes(v16), 2)
                     } else {
@@ -2306,9 +2369,18 @@ fn cleanup_vbv_kbit(settings: &CaptureSettings, bitrate_kbps: i32) -> i32 {
     frames.max(seconds).max(1) as i32
 }
 
+/// Frames of the target a constant-rate x264 session is given as its buffer where the caller
+/// names no `video_vbv_multiplier`. x264's row-level control prices each row against a slice's
+/// share of the buffer, so in the frame and a half the other encoders take it coded a moving
+/// 1080p window on a 2560x1600 screen at half its target: 1.95 Mbit/s of 4 at 30.4 dB, 2.96 in
+/// four frames, 3.52 at 34.6 dB in eight, 3.68 in fifteen, with no latency lost on a LAN (6.2 ms
+/// to draw and decode at 1.5 frames, 5.5 at 8). Eight frames hold a frame's worst case to 133 ms
+/// of the rate at 60 fps, where fifteen added queue on a slow link for 4% more of the target.
+const CBR_VBV_FRAMES: f64 = 8.0;
+
 /// The `(bitrate_kbps, vbv_kbit)` the software H.264 encoder is programmed with: the CBR
-/// target, or the peak of a CRF a positive `video_vbv_multiplier` caps. An uncapped CRF gets a
-/// buffer of 0.
+/// target, with a buffer of `CBR_VBV_FRAMES` unless `video_vbv_multiplier` names one, or the
+/// peak of a CRF a positive `video_vbv_multiplier` caps. An uncapped CRF gets a buffer of 0.
 fn rate_control(settings: &CaptureSettings) -> (i32, i32) {
     let bitrate = settings.video_bitrate_kbps.max(1);
     if !settings.video_cbr_mode && settings.video_vbv_multiplier <= 0.0 {
@@ -2318,7 +2390,11 @@ fn rate_control(settings: &CaptureSettings) -> (i32, i32) {
         (bitrate as u32).saturating_mul(1000),
         settings.target_fps,
         settings.keyframe_interval_s,
-        settings.video_vbv_multiplier,
+        if settings.video_cbr_mode && settings.video_vbv_multiplier <= 0.0 {
+            CBR_VBV_FRAMES
+        } else {
+            settings.video_vbv_multiplier
+        },
     ) / 1000)
         .max(1) as i32;
     (bitrate, vbv)
