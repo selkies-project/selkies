@@ -229,6 +229,7 @@ SUITES: list = [
                    "inuse", "inuse-wr", "older", "frozen-wr"]},
     {"path": "e2e/test_wayland_host_portal.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc", "scaled", "gnome", "gnome-scaled", "gnome-notify", "wayland"]},
+    {"path": "e2e/test_wayland_host_menu.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_wayland_primary_shrink.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_wayland_secondary_shrink.py", "tier": "e2e", "timeout": 600,
      "selectors": ["websockets", "webrtc"]},
