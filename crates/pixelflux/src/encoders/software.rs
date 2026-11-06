@@ -3733,9 +3733,15 @@ mod tests {
             pictures[0].in_place,
             "the linked libx264 lays out a picture to encode in place"
         );
+        let layout = super::x264_input_layout(w, h).expect("layout");
+        let align = x264_sys::X264_IN_PLACE_ALIGN as usize;
         for p in &pictures {
             let (y, uv) = p.planes();
-            assert!(y.as_ptr().addr() % 64 == 0 && uv.as_ptr().addr() % 64 == 0);
+            assert!(
+                (y.as_ptr().addr() - layout.offset[0]).is_multiple_of(align)
+                    && (uv.as_ptr().addr() - layout.offset[1]).is_multiple_of(align),
+                "each plane lies its layout offset into a buffer aligned as x264 asks"
+            );
         }
         let (mut a, mut b) = (Vec::new(), Vec::new());
         for (n, bgra) in frames.iter().enumerate() {

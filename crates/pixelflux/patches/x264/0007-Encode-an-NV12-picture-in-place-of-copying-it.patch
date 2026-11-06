@@ -30,12 +30,12 @@ full-screen scroll at 2560x1600 (half its macroblocks changed) took 5.14 ms wher
 and at 1080p 3.12 where it took 3.52; a 256x256 change is unchanged.
 ---
  common/common.h   |   4 ++
- common/frame.c    | 143 ++++++++++++++++++++++++++++++++++++----------
+ common/frame.c    | 150 ++++++++++++++++++++++++++++++++++++----------
  common/frame.h    |  11 +++-
  encoder/api.c     |  22 +++++++
  encoder/encoder.c |  27 +++++++--
- x264.h            |  23 ++++++++
- 6 files changed, 195 insertions(+), 35 deletions(-)
+ x264.h            |  23 +++++++
+ 6 files changed, 202 insertions(+), 35 deletions(-)
 
 diff --git a/common/common.h b/common/common.h
 index 429c33b..586a28c 100644
@@ -60,7 +60,7 @@ index 429c33b..586a28c 100644
          int i_max_dpb;  /* Number of frames allocated in the decoded picture buffer */
          int i_max_ref0;
 diff --git a/common/frame.c b/common/frame.c
-index a58d0b7..35e2107 100644
+index a58d0b7..18c85d5 100644
 --- a/common/frame.c
 +++ b/common/frame.c
 @@ -42,6 +42,27 @@ static int align_plane_size( int x, int disalign )
@@ -118,10 +118,17 @@ index a58d0b7..35e2107 100644
      PREALLOC_INIT
  
      /* allocate frame data (+64 for extra data for me) */
-@@ -310,6 +319,26 @@ fail:
+@@ -310,6 +319,33 @@ fail:
      return NULL;
  }
  
++/* The bytes from the start of a frame's buffer for plane p to its first pixel, the plane stride
++ * pixels a row: PADV rows (half of them for chroma) and PADH_ALIGN columns of padding. */
++static int frame_plane_offset( int stride, int p )
++{
++    return (stride * (PADV >> p) + PADH_ALIGN) * SIZEOF_PIXEL;
++}
++
 +/* The planes of a frame of an encoder opened with param, as frame_new lays them out: the buffers
 + * a picture is encoded from in place (X264_CSP_IN_PLACE, x264_param_input_layout). */
 +int x264_frame_input_layout( const x264_param_t *param, int i_stride[2], int i_offset[2], int64_t i_size[2] )
@@ -136,7 +143,7 @@ index a58d0b7..35e2107 100644
 +    {
 +        int lines = (i_lines >> p) + 2 * (PADV >> p);
 +        i_stride[p] = stride * SIZEOF_PIXEL;
-+        i_offset[p] = (stride * (PADV >> p) + PADH_ALIGN) * SIZEOF_PIXEL;
++        i_offset[p] = frame_plane_offset( stride, p );
 +        i_size[p] = (int64_t)(p ? stride * lines : align_plane_size( stride * lines, FRAME_DISALIGN )) * SIZEOF_PIXEL;
 +    }
 +    return 0;
@@ -145,7 +152,7 @@ index a58d0b7..35e2107 100644
  void x264_frame_delete( x264_frame_t *frame )
  {
      /* Duplicate frames are blank copies of real frames (including pointers),
-@@ -361,36 +390,88 @@ static int get_plane_ptr( x264_t *h, x264_picture_t *src, uint8_t **pix, int *st
+@@ -361,36 +397,88 @@ static int get_plane_ptr( x264_t *h, x264_picture_t *src, uint8_t **pix, int *st
  
  #define get_plane_ptr(...) do { if( get_plane_ptr(__VA_ARGS__) < 0 ) return -1; } while( 0 )
  
@@ -205,7 +212,7 @@ index a58d0b7..35e2107 100644
 +        return 0;
 +    for( int p = 0; p < 2; p++ )
 +        if( src->img.i_stride[p] != dst->i_stride[p] * SIZEOF_PIXEL
-+            || (intptr_t)src->img.plane[p] & (X264_IN_PLACE_ALIGN - 1) )
++            || ((intptr_t)src->img.plane[p] - frame_plane_offset( dst->i_stride[p], p )) & (X264_IN_PLACE_ALIGN - 1) )
 +            return 0;
 +    for( int p = 0; p < 2; p++ )
 +    {
@@ -248,7 +255,7 @@ index a58d0b7..35e2107 100644
      int planar420 = i_csp == X264_CSP_I420;
      int planar444 = i_csp == X264_CSP_I444;
      if( held < 0 || h->frames.i_input_all_changed > held || !(planar420 || planar444) )
-@@ -492,7 +573,9 @@ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
+@@ -492,7 +580,9 @@ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
  
      uint8_t *pix[3];
      int stride[3];

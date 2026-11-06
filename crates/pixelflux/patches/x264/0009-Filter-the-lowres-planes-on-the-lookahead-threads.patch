@@ -25,10 +25,10 @@ against 0.038.
  3 files changed, 106 insertions(+), 33 deletions(-)
 
 diff --git a/common/frame.c b/common/frame.c
-index 35e2107..e9c9df5 100644
+index 18c85d5..ee8dd2c 100644
 --- a/common/frame.c
 +++ b/common/frame.c
-@@ -798,6 +798,14 @@ void x264_frame_expand_border_lowres( x264_frame_t *frame )
+@@ -805,6 +805,14 @@ void x264_frame_expand_border_lowres( x264_frame_t *frame )
          plane_expand_border( frame->lowres[i], frame->i_stride_lowres, frame->i_width_lowres, frame->i_lines_lowres, PADH, PADV, 1, 1, 0 );
  }
  
