@@ -70,7 +70,7 @@ A wheel leaves a few libraries to the host, the ones a desktop already carries: 
 **Option B: Install from local source**
 ```bash
 # From the root of the project repository
-pip install .
+pip install ./crates/pixelflux
 ```
 
 ## Usage

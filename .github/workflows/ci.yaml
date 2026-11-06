@@ -144,7 +144,6 @@ jobs:
           cargo test --locked -p pcmflux --lib
           cargo test --locked -p pcmflux --lib --features python
       - name: Test the non-GPL pixelflux configuration
-        if: matrix.arch == 'x86_64'
         run: cargo test --locked -p pixelflux --lib --no-default-features --features openh264
 
   python-compat:

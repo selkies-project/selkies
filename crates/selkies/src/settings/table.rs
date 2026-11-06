@@ -2333,7 +2333,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "backpressure_queue_size",
         kind: Kind::Int,
         default: "120",
-        help: "Max frames/audio chunks buffered per stream before dropping under backpressure (WebSockets mode). Higher tolerates larger client hiccups at the cost of latency.",
+        help: "Audio capture broadcast queue depth in packets, clamped to 1-65536 and rounded up to a power of two; lagging receivers lose overwritten packets. Applies to WebSockets and WebRTC audio, not video. Higher values tolerate longer consumer stalls at the cost of latency.",
         env_vars: &[],
         allowed: &[],
         value_range: None,

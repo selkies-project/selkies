@@ -54,7 +54,6 @@ The video encoder and its rate control. The dashboard chooses among what the ser
 | `--gpu-id`<br>`SELKIES_GPU_ID` | (empty)<br>str | GPU ID for hardware video encoders: selects /dev/dri/renderD{128 + n} and the GPU-stats index. Empty (default) sets no explicit pick, encoding on ID 0 — the first GPU — or on the GPU chosen by --auto-gpu; -1 disables hardware encoding. Ignored when --encode-dri specifies a device path. |
 | `--encode-dri`<br>`SELKIES_ENCODE_DRI`<br>`DRI_NODE` | (empty)<br>str | Path to the DRI render node the ENCODER uses (VA-API/NVENC device selection). |
 | `--webrtc-pacer`<br>`SELKIES_WEBRTC_PACER` | `true`<br>bool | Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget, and GOP-reset recovery, so audio and interactive signaling are protected from video bursts on congested links. Enabled by default; set SELKIES_WEBRTC_PACER=false to disable. SELKIES_WEBRTC_PACER_STALE_MS sets the stale-GOP purge deadline in milliseconds (0 = disabled). |
-| `--backpressure-queue-size`<br>`SELKIES_BACKPRESSURE_QUEUE_SIZE` | `120`<br>int, 1 to 100000 | Max frames/audio chunks buffered per stream before dropping under backpressure (WebSockets mode). Higher tolerates larger client hiccups at the cost of latency. |
 
 ## Audio
 
@@ -69,6 +68,7 @@ Server-to-client audio and the microphone uplink.
 | `--audio-frame-duration-ms`<br>`SELKIES_AUDIO_FRAME_DURATION_MS` | `10`<br>enum: one of `2.5`, `5`, `10`, `20`, `40`, `60` | Opus frame duration in milliseconds for server-to-client audio. Lower values cut audio latency (each frame must fill before it can be sent, and the client buffers a fixed number of frames) at a small bitrate-efficiency and packet-rate cost. On WebRTC the SDP ptime/minptime follow this value. |
 | `--audio-redundancy`<br>`SELKIES_AUDIO_REDUNDANCY` | `true`<br>bool | Enable Opus RED (RFC 2198) audio redundancy to cut dropouts/concealment under packet loss. On by default; carries prior frames as redundancy on WebRTC (browsers de-RED natively, plain-opus fallback for peers that decline) and, on WebSocket, is gated on every client supporting it. |
 | `--audio-redundancy-distance`<br>`SELKIES_AUDIO_REDUNDANCY_DISTANCE` | `2`<br>int, 0 to 4 | Number of prior Opus frames carried as RED redundancy when audio_redundancy is enabled (0-4; higher survives longer loss bursts at proportionally more bandwidth). |
+| `--backpressure-queue-size`<br>`SELKIES_BACKPRESSURE_QUEUE_SIZE` | `120`<br>int, 1 to 100000 | Audio capture broadcast queue depth in packets, clamped to 1-65536 and rounded up to a power of two; lagging receivers lose overwritten packets. Applies to WebSockets and WebRTC audio, not video. Higher values tolerate longer consumer stalls at the cost of latency. |
 | `--microphone-enabled`<br>`SELKIES_MICROPHONE_ENABLED` | `false`<br>bool | Enable client-to-server microphone forwarding. |
 
 ## Display

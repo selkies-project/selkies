@@ -47,6 +47,7 @@ jobs:
 
   pypi:
     name: Publish the wheel to PyPI
+    needs: pypi-pixelflux
     if: >-
       ${{ contains(github.event.release.body, '<!-- selkies-release: pypi=true -->') }}
     runs-on: ubuntu-latest
@@ -67,6 +68,7 @@ jobs:
 
   pypi-pixelflux:
     name: Publish pixelflux wheels to PyPI
+    needs: pypi-pcmflux
     if: >-
       ${{ contains(github.event.release.body, '<!-- selkies-release: pypi=true -->') }}
     runs-on: ubuntu-latest
