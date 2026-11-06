@@ -134,7 +134,11 @@ jobs:
       - name: Install the native toolchain and libraries
         run: |
           scripts/ci/server-build-deps.sh
-          sudo apt-get install -y --no-install-recommends libkvazaar-dev python3-dev
+          sudo apt-get install -y --no-install-recommends python3-dev
+          # Noble has no Kvazaar package; the non-GPL tests need the same
+          # per-encoder rate-control ABI (2.3.2) that the wheel recipe builds.
+          sudo sh crates/pixelflux/scripts/build-kvazaar.sh /usr/local
+          sudo ldconfig
       - name: Test the Rust and Python bridge configurations
         # GPU, render-node, encoder-device, and sound-server tests remain
         # explicitly ignored on runners without those devices.

@@ -49,7 +49,10 @@ def recipe():
     if any("before-all" in override for override in settings.get("overrides", [])):
         sys.exit("an override's before-all would be left out of the image")
     exports = "".join(f'export {name}="{value}"\n' for name, value in settings.get("environment", {}).items())
-    return exports + settings["linux"]["before-all"] + "\n"
+    # cibuildwheel expands this before invoking the recipe shell. The dependency
+    # image runs the recipe itself, with the crate mounted at the same path.
+    before_all = settings["linux"]["before-all"].replace("{project}", "/project")
+    return exports + before_all + "\n"
 
 
 def cached(keys):
