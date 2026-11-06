@@ -84,10 +84,5 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The capture stack, pinned by `rev` in the workspace's Cargo.toml, and the
-# smithay commit pixelflux pins.
-allow-git = [
-    "https://github.com/selkies-project/pixelflux",
-    "https://github.com/selkies-project/pcmflux",
-    "https://github.com/Smithay/smithay",
-]
+# The smithay commit pixelflux pins.
+allow-git = ["https://github.com/Smithay/smithay"]

@@ -275,7 +275,7 @@ before-all = """
 # later wheels find them fetched.
 before-build = """
     for attempt in 1 2 3 4; do
-        cargo fetch --locked --manifest-path pixelflux/Cargo.toml \
+        cargo fetch --locked --manifest-path Cargo.toml \
             --target "$(rustc -vV | sed -n 's/^host: //p')" && exit 0
         echo "cargo fetch: failed (attempt ${attempt}/4)" >&2
         sleep $((attempt * 15))

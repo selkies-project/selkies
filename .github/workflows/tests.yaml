@@ -130,11 +130,8 @@ jobs:
 
   # The server the suites drive is the one this run's selkies wheel carries,
   # and the capture stack they drive beside it rides wheels this run has in
-  # hand rather than an index, which carries neither pre-release. The caller
-  # passes them in as artifacts when it has already built them; a standalone
-  # run builds the selkies wheel and resolves the capture stack here,
-  # downloading each project's per-commit pre-release or building what has
-  # none yet.
+  # hand rather than an index. The caller passes them in as artifacts when it
+  # has already built them; a standalone run builds all three here.
   wheel:
     name: Build wheel
     if: ${{ !inputs.wheels_ready }}
@@ -143,7 +140,7 @@ jobs:
     uses: ./.github/workflows/build-wheel.yaml
 
   wheels:
-    name: Capture stack (pinned commits)
+    name: Capture stack (local crates)
     if: ${{ !inputs.wheels_ready }}
     permissions:
       contents: read
@@ -317,21 +314,21 @@ jobs:
       - name: Verify the patched Xvfb
         run: |
           Xvfb -help 2>&1 | grep -q -- 'CRTCs per screen (default: 4)'
-      # Whichever jobs built them left the selkies wheel and the pixelflux and
-      # pcmflux wheels of the commits Cargo.toml pins here.
+      # Whichever jobs built them left the Selkies wheel and both native wheels
+      # from this checkout here.
       - name: Download the selkies wheel
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: selkies-wheel
           path: dist/
-      - name: Download the pixelflux wheels (pinned commit)
+      - name: Download the pixelflux wheels (local crates)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
           path: capture-wheels/
           merge-multiple: true
-      - name: Download the pcmflux wheels (pinned commit)
+      - name: Download the pcmflux wheels (local crates)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
@@ -348,8 +345,7 @@ jobs:
           "${server}" --version
           echo "SELKIES_TEST_SERVER=${server}" >> "$GITHUB_ENV"
           python -m pip install -r tests/requirements.txt
-          # The pinned pixelflux/pcmflux are a pre-release no index carries:
-          # install them from the wheels downloaded above.
+          # Install the exact local native wheels downloaded above.
           mkdir -p capture-wheels
           ABI="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
           WHEEL_GLOB="*${ABI}-*manylinux*$(uname -m)*.whl"
@@ -358,7 +354,7 @@ jobs:
           for project in pixelflux pcmflux; do
             found="$(find capture-wheels -maxdepth 1 -name "${project}-${WHEEL_GLOB}" 2>/dev/null || true)"
             if [ -z "${found}" ]; then
-              echo "::error::No ${project} wheel of the pinned commit matching ${WHEEL_GLOB}"
+              echo "::error::No local ${project} wheel matching ${WHEEL_GLOB}"
               exit 1
             fi
             echo "${found}" | xargs python -m pip install --force-reinstall --no-deps

@@ -1,5 +1,0 @@
-[codespell]
-# Build output and lockfiles are not ours to spell-check.
-skip = ./.git,./build,./dist,./pcmflux/target,*.lock
-# retuned is spelled as meant.
-ignore-words-list = retuned

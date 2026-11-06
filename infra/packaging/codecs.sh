@@ -25,7 +25,7 @@
 set -eu
 PREFIX="${1:?usage: codecs.sh <prefix> <pixelflux crate directory>}"
 CRATE="${2:?usage: codecs.sh <prefix> <pixelflux crate directory>}"
-RECIPE="${CRATE}/../pyproject.toml"
+RECIPE="${CRATE}/pyproject.toml"
 FLOORS="${CRATE}/codec-sys/build.rs"
 JOBS="$(nproc 2>/dev/null || echo 4)"
 mkdir -p "${PREFIX}/src"
@@ -90,7 +90,7 @@ cmake_static() {
 # pixelflux reads the API its patches add, so x264 is always built, with them.
 build_x264() {
     fetch x264
-    git -C "${PREFIX}/src/x264" apply "${CRATE}"/../patches/x264/*.patch
+    git -C "${PREFIX}/src/x264" apply "${CRATE}"/patches/x264/*.patch
     (cd "${PREFIX}/src/x264" && ./configure --prefix="${PREFIX}" --enable-static --enable-pic \
         --disable-cli --disable-opencl && make -j"${JOBS}" && make install)
 }

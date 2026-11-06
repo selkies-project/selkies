@@ -16,7 +16,7 @@
 # libraries are the distribution's: pixelflux's codec-sys names their floors,
 # and a release that falls short fails the build at pkg-config, naming the
 # library. libx264 is the exception, built under /usr/local with the patches
-# whose API the pinned pixelflux reads (infra/packaging/x264.sh). Root runs
+# whose API the workspace pixelflux reads (infra/packaging/x264.sh). Root runs
 # apt-get and that install itself, anyone else through sudo.
 #
 # Usage: server-build-deps.sh

@@ -34,7 +34,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-MANIFEST = os.path.join(REPO, "pixelflux", "Cargo.toml")
+MANIFEST = os.path.join(REPO, "Cargo.toml")
 
 # Build configurations, as setup.py selects them: the default features (`gpl`,
 # libx264) and the PIXELFLUX_ENABLE_GPL=0 build (`openh264` instead of `gpl`).

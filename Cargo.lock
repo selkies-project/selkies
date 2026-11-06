@@ -636,7 +636,6 @@ dependencies = [
 [[package]]
 name = "codec-sys"
 version = "0.1.0"
-source = "git+https://github.com/selkies-project/pixelflux?rev=600f00cb0c8cd2329ae3f24700aaa2715349eaa6#600f00cb0c8cd2329ae3f24700aaa2715349eaa6"
 dependencies = [
  "bindgen 0.73.2",
  "pkg-config",
@@ -2296,7 +2295,6 @@ dependencies = [
 [[package]]
 name = "nvcodec-sys"
 version = "0.1.0"
-source = "git+https://github.com/selkies-project/pixelflux?rev=600f00cb0c8cd2329ae3f24700aaa2715349eaa6#600f00cb0c8cd2329ae3f24700aaa2715349eaa6"
 
 [[package]]
 name = "nvml-wrapper"
@@ -2429,12 +2427,12 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 [[package]]
 name = "pcmflux"
 version = "2.2.1"
-source = "git+https://github.com/selkies-project/pcmflux?rev=f81ca4085198a184e4696a50f5c1c92b3056518b#f81ca4085198a184e4696a50f5c1c92b3056518b"
 dependencies = [
  "bytemuck",
  "libc",
  "libpulse-binding",
  "opusic-sys",
+ "pyo3",
 ]
 
 [[package]]
@@ -2472,7 +2470,6 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pixelflux"
 version = "2.2.3"
-source = "git+https://github.com/selkies-project/pixelflux?rev=600f00cb0c8cd2329ae3f24700aaa2715349eaa6#600f00cb0c8cd2329ae3f24700aaa2715349eaa6"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.2",
@@ -2488,6 +2485,7 @@ dependencies = [
  "nvcodec-sys",
  "openh264",
  "openh264-sys2",
+ "pyo3",
  "rayon",
  "reis",
  "serde",
@@ -2701,6 +2699,63 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "pyo3"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "229ca13b8a15bb0d1487b81ab975bfcd97513416499a8312011b6036e42e0de4"
+dependencies = [
+ "libc",
+ "once_cell",
+ "portable-atomic",
+ "pyo3-build-config",
+ "pyo3-ffi",
+ "pyo3-macros",
+]
+
+[[package]]
+name = "pyo3-build-config"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70130e2b6dd1ee589a8788026a429561ca5c40fa7a2fa7914c2282eddae24700"
+dependencies = [
+ "target-lexicon",
+]
+
+[[package]]
+name = "pyo3-ffi"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e7ff73c555c286d212d4ce7e5fbda845a973c4f61bd5f160f5f2c3c2a04d1c4"
+dependencies = [
+ "libc",
+ "pyo3-build-config",
+]
+
+[[package]]
+name = "pyo3-macros"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c46d2e5862c7bb8207e3b639f713dda3c499933444784154c11d013c5a691b60"
+dependencies = [
+ "proc-macro2",
+ "pyo3-macros-backend",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "pyo3-macros-backend"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38b89f066f2ae72a2aef52d1537ca2fcd104440ebfadee06e97aa90738a25b9b"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
 
 [[package]]
 name = "qoi"
@@ -4334,7 +4389,6 @@ dependencies = [
 [[package]]
 name = "va-sys"
 version = "0.1.0"
-source = "git+https://github.com/selkies-project/pixelflux?rev=600f00cb0c8cd2329ae3f24700aaa2715349eaa6#600f00cb0c8cd2329ae3f24700aaa2715349eaa6"
 dependencies = [
  "libloading 0.9.0",
 ]

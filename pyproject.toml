@@ -53,9 +53,10 @@ manifest-path = "crates/selkies/Cargo.toml"
 python-source = "infra/wheel"
 # infra/wheel/build.sh stages the web client here, as data/share/selkies/web
 data = "build/wheel/data"
-# What a wheel built from the sdist needs beyond the crates' own sources: the
-# vendored crate the workspace patches in, and the staged web client
+# A wheel built from the sdist needs the complete workspace's native sources,
+# generated bindings and protocols, codec recipes and patches, vendored crates,
+# and the staged web client.
 include = [
-    { path = "crates/selkies-rtc/vendor/**/*", format = "sdist" },
+    { path = "crates/**/*", format = "sdist" },
     { path = "build/wheel/data/**/*", format = "sdist" },
 ]

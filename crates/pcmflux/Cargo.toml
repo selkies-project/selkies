@@ -3,6 +3,7 @@ name = "pcmflux"
 version = "2.2.1"
 edition = "2024"
 license = "MPL-2.0"
+repository = "https://github.com/selkies-project/selkies/tree/main/crates/pcmflux"
 # let-chains (stable in edition 2024 since 1.88) are the newest language feature used.
 rust-version = "1.88"
 

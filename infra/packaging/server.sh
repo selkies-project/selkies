@@ -11,10 +11,8 @@
 # sonames this distribution ships, and the codec libraries it lacks are built
 # by codecs.sh and linked in. The toolchain is the pinned release the images
 # build with, installed by rustup-init checked against the hash rustup
-# publishes beside it. pixelflux and pcmflux are git dependencies at the
-# commits Cargo.lock pins, which Cargo fetches, so the build needs git and the
-# network (or a `cargo vendor` tree configured for an offline one). The
-# checkout stays read-only:
+# publishes beside it. pixelflux and pcmflux are copied with the workspace and
+# built through local path dependencies. The checkout stays read-only:
 # the manifests are copied out so the release version can be stamped into
 # them, and everything Cargo writes goes under /build.
 #
@@ -70,11 +68,17 @@ SRC="${BUILD}/server"
 rm -rf "${SRC}"
 mkdir -p "${SRC}"
 cp -r "${REPO}/Cargo.toml" "${REPO}/Cargo.lock" "${REPO}/crates" "${SRC}/"
-# The workspace version (the manifest's one top-level `version`) and the lock
-# entries of its two members, which `--locked` holds to the manifest
-sed -i "s|^version = .*|version = \"${CRATE_VERSION}\"|" "${SRC}/Cargo.toml"
-for member in selkies selkies-rtc; do
+# Every public crate carries the release version. Each native crate also keeps
+# its own manifest and lock for a standalone wheel build, while the root lock
+# covers both that build and this workspace build under `--locked`.
+sed -i "0,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|" "${SRC}/Cargo.toml"
+for member in selkies selkies-rtc pixelflux pcmflux; do
     sed -i "/^name = \"${member}\"$/{n;s|^version = .*|version = \"${CRATE_VERSION}\"|}" "${SRC}/Cargo.lock"
+done
+for component in pixelflux pcmflux; do
+    sed -i "0,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|" "${SRC}/crates/${component}/Cargo.toml"
+    sed -i "/^name = \"${component}\"$/{n;s|^version = .*|version = \"${CRATE_VERSION}\"|}" \
+        "${SRC}/crates/${component}/Cargo.lock"
 done
 cargo fetch --locked --manifest-path "${SRC}/Cargo.toml"
 

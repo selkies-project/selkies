@@ -70,7 +70,6 @@ body { margin: 0 auto; max-width: 60rem; padding: 0 16px; font: 16px/1.55 system
 <ul>
 ${items}
 </ul>
-<p>The capture stack the server links publishes its own: <a href="https://pixelflux.selkies.io">pixelflux</a> and <a href="https://pcmflux.selkies.io">pcmflux</a>.</p>
 </html>
 `;
 }
@@ -89,6 +88,8 @@ try {
     halves.push(
       { href: 'rustdoc/selkies/index.html', title: '<code>selkies</code>', summary: 'the streaming server and the <code>selkies</code> executable' },
       { href: 'rustdoc/selkies_rtc/index.html', title: '<code>selkies-rtc</code>', summary: 'its WebRTC stack' },
+      { href: 'rustdoc/pixelflux/index.html', title: '<code>pixelflux</code>', summary: 'screen capture and video encoding' },
+      { href: 'rustdoc/pcmflux/index.html', title: '<code>pcmflux</code>', summary: 'audio capture, playback, and Opus encoding' },
     );
   }
   if (existsSync(join(tree, 'src', 'selkies', '__init__.py'))) {

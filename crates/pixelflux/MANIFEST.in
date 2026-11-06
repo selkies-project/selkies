@@ -1,14 +1,16 @@
-include pixelflux/Cargo.toml
-include pixelflux/Cargo.lock
-recursive-include pixelflux/src *
-recursive-include pixelflux/nvcodec-sys *
-recursive-include pixelflux/codec-sys *
-recursive-include pixelflux/va-sys *
-recursive-exclude pixelflux *.so *.pyc
-prune pixelflux/target
-prune pixelflux/nvcodec-sys/target
-prune pixelflux/codec-sys/target
-prune pixelflux/va-sys/target
+include Cargo.toml
+include Cargo.lock
+recursive-include src *
+recursive-include protocols *
+recursive-include nvcodec-sys *
+recursive-include codec-sys *
+recursive-include va-sys *
+recursive-include patches/x264 *.patch
+recursive-exclude src *.so *.pyc
+prune target
+prune nvcodec-sys/target
+prune codec-sys/target
+prune va-sys/target
 include LICENSE
 include LICENSES.md
 include pyproject.toml

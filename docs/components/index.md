@@ -13,8 +13,8 @@ At runtime Selkies is a **single executable**, `selkies`, whichever package, ima
 | --- | --- | --- |
 | Server (`selkies`) | Serves the web client and every endpoint on one port, drives the display's input, clipboard, files, and printing, and streams over WebSockets or WebRTC | [Usage](../usage.md), [Settings Reference](../settings.md), the [Developer Reference](../development.md#developer-reference) |
 | Web client and dashboards | The bundled `selkies-web-core` client and the reference dashboards built on it | [Web Client and Dashboards](web-client.md) |
-| `pixelflux` | Screen capture on X11 and Wayland and video encoding, on the GPU where it carries the codec and in software where it does not | [pixelflux](pixelflux.md), the Rust reference at <https://pixelflux.selkies.io> |
-| `pcmflux` | Audio capture from PulseAudio or PipeWire-Pulse, Opus encoding, and the microphone and recording paths | [pcmflux](pcmflux.md), the Rust reference at <https://pcmflux.selkies.io> |
+| `pixelflux` | Screen capture on X11 and Wayland and video encoding, on the GPU where it carries the codec and in software where it does not | [pixelflux](pixelflux.md), the [Rust reference](/rustdoc/pixelflux/index.html) |
+| `pcmflux` | Audio capture from PulseAudio or PipeWire-Pulse, Opus encoding, and the microphone and recording paths | [pcmflux](pcmflux.md), the [Rust reference](/rustdoc/pcmflux/index.html) |
 
 ## Optional Components
 

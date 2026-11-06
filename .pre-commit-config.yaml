@@ -34,11 +34,23 @@ repos:
         entry: rustfmt --edition 2024
         language: system
         types: [rust]
-        # The vendored crates keep upstream's formatting
-        exclude: ^crates/selkies-rtc/vendor/
+        # Vendored crates and generated bindings keep upstream's formatting
+        exclude: ^crates/(selkies-rtc/vendor|pixelflux/(nvcodec-sys|va-sys)/src/bindgen)/
       - id: clippy
         name: clippy
         entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: clippy-pixelflux-python
+        name: clippy (pixelflux Python feature)
+        entry: cargo clippy -p pixelflux --all-targets --features python -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: clippy-pcmflux-python
+        name: clippy (pcmflux Python feature)
+        entry: cargo clippy -p pcmflux --all-targets --features python -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false

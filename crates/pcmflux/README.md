@@ -1,16 +1,16 @@
 <h1 align="center">pcmflux</h1>
 
-<p align="center">Part of <a href="https://www.linuxserver.io"><img src="https://raw.githubusercontent.com/selkies-project/pcmflux/main/assets/linuxserver.svg" alt="LinuxServer.io" title="LinuxServer.io" width="182" align="middle"></a></p>
+<p align="center">Part of <a href="https://www.linuxserver.io"><img src="https://raw.githubusercontent.com/selkies-project/selkies/main/crates/pcmflux/assets/linuxserver.svg" alt="LinuxServer.io" title="LinuxServer.io" width="182" align="middle"></a></p>
 
-[![Tests](https://github.com/selkies-project/pcmflux/actions/workflows/tests.yml/badge.svg)](https://github.com/selkies-project/pcmflux/actions/workflows/tests.yml) [![Release](https://img.shields.io/github/v/release/selkies-project/pcmflux?display_name=tag)](https://github.com/selkies-project/pcmflux/releases/latest) [![PyPI](https://img.shields.io/pypi/v/pcmflux)](https://pypi.org/project/pcmflux/) [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0) [![Docs](https://img.shields.io/badge/docs-pcmflux.selkies.io-blue)](https://pcmflux.selkies.io/) [![Discord](https://img.shields.io/badge/dynamic/json?logo=discord&label=Discord%20Members&query=approximate_member_count&url=https%3A%2F%2Fdiscordapp.com%2Fapi%2Finvites%2FwDNGDeSW5F%3Fwith_counts%3Dtrue)](https://discord.gg/wDNGDeSW5F) [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-blue)](https://deepwiki.com/selkies-project/pcmflux)
+[![CI](https://github.com/selkies-project/selkies/actions/workflows/ci.yaml/badge.svg)](https://github.com/selkies-project/selkies/actions/workflows/ci.yaml) [![Release](https://img.shields.io/github/v/release/selkies-project/selkies?display_name=tag)](https://github.com/selkies-project/selkies/releases/latest) [![PyPI](https://img.shields.io/pypi/v/pcmflux)](https://pypi.org/project/pcmflux/) [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0) [![Docs](https://img.shields.io/badge/docs-docs.selkies.io-blue)](https://docs.selkies.io/rustdoc/pcmflux/index.html) [![Discord](https://img.shields.io/badge/dynamic/json?logo=discord&label=Discord%20Members&query=approximate_member_count&url=https%3A%2F%2Fdiscordapp.com%2Fapi%2Finvites%2FwDNGDeSW5F%3Fwith_counts%3Dtrue)](https://discord.gg/wDNGDeSW5F) [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-blue)](https://deepwiki.com/selkies-project/selkies)
 
 pcmflux is a high-performance audio capture and encoding library for Rust and Python.
 
-It is designed to capture system audio using PulseAudio, encode it into the Opus format, and stream it with low latency. A key optimization is its ability to detect and discard silent audio chunks, significantly reducing network traffic and CPU usage during periods of no sound. The Rust crate under `pcmflux/` is the library; its `python` feature adds the `pcmflux` extension module, thin wrappers over the same API, which the wheels build.
+It is designed to capture system audio using PulseAudio, encode it into the Opus format, and stream it with low latency. A key optimization is its ability to detect and discard silent audio chunks, significantly reducing network traffic and CPU usage during periods of no sound. This directory's Rust crate is the library; its `python` feature adds the `pcmflux` extension module, thin wrappers over the same API, which the wheels build.
 
 ## Installation
 
-Every release on the [GitHub Releases page](https://github.com/selkies-project/pcmflux/releases) carries wheels (`manylinux_2_28` and `musllinux`, x86_64 and aarch64, CPython 3.9 and newer), the pre-releases cut per commit included; take the one for your interpreter and platform:
+Every release on the [GitHub Releases page](https://github.com/selkies-project/selkies/releases) carries wheels (`manylinux_2_28` and `musllinux`, x86_64 and aarch64, CPython 3.9 and newer), the pre-releases cut per commit included; take the one for your interpreter and platform:
 ```bash
 pip install ./pcmflux-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
 ```
@@ -32,7 +32,7 @@ The Opus encoder is built from the copy of libopus that `opusic-sys` vendors and
 A Rust program depends on the crate directly, pinned to the release it goes with, with no Python involved:
 ```toml
 [dependencies]
-pcmflux = { git = "https://github.com/selkies-project/pcmflux", tag = "<release>" }
+pcmflux = { git = "https://github.com/selkies-project/selkies", tag = "<release>" }
 ```
 
 ## Core Features
@@ -167,7 +167,7 @@ The `example` directory contains a standalone demo that captures system audio, b
 
 To run the example:
 
-1.  Install the module: `pip3 install .`, or a wheel from the [GitHub Releases page](https://github.com/selkies-project/pcmflux/releases)
+1.  Install the module: `pip3 install .`, or a wheel from the [GitHub Releases page](https://github.com/selkies-project/selkies/releases)
 2.  Run the server: `cd example && python3 audio_to_browser.py`
 3.  Open `http://localhost:9001` in a modern web browser (Chrome, Edge, etc.).
 
@@ -190,11 +190,11 @@ ffmpeg -i unix:/run/user/1000/audio.sock -c:a copy capture.opus
 
 `AGENTS.md` carries the conventions and the invariants of this tree, for contributors and coding agents alike. `cargo test --lib` covers the capture, encode, and assembly paths without an interpreter, `cargo test --lib --features python` adds the Python bridge, and `cargo test --release bench_emit_assembly -- --ignored --nocapture` prints the assembly measurement. `pip wheel . --no-deps` builds the extension the way the released wheels are built, and that wheel installed into a [selkies](https://github.com/selkies-project/selkies) checkout set up as its development documentation describes puts the change under the end-to-end audio suites.
 
-Releases are cut by running the [Release](https://github.com/selkies-project/pcmflux/actions/workflows/release.yml) workflow from the Actions tab, **Run workflow** with **Use workflow from** on `main` and the tag, or by pushing the tag. A run releases the commit it started from: a new tag is created on it once the checks pass, and a tag that already exists has to be on it, so an earlier commit's tag is released by a run started from that tag. The `latest` input decides the "Latest" badge: `auto` gives it to a release and not to a pre-release, `never` holds it back for a fix to an older series, and `always` gives it to a pre-release as well. The tag is the version the wheels carry, a PEP 440 one such as `2.1.0` or `2.1.0rc1`, and its notes are `release-notes/<tag>.md`, or for a pre-release the notes of the release it leads to. The `pypi` input decides whether the wheels go to PyPI as well: `auto` publishes a release designated as the latest and no pre-release.
+Selkies' [Release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) workflow builds pcmflux from `crates/pcmflux` and attaches its CPython 3.9+ wheels beside the server artifacts. The tag stamps this crate's literal Cargo version, its standalone lock, and the root lock together. `release-published.yaml` uploads the wheels through PyPI trusted publishing. Before the standalone repository and its Pages site can be archived, a maintainer must register the pcmflux trusted publisher for Selkies' `release-published.yaml` and `pypi` environment and migrate the old documentation destination; neither external registration nor archival is performed by this source tree.
 
 ## License
 
 This project is licensed under the **Mozilla Public License Version 2.0**.
 A copy of the MPL 2.0 can be found at https://mozilla.org/MPL/2.0/.
 
-[LICENSES.md](LICENSES.md) inventories the third-party components of a built `pcmflux` (crates, the linked libpulse and libopus, what the wheels bundle) with their licenses, and describes the cargo-deny check (`pcmflux/deny.toml`, the `Licenses` workflow) that keeps the crate graph permissive.
+[LICENSES.md](LICENSES.md) inventories the third-party components of a built `pcmflux` (crates, the linked libpulse and libopus, what the wheels bundle) with their licenses, and describes the cargo-deny check (`deny.toml`, the root license checks) that keeps the crate graph permissive.

@@ -75,7 +75,7 @@ their own desktop. The environment the server starts in chooses the rest:
 `XDG_CURRENT_DESKTOP` the desktop, `SELKIES_WAYLAND` the backend. The host
 brings what the wheel leaves to it: a desktop, Xvfb for the X11 backend, and
 the libraries the server takes from the system as
-[pixelflux's own wheels do](https://github.com/selkies-project/pixelflux#3-install-the-package),
+[pixelflux's own wheels do](https://github.com/selkies-project/selkies/tree/main/crates/pixelflux#3-install-the-package),
 which a desktop usually carries (`libgbm1` and `libpixman-1-0` on Debian and
 Ubuntu); without them the `selkies` executable does not start.
 

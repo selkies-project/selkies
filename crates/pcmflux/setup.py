@@ -14,7 +14,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 def crate_version() -> str:
     """The crate's version as pip spells it: a `2.1.0-rc.1` in Cargo.toml is `2.1.0rc1` here."""
-    manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pcmflux", "Cargo.toml")
+    manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Cargo.toml")
     with open(manifest, encoding="utf-8") as fh:
         semver = re.search(r'^version = "([^"]+)"', fh.read(), re.M).group(1)
     spelled = {"alpha": "a", "beta": "b", "rc": "rc", "dev": ".dev", "post": ".post"}
@@ -30,12 +30,12 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="MPL-2.0",
-    url="https://github.com/selkies-project/pcmflux",
+    url="https://github.com/selkies-project/selkies/tree/main/crates/pcmflux",
     packages=[],
     rust_extensions=[
         RustExtension(
             "pcmflux",
-            "pcmflux/Cargo.toml",
+            "Cargo.toml",
             binding=Binding.PyO3,
             features=["python", "extension-module"],
             debug=False,

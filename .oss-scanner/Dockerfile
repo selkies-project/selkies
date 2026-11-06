@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/opt/rustup \
     PATH=/opt/venv/bin:/opt/cargo/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates build-essential gcc-multilib git jq libxkbcommon0 pkg-config python3 python3-dev python3-venv \
+      ca-certificates build-essential gcc-multilib git jq libkvazaar-dev libxkbcommon0 pkg-config python3 python3-dev python3-venv \
       pulseaudio pulseaudio-utils shellcheck xkb-data xvfb \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m tester
@@ -26,12 +26,21 @@ RUN for dir in addons/input-interposer addons/v4l2-interposer addons/fake-udev t
     done
 # The npm dependencies of both packages, and the bundle the server's HTTP tests serve from dist/web
 RUN scripts/ci/build-web.sh
-RUN runuser -u tester -- cargo test --offline --locked --workspace --no-run
+RUN runuser -u tester -- cargo test --offline --locked --workspace --no-run \
+    && runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --features python --no-run \
+    && runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --no-default-features --features openh264 --no-run \
+    && runuser -u tester -- cargo test --offline --locked -p pcmflux --lib --features python --no-run
 
 # As an unprivileged user, since the suites check that permission errors are handled. The sound server the audio
 # tests drive is the one CI's suites stream from.
 RUN runuser -u tester -- sh -c 'scripts/ci/test-stack.sh > /dev/null \
       && PULSE_SERVER="unix:$(pactl info | sed -n "s/^Server String: //p")" \
          cargo test --offline --locked --workspace' || echo "WARNING: the server's unit tests reported failures"; \
+    runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --features python \
+      || echo "WARNING: pixelflux Python tests reported failures"; \
+    runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --no-default-features --features openh264 \
+      || echo "WARNING: pixelflux OpenH264 tests reported failures"; \
+    runuser -u tester -- cargo test --offline --locked -p pcmflux --lib --features python \
+      || echo "WARNING: pcmflux Python tests reported failures"; \
     runuser -u tester -- env E2E_WORKDIR=/tmp/selkies-unit \
       python -m pytest tests -m unit -q -rs -p no:cacheprovider || echo "WARNING: the unit tier reported failures"

@@ -1,9 +1,7 @@
 # Working on this repository
 
-pcmflux is the audio-capture and encode library behind
-[selkies](https://github.com/selkies-project/selkies), and is developed together with it and with
-[pixelflux](https://github.com/selkies-project/pixelflux) (screen capture and video encode). A change in one often
-belongs in another; coordinate across all three.
+pcmflux is the audio-capture and encode library in Selkies' `crates/pcmflux`, beside the server and
+[pixelflux](../pixelflux) (screen capture and video encode). Native changes and callers land in one commit.
 
 Use web search, web fetch, and other available tools as necessary. Make sure that the comments or documentation are
 not too verbose (do not add comments more fit for a PR summary than a comment). Do not leave arbitrary numbers (such
@@ -14,7 +12,7 @@ to an LLM bot or developer. Write American English -- color, behavior, center, i
 where a name belongs to something upstream, such as a Wayland `Cancelled` event or an NVENC `colourMatrix` field.
 
 Empirical testing is possible for everything here, including implementation, auditing, validation, and verification,
-and every change is validated before it is reported. The crate under `pcmflux/` is a Rust library (`rlib` and
+and every change is validated before it is reported. This crate is a Rust library (`rlib` and
 `cdylib`) whose public API (`AudioCapture`, `AudioPlayback`, the settings, `AudioFrame`, `AudioSink`, `Error`,
 `State`, `stop_all`) is everything in `src/lib.rs`; its `python` feature adds `src/python.rs`, the `pcmflux`
 extension module as thin wrappers over that API, and nothing in `lib.rs` names PyO3. Both configurations are tested on
@@ -34,7 +32,7 @@ Safari. Ask before building an environment on a machine that was not set up for 
 closed package manager) and take the operator's directives on how it is constructed and constrained. Say which checks
 could not run where the hardware for them was not available.
 
-`.oss-scanner/` serves Anthropic's OSS Scanner. `threat_model.md` states what pcmflux does, where untrusted bytes
+`../../.oss-scanner/` serves Anthropic's OSS Scanner. Its unified `threat_model.md` covers pcmflux, where untrusted bytes
 enter from the weakest principal up, what matters most, how to exercise it, and how severity is rated; `Dockerfile`
 builds the crate and runs its tests offline the way CI's cargo job does. The threat model is the rule the code is
 held to, not a description of it: where the code lets an input reach what the model keeps from it, the code is the
@@ -44,8 +42,8 @@ it is a maintainer's call. Keep the model current in the commit that moves it: a
 of bytes pcmflux does not write itself joins its entry points. Carry a new system package the build or the tests
 need into `Dockerfile`.
 
-`.clusterfuzzlite/` builds `pcmflux/fuzz` (`cargo fuzz`) in an OSS-Fuzz builder for ClusterFuzzLite
-(`.github/workflows/fuzz.yml`: the code a pull request changes for five minutes, every target for an hour a day)
+`../../.clusterfuzzlite/` builds `crates/pcmflux/fuzz` (`cargo fuzz`) for ClusterFuzzLite
+(`../../.github/workflows/fuzz.yaml`: changed code for five minutes, every target for an hour a day)
 and OSS-Fuzz. Code that parses bytes pcmflux does not write itself (a microphone packet, a RED payload, a socket
 peer's request) gets a target in `fuzz/fuzz_targets` that compiles the modules it fuzzes through `#[path]`, so it
 needs none of the crate's system libraries, with seeds in `fuzz/seeds/<target>/` and its source among the
@@ -100,7 +98,7 @@ An optional path another component may offer
 as the default: that it is exposed is not proof it works, and a reviewer has to be able to tell what runs where.
 
 `LICENSES.md` inventories the crates, the linked libpulse (LGPL-2.1-or-later), and the statically linked libopus (BSD-3-Clause);
-`pcmflux/deny.toml` keeps the crate graph permissive (the `Licenses` workflow runs it). A new crate that links
+`deny.toml` keeps the crate graph permissive (the root license workflow runs it). A new crate that links
 native code gets a row there.
 
 Update this file when certain details change.

@@ -26,7 +26,7 @@ GPL-licensed libraries into every release build:
 
 | Source | GPL component | How it gets in | How to leave it out |
 | --- | --- | --- | --- |
-| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used, as the `h264enc` fallback; and x265 (GPL-2.0-or-later) behind `h265enc` in the same case | the `gpl` Cargo feature of pixelflux, which the workspace's `Cargo.toml` turns on, so the server links libx264 and x265 in every release build | name pixelflux's `openh264` feature in place of `gpl` in the workspace's `Cargo.toml`: BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The check under [How this is kept up to date](#how-this-is-kept-up-to-date) holds that build copyleft-free; pixelflux's own inventory is its [LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md). |
+| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used, as the `h264enc` fallback; and x265 (GPL-2.0-or-later) behind `h265enc` in the same case | the `gpl` Cargo feature of pixelflux, which the workspace's `Cargo.toml` turns on, so the server links libx264 and x265 in every release build | name pixelflux's `openh264` feature in place of `gpl` in the workspace's `Cargo.toml`: BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The check under [How this is kept up to date](#how-this-is-kept-up-to-date) holds that build copyleft-free; pixelflux's own inventory is its [LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pixelflux/LICENSES.md). |
 
 pixelflux and pcmflux encode and decode the video and audio through the codec
 libraries they link, and the RTP layer packetizes their output through an
@@ -51,8 +51,8 @@ dependency of the workspace's crates, by what it does:
 
 | Crate | License | Category | How used | Notes |
 | --- | --- | --- | --- | --- |
-| `pixelflux` | MPL-2.0 | weak copyleft | screen capture and video encoding, over the native libraries below | see [pixelflux's LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md) |
-| `pcmflux` | MPL-2.0 | weak copyleft | audio capture and Opus encoding, over libpulse and libopus | see [pcmflux's LICENSES.md](https://github.com/selkies-project/pcmflux/blob/main/LICENSES.md) |
+| `pixelflux` | MPL-2.0 | weak copyleft | screen capture and video encoding, over the native libraries below | see [pixelflux's LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pixelflux/LICENSES.md) |
+| `pcmflux` | MPL-2.0 | weak copyleft | audio capture and Opus encoding, over libpulse and libopus | see [pcmflux's LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pcmflux/LICENSES.md) |
 | `selkies-rtc` | MPL-2.0 | weak copyleft | the WebRTC stack, in this repository under `crates/selkies-rtc` |  |
 | `rtc-crypto`, `rtc-dtls`, `rtc-ice`, `rtc-mdns`, `rtc-sctp`, `rtc-sdp`, `rtc-shared`, `rtc-srtp`, `rtc-stun`, `rtc-turn`, `sansio` | Apache-2.0 OR MIT | permissive | the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over | `rtc-sctp` vendored (below) |
 | `tokio`, `tokio-util`, `futures`, `async-trait`, `bytes` | MIT; Apache-2.0 OR MIT | permissive | async runtime |  |
@@ -268,8 +268,8 @@ python3 scripts/check-licenses.py --write
 
 cargo-deny audits the shipped graph on its own (`cargo deny --exclude-dev check`):
 crate licenses against a permissive allow list plus MPL-2.0, with x264-sys's
-GPL as the one exception; crates.io and the pinned pixelflux, pcmflux, and
-smithay repositories as the only sources; and the RustSec advisories, every one
+GPL as the one exception; crates.io and pixelflux's pinned Smithay repository
+as the only sources; and the RustSec advisories, every one
 it ignores listed in `deny.toml` with the reason. pixelflux and pcmflux carry
 the same gate over their own graphs (pixelflux's
-[LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md)).
+[LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pixelflux/LICENSES.md)).

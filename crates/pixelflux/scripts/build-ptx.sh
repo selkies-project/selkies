@@ -16,8 +16,8 @@
 #   scripts/build-ptx.sh [path-to-nvcc] [path-to-host-c++]
 set -euo pipefail
 here="$(dirname "$(readlink -f "$0")")"
-src="${here}/../pixelflux/src/encoders/argb_to_nv12.cu"
-out="${here}/../pixelflux/src/encoders/argb_to_nv12.ptx"
+src="${here}/../src/encoders/argb_to_nv12.cu"
+out="${here}/../src/encoders/argb_to_nv12.ptx"
 nvcc="${1:-nvcc}"
 ccbin=()
 [ $# -ge 2 ] && ccbin=(-ccbin "$2")

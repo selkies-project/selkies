@@ -1,4 +1,4 @@
-# cargo-deny policy for the pixelflux crate graph (see ../LICENSES.md).
+# cargo-deny policy for the pixelflux crate graph (see LICENSES.md).
 #
 # The graph is resolved with `--no-default-features --features openh264`, the
 # configuration setup.py selects for PIXELFLUX_ENABLE_GPL=0, so a plain

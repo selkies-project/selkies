@@ -27,9 +27,8 @@ feature, which every release ships. ``non-gpl`` is the build an operator gets by
 pixelflux's ``openh264`` feature in its place: Selkies has no feature of its own for the
 switch, so the script resolves a copy of the workspace manifest with that one feature
 swapped, beside a copy of the committed ``Cargo.lock`` and the real ``crates/``
-directory. The lockfile holds only the optional dependencies the committed features
-activate, so cargo drops ``x264-sys`` and its build tools from the copy; a package the
-copy gains instead is one the committed lockfile does not pin, and fails the check.
+directory. Cargo drops packages the copied configuration no longer selects; any package
+or version the copy gains beyond the committed lockfile fails the check.
 
 The page sections sit between ``check-licenses:begin`` and ``check-licenses:end``
 markers. They name crates and licenses, never counts or versions beside a vendored
@@ -354,9 +353,9 @@ class Role(NamedTuple):
 # new one fails the check until it is placed here.
 ROLES: Tuple[Role, ...] = (
     Role(("pixelflux",), "screen capture and video encoding, over the native libraries below",
-         "see [pixelflux's LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md)"),
+         "see [pixelflux's LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pixelflux/LICENSES.md)"),
     Role(("pcmflux",), "audio capture and Opus encoding, over libpulse and libopus",
-         "see [pcmflux's LICENSES.md](https://github.com/selkies-project/pcmflux/blob/main/LICENSES.md)"),
+         "see [pcmflux's LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pcmflux/LICENSES.md)"),
     Role(("selkies-rtc",), "the WebRTC stack, in this repository under `crates/selkies-rtc`"),
     Role(("rtc-crypto", "rtc-dtls", "rtc-ice", "rtc-mdns", "rtc-sctp", "rtc-sdp", "rtc-shared", "rtc-srtp",
           "rtc-stun", "rtc-turn", "sansio"),

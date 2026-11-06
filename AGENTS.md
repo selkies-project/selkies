@@ -1,10 +1,14 @@
 # Working on this repository
 
-Selkies is developed together with two sibling repositories, [pixelflux](https://github.com/selkies-project/pixelflux)
-(screen capture and video encode) and [pcmflux](https://github.com/selkies-project/pcmflux) (audio capture and
-encode). A change in one often belongs in another; coordinate across all three. The server is the Rust workspace
-under `crates/` (`crates/selkies`, the `selkies` executable, and `crates/selkies-rtc`, its WebRTC stack), which
-links both libraries as Rust crates; the web client is under `addons/`.
+Selkies' Rust workspace lives under `crates/`: `crates/selkies` is the executable, `crates/selkies-rtc` its WebRTC
+stack, `crates/pixelflux` its screen-capture and video-encode library, and `crates/pcmflux` its audio-capture and
+encode library. The server links both native libraries directly as Rust crates, without Python. Their optional PyO3
+features are only for standalone wheels. The web client is under `addons/`.
+
+HTTP and WebSocket serving uses Axum and Tower because the existing `http::app` composes authentication, bounded
+request handling, operator and file routes, static content, and WebSocket upgrades in one router, with the same
+middleware exercised in `crates/selkies/src/http/route_tests.rs` and through the real-listener tests in `listen.rs`.
+Preserve that composition and its zero-copy streaming paths rather than introducing a second web framework.
 
 This file holds working conventions and the cross-cutting invariants no single module reveals. Mechanism and
 rationale live in the docblock of the module that implements them, never here.
@@ -129,13 +133,13 @@ credential or role its principals, and a change to what a role may reach its rul
 tier needs (a system package the crates build against, a Makefile under `addons/` or `tests/tools`, a web
 package's lockfile) into `Dockerfile`.
 
-`.clusterfuzzlite/` builds the `cargo fuzz` targets of `crates/selkies-rtc/fuzz` in an OSS-Fuzz builder for
-ClusterFuzzLite (`.github/workflows/fuzz.yaml`: the code a pull request changes for five minutes, every target for
-an hour a day) and OSS-Fuzz. `build.sh` builds every target `cargo fuzz list` names and zips each one's seeds from
-`fuzz/seeds/<target>/`. Code that parses bytes a peer,
-a client, or another local account controls gets a target, a seed corpus zipped by `build.sh` where valid inputs
-are hard to stumble on, and its source among the workflow's `pull_request` paths; a target builds without pixelflux
-and pcmflux, whose native libraries the builder lacks. A crash the fuzzer finds is fixed at its cause, and its input
+`.clusterfuzzlite/` builds the independent `cargo fuzz` workspaces of `crates/selkies-rtc`, `crates/pixelflux`, and
+`crates/pcmflux` in an OSS-Fuzz builder for ClusterFuzzLite (`.github/workflows/fuzz.yaml`: changed code for five
+minutes, every target for an hour a day) and OSS-Fuzz. `build.sh` builds every target each `cargo fuzz list` names
+and zips its seeds from `fuzz/seeds/<target>/`. The targets are `rtp`, `sctp`, `sdp`, `stun`, `sps`, and `red`.
+Code that parses bytes a peer, a client, or another local account controls gets a target, a seed corpus where valid
+inputs are hard to stumble on, and its source among the workflow's `pull_request` paths. Native fuzz targets compile
+their parser modules directly so the builder needs no media libraries. A crash is fixed at its cause, and its input
 joins the corpus.
 
 CodeQL's code scanning and the other checkers (clippy, rustfmt, ruff, codespell, eslint and tsc through
@@ -190,7 +194,8 @@ what runs where.
   blocking call or long computation on a tokio worker (it goes to `spawn_blocking` or a thread of its own), no lock
   held across an `.await`, and no work on a hot path the frame does not need. There is no server-wide GIL: thread
   independent capture, encoding, transport, display, and peer work where that improves latency, unrestricted frame
-  rate, zero-copy pipelines, or reasonable CPU consumption without adding queueing or contention.
+  rate, zero-copy pipelines, or reasonable CPU consumption without adding queueing or contention. Use an additional
+  thread for slight extra CPU when latency justifies it, never for work that merely moves a queue or a contended lock.
 - End-to-end latency and an unrestricted frame rate are separate goals, not two ends of one dial: neither is
   spent to buy the other, and a change that trades one away has not improved the other.
 - A change never drops a capability or falls back to an older implementation to make itself simpler. Where one
@@ -199,15 +204,13 @@ what runs where.
   Gate on capabilities, never on versions: prefer the API that already encapsulates the difference, else probe the
   feature itself (a symbol resolved at run time, a capability the driver reports, an error the API returns) —
   never compare a version number.
-- The capture stack is pinned, not detected: every Selkies build and release names the pixelflux and pcmflux
-  commit it goes with (the `rev` of their git dependencies in the workspace's `Cargo.toml`, which `Cargo.lock`
-  records), so the two are never mixed across versions. Backward compatibility measures against a sibling are
-  unwanted for that reason: a probe for an API a newer one adds, or a suite that skips because the build lacks an
-  API, hedges a combination that never ships and hides the path it was meant to measure. Call the sibling API
-  directly, push its commit first, and move the `rev` to it, so the run here builds against it. A sibling checked
-  out beside this tree is built through a `[patch]` of its repository's URL in a Cargo configuration outside the
-  repository, never a `path` in `Cargo.toml`, and the `Cargo.lock` that patch rewrites is never committed. What
-  a pinned build was compiled with (software H.264, below) is still read, as is the host's CUDA range above.
+- The capture stack is built from the workspace's path dependencies, never fetched from a second revision or
+  detected through a compatibility probe: every build and release uses the pixelflux and pcmflux sources beside the
+  server. Call their Rust APIs directly and change caller and callee together. A suite that skips because the build
+  lacks an API hedges a combination that never ships and hides the path it was meant to measure. Each native crate
+  retains its own `Cargo.lock` for standalone wheel builds, while root `Cargo.lock` governs workspace builds; release
+  stamping updates every public crate manifest and both lock contexts together. What a build was compiled with
+  (software H.264, below) is still read, as is the host's CUDA range above.
 
 ## Cross-cutting invariants
 

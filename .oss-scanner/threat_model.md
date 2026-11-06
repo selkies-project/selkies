@@ -6,6 +6,9 @@
   (`addons/selkies-web-core`, dashboards in `addons/selkies-dashboard*`). One desktop user runs it; it injects
   keyboard, mouse, touch and gamepad input, syncs the clipboard both ways, serves files under a configured root, and
   plays audio, microphone and webcam through LD_PRELOAD interposers (`addons/*-interposer`, `addons/fake-udev`).
+  Screen capture, video encode, virtual-webcam decode, and Computer Use live in `crates/pixelflux`; audio capture,
+  Opus encode/decode, RFC 2198 RED, and Ogg output live in `crates/pcmflux`. Both are Rust libraries by default,
+  with optional PyO3 bridges used only by their standalone wheels.
 - Network input, weakest principal first: any peer that reaches the port (HTTP, the data WebSocket, WebRTC
   signaling, ICE/STUN/TURN, DTLS, SCTP, RTP/RTCP); a viewer token (watch only); a gamepad slot token; a read-write
   collaborator; the controller (full token or Basic auth user); the orchestrator holding the master token
@@ -15,7 +18,10 @@
   screenshot, print, apps routes), `ws` (data plane, binary opcodes in `protocol.rs`), WebRTC signaling
   (`crates/selkies-rtc/src/signaling`, mounted by `webrtc/routes.rs`), the WebRTC stack (`crates/selkies-rtc`: `ice`,
   `dtls`, `srtp`, `rtp`, `sctp`, `sdp`, and the vendored `rtc-sctp` under `vendor/`, edited in tree and in scope),
-  `input` (`Dispatcher::receive`, the input authority in `authority.rs`), `core` (`Role`).
+  `input` (`Dispatcher::receive`, the input authority in `authority.rs`), `core` (`Role`). Native media entry
+  points include browser webcam bitstreams and H.264 SPS input in `crates/pixelflux/src/{webcam,encoders/sps.rs}`,
+  microphone Opus and RED in `crates/pcmflux/src/red.rs`, the token-gated Computer-Use HTTP server in
+  `crates/pixelflux/src/computer_use.rs`, and untrusted Wayland buffers and local recording, webcam, and Ogg sockets.
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
   `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
   write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose
@@ -25,7 +31,8 @@
 ## Components that matter most / least
 - Most: authentication and role checks (a viewer or slot token must never reach input, files, the clipboard or
   another role); the parsers of remote bytes in `crates/selkies-rtc` (one packet must not stall a tokio worker or a
-  task every client depends on); the interposers' C code; file upload and download confinement.
+  task every client depends on); native decoder and FFI memory safety, RED bounds, Computer-Use token checks, and
+  peer-controlled sizes in pixelflux and pcmflux; the interposers' C code; file upload and download confinement.
 - In scope but lower: the web client (origin checks on `postMessage`, token handling), CI workflows and release
   scripts, and what the images download at build time outside a signed apt repository: the desktop image takes the
   `selkies-desktop` binary at the release tag `SELKIES_DESKTOP_VERSION` pins, checked against the `.sha256` that
@@ -48,6 +55,11 @@
   `rtp::RtpPacket::parse` and `rtp::RtcpPacket::parse`, `sctp::Sctp::handle_packet`, `sdp::SessionDescription::parse`.
   `crates/selkies-rtc/fuzz` drives each the way the server does (`cargo fuzz run rtp|sctp|sdp|stun` on a nightly
   toolchain, seeds in `fuzz/seeds/<target>`).
+- The scanner also runs pixelflux with `--features python` and with `--no-default-features --features openh264`,
+  and pcmflux with `--features python`. The pixelflux suites cover SPS/webcam decoding, Computer-Use requests, and
+  VA-API through a pure-Rust mock driver; pcmflux covers RED parsing and Ogg page construction and round trips.
+  GPU, render-node, encoder-device, and physical sound-server tests remain `#[ignore]` without their hardware.
+  `crates/pixelflux/fuzz` drives SPS and `crates/pcmflux/fuzz` drives RED beside the WebRTC targets.
 - The full server needs a display, PulseAudio and a GPU or software encoder; reproducers that need no display are
   preferred.
 

@@ -29,8 +29,8 @@
 #   - Audio: PipeWire with the PulseAudio, ALSA, JACK, and V4L2 interfaces,
 #     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
-#   - The Selkies server, built from this tree's crates with the pixelflux and
-#     pcmflux commits Cargo.toml pins, and the web client it serves
+#   - The Selkies server, built from this tree's crates and local pixelflux and
+#     pcmflux path dependencies, and the web client it serves
 #
 # Supported bases: Ubuntu 26.04 and Debian Trixie, and later releases of both
 # (select with --build-arg DISTRIB_IMAGE=ubuntu|debian DISTRIB_RELEASE=26.04|trixie).
@@ -287,10 +287,9 @@ RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
 # against the hash rustup publishes beside it. The packages behind every
 # library the binary links are recorded for the final stage, so the image
 # declares what the server needs rather than inheriting it from whatever else
-# happens to pull those libraries in. pixelflux and pcmflux are fetched at the
-# commits the workspace pins, never from a clone in the build context. libx264
-# is built from the pinned pixelflux's scripts/build-x264.sh, with the patches
-# whose API pixelflux reads, and linked in statically.
+# happens to pull those libraries in. pixelflux and pcmflux build from local
+# workspace path dependencies. libx264 is built from pixelflux's
+# scripts/build-x264.sh, with the patches whose API it reads, and linked statically.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS server
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG RUST_TOOLCHAIN="1.99.1"
@@ -319,7 +318,7 @@ RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt
     cargo fetch --locked; \
     pixelflux="$(cargo metadata --locked --format-version 1 \
         | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"; \
-    sh "$(dirname "$(dirname "${pixelflux}")")/scripts/build-x264.sh" /usr/local; \
+    sh "$(dirname "${pixelflux}")/scripts/build-x264.sh" /usr/local; \
     SYSTEM_DEPS_X264_LINK=static cargo build --release --locked -p selkies; \
     install -Dm755 target/release/selkies /out/selkies; \
     ldd /out/selkies | awk '/=>/ {print $3}' | xargs -r readlink -f | xargs -r dpkg -S | \

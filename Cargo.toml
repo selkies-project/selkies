@@ -2,11 +2,16 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# The Rust Selkies: one workspace, the server crate under crates/, and the capture stack
-# pinned to a commit of each sibling repository.
+# The Rust Selkies: one workspace for the server and its native capture stack.
 [workspace]
 resolver = "3"
-members = ["crates/selkies", "crates/selkies-rtc"]
+members = ["crates/selkies", "crates/selkies-rtc", "crates/pixelflux", "crates/pcmflux"]
+default-members = ["crates/selkies", "crates/selkies-rtc"]
+exclude = [
+    "crates/pixelflux/codec-sys",
+    "crates/pixelflux/va-sys",
+    "crates/pixelflux/nvcodec-sys",
+]
 
 [workspace.package]
 version = "0.0.0"
@@ -16,11 +21,9 @@ license = "MPL-2.0"
 repository = "https://github.com/selkies-project/selkies"
 
 [workspace.dependencies]
-# The capture stack, pinned to the commit of each repository this tree is built and released
-# with. Working on a sibling beside this tree is a `[patch]` of that repository's URL with a
-# path, in a Cargo configuration outside the repository, so every checkout builds the pins.
-pixelflux = { git = "https://github.com/selkies-project/pixelflux", rev = "600f00cb0c8cd2329ae3f24700aaa2715349eaa6", default-features = false, features = ["gpl"] }
-pcmflux = { git = "https://github.com/selkies-project/pcmflux", rev = "f81ca4085198a184e4696a50f5c1c92b3056518b", default-features = false }
+# The server links the capture stack directly, without either crate's optional Python bridge.
+pixelflux = { path = "crates/pixelflux", default-features = false, features = ["gpl"] }
+pcmflux = { path = "crates/pcmflux", default-features = false }
 
 [profile.release]
 opt-level = 3

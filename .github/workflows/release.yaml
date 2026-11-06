@@ -160,6 +160,15 @@ jobs:
     with:
       package_version: ${{ needs.check.outputs.version }}
 
+  capture-wheels:
+    name: Build capture stack wheels
+    needs: check
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+    with:
+      package_version: ${{ needs.check.outputs.version }}
+
   wheel-smoke:
     name: Smoke test the wheel
     needs: [check, wheel]
@@ -200,7 +209,7 @@ jobs:
 
   draft-release:
     name: Assemble draft release
-    needs: [check, wheel, wheel-smoke, images, packages, reference]
+    needs: [check, wheel, wheel-smoke, capture-wheels, images, packages, reference]
     runs-on: ubuntu-latest
     permissions:
       contents: write

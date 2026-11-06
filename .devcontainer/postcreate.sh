@@ -22,16 +22,11 @@ PATH="${CARGO_HOME:-${HOME}/.cargo}/bin:${PATH}"
 cargo build --release --locked -p selkies
 
 # The suites' own dependencies, and the pixelflux and pcmflux they drive beside
-# the server: the wheels of the commits Cargo.toml pins, from the pre-release
-# each project cuts per commit (tagged with its abbreviated SHA)
+# the server: local wheels of the same sources the server links.
 WHEELS="$(mktemp -d)"
-pin() { sed -n "s/^$1 = {.* rev = \"\([0-9a-f]\{7\}\)[0-9a-f]*\".*/\1/p" Cargo.toml; }
-.devcontainer/features/desktop-selkies/src/fetch-release-wheels.sh "${WHEELS}" none \
-  "$(pin pixelflux)" "$(pin pcmflux)"
+python3 -m pip wheel --no-deps --wheel-dir "${WHEELS}" ./crates/pixelflux ./crates/pcmflux
 PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --retries 5 --timeout 60 --user -r tests/requirements.txt
-if ls "${WHEELS}"/*.whl > /dev/null 2>&1; then
-  PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --user --no-deps --force-reinstall "${WHEELS}"/*.whl
-fi
+PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --user --no-deps --force-reinstall "${WHEELS}"/*.whl
 rm -rf "${WHEELS}"
 
 # The rest of what the suites need: the Playwright engines with their system

@@ -1,8 +1,8 @@
-include pcmflux/Cargo.toml
-include pcmflux/Cargo.lock
-recursive-include pcmflux/src *
-recursive-exclude pcmflux *.so *.pyc
-prune pcmflux/target
+include Cargo.toml
+include Cargo.lock
+recursive-include src *
+recursive-exclude src *.so *.pyc
+prune target
 include LICENSE
 include LICENSES.md
 include pyproject.toml

@@ -1,5 +1,7 @@
 # Formatting-only commits, which `git blame` skips with
 # `git config blame.ignoreRevsFile .git-blame-ignore-revs`, as GitHub does.
 
-# style: Format the Rust sources with rustfmt
+# style: Format the pixelflux Rust sources with rustfmt
 ffe1b8d70375498b41051825d3df3896255f7e57
+# style: Format the pcmflux Rust sources with rustfmt
+319331a213a806ce2fdc2bddad72d73a05417c7e

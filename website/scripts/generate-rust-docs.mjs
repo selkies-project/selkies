@@ -2,7 +2,7 @@
  * Builds the server half of the Developer Reference from the rustdoc
  * docblocks of the workspace under crates/.
  *
- * `cargo doc` renders the `selkies` and `selkies-rtc` crates, private items
+ * `cargo doc` renders all four public workspace crates, private items
  * included, since the reference covers what the docblocks cover, as it does
  * for the web client. rustdoc's pages are served as rustdoc wrote them, with
  * their own search and source view, rather than converted into site pages:
@@ -44,6 +44,8 @@ const targetDir = join(workspaceTarget, 'reference');
 const CRATES = [
   { pkg: 'selkies', dir: 'selkies', summary: 'the streaming server and the `selkies` executable' },
   { pkg: 'selkies-rtc', dir: 'selkies_rtc', summary: 'its WebRTC stack' },
+  { pkg: 'pixelflux', dir: 'pixelflux', summary: 'screen capture and video encoding' },
+  { pkg: 'pcmflux', dir: 'pcmflux', summary: 'audio capture, playback, and Opus encoding' },
 ];
 
 if (!existsSync(join(repoRoot, 'crates', 'selkies', 'Cargo.toml'))) {
@@ -112,7 +114,7 @@ The server is the Rust workspace under \`crates/\`, and its reference is rustdoc
 
 ${crateLinks}
 
-The capture stack it links publishes its own: [pixelflux](https://pixelflux.selkies.io) and [pcmflux](https://pcmflux.selkies.io). The web client core and the dashboard follow in the sidebar.
+The web client core and the dashboard follow in the sidebar.
 `;
 
 await fs.rm(outDir, { recursive: true, force: true });

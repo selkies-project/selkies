@@ -84,7 +84,7 @@ cat > "$SB/stubs/cargo" <<EOF
 echo "cargo \$*" >> "$SB/log/calls"
 case "\$1" in
   fetch) exit 0 ;;
-  metadata) echo '{"packages":[{"name":"pixelflux","manifest_path":"$SB/pixelflux/pixelflux/Cargo.toml"}]}'; exit 0 ;;
+  metadata) echo '{"packages":[{"name":"pixelflux","manifest_path":"$SB/repo/crates/pixelflux/Cargo.toml"}]}'; exit 0 ;;
 esac
 manifest=""
 while [ \$# -gt 0 ]; do [ "\$1" = --manifest-path ] && manifest="\$2"; shift; done

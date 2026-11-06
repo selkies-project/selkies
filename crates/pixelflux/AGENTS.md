@@ -1,9 +1,7 @@
 # Working on this repository
 
-pixelflux is the screen-capture and video-encode library behind
-[selkies](https://github.com/selkies-project/selkies), and is developed together with it and with
-[pcmflux](https://github.com/selkies-project/pcmflux) (audio capture and encode). A change in one often belongs in
-another; coordinate across all three.
+pixelflux is the screen-capture and video-encode library in Selkies' `crates/pixelflux`, beside the server and
+[pcmflux](../pcmflux) (audio capture and encode). Native changes and callers land in one commit.
 
 Use web search, web fetch, and other available tools as necessary. Make sure that the comments or documentation are
 not too verbose (do not add comments more fit for a PR summary than a comment). Do not leave arbitrary numbers (such
@@ -33,13 +31,13 @@ runs only where a VA-API device opens, so the CI runners and NVIDIA hosts never 
 hardware in the selkies sandbox. End to end, a change is a wheel
 (`pip wheel . --no-deps`) installed into a selkies sandbox as the Agentic Development section of that repository's
 `docs/development.md` describes, driven by its suites over both transports on X11 and Wayland with the installed
-Firefox and Chrome and Playwright/Selenium/Puppeteer/Cypress WebKit in place of Safari; the `.devcontainer` here
-builds the extension with its native dependencies. Ask before building an environment on a machine that was not set
+Firefox and Chrome and Playwright/Selenium/Puppeteer/Cypress WebKit in place of Safari; Selkies' root
+`.devcontainer` builds the extension with its native dependencies. Ask before building an environment on a machine that was not set
 up for one (Miniforge serves a host with a closed package manager; keep the system `libgbm.so` for GBM on NVIDIA and
 other GPUs) and take the operator's directives on how it is constructed and constrained. Say which checks could not
 run where the hardware for them was not available.
 
-`.oss-scanner/` serves Anthropic's OSS Scanner. `threat_model.md` states what pixelflux does, where untrusted bytes
+`../../.oss-scanner/` serves Anthropic's OSS Scanner. Its unified `threat_model.md` covers pixelflux, where untrusted bytes
 enter from the weakest principal up, what matters most, how to exercise it, and how severity is rated; `Dockerfile`
 builds the crate and runs its tests offline the way CI's cargo job does. The threat model is the rule the code is
 held to, not a description of it: where the code lets an input reach what the model keeps from it, the code is the
@@ -49,8 +47,8 @@ it is a maintainer's call. Keep the model current in the commit that moves it: a
 or parser of bytes pixelflux does not write itself joins its entry points. Carry a new system package the build or
 the tests need into `Dockerfile`.
 
-`.clusterfuzzlite/` builds `pixelflux/fuzz` (`cargo fuzz`) in an OSS-Fuzz builder for ClusterFuzzLite
-(`.github/workflows/fuzz.yml`: the code a pull request changes for five minutes, every target for an hour a day)
+`../../.clusterfuzzlite/` builds `crates/pixelflux/fuzz` (`cargo fuzz`) for ClusterFuzzLite
+(`../../.github/workflows/fuzz.yaml`: changed code for five minutes, every target for an hour a day)
 and OSS-Fuzz. Code that parses bytes pixelflux does not write itself (a bitstream an encoder emits, a webcam frame, a
 request, a protocol message) gets a target in `fuzz/fuzz_targets` that compiles the modules it fuzzes through
 `#[path]`, so it needs none of the crate's system libraries, with seeds in `fuzz/seeds/<target>/` and its source
@@ -399,22 +397,22 @@ paint the root of whatever `DISPLAY` names, so on a host where that is a live de
 sweep runs with `--skip nvfbc --skip dri3` and those checks run only against an X server of their
 own; `x11::gpu_test_support` holds the painting and decoding helpers they share.
 
-The virtual camera (`pixelflux/src/webcam/`, Python class `VirtualCamera`) is the webcam counterpart of pcmflux's
+The virtual camera (`src/webcam/`, Python class `VirtualCamera`) is the webcam counterpart of pcmflux's
 `AudioPlayback`: selkies only gates and hands encoded frames over; decoding (OpenH264, libvpx, dav1d, libde265,
 TurboJPEG), fitting into the
 fixed device format, and publishing happen on the camera's own thread. `push` takes the frame's upright transform as
 optional arguments (`rotation` in clockwise degrees, then a horizontal `flip`); `convert::orient_i420` bakes it
 right after decode, ahead of the fit, and an upright MJPEG frame keeps its pass-through. Sinks are the shared-memory ring served to the
 Selkies V4L2 interposer (`ring.rs`/`server.rs`; the layout is mirrored byte-for-byte by
-`selkies/addons/v4l2-interposer/v4l2_interposer.c` and checked by selkies' `tests/unit/test_webcam_abi.py`), a
+`addons/v4l2-interposer/v4l2_interposer.c` and checked by selkies' `tests/unit/test_webcam_abi.py`), a
 v4l2loopback output device (`v4l2out.rs`), and a PipeWire `Video/Source` node (`pipewire.rs`, `libpipewire-0.3`
 loaded at run time, pods built by hand — never add a build-time PipeWire dependency). `cargo test --lib webcam`
 covers the ring, decoders (including an OpenH264 encode-and-decode round trip), and pod layouts; the device-level and browser
-checks live in selkies (`tests/integration/test_webcam_device.py`, `tests/e2e/test_webcam.py`).
+checks live in Selkies (`tests/integration/test_webcam_device.py`, `tests/e2e/test_webcam.py` from the repository root).
 
 Licensing is part of the build matrix: `LICENSES.md` inventories every crate and native library of the default
 (`gpl`, libx264) and `PIXELFLUX_ENABLE_GPL=0` (`openh264`) builds, `scripts/check-licenses.py` and
-`pixelflux/deny.toml` gate both (the `Licenses` workflow runs them), and a new crate that links, loads, or vendors
+`deny.toml` gate both (the root license workflow runs the workspace equivalents), and a new crate that links, loads, or vendors
 native code has to be described in the script's `NATIVE` table and in `LICENSES.md` before the check passes.
 Copyleft stays confined to the `gpl` feature.
 

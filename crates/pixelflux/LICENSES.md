@@ -3,7 +3,7 @@
 pixelflux itself is licensed under the [Mozilla Public License 2.0](LICENSE).
 This file inventories what a built `pixelflux` extension contains or loads, per
 build configuration, and the license of each piece. It is enforced by
-`scripts/check-licenses.py`, `pixelflux/deny.toml`, and the `Licenses` workflow
+`scripts/check-licenses.py`, `deny.toml`, and the root license checks
 (see [How this is enforced](#how-this-is-enforced)).
 
 Categories used below:
@@ -46,13 +46,13 @@ contains it.
 | SVT-AV1 (via `codec-sys`) | BSD-3-Clause-Clear (with the Alliance for Open Media patent license) | permissive | both | linked shared library, bound at build time from its headers; bundled into the wheels | software AV1 |
 | dav1d (via `codec-sys`) | BSD-2-Clause | permissive | both | linked shared library, bound at build time from its headers; bundled into the wheels | the virtual camera's AV1 decoder |
 | libde265 (via `codec-sys`) | LGPL-3.0-or-later | weak copyleft | both | linked shared library, bound at build time from its headers; bundled into the wheels, replaceable | the virtual camera's HEVC decoder |
-| libva, libva-drm (via `va-sys`) | MIT | permissive | both | `dlopen("libva.so.2")` and `dlopen("libva-drm.so.2")` at run time, never linked; not in the wheel, the host's copy serves the driver it was built for. The bindings are generated from the libva 2.24 headers vendored under `pixelflux/va-sys/headers/` (MIT) | VA-API encoders and video processor |
+| libva, libva-drm (via `va-sys`) | MIT | permissive | both | `dlopen("libva.so.2")` and `dlopen("libva-drm.so.2")` at run time, never linked; not in the wheel, the host's copy serves the driver it was built for. The bindings are generated from the libva 2.24 headers vendored under `va-sys/headers/` (MIT) | VA-API encoders and video processor |
 | libdrm | MIT | permissive | both (headers only) | `drm-sys` carries bindings generated from its headers and `drm-ffi` issues the ioctls itself; no libdrm symbol is linked | DRM/KMS |
 | libgbm (Mesa) | MIT | permissive | both | linked shared library (`gbm-sys`); excluded from the wheel | GPU buffer allocation |
 | libpixman-1 | MIT | permissive | both | linked shared library (`pixman-sys`); excluded from the wheel | software renderer of the compositor |
 | libxkbcommon | MIT | permissive | both | linked shared library (`xkbcommon` crate); excluded from the wheel | keymaps |
 | libwayland-server | MIT | permissive | both | `dlopen` at run time (`wayland-sys` `dlopen` feature), never linked | capture compositor. libwayland-client is not used: the Wayland client side is the pure-Rust `wayland-backend`. |
-| NVIDIA NvFBC (`libnvidia-fbc.so.1`) | proprietary (NVIDIA driver component); the `NvFBC.h` header vendored under `pixelflux/nvcodec-sys/headers/` is under NVIDIA's MIT-style permission grant | permissive (header); driver component | both | `dlopen("libnvidia-fbc.so.1")` at run time for the X11 zero-copy capture path, never linked; excluded from the wheel | ships with the NVIDIA driver and is injected into containers under the `video` driver capability, like `libnvidia-encode.so.1`. The header is vendored for provenance only; the bindings are hand-written |
+| NVIDIA NvFBC (`libnvidia-fbc.so.1`) | proprietary (NVIDIA driver component); the `NvFBC.h` header vendored under `nvcodec-sys/headers/` is under NVIDIA's MIT-style permission grant | permissive (header); driver component | both | `dlopen("libnvidia-fbc.so.1")` at run time for the X11 zero-copy capture path, never linked; excluded from the wheel | ships with the NVIDIA driver and is injected into containers under the `video` driver capability, like `libnvidia-encode.so.1`. The header is vendored for provenance only; the bindings are hand-written |
 | libEGL (Mesa / vendor) | MIT (Mesa), Khronos headers | permissive | both | `dlopen("libEGL.so.1")` at run time for the dmabuf import path, never linked; excluded from the wheel | GL entry points are resolved through `eglGetProcAddress` |
 | libpipewire-0.3 | MIT | permissive | both | `dlopen("libpipewire-0.3.so.0")` at run time for the virtual-camera PipeWire sink and the portal screen-capture streams, never linked | no build-time PipeWire dependency; the xdg-desktop-portal bus client is the pure-Rust `zbus` |
 | libinput | MIT | permissive | both (graph only) | `input-sys` is in the crate graph through smithay's `backend_libinput`, but no symbol is referenced and the linker drops it: not in `NEEDED` | compositor backend not used by pixelflux |
@@ -62,9 +62,9 @@ contains it.
 | libxcb, libX11 | not linked | - | - | `x11rb` is pure Rust and opens the X socket itself; no libxcb/libX11 symbol is linked (the `auditwheel --exclude` entries for them are harmless) | X11 capture, XTEST, XFixes cursor |
 | NVIDIA NVENC (`libnvidia-encode.so.1`) and CUDA driver API (`libcuda.so.1`) | proprietary (NVIDIA driver) | - | both | `dlopen` at run time, never linked, never shipped; only present on hosts with the NVIDIA driver | NVENC encoder |
 | NVIDIA Jetson Linux encoder and surface libraries (`libnvv4l2.so`, and `libnvbuf_utils.so` on JetPack 4 or `libnvbufsurface.so` with `libnvbufsurftransform.so` on JetPack 5 and 6) | proprietary (NVIDIA Jetson Linux components) | - | both | `dlopen` at run time on `aarch64` alone, never linked, never shipped; only present on a board carrying JetPack | the Tegra H.264 encoder. No header is vendored: the interface is declared in `encoders/tegra.rs` and `abi_matches()` refuses a node if this build lays any of it out differently |
-| NVIDIA SDK headers (`pixelflux/nvcodec-sys/headers/nvEncodeAPI.h`, NVENCAPI 13.0 from FFmpeg's nv-codec-headers) | MIT | permissive | both | vendored header; the committed `src/bindgen/nvenc.rs` is generated from it | the crate `nvcodec-sys` is MIT OR Apache-2.0 |
-| KDE plasma-wayland-protocols XMLs (`pixelflux/protocols/kde-output-device-v2.xml`, `kde-output-management-v2.xml`) | MIT-CMU | permissive | both | vendored protocol descriptions compiled to Rust by `wayland-scanner` at build time; nothing is linked | newer than the copies `wayland-protocols-plasma` bundles, which KWin outgrew (`src/wayland/kdeproto.rs`) |
-| CUDA driver API declarations (`pixelflux/nvcodec-sys/src/bindgen/cuda.rs`) | bindgen output of the CUDA toolkit `cuda.h` declarations (the 31 functions pixelflux calls); the toolkit header is under the NVIDIA CUDA Toolkit EULA | - | both | committed FFI declarations only, as cudarc/cuda-sys ship; the toolkit is not needed to build and nothing from it is redistributed | regenerated only with the `regen` feature |
+| NVIDIA SDK headers (`nvcodec-sys/headers/nvEncodeAPI.h`, NVENCAPI 13.0 from FFmpeg's nv-codec-headers) | MIT | permissive | both | vendored header; the committed `src/bindgen/nvenc.rs` is generated from it | the crate `nvcodec-sys` is MIT OR Apache-2.0 |
+| KDE plasma-wayland-protocols XMLs (`protocols/kde-output-device-v2.xml`, `kde-output-management-v2.xml`) | MIT-CMU | permissive | both | vendored protocol descriptions compiled to Rust by `wayland-scanner` at build time; nothing is linked | newer than the copies `wayland-protocols-plasma` bundles, which KWin outgrew (`src/wayland/kdeproto.rs`) |
+| CUDA driver API declarations (`nvcodec-sys/src/bindgen/cuda.rs`) | bindgen output of the CUDA toolkit `cuda.h` declarations (the 31 functions pixelflux calls); the toolkit header is under the NVIDIA CUDA Toolkit EULA | - | both | committed FFI declarations only, as cudarc/cuda-sys ship; the toolkit is not needed to build and nothing from it is redistributed | regenerated only with the `regen` feature |
 | Linux kernel ABI (`linux-raw-sys`) | Linux-syscall-note (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT for the crate) | permissive | both | syscall numbers and structs as Rust constants | rustix backend |
 | CPython (`libpython`) | PSF-2.0 | permissive | both | extension module: symbols come from the hosting interpreter, nothing is linked | `pyo3` with `extension-module` |
 | glibc (`libc`, `libm`, `libpthread`, `libdl`) | LGPL-2.1-or-later | weak copyleft | both | linked shared libraries, as for every program; musllinux wheels use musl (MIT) | C runtime |
@@ -352,7 +352,8 @@ The default build (`gpl` feature, what the published wheels and
   (BSD-2-Clause) and libjpeg-turbo (IJG/BSD-3-Clause/Zlib) and the bundled
   codec libraries' notices are not included in the wheel; this file is the
   inventory, their license texts live in the upstream sources named above.
-- selkies' container images and AppImage take pixelflux's wheel as it is.
+- Selkies' server packages link the same crate directly; its test suites drive
+  the standalone wheel's optional Python bridge.
 
 ## How this is enforced
 
@@ -368,27 +369,23 @@ The default build (`gpl` feature, what the published wheels and
   repository root: `python3 scripts/check-licenses.py` (`--set non-gpl`,
   `--markdown`, `--metadata FILE` for a saved `cargo metadata` JSON). It
   reports `PASS`/`FAIL` per configuration and exits non-zero on a failure.
-- `pixelflux/deny.toml` is the [cargo-deny](https://embarkstudios.github.io/cargo-deny/)
+- `deny.toml` is the [cargo-deny](https://embarkstudios.github.io/cargo-deny/)
   policy: its graph is the non-GPL configuration, the allow list is
   permissive-only, `x264-sys` is clarified as `MIT AND GPL-2.0-or-later`,
   banned from that graph, and accepted only through an exception when the graph
-  is switched to the GPL build. From `pixelflux/`:
+  is switched to the GPL build. From this directory:
   `cargo deny --exclude-dev check licenses bans sources` (non-GPL gate) and
   `cargo deny --exclude-dev --features gpl check licenses sources` (GPL build;
   its `bans` check fails on purpose). `cargo deny list` ignores the `[graph]`
   section and needs `--no-default-features --features openh264` spelled out.
-- `.github/workflows/licenses.yml` runs the script and both cargo-deny
-  invocations on every push and pull request.
+- The root license workflow inventories the workspace in both configurations;
+  the cargo-deny invocations above additionally audit this crate standalone.
 - Adding a dependency that links, loads, or vendors native code means adding it
   to `NATIVE` in the script and to the table above; adding a copyleft
   dependency means an `ALLOWED_COPYLEFT` entry, a `deny.toml` clarification
   and exception, and a row here. To exercise the gate itself, save the GPL
-  graph (`cargo metadata --format-version 1 --manifest-path pixelflux/Cargo.toml
+  graph (`cargo metadata --format-version 1 --manifest-path Cargo.toml
   > gpl.json`) and audit it under the non-GPL policy
   (`scripts/check-licenses.py --metadata gpl.json --set non-gpl`): it must
   fail on `x264-sys` and on `codec-sys` for its `x265` feature.
 
-## Open items
-
-- `pixelflux/Cargo.toml` has no `license = "MPL-2.0"` field (the script and
-  `deny.toml` carry the clarification); adding it lets every tool see it.

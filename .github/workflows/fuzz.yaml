@@ -2,10 +2,10 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# Fuzzes the parsers of what a peer sends (crates/selkies-rtc/fuzz) with ClusterFuzzLite:
-# the code a pull request changes for five minutes, and every fuzzer for an
-# hour a day, whose corpus is then pruned. Corpora and crashes are kept as
-# workflow artifacts.
+# Fuzzes the parsers of what a peer sends in selkies-rtc (rtp, sctp, sdp,
+# stun), pixelflux (sps), and pcmflux (red) with ClusterFuzzLite: changed code
+# for five minutes on a pull request, and every fuzzer for an hour a day,
+# whose corpus is then pruned. Corpora and crashes are kept as artifacts.
 name: Fuzz
 
 on:
@@ -15,6 +15,11 @@ on:
       - "crates/selkies-rtc/src/**"
       - "crates/selkies-rtc/vendor/**"
       - "crates/selkies-rtc/fuzz/**"
+      - "crates/pixelflux/src/encoders/bits.rs"
+      - "crates/pixelflux/src/encoders/sps.rs"
+      - "crates/pixelflux/fuzz/**"
+      - "crates/pcmflux/src/red.rs"
+      - "crates/pcmflux/fuzz/**"
       - ".clusterfuzzlite/**"
       - ".github/workflows/fuzz.yaml"
   schedule:

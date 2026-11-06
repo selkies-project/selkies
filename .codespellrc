@@ -1,11 +1,11 @@
 [codespell]
 # npm dependencies, lockfiles, local build output (Cargo's target among it),
-# generated bundles (the web client's dist/web among them), the pixelflux and
-# pcmflux clones, the translation catalog, the TypeScript build caches, the
+# generated bundles (the web client's dist/web among them), the translation
+# catalog, the TypeScript build caches, the
 # desktop theme configs (whose keys are spelled by their toolkits, e.g.
 # openbox's osd.hilight.bg), the vendored Wayland protocols and crates, and the
 # fuzzers' seed inputs are not ours to spell-check.
-skip = ./.git,./build,./dist,./target,./pixelflux,./pcmflux,./tests/tools/protocols,./crates/selkies-rtc/vendor,./crates/selkies-rtc/fuzz/seeds,./addons/*/node_modules,./addons/*/dist,./addons/desktop/theme,./website/node_modules,./website/out,./website/.next,./website/public,*.lock,package-lock.json,*.tsbuildinfo,*.min.js,selkies-core.js,translations.ts,*.svg,*.png,*.ico,*.woff,*.woff2
+skip = ./.git,./build,./dist,./target,./tests/tools/protocols,./crates/selkies-rtc/vendor,./crates/selkies-rtc/fuzz/seeds,./crates/pixelflux/fuzz/seeds,./crates/pcmflux/fuzz/seeds,./crates/pixelflux/va-sys/headers,./crates/pixelflux/va-sys/src/bindgen,./crates/pixelflux/codec-sys/headers,./crates/pixelflux/nvcodec-sys/headers,./crates/pixelflux/nvcodec-sys/src/bindgen,./addons/*/node_modules,./addons/*/dist,./addons/desktop/theme,./website/node_modules,./website/out,./website/.next,./website/public,*.lock,package-lock.json,*.tsbuildinfo,*.min.js,selkies-core.js,translations.ts,*.svg,*.png,*.ico,*.woff,*.woff2
 # renderD: DRM render node prefix (renderD128). requestor: X11 selection
 # protocol field name. currentY/initialY: pointer coordinate variables.
 # chage: the shadow-utils command. anc: SDI ancillary-data region.
@@ -13,4 +13,4 @@ skip = ./.git,./build,./dist,./target,./pixelflux,./pcmflux,./tests/tools/protoc
 # datas: PipeWire spa_buffer field (buffer->datas, n_datas). propertyst: the X
 # server's propertyst.h header. notin: Kubernetes' NotIn selector operator.
 # ue: the exp-Golomb ue(v) syntax element. rightt: the X keysym's name.
-ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc,zink,parm,datas,propertyst,notin,ue,rightt
+ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc,zink,parm,datas,propertyst,notin,ue,rightt,trun,re-declares,retuned

@@ -1,4 +1,4 @@
-# cargo-deny policy for the pcmflux crate graph (see ../LICENSES.md).
+# cargo-deny policy for the pcmflux crate graph (see LICENSES.md).
 #
 #     cargo deny --exclude-dev check licenses bans sources
 #

@@ -7,8 +7,8 @@ name: Packages
 # floor); a native package installs it at /usr/bin/selkies with the web client
 # at /usr/share/selkies/web and declares the packages behind the libraries the
 # binary links and loads, as that distribution names them, and the AppImage
-# carries it in a conda environment of conda-forge's libraries. Cargo fetches
-# pixelflux and pcmflux at the commits Cargo.lock pins. Only apt/apt-get, dnf,
+# carries it in a conda environment of conda-forge's libraries. pixelflux and
+# pcmflux come from the workspace's copied path dependencies. Only apt/apt-get, dnf,
 # apk, pacman, or micromamba are ever invoked.
 
 # Triggered by ci.yaml on pushes to main and by release.yaml for releases; can
