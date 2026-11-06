@@ -33,7 +33,7 @@ retry() {
 
 # 0) The server, built where glibc is the AppImage's floor, against the
 #    conda-forge libxkbcommon the AppImage carries, with the network reachable
-#    for Cargo to fetch the pixelflux and pcmflux commits the lock pins.
+#    for Cargo to fetch the workspace's registry dependencies.
 #    micromamba solves every conda environment here, the plugin's included.
 test -f dist/web/index.html
 export MAMBA_REMOTE_MAX_RETRIES="5" MAMBA_REMOTE_BACKOFF_FACTOR="3" \

@@ -49,11 +49,11 @@ SECTIONS = [
         "enable_rate_control", "congestion_control", "keyframe_interval", "video_min_qp", "video_max_qp",
         "jpeg_quality", "video_streaming_mode", "use_paint_over_quality", "paint_over_jpeg_quality",
         "video_paintover_crf", "video_paintover_burst_frames", "use_cpu", "cpu_encode_threading", "gpu_id", "encode_dri",
-        "webrtc_pacer", "backpressure_queue_size",
+        "webrtc_pacer",
     ]),
     ("Audio", "Server-to-client audio and the microphone uplink.", [
         "audio_enabled", "audio_bitrate", "audio_channels", "audio_device_name", "audio_frame_duration_ms",
-        "audio_redundancy", "audio_redundancy_distance", "microphone_enabled",
+        "audio_redundancy", "audio_redundancy_distance", "backpressure_queue_size", "microphone_enabled",
     ]),
     ("Display", "Resolution, scaling, cursors, and the second display.", [
         "enable_resize", "manual_resolution", "manual_width", "manual_height", "force_aligned_resolution",

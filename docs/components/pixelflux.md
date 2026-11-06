@@ -15,7 +15,7 @@ A request the host cannot serve falls through the codecs it does, in the order [
 
 ## Zero-Copy Paths
 
-Frames reach the encoder without a copy wherever the hardware allows it. On Wayland the compositor's dmabuf goes to the encoder as it is. On X11 the same holds on an NVIDIA GPU encoding with NVENC: `pixelflux` captures through NvFBC, so the NVIDIA X driver composites the screen straight into video memory and the encoder reads that buffer in place, which measures 2.52 ms per frame at 1920x1080 against 5.30 ms for the shared-memory path on the same GPU. Every other X11 session copies once, into a shared-memory surface the encoder then reads in place. Nothing needs configuring for any of this; the session says which path it took in its log.
+Frames reach the encoder without a host copy wherever the hardware allows it. On Wayland the compositor's dmabuf goes to the encoder as it is. X11 has three hardware- and server-dependent paths: NvFBC hands NVENC an NVIDIA-owned video-memory buffer in place; DRI3 blits a GPU-backed X server's screen into dmabufs the hardware encoder imports in place; and a shared-framebuffer Xvfb reads its system-memory screen in place, converting directly from that surface where the encoder accepts host planes. Other X11 sessions use XShm, with host conversion where the encoder requires it. Nothing needs configuring for any of this; the session says which path it took in its log.
 
 ## Capture Backends
 

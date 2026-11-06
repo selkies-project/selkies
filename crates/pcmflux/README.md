@@ -24,7 +24,7 @@ This package builds a native Rust extension (via `setuptools-rust`/PyO3, the cra
 On Debian/Ubuntu, from the root of the repository:
 ```bash
 sudo apt-get install libpulse-dev cmake build-essential
-pip install .
+pip install ./crates/pcmflux
 ```
 
 The Opus encoder is built from the copy of libopus that `opusic-sys` vendors and is linked statically, so `cmake` and a C compiler are always required and no system `libopus` is used.

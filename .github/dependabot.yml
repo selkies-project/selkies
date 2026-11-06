@@ -62,9 +62,9 @@ updates:
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
 
-  # Base images of the wheel builder, the devcontainer, and the published images
+  # Base images of the wheel builder, devcontainer, fuzzers, scanner, and published images
   - package-ecosystem: docker
-    directories: ["/", "/.devcontainer", "/addons/base", "/addons/coturn", "/addons/desktop", "/addons/turn-rest"]
+    directories: ["/", "/.clusterfuzzlite", "/.devcontainer", "/.oss-scanner", "/addons/base", "/addons/coturn", "/addons/desktop", "/addons/turn-rest"]
     schedule:
       interval: weekly
     groups:
@@ -76,9 +76,9 @@ updates:
       - dependency-name: "*node"
         update-types: ["version-update:semver-major"]
 
-  # Native capture crates and the isolated NVENC binding-generation manifest
+  # Rust workspace, native capture crates, and the isolated NVENC binding-generation manifest
   - package-ecosystem: cargo
-    directories: ["/crates/pixelflux", "/crates/pixelflux/nvcodec-sys", "/crates/pcmflux"]
+    directories: ["/", "/crates/pixelflux", "/crates/pixelflux/nvcodec-sys", "/crates/pcmflux"]
     schedule:
       interval: weekly
     groups:

@@ -83,8 +83,7 @@ for component in pixelflux pcmflux; do
 done
 cargo fetch --locked --manifest-path "${SRC}/Cargo.toml"
 
-# The pixelflux checkout Cargo fetched at the commit the lock pins, whose wheel
-# recipe and codec floors codecs.sh reads
+# The local pixelflux source whose wheel recipe and codec floors codecs.sh reads
 PIXELFLUX="$(cargo metadata --locked --format-version 1 --manifest-path "${SRC}/Cargo.toml" \
     | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"
 [ -n "${PIXELFLUX}" ] || { echo "cargo metadata names no pixelflux checkout" >&2; exit 1; }
