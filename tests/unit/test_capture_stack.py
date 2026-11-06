@@ -40,8 +40,9 @@ for project in ("pixelflux", "pcmflux"):
           f'"crates/{project}"' in manifest.split("default-members", 1)[0])
     check(f"the workflow plans from crates/{project}",
           'cd "crates/${project}"' in workflow and "for project in pixelflux pcmflux" in workflow)
-    check(f"{project} wheels upload from its local wheelhouse",
-          "path: crates/${{ matrix.group.project }}/wheelhouse/*.whl" in workflow
+    check(f"{project} wheels are written to and uploaded from its local wheelhouse",
+          "output-dir: crates/${{ matrix.group.project }}/wheelhouse" in workflow
+          and "path: crates/${{ matrix.group.project }}/wheelhouse/*.whl" in workflow
           and "name: ${{ matrix.group.project }}-wheels-" in workflow)
     check(f"{project} wheels come from its local package directory",
           "package-dir: crates/${{ matrix.group.project }}" in workflow)
