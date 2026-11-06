@@ -61,9 +61,9 @@ sudo apt-get install -y \
 
 **Option A: Install a prebuilt wheel**
 
-Every release on the [GitHub Releases page](https://github.com/selkies-project/selkies/releases) carries wheels (`manylinux_2_28` and `musllinux`, x86_64 and aarch64, CPython 3.9 and newer), the pre-releases cut per commit included; take the one for your interpreter and platform:
+Every release on the [GitHub Releases page](https://github.com/selkies-project/selkies/releases) carries one `cp311-abi3` wheel per platform (`manylinux_2_28` and `musllinux_1_2`, x86_64 and aarch64), the pre-releases cut per commit included. A wheel installs on GIL-enabled CPython 3.11 and newer on its own libc and architecture; free-threaded CPython is not supported by ordinary abi3 wheels. The stable ABI covers only the CPython extension interface, not the native codec, CUDA/NVENC, Rust, libc, OS, or CPU-architecture interfaces.
 ```bash
-pip install ./pixelflux-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
+pip install ./pixelflux-<version>-cp311-abi3-manylinux_2_28_x86_64.whl
 ```
 A wheel leaves a few libraries to the host, the ones a desktop already carries: `libgbm1`, `libpixman-1-0`, and `libxkbcommon0` on Debian and Ubuntu (`mesa-libgbm`, `pixman`, and `libxkbcommon` on Fedora and RHEL), and `libegl1` for NVENC's zero-copy dmabuf import; a musllinux wheel also takes the C++ runtime from Alpine (`apk add libstdc++ libgcc mesa-gbm pixman libxkbcommon`).
 
@@ -391,7 +391,7 @@ def my_callback(frame):
 ### Zero-Copy Frames
 
 `memoryview(frame)` aliases the native encoder buffer with **no copy**, on **every supported
-Python version (3.9 and newer)**. The frame object owns its buffer and keeps it alive until every
+Python version (3.11 and newer)**. The frame object owns its buffer and keeps it alive until every
 consumer — including a transport that retained a slice during a partial write — has released its
 view, so the hand-off is memory-safe. (The old `deferred_free` / `OwnedFrame` / PEP 688 /
 Python-3.12-only path is gone; the native buffer protocol does this on all versions.) Hand the
@@ -855,7 +855,7 @@ asked for.
     *   **Software:** full-frame H.264 through x264 (incl. 4:4:4 — GPL, the default) or, in a GPL-free build, the BSD-licensed OpenH264 (4:2:0), and JPEG with multi-threaded striping; full-frame H.265 through x265 (incl. 4:4:4) or kvazaar, VP8 and VP9 through libvpx, AV1 through SVT-AV1, each linked directly; `pixelflux.SOFTWARE_ENCODERS` names the build's encoder per codec, and `pixelflux.hardware_encoders(encode_node_index, auto_gpu)` the codecs a render node's NVENC or VA-API serves, the node resolved as a capture resolves it, probed once per node at first call. `pixelflux.SOFTWARE_FULLCOLOR` and `pixelflux.hardware_fullcolor(encode_node_index, auto_gpu)` name, of those, the codecs each side encodes 4:4:4 when `video_fullcolor` asks for it, so a caller knows the chroma a session will carry before it opens one. `pixelflux.hardware_formats(encode_node_index, auto_gpu)` lists every format the node's engine encodes per codec (`"420-8"`, `"444-8"`, `"420-10"`, `"444-10"`), and `pixelflux.SOFTWARE_FORMATS` the same for each software encoder of the build, which is what `video_bit_depth` is answered from, and `ScreenCapture.stream_info` reports the `bit_depth` a session came up with.
     *   **Hardware:** NVIDIA NVENC (H.264, H.265, and AV1; incl. 4:4:4 for H.264 and H.265, ARGB-direct with matched VUI color signaling, multi-GPU containers, API-version negotiation) and VA-API (Intel/AMD; H.264, H.265, VP8, VP9, and AV1 through libva directly, loaded at runtime, the session writing the headers the driver takes packed; VA-VPP convert, per-device 4:4:4 negotiation, low-power entry points) with Zero-Copy support.
     *   **Driver-aware GPU auto-selection** via the `auto_gpu` setting.
-*   **Zero-Copy Frames (X11 & Wayland):** the native frame object (buffer protocol) hands the encoded buffer to Python with no copy, on every supported Python version (3.9 and newer).
+*   **Zero-Copy Frames (X11 & Wayland):** the native frame object (buffer protocol) hands the encoded buffer to Python with no copy, on every supported Python version (3.11 and newer).
 *   **Smart Bandwidth Management:**
     *   **Change Detection:** Encodes only changed stripes (JPEG) and changed frames (video).
     *   **Paint-Over:** Cleans up a still screen once its content stops changing, even while
@@ -900,7 +900,7 @@ asked for.
 
 `AGENTS.md` carries the conventions and the invariants of this tree, for contributors and coding agents alike. The crate builds in three configurations, `cargo test --lib` (the default `gpl` feature, libx264, no Python), `cargo test --lib --features python` (the Python bridge), and `cargo test --lib --no-default-features --features openh264`, and all are expected to pass. The `#[ignore]`d `gpu_` tests run on an NVIDIA GPU with `cargo test gpu_ -- --ignored --nocapture --test-threads=1`, the `gpu_dmabuf_` ones need a render node, and the `gpu_bench_` ones print measurements. `pip wheel . --no-deps` builds the extension the way the released wheels are built (`PIXELFLUX_ENABLE_GPL=0` for the OpenH264 build), and that wheel installed into a [selkies](https://github.com/selkies-project/selkies) checkout set up as its development documentation describes puts the change under the end-to-end suites. Selkies' root `.devcontainer` installs the native dependencies the build needs.
 
-Selkies' [Release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) workflow builds pixelflux from `crates/pixelflux` and attaches its CPython 3.9+ wheels beside the server artifacts. The tag stamps this crate's literal Cargo version, its standalone lock, and the root lock together. `release-published.yaml` uploads the wheels through PyPI trusted publishing. Before the standalone repository and its Pages site can be archived, a maintainer must register the pixelflux trusted publisher for Selkies' `release-published.yaml` and `pypi` environment and migrate the old documentation destination; neither external registration nor archival is performed by this source tree.
+Selkies' [Release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) workflow builds pixelflux from `crates/pixelflux` and attaches its CPython 3.11+ `cp311-abi3` wheels beside the server artifacts. The tag stamps this crate's literal Cargo version, its standalone lock, and the root lock together. `release-published.yaml` uploads the wheels through PyPI trusted publishing. Before the standalone repository and its Pages site can be archived, a maintainer must register the pixelflux trusted publisher for Selkies' `release-published.yaml` and `pypi` environment and migrate the old documentation destination; neither external registration nor archival is performed by this source tree.
 
 ## License
 

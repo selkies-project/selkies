@@ -17,7 +17,7 @@ crate-type = ["rlib", "cdylib"]
 # module; left off, the crate links the interpreter, which is what `cargo test
 # --features python` needs.
 python = ["dep:pyo3"]
-extension-module = ["python", "pyo3/extension-module"]
+extension-module = ["python", "pyo3/extension-module", "pyo3/abi3-py311"]
 
 [dependencies]
 pyo3 = { version = "0.30.1", optional = true }

@@ -60,8 +60,11 @@ setup(
 
     # Single self-contained Rust extension: the top-level `pixelflux` module does X11 (XShm)
     # and Wayland capture plus all encoding/conversion. No C/C++ sources, no Python package
-    # layer -- `import pixelflux` resolves directly to pixelflux.cpython-*.so.
+    # layer -- `import pixelflux` resolves directly to pixelflux.abi3.so. The
+    # CPython 3.11 limited API carries the native buffer protocol; one abi3
+    # wheel serves each later GIL-enabled CPython on the same platform.
     packages=[],
+    options={"bdist_wheel": {"py_limited_api": "cp311"}},
     rust_extensions=[
         RustExtension(
             "pixelflux",
@@ -81,6 +84,6 @@ setup(
         "Programming Language :: Python :: 3",
         "Operating System :: POSIX :: Linux",
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.11",
     zip_safe=False,
 )

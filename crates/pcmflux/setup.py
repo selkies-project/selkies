@@ -32,6 +32,9 @@ setup(
     license="MPL-2.0",
     url="https://github.com/selkies-project/selkies/tree/main/crates/pcmflux",
     packages=[],
+    # PyO3's abi3-py311 feature and this wheel tag are a pair: the frame
+    # exporters need the buffer protocol added to the limited API in 3.11.
+    options={"bdist_wheel": {"py_limited_api": "cp311"}},
     rust_extensions=[
         RustExtension(
             "pcmflux",
@@ -50,6 +53,6 @@ setup(
         "Programming Language :: Python :: 3",
         "Operating System :: POSIX :: Linux",
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.11",
     zip_safe=False,
 )

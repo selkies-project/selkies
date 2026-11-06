@@ -47,6 +47,18 @@ for project in ("pixelflux", "pcmflux"):
           "package-dir: crates/${{ matrix.group.project }}" in workflow)
     check(f"development installs the local {project} wheel",
           f"./crates/{project}" in postcreate and "pip wheel --no-deps" in postcreate)
+    package = os.path.join(REPO, "crates", project)
+    cargo = open(os.path.join(package, "Cargo.toml"), encoding="utf-8").read()
+    setup = open(os.path.join(package, "setup.py"), encoding="utf-8").read()
+    pyproject = open(os.path.join(package, "pyproject.toml"), encoding="utf-8").read()
+    check(f"{project} limits only its extension build to the 3.11 stable ABI",
+          'extension-module = ["python", "pyo3/extension-module", "pyo3/abi3-py311"]' in cargo
+          and 'python = ["dep:pyo3"]' in cargo)
+    check(f"{project} wheels declare cp311-abi3 and Python 3.11+",
+          'options={"bdist_wheel": {"py_limited_api": "cp311"}}' in setup
+          and 'python_requires=">=3.11"' in setup)
+    check(f"{project} builds each platform wheel on CPython 3.11",
+          'build = "cp311-*"' in pyproject and 'skip = "*t-*"' in pyproject)
 
 check("no external release location or polling remains",
       "locate:" not in workflow and "gh release" not in workflow and "gh run" not in workflow
