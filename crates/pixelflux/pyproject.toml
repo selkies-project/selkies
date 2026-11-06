@@ -10,6 +10,7 @@ manylinux-aarch64-image = "manylinux_2_28"
 skip = "*t-*"
 
 [tool.cibuildwheel.environment]
+PIXELFLUX_ABI3 = "1"
 LD_LIBRARY_PATH = "/usr/local/lib:/usr/local/lib64"
 # The source-built libraries below install under /usr/local; Alpine's pkgconf
 # does not search there by default, so both platforms are told explicitly.

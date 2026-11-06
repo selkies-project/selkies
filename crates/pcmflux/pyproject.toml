@@ -10,6 +10,7 @@ manylinux-aarch64-image = "manylinux_2_28"
 skip = "*t-*"
 
 [tool.cibuildwheel.environment]
+PCMFLUX_ABI3 = "1"
 PATH = "$HOME/.cargo/bin:$PATH"
 
 [tool.cibuildwheel.linux]

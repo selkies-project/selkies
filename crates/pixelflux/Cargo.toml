@@ -80,9 +80,12 @@ default = ["gpl"]
 ## The Python bridge: `import pixelflux` over the Rust API. Off, the crate is a Rust library
 ## with no interpreter in its build.
 python = ["dep:pyo3"]
-## The wheel's module: `python` with pyo3 linking against the importing interpreter rather
-## than a libpython of its own. Tests of the `python` feature run without it.
-extension-module = ["python", "pyo3/extension-module", "pyo3/abi3-py311"]
+## A full-CPython-API extension: `python` with pyo3 linking against the importing
+## interpreter rather than a libpython of its own. Tests of `python` run without it.
+extension-module = ["python", "pyo3/extension-module"]
+## Release wheels opt into the 3.11 limited API explicitly; ordinary source builds retain
+## the full API needed for CPython 3.9/3.10 and their identical zero-copy frame exporter.
+abi3-extension-module = ["extension-module", "pyo3/abi3-py311"]
 ## GPL-licensed components: libx264 (GPL-2.0+) as the software H.264 encoder and x265
 ## (GPL-2.0+) as the software HEVC encoder. Wins over `openh264` whenever both are enabled.
 gpl = ["dep:x264-sys", "codec-sys/x265"]

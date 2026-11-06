@@ -4,6 +4,7 @@
 
 import os
 import re
+import sys
 
 from setuptools import setup
 from setuptools_rust import Binding, RustExtension, Strip
@@ -21,6 +22,13 @@ def crate_version() -> str:
     return re.sub(r"-(alpha|beta|rc|dev|post)\.(\d+)$", lambda m: spelled[m.group(1)] + m.group(2), semver)
 
 
+# Release wheels opt in explicitly. Ordinary source builds retain the full CPython API,
+# including the zero-copy buffer exporter on CPython 3.9/3.10.
+_abi3 = os.environ.get("PCMFLUX_ABI3", "0").strip().lower() in ("1", "true", "yes", "on")
+if _abi3 and sys.version_info < (3, 11):
+    raise RuntimeError("PCMFLUX_ABI3=1 requires CPython 3.11 or newer")
+
+
 setup(
     name="pcmflux",
     version=crate_version(),
@@ -32,15 +40,14 @@ setup(
     license="MPL-2.0",
     url="https://github.com/selkies-project/selkies/tree/main/crates/pcmflux",
     packages=[],
-    # PyO3's abi3-py311 feature and this wheel tag are a pair: the frame
-    # exporters need the buffer protocol added to the limited API in 3.11.
-    options={"bdist_wheel": {"py_limited_api": "cp311"}},
+    # The `abi3-py311` Cargo feature and wheel tag are paired only in release mode.
+    options={"bdist_wheel": {"py_limited_api": "cp311"}} if _abi3 else {},
     rust_extensions=[
         RustExtension(
             "pcmflux",
             "Cargo.toml",
             binding=Binding.PyO3,
-            features=["python", "extension-module"],
+            features=["python", "abi3-extension-module" if _abi3 else "extension-module"],
             debug=False,
             strip=Strip.All,
             # `--locked`: a wheel carries the crate versions Cargo.lock names, and a
@@ -53,6 +60,6 @@ setup(
         "Programming Language :: Python :: 3",
         "Operating System :: POSIX :: Linux",
     ],
-    python_requires=">=3.11",
+    python_requires=">=3.9",
     zip_safe=False,
 )

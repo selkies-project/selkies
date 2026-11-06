@@ -84,7 +84,7 @@ hanging or lagging. Performance preservation or improvements such as zero-copy a
 always important, and the GIL is held no longer than the work needs. End-to-end latency and an unrestricted frame
 rate are separate goals rather than two ends of one dial: neither is spent to buy the other. A change never drops a
 capability or falls back to an older implementation to make itself simpler; where one seems to be in the way, say
-what it is rather than removing it. Note that compatibility should be ensured for GIL-enabled CPython 3.11 to 3.15 or even higher, and CUDA/NVENC 11
+what it is rather than removing it. Note that compatibility should be ensured for GIL-enabled CPython 3.9 to 3.15 or even higher, and CUDA/NVENC 11
 to 13 or higher. Protocol clients form fallback ladders that bind the newest architecture first (ext- before
 zwlr-data-control in dcclient) and exist to keep selkies' Wayland path subprocess-free — they replace wtype/wl-copy
 style forks, so extend them in-process rather than shelling out. A nested KWin session forwards no delta from its host

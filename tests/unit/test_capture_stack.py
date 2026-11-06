@@ -51,14 +51,17 @@ for project in ("pixelflux", "pcmflux"):
     cargo = open(os.path.join(package, "Cargo.toml"), encoding="utf-8").read()
     setup = open(os.path.join(package, "setup.py"), encoding="utf-8").read()
     pyproject = open(os.path.join(package, "pyproject.toml"), encoding="utf-8").read()
-    check(f"{project} limits only its extension build to the 3.11 stable ABI",
-          'extension-module = ["python", "pyo3/extension-module", "pyo3/abi3-py311"]' in cargo
+    check(f"{project} opt-ins separate full-API and 3.11 stable-ABI extensions",
+          'extension-module = ["python", "pyo3/extension-module"]' in cargo
+          and 'abi3-extension-module = ["extension-module", "pyo3/abi3-py311"]' in cargo
           and 'python = ["dep:pyo3"]' in cargo)
-    check(f"{project} wheels declare cp311-abi3 and Python 3.11+",
-          'options={"bdist_wheel": {"py_limited_api": "cp311"}}' in setup
-          and 'python_requires=">=3.11"' in setup)
-    check(f"{project} builds each platform wheel on CPython 3.11",
-          'build = "cp311-*"' in pyproject and 'skip = "*t-*"' in pyproject)
+    check(f"{project} retains full-API source builds on Python 3.9+",
+          'options={"bdist_wheel": {"py_limited_api": "cp311"}} if _abi3 else {}' in setup
+          and '"abi3-extension-module" if _abi3 else "extension-module"' in setup
+          and 'python_requires=">=3.9"' in setup)
+    check(f"{project} builds release wheels explicitly in ABI3 mode on CPython 3.11",
+          'build = "cp311-*"' in pyproject and f'{project.upper()}_ABI3 = "1"' in pyproject
+          and 'skip = "*t-*"' in pyproject)
 
 check("no external release location or polling remains",
       "locate:" not in workflow and "gh release" not in workflow and "gh run" not in workflow

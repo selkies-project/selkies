@@ -21,6 +21,14 @@ def crate_version() -> str:
     return re.sub(r"-(alpha|beta|rc|dev|post)\.(\d+)$", lambda m: spelled[m.group(1)] + m.group(2), semver)
 
 
+# Release wheels opt in explicitly. An ordinary source build remains a full-API
+# extension, including on CPython 3.9/3.10 where the native buffer protocol predates
+# the limited API's buffer support.
+_abi3 = os.environ.get("PIXELFLUX_ABI3", "0").strip().lower() in ("1", "true", "yes", "on")
+if _abi3 and sys.version_info < (3, 11):
+    raise RuntimeError("PIXELFLUX_ABI3=1 requires CPython 3.11 or newer")
+
+
 # The software H.264 and H.265 encoders are chosen at build time. The default build enables
 # the GPL components (GPL-2.0+ libx264 and x265 encode every software H.264 and H.265
 # session). Set PIXELFLUX_ENABLE_GPL=0 (or "false"/"no") to build without them: the
@@ -60,11 +68,10 @@ setup(
 
     # Single self-contained Rust extension: the top-level `pixelflux` module does X11 (XShm)
     # and Wayland capture plus all encoding/conversion. No C/C++ sources, no Python package
-    # layer -- `import pixelflux` resolves directly to pixelflux.abi3.so. The
-    # CPython 3.11 limited API carries the native buffer protocol; one abi3
-    # wheel serves each later GIL-enabled CPython on the same platform.
+    # layer -- import resolves directly to the extension. ABI3 mode builds pixelflux.abi3.so
+    # for GIL-enabled CPython 3.11+; ordinary source builds carry the interpreter's own tag.
     packages=[],
-    options={"bdist_wheel": {"py_limited_api": "cp311"}},
+    options={"bdist_wheel": {"py_limited_api": "cp311"}} if _abi3 else {},
     rust_extensions=[
         RustExtension(
             "pixelflux",
@@ -75,7 +82,7 @@ setup(
             # `--locked`: a wheel carries the crate versions Cargo.lock names, and a
             # manifest that has outrun the lock fails the build rather than silently
             # resolving past it.
-            features=["python", "extension-module"],
+            features=["python", "abi3-extension-module" if _abi3 else "extension-module"],
             args=["--locked", *([] if _enable_gpl else ["--no-default-features", "--features", "openh264"])],
         )
     ],
@@ -84,6 +91,6 @@ setup(
         "Programming Language :: Python :: 3",
         "Operating System :: POSIX :: Linux",
     ],
-    python_requires=">=3.11",
+    python_requires=">=3.9",
     zip_safe=False,
 )
