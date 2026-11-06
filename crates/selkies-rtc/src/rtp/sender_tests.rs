@@ -1005,8 +1005,8 @@ fn a_pacer_cut_is_answered_without_a_key_frame() {
     h.clock += RESYNC_S + 0.01;
     h.send(3, Some(2), 30, false, false);
     assert!(
-        h.rec.events().contains(&"pli".to_string()) && h.s.resync_since.is_none(),
-        "never predicted past"
+        h.rec.events().contains(&"pli".to_string()) && h.s.resync_since.is_some(),
+        "never predicted past: the run holds later deltas until the requested key arrives"
     );
 
     let mut h = Harness::new(false, Some(true), true, "video/H264");
@@ -1058,6 +1058,10 @@ fn a_real_pacer_cut_reaches_the_sender_through_the_verdict() {
     // Past the 120 ms budget at the pace: the key frame sized the floor, so this overflows it.
     h.s.push_frame(frame(2, Some(1), false, 1_000_000), &mut h.tr, now);
     assert_eq!(h.s.resyncs, 1);
+    assert!(
+        h.s.key_sent_at.is_none(),
+        "a reset does not leave the key it dropped answering later repairs"
+    );
     let pacer = h.tr.pacer.as_ref().unwrap();
     assert_eq!(pacer.stats().resyncs, 1, "{:?}", pacer.snapshot());
     assert_eq!(
@@ -1282,6 +1286,178 @@ fn an_anchored_run_waits_longer_for_a_key_frame() {
     h.clock += RESYNC_ANCHORED_S;
     h.send(7, Some(6), 70, false, false);
     assert!(h.rec.events().contains(&"pli".to_string()));
+}
+
+#[test]
+fn selective_repair_redrives_share_only_a_legitimate_key_frame() {
+    let mut slow = Harness::selective();
+    let mut healthy = Harness::new(true, Some(false), true, "video/H264");
+    let start = slow.clock;
+    for h in [&mut slow, &mut healthy] {
+        h.send(1, None, 10, true, false);
+        h.send(2, Some(1), 20, false, true);
+    }
+    slow.s.key_sent_at = Some(start);
+    slow.behind(RESYNC_FAR_FRAMES, 3.0);
+    let mut sync_reference = 2;
+    let mut reference = sync_reference;
+    let mut next = 3;
+    let mut key_times = Vec::new();
+    let step = RESYNC_ANCHORED_S + 0.01;
+    for _ in 0..3 {
+        if slow.s.resync_since.is_none() {
+            let blocked = next;
+            next += 1;
+            assert_eq!(
+                slow.send(blocked, Some(sync_reference), 0, false, false),
+                None,
+                "blocked frame {blocked}"
+            );
+            reference = blocked;
+        }
+        slow.clock += step;
+        let redrive = next;
+        next += 1;
+        assert_eq!(
+            slow.send(redrive, Some(reference), 0, false, false),
+            None,
+            "redrive frame {redrive}"
+        );
+        reference = redrive;
+        if plis(&slow) > key_times.len() {
+            key_times.push(slow.clock);
+            assert_eq!(
+                slow.send(next, Some(reference), 0, false, false),
+                None,
+                "a delta still waiting on that key stays in the run"
+            );
+            next += 1;
+            assert_eq!(
+                plis(&slow),
+                key_times.len(),
+                "a pre-key redrive does not bypass the pending-key guard"
+            );
+            for h in [&mut slow, &mut healthy] {
+                assert!(h.send(next, None, 0, true, false).is_some());
+            }
+            slow.s.key_sent_at = Some(slow.clock);
+            sync_reference = next;
+            reference = next;
+            next += 1;
+        } else {
+            slow.behind(RESYNC_FAR_FRAMES, 30.0);
+        }
+    }
+    assert_eq!(
+        key_times.len(),
+        1,
+        "a queued key answers one redrive window, then starvation earns exactly one new key"
+    );
+    assert!((key_times[0] - start - 2.0 * step).abs() < 1e-9);
+    slow.behind(0, 0.0);
+    assert!(
+        slow.send(next, Some(sync_reference), 0, false, false)
+            .is_some(),
+        "a frame predicting past the held run still recovers without another key"
+    );
+}
+
+#[test]
+fn a_held_resync_defers_only_one_repair_window() {
+    let mut h = Harness::selective();
+    let start = h.clock;
+    h.send(1, None, 10, true, false);
+    h.send(2, Some(1), 20, false, true);
+    h.send(3, Some(2), 30, false, false);
+    h.hold(&[1, 2]);
+    h.s.held_at = start;
+    h.behind(RESYNC_FAR_FRAMES, 3.0);
+    let mut reference = 3;
+    let mut next = 4;
+    let step = RESYNC_ANCHORED_S + 0.01;
+    for expected in 0..3 {
+        if h.s.resync_since.is_none() {
+            assert_eq!(h.send(next, Some(reference), 0, false, false), None);
+            reference = next;
+            next += 1;
+        }
+        h.clock += step;
+        assert_eq!(h.send(next, Some(reference), 0, false, false), None);
+        reference = next;
+        next += 1;
+        assert_eq!(
+            plis(&h),
+            usize::from(expected == 2),
+            "one actual resync and one waiting window precede a legitimate key request"
+        );
+    }
+    assert_eq!(plis(&h), 1, "held frames never defer starvation forever");
+    h.behind(0, 0.0);
+    assert!(h.send(next, Some(2), 0, false, false).is_some());
+}
+
+#[test]
+fn quiet_feedback_advances_deferred_and_pending_key_runs() {
+    for queued in [true, false] {
+        for kind in 0..=2 {
+            let mut h = Harness::selective();
+            h.send(1, None, 10, true, false);
+            h.send(2, Some(1), 20, false, true);
+            h.s.key_sent_at = queued.then_some(h.clock);
+            h.behind(RESYNC_FAR_FRAMES, 3.0);
+            assert_eq!(h.send(3, Some(2), 0, false, false), None);
+            let step = RESYNC_ANCHORED_S + 0.01;
+            h.clock += step;
+            assert_eq!(h.send(4, Some(3), 0, false, false), None);
+            let before = usize::from(!queued);
+            assert_eq!(plis(&h), before, "setup for queued={queued}, kind={kind}");
+            assert!(h.s.resync_since.is_some());
+            h.clock += step;
+            match kind {
+                2 => h.nack(&[9999]),
+                _ => {
+                    let packet = RtcpPacket::Psfb(PsfbPacket {
+                        fmt: if kind == 0 {
+                            RTCP_PSFB_PLI
+                        } else {
+                            RTCP_PSFB_FIR
+                        },
+                        ssrc: 1,
+                        media_ssrc: 2,
+                        fci: vec![],
+                    });
+                    h.s.handle_rtcp(&packet, &mut h.tr, h.clock);
+                }
+            }
+            assert_eq!(
+                plis(&h),
+                before + 1,
+                "quiet feedback must advance the expired run: queued={queued}, kind={kind}"
+            );
+            assert!(h.s.resync_since.is_some());
+            match kind {
+                2 => h.nack(&[9999]),
+                _ => {
+                    let packet = RtcpPacket::Psfb(PsfbPacket {
+                        fmt: if kind == 0 {
+                            RTCP_PSFB_PLI
+                        } else {
+                            RTCP_PSFB_FIR
+                        },
+                        ssrc: 1,
+                        media_ssrc: 2,
+                        fci: vec![],
+                    });
+                    h.s.handle_rtcp(&packet, &mut h.tr, h.clock);
+                }
+            }
+            assert_eq!(
+                plis(&h),
+                before + 1,
+                "nested repair must not duplicate the outer request: queued={queued}, kind={kind}"
+            );
+        }
+    }
 }
 
 #[test]

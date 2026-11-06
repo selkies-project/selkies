@@ -523,6 +523,8 @@ pub struct RtpSender {
     resync_first: Option<u16>,
     resync_run: usize,
     resync_told: bool,
+    /// This run already took one guarded repair window without resuming.
+    repair_deferred: bool,
     since_key: usize,
     resyncs: u64,
     anchored: bool,
@@ -611,6 +613,7 @@ impl RtpSender {
             resync_first: None,
             resync_run: 0,
             resync_told: false,
+            repair_deferred: false,
             since_key: 0,
             resyncs: 0,
             anchored: false,
@@ -922,6 +925,7 @@ impl RtpSender {
         self.resync_first = Some(frame_id);
         self.resync_run = 1;
         self.resync_told = false;
+        self.repair_deferred = false;
     }
 
     fn close_run(&mut self) {
@@ -929,12 +933,16 @@ impl RtpSender {
         self.resync_first = None;
         self.resync_run = 0;
         self.resync_told = false;
+        self.repair_deferred = false;
     }
 
     /// A frame of the open run was held back: tell the encoder of the run's first frame once
     /// the peer has room, or sooner where waiting would cost a key frame
-    /// (`RESYNC_REACH_FRAMES`); past `RESYNC_S` (`RESYNC_ANCHORED_S` where anchors run), ask
-    /// for a key frame instead.
+    /// (`RESYNC_REACH_FRAMES`). Past `RESYNC_S` (`RESYNC_ANCHORED_S` where anchors run), a
+    /// held resync or a key already due to this peer answers instead of another encoder
+    /// request. A resync that only keeps the same run waiting gets one such window; its next
+    /// deadline asks for a key frame rather than deferring forever. The run stays open after
+    /// that request, so deltas still predicting from it cannot redrive PLI before the key.
     fn repair(&mut self, transport: &mut dyn SenderTransport, now: f64) {
         let Some(since) = self.resync_since else {
             return;
@@ -945,13 +953,38 @@ impl RtpSender {
             RESYNC_S
         };
         if now - since > limit {
+            let deferred = self.repair_deferred;
+            if self.key_on_its_way(transport, now) {
+                return;
+            }
+            if !deferred && self.queued_key_on_its_way(transport, now) {
+                self.resync_since = Some(now);
+                self.repair_deferred = true;
+                return;
+            }
+            let first = self.resync_first.expect("an open run has a first frame");
+            let run = self.resync_run;
+            let told = self.resync_told;
+            self.close_run();
+            if !deferred && self.resync_held(transport, now) {
+                if self.resync_since.is_none() {
+                    self.open_run(first, now);
+                    self.resync_run = run;
+                    self.resync_told = told;
+                    self.repair_deferred = true;
+                }
+                return;
+            }
             log::info!(
                 target: "webrtc",
                 "{} sender {}: frame {:?} was never predicted past; asking for a key frame",
-                self.kind.as_str(), self.ssrc, self.resync_first
+                self.kind.as_str(), self.ssrc, Some(first)
             );
-            self.close_run();
-            self.hooks.pli();
+            self.ask_key_frame(now);
+            self.open_run(first, now);
+            self.resync_run = run;
+            self.resync_told = told;
+            self.repair_deferred = true;
             return;
         }
         if self.resync_told {
@@ -1089,6 +1122,7 @@ impl RtpSender {
         // Whatever key frame was on its way, the reset may have dropped: the next request asks again.
         self.key_requested = None;
         self.key_wire = None;
+        self.key_sent_at = None;
         let Some(first_tag) = first_tag else {
             return false;
         };
@@ -1228,13 +1262,11 @@ impl RtpSender {
             return false;
         }
         if self.resync_since.is_some() {
+            self.repair(transport, now);
             return true;
         }
         if self.held.is_empty() {
-            let wait = transport.video_backlog(now).1;
-            return self
-                .key_sent_at
-                .is_some_and(|at| now - at < RESYNC_S.max(2.0 * (wait + self.rtt.unwrap_or(0.0))));
+            return self.queued_key_on_its_way(transport, now);
         }
         let Some(number) = self
             .held
@@ -1326,6 +1358,19 @@ impl RtpSender {
         }
         self.repair_bytes -= size as f64;
         true
+    }
+
+    /// Whether this selective peer's newest key frame is still due to reach it. Packetization
+    /// clears the peer's held references then, even where its key waits in the pacer; two queue
+    /// waits and round trips, with `RESYNC_S` as a floor, bound that wait. No frame held since the
+    /// key means it is the peer's only available sync point.
+    fn queued_key_on_its_way(&mut self, transport: &mut dyn SenderTransport, now: f64) -> bool {
+        if self.hooks.selective() != Some(true) || !self.held.is_empty() {
+            return false;
+        }
+        let wait = transport.video_backlog(now).1;
+        self.key_sent_at
+            .is_some_and(|at| now - at < RESYNC_S.max(2.0 * (wait + self.rtt.unwrap_or(0.0))))
     }
 
     /// Whether a key frame answers a request already, where congestion control measures what the
