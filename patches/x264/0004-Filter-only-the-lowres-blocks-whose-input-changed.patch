@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: thelamer <ryankuba@gmail.com>
 Date: Wed, 4 Nov 2026 23:53:28 -0500
-Subject: [PATCH 4/5] Filter only the lowres blocks whose input changed
+Subject: [PATCH] Filter only the lowres blocks whose input changed
 
 A recycled input frame's lowres planes hold the input frame they were filtered from (its
 i_lowres_frame), so only a block whose 16x16 macroblock, or the column or row of the next ones
@@ -96,3 +96,6 @@ index ae81ce4..1097d8d 100644
      x264_frame_expand_border_lowres( frame );
  
      memset( frame->i_cost_est, -1, sizeof(frame->i_cost_est) );
+-- 
+2.47.3
+
