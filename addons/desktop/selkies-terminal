@@ -1,0 +1,20 @@
+#!/bin/sh
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The session's terminal, whichever backend it runs on: foot where a Wayland
+# compositor is there to draw it, which it needs and XWayland cannot stand in
+# for, and xfce4-terminal on X11. Installed as the x-terminal-emulator
+# alternative, so the menus, the window managers' bindings, the desktop's
+# Terminal=true entries, and anything else that asks the system for a terminal
+# open the same one. Takes the alternative's arguments (`-e COMMAND ARGS`,
+# `-T TITLE`), which foot accepts as they are and Debian's xfce4-terminal
+# wrapper translates.
+if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v foot > /dev/null 2>&1; then
+  exec foot "$@"
+fi
+if command -v xfce4-terminal.wrapper > /dev/null 2>&1; then
+  exec xfce4-terminal.wrapper "$@"
+fi
+exec xfce4-terminal "$@"
