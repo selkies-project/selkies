@@ -59,6 +59,9 @@ env:
 jobs:
   unit:
     name: Unit suites (Python ${{ matrix.python-version }})
+    needs: [wheel]
+    if: >-
+      ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -86,10 +89,26 @@ jobs:
       # nothing else notices it never ran.
       - name: Install shellcheck
         run: scripts/ci/install-shellcheck.sh
+      # The command-dispatch suite drives the current wheel's real server, not
+      # whichever selkies happens to be installed on the runner.
+      - name: Download the selkies wheel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: selkies-wheel
+          path: dist/
+      - name: Install the selkies server under test
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libgbm1 libpixman-1-0
+          python -m pip install --no-index --find-links "$PWD/dist" --only-binary=:all: selkies
+          server="$(python -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/selkies"
+          "${server}" --version
+          "${server}" --help > /dev/null
+          echo "SELKIES_TEST_SERVER=${server}" >> "$GITHUB_ENV"
       - name: Run the unit tier
         run: |
-          # The tier is the source tree and the standard library; pytest is all
-          # it imports beyond them
+          # Apart from the current server, the tier needs only the source tree,
+          # the standard library, and pytest
           python -m pip install pytest
           python -m pytest tests -m unit -v --junitxml=unit-report.xml
       - name: Fail if any suite skipped
@@ -193,8 +212,9 @@ jobs:
             xvfb x11-xserver-utils x11-utils xauth xcvt wmctrl \
             wl-clipboard libsdl2-2.0-0 openbox kwin-x11 kwin-wayland kwin-common \
             pulseaudio pulseaudio-utils \
-            dbus pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-kde qtwayland5 qt6-wayland \
-            mutter python3-gi \
+            dbus pipewire pipewire-pulse wireplumber xdg-desktop-portal xdg-desktop-portal-kde qtwayland5 qt6-wayland \
+            mutter python3-gi python3-xlib gir1.2-gtk-3.0 \
+            libudev-dev libpipewire-0.3-dev ffmpeg v4l-utils \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
             libgl1 libegl1 libegl-mesa0 libgl1-mesa-dri libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
@@ -368,9 +388,18 @@ jobs:
       - name: Build the test tools
         run: make -C tests/tools
       # The same stack a development sandbox starts, on the display the
-      # workflow names
+      # workflow names. VirtualCamera publishes a PipeWire node as well as
+      # listening on its socket, so the webcam suite needs a reachable daemon.
       - name: Start the display server and audio
-        run: scripts/ci/test-stack.sh
+        run: |
+          scripts/ci/test-stack.sh
+          if ! pw-cli info 0 > /dev/null 2>&1; then
+            dbus-run-session -- /usr/bin/pipewire > /tmp/selkies-pipewire.log 2>&1 &
+            until pw-cli info 0 > /dev/null 2>&1; do sleep 0.5; done
+            # AUTOCONNECT resolves the virtual camera's named target through
+            # the session manager; a bare core publishes but cannot link it.
+            dbus-run-session -- /usr/bin/wireplumber > /tmp/selkies-wireplumber.log 2>&1 &
+          fi
       # The integration tier drives Chromium as well, for the gamepad and
       # WebRTC-transport suites; only the browser matrix needs the other engines
       - name: Install Chromium
