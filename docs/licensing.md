@@ -160,7 +160,7 @@ What the built client contains (packages under `dependencies` are what
 
 | Addon | Shipped in the build | Build-only |
 | --- | --- | --- |
-| `addons/selkies-web-core` | the bundle is Selkies' own MPL-2.0 code; `gendb.js` converts the SDL_GameControllerDB `gamecontrollerdb.txt` (Zlib) into the `jsdb/` mapping files at build time; libopus-wasm with the libopus it compiles to WebAssembly (BSD-3-Clause) is copied into `codecs/libopus-wasm/`, its generated module renamed to `.js`, beside its `LICENSE` and `THIRD_PARTY_NOTICES.md`, for the browsers without WebCodecs audio | vite and vite-plugin-minify, declared under `dependencies` but used by the build only, with what they pull in, lightningcss (MPL-2.0) among them |
+| `addons/selkies-web-core` | the bundle is Selkies' own MPL-2.0 code; `gendb.js` converts the SDL_GameControllerDB `gamecontrollerdb.txt` (Zlib) into the `jsdb/` mapping files at build time; libopus-wasm with the libopus it compiles to WebAssembly (BSD-3-Clause) is copied into `codecs/libopus-wasm/`, its generated module renamed to `.js`, beside its `LICENSE` and `THIRD_PARTY_NOTICES.md`, for the browsers without WebCodecs audio | vite and vite-plugin-minify, declared under `dependencies` but used by the build only, with what they pull in, lightningcss (MPL-2.0) among them; typescript (Apache-2.0), under `devDependencies`, which checks the sources and ships nothing |
 | `addons/selkies-dashboard` | react, react-dom, `@base-ui/react`, lucide-react, sonner, cn, class-variance-authority, js-yaml with argparse, `@fontsource-variable/inter` (its Inter font files are bundled into the build), tw-animate-css, shadcn's `tailwind.css` (MIT, kept with its notice as `src/shadcn-tailwind.css`); `universalTouchGamepad.js` (MPL-2.0); the core above | vite, typescript, eslint, and tailwindcss with lightningcss (MPL-2.0), and what they pull in |
 
 The direct runtime dependencies, with the license each package's lockfile entry
@@ -193,6 +193,7 @@ Every license among the packages each lockfile installs:
 | Addon | Packages | Licenses |
 | --- | --- | --- |
 | `addons/selkies-web-core` | `dependencies` and what they pull in | Apache-2.0, BSD-2-Clause, BSD-3-Clause, BlueOak-1.0.0, CC0-1.0, ISC, MIT, MPL-2.0 (weak copyleft) |
+| `addons/selkies-web-core` | `devDependencies` and what they pull in | Apache-2.0 |
 | `addons/selkies-dashboard` | `dependencies` and what they pull in | 0BSD, Apache-2.0, BSD-3-Clause, ISC, MIT, MPL-2.0 (weak copyleft), OFL-1.1, PSF-2.0 |
 | `addons/selkies-dashboard` | `devDependencies` and what they pull in | Apache-2.0, BSD-2-Clause, BSD-3-Clause, BlueOak-1.0.0, CC-BY-4.0, CC0-1.0, ISC, MIT |
 

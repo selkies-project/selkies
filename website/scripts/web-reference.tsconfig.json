@@ -20,8 +20,8 @@
     }
   },
   "include": [
-    "../../addons/selkies-web-core/*.js",
-    "../../addons/selkies-web-core/lib/*.js",
+    "../../addons/selkies-web-core/*.ts",
+    "../../addons/selkies-web-core/lib/*.ts",
     "../../addons/selkies-dashboard/src/**/*"
   ]
 }

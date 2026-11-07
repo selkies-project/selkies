@@ -25,8 +25,8 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-import { Input } from '../../addons/selkies-web-core/lib/input.js';
-import { RAW_POINTER_MOTION_SPEC, resolveSpec } from '../../addons/selkies-web-core/lib/conditional-settings.js';
+import { Input } from '../../addons/selkies-web-core/lib/input.ts';
+import { RAW_POINTER_MOTION_SPEC, resolveSpec } from '../../addons/selkies-web-core/lib/conditional-settings.ts';
 
 let failed = 0;
 
@@ -154,7 +154,7 @@ function reset(element) {
     let seq = 0;
     const loadUnder = async (nav) => {
         setNavigator(nav);
-        const mod = await import(`../../addons/selkies-web-core/lib/input.js?platform=${seq++}`);
+        const mod = await import(`../../addons/selkies-web-core/lib/input.ts?platform=${seq++}`);
         return mod.Input.rawPointerMotion;
     };
     try {

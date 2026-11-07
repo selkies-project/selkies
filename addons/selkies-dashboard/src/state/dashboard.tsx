@@ -27,9 +27,9 @@
  * @module
  */
 import * as React from "react";
-import { fragmentWithSessionToken } from "../../../selkies-web-core/lib/page-url.js";
+import { fragmentWithSessionToken } from "../../../selkies-web-core/lib/page-url.ts";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
-  formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.js";
+  formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.ts";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard,
   isMobileClient, isSecondaryDisplay, isViewerUrlMode, onCoreMessage, type Renderable, type ServerSettings } from "@/utils";
 import { LAYOUTS, layoutById, resolveLayout, storeLayout, type LayoutSpec } from "@/layouts";
@@ -339,7 +339,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
    * releasing it again on the next touch of the interaction overlay. An
    * attached keyboard is no longer assumed, so the floating button comes back.
    */
-  // Asked for, the on-screen keyboard is the core's to raise (lib/virtual-keyboard.js), in the same tap: an attached
+  // Asked for, the on-screen keyboard is the core's to raise (lib/virtual-keyboard.ts), in the same tap: an attached
   // keyboard is no longer assumed, so the floating button comes back.
   const showVirtualKeyboard = React.useCallback(() => {
     keyboardWatch.reset();
@@ -366,7 +366,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   }, [heldKeys]);
 
   /**
-   * Plays a palette chord (`lib/touch-controls.js`) as the soft keys do, with
+   * Plays a palette chord (`lib/touch-controls.ts`) as the soft keys do, with
    * synthetic mode on for its length unless a soft modifier already has it:
    * its modifiers and key pressed, then after 50 ms released in reverse. A
    * modifier held on a soft key stays held.

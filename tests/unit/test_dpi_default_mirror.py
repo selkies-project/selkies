@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The derived `scaling_dpi` default is the same number on both sides.
 
-Two copies exist: the cores' shared rule in lib/stream-density.js and the
+Two copies exist: the cores' shared rule in lib/stream-density.ts and the
 dashboard's, which cannot import it. They have to agree, because they do not
 merely display the same value: on connect the core sends its derived default,
 and the dashboard posts *its* over the top whenever the two differ (the
@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 ADDONS = os.path.join(ROOT, "addons")
 
 SOURCES = {
-    "lib": "selkies-web-core/lib/stream-density.js",
+    "lib": "selkies-web-core/lib/stream-density.ts",
     "dashboard": "selkies-dashboard/src/state/settings.ts",
 }
 # The density each side reads off a manual resolution, and off the display when
@@ -46,7 +46,7 @@ def read(rel: str) -> str:
 
 def stops(text: str) -> list:
     """The DPI stops the source offers, from either shape they are written in."""
-    listed = re.search(r"DPI_STOPS\s*=\s*\[([^\]]*)\]", text)
+    listed = re.search(r"DPI_STOPS\s*(?::[^=]*)?=\s*\[([^\]]*)\]", text)
     if listed:
         return [int(n) for n in re.findall(r"\d+", listed.group(1))]
     options = re.search(r"dpiScalingOptions\s*(?::[^=]*)?=\s*\[(.*?)\n\]", text, re.S)

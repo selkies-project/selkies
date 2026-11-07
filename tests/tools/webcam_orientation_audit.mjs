@@ -16,7 +16,7 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-const MODULE = new URL('../../addons/selkies-web-core/lib/webcam-capture.js', import.meta.url).href;
+const MODULE = new URL('../../addons/selkies-web-core/lib/webcam-capture.ts', import.meta.url).href;
 
 let failed = 0;
 let variant = 0;

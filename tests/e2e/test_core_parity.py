@@ -125,7 +125,7 @@ window.__padPress = (p, i, v) => {
 };
 """
 
-# The cores' storage prefix (lib/util.js getStorageAppName): origin + path with
+# The cores' storage prefix (lib/util.ts getStorageAppName): origin + path with
 # everything but [A-Za-z0-9._-] replaced by '_'.
 STORAGE_APP = "(location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_')"
 

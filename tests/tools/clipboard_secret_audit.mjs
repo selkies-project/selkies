@@ -26,7 +26,7 @@ globalThis.self = {
         else waiter.reject(new Error(msg.error));
     },
 };
-await import('../../addons/selkies-web-core/clipboard-worker.js');
+await import('../../addons/selkies-web-core/clipboard-worker.ts');
 const workerScope = globalThis.self;
 
 function ask(action, payload, extra = {}) {
@@ -105,7 +105,7 @@ Object.defineProperty(globalThis, 'navigator', {
 
 const {
     clipboardPreviewMessage, createClipboardSync, createDeferredClipboardWriter, createIncomingClipboard,
-} = await import('../../addons/selkies-web-core/lib/clipboard-sync.js');
+} = await import('../../addons/selkies-web-core/lib/clipboard-sync.ts');
 
 let failed = 0;
 function check(label, ok, detail = '') {

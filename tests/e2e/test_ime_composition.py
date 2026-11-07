@@ -32,7 +32,6 @@ letter as plain insertText with no composition at all. The wire must carry
 the preedit as a rolling diff and the commit exactly once.
 """
 import functools
-import http.server
 import os
 import socketserver
 import sys
@@ -44,6 +43,7 @@ from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core_lib as C  # noqa: E402
+from ts_static import TypeScriptHandler  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT = os.path.join(REPO, "addons", "selkies-web-core")
@@ -67,7 +67,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 window.__sent = [];
 window.__errs = [];
 try {
-  const mod = await import('/lib/input.js');
+  const mod = await import('/lib/input.ts');
   const el = document.getElementById('overlayInput');
   const send = (m) => window.__sent.push(m);
   window.__input = new mod.Input(el, send, false, null, false);
@@ -200,7 +200,7 @@ IBUS_PROBE_IDX = 1
 CDP_EXPECT = "한글"
 
 
-class Quiet(http.server.SimpleHTTPRequestHandler):
+class Quiet(TypeScriptHandler):
     def log_message(self, *args) -> None:
         pass
 

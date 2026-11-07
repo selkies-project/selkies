@@ -14,7 +14,7 @@
 
 const replies = [];
 globalThis.self = { postMessage: (msg) => replies.push(msg) };
-await import('../../addons/selkies-web-core/clipboard-worker.js');
+await import('../../addons/selkies-web-core/clipboard-worker.ts');
 const worker = globalThis.self;
 
 let failed = 0;

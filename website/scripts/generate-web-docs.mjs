@@ -5,10 +5,9 @@
  * Runs after the server's half (generate-rust-docs.mjs, or
  * generate-python-docs.mjs for a release whose server is Python) from
  * generate-reference.mjs and adds one gitignored folder per addon
- * beside it. TypeDoc
- * reads plain JavaScript through the TypeScript compiler's JSDoc support and
- * TypeScript natively, so one configuration covers selkies-web-core and the
- * dashboard; typedoc-plugin-markdown writes the pages
+ * beside it. Both addons are TypeScript, so TypeDoc reads them through one
+ * configuration (`allowJs` stays on for the build helpers and any JavaScript
+ * a tree still carries); typedoc-plugin-markdown writes the pages
  * as Markdown (not MDX, so nothing in a comment can be mistaken for JSX) and
  * web-reference-plugin.mjs adds front matter and hides `_`-prefixed members.
  *
@@ -60,7 +59,7 @@ const ADDONS = [
     dir: 'web-core',
     title: 'Web client core',
     source: 'selkies-web-core',
-    entryPoints: ['selkies-core.js', 'selkies-ws-core.js', 'selkies-wr-core.js', 'clipboard-worker.js', 'lib'],
+    entryPoints: ['selkies-core.ts', 'selkies-ws-core.ts', 'selkies-wr-core.ts', 'clipboard-worker.ts', 'lib'],
   },
   { dir: 'dashboard', title: 'Dashboard', source: 'selkies-dashboard/src', entryPoints: ['.'] },
 ];

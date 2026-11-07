@@ -28,19 +28,23 @@
  * @module
  */
 import { readFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { createStripeClock } from '../../addons/selkies-web-core/lib/stripe-clock.js';
-import { createChunkStamp } from '../../addons/selkies-web-core/lib/chunk-stamp.js';
-import { createFrameFit } from '../../addons/selkies-web-core/lib/fit-frame.js';
-import { createPresentMeter } from '../../addons/selkies-web-core/lib/present-meter.js';
-import { isSkiaWebKit } from '../../addons/selkies-web-core/lib/util.js';
+import { createStripeClock } from '../../addons/selkies-web-core/lib/stripe-clock.ts';
+import { createChunkStamp } from '../../addons/selkies-web-core/lib/chunk-stamp.ts';
+import { createFrameFit } from '../../addons/selkies-web-core/lib/fit-frame.ts';
+import { createPresentMeter } from '../../addons/selkies-web-core/lib/present-meter.ts';
+import { isSkiaWebKit } from '../../addons/selkies-web-core/lib/util.ts';
 
 const TOOLS = dirname(fileURLToPath(import.meta.url));
 const WEB = join(TOOLS, '..', '..', 'addons', 'selkies-web-core');
-const CORE = join(WEB, 'selkies-ws-core.js');
-const WEBCAM = join(WEB, 'lib', 'webcam-capture.js');
+const CORE = join(WEB, 'selkies-ws-core.ts');
+const WEBCAM = join(WEB, 'lib', 'webcam-capture.ts');
+
+/** A web-core source as the JavaScript its types strip to, which is what a worker runs. */
+const readSource = (file) => stripTypeScriptTypes(readFileSync(file, 'utf8'));
 
 let passed = 0, failed = 0;
 const check = (label, ok, detail = '') => {
@@ -88,9 +92,9 @@ const IMPORTED = { createStripeClock, createChunkStamp, createFrameFit, createPr
 
 /** Module sources a worker splices in whole, by their `?raw` import name. */
 const RAW_SOURCES = {
-    wireCodecsSource: () => readFileSync(join(WEB, 'lib', 'wire-codecs.js'), 'utf8').replace(/^export /gm, ''),
-    decodeGateSource: () => readFileSync(join(WEB, 'lib', 'decode-gate.js'), 'utf8').replace(/^export /gm, ''),
-    decodePaceSource: () => readFileSync(join(WEB, 'lib', 'decode-pace.js'), 'utf8').replace(/^export /gm, ''),
+    wireCodecsSource: () => readSource(join(WEB, 'lib', 'wire-codecs.ts')).replace(/^export /gm, ''),
+    decodeGateSource: () => readSource(join(WEB, 'lib', 'decode-gate.ts')).replace(/^export /gm, ''),
+    decodePaceSource: () => readSource(join(WEB, 'lib', 'decode-pace.ts')).replace(/^export /gm, ''),
 };
 
 /** Resolves one `${...}` the client would have interpolated. */
@@ -185,7 +189,7 @@ function runWorker({ withGenerator, globals = {} }) {
     Object.assign(self, scope);
     scope.self = self;
     vm.createContext(scope);
-    new vm.Script(workerSource(readFileSync(CORE, 'utf8'), 'VIDEO_WORKER_SRC'),
+    new vm.Script(workerSource(readSource(CORE), 'VIDEO_WORKER_SRC'),
                   { filename: 'video-worker.js' }).runInContext(scope);
     state.onmessage = self.onmessage;
     return state;
@@ -306,7 +310,7 @@ function runEncodeWorker({ withProcessor }) {
     Object.assign(self, scope);
     scope.self = self;
     vm.createContext(scope);
-    new vm.Script(workerSource(readFileSync(WEBCAM, 'utf8'), 'ENCODE_WORKER_SRC'),
+    new vm.Script(workerSource(readSource(WEBCAM), 'ENCODE_WORKER_SRC'),
                   { filename: 'encode-worker.js' }).runInContext(scope);
     const track = { kind: 'video', __mediaStreamTrack: true };
     self.onmessage({ data: { type: 'track', track } });

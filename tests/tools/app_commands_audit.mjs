@@ -59,7 +59,7 @@ const {
     readInstalledApps,
     writeInstalledApps,
     resolveFailedAppCommand,
-} = await import('../../addons/selkies-web-core/lib/app-commands.js');
+} = await import('../../addons/selkies-web-core/lib/app-commands.ts');
 
 let stateEvents = 0;
 window.addEventListener(APP_COMMAND_STATE_EVENT, () => { stateEvents++; });
