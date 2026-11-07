@@ -141,7 +141,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         writeInstalledApps(installedApps);
     }, [installedApps]);
 
-    // The running set lives in app-commands.js; this only re-reads it.
+    // The running set lives in app-commands.ts; this only re-reads it.
     useEffect(() => {
         const onCommandState = () => setCommandTick((tick) => tick + 1);
         window.addEventListener(APP_COMMAND_STATE_EVENT, onCommandState);
