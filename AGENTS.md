@@ -41,10 +41,10 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   module) and are named for the behavior they hold, as a sentence.
 - TypeScript (`.ts`/`.tsx`): JSDoc blocks with `@param name description`, `@returns`, `@throws`, and no types in
   the tags — the signature is the type. Props are an `interface` or `type` with a line per field.
-- JavaScript (`.js`/`.jsx`): the same JSDoc blocks, but the tags carry the types (`@param {Type} name`,
-  `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The dashboard's `tsc` compiles
-  `selkies-web-core/lib` through `allowJs`, so these types are checked contracts: a `@type` on an exported
-  constant replaces its inferred type for every TypeScript consumer.
+- JavaScript (`.js`/`.jsx`), left only in the web core's build helpers (`gendb.js`, the vite config): the same
+  JSDoc blocks, but the tags carry the types (`@param {Type} name`, `@returns {Type}`, `@typedef`/`@callback` for
+  option bags and callbacks). The web core is TypeScript, checked strictly by its own `tsc -b`
+  (`addons/selkies-web-core/tsconfig.json`), and the dashboard's `tsc` compiles the `lib` modules it imports.
 - TypeScript and JavaScript: a `/** ... @module */` block after the license header is the module docblock;
   `_`-prefixed members are private and hidden from the reference; a React component documents what it renders and
   which core messages or `window` state it consumes. A tag TypeDoc does not know (`@constructor`) is a build
@@ -278,7 +278,7 @@ Each is documented in full where named; read that before changing the subsystem.
 - A picture a client could not decode is repaired by taking it out of the encoder's references, not by a key
   frame: the client names the frame it lost, the server asks that display's capture to forget it, and the
   stream keeps predicting past it while the other clients see nothing. Over WebSockets the client's decode
-  gate names it (`addons/selkies-web-core/lib/decode-gate.js` module docblock, the `LOST_FRAME` verb); over
+  gate names it (`addons/selkies-web-core/lib/decode-gate.ts` module docblock, the `LOST_FRAME` verb); over
   WebRTC a second NACK for a packet the sender still holds does (`RtpSender::retransmit` in
   `crates/selkies-rtc/src/rtp/sender.rs`, the `lost_frame` hook, which the WebRTC engine answers). A stream whose
   encoder names no reference -- a session that cannot invalidate -- gets the key frame instead, and so does a run
@@ -289,7 +289,7 @@ Each is documented in full where named; read that before changing the subsystem.
   answer a drop with the key frame, while the encoders that keep a buffer of their own (NVENC, libvpx, SVT-AV1,
   VA-API's VP8, VP9, and AV1) still predict past it.
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in the server
-  (`addons/selkies-web-core/lib/webcam-capture.js` header, `crates/selkies/src/webcam` module docblock,
+  (`addons/selkies-web-core/lib/webcam-capture.ts` header, `crates/selkies/src/webcam` module docblock,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).
 - What a session starts with is one rule both transports read (`Settings::pipeline_starts_on`, the
   `*_on_start` settings): the server captures only what a page receives and the page requests only what
@@ -303,8 +303,8 @@ Each is documented in full where named; read that before changing the subsystem.
   (`ScreenCapture::stream_info`), the server relays that once and on every change as `stream_info`, and every
   periodic figure (`stream_stats`: the host's load, the encode's rate and cost, the link) is sampled and sent
   only while a controller's dashboard has its stats on screen (the `_stats` verb; `crates/selkies/src/stats`
-  module docblock, `addons/selkies-web-core/lib/stream-stats.js`). A shared viewer is sent neither, and both
-  dashboards draw one reading of it (`lib/stream-stats-view.js`), where a row warns for a session that fell
+  module docblock, `addons/selkies-web-core/lib/stream-stats.ts`). A shared viewer is sent neither, and both
+  dashboards draw one reading of it (`lib/stream-stats-view.ts`), where a row warns for a session that fell
   short of what it asked for, never for a choice and never for a host built without the faster path: a server
   exposed no GPU (`gpu_present`), or a display server that offers the encoder no zero-copy path
   (pixelflux's `zero_copy_available`), each an ordinary deployment.

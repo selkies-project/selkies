@@ -17,8 +17,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 ADDONS = os.path.join(ROOT, "addons")
 
 SOURCES = {
-    "ws-core": "selkies-web-core/selkies-ws-core.js",
-    "wr-core": "selkies-web-core/selkies-wr-core.js",
+    "ws-core": "selkies-web-core/selkies-ws-core.ts",
+    "wr-core": "selkies-web-core/selkies-wr-core.ts",
     "dashboard": "selkies-dashboard/src/utils.ts",
 }
 

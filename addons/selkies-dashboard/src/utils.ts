@@ -8,7 +8,7 @@
  * Selkies-specific utilities shared by the dashboard's panels and layouts.
  *
  * Storage keys: every localStorage key is prefixed with the storage namespace
- * the streaming cores derive from the page URL (`lib/util.js`), and the
+ * the streaming cores derive from the page URL (`lib/util.ts`), and the
  * per-display settings gain a `_display2` suffix on the secondary display,
  * selected by the `#display2` URL hash. The route prefix is the cores'
  * derivation too, so the dashboard and both cores agree on all of them.
@@ -22,9 +22,9 @@
  * @module
  */
 
-import { getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../selkies-web-core/lib/util.js";
-import { urlFragmentKeyword } from "../../selkies-web-core/lib/page-url.js";
-import { hardwareKeyboard } from "../../selkies-web-core/lib/hardware-keyboard.js";
+import { getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../selkies-web-core/lib/util.ts";
+import { urlFragmentKeyword } from "../../selkies-web-core/lib/page-url.ts";
+import { hardwareKeyboard } from "../../selkies-web-core/lib/hardware-keyboard.ts";
 
 export { isMobileClient, hardwareKeyboard, getRoutePrefix, getStorageAppName };
 

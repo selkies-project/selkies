@@ -18,7 +18,7 @@
  */
 import { useState } from "react";
 import { Check, ChevronDown, ChevronUp, CircleCheck, Copy, Dot, Mic, TriangleAlert, Video } from "lucide-react";
-import { streamMeters } from "../../../selkies-web-core/lib/stream-stats-view.js";
+import { streamMeters } from "../../../selkies-web-core/lib/stream-stats-view.ts";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { FloatingPanel } from "@/panels/floating-panel";

@@ -12,7 +12,7 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-import { createChunkStamp } from '../../addons/selkies-web-core/lib/chunk-stamp.js';
+import { createChunkStamp } from '../../addons/selkies-web-core/lib/chunk-stamp.ts';
 
 let failed = 0;
 

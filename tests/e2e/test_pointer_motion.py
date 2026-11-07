@@ -33,6 +33,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 from core_lib import CHROME_PATH, FIREFOX_PATH
+from ts_static import TypeScriptHandler
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
@@ -49,8 +50,8 @@ PATTERNS = (("slow", 40, 1, 0.025),
             ("flick", 60, 8, 0.002))
 
 
-class Handler(http.server.SimpleHTTPRequestHandler):
-    """Serves the repo so the page can import the client's own modules."""
+class Handler(TypeScriptHandler):
+    """Serves the repo so the page can import the client's own modules, TypeScript as JavaScript."""
 
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=REPO, **kw)

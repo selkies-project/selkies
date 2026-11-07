@@ -26,7 +26,7 @@ import App from './App';
 import PlayerGamepadButton from './panels/player-gamepad-button';
 import './index.css';
 import { getRoutePrefix } from './utils';
-import { urlFragmentKeyword } from '../../selkies-web-core/lib/page-url.js';
+import { urlFragmentKeyword } from '../../selkies-web-core/lib/page-url.ts';
 import "../../universal-touch-gamepad/universalTouchGamepad.js";
 
 declare global {

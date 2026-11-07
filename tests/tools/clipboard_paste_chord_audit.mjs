@@ -29,7 +29,7 @@ globalThis.KeyboardEvent = class {
 };
 
 const { createClipboardGestures } = await import(
-    '../../addons/selkies-web-core/lib/clipboard-sync.js');
+    '../../addons/selkies-web-core/lib/clipboard-sync.ts');
 
 let failed = 0;
 

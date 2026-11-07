@@ -11,7 +11,8 @@
     "serve": "vite",
     "build": "vite build",
     "postbuild": "node gendb.js",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc -b"
   },
   "author": "Selkies",
   "license": "MPL-2.0",
@@ -19,5 +20,8 @@
     "libopus-wasm": "^0.4.1",
     "vite": "^8.3.5",
     "vite-plugin-minify": "^3.0.0"
+  },
+  "devDependencies": {
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   }
 }

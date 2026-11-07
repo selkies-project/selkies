@@ -15,7 +15,7 @@ import { Check, ChevronLeft, CircleAlert, Download, Info, Loader2, Play, RotateC
 import * as yaml from "js-yaml";
 import { t } from "@/i18n";
 import { getLastServerSettings, onCoreMessage } from "@/utils";
-import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
+import { withSessionToken } from "../../../selkies-web-core/lib/session-token.ts";
 import {
     APP_COMMAND_STATE_EVENT,
     INSTALLED_APPS_ROLLBACK_EVENT,
@@ -26,14 +26,14 @@ import {
     postAppCommand,
     readInstalledApps,
     writeInstalledApps,
-} from "../../../selkies-web-core/lib/app-commands.js";
+} from "../../../selkies-web-core/lib/app-commands.ts";
 
 /**
  * The apps modal: the proot-apps catalog, with install, remove, update, and
  * launch actions.
  *
  * Actions go through the apps command contract of the core
- * (`selkies-web-core/lib/app-commands.js`): it posts the selkies-proot wrapper
+ * (`selkies-web-core/lib/app-commands.ts`): it posts the selkies-proot wrapper
  * commands to the core and tracks them for rollback, and its `appsCatalog`
  * says where the catalog is read from (the remote repository's metadata, or
  * this server's `api/apps/` for a local repository). Which apps are installed

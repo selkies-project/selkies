@@ -10,11 +10,11 @@
  * graphs that grow while the section stays open, the figures as tiles, the
  * host's meters as bars, and the uplinks; and the strip over the stream the
  * section's switch lays out, which shows the status marks and the figures a
- * glance needs (`streamStrip` in `lib/stream-stats-view.js`), takes no
+ * glance needs (`streamStrip` in `lib/stream-stats-view.ts`), takes no
  * pointer input, and stays on with the drawer shut.
  * @module
  */
-import { streamMeters, streamStrip } from "../../../selkies-web-core/lib/stream-stats-view.js";
+import { streamMeters, streamStrip } from "../../../selkies-web-core/lib/stream-stats-view.ts";
 import { snapshotRows, snapshotTiles, useCopyReport, useStatsGraphs, useStreamSnapshot, type Status } from "@/panels/stats-data";
 import { Graphs, StatRows, StatTiles, type GraphSkin, type RowsSkin, type TilesSkin } from "@/panels/stats-view";
 import { t } from "@/i18n";

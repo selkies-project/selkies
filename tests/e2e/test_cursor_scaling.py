@@ -17,10 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core_lib as C
 import helpers as H
 from playwright.sync_api import Page, sync_playwright
+from ts_static import TypeScriptHandler
 
 
-class Quiet(http.server.SimpleHTTPRequestHandler):
-    """Serve the repository without logging every module request."""
+class Quiet(TypeScriptHandler):
+    """Serve the repository, its TypeScript modules as JavaScript, without logging every module request."""
 
     def log_message(self, *args) -> None:
         pass

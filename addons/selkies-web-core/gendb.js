@@ -28,7 +28,7 @@ const VALID_MAPPINGS = new Set([
 
 // The SDL DB carries one line per platform for the same vendor-product GUID and
 // the raw button/axis indices differ between them, so each mapping is written
-// into a per-platform subdirectory that lib/gamepad.js selects by user agent.
+// into a per-platform subdirectory that lib/gamepad.ts selects by user agent.
 // Platforms outside this set have no browser target and are skipped.
 const PLATFORM_DIRS = {
   'windows': 'windows',

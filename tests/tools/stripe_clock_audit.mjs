@@ -13,7 +13,7 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-import { createStripeClock } from '../../addons/selkies-web-core/lib/stripe-clock.js';
+import { createStripeClock } from '../../addons/selkies-web-core/lib/stripe-clock.ts';
 
 // The factory's floor and decay are locals there (the video worker embeds the
 // factory by toString, so it exports nothing else); pinned here so the audit
