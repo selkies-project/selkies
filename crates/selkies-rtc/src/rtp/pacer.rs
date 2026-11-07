@@ -654,6 +654,10 @@ impl Pacer {
                     "pacer: no keyframe within {RESURRECT_TIMEOUT_S:.1}s of reset; resurrecting video optimistically"
                 );
             } else {
+                // The request that caused the reset may have shared the display's IDR floor with
+                // an earlier request whose keyframe the reset dropped. Keep asking at the existing
+                // throttle instead of waiting for a receiver PLI past the resurrection deadline.
+                self.request_keyframe_once(now);
                 self.stats.video_dropped += 1;
                 self.drop_tag(tag);
                 return Verdict::Dropped;
@@ -1483,6 +1487,77 @@ mod tests {
         pacer.wire_failed(None, now);
         assert!(pacer.gop_dead() && pacer.video_queue_len() == 0 && pacer.bytes_queued() == 0);
         assert_eq!(pacer.stats().keyreqs, 1);
+    }
+
+    #[test]
+    fn an_abandoned_gop_retries_its_keyframe_request_before_the_timeout() {
+        let now = 5.0;
+        let mut pacer = Pacer::new(ENCODER_BPS, now);
+        pacer.reset_for_test(now);
+        assert_eq!(drain_events(&mut pacer), vec![PacerEvent::KeyframeRequest]);
+
+        let dropped = Bytes::from_static(&[0u8; 100]);
+        assert_eq!(
+            pacer.send(dropped.clone(), Class::Video, None, now + 0.25),
+            Verdict::Dropped
+        );
+        assert_eq!(
+            pacer.stats().keyreqs,
+            1,
+            "the existing throttle still applies"
+        );
+        assert!(
+            drain_events(&mut pacer).is_empty(),
+            "the first refusal asks for nothing new"
+        );
+        let retry_at = now + KEYREQ_MIN_INTERVAL_S;
+        assert_eq!(
+            pacer.send(dropped.clone(), Class::Video, None, retry_at),
+            Verdict::Dropped
+        );
+        assert_eq!(pacer.stats().keyreqs, 2);
+        assert_eq!(pacer.stats().timeout_resurrects, 0);
+        assert!(pacer.gop_dead());
+        assert_eq!(drain_events(&mut pacer), vec![PacerEvent::KeyframeRequest]);
+        assert_eq!(
+            pacer.send(dropped, Class::Video, None, retry_at),
+            Verdict::Dropped
+        );
+        assert_eq!(
+            pacer.stats().keyreqs,
+            2,
+            "one refusal cannot repeat the retry"
+        );
+        assert!(drain_events(&mut pacer).is_empty());
+
+        pacer.note_keyframe(20_000, false, retry_at + 0.02);
+        assert!(
+            !pacer.gop_dead(),
+            "an actual keyframe clears the abandoned GOP"
+        );
+        assert_eq!(pacer.stats().idr_resurrects, 1);
+        assert_eq!(pacer.stats().timeout_resurrects, 0);
+    }
+
+    #[test]
+    fn unanswered_keyframe_retries_still_have_one_bounded_timeout() {
+        let now = 5.0;
+        let mut pacer = Pacer::new(ENCODER_BPS, now);
+        pacer.reset_for_test(now);
+        let packet = Bytes::from_static(&[0u8; 100]);
+        let timed_out = now + RESURRECT_TIMEOUT_S;
+        assert!(pacer.gop_dead());
+        assert_eq!(
+            pacer.send(packet.clone(), Class::Video, None, timed_out),
+            Verdict::SendNow
+        );
+        assert_eq!(pacer.stats().timeout_resurrects, 1);
+        assert!(!pacer.gop_dead());
+        assert_eq!(
+            pacer.send(packet, Class::Video, None, timed_out),
+            Verdict::SendNow
+        );
+        assert_eq!(pacer.stats().timeout_resurrects, 1);
     }
 
     #[test]
