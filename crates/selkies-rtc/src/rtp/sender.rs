@@ -565,6 +565,8 @@ pub struct RtpSender {
     repair_at: f64,
     delivery_bps: Option<f64>,
     key_requested: Option<f64>,
+    /// Request history must roll only once, the first actual H264 IDR that answers it.
+    response_history_pending: bool,
     key_wire: Option<(u16, f64, usize)>,
     started: bool,
     sequence_number: u16,
@@ -650,6 +652,7 @@ impl RtpSender {
             repair_at: 0.0,
             delivery_bps: None,
             key_requested: None,
+            response_history_pending: false,
             key_wire: None,
             started: false,
             sequence_number: random_sequence_number(),
@@ -980,7 +983,7 @@ impl RtpSender {
                 "{} sender {}: frame {:?} was never predicted past; asking for a key frame",
                 self.kind.as_str(), self.ssrc, Some(first)
             );
-            self.ask_key_frame(now);
+            self.ask_key_frame(transport, now);
             self.open_run(first, now);
             self.resync_run = run;
             self.resync_told = told;
@@ -1121,6 +1124,7 @@ impl RtpSender {
     ) -> bool {
         // Whatever key frame was on its way, the reset may have dropped: the next request asks again.
         self.key_requested = None;
+        self.response_history_pending = false;
         self.key_wire = None;
         self.key_sent_at = None;
         let Some(first_tag) = first_tag else {
@@ -1400,9 +1404,19 @@ impl RtpSender {
         now - at < travel
     }
 
-    /// Ask the encoder for a key frame, which answers the requests after it.
-    fn ask_key_frame(&mut self, now: f64) {
+    /// Ask the encoder for a key frame, which answers the requests after it. Its own stale queue
+    /// cannot arrest this peer's recovery behind an IDR that is already on its way.
+    fn ask_key_frame(&mut self, transport: &mut dyn SenderTransport, now: f64) {
+        if self.kind == Kind::Video
+            && let Some(pacer) = transport.pacer()
+        {
+            pacer.expect_keyframe(now);
+        }
         self.key_requested = Some(now);
+        self.response_history_pending |= self.kind == Kind::Video
+            && transport
+                .pacer()
+                .is_some_and(|pacer| pacer.receiver_recovery());
         self.hooks.pli();
     }
 
@@ -1495,6 +1509,10 @@ impl RtpSender {
             twcc_seq,
             now,
         );
+        let preserve_history = matches!(&verdict, Verdict::Dropped)
+            && transport
+                .pacer()
+                .is_some_and(|pacer| pacer.receiver_recovery());
         let sent = match verdict {
             Verdict::SendNow => {
                 if transport.pacer().is_none()
@@ -1515,7 +1533,7 @@ impl RtpSender {
             }
         };
         self.take_pacer_events(transport);
-        if !sent {
+        if !sent && !preserve_history {
             self.history.abandon();
         }
         sent
@@ -1738,6 +1756,15 @@ impl RtpSender {
             (Some(_), true) => frame.dependency.map(|(fid, _)| fid),
             _ => None,
         };
+        // The actual response's packets start a fresh repair epoch. Their predecessor's packets
+        // must not consume the queue behind this response, but the response itself stays repairable.
+        if self.kind == Kind::Video
+            && keyframe
+            && codec_kind == Codec::H264
+            && std::mem::take(&mut self.response_history_pending)
+        {
+            self.history.abandon();
+        }
         // Every datagram of the frame is built before the first is sent: building and sending
         // in turn evicts what the other just warmed, and the frame is decodable only once its
         // last packet is in.
@@ -1828,7 +1855,7 @@ impl RtpSender {
                 },
             );
             if let Some(pacer) = transport.pacer() {
-                pacer.frame_end(last);
+                pacer.frame_end_with_keyframe(last, keyframe);
             }
             if let (Some(_), Some((frame_id, reference))) = (described, frame.dependency) {
                 self.in_flight.push_back((last, frame_id));
@@ -2038,7 +2065,7 @@ impl RtpSender {
                 {
                     // Gone from the history, or past repair, where no resync answers it: only
                     // a key frame brings the peer back, unless one is on its way.
-                    self.ask_key_frame(now);
+                    self.ask_key_frame(transport, now);
                 }
             }
             RtcpPacket::Xr(xr) if xr.rrtr.is_some() => {
@@ -2072,7 +2099,7 @@ impl RtpSender {
                     && !self.resync_held(transport, now)
                     && !self.key_on_its_way(transport, now)
                 {
-                    self.ask_key_frame(now);
+                    self.ask_key_frame(transport, now);
                 }
             }
             RtcpPacket::Psfb(fb) if fb.fmt == RTCP_PSFB_APP => {

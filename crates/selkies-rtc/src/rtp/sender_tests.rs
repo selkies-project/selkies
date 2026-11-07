@@ -1085,6 +1085,189 @@ fn a_real_pacer_cut_reaches_the_sender_through_the_verdict() {
 }
 
 #[test]
+fn a_receiver_pli_retires_stale_media_and_delivers_the_fresh_idr() {
+    let mut h = Harness::new(true, Some(false), true, "video/H264");
+    let mut pacer = Pacer::new(8_000_000, h.clock);
+    pacer.set_credit(0.0, h.clock);
+    h.tr.pacer = Some(pacer);
+    let frame = |id: u16, reference, key, size: usize| {
+        let mut data = vec![0, 0, 0, 1, if key { 0x65 } else { 0x41 }];
+        data.resize(5 + size, if key { 0x77 } else { 0x66 });
+        EncodedFrame {
+            data: Bytes::from(data),
+            timestamp: id as u32 * 3000,
+            keyframe: key,
+            dependency: Some((id, reference)),
+            ..Default::default()
+        }
+    };
+    let now = h.clock;
+    h.s.push_frame(frame(1, None, true, 10_000), &mut h.tr, now);
+    let mut original_key = Vec::new();
+    h.tr.pacer
+        .as_mut()
+        .unwrap()
+        .drain(now + 0.01, &mut original_key);
+    assert!(!original_key.is_empty());
+    h.tr.pacer
+        .as_mut()
+        .unwrap()
+        .force_braked(super::super::pacer::MIN_PACE_BPS, now + 0.01);
+    h.tr.pacer.as_mut().unwrap().set_credit(0.0, now + 0.01);
+    h.clock = now + 0.01;
+    h.s.push_frame(frame(2, Some(1), false, 20_000), &mut h.tr, h.clock);
+    assert!(h.tr.pacer.as_ref().unwrap().bytes_queued() > 10_000);
+    let transmitted_reference = h.tr.seqs()[0];
+    h.s.history
+        .add(payload_packet(transmitted_reference), now, Some(1));
+    assert!(h.s.history.get(transmitted_reference).is_some());
+    h.rec.0.lock().unwrap().events.clear();
+
+    pli(&mut h);
+    assert_eq!(
+        plis(&h),
+        1,
+        "the original receiver request is the only request"
+    );
+    assert!(h.tr.pacer.as_ref().unwrap().gop_dead());
+    assert_eq!(
+        h.tr.pacer.as_ref().unwrap().video_room(),
+        h.tr.pacer.as_ref().unwrap().video_cap()
+    );
+    assert!(
+        h.s.history.get(transmitted_reference).is_some(),
+        "transmitted reference history survives"
+    );
+    h.s.push_frame(frame(2, Some(1), false, 2_000), &mut h.tr, h.clock);
+    assert!(
+        !h.s.history.abandoned(transmitted_reference),
+        "an intervening delta refusal does not abandon transmitted history"
+    );
+    let attempts_before_nack = h.tr.attempts.len();
+    h.nack(&[transmitted_reference]);
+    assert!(
+        h.tr.attempts.len() > attempts_before_nack,
+        "the NACK still finds its RTP history"
+    );
+    assert!(h.s.history.get(transmitted_reference).is_some());
+
+    let attempted_before_idr = h.tr.rtp.len();
+    h.s.push_frame(frame(3, None, true, 2_000), &mut h.tr, now + 0.01);
+    assert!(!h.tr.pacer.as_ref().unwrap().gop_dead());
+    assert!(
+        h.s.history.abandoned(transmitted_reference),
+        "only the actual replacement IDR ends the older repair epoch"
+    );
+    let fresh_sequence = h.tr.seqs()[attempted_before_idr];
+    assert!(h.s.history.get(fresh_sequence).is_some());
+    assert!(
+        !h.s.history.abandoned(fresh_sequence),
+        "the replacement IDR stays repairable"
+    );
+    h.s.push_frame(frame(4, None, true, 2_000), &mut h.tr, now + 0.02);
+    assert!(
+        !h.s.history.abandoned(fresh_sequence),
+        "a later IDR cannot abandon the first unsent response's repair history"
+    );
+    let attempts_before_waiting_repair = h.tr.attempts.len();
+    h.nack(&[fresh_sequence]);
+    assert!(h.tr.attempts.len() > attempts_before_waiting_repair);
+    h.tr.pacer
+        .as_mut()
+        .unwrap()
+        .force_braked(8_000_000, h.clock);
+    let burst = h.tr.pacer.as_ref().unwrap().burst_bytes();
+    h.tr.pacer.as_mut().unwrap().set_credit(burst, now + 0.03);
+    let mut completed_key = Vec::new();
+    h.tr.pacer
+        .as_mut()
+        .unwrap()
+        .drain(now + 0.03, &mut completed_key);
+    let key_events = h.tr.pacer.as_mut().unwrap().take_events();
+    h.s.apply_pacer_events(key_events, &mut h.tr.twcc);
+    assert!(
+        h.s.key_requested.is_none(),
+        "the replacement was completely written"
+    );
+    h.s.push_frame(frame(5, None, true, 2_000), &mut h.tr, now + 0.04);
+    assert!(
+        !h.s.history.abandoned(fresh_sequence),
+        "an unrequested natural H264 IDR preserves useful prior repair history"
+    );
+    let attempts_before_fresh_repair = h.tr.attempts.len();
+    h.nack(&[fresh_sequence]);
+    assert!(
+        h.tr.attempts.len() > attempts_before_fresh_repair,
+        "the replacement IDR enters the new repair epoch and can be retransmitted"
+    );
+    let mut wire = Vec::new();
+    h.tr.pacer.as_mut().unwrap().drain(now + 0.1, &mut wire);
+    let mut fresh: Vec<Vec<u8>> = h.tr.rtp[attempted_before_idr..].to_vec();
+    fresh.extend(wire.into_iter().map(|packet| packet.data.to_vec()));
+    assert!(!fresh.is_empty());
+    let map = h.s.header_extensions().clone();
+    let parsed: Vec<RtpPacket> = fresh
+        .iter()
+        .map(|packet| RtpPacket::parse(&Bytes::from(packet.clone()), &map).unwrap())
+        .collect();
+    let has_run = |byte| {
+        parsed.iter().any(|packet| {
+            packet.payload.pieces().iter().any(|piece| {
+                piece
+                    .windows(16)
+                    .any(|window| window.iter().all(|b| *b == byte))
+            })
+        })
+    };
+    assert!(!has_run(0x66), "stale delta payloads stay out of recovery");
+    assert!(
+        has_run(0x77),
+        "the reassembled fresh IDR payload reaches the wire"
+    );
+}
+
+#[test]
+fn an_older_queued_idr_preserves_stock_history_without_gated_recovery() {
+    let mut h = Harness::new(true, Some(false), true, "video/H264");
+    let mut pacer = Pacer::new(8_000_000, h.clock);
+    pacer.set_credit(0.0, h.clock);
+    h.tr.pacer = Some(pacer);
+    let frame = |id: u16| {
+        let mut data = vec![0, 0, 0, 1, 0x65];
+        data.resize(2_005, 0x77);
+        EncodedFrame {
+            data: Bytes::from(data),
+            timestamp: id as u32 * 3000,
+            keyframe: true,
+            dependency: Some((id, None)),
+            ..Default::default()
+        }
+    };
+    let now = h.clock;
+    h.s.push_frame(frame(1), &mut h.tr, now);
+    let old_sequence = h.tr.seqs()[0];
+    h.s.history.add(payload_packet(old_sequence), now, Some(1));
+    pli(&mut h);
+    assert!(!h.s.response_history_pending);
+    let burst = h.tr.pacer.as_ref().unwrap().burst_bytes();
+    h.tr.pacer.as_mut().unwrap().set_credit(burst, now);
+    let mut older_key = Vec::new();
+    h.tr.pacer.as_mut().unwrap().drain(now, &mut older_key);
+    let events = h.tr.pacer.as_mut().unwrap().take_events();
+    h.s.apply_pacer_events(events, &mut h.tr.twcc);
+    assert!(
+        !h.s.response_history_pending,
+        "ordinary queued IDR handling adds no gated epoch"
+    );
+
+    let previous = h.tr.rtp.len();
+    h.s.push_frame(frame(2), &mut h.tr, now + 0.01);
+    assert!(!h.s.history.abandoned(old_sequence));
+    let response_sequence = h.tr.seqs()[previous];
+    assert!(!h.s.history.abandoned(response_sequence));
+}
+
+#[test]
 fn a_peer_without_room_is_left_frames_and_resynced() {
     let mut h = Harness::selective();
     h.send(1, None, 10, true, false);

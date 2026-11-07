@@ -205,6 +205,8 @@ pub struct Pacer {
     brake_hold_until: f64,
     /// Tags whose frame's end the sender waits on, oldest first.
     frame_ends: VecDeque<u16>,
+    /// The subset that ends a keyframe still queued, rather than already on the wire.
+    key_ends: VecDeque<u16>,
     data_queue: VecDeque<Queued>,
     video_queue: VecDeque<Queued>,
     bytes_queued: usize,
@@ -225,6 +227,8 @@ pub struct Pacer {
     idr_floor_bytes: usize,
     frame_floor_bytes: usize,
     gop_dead: bool,
+    /// A receiver-requested key does not make already-transmitted RTP history a failed GOP.
+    receiver_recovery: bool,
     last_keyreq: f64,
     keyreq_answered: bool,
     enabled_at: f64,
@@ -248,6 +252,7 @@ impl Pacer {
             goodput_at: 0.0,
             brake_hold_until: 0.0,
             frame_ends: VecDeque::with_capacity(FRAME_ENDS_MAX),
+            key_ends: VecDeque::with_capacity(FRAME_ENDS_MAX),
             data_queue: VecDeque::new(),
             video_queue: VecDeque::new(),
             bytes_queued: 0,
@@ -268,6 +273,7 @@ impl Pacer {
             idr_floor_bytes: 0,
             frame_floor_bytes: 0,
             gop_dead: false,
+            receiver_recovery: false,
             last_keyreq: 0.0,
             keyreq_answered: true,
             enabled_at: now,
@@ -416,6 +422,12 @@ impl Pacer {
         self.gop_dead
     }
 
+    /// Refused intermediate deltas and repairs must retain transmitted history for this
+    /// receiver-driven recovery, unlike an overflow or a wire write failure.
+    pub(crate) fn receiver_recovery(&self) -> bool {
+        self.gop_dead && self.receiver_recovery
+    }
+
     pub fn stats(&self) -> &PacerStats {
         &self.stats
     }
@@ -553,6 +565,7 @@ impl Pacer {
         }
         self.keyreq_answered = true;
         if self.gop_dead {
+            self.receiver_recovery = false;
             self.gop_dead = false;
             self.stats.idr_resurrects += 1;
             log::debug!(
@@ -573,6 +586,42 @@ impl Pacer {
         self.keyreq_answered = false;
         self.stats.keyreqs += 1;
         self.events.push(PacerEvent::KeyframeRequest);
+    }
+
+    /// Prepare for the keyframe the caller is about to request from its encoder. Packets still
+    /// queued for the old GOP cannot help a receiver that asked for a fresh decode entry point,
+    /// and a repair queued behind them only delays that entry point again. Already-sent RTP and
+    /// the other classes are untouched. No request is emitted here: the caller makes that one.
+    pub(crate) fn expect_keyframe(&mut self, now: f64) {
+        if self.gop_dead {
+            return;
+        }
+        if !self.key_ends.is_empty() {
+            // A genuine queued IDR is the suppressing key-on-way even if this transport has
+            // no delivery estimate yet. Never discard its remaining packets for another PLI.
+            return;
+        }
+        let video_wait_s = self.video_bytes as f64 * 8.0 / self.pace_bps.max(1) as f64;
+        if video_wait_s < RESURRECT_TIMEOUT_S {
+            return;
+        }
+        let (_, purged) = self.purge_video();
+        self.gop_dead = true;
+        self.receiver_recovery = true;
+        self.gop_dead_at = now;
+        // The caller's request is the outstanding one, for the usual retry throttle.
+        self.last_keyreq = now;
+        self.keyreq_answered = false;
+        self.stats.gop_resets += 1;
+        if purged > 0 {
+            // Retiring real backlog must not hide the same fresh wire evidence an overflow cut
+            // would have learned from. With none, the recovery is scheduling only.
+            self.on_overflow(now);
+            log::info!(
+                target: "webrtc",
+                "pacer: receiver keyframe => {purged} stale queued packets purged"
+            );
+        }
     }
 
     /// Bytes the video queue takes before a packet overflows it.
@@ -648,6 +697,7 @@ impl Pacer {
             // flow again anyway; the decoder recovers at the next keyframe.
             if now - self.gop_dead_at >= RESURRECT_TIMEOUT_S {
                 self.gop_dead = false;
+                self.receiver_recovery = false;
                 self.stats.timeout_resurrects += 1;
                 log::info!(
                     target: "webrtc",
@@ -714,6 +764,7 @@ impl Pacer {
     }
 
     fn left(&mut self, tag: u16, now: f64) {
+        self.forget_key_end(tag);
         if let Some(pos) = self.frame_ends.iter().position(|t| *t == tag) {
             self.frame_ends.remove(pos);
             self.events.push(PacerEvent::FrameLeft { tag, at: now });
@@ -724,6 +775,7 @@ impl Pacer {
     /// the transport's loss accounting told.
     pub fn drop_tag(&mut self, tag: Option<u16>) {
         if let Some(tag) = tag {
+            self.forget_key_end(tag);
             if let Some(pos) = self.frame_ends.iter().position(|t| *t == tag) {
                 self.frame_ends.remove(pos);
             }
@@ -735,12 +787,28 @@ impl Pacer {
     /// the wire (`PacerEvent::FrameLeft`): how long a frame took to get there includes the
     /// time it queued here. At most `FRAME_ENDS_MAX` are held; the oldest goes first.
     pub fn frame_end(&mut self, tag: u16) {
+        self.frame_end_with_keyframe(tag, false);
+    }
+
+    pub(crate) fn frame_end_with_keyframe(&mut self, tag: u16, keyframe: bool) {
         if let Some(pos) = self.frame_ends.iter().position(|t| *t == tag) {
             self.frame_ends.remove(pos);
         }
+        self.forget_key_end(tag);
         self.frame_ends.push_back(tag);
+        if keyframe {
+            self.key_ends.push_back(tag);
+        }
         while self.frame_ends.len() > FRAME_ENDS_MAX {
-            self.frame_ends.pop_front();
+            if let Some(tag) = self.frame_ends.pop_front() {
+                self.forget_key_end(tag);
+            }
+        }
+    }
+
+    fn forget_key_end(&mut self, tag: u16) {
+        if let Some(pos) = self.key_ends.iter().position(|t| *t == tag) {
+            self.key_ends.remove(pos);
         }
     }
 
@@ -749,6 +817,7 @@ impl Pacer {
         if let Some(pos) = self.frame_ends.iter().position(|t| *t == tag) {
             self.frame_ends.remove(pos);
         }
+        self.forget_key_end(tag);
     }
 
     /// Drop the whole video queue; the oldest tag dropped and how many packets went.
@@ -800,6 +869,7 @@ impl Pacer {
             return;
         }
         self.gop_dead = true;
+        self.receiver_recovery = false;
         self.gop_dead_at = now;
         self.on_overflow(now);
         self.stats.gop_resets += 1;
@@ -887,6 +957,7 @@ impl Pacer {
     /// packets, so the queues are dropped and the GOP reset, with a keyframe asked for.
     pub fn wire_failed(&mut self, tag: Option<u16>, now: f64) {
         log::warn!(target: "webrtc", "pacer: send failed; dropping queue");
+        self.receiver_recovery = false;
         let verdict = self.reset_gop("send failed".to_string(), tag);
         if matches!(verdict, Verdict::Overflow { .. }) {
             self.resolve_overflow(false, now);
@@ -1537,6 +1608,163 @@ mod tests {
         );
         assert_eq!(pacer.stats().idr_resurrects, 1);
         assert_eq!(pacer.stats().timeout_resurrects, 0);
+    }
+
+    #[test]
+    fn a_receiver_keyframe_retires_only_its_unsent_video_once() {
+        let now = 5.0;
+        let mut ordinary = Pacer::new(ENCODER_BPS, now);
+        ordinary.set_credit(0.0, now);
+        ordinary.send(Bytes::from(vec![0u8; 1000]), Class::Video, Some(99), now);
+        ordinary.expect_keyframe(now);
+        assert!(!ordinary.gop_dead(), "an ordinary PLI keeps stock behavior");
+        assert_eq!(ordinary.bytes_queued(), 1000);
+        assert!(ordinary.events.is_empty());
+
+        let mut pacer = Pacer::new(ENCODER_BPS, now);
+        pacer.set_credit(0.0, now);
+        pacer.force_braked(MIN_PACE_BPS, now);
+        pacer.last_pace_update_at = now;
+        for tag in 0..3 {
+            assert_eq!(
+                pacer.send(Bytes::from(vec![0u8; 10_000]), Class::Video, Some(tag), now,),
+                Verdict::Queued
+            );
+        }
+        assert_eq!(
+            pacer.send(Bytes::from(vec![1u8; 500]), Class::Data, None, now),
+            Verdict::Queued
+        );
+
+        pacer.expect_keyframe(now);
+        assert!(pacer.gop_dead());
+        assert_eq!(pacer.video_queue_len(), 0);
+        assert_eq!(pacer.data_queue_len(), 1);
+        assert_eq!(pacer.bytes_queued(), 500);
+        assert_eq!(pacer.stats().gop_resets, 1);
+        assert_eq!(
+            pacer.stats().keyreqs,
+            0,
+            "the receiver's request is not duplicated"
+        );
+        let dropped: Vec<u16> = drain_events(&mut pacer)
+            .into_iter()
+            .filter_map(|event| match event {
+                PacerEvent::Dropped(tag) => Some(tag),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dropped, vec![0, 1, 2]);
+        assert!(pacer.events.is_empty(), "no new native request is queued");
+
+        pacer.expect_keyframe(now);
+        assert_eq!(
+            pacer.stats().gop_resets,
+            1,
+            "one recovery cannot retire it twice"
+        );
+        assert_eq!(
+            pacer.send(Bytes::from(vec![0u8; 1000]), Class::Video, None, now + 0.25),
+            Verdict::Dropped
+        );
+        assert_eq!(pacer.stats().keyreqs, 0);
+        assert!(pacer.events.is_empty());
+        let retry_at = now + KEYREQ_MIN_INTERVAL_S;
+        assert_eq!(
+            pacer.send(Bytes::from(vec![0u8; 1000]), Class::Video, None, retry_at),
+            Verdict::Dropped
+        );
+        assert_eq!(
+            pacer.stats().keyreqs,
+            1,
+            "the bounded 500 ms retry remains available"
+        );
+        assert_eq!(drain_events(&mut pacer), vec![PacerEvent::KeyframeRequest]);
+        pacer.note_keyframe(1000, false, retry_at + 0.01);
+        assert!(!pacer.gop_dead());
+        assert_eq!(pacer.stats().idr_resurrects, 1);
+        assert_eq!(pacer.stats().timeout_resurrects, 0);
+        assert_eq!(pacer.data_queue_len(), 1);
+
+        let mut key_waiting = Pacer::new(ENCODER_BPS, now);
+        key_waiting.set_credit(0.0, now);
+        key_waiting.note_keyframe(1000, false, now);
+        key_waiting.frame_end_with_keyframe(90, true);
+        assert_eq!(
+            key_waiting.send(Bytes::from(vec![0u8; 1000]), Class::Video, Some(90), now),
+            Verdict::Queued
+        );
+        let queued = key_waiting.bytes_queued();
+        key_waiting.expect_keyframe(now);
+        assert!(!key_waiting.gop_dead(), "the queued IDR remains the answer");
+        assert_eq!(key_waiting.stats().gop_resets, 0);
+        assert_eq!(
+            key_waiting.bytes_queued(),
+            queued,
+            "no fresh key packet is discarded"
+        );
+        assert!(key_waiting.events.is_empty());
+
+        let mut write_failed = Pacer::new(ENCODER_BPS, now);
+        write_failed.set_credit(0.0, now);
+        write_failed.force_braked(MIN_PACE_BPS, now);
+        write_failed.last_pace_update_at = now;
+        write_failed.send(Bytes::from(vec![0u8; 20_000]), Class::Video, None, now);
+        write_failed.expect_keyframe(now);
+        assert!(write_failed.receiver_recovery());
+        write_failed.wire_failed(None, now);
+        assert!(write_failed.gop_dead());
+        assert!(
+            !write_failed.receiver_recovery(),
+            "a socket failure keeps its history-wide abandonment even during PLI recovery"
+        );
+    }
+
+    #[test]
+    fn receiver_retirement_uses_the_same_fresh_goodput_brake() {
+        let now = 5.0;
+        let mut retired = Pacer::new(ENCODER_BPS, now);
+        let mut ordinary = Pacer::new(ENCODER_BPS, now);
+        for pacer in [&mut retired, &mut ordinary] {
+            pacer.set_credit(0.0, now);
+            pacer.set_steered_bps(Some(4_000_000), now);
+            pacer.force_braked(1_600_000, now);
+            pacer.set_goodput_bps(Some(1_500_000), now + GOODPUT_WARMUP_S);
+            pacer.last_pace_update_at = now + GOODPUT_WARMUP_S;
+        }
+        retired.send(Bytes::from(vec![0u8; 200_000]), Class::Video, Some(7), now);
+        ordinary.on_overflow(now + GOODPUT_WARMUP_S);
+        let expected = ordinary.snapshot().pace_bps;
+        assert!(expected < ordinary.encoder_bps);
+        retired.expect_keyframe(now + GOODPUT_WARMUP_S);
+        assert_eq!(retired.snapshot().pace_bps, expected);
+        let held_at = retired.brake_hold_until;
+        let updated_at = retired.last_pace_update_at;
+        retired.on_overflow(now + GOODPUT_WARMUP_S + 0.25);
+        assert_eq!(
+            retired.brake_hold_until, held_at,
+            "the existing hold is unchanged"
+        );
+        assert_eq!(retired.last_pace_update_at, updated_at);
+
+        let mut zero = Pacer::new(ENCODER_BPS, now);
+        let zero_pace = zero.pace_bps;
+        let zero_updated = zero.last_pace_update_at;
+        zero.expect_keyframe(now + GOODPUT_WARMUP_S);
+        assert_eq!(zero.pace_bps, zero_pace);
+        assert!(!zero.ever_overflowed && zero.brake_hold_until == 0.0);
+        assert_eq!(zero.last_pace_update_at, zero_updated);
+
+        let mut no_fresh_estimate = Pacer::new(ENCODER_BPS, now);
+        no_fresh_estimate.set_credit(0.0, now);
+        no_fresh_estimate.force_braked(MIN_PACE_BPS, now);
+        no_fresh_estimate.last_pace_update_at = now;
+        no_fresh_estimate.send(Bytes::from(vec![0u8; 10_000]), Class::Video, Some(8), now);
+        let before = no_fresh_estimate.pace_bps;
+        let before_ever_overflowed = no_fresh_estimate.ever_overflowed;
+        no_fresh_estimate.expect_keyframe(now + GOODPUT_MAX_AGE_S + 1.0);
+        assert_eq!(no_fresh_estimate.pace_bps, before);
+        assert_eq!(no_fresh_estimate.ever_overflowed, before_ever_overflowed);
     }
 
     #[test]
