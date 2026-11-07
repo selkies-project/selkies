@@ -78,7 +78,7 @@ def request(method: str, path: str, headers: Optional[dict] = None,
 
 def client_upload(name: str, data: bytes, extra: Optional[dict] = None,
                   auth: Optional[dict] = None) -> tuple:
-    """POST /api/upload with the headers lib/file-upload.js sends.
+    """POST /api/upload with the headers lib/file-upload.ts sends.
 
     Args:
         name: Destination path relative to the file-manager root.

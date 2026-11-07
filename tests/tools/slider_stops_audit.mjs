@@ -11,7 +11,7 @@
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
 const { FRAMERATE_STOPS, BITRATE_STOPS, CRF_STOPS, stopsWithin, stopIndex, withDisplayStop, framerateStopIndex } =
-    await import('../../addons/selkies-web-core/lib/slider-stops.js');
+    await import('../../addons/selkies-web-core/lib/slider-stops.ts');
 
 let failed = 0;
 

@@ -5,8 +5,35 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { defineConfig } from 'vite';
+import { defineConfig, transformWithOxc } from 'vite';
 import { ViteMinifyPlugin } from 'vite-plugin-minify';
+
+// selkies-ws-core.ts inlines three lib modules into Blob workers by source
+// (`?raw`): a bundler rename would leave the stringified copy's bindings
+// unresolved. Vite hands back the raw file, so a TypeScript source would
+// land in the worker verbatim and fail to parse; run it through esbuild
+// (the loader is the file's own) and hand the worker the emitted
+// JavaScript instead. Only those three are inlined this way.
+const RAW_TS_MODULES = new Set([
+  'lib/decode-gate.ts',
+  'lib/decode-pace.ts',
+  'lib/wire-codecs.ts',
+]);
+function stripRawTs() {
+  return {
+    name: 'selkies-strip-raw-ts',
+    enforce: 'pre',
+    async load(id) {
+      if (!id.includes('?raw')) return;
+      const file = id.split('?')[0];
+      const rel = file.split(/[\\/]/).join('/').replace(/.*selkies-web-core\//, '');
+      if (!RAW_TS_MODULES.has(rel)) return;
+      const source = readFileSync(file, 'utf8');
+      const { code } = await transformWithOxc(source, file);
+      return { code: `export default ${JSON.stringify(code)};`, map: null };
+    },
+  };
+}
 
 // libopus in WASM for the engines without WebCodecs audio, served from codecs/
 // beside the bundle for them to import on first use; no other engine loads it.
@@ -76,7 +103,8 @@ export default defineConfig({
   plugins: [
     ViteMinifyPlugin(),
     opusWasm(),
-    restartOnChange(['selkies-core.js', 'lib/**', 'selkies-version.txt']),
+    stripRawTs(),
+    restartOnChange(['selkies-core.ts', 'lib/**', 'selkies-version.txt']),
   ],
   build: {
     target: 'chrome94',

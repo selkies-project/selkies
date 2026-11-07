@@ -53,7 +53,7 @@ Object.defineProperty(globalThis, 'navigator', {
              getGamepads: () => pads },
     configurable: true, writable: true });
 
-const { Input, slotList } = await import('../../addons/selkies-web-core/lib/input.js');
+const { Input, slotList } = await import('../../addons/selkies-web-core/lib/input.ts');
 
 const plays = [];
 const pad = (name, index) => ({

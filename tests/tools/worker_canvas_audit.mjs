@@ -13,7 +13,7 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-import { isSkiaWebKit } from '../../addons/selkies-web-core/lib/util.js';
+import { isSkiaWebKit } from '../../addons/selkies-web-core/lib/util.ts';
 
 let failed = 0;
 

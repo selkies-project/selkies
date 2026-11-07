@@ -28,9 +28,9 @@ import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/ui/theme-provider";
 import { useDashboard } from "@/state/dashboard";
 import { computeRenderableSettings, getLastServerSettings, isMobileClient, isViewerUrlMode, onCoreMessage } from "@/utils";
-import { resolveFailedAppCommand } from "../../../selkies-web-core/lib/app-commands.js";
-import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.js";
-import { STATS_EVENT } from "../../../selkies-web-core/lib/stream-stats.js";
+import { resolveFailedAppCommand } from "../../../selkies-web-core/lib/app-commands.ts";
+import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.ts";
+import { STATS_EVENT } from "../../../selkies-web-core/lib/stream-stats.ts";
 import { t } from "@/i18n";
 
 const TRANSPORT_TOAST_ID = "transport-advice";

@@ -39,7 +39,7 @@ import { onCoreMessage } from "@/utils"
 import {
   sessionAuthHeaders,
   withSessionToken,
-} from "../../../selkies-web-core/lib/session-token.js"
+} from "../../../selkies-web-core/lib/session-token.ts"
 
 /** One entry of a directory listing, as the server's file-manager listing returns it. */
 type FileManagerItem = {

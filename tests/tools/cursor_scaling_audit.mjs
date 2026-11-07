@@ -10,7 +10,7 @@
  * transports, including the absolute and relative coordinate paths.
  * @module
  */
-import { Input } from '../../addons/selkies-web-core/lib/input.js';
+import { Input } from '../../addons/selkies-web-core/lib/input.ts';
 
 let failed = 0;
 function check(label, ok, detail = '') {

@@ -4,7 +4,8 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # ESLint over the dashboard, the web core, the touch gamepad and the scripts
-# outside them, plus the dashboard's TypeScript check. Run from the
+# outside them, plus the TypeScript check of the dashboard and of the web
+# core. Run from the
 # repository root; requires npm.
 #
 # The CI lint gate and the pre-commit hook both call this, so the two cannot
@@ -24,8 +25,8 @@ fi
 echo "eslint: ${pkg}"
 (cd "${pkg}" && npm run --silent lint)
 
-# The web core and the touch gamepad have no dev dependencies of their own:
-# addons/eslint.config.mjs lints them with the dashboard's ESLint.
+# The web core and the touch gamepad are linted by the dashboard's ESLint, whose
+# addons/eslint.config.mjs covers both; the web core's TypeScript is checked below.
 echo "eslint: addons/selkies-web-core addons/universal-touch-gamepad"
 (cd addons && selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
     selkies-web-core universal-touch-gamepad)
@@ -39,3 +40,13 @@ addons/selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
 # The dashboard's own build runs tsc as well, but that is downstream of this gate.
 echo "tsc: addons/selkies-dashboard"
 (cd addons/selkies-dashboard && npm run --silent typecheck)
+
+# The web core checks itself strictly with the TypeScript it declares; its own
+# node_modules, unlike the lint's, exist only once its dependencies are installed.
+echo "tsc: addons/selkies-web-core"
+core=addons/selkies-web-core
+if [ ! -d "${core}/node_modules" ]; then
+    (cd "${core}" && npm ci --no-audit --no-fund \
+        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
+fi
+(cd "${core}" && npm run --silent typecheck)

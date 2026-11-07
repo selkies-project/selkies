@@ -8,10 +8,10 @@
  * What every stats view reads: the core's stream state, the rows and tiles
  * worded from it, the graphs' series and scales, and the copied report. The
  * views themselves are `stats-view.tsx`; what a row says and when it warns is
- * `lib/stream-stats-view.js`.
+ * `lib/stream-stats-view.ts`.
  *
  * The state is the core's `window.stream_info`, `window.stream_client`, and
- * `window.stream_stats` (`selkies-web-core/lib/stream-stats.js`), read each
+ * `window.stream_stats` (`selkies-web-core/lib/stream-stats.ts`), read each
  * time the core announces a change (`STATS_EVENT`) while a view is on screen
  * in a visible tab. Being on screen is what turns the numbers on: each view
  * holds them through `holdStats`, so the core is told the stats shut only when
@@ -19,8 +19,8 @@
  * @module
  */
 import * as React from "react";
-import { STATS_EVENT, type StreamClient, type StreamInfo, type StreamSample } from "../../../selkies-web-core/lib/stream-stats.js";
-import { seriesOf, streamReport, streamRows, streamTiles } from "../../../selkies-web-core/lib/stream-stats-view.js";
+import { STATS_EVENT, type StreamClient, type StreamInfo, type StreamSample } from "../../../selkies-web-core/lib/stream-stats.ts";
+import { seriesOf, streamReport, streamRows, streamTiles } from "../../../selkies-web-core/lib/stream-stats-view.ts";
 import { holdStats } from "@/panels/stats-hold";
 import { t } from "@/i18n";
 

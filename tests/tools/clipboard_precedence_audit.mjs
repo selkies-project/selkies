@@ -25,7 +25,7 @@ Object.defineProperty(globalThis, 'navigator', {
 });
 
 const { createClipboardSync, createLocalClipboardSender } = await import(
-    '../../addons/selkies-web-core/lib/clipboard-sync.js');
+    '../../addons/selkies-web-core/lib/clipboard-sync.ts');
 
 // The precedence window is a local in the module; pinned here so the audit
 // fails when it drifts, and bound to the behavior by the checks below.

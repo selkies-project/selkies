@@ -11,6 +11,7 @@ release/
 AppDir/
 infra/appimage/AppDir/
 addons/selkies-dashboard/public/selkies-core.js
+*.tsbuildinfo
 
 # Built by tests/tools/Makefile
 tests/tools/*.so

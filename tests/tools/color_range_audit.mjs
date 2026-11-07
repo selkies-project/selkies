@@ -14,7 +14,7 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-import { decoderColorSpace } from '../../addons/selkies-web-core/lib/wire-codecs.js';
+import { decoderColorSpace } from '../../addons/selkies-web-core/lib/wire-codecs.ts';
 
 let failed = 0;
 
