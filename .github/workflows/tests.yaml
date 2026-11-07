@@ -396,6 +396,9 @@ jobs:
           if ! pw-cli info 0 > /dev/null 2>&1; then
             dbus-run-session -- /usr/bin/pipewire > /tmp/selkies-pipewire.log 2>&1 &
             until pw-cli info 0 > /dev/null 2>&1; do sleep 0.5; done
+            # AUTOCONNECT resolves the virtual camera's named target through
+            # the session manager; a bare core publishes but cannot link it.
+            dbus-run-session -- /usr/bin/wireplumber > /tmp/selkies-wireplumber.log 2>&1 &
           fi
       # The integration tier drives Chromium as well, for the gamepad and
       # WebRTC-transport suites; only the browser matrix needs the other engines
