@@ -5,7 +5,7 @@ description: Install Selkies as a package or an AppImage and attach it to a disp
 
 Selkies also ships outside a container: native packages for the common distributions, and an AppImage that installs nothing. Neither brings a desktop, a display server, or an audio server — they attach to the ones you run — so [Getting Started](start.md) is the shorter road if a container will do.
 
-None of these needs a Python environment: the web client, the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions, and the interposers all travel inside. Every block below uses the release version, which is the release's tag, so paste this line first (set `SELKIES_VERSION` yourself for a release other than the latest):
+Each carries the Selkies server, one binary that links `pixelflux` (screen capture and video encoding) and `pcmflux` (PulseAudio capture with Opus encoding), with its web client and the interposers. Every block below uses the release version, which is the release's tag, so paste this line first (set `SELKIES_VERSION` yourself for a release other than the latest):
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name')"
@@ -13,7 +13,7 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 
 ## Packages
 
-Installs a private Python environment at `/opt/selkies`, puts `selkies` on `PATH` (with its commands `selkies session`, `selkies resize`, and `selkies gpu-probe`), carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
+Installs the server at `/usr/bin/selkies` (with its commands `selkies session`, `selkies resize`, and `selkies gpu-probe`) and its web client at `/usr/share/selkies/web`, carries both interposers, and depends on the distribution's packages behind every library the server links or loads, so your package manager pulls them in. A software codec library the distribution does not carry at the release `pixelflux` needs (x264, x265, and libde265 on Fedora, all of them on Enterprise Linux) is built into the server instead. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
 
 ```bash
 # Ubuntu and Debian. The suffix names the distribution the package was built in
@@ -55,7 +55,7 @@ For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVID
 
 ## The AppImage
 
-Runs from wherever you put it, on any distribution with glibc 2.28 or newer (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. Every Python and native dependency is inside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
+Runs from wherever you put it, on any distribution with glibc 2.28 or newer (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. Every native dependency is inside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
 
 ```bash
 APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
@@ -95,7 +95,7 @@ export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DI
 selkies --public --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
-In the default WebSocket mode, `--encoder=` accepts `h264enc` (default), `h265enc`, `vp8enc`, `vp9enc`, and `av1enc` (each hardware NVENC or VA-API where the GPU carries the codec, otherwise the software encoder `pixelflux` was built with — `x264` (or OpenH264 in a GPL-free build), `x265` (or kvazaar in a GPL-free build), libvpx, SVT-AV1), `h264enc-striped` (striped software H.264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies to the full-frame encoders (`h264enc`, `h265enc`, `vp8enc`, `vp9enc`, `av1enc`), a browser that declines the codec is answered with H.264, and the striped `h264enc-striped` and `jpeg` fall back to the default with a logged warning.
+In the default WebSocket mode, `--encoder=` accepts `h264enc` (default), `h265enc`, `vp8enc`, `vp9enc`, and `av1enc` (each hardware NVENC or VA-API where the GPU carries the codec, otherwise the software encoder `pixelflux` was built with — `x264` (or OpenH264 in a GPL-free build), `x265` (or kvazaar in a GPL-free build), libvpx, SVT-AV1), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies to the full-frame encoders (`h264enc`, `h265enc`, `vp8enc`, `vp9enc`, `av1enc`), a browser that declines the codec is answered with H.264, and the striped `jpeg` falls back to the default with a logged warning.
 
 `--public` above accepts connections on every interface, IPv4 and IPv6; without it, Selkies listens on the loopback addresses only (`127.0.0.1,::1`), and `--addr=` names particular addresses instead. `--enable-https=false` leaves the web interface on plain HTTP, which browsers accept as a secure context only on `localhost`; the clipboard, gamepads, pointer lock, and the microphone and webcam need one. Setting `--enable-https=true` is the whole switch: the `--https-cert=` and `--https-key=` paths are the `ssl-cert-snakeoil` pair Debian and Ubuntu install, and when they are absent Selkies writes a self-signed pair itself, so nothing has to be prepared. Browsers warn once on a self-signed certificate; a certificate from an authority at those paths, or a reverse proxy terminating TLS in front, avoids the warning.
 
@@ -130,13 +130,13 @@ Please read [**WebRTC and Firewall Issues**](firewall.md).
 
 ### Backgrounds
 
-Selkies has a modularized architecture, but at runtime it is a **single Python application**, the one every package and image carries, that:
+Selkies has a modularized architecture, but at runtime it is a **single executable**, `selkies`, the one every package and image carries, that:
 
-- serves the HTML5 web client, which is bundled inside it (at `src/selkies/selkies_web`) and served from the same single port;
-- captures and encodes the screen through the `pixelflux` extension (hardware H.264 via NVENC or VA-API, software H.264 via `x264` — or OpenH264 in a GPL-free `pixelflux` build — or JPEG);
-- captures and encodes audio through the `pcmflux` extension (Opus);
-- injects keyboard, mouse, and gamepad input through a vendored `python-xlib` (XTEST/XFixes);
-- and, only for the opt-in WebRTC transport, uses a vendored fork of `aiortc`.
+- serves the HTML5 web client, which is installed beside it (at `share/selkies/web` next to the directory holding the executable) and served from the same single port;
+- captures and encodes the screen through the `pixelflux` library it links (hardware H.264 via NVENC or VA-API, software H.264 via `x264` — or OpenH264 in a GPL-free `pixelflux` build — or JPEG);
+- captures and encodes audio through the `pcmflux` library it links (Opus);
+- injects keyboard and mouse input through XTEST/XFixes on X11, and gamepad input through the Input Interposer's sockets or uinput;
+- and, only for the opt-in WebRTC transport, uses its own WebRTC stack, the `selkies-rtc` crate.
 
 `pixelflux`, `pcmflux`, and the web client all travel inside whichever medium you installed. There is **no separate multimedia-framework build or web-interface package to install**.
 
@@ -194,7 +194,7 @@ sudo mkdir -pm1777 /dev/input
 
 # Start a virtual X11 server if not already running, skip this line if an X server already exists or you are already using a display
 # (-s 0 -dpms keeps the server's own screen saver and DPMS from ever blanking the framebuffer, as the desktop container and the AppImage do; see the FAQ on screen locking)
-# Xvfb "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem >/tmp/Xvfb_selkies.log 2>&1 &
+# Xvfb "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset >/tmp/Xvfb_selkies.log 2>&1 &
 
 # Wait for X server to start
 # echo 'Waiting for X Socket' && until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done && echo 'X Server is ready'
@@ -231,11 +231,11 @@ sudo mkdir -pm1777 /dev/input
 # Starts the remote desktop process with the interposers unloaded: they answer
 # for /dev/input and /dev/video0 in the session's applications, which the
 # gamepad and capture sides must keep seeing as the kernel reports them, and
-# their process-wide hooks can stop the asyncio loop answering. The two
-# variables stay set, which is what tells Selkies applications reach the
-# devices through the preload.
-# In the default WebSocket mode, change `--encoder=` to `h265enc`, `vp8enc`, `vp9enc`, `av1enc`, `h264enc-striped` or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
-# For the WebRTC transport instead, add `--mode=webrtc` (the full-frame encoders stream over WebRTC; `h264enc-striped` and `jpeg` are WebSocket-only)
+# their process-wide hooks would sit under the server's own reads and polls.
+# The two variables stay set, which is what tells Selkies applications reach
+# the devices through the preload.
+# In the default WebSocket mode, change `--encoder=` to `h265enc`, `vp8enc`, `vp9enc`, `av1enc` or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
+# For the WebRTC transport instead, add `--mode=webrtc` (the full-frame encoders stream over WebRTC; `jpeg` is WebSocket-only)
 # DO NOT set `--enable-resize=true` if there is a physical display
 env -u LD_PRELOAD selkies --public --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
 ```
@@ -252,6 +252,6 @@ Please read [**WebRTC and Firewall Issues**](firewall.md).
 
 ### Install an unreleased build
 
-Every push to `main` builds the same media a release does, so an unreleased commit installs exactly like the released one above. **Nothing here needs Docker®.** Log in to GitHub, open that commit's `CI` run in [Actions](https://github.com/selkies-project/selkies/actions), and take its Build Artifacts: the `selkies-wheel` artifact holds the wheel, and the package jobs attach the `.deb`, `.rpm`, `.apk`, `.pkg.tar.zst`, and the AppImage. [`gh run download`](https://cli.github.com/manual/gh_run_download) fetches them from a shell instead.
+Every commit to `main` that passes its suites is published as a pre-release named after its short commit hash on the [Releases](https://github.com/selkies-project/selkies/releases) page, carrying the same media a release does, so an unreleased commit installs exactly like the released one above. **Nothing here needs Docker®.** Take the wheel, the `.deb`, `.rpm`, `.apk`, `.pkg.tar.zst`, or the AppImage from that pre-release and check it against its `SHA256SUMS`; [`gh release download`](https://cli.github.com/manual/gh_release_download) fetches them from a shell instead (`gh release download <hash> -R selkies-project/selkies -p '*.AppImage'`). A pre-release is never marked as the latest release, so the steps above keep installing the newest tagged one.
 
 The container images are published to `ghcr.io` rather than attached to the run, as `ghcr.io/selkies-project/selkies/base:main-ubuntu26.04` and `desktop:main-ubuntu26.04` (and the `debiantrixie` flavor of each), which every push moves onto the new build. Run one as the [Desktop Container](components/desktop-image.md) shows, or name it in a `FROM` line to build your own desktop on it — [Container Customization](development.md#container-customization) covers that. Replace `main` with `latest` in any of these tags for the newest release instead of the newest commit.

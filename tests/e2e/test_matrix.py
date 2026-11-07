@@ -15,6 +15,9 @@ def run_block(mode: str, wayland: bool, block: str = "",
               engine: str = "chromium") -> "H.Results":
     """Drive one transport/backend pair through the full e2e checklist.
 
+    The server runs Turbo, so the still test display keeps sending the frames
+    the WebSockets block counts.
+
     Args:
         mode: Transport mode, ``websockets`` or ``webrtc``.
         wayland: True to run against the Wayland backend, False for X11.
@@ -28,7 +31,7 @@ def run_block(mode: str, wayland: bool, block: str = "",
     res = H.Results(tag)
     wl_socket = "wayland-1"
 
-    H.server_start(mode=mode, wayland=wayland)
+    H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_VIDEO_STREAMING_MODE": "true"})
     res.check("server up", True, H.curl("/api/status")[0])
     st_mode = json.loads(H.curl("/api/status")[1]).get("current_mode")
     res.check("api/status mode", st_mode == mode, st_mode)

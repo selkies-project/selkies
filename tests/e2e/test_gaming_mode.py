@@ -99,13 +99,13 @@ class Desk:
         deadline = time.time() + 15
         while time.time() < deadline and not PL.Desktop._x11_managed(self.display):
             time.sleep(0.25)
-        from selkies.Xlib.display import Display
+        from Xlib.display import Display
         self.d = Display(self.display)
         self.root = self.d.screen().root
 
     def key(self, name: str, down: bool) -> None:
-        from selkies.Xlib import X, XK
-        from selkies.Xlib.ext import xtest
+        from Xlib import X, XK
+        from Xlib.ext import xtest
         keycode = self.d.keysym_to_keycode(XK.string_to_keysym(name))
         xtest.fake_input(self.d, X.KeyPress if down else X.KeyRelease, keycode)
         self.d.flush()
@@ -124,8 +124,8 @@ class Desk:
             time.sleep(0.03)
 
     def click(self, x: int, y: int) -> None:
-        from selkies.Xlib import X
-        from selkies.Xlib.ext import xtest
+        from Xlib import X
+        from Xlib.ext import xtest
         self.root.warp_pointer(x, y)
         self.d.sync()
         time.sleep(0.1)
@@ -136,8 +136,8 @@ class Desk:
         self.d.flush()
 
     def move(self, dx: int, dy: int) -> None:
-        from selkies.Xlib import X
-        from selkies.Xlib.ext import xtest
+        from Xlib import X
+        from Xlib.ext import xtest
         xtest.fake_input(self.d, X.MotionNotify, detail=True, root=X.NONE, x=dx, y=dy)
         self.d.flush()
 

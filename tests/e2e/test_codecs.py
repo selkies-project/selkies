@@ -17,7 +17,9 @@ H.264 and the display moves to ``h264enc``, logged by the server.
 
 The picture is a known color the test paints on the server, sampled from the
 decoded frame in the page, exactly as ``test_encoders.py`` does; over WebRTC
-the <video> must then keep presenting frames while the screen changes.
+the <video> must then keep presenting frames while the screen changes. The
+server runs Turbo, so the frame rate read over WebSockets is the stream's while
+the painted picture holds still.
 
     python3 tests/e2e/test_codecs.py ws-x11|ws-wl|wr-x11 [chromium|firefox|webkit|all]
 
@@ -128,7 +130,7 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
             if engine == "webkit" and encoder == "vp8enc" else "")
     # The codec under test is the default; the ladder's rungs stay allowed.
     H.server_start(mode=mode, wayland=wayland,
-                   extra_env={"SELKIES_ENCODER": f"{encoder},h264enc,jpeg"})
+                   extra_env={"SELKIES_ENCODER": f"{encoder},h264enc,jpeg", **TENC.TURBO})
     picture = TENC.Picture(wayland, live=mode == "webrtc")
     try:
         picture.paint()
@@ -153,7 +155,7 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
                     else:
                         res.check(f"{tag}: the browser declined it, so the display moved to h264enc",
                                   C.wait_log("is not decoded by a WebRTC peer", timeout=10)
-                                  and C.wait_log("using 'h264enc'", timeout=10), "")
+                                  and C.wait_log('using "h264enc"', timeout=10), "")
                         line = wait_stream_mode("H264")
                         res.check(f"{tag}: the server streams H.264 instead",
                                   "Mode: H264" in line, TENC.encoder_field(line))
@@ -210,7 +212,7 @@ def paint_bars(w: int, h: int) -> Any:
     """A bar over the last CROP_BAR rows and another over the last columns, on
     the test display, so the edge a padded picture would push out of view is
     a known color."""
-    from selkies.Xlib import display as xdisp, X
+    from Xlib import display as xdisp, X
     d = xdisp.Display(H.require_display())
     scr = d.screen()
     for geometry, argb in (((0, h - CROP_BAR, w, CROP_BAR), TENC.PAINT_ARGB),

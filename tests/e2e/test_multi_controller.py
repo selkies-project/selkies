@@ -42,6 +42,9 @@ The ``frozen-wr`` block hides an owner over WebRTC whose page never sends its
 STOP_VIDEO (a phone frozen on hide): once the display goes to the page in
 view, the old owner's feed pauses, and resumes when it is shown.
 
+Every server runs Turbo, so the still test display keeps each page's stream
+moving for the checks that count its frames.
+
 Usage: python3 tests/e2e/test_multi_controller.py
     [websockets|webrtc|settings|settings-wr|nodisrupt|visible|visible-wr|inuse|inuse-wr|older|frozen-wr|all]
 """
@@ -55,6 +58,8 @@ import helpers as H
 import core_lib as C
 import test_encoders as TENC
 from playwright.sync_api import sync_playwright
+
+TURBO = {"SELKIES_VIDEO_STREAMING_MODE": "true"}
 
 
 def streaming(page, mode: str, seconds: float = 2.0) -> bool:
@@ -90,7 +95,7 @@ def wait_root(want: tuple, timeout: float = 20, slack: int = 16) -> tuple:
 
 
 def run(res: "H.Results", mode: str) -> None:
-    H.server_start(mode=mode)
+    H.server_start(mode=mode, extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             owner_browser, owner, _, _ = C.launch_chrome(pw, mode=mode)
@@ -222,7 +227,7 @@ def crashed(lines: list) -> list:
 
 
 def run_settings(res: "H.Results") -> None:
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             owner_browser, owner, owner_lines = open_page(pw, {"encoder": "jpeg", "video_crf": "30"})
@@ -263,7 +268,7 @@ def run_settings(res: "H.Results") -> None:
             other_browser.close()
             owner_browser.close()
         # A later visit of the owner's browser, the display's last session gone: its own picks.
-        H.server_start(mode="websockets")
+        H.server_start(mode="websockets", extra_env=TURBO)
         with sync_playwright() as pw:
             browser, page, _ = open_page(pw, {}, storage=storage)
             res.check("settings: a later visit of the owner's browser streams", video(page, "websockets"))
@@ -294,7 +299,7 @@ def wait_codec(page, name: str, timeout: float = 30) -> str:
 
 
 def run_settings_wr(res: "H.Results") -> None:
-    H.server_start(mode="webrtc")
+    H.server_start(mode="webrtc", extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             owner_browser, owner, owner_lines = open_page(pw, {"encoder": "vp8enc", "video_crf": "30"},
@@ -331,7 +336,7 @@ def run_settings_wr(res: "H.Results") -> None:
             storage = owner.context.storage_state()
             other_browser.close()
             owner_browser.close()
-        H.server_start(mode="webrtc")
+        H.server_start(mode="webrtc", extra_env=TURBO)
         with sync_playwright() as pw:
             browser, page, _ = open_page(pw, {}, storage=storage, mode="webrtc")
             res.check("settings-wr: a later visit of the owner's browser streams", video(page, "webrtc"))
@@ -404,7 +409,7 @@ def near(size: tuple, want: tuple, slack: int = 16) -> bool:
 
 def run_visible(res: "H.Results", mode: str) -> None:
     tag = f"visible-{mode}"
-    H.server_start(mode=mode)
+    H.server_start(mode=mode, extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             owner_browser, owner, _, _ = C.launch_chrome(pw, mode=mode)
@@ -461,7 +466,7 @@ def run_visible(res: "H.Results", mode: str) -> None:
 
 def run_inuse(res: "H.Results", mode: str) -> None:
     tag = f"inuse-{mode}"
-    H.server_start(mode=mode)
+    H.server_start(mode=mode, extra_env=TURBO)
     try:
         with sync_playwright() as pw:
             owner_browser, owner, _, _ = C.launch_chrome(pw, mode=mode)
@@ -501,7 +506,7 @@ def run_inuse(res: "H.Results", mode: str) -> None:
 
 
 def run_nodisrupt(res: "H.Results") -> None:
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     tone = H.pulse_sine()
     picture = TENC.Picture(False)
     try:
@@ -564,7 +569,7 @@ def run_nodisrupt(res: "H.Results") -> None:
 
 
 def run_older(res: "H.Results") -> None:
-    H.server_start(mode="websockets")
+    H.server_start(mode="websockets", extra_env=TURBO)
     picture = TENC.Picture(False)
     try:
         with sync_playwright() as pw:
@@ -607,7 +612,7 @@ def wr_frames(page) -> int:
 
 
 def run_frozen_wr(res: "H.Results") -> None:
-    H.server_start(mode="webrtc")
+    H.server_start(mode="webrtc", extra_env=TURBO)
     picture = TENC.Picture(False, live=True)
     try:
         with sync_playwright() as pw:

@@ -125,7 +125,7 @@ window.__padPress = (p, i, v) => {
 };
 """
 
-# The cores' storage prefix (lib/util.js getStorageAppName): origin + path with
+# The cores' storage prefix (lib/util.ts getStorageAppName): origin + path with
 # everything but [A-Za-z0-9._-] replaced by '_'.
 STORAGE_APP = "(location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_')"
 
@@ -332,7 +332,7 @@ def static_rendering_block(page: Any, mode: str, res: "H.Results") -> None:
             res.check(f"static rendering: anti-aliasing {enabled} needs no new frame",
                       bool(after and before and after["frames"] == before["frames"]), after)
     finally:
-        post(page, {"type": "settings", "settings": {"video_streaming_mode": True}})
+        post(page, {"type": "settings", "settings": {"use_paint_over_quality": True}})
 
 
 def resolution_block(page: Any, mode: str, res: "H.Results") -> None:

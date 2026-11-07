@@ -1,0 +1,148 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: Build the Developer Reference
+
+# The Developer Reference is a file a release carries,
+# selkies-<version>-reference.tar.gz, which that version's page of the docs
+# site links; the site hosts prose alone, for every version.
+# website/scripts/build-reference-archive.mjs builds it, and this uploads it
+# as the run's `selkies-reference` artifact.
+#
+# A caller builds the commit it checked out: release.yaml for every release
+# it cuts, whose draft takes the file with the run's other artifacts, under
+# its SHA256SUMS and attestation, and the per-commit pre-release of main,
+# whose newest file the site's main version links. Run from the Actions tab
+# with the tag of a release, it builds that tag with the site tooling of the
+# branch it runs from, and with `attach` puts the file on the release,
+# replacing one already there, and brings the release's SHA256SUMS to cover
+# it: how a release cut before its reference was a download gets one.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version the file is named for and its source links point at (0.0.0.dev0 for a build of main)
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of the release to build the reference of (e.g. 2.2.1)
+        type: string
+        required: true
+      attach:
+        description: Attach the file to the release of that tag, replacing one already there
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "26"
+  # The toolchain the packages and images build the server with
+  RUST_TOOLCHAIN: "1.99.1"
+  # Set for a run from the Actions tab alone; a caller passes the version
+  # and builds the commit it checked out
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  build:
+    name: Build the reference
+    runs-on: ubuntu-latest
+    outputs:
+      asset: ${{ steps.build.outputs.asset }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # A release's tag is exported from the history
+          fetch-depth: ${{ inputs.tag == '' && 1 || 0 }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # The server's half is cargo doc's for a tree whose server is the Rust
+      # workspace, which type-checks pixelflux and pcmflux against the
+      # libraries they build with, the ones the base image's server stage
+      # installs; a release whose server is the Python package needs python3,
+      # which the runner has.
+      - name: Install the Rust toolchain and the server's build libraries
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential pkg-config cmake nasm clang libclang-dev \
+            libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
+            libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
+            libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
+            libxcb-xfixes0-dev libpulse-dev
+          # libx264 with the patches whose API pixelflux reads
+          sh infra/packaging/x264.sh "${HOME}/x264"
+          echo "PKG_CONFIG_PATH=${HOME}/x264/lib/pkgconfig" >> "${GITHUB_ENV}"
+
+      - id: build
+        name: Build the reference archive
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -e
+          (cd website && npm ci --no-audit --no-fund)
+          if [ -n "${TAG}" ]; then
+            git rev-parse --verify --quiet "refs/tags/${TAG}" > /dev/null \
+              || { echo "::error::${TAG} is not a tag"; exit 1; }
+            version="${TAG#v}"
+            node website/scripts/build-reference-archive.mjs "${version}" --tag "${TAG}" --out reference
+          else
+            version="${VERSION}"
+            node website/scripts/build-reference-archive.mjs "${version}" --out reference
+          fi
+          echo "asset=selkies-${version}-reference.tar.gz" >> "${GITHUB_OUTPUT}"
+          ls -la reference/
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selkies-reference
+          path: reference/*
+          # Already compressed
+          compression-level: 0
+          if-no-files-found: error
+
+  attach:
+    name: Attach the reference to its release
+    needs: build
+    if: ${{ inputs.attach }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # The file's build provenance, as release.yaml attests the files it releases
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: selkies-reference
+          path: reference/
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: reference/*
+      # A release that lists its files' sums lists this one's too, in place of
+      # any line an earlier upload of it left; one that lists none is left so
+      - name: Upload the reference and its sum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ needs.build.outputs.asset }}
+        run: |
+          set -e
+          set -- "reference/${ASSET}"
+          if gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --pattern SHA256SUMS --dir sums; then
+            grep -v -F "  ${ASSET}" sums/SHA256SUMS > sums/listed || true
+            (cd reference && sha256sum -- "${ASSET}") >> sums/listed
+            mv sums/listed sums/SHA256SUMS
+            set -- "$@" sums/SHA256SUMS
+          fi
+          gh release upload "${TAG}" "$@" --repo "${GITHUB_REPOSITORY}" --clobber

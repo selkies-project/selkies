@@ -276,7 +276,7 @@ def log_since(offset: int) -> str:
 
 
 def keycodes(chars: str) -> dict:
-    from selkies.Xlib import XK
+    from Xlib import XK
     d = H.x_display()
     try:
         return {d.keysym_to_keycode(XK.string_to_keysym(ch)): ch for ch in chars}

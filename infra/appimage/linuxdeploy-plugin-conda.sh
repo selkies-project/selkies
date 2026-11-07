@@ -5,16 +5,17 @@
 #
 # linuxdeploy plugin that bundles a conda environment into an AppDir, in the
 # same shape as https://github.com/linuxdeploy/linuxdeploy-plugin-conda and
-# with the same variables, but installing Miniforge instead of Miniconda3:
-# Miniforge is BSD-3-Clause and resolves against conda-forge alone, so nothing
-# here is subject to the Anaconda repository terms. That upstream plugin also
-# publishes no release artifacts, so it is vendored rather than downloaded.
+# with the same variables, but creating the prefix with micromamba instead of
+# installing Miniconda3: micromamba is one static executable (BSD-3-Clause)
+# that solves and installs without a Python interpreter, so the prefix holds
+# the packages asked for and none of conda's own, and it resolves against the
+# channels named alone, so nothing here is subject to the Anaconda repository
+# terms. That upstream plugin also publishes no release artifacts, so it is
+# vendored rather than downloaded.
 #
 # Variables:
 #   CONDA_CHANNELS="channelA;channelB;..."   (in priority order)
 #   CONDA_PACKAGES="packageA;packageB;..."
-#   CONDA_PYTHON_VERSION="3.12"
-#   PIP_REQUIREMENTS="packageA packageB -r requirements.txt"
 #   ARCH="x86_64" (also aarch64)
 set -e
 [ -n "${DEBUG:-}" ] && set -x
@@ -26,64 +27,63 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --plugin-api-version) echo "0"; exit 0 ;;
         --appdir) APPDIR="$(readlink -f "$2")"; shift 2 ;;
-        --help) sed -n '2,22p' "$0"; exit 0 ;;
+        --help) sed -n '2,19p' "$0"; exit 0 ;;
         *) echo "invalid argument: $1" >&2; exit 1 ;;
     esac
 done
 [ -n "${APPDIR}" ] || { echo "usage: $0 --appdir <path>" >&2; exit 1; }
 
 DOWNLOAD_DIR="${CONDA_DOWNLOAD_DIR:-/tmp/linuxdeploy-plugin-conda-$(id -u)}"
-# conda maps CONDA_*-named environment variables onto its own configuration, and
-# `channels` is one of them: left in the environment, the solver reads the whole
-# ';'-separated list as a single channel name. pip does the same with PIP_*. Take
-# a copy and clear them before anything is invoked.
+# micromamba maps CONDA_*-named environment variables onto its own
+# configuration, and `channels` is one of them: left in the environment, the
+# solver reads the whole ';'-separated list as a single channel name. Take a
+# copy and clear them before anything is invoked.
 CHANNELS="${CONDA_CHANNELS:-}"
 PACKAGES="${CONDA_PACKAGES:-}"
-PYTHON_VERSION="${CONDA_PYTHON_VERSION:-}"
-REQUIREMENTS="${PIP_REQUIREMENTS:-}"
-unset CONDA_CHANNELS CONDA_PACKAGES CONDA_PYTHON_VERSION PIP_REQUIREMENTS
+unset CONDA_CHANNELS CONDA_PACKAGES
 
-# Retry every remote fetch below. mamba reads MAMBA_* and keeps its defaults when
-# only CONDA_* is set, so both prefixes are exported, with mamba's own backoff
-# factor of 3 matched rather than lowered. Unrelated to the CONDA_* names cleared
-# above, which are this plugin's inputs that conda would misread as its config.
+# Retry every remote fetch below, with mamba's own backoff factor of 3 matched
+# rather than lowered. Unrelated to the CONDA_* names cleared above, which are
+# this plugin's inputs that micromamba would misread as its config.
 export MAMBA_REMOTE_MAX_RETRIES="5" MAMBA_REMOTE_BACKOFF_FACTOR="3" \
     MAMBA_REMOTE_CONNECT_TIMEOUT_SECS="30"
-export CONDA_REMOTE_MAX_RETRIES="5" CONDA_REMOTE_BACKOFF_FACTOR="3" \
-    CONDA_REMOTE_CONNECT_TIMEOUT_SECS="30" CONDA_REMOTE_READ_TIMEOUT_SECS="120"
-export PIP_RETRIES="5" PIP_TIMEOUT="60"
+# Its package cache stays beside the download rather than in the prefix
+export MAMBA_ROOT_PREFIX="${DOWNLOAD_DIR}/root"
 
 mkdir -p "${DOWNLOAD_DIR}" "${APPDIR}"
-# Miniforge names its installers after `uname -m`
-INSTALLER="Miniforge3-Linux-${ARCH}.sh"
+# micromamba names its executables after conda's platform, which is `uname -m`
+# for every architecture but x86_64
+case "${ARCH}" in
+    x86_64) ASSET="micromamba-linux-64" ;;
+    *) ASSET="micromamba-linux-${ARCH}" ;;
+esac
+MAMBA="${DOWNLOAD_DIR}/micromamba"
 # The latest release, checked against the SHA-256 recorded for it.
 # fetch-verified reads that off GitHub's API and waits out the rate limit it
 # answers with; it sits beside this plugin when scripts/ci/appimage.sh placed it
-# there, and a direct run of the plugin takes the latest release's versioned
-# installer and the `.sha256` Miniforge publishes beside that one.
+# there, and a direct run of the plugin takes the latest release's executable
+# and the `.sha256` micromamba publishes beside it.
 HERE="$(dirname "$(readlink -f "$0")")"
 if [ -x "${HERE}/fetch-verified" ]; then
-    "${HERE}/fetch-verified" release conda-forge/miniforge latest "${INSTALLER}" "${DOWNLOAD_DIR}/${INSTALLER}"
+    "${HERE}/fetch-verified" release mamba-org/micromamba-releases latest "${ASSET}" "${MAMBA}"
 else
     CURL=(curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180)
-    TAG="$("${CURL[@]}" -I -o /dev/null -w '%{url_effective}' https://github.com/conda-forge/miniforge/releases/latest)"
-    TAG="${TAG##*/}"
-    URL="https://github.com/conda-forge/miniforge/releases/download/${TAG}/Miniforge3-${TAG}-Linux-${ARCH}.sh"
-    "${CURL[@]}" -o "${DOWNLOAD_DIR}/${INSTALLER}" "${URL}"
+    URL="https://github.com/mamba-org/micromamba-releases/releases/latest/download/${ASSET}"
+    "${CURL[@]}" -o "${MAMBA}" "${URL}"
     SUM="$("${CURL[@]}" "${URL}.sha256" | cut -d' ' -f1)"
-    if [ "$(sha256sum "${DOWNLOAD_DIR}/${INSTALLER}" | cut -d' ' -f1)" != "${SUM}" ]; then
-        echo "Miniforge ${TAG}: ${INSTALLER} does not match its published SHA-256 ${SUM}" >&2
-        rm -f "${DOWNLOAD_DIR}/${INSTALLER}"
+    if [ "$(sha256sum "${MAMBA}" | cut -d' ' -f1)" != "${SUM}" ]; then
+        echo "micromamba: ${ASSET} does not match its published SHA-256 ${SUM}" >&2
+        rm -f "${MAMBA}"
         exit 1
     fi
 fi
+chmod +x "${MAMBA}"
 
 # usr/conda rather than usr/ so these libraries cannot collide with what
 # linuxdeploy and its other plugins bundle
 PREFIX="${APPDIR}/usr/conda"
-bash "${DOWNLOAD_DIR}/${INSTALLER}" -b -p "${PREFIX}" -f
 
-# Keep conda away from the invoking user's configuration
+# Keep micromamba away from the invoking user's configuration
 mkdir -p "${APPDIR}/.conda-home"
 export HOME
 HOME="$(readlink -f "${APPDIR}/.conda-home")"
@@ -95,7 +95,6 @@ for chan in "${chans[@]}"; do
 done
 
 pkgs=()
-[ -n "${PYTHON_VERSION}" ] && pkgs+=("python=${PYTHON_VERSION}")
 IFS=';' read -ra requested <<< "${PACKAGES}"
 for pkg in "${requested[@]}"; do
     [ -n "${pkg}" ] && pkgs+=("${pkg}")
@@ -103,27 +102,13 @@ done
 if [ "${#pkgs[@]}" -eq 0 ]; then
     echo "WARNING: no CONDA_PACKAGES requested" >&2
 else
-    # One transaction so the solver sees the whole set; mamba ships with
-    # Miniforge and conda is the fallback
-    SOLVER="${PREFIX}/bin/mamba"
-    [ -x "${SOLVER}" ] || SOLVER="${PREFIX}/bin/conda"
-    "${SOLVER}" install -y "${channel_args[@]}" "${pkgs[@]}"
+    # One transaction so the solver sees the whole set. Copies rather than
+    # links into its package cache, which the cleanup below would strip
+    # through the links.
+    "${MAMBA}" create -y -p "${PREFIX}" --always-copy "${channel_args[@]}" "${pkgs[@]}"
 fi
 
-if [ -n "${REQUIREMENTS}" ]; then
-    # shellcheck disable=SC2086  # the requirement list is intentionally split
-    "${PREFIX}/bin/pip" install -U ${REQUIREMENTS}
-fi
-
-# Every entry point conda and pip generated names the interpreter by this
-# prefix's path, which exists only on the machine that built the AppImage, so
-# they are pointed at it relative to themselves. The sibling script is required
-# rather than optional: without it the AppDir assembles and nothing in it runs.
-RELOCATE="${HERE}/relocate-shebangs.sh"
-[ -x "${RELOCATE}" ] || { echo "${RELOCATE} is missing" >&2; exit 1; }
-"${RELOCATE}" "${PREFIX}"
-
-# linuxdeploy looks for the entry points in usr/bin
+# linuxdeploy looks for the executables in usr/bin
 mkdir -p "${APPDIR}/usr/bin"
 for path in "${PREFIX}"/bin/*; do
     name="$(basename "${path}")"
@@ -134,7 +119,6 @@ done
 if [ "${CONDA_SKIP_CLEANUP:-}" != "1" ]; then
     rm -rf "${PREFIX}/pkgs" "${PREFIX}/lib/cmake" "${PREFIX}/share/doc" \
            "${PREFIX}/share/gtk-doc" "${PREFIX}/share/man" "${APPDIR}/.conda-home"
-    find "${PREFIX}" -type d -name '__pycache__' -prune -exec rm -rf {} +
     find "${PREFIX}" -type f -name '*.a' -delete
     find "${PREFIX}" -type f -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
 fi

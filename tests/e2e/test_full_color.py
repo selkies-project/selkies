@@ -4,7 +4,7 @@
 `video_fullcolor` makes the H.264 encoders emit 4:4:4, which is High 4:4:4
 Predictive on the wire, and engines differ on whether their decoder has that
 profile. One that does not shows no picture at all rather than a worse one,
-with every stripe decoder built and refused for as long as the session runs, so
+with every decoder built and refused for as long as the session runs, so
 the client settles the question against its own decoder before it asks the
 server for anything. This suite asks each engine the same way rather than
 naming which ones can: what an engine decodes changes with its releases.
@@ -92,7 +92,7 @@ window.__SELKIES_STREAMING_MODE__ = '%s';
   localStorage.setItem(k + '_encoder', '%s');
   localStorage.setItem(k + '_video_fullcolor', 'true');
 })();
-""" % (mode, encoder or ("h264enc-striped" if mode == "websockets" else "h264enc"))
+""" % (mode, encoder or "h264enc")
 
 
 # A decoder without the 4:4:4 profile, whatever this engine's really has: the
@@ -112,8 +112,8 @@ REFUSE_FULLCOLOR_JS = """
   };
 })();
 """
-# The stripe decoders on the page rather than in the video worker, where a
-# script injected into the page cannot reach them.
+# The decoders on the page rather than in the video worker, where a script
+# injected into the page cannot reach them.
 PAGE_DECODE_URL = H.BASE_URL + "/?offscreen_worker=false"
 
 # A decoder that takes the probe and never answers it, which is what WebKit's
@@ -163,9 +163,10 @@ def drive_stalled(res: "H.Results", p: Any, mode: str) -> None:
 
 
 def drive_openh264(res: "H.Results", p: Any, tag: str) -> None:
-    """The striped encoder of an OpenH264 build cannot emit 4:4:4, so a locked
-    full color reaches the client as 4:2:0, which every engine decodes:
-    nothing is refused, nothing is said, and the stream plays where it is."""
+    """OpenH264 cannot emit 4:4:4, so a locked full color on a software session
+    of an OpenH264 build reaches the client as 4:2:0, which every engine
+    decodes: nothing is refused, nothing is said, and the stream plays where it
+    is."""
     browser = C.launch_browser(p, "webkit")
     try:
         ctx = browser.new_context(viewport={"width": 1280, "height": 720})
@@ -178,7 +179,7 @@ def drive_openh264(res: "H.Results", p: Any, tag: str) -> None:
         encoder = page.evaluate(STORED_JS.replace("_video_fullcolor", "_encoder"))
         res.check(f"[{tag}] OpenH264 streams 4:2:0 under a locked full color",
                   "Colorspace: I420" in H.server_log(), H.server_log()[-200:])
-        res.check(f"[{tag}] and the stream plays where it is", played and encoder == "h264enc-striped",
+        res.check(f"[{tag}] and the stream plays where it is", played and encoder == "h264enc",
                   (played, encoder))
         refused = [t for t in said if "has no decoder for" in t or "cannot decode" in t]
         res.check(f"[{tag}] nothing is refused", not refused, refused[:2])
@@ -192,8 +193,8 @@ def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
     A client cannot turn a locked setting off, so it walks the refusal ladder
     instead: the next allowed video encoder whose stream it decodes at the
     locked full color, or whose codec carries none, and JPEG only when no
-    video codec is left. What must not happen is the stripe decoders being
-    built and refused for as long as the session runs, with nothing on the
+    video codec is left. What must not happen is the decoder being built and
+    refused for as long as the session runs, with nothing on the
     page to say why.
 
     Args:
@@ -229,7 +230,7 @@ def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
                   encoder in ("h265enc", "vp8enc", "vp9enc", "av1enc"), encoder)
         res.check("[locked] and the stream plays there", played, played)
         spam = [t for t in said if "Error configuring VNC stripe decoder" in t]
-        res.check("[locked] no stripe is left reporting the refusal per frame",
+        res.check("[locked] no decoder is left reporting the refusal per frame",
                   not spam, spam[:2])
     finally:
         C.close_browser(browser)
@@ -261,7 +262,7 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
         # encoder and full color again and then send a key frame the engine
         # refuses again; the refusal stands and is not reported a second time.
         page.evaluate(
-            "window.postMessage({ type: 'settings', settings: { video_streaming_mode: true } }, window.location.origin)")
+            "window.postMessage({ type: 'settings', settings: { cpu_encode_threading: false } }, window.location.origin)")
         page.wait_for_timeout(8000)
         again = [t for t in said if "which this browser cannot decode" in t]
         res.check("[pinned] and not again when the server announces the same",
@@ -272,7 +273,7 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
         res.check("[pinned] and said on the page, not only in the console",
                   shown and "hidden" not in shown[0], shown)
         spam = [t for t in said if "Error configuring VNC stripe decoder" in t]
-        res.check("[pinned] no stripe is left reporting the refusal per frame",
+        res.check("[pinned] no decoder is left reporting the refusal per frame",
                   not spam, spam[:2])
     finally:
         C.close_browser(browser)
@@ -345,7 +346,7 @@ def drive(res: "H.Results", engine: str, mode: str, p: Any, vp9: bool = False) -
         res.check(f"[{tag}] turning it off is said once, and only then",
                   (len(said) > 0) == (not decodable), said[:1] or decodable)
         refused = [w for w in warnings if "config not supported" in w]
-        res.check(f"[{tag}] no stripe decoder is left asking for a profile it lacks",
+        res.check(f"[{tag}] no decoder is left asking for a profile it lacks",
                   not refused, refused[:1])
     finally:
         C.close_browser(browser)
@@ -365,7 +366,9 @@ def main() -> "H.Results":
     default = engine == "default"
     env = {"SELKIES_VIDEO_FULLCOLOR": "true|locked"} if locked else None
     if engine == "pinned":
-        env["SELKIES_ENCODER"] = "h264enc-striped"
+        env["SELKIES_ENCODER"] = "h264enc"
+    if locked and TS.server_software_encoder() == "openh264":
+        env["SELKIES_USE_CPU"] = "true"
     if default:
         env = {"SELKIES_VIDEO_FULLCOLOR": "true"}
     if vp9:

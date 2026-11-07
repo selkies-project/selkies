@@ -64,7 +64,7 @@ However, it might be that the parameters for the transport, the video encoder (`
 
 Open the stats (the sidebar's Stats section, or the toolbar's gauge button). Nothing in the container log is needed; the first four rows are what the capture library and the browser report about this session, and a row that fell short of what the session asked for carries a warning mark and the reason underneath.
 
-- **Encoder** names what encodes the stream: `NVENC` or `VAAPI` with the GPU, its render node, and kernel driver, or a software library (`x264`, `openh264`, `libvpx`, ...). Software encoding that was selected (`--use-cpu`, the striped H.264 encoder, JPEG) is shown without a warning, and so is a server that is exposed no GPU at all (no `/dev/dri/renderD*` and no `/dev/nvidiactl`), which the row states: a container that was never given the machine's GPU is an ordinary deployment, and giving it one (`--gpus`, `--device /dev/dri`) is what changes the row. Software encoding on a server that does have a GPU, in a session that asked for hardware, warns and says why the hardware session did not open. The usual causes are a render node the session user cannot open, a missing NVIDIA `video` driver capability, or a codec the GPU has no engine for.
+- **Encoder** names what encodes the stream: `NVENC` or `VAAPI` with the GPU, its render node, and kernel driver, or a software library (`x264`, `openh264`, `libvpx`, ...). Software encoding that was selected (`--use-cpu`, JPEG) is shown without a warning, and so is a server that is exposed no GPU at all (no `/dev/dri/renderD*` and no `/dev/nvidiactl`), which the row states: a container that was never given the machine's GPU is an ordinary deployment, and giving it one (`--gpus`, `--device /dev/dri`) is what changes the row. Software encoding on a server that does have a GPU, in a session that asked for hardware, warns and says why the hardware session did not open. The usual causes are a render node the session user cannot open, a missing NVIDIA `video` driver capability, or a codec the GPU has no engine for.
 - **Capture** names the display backend and whether frames reach a hardware encoder without a copy: NvFBC or DRI3 on X11, the compositor's own buffers on Wayland. A readback in front of a software encoder is simply how software encoding works and carries no warning. A readback in front of a hardware encoder warns where the display server offered it a zero-copy path that was not taken, and lists what each path was declined for; on a server that offers none, such as an Xvfb with neither DRI3 nor NvFBC or an X server drawing on another GPU, the readback is how that host is built and carries no warning. On Wayland the second line says whether the compositor renders with GL on a render node or in software.
 - **Decoder** says whether this browser decodes in hardware, and on what evidence. Browsers do not always say: over WebSockets the verdict comes from the frames the decoder hands out and from asking the browser whether a hardware decoder exists for the stream, over WebRTC from the decoder the browser names, which some browsers name only to a page holding a camera or microphone permission, else from a frame read off the received video the same way. Software decoding warns only where the browser had a hardware decoder for the stream and did not use it, by one rule on both transports: the browser says it decodes this stream, with its codec, profile, and size, power-efficiently, or this client left a hardware decoder after it failed; a browser with no hardware decoder for the stream is as ordinary as a server with no GPU. `N/A` means the browser gave nothing to go on, not that decoding is slow; the decode time under the graphs is what shows a decoder falling behind.
 - **Connection** names the transport, and over WebRTC the path: `Host UDP` is direct (`Srflx` and `Prflx` through a NAT), `Relay` is a TURN server in the path, and `TCP` costs latency under loss. A direct UDP path is marked good and the others are how the network connects this client, which marks nothing either way; the row warns only while the server is holding frames back because this client is not keeping up.
@@ -205,27 +205,29 @@ Try the [TURN-REST Container](components/turn.md#turn-rest) or its underlying tu
 
 The below steps can be used when you want to test your TURN server configured with a shared secret instead of the legacy username/password authentication:
 
-**1. Run the [Desktop Container](components/desktop-image.md) (set `DISTRIB_FLAVOR` to an image flavor, `ubuntu26.04` or `debiantrixie`):**
+**1. Run the [Desktop Container](components/desktop-image.md) in WebRTC mode with the TURN server and its shared secret (set `DISTRIB_FLAVOR` to an image flavor, `ubuntu26.04` or `debiantrixie`):**
 
 ```bash
-docker run --name selkies -it -d --rm -p 8080:8080 -p 3478:3478 ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}
-docker exec -it selkies bash
+docker run --name selkies -it -d --rm -p 8080:8080 -p 3478:3478 \
+  -e SELKIES_MODE=webrtc \
+  -e SELKIES_TURN_HOST="YOUR_TURN_HOST" \
+  -e SELKIES_TURN_PORT="YOUR_TURN_PORT" \
+  -e SELKIES_TURN_SHARED_SECRET="YOUR_SHARED_SECRET" \
+  -e SELKIES_TURN_REST_USERNAME="user" \
+  ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}
 ```
 
 > **The default login is `ubuntu` / `mypasswd`.** Change it with `-e PASSWD=...` before putting a session anywhere others can reach it.
 
 Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs, with the NVIDIA Container Toolkit v1.20.1 or higher on the host.
 
-**2. From inside the test container, call the `generate_rtc_config` method.**
+**2. Ask the server for the RTC configuration it generated from the shared secret.**
 
 ```bash
-export SELKIES_TURN_HOST="YOUR_TURN_HOST"
-export SELKIES_TURN_PORT="YOUR_TURN_PORT"
-export SELKIES_TURN_SHARED_SECRET="YOUR_SHARED_SECRET"
-export SELKIES_TURN_USERNAME="user"
-
-python3 -c 'import os;from selkies.webrtc_ice_config import generate_rtc_config; print(generate_rtc_config(os.environ["SELKIES_TURN_HOST"], os.environ["SELKIES_TURN_PORT"], os.environ["SELKIES_TURN_SHARED_SECRET"], os.environ["SELKIES_TURN_USERNAME"]))'
+curl -sk -u ubuntu:mypasswd https://localhost:8080/api/turn
 ```
+
+The `turn:` server in `iceServers` carries the short-term credential: the `username` `<expiry>:user` and, as its `credential`, the base64 HMAC-SHA1 of that username under the shared secret.
 
 Using both methods, you can then test your TURN server configuration from the [Trickle ICE](https://webrtc.github.io/samples/src/content/peerconnection/trickle-ice/) website.
 

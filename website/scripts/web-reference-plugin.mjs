@@ -7,14 +7,15 @@
  * inside it, and the dashboard keeps its handlers inside its components.
  * This plugin therefore converts every function that carries a docblock —
  * module-level or nested — into its module's page, so the reference covers
- * what the docblocks cover, as griffe does for the Python modules. A default
+ * what the docblocks cover, as rustdoc does for the server's crates. A default
  * export is named after its declaration rather than `default`.
  *
  * `_`-prefixed members are dropped from the reference: the web sources mark
  * private state and helpers by that prefix rather than TypeScript's `private`
  * keyword, which is all TypeDoc's excludePrivate understands. Finally the
- * front matter fumadocs needs is written, since typedoc-plugin-markdown emits
- * none.
+ * front matter fumadocs needs is written into each Markdown page, since
+ * typedoc-plugin-markdown emits none; its page event shares its name with the
+ * HTML theme's, so a page the archive renders with that theme is left alone.
  */
 import ts from 'typescript';
 import { Converter, ReflectionKind } from 'typedoc';
@@ -89,6 +90,7 @@ export function load(app) {
   });
 
   app.renderer.on(MarkdownPageEvent.END, (page) => {
+    if (!page.url.endsWith('.md')) return;
     page.contents = `---\ntitle: ${JSON.stringify(page.model.name)}\n---\n\n${page.contents ?? ''}`;
   });
 }

@@ -4,8 +4,8 @@
 
 # Development stack for this repository. `dist` builds the wheel (web client
 # included), `base` builds the desktop-less session container from addons/base,
-# `desktop` layers the reference LXQt desktop on it, and `desktop-gpu` is the
-# same container with a GPU attached.
+# `desktop` layers the reference desktop (selkies-desktop) on it, and
+# `desktop-gpu` is the same container with a GPU attached.
 #
 #   docker compose build dist                      # wheel image
 #   docker compose build base desktop              # session, then the desktop
@@ -29,10 +29,7 @@ services:
   base:
     ###
     # NOTE: export DISTRIB_IMAGE and DISTRIB_RELEASE to change the base image.
-    # To test an unreleased wheel, build it with the `dist` service, then copy it
-    # from the `selkies-py-build` image into `addons/base/wheels/` before
-    # building this service; otherwise the wheel of the newest GitHub release
-    # is installed.
+    # The server is built from this checkout.
     ###
     image: selkies-base:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     build:
@@ -75,8 +72,8 @@ services:
       SELKIES_DEBUG_CURSORS: ${SELKIES_DEBUG_CURSORS:-false}
       # Login password of the unprivileged user
       PASSWD: ${PASSWD:-mypasswd}
-      # Start a full LXQt session, vs just the display server.
-      START_LXQT: ${START_LXQT:-true}
+      # Start the desktop (selkies-desktop, over Openbox on X11), vs just the display server.
+      START_DESKTOP: ${START_DESKTOP:-true}
       # Use the headless Wayland backend instead of X11 (default: X11 Xvfb).
       SELKIES_WAYLAND: ${SELKIES_WAYLAND:-false}
       # Session compositor nested in the capture compositor, supplying window

@@ -3,7 +3,10 @@
 #     pip install pre-commit
 #     pre-commit install
 #
-# Run over the whole tree at any time with `pre-commit run --all-files`.
+# Run over the whole tree at any time with `pre-commit run --all-files`. rustfmt
+# and clippy come with the Rust toolchain (`rustup component add rustfmt
+# clippy`); clippy builds the workspace, so it needs the native libraries a
+# test build does and the pixelflux and pcmflux the workspace links.
 #
 # The revisions here and the linter pins in .github/workflows/ci.yaml name the
 # same tools; bump them together. CI additionally runs actionlint over the
@@ -12,7 +15,7 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.3
     hooks:
-      # Rule selection lives in pyproject.toml
+      # Rule selection lives in ruff.toml
       - id: ruff-check
 
   - repo: https://github.com/codespell-project/codespell
@@ -26,6 +29,31 @@ repos:
 
   - repo: local
     hooks:
+      - id: rustfmt
+        name: rustfmt
+        entry: rustfmt --edition 2024
+        language: system
+        types: [rust]
+        # Vendored crates and generated bindings keep upstream's formatting
+        exclude: ^crates/(selkies-rtc/vendor|pixelflux/(nvcodec-sys|va-sys)/src/bindgen)/
+      - id: clippy
+        name: clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: clippy-pixelflux-python
+        name: clippy (pixelflux Python feature)
+        entry: cargo clippy -p pixelflux --all-targets --features python -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: clippy-pcmflux-python
+        name: clippy (pcmflux Python feature)
+        entry: cargo clippy -p pcmflux --all-targets --features python -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
       - id: web-lint
         name: eslint and tsc (web client)
         # The flat configs are per package and their rules read across files, so
@@ -33,7 +61,7 @@ repos:
         entry: scripts/ci/lint-web.sh
         language: script
         pass_filenames: false
-        files: ^(addons/(selkies-dashboard/.*\.(js|jsx|ts|tsx|json)|(selkies-web-core|universal-touch-gamepad)/.*\.(js|mjs)|eslint\.config\.mjs)|(tests/tools|website/scripts)/.*\.mjs|tests/image/site/.*\.js|eslint\.config\.mjs)$
+        files: ^(addons/(selkies-dashboard/.*\.(js|jsx|ts|tsx|json)|selkies-web-core/.*\.(js|mjs|ts)|universal-touch-gamepad/.*\.(js|mjs)|eslint\.config\.mjs)|(tests/tools|website/scripts)/.*\.mjs|tests/image/site/.*\.js|eslint\.config\.mjs)$
 
       - id: settings-doc
         name: settings reference (docs/settings.md)
@@ -43,7 +71,7 @@ repos:
         args: [--check]
         language: script
         pass_filenames: false
-        files: ^(src/selkies/settings\.py|docs/settings\.md|scripts/generate-settings-doc\.py)$
+        files: ^(crates/selkies/src/settings/(table|mod)\.rs|docs/settings\.md|scripts/generate-settings-doc\.py)$
 
       - id: file-index
         name: nginx fancyindex fragments
@@ -53,4 +81,4 @@ repos:
         args: [--check]
         language: script
         pass_filenames: false
-        files: ^(src/selkies/stream_server\.py|addons/selkies-web-core/nginx/.*\.html|scripts/generate-file-index\.py)$
+        files: ^(crates/selkies/src/files/index_html\.rs|addons/selkies-web-core/nginx/.*\.html|scripts/generate-file-index\.py)$

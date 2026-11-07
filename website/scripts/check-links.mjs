@@ -2,6 +2,11 @@
 // that does not resolve. Pages cross-reference each other by file name, and
 // those names are rewritten at build time, so a rename that breaks a link is
 // invisible until something checks the output.
+//
+// The rustdoc pages generate-rust-docs.mjs copies in are targets, never
+// sources: links into them are checked, but rustdoc's own pages are its
+// output, whose source-line anchors its script resolves and whose inlined
+// dependency docs keep their crate's relative links.
 import { readFile, readdir } from 'node:fs/promises';
 import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +27,7 @@ async function walk(dir) {
 const files = await walk(out);
 const exists = new Set(files.map((f) => `/${relative(out, f).split(/[\\/]/).join('/')}`));
 const pages = files.filter((f) => f.endsWith('.html'));
+const isRustdoc = (url) => url.split('/').includes('rustdoc');
 
 /** Every id an exported page defines, so anchors can be checked against it. */
 const ids = new Map();
@@ -32,12 +38,16 @@ for (const page of pages) {
   ids.set(`/${relative(out, page).split(/[\\/]/).join('/')}`, set);
 }
 
-/** The file a site-absolute URL is served from, or undefined. */
-function resolve(path) {
-  for (const candidate of [path, `${path}/index.html`, `${path}.html`, `${path.replace(/\/$/, '')}/index.html`]) {
-    const normalized = candidate.replace(/\/{2,}/g, '/');
-    if (exists.has(normalized)) return normalized;
-  }
+/**
+ * The file GitHub Pages serves a site-absolute URL from, or undefined. An
+ * address ending in a slash is its directory's index.html, which is where the
+ * export writes every page (`trailingSlash`); any other is the file itself,
+ * that name with `.html`, or a directory Pages redirects to with the slash.
+ */
+function resolve(url) {
+  const path = url.replace(/\/{2,}/g, '/');
+  const candidates = path.endsWith('/') ? [`${path}index.html`] : [path, `${path}.html`, `${path}/index.html`];
+  return candidates.find((candidate) => exists.has(candidate));
 }
 
 const problems = [];
@@ -45,6 +55,7 @@ let checked = 0;
 
 for (const page of pages) {
   const url = `/${relative(out, page).split(/[\\/]/).join('/')}`;
+  if (isRustdoc(url)) continue;
   const html = await readFile(page, 'utf8');
   const here = posix.dirname(url);
 

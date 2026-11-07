@@ -2,12 +2,12 @@
 """What a release carries is whatever every job of the run uploaded, minus a list.
 
 The draft release is assembled from one download of every artifact in the run,
-so each job's incidental output -- an image build record, the conda package an
-AppImage is assembled from, the capture-stack wheels that belong to their own
-projects' releases, the empty digest files a manifest merge passes between jobs
--- lands beside the deliverables unless the collect step drops it. This runs
-that step over a tree holding one of each and reads back what a user would see
-on the release page, with the SHA-256 sums the step lists them under.
+so each job's incidental output -- an image build record, the web client every
+package is built with, the conda package an AppImage is assembled from, the
+empty digest files a manifest merge passes between jobs -- lands beside the
+deliverables unless the collect step drops it. This runs that step over a tree
+holding one of each and reads back what a user would see on the release page,
+with the SHA-256 sums the step lists them under.
 
 Drives the step lifted out of the workflow; no network, no runner.
 
@@ -25,19 +25,24 @@ WORKFLOW = os.path.join(REPO, ".github", "workflows", "release.yaml")
 
 # One of each: what the jobs of a release run leave in the artifact tree.
 DELIVERED = (
-    ("the wheel", "selkies-2.0.0rc0-py3-none-any.whl"),
+    ("a manylinux wheel", "selkies-2.0.0rc0-py3-none-manylinux_2_28_x86_64.whl"),
+    ("a musllinux wheel", "selkies-2.0.0rc0-py3-none-musllinux_1_2_aarch64.whl"),
     ("the sdist", "selkies-2.0.0rc0.tar.gz"),
+    ("a pixelflux manylinux wheel", "pixelflux-2.0.0rc0-cp312-cp312-manylinux_2_28_x86_64.whl"),
+    ("a pixelflux musllinux wheel", "pixelflux-2.0.0rc0-cp312-cp312-musllinux_1_2_aarch64.whl"),
+    ("a pcmflux manylinux wheel", "pcmflux-2.0.0rc0-cp312-cp312-manylinux_2_28_aarch64.whl"),
+    ("a pcmflux musllinux wheel", "pcmflux-2.0.0rc0-cp312-cp312-musllinux_1_2_x86_64.whl"),
     ("the AppImage", "selkies-2.0.0rc0-x86_64.AppImage"),
     ("the deb", "selkies_2.0.0.rc0-1.ubuntu26.04_amd64.deb"),
     ("the rpm", "selkies-2.0.0.rc0-1.el9.x86_64.rpm"),
     ("the apk", "selkies-2.0.0_rc0-r0-x86_64.apk"),
     ("the pacman package", "selkies-2.0.0rc0-1-x86_64.pkg.tar.zst"),
+    ("the Developer Reference", "selkies-2.0.0rc0-reference.tar.gz"),
 )
 WITHHELD = (
     ("an image build record", "selkies-project.selkies.8M3GBU.dockerbuild"),
-    ("the AppImage's conda package", "selkies-2.0.0rc0-pyh4616a5c_0.conda"),
-    ("a pixelflux wheel", "pixelflux-2.1.0rc0-cp39-abi3-manylinux_2_28_x86_64.whl"),
-    ("a pcmflux wheel", "pcmflux-2.1.0rc0-cp39-abi3-musllinux_1_2_aarch64.whl"),
+    ("the packages' web client", "selkies-web-client.tar"),
+    ("the AppImage's conda package", "selkies-2.0.0rc0-hb0f4dca_0.conda"),
     ("an image-digest placeholder", "a" * 64),
 )
 

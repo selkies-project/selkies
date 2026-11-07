@@ -3,11 +3,12 @@
 with: libx264 (the default build) or Cisco OpenH264 (a PIXELFLUX_ENABLE_GPL=0
 build). Selkies never chooses between them — it reads pixelflux.SOFTWARE_ENCODERS["h264"]
 — so the same session has to come up, name that encoder in the server log, and
-decode in a real browser on either build: full-frame `h264enc` forced onto the
-CPU, then the per-stripe `h264enc-striped` streams, on X11 and on Wayland.
+decode in a real browser on either build: `h264enc` forced onto the CPU, on X11
+and on Wayland.
 
-Run with SELKIES_TEST_PYTHON pointing at the interpreter whose pixelflux build is
-under test (tests/helpers.py starts the server with it).
+Run with SELKIES_TEST_SERVER pointing at the server whose pixelflux build is under
+test, and the suites' interpreter carrying the matching pixelflux wheel, whose
+SOFTWARE_ENCODERS names the encoder to expect.
 
 Usage: python3 tests/e2e/test_software_h264.py [x11|wl|all]
 """
@@ -22,10 +23,8 @@ import helpers as H
 import core_lib as C
 
 # Counts decoded VideoFrames and records every decoder configuration on the
-# page, which is where a full-frame session decodes. The striped modes decode
-# and composite in the video worker, so their evidence is what the client
-# publishes about it -- the wire counter, the row layout the worker reports, and
-# which sink element is on screen.
+# page, which is where a full-frame session decodes, beside what the client
+# publishes -- the wire counter and which sink element is on screen.
 INSTRUMENT_JS = """
   window.__decoded = 0;
   window.__cfgs = [];
@@ -67,15 +66,13 @@ SINK_IDS = ("videoCanvas", "videoWorkerCanvas", "videoStream")
 
 
 def read_state(page) -> dict:
-    """Page decode counters plus what the client publishes about the worker: the
-    wire chunk count, the stripe rows it is decoding, and the sinks on screen."""
+    """Page decode counters plus what the client publishes: the wire chunk count
+    and the sinks on screen."""
     return page.evaluate("""(() => ({
       decoded: window.__decoded || 0,
       cfgs: window.__cfgs || [],
       errors: window.__decodeErrors || [],
       chunks: window.videoChunksReceived || 0,
-      divert: !!window.videoDivertOn,
-      rows: Object.keys(window.videoStripeRows || {}).length,
       sinks: ['videoCanvas', 'videoWorkerCanvas', 'videoStream'].filter((id) => {
         const el = document.getElementById(id);
         return el && getComputedStyle(el).display !== 'none';
@@ -105,27 +102,16 @@ def wait_state(page, predicate, timeout: float = 30) -> dict:
     return state
 
 
-def wait_log_after(mark: int, substr: str, timeout: float = 20) -> bool:
-    """Whether `substr` appears in the server log past byte offset `mark` within `timeout`."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if substr in H.server_log()[mark:]:
-            return True
-        time.sleep(0.5)
-    return substr in H.server_log()[mark:]
-
-
 def run_block(r: "H.Results", wayland: bool) -> None:
-    """Stream full-frame then striped software H.264 on one backend and check
-    that the build's encoder is named in the logs and decodes in the browser."""
+    """Stream software H.264 on one backend and check that the build's encoder is
+    named in the logs and decodes in the browser. The server runs Turbo, so the still test display
+    keeps sending the frames counted."""
     encoder = server_software_encoder()
     r.check("server pixelflux names its software H.264 encoder",
             encoder in ("x264", "openh264"), encoder)
     from playwright.sync_api import sync_playwright
-    # Only software encoding is pinned: an operator encoder pin would narrow the
-    # published menu to that one encoder, and the switch below must stay allowed.
     H.server_start(mode="websockets", wayland=wayland,
-                   extra_env={"SELKIES_USE_CPU": "true"})
+                   extra_env={"SELKIES_USE_CPU": "true", "SELKIES_VIDEO_STREAMING_MODE": "true"})
     try:
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)
@@ -155,43 +141,6 @@ def run_block(r: "H.Results", wayland: bool) -> None:
                 stream_line = f"Mode: H264 ({encoder})" if wayland else f"Encoder: CPU ({encoder})"
                 r.check("pixelflux's stream-settings line names the software encoder",
                         stream_line in log, stream_line)
-
-                mark = len(H.server_log())
-                before = read_state(page)
-                C.settings_change(page, {"encoder": "h264enc-striped"})
-                restarted = wait_log_after(mark, "Capture started", timeout=20)
-                r.check("h264enc-striped: capture restarted", restarted, "")
-
-                state = wait_state(
-                    page,
-                    lambda s: s["chunks"] >= before["chunks"] + 24 and s["rows"] >= 2,
-                    timeout=40)
-                r.check("h264enc-striped: frames keep flowing",
-                        state["chunks"] >= before["chunks"] + 24,
-                        (before["chunks"], state["chunks"]))
-                r.check("h264enc-striped: a decoder per stripe", state["rows"] >= 2,
-                        state["rows"])
-                r.check("h264enc-striped: no decoder errors", not state["errors"], state["errors"][:3])
-                striped_sinks = wait_sinks(page)
-                r.check("h264enc-striped: one video sink on screen",
-                        len(striped_sinks) == 1, striped_sinks)
-                tail = H.server_log()[mark:]
-                r.check("h264enc-striped: the session is the build's software encoder",
-                        f"encodes H.264 in software ({encoder})" in tail, encoder)
-
-                # Back to full frames: the sink the striped mode presented on has
-                # to give way, or its last composite covers the live one until a
-                # reload -- the picture looks wedged while the wire keeps running.
-                before = read_state(page)
-                C.settings_change(page, {"encoder": "h264enc"})
-                state = wait_state(page, lambda s: s["chunks"] >= before["chunks"] + 24,
-                                   timeout=40)
-                r.check("back to h264enc: frames keep flowing",
-                        state["chunks"] >= before["chunks"] + 24,
-                        (before["chunks"], state["chunks"]))
-                back_sinks = wait_sinks(page, want=full_sinks)
-                r.check("back to h264enc: the striped sink gave way",
-                        back_sinks == full_sinks, (striped_sinks, back_sinks, full_sinks))
             finally:
                 browser.close()
     finally:

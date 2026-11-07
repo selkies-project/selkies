@@ -1,9 +1,9 @@
 ---
 title: pcmflux
-description: The audio capture and Opus encoding extension behind every Selkies session, and where its own documentation lives.
+description: The audio capture and Opus encoding library behind every Selkies session, and where its own documentation lives.
 ---
 
-Audio capture and encoding are performed by [`pcmflux`](https://github.com/selkies-project/pcmflux), a companion Rust (PyO3) extension the `selkies` wheel installs as a dependency. Its Rust reference is published at <https://pcmflux.selkies.io>, and its README carries the Python API.
+Audio capture and encoding are performed by [`pcmflux`](https://github.com/selkies-project/selkies/tree/main/crates/pcmflux), a Rust library in the workspace's `crates/pcmflux` that the `selkies` server links directly. Its [Rust reference](/rustdoc/pcmflux/index.html) is generated into Selkies' unified Developer Reference.
 
 ## What it does
 
@@ -13,6 +13,6 @@ The microphone uplink runs the other way through the same library: the browser's
 
 Whatever starts off is not captured at all until it is turned on: no capture runs for a page that does not receive audio, and the microphone is only asked for once the client turns it on or, under `--microphone-on-start=demand`, once an application records from the virtual source ([What a Session Starts With](../usage.md#what-a-session-starts-with)).
 
-## Installing a Development Build
+## Building in the Workspace
 
-As for [pixelflux](pixelflux.md#installing-a-development-build): every commit to `main` is attached to a pre-release as wheels, and a local change is a wheel built with `pip wheel . --no-deps` and installed beside `selkies`.
+As for [pixelflux](pixelflux.md#building-in-the-workspace), the server always builds the local `crates/pcmflux` path dependency. Change its Rust API and callers together, test both the default and `python` configurations, and build its optional standalone wheel from this directory when changing its Python bridge or packaging.

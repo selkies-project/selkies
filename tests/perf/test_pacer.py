@@ -1,8 +1,7 @@
 """Real-life E2E for the WebRTC packet pacer (SELKIES_WEBRTC_PACER off vs on).
 
-Real selkies server (webrtc mode, pixelflux H264, Opus audio, TWCC, the real
-vendored ICE/DTLS/SRTP stack) + headless Python WebRTC client on that same
-stack. Constrained-link realism comes from a userspace UDP relay with a
+Real selkies server (webrtc mode, pixelflux H264, Opus audio, TWCC) + a headless
+aiortc client. Constrained-link realism comes from a userspace UDP relay with a
 deterministic token-bucket queue + delay/jitter: every ICE candidate on BOTH
 sides is rewritten to point at a relay endpoint, so all media crosses the
 shaper (works without root).
@@ -31,12 +30,12 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 
-from selkies.webrtc import (  # noqa: E402
+from aiortc import (  # noqa: E402
     RTCPeerConnection, RTCConfiguration, RTCSessionDescription,
 )
-from selkies.webrtc.sdp import candidate_from_sdp  # noqa: E402
-import selkies.webrtc.rtcrtpreceiver as rrx_mod  # noqa: E402
-from selkies.webrtc.clock import current_ntp_time  # noqa: E402
+from aiortc.sdp import candidate_from_sdp  # noqa: E402
+import aiortc.rtcrtpreceiver as rrx_mod  # noqa: E402
+from aiortc.clock import current_ntp_time  # noqa: E402
 
 LOG = logging.getLogger("pacer_e2e")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")

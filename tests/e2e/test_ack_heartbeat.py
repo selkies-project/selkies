@@ -8,7 +8,7 @@ client repeats its last ack about once a second: that is what tells an idle
 client from a dead one. The socket worker sends those acks, which a page-side
 hook never sees, so the page reaches the server through `tools/ws_tap.py`
 and the acks are counted on the wire. Full frames (h264enc) ack on receipt
-and the striped modes (jpeg) ack what the video worker presented; both are
+and JPEG acks what the video worker presented; both are
 covered, and after the still period the stream must resume with the first
 change on the screen. WebKit decodes full-frame H.264 only after the client's
 software-decode retry, so that case is seeded with the persisted preference

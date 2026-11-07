@@ -16,6 +16,9 @@ const config = {
   turbopack: { root: join(dirname(fileURLToPath(import.meta.url)), '..') },
   // GitHub Pages serves files, not a Node.js server.
   output: 'export',
+  // Every page is written as <page>/index.html, which GitHub Pages serves at
+  // /page/ and redirects /page to, so both spellings reach the one copy.
+  trailingSlash: true,
   basePath,
   // The optimizer is a server, which a static export does not have.
   images: { unoptimized: true },

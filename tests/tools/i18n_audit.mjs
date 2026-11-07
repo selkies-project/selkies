@@ -42,7 +42,7 @@ function literal(src, name) {
   return end < 0 ? null : eval("(" + src.slice(open, end) + ")");
 }
 
-const statsView = await import(pathToFileURL(resolve(`${ADDONS}/selkies-web-core/lib/stream-stats-view.js`)).href);
+const statsView = await import(pathToFileURL(resolve(`${ADDONS}/selkies-web-core/lib/stream-stats-view.ts`)).href);
 // The translator is TypeScript, which Node strips the types from on import.
 const { resolveLocale } = await import(pathToFileURL(resolve(`${DASHBOARD}/src/i18n.ts`)).href);
 const src = readFileSync(`${DASHBOARD}/src/translations.ts`, "utf8");

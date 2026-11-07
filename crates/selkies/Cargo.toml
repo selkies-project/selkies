@@ -1,0 +1,78 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "selkies"
+description = "Open-Source Low-Latency Linux WebRTC HTML5 Remote Desktop and 3D Graphics / Game Streaming Platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "selkies"
+path = "src/lib.rs"
+
+[[bin]]
+name = "selkies"
+path = "src/main.rs"
+
+[dependencies]
+pixelflux.workspace = true
+pcmflux.workspace = true
+selkies-rtc = { path = "../selkies-rtc" }
+log = { version = "0.4", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+futures = "0.3"
+bytes = "1"
+axum = { version = "0.8", features = ["ws", "http2", "macros", "multipart"] }
+tower = { version = "0.5", features = ["util", "timeout", "limit"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "set-header", "compression-gzip"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http = "1"
+http-body-util = "0.1"
+rustls = "0.23"
+tokio-rustls = "0.26"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "aws-lc-rs", "native-tokio"] }
+rcgen = "0.13"
+flate2 = "1"
+base64 = "0.22"
+rand = "0.9"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+hex = "0.4"
+regex = "1"
+percent-encoding = "2"
+url = "2"
+mime_guess = "2"
+thiserror = "2"
+parking_lot = "0.12"
+dashmap = "6"
+async-trait = "0.1"
+libc = "0.2"
+nix = { version = "0.29", features = ["fs", "socket", "net", "hostname", "signal", "process", "user", "poll", "ioctl"] }
+x11rb = { version = "0.14", features = ["xtest", "xfixes", "randr", "xkb", "xinput", "render", "res"] }
+libpulse-binding = "2.30"
+sysinfo = "0.33"
+nvml-wrapper = "0.10"
+prometheus-client = "0.23"
+rmp-serde = "1"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+chrono = "0.4"
+shlex = "1"
+tempfile = "3"
+xkbcommon = { version = "0.9", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+
+[features]
+## Writes one line per frame sent to `$BASELINE_FRAME_LOG`, what the comparison benchmark reads; a
+## measurement build only, never a release.
+frame-log = []

@@ -22,6 +22,8 @@ permissions:
 
 env:
   NODE_VERSION: "26"
+  # The toolchain the packages and images build the server with
+  RUST_TOOLCHAIN: "1.99.1"
 
 jobs:
   build:
@@ -37,11 +39,30 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      # main's Developer Reference is cargo doc's, which type-checks pixelflux
+      # and pcmflux against the libraries they build with, the ones the base
+      # image's server stage installs
+      - name: Install the Rust toolchain and the server's build libraries
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential pkg-config cmake nasm clang libclang-dev \
+            libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
+            libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
+            libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
+            libxcb-xfixes0-dev libpulse-dev
+          # libx264 with the patches whose API pixelflux reads
+          sh infra/packaging/x264.sh "${HOME}/x264"
+          echo "PKG_CONFIG_PATH=${HOME}/x264/lib/pkgconfig" >> "${GITHUB_ENV}"
+
       - name: Build the static site, one version per release and main
         working-directory: website
         env:
-          # The build asks GitHub which release is the latest, authenticated so
-          # the runner's shared address never trips the unauthenticated limit
+          # The build asks GitHub which release is the latest, authenticated
+          # so the runner's shared address never trips the unauthenticated
+          # limit
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           npm ci --no-audit --no-fund

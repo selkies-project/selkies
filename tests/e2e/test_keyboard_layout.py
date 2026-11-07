@@ -46,7 +46,6 @@ import time
 from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "integration"))
 import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
@@ -433,7 +432,7 @@ def check_probes(res: "H.Results", layout: str, xkb: Xkb, events_after: Any, key
 
 
 def run_x11(mode: str, res: "H.Results") -> None:
-    from test_x11_multigroup import Observer
+    from x11_observer import Observer
 
     xkb = Xkb()
     xvfb, display = H.private_x_server(1280, 720, extra_args=("-s", "0", "-dpms"))

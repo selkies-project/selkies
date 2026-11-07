@@ -31,7 +31,7 @@ globalThis.self = {
         else waiter.reject(new Error(msg.error));
     },
 };
-await import('../../addons/selkies-web-core/clipboard-worker.js');
+await import('../../addons/selkies-web-core/clipboard-worker.ts');
 const workerScope = globalThis.self;
 
 /** The worker bridge's surface, answered in-process by the real worker. */
@@ -104,7 +104,7 @@ Object.defineProperty(globalThis, 'navigator', {
 
 const {
     createClipboardSync, createDeferredClipboardWriter, createIncomingClipboard, digestedPayload,
-} = await import('../../addons/selkies-web-core/lib/clipboard-sync.js');
+} = await import('../../addons/selkies-web-core/lib/clipboard-sync.ts');
 
 let failed = 0;
 

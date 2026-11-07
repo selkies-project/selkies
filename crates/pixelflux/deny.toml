@@ -1,0 +1,95 @@
+# cargo-deny policy for the pixelflux crate graph (see LICENSES.md).
+#
+# The graph is resolved with `--no-default-features --features openh264`, the
+# configuration setup.py selects for PIXELFLUX_ENABLE_GPL=0, so a plain
+#
+#     cargo deny check licenses bans sources
+#
+# audits exactly what a non-GPL build contains: every crate license must be in
+# the permissive allow list, and x264-sys (the MIT binding whose only purpose is
+# linking the GPL-2.0-or-later libx264) is banned from that graph. The default
+# build is `--features gpl` instead (x264-sys in place of the OpenH264 crates);
+# audit it with
+#
+#     cargo deny --features gpl check licenses sources
+#
+# where the exception below accepts x264-sys's GPL clarification. The ban is the
+# non-GPL gate, so `--features gpl check bans` fails by design. The advisories
+# check (`check advisories`) needs the network to fetch the RustSec database and
+# is gated by the [advisories] policy below. scripts/check-licenses.py covers
+# both build configurations offline, plus the native libraries crate metadata
+# cannot see.
+
+[graph]
+no-default-features = true
+features = ["openh264"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+
+[licenses]
+# Permissive licenses only: a GPL, LGPL, or AGPL crate, or a crate without
+# license metadata, fails the check. MPL-2.0 is file-level copyleft and is
+# accepted (pixelflux itself is MPL-2.0).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+# The x264-sys exception is reported as unmatched on the non-GPL graph, which
+# is the intended state.
+# The only copyleft component, and only as the `gpl` feature: the bans section
+# keeps it out of the non-GPL graph.
+exceptions = [
+    { crate = "x264-sys", allow = ["GPL-2.0-or-later"] },
+]
+
+# x264-sys is an MIT binding, but the only library it can link is libx264,
+# which is GPL-2.0-or-later: a binary that contains it is GPL.
+[[licenses.clarify]]
+crate = "x264-sys"
+expression = "MIT AND GPL-2.0-or-later"
+license-files = []
+
+[licenses.private]
+ignore = false
+
+# Advisory policy for `cargo deny check advisories` (needs the network to fetch
+# the RustSec database, so it runs as its own CI step, not in the offline
+# license job). Every ignore below is a transitive crate pulled by smithay or
+# image that pixelflux neither selects nor can swap; each is pinned to the
+# reason it is accepted rather than left silently unaudited.
+[advisories]
+ignore = [
+    # paste (via smithay's pixman, and image's exr/rav1e): a build-time
+    # proc-macro, unmaintained but sound. pixman keeps it in the graph
+    # regardless of image's features, so there is nothing to remove.
+    "RUSTSEC-2024-0436",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+deny = [
+    { crate = "x264-sys", reason = "links GPL-2.0-or-later libx264; only the `gpl` feature may pull it in" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/Smithay/smithay"]

@@ -25,6 +25,49 @@ from playwright.sync_api import sync_playwright
 from typing import Optional
 
 
+
+def wm_pid() -> int:
+    """Process id of the window manager managing the test display, 0 for none: its check
+    window's _NET_WM_PID, or, for a manager that sets none (Openbox), what the X-Resource
+    extension knows of the client owning that window."""
+    from Xlib import X, display as xdisp
+    from Xlib.ext import res as xres
+    d = xdisp.Display(H.require_display())
+    try:
+        check = d.screen().root.get_full_property(d.intern_atom("_NET_SUPPORTING_WM_CHECK"), X.AnyPropertyType)
+        if not check or not check.value:
+            return 0
+        window = d.create_resource_object("window", int(check.value[0]))
+        pid = window.get_full_property(d.intern_atom("_NET_WM_PID"), X.AnyPropertyType)
+        if pid and pid.value:
+            return int(pid.value[0])
+        if d.query_extension("X-Resource") is None:
+            return 0
+        reply = d.res_query_client_ids([{"client": window.id, "mask": xres.LocalClientPIDMask}])
+        for entry in reply.ids:
+            if entry.spec.mask & xres.LocalClientPIDMask and entry.value:
+                return int(entry.value[0])
+        return 0
+    finally:
+        d.close()
+
+
+def wm_name() -> str:
+    """The name the window manager managing the test display advertises on its check window
+    (_NET_WM_NAME), empty for none."""
+    from Xlib import X, display as xdisp
+    d = xdisp.Display(H.require_display())
+    try:
+        check = d.screen().root.get_full_property(d.intern_atom("_NET_SUPPORTING_WM_CHECK"), X.AnyPropertyType)
+        if not check or not check.value:
+            return ""
+        window = d.create_resource_object("window", int(check.value[0]))
+        name = window.get_full_property(d.intern_atom("_NET_WM_NAME"), d.intern_atom("UTF8_STRING"))
+        value = name.value if name else b""
+        return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+    finally:
+        d.close()
+
 def desktop_window() -> Optional[tuple]:
     """(x, y, w, h) of the session's desktop window, or None when it has none.
 
@@ -121,18 +164,16 @@ def wm_restart_check(res: "H.Results", wm_proc: Optional[subprocess.Popen], mark
     if wm_proc is None:
         res.skip("the first extend restarts the window manager", "no Openbox on the display")
         return
-    from selkies import display_utils as DU
-    from selkies import display_utils_xrandr as DX
-    os.environ["DISPLAY"] = H.require_display()
-    DU._drop_module_display()
-    outputs = DU._sync_has_pluggable_outputs()
+    # Which way the server went is in its own log: displays as outputs of their own leave the
+    # manager alone, a set of logical monitors restarts it.
     deadline = time.time() + 20
-    said = False
+    outputs = said = False
     while time.time() < deadline and not (said and (outputs or wm_proc.poll() is not None)):
-        said = said or H.server_log().find(
-            "outputs of their own" if outputs else "restarting openbox", mark) >= 0
+        log = H.server_log()
+        outputs = log.find("outputs of their own", mark) >= 0
+        said = outputs or log.find("restarting openbox", mark) >= 0
         time.sleep(0.25)
-    new_pid = DX._sync_wm_pid()
+    new_pid = wm_pid()
     if outputs:
         res.check("the first extend leaves the window manager alone where displays are outputs",
                   said and wm_proc.poll() is None and new_pid == wm_proc.pid,
@@ -140,7 +181,7 @@ def wm_restart_check(res: "H.Results", wm_proc: Optional[subprocess.Popen], mark
         return
     res.check("the first extend restarts the window manager",
               said and wm_proc.poll() is not None and new_pid not in (0, wm_proc.pid)
-              and DX.wm_name_matches("openbox", DX._sync_wm_name()),
+              and wm_name().lower().startswith("openbox"),
               f"said={said} old={wm_proc.pid} exit={wm_proc.poll()} new={new_pid}")
     if new_pid not in (0, wm_proc.pid):
         os.kill(new_pid, 15)

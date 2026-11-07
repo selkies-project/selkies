@@ -29,7 +29,7 @@ from typing import Any, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
-from selkies.Xlib import display as x11_display
+from Xlib import display as x11_display
 from playwright.sync_api import sync_playwright
 
 SECRET = "e2e-turn-shared-secret"

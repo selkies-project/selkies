@@ -3,13 +3,17 @@ device open, so it may not be recreated (or lost) when the service restarts."""
 import os
 import struct
 import sys
+import types
 import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
 sys.path.insert(0, H.SRC)
-import selkies.input_handler as ih
+# Linux input event codes (linux/input-event-codes.h), and the name of the standard pad the
+# server publishes.
+codes = types.SimpleNamespace(EV_KEY=0x01, BTN_A=0x130, BTN_Y=0x134,
+                              STANDARD_XPAD_CONFIG={"name": "Microsoft X-Box 360 pad"})
 
 PAD: str = H.pad_init_js()
 
@@ -48,7 +52,7 @@ def press(pw, mode: str, res: "H.Results", tag: str) -> None:
     page.evaluate("window.__padPress(3, 0)")
     time.sleep(0.4)
     events = decode(STREAM)[before:]
-    res.check(f"{tag}: input reaches the kernel device", (ih.EV_KEY, ih.BTN_Y, 1) in events, str(events[:2]))
+    res.check(f"{tag}: input reaches the kernel device", (codes.EV_KEY, codes.BTN_Y, 1) in events, str(events[:2]))
     browser.close()
 
 res = H.Results("switch")
@@ -62,7 +66,7 @@ try:
         time.sleep(3)
         press(pw, "webrtc", res, "after switch")
     log = open(SHIMLOG).read()
-    pad = ih.STANDARD_XPAD_CONFIG["name"]
+    pad = codes.STANDARD_XPAD_CONFIG["name"]
     made = H.shim_created(SHIMLOG, pad)
     res.check("kernel device created once", made == 1, f"{made} creations of {pad!r}")
     res.check("kernel device never destroyed by the switch", log.count("DEV_DESTROY") == 0)

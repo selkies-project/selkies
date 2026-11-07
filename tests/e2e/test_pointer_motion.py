@@ -19,7 +19,6 @@ The `raw_pointer_motion` setting is checked against the same engines: turned off
 it must keep the client from asking at all, and turned on it must ask, whatever
 the engine then answers.
 """
-import asyncio
 import http.server
 import json
 import os
@@ -34,6 +33,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 from core_lib import CHROME_PATH, FIREFOX_PATH
+from ts_static import TypeScriptHandler
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
@@ -50,8 +50,8 @@ PATTERNS = (("slow", 40, 1, 0.025),
             ("flick", 60, 8, 0.002))
 
 
-class Handler(http.server.SimpleHTTPRequestHandler):
-    """Serves the repo so the page can import the client's own modules."""
+class Handler(TypeScriptHandler):
+    """Serves the repo so the page can import the client's own modules, TypeScript as JavaScript."""
 
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=REPO, **kw)
@@ -249,8 +249,8 @@ def lock(res, label: str, d) -> bool:
     Returns:
         True once the page reports the lock; a check has been recorded on failure.
     """
-    from selkies.Xlib import X
-    from selkies.Xlib.ext import xtest
+    from Xlib import X
+    from Xlib.ext import xtest
 
     root = d.screen().root
     # A browser still opening its window swallows the first click; a machine
@@ -274,8 +274,8 @@ def lock(res, label: str, d) -> bool:
 
 def measure(res, browser: str, dpr: float) -> None:
     """Lock the pointer in `browser` and record the travel for each pattern."""
-    from selkies.Xlib import X
-    from selkies.Xlib.ext import xtest
+    from Xlib import X
+    from Xlib.ext import xtest
 
     label = f"{browser} at dpr {dpr}"
     d = H.x_display()
@@ -368,10 +368,8 @@ def size_screen() -> None:
     """
     if screen_fits()[0]:
         return
-    from selkies import display_utils as DU
-    os.environ["DISPLAY"] = H.require_display()
-    DU._drop_module_display()
-    asyncio.run(DU.resize_display(f"{SCREEN[0]}x{SCREEN[1]}"))
+    subprocess.run([H.SERVER, "resize", f"{SCREEN[0]}x{SCREEN[1]}"],
+                   env=dict(os.environ, DISPLAY=H.require_display()), check=False, timeout=30)
 
 
 def screen_fits() -> tuple:

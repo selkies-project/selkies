@@ -4,15 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "node scripts/sync-assets.mjs && node scripts/generate-python-docs.mjs && node scripts/generate-web-docs.mjs",
+    "predev": "node scripts/sync-assets.mjs && node scripts/generate-reference.mjs",
     "dev": "next dev",
-    "prebuild": "node scripts/sync-assets.mjs && node scripts/generate-python-docs.mjs && node scripts/generate-web-docs.mjs",
+    "prebuild": "node scripts/sync-assets.mjs && node scripts/generate-reference.mjs",
     "build": "next build",
-    "postbuild": "node scripts/mirror-page-urls.mjs",
+    "postbuild": "node scripts/drop-full-payloads.mjs",
     "build:versions": "node scripts/build-versions.mjs",
     "typecheck": "next typegen && tsc --noEmit",
     "check-links": "node scripts/check-links.mjs",
-    "generate:api": "node scripts/generate-python-docs.mjs && node scripts/generate-web-docs.mjs"
+    "generate:api": "node scripts/generate-reference.mjs"
   },
   "dependencies": {
     "@mdx-js/mdx": "^3.1.1",

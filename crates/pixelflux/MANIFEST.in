@@ -1,0 +1,18 @@
+include Cargo.toml
+include Cargo.lock
+recursive-include src *
+recursive-include protocols *
+recursive-include nvcodec-sys *
+recursive-include codec-sys *
+recursive-include va-sys *
+recursive-include patches/x264 *.patch
+recursive-exclude src *.so *.pyc
+prune target
+prune nvcodec-sys/target
+prune codec-sys/target
+prune va-sys/target
+include LICENSE
+include LICENSES.md
+include pyproject.toml
+include README.md
+include setup.py

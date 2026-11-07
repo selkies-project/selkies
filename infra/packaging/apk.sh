@@ -16,32 +16,36 @@ retry() {
         i=$((i + 1)); sleep 5
     done
 }
-# build-base/python3-dev/linux-headers: musl has no manylinux wheels, so every
-# extension dependency is compiled here (psutil needs the kernel headers).
-# pipewire-dev gives the V4L2 interposer its PipeWire frame source (headers
-# only; the library is loaded at runtime when an application uses it)
+# The server's build against Alpine's own musl builds of every library it
+# links. pipewire-dev gives the V4L2 interposer its PipeWire frame source
+# (headers only; the library is loaded at runtime when an application uses it)
 retry apk add --no-cache \
-    abuild build-base pkgconf linux-headers pipewire-dev \
-    python3 python3-dev py3-pip py3-virtualenv \
-    ca-certificates
-# The runtime libraries come from the APKBUILD's own depends, keeping one list:
-# the venv links them, mkvenv.sh's smoke test loads them, and abuild resolves the
-# sonames it scans against whatever the builder has installed.
-# shellcheck disable=SC2046  # the depends list is deliberately word-split
-retry apk add --no-cache $(sed -n 's/^depends="\(.*\)"$/\1/p' /repo/infra/packaging/apk/APKBUILD)
+    abuild build-base pkgconf linux-headers pipewire-dev ca-certificates curl git \
+    cmake nasm clang \
+    x265-dev libvpx-dev svt-av1-dev dav1d-dev libde265-dev \
+    libva-dev libdrm-dev mesa-dev wayland-dev libinput-dev eudev-dev libxkbcommon-dev \
+    pixman-dev libxcb-dev pulseaudio-dev
+# bindgen opens libclang at run time, and Alpine names that package after the
+# compiler's major version, which moves every release
+retry apk add --no-cache "clang$(clang -dumpversion | cut -d. -f1)-libclang"
 # shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
-/repo/infra/packaging/mkvenv.sh
+rm -rf /pkg-root
+/repo/infra/packaging/server.sh /pkg-root
 /repo/infra/packaging/interposer.sh /pkg-root
 /repo/infra/packaging/v4l2-interposer.sh /pkg-root
 # abuild writes src/ and pkg/ next to the APKBUILD, and /repo is read-only
-rm -rf /build
+rm -rf /build/apk /build/apkrepo
 mkdir -p /build /out
 cp -r /repo/infra/packaging/apk /build/apk
 chmod -R u+w /build/apk
 # Alpine spells pre-releases such as the 0.0.0.dev0 CI default its own way
 PKGVER="$(alpine_version "${SELKIES_VERSION:-0.0.0}")"
 sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" /build/apk/APKBUILD
+# abuild adds a so: dependency for every library the binary links on its own;
+# the packages behind the libraries loaded by name at run time are named here
+DEPENDS="$(/repo/infra/packaging/runtime-deps.sh /pkg-root/usr/bin/selkies | tr '\n' ' ')"
+sed -i "s/^depends=.*/depends=\"${DEPENDS% }\"/" /build/apk/APKBUILD
 # -i would install the public key with doas, which this image has no need for:
 # the build runs as root and can place the key itself
 abuild-keygen -a -n

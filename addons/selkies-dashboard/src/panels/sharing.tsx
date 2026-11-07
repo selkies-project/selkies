@@ -11,7 +11,7 @@ import { Check, Copy, Info } from "lucide-react";
 import { toast } from "sonner";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
 import { t } from "@/i18n";
-import { shareablePageURL } from "../../../selkies-web-core/lib/page-url.js";
+import { shareablePageURL } from "../../../selkies-web-core/lib/page-url.ts";
 
 /**
  * The sharing view of the overflow menu: copyable links for the viewer

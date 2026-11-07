@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as H  # noqa: E402
 import core_lib as C  # noqa: E402
 import test_ws_cut as ws  # noqa: E402
-from selkies.webrtc_signaling_server import SESSION_HOLD_S  # noqa: E402
+# How long the signaling registry holds a vanished peer's session (selkies-rtc's SESSION_HOLD).
+SESSION_HOLD_S = 3.0
 
 WIDTH, HEIGHT = ws.WIDTH, ws.HEIGHT
 RELAY_PORT = int(os.environ.get("E2E_CUT_PORT", "18215"))

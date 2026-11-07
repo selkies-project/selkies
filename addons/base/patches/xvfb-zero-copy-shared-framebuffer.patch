@@ -1,0 +1,807 @@
+xvfb: share a system-memory screen with a capture client in place
+
+A client that streams the screen otherwise has the server copy every frame
+into its shared memory (XShmGetImage) and asks where it changed through
+XDamage, a round trip each. Xvfb's own -shmem buffer does not serve it: a
+RandR resize moves the screen into memory of its own and leaves the segment
+holding the old picture, the segment is open to every local account, and it
+carries neither where the screen changed nor whether a drawing operation is
+under way.
+
+- The screen of a server started without -shmem or -fbdir lives in a memfd,
+  sealed against resizing, its pixels a page past a head carrying the
+  geometry, a count of drawing operations (odd while one runs), and a
+  retired flag; a resize moves the screen to a memfd of its new size and
+  retires the old one.
+- SELKIES-FRAMEBUFFER 1.0: QueryVersion; Watch(watch, drawable), which needs
+  read access to the drawable as GetImage does and a local connection, and
+  answers with the framebuffer read-only, the watch's memfd, and an
+  eventfd; Unwatch(watch). A watch is a bitmap of the 16x16 tiles drawn
+  into, which the server sets before each drawing operation on the screen
+  pixmap and the client clears as it reads, and an armed flag, on which the
+  server signals the eventfd once the operation ends. A retired framebuffer
+  signals every watch. A screen whose pixmap moved to the GPU (glamor)
+  answers BadMatch.
+- Such a screen's cursor is never drawn into it, as a hardware cursor is
+  not: GetImage hides a sprite drawn there, which a read in place would see.
+
+diff --git a/hw/vfb/InitOutput.c b/hw/vfb/InitOutput.c
+index d4ab85d..b45a67b 100644
+--- a/hw/vfb/InitOutput.c
++++ b/hw/vfb/InitOutput.c
+@@ -80,6 +80,7 @@ from The Open Group.
+ #include <X11/Xatom.h>
+ 
+ #ifdef GLAMOR
++#include "vfbframebuffer.h"
+ #include "glamor.h"
+ #include "glamor_egl.h"
+ #include "glamor_priv.h"
+@@ -694,6 +695,8 @@ vfbAllocateSharedMemoryFramebuffer(vfbScreenInfoPtr pvfb)
+ static char *
+ vfbAllocateFramebufferMemory(vfbScreenInfoPtr pvfb)
+ {
++    struct vfb_framebuffer *fb = NULL;
++
+     if (pvfb->pfbMemory)
+         return pvfb->pfbMemory; /* already done */
+ 
+@@ -742,7 +745,13 @@ vfbAllocateFramebufferMemory(vfbScreenInfoPtr pvfb)
+ #endif /* CONFIG_MITSHM */
+ 
+     case NORMAL_MEMORY_FB:
+-        pvfb->pXWDHeader = (XWDFileHeader *) calloc(1, pvfb->sizeInBytes);
++        /* The pixels go in a framebuffer SELKIES-FRAMEBUFFER can share,
++         * the XWD header and colormap in memory of their own. */
++        fb = vfbFramebufferNew(pvfb->width, pvfb->height,
++                               pvfb->paddedBytesWidth, pvfb->bitsPerPixel);
++        pvfb->pXWDHeader = (XWDFileHeader *) calloc(1, fb ? pvfb->sizeInBytes -
++                                                    pvfb->paddedBytesWidth * pvfb->height :
++                                                    pvfb->sizeInBytes);
+         break;
+     }
+ 
+@@ -751,6 +760,10 @@ vfbAllocateFramebufferMemory(vfbScreenInfoPtr pvfb)
+                                        + SIZEOF(XWDheader) +
+                                        XWD_WINDOW_NAME_LEN);
+         pvfb->pfbMemory = (char *) (pvfb->pXWDCmap + pvfb->ncolors);
++        if (fb) {
++            pvfb->pfbMemory = vfbFramebufferPixels(fb);
++            vfbFramebufferSetScreen(pvfb - vfbScreens, fb);
++        }
+ 
+         return pvfb->pfbMemory;
+     }
+@@ -819,6 +832,48 @@ vfbWriteXWDFileHeader(ScreenPtr pScreen)
+     }
+ }
+ 
++/*
++ * A cursor the server never draws into the screen, for a screen whose
++ * framebuffer SELKIES-FRAMEBUFFER shares: a client reading it in place would
++ * see a sprite drawn there, where GetImage takes it out for the read. The
++ * client composites the XFixes cursor itself, or the viewer draws it.
++ */
++static Bool
++vfbSpriteRealize(DeviceIntPtr pDev, ScreenPtr pScreen, CursorPtr pCursor)
++{
++    return TRUE;
++}
++
++static void
++vfbSpriteSet(DeviceIntPtr pDev, ScreenPtr pScreen, CursorPtr pCursor, int x, int y)
++{
++}
++
++static void
++vfbSpriteMove(DeviceIntPtr pDev, ScreenPtr pScreen, int x, int y)
++{
++}
++
++static Bool
++vfbSpriteDeviceInitialize(DeviceIntPtr pDev, ScreenPtr pScreen)
++{
++    return TRUE;
++}
++
++static void
++vfbSpriteDeviceCleanup(DeviceIntPtr pDev, ScreenPtr pScreen)
++{
++}
++
++static miPointerSpriteFuncRec vfbSpriteFuncs = {
++    vfbSpriteRealize,
++    vfbSpriteRealize,
++    vfbSpriteSet,
++    vfbSpriteMove,
++    vfbSpriteDeviceInitialize,
++    vfbSpriteDeviceCleanup
++};
++
+ static Bool
+ vfbCursorOffScreen(ScreenPtr *ppScreen, int *x, int *y)
+ {
+@@ -857,6 +912,7 @@ vfbCloseScreen(ScreenPtr pScreen)
+ #endif
+     free(pvfb->resizedFb);
+     pvfb->resizedFb = NULL;
++    vfbFramebufferSetScreen(pScreen->myNum, NULL);
+ 
+     return pScreen->CloseScreen(pScreen);
+ }
+@@ -919,6 +975,7 @@ vfbCreateScreenResources(ScreenPtr pScreen)
+     pScreen->SetScreenPixmap(gpu_pixmap);
+     dixDestroyPixmap(old_pixmap, 0);
+     pvfb->gpuScreen = TRUE;
++    vfbFramebufferSetScreen(pScreen->myNum, NULL);
+ 
+     LogMessage(X_INFO, "vfb: screen pixmap is on the GPU (%dx%d)\n",
+                gpu_pixmap->drawable.width, gpu_pixmap->drawable.height);
+@@ -1102,8 +1159,17 @@ vfbResizeScreenPixmap(ScreenPtr pScreen, int width, int height)
+         int stride = PixmapBytePad(width, pScreen->rootDepth);
+         char *bits;
+         int y, row_bytes;
++        struct vfb_framebuffer *fb = NULL;
+ 
+-        bits = calloc(height, stride);
++        if (vfbFramebufferOf(pScreen->myNum)) {
++            fb = vfbFramebufferNew(width, height, stride,
++                                   pixmap->drawable.bitsPerPixel);
++            if (!fb)
++                return FALSE;
++            bits = vfbFramebufferPixels(fb);
++        }
++        else
++            bits = calloc(height, stride);
+         if (!bits)
+             return FALSE;
+ 
+@@ -1127,6 +1193,10 @@ vfbResizeScreenPixmap(ScreenPtr pScreen, int width, int height)
+         for (y = 0; y < min(height, old_height); y++)
+             memcpy(bits + y * stride, old_bits + y * old_stride, row_bytes);
+ 
++        if (fb) {
++            vfbFramebufferSetScreen(pScreen->myNum, fb);
++            return TRUE;
++        }
+         free(pvfb->resizedFb);
+         pvfb->resizedFb = bits;
+         return TRUE;
+@@ -1425,7 +1495,10 @@ vfbScreenInit(ScreenPtr pScreen, int argc, char **argv)
+     pScreen->InstallColormap = vfbInstallColormap;
+     pScreen->StoreColors = vfbStoreColors;
+ 
+-    miDCInitialize(pScreen, &vfbPointerCursorFuncs);
++    if (vfbFramebufferOf(pScreen->myNum))
++        miPointerInitialize(pScreen, &vfbSpriteFuncs, &vfbPointerCursorFuncs, FALSE);
++    else
++        miDCInitialize(pScreen, &vfbPointerCursorFuncs);
+ 
+     vfbWriteXWDFileHeader(pScreen);
+ 
+@@ -1508,6 +1581,14 @@ InitOutput(int argc, char **argv)
+         }
+     }
+ 
++    {
++        static const ExtensionModule vfbFramebufferExtensions[] = {
++            { vfbFramebufferExtensionInit, SELKIES_FRAMEBUFFER_NAME, NULL },
++        };
++
++        LoadExtensionList(vfbFramebufferExtensions, ARRAY_SIZE(vfbFramebufferExtensions), TRUE);
++    }
++
+ #ifdef GLAMOR
+     /* The screens are up, and SELKIES-SEMAPHORE asks each one's glamor. */
+     {
+diff --git a/hw/vfb/meson.build b/hw/vfb/meson.build
+index 5ecf529..27f216f 100644
+--- a/hw/vfb/meson.build
++++ b/hw/vfb/meson.build
+@@ -1,4 +1,5 @@
+ srcs = [
++    'vfbframebuffer.c',
+     'InitInput.c',
+     'InitOutput.c',
+     '../../mi/miinitext.c',
+diff --git a/hw/vfb/vfbframebuffer.c b/hw/vfb/vfbframebuffer.c
+new file mode 100644
+index 0000000..a06bdff
+--- /dev/null
++++ b/hw/vfb/vfbframebuffer.c
+@@ -0,0 +1,521 @@
++/*
++ * SELKIES-FRAMEBUFFER: the screen's system-memory framebuffer, shared with a
++ * capture client on the same host.
++ *
++ * A client that streams the screen otherwise has the server copy every frame
++ * into its shared memory (XShmGetImage) and asks where it changed through
++ * XDamage, a round trip each. Here the framebuffer lives in a memfd, which the
++ * client maps read-only and reads where it changed, which the server tells it
++ * without a request: each client's watch is a memfd of its own holding a
++ * bitmap of the tiles drawn into, which the server sets as it draws and the
++ * client clears as it reads, and an eventfd the server signals once a drawing
++ * operation ends, where the client asked for a signal.
++ *
++ * The framebuffer's head carries a sequence count, odd while a drawing
++ * operation runs. A client reads what changed, then the count again, and
++ * takes the read where the count stood even and unchanged. A resize moves
++ * the screen to a framebuffer of its own size and retires the old one, which
++ * says so in its head and signals every watch; the client then watches again.
++ *
++ * Requests, after the major opcode QueryExtension gives:
++ *   0 QueryVersion(client major, client minor) -> major, minor
++ *   1 Watch(watch, drawable) -> 3 fds: the framebuffer of the drawable's
++ *     screen, read-only; the watch, read-write; the eventfd. Width, height,
++ *     stride, bits a pixel, the pixels' offset, and the tile size.
++ *   2 Unwatch(watch)
++ *
++ * The extension is offered where some screen keeps its framebuffer in system
++ * memory; a screen on the GPU (glamor) answers BadMatch. A client needs read
++ * access to the drawable, as for GetImage, and a local connection.
++ */
++
++#include <dix-config.h>
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/eventfd.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <X11/X.h>
++#include <X11/Xproto.h>
++
++#include "dix/dix_priv.h"
++#include "dix/request_priv.h"
++#include "dix/screenint_priv.h"
++#include "os/client_priv.h"
++#include "dixstruct_priv.h"
++#include "damage.h"
++#include "extnsionst.h"
++#include "list.h"
++#include "pixmapstr.h"
++#include "regionstr.h"
++#include "resource.h"
++#include "scrnintstr.h"
++
++#include "vfbframebuffer.h"
++
++#define FRAMEBUFFER_MAJOR 1
++#define FRAMEBUFFER_MINOR 0
++
++typedef struct {
++    CARD8 reqType;
++    CARD8 framebufferReqType;
++    CARD16 length;
++    CARD32 majorVersion;
++    CARD32 minorVersion;
++} xFramebufferQueryVersionReq;
++
++typedef struct {
++    BYTE type;
++    CARD8 pad1;
++    CARD16 sequenceNumber;
++    CARD32 length;
++    CARD32 majorVersion;
++    CARD32 minorVersion;
++    CARD32 pad2;
++    CARD32 pad3;
++    CARD32 pad4;
++    CARD32 pad5;
++} xFramebufferQueryVersionReply;
++
++typedef struct {
++    CARD8 reqType;
++    CARD8 framebufferReqType;
++    CARD16 length;
++    CARD32 watch;
++    CARD32 drawable;
++} xFramebufferWatchReq;
++
++typedef struct {
++    BYTE type;
++    CARD8 nfd;
++    CARD16 sequenceNumber;
++    CARD32 length;
++    CARD32 width;
++    CARD32 height;
++    CARD32 stride;
++    CARD32 bpp;
++    CARD32 pixelOffset;
++    CARD32 tile;
++} xFramebufferWatchReply;
++
++typedef struct {
++    CARD8 reqType;
++    CARD8 framebufferReqType;
++    CARD16 length;
++    CARD32 watch;
++} xFramebufferUnwatchReq;
++
++struct vfb_framebuffer {
++    int fd;
++    size_t size;
++    struct selkies_fb_header *head;
++};
++
++typedef struct {
++    struct xorg_list link;
++    int screen;
++    int fd;
++    int event;
++    size_t size;
++    uint32_t tiles_x;
++    uint32_t tiles_y;
++    Bool drawn;
++    struct selkies_fb_watch *map;
++} WatchRec;
++
++typedef struct {
++    struct vfb_framebuffer *fb;
++    DamagePtr before;
++    DamagePtr after;
++    Bool drawing;
++    struct xorg_list watches;
++} FramebufferScreenRec;
++
++static FramebufferScreenRec screens[MAXSCREENS];
++static RESTYPE watch_type;
++
++struct vfb_framebuffer *
++vfbFramebufferNew(int width, int height, int stride, int bpp)
++{
++    struct vfb_framebuffer *fb = calloc(1, sizeof(*fb));
++    size_t size = SELKIES_FB_PIXEL_OFFSET + (size_t) stride * height;
++
++    if (!fb)
++        return NULL;
++    fb->fd = memfd_create("selkies-framebuffer", MFD_CLOEXEC | MFD_ALLOW_SEALING);
++    if (fb->fd < 0) {
++        free(fb);
++        return NULL;
++    }
++    if (ftruncate(fb->fd, size) < 0 ||
++        fcntl(fb->fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) < 0) {
++        close(fb->fd);
++        free(fb);
++        return NULL;
++    }
++    fb->head = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fb->fd, 0);
++    if (fb->head == MAP_FAILED) {
++        close(fb->fd);
++        free(fb);
++        return NULL;
++    }
++    fb->size = size;
++    fb->head->magic = SELKIES_FB_MAGIC;
++    fb->head->version = SELKIES_FB_VERSION;
++    fb->head->width = width;
++    fb->head->height = height;
++    fb->head->stride = stride;
++    fb->head->bpp = bpp;
++    fb->head->pixel_offset = SELKIES_FB_PIXEL_OFFSET;
++    return fb;
++}
++
++char *
++vfbFramebufferPixels(struct vfb_framebuffer *fb)
++{
++    return (char *) fb->head + SELKIES_FB_PIXEL_OFFSET;
++}
++
++static void
++signal_watch(WatchRec *watch)
++{
++    uint64_t one = 1;
++
++    if (write(watch->event, &one, sizeof(one)) < 0 && errno != EAGAIN)
++        ErrorF("vfb: framebuffer watch signal failed: %s\n", strerror(errno));
++}
++
++void
++vfbFramebufferSetScreen(int screen, struct vfb_framebuffer *fb)
++{
++    struct vfb_framebuffer *old = screens[screen].fb;
++    WatchRec *watch;
++
++    screens[screen].fb = fb;
++    screens[screen].drawing = FALSE;
++    if (!old)
++        return;
++    __atomic_store_n(&old->head->retired, 1, __ATOMIC_RELEASE);
++    if (screens[screen].watches.next)
++        xorg_list_for_each_entry(watch, &screens[screen].watches, link)
++            signal_watch(watch);
++    munmap(old->head, old->size);
++    close(old->fd);
++    free(old);
++}
++
++/* The tiles a drawing operation is about to cover, into every watch. */
++static void
++damage_before(DamagePtr damage, RegionPtr region, void *closure)
++{
++    FramebufferScreenRec *s = closure;
++    BoxPtr box = RegionRects(region);
++    int n = RegionNumRects(region);
++    WatchRec *watch;
++
++    if (s->fb && !s->drawing) {
++        s->drawing = TRUE;
++        __atomic_add_fetch(&s->fb->head->seq, 1, __ATOMIC_ACQ_REL);
++    }
++    xorg_list_for_each_entry(watch, &s->watches, link) {
++        for (int i = 0; i < n; i++) {
++            uint32_t x1 = max(box[i].x1, 0) / SELKIES_FB_TILE;
++            uint32_t y1 = max(box[i].y1, 0) / SELKIES_FB_TILE;
++            uint32_t x2 = min((uint32_t) max(box[i].x2 - 1, 0) / SELKIES_FB_TILE, watch->tiles_x - 1);
++            uint32_t y2 = min((uint32_t) max(box[i].y2 - 1, 0) / SELKIES_FB_TILE, watch->tiles_y - 1);
++
++            if (box[i].x2 <= box[i].x1 || box[i].y2 <= box[i].y1 || x1 > x2 || y1 > y2)
++                continue;
++            for (uint32_t y = y1; y <= y2; y++) {
++                for (uint32_t x = x1; x <= x2; x++) {
++                    uint64_t tile = (uint64_t) y * watch->tiles_x + x;
++
++                    __atomic_fetch_or(&watch->map->bits[tile / 64], 1ull << (tile % 64),
++                                      __ATOMIC_RELAXED);
++                }
++            }
++        }
++        watch->drawn = TRUE;
++    }
++    DamageEmpty(damage);
++}
++
++/* A drawing operation ended: the pixels are whole again. */
++static void
++drawn(FramebufferScreenRec *s)
++{
++    WatchRec *watch;
++
++    if (s->fb && s->drawing) {
++        s->drawing = FALSE;
++        __atomic_add_fetch(&s->fb->head->seq, 1, __ATOMIC_ACQ_REL);
++    }
++    xorg_list_for_each_entry(watch, &s->watches, link) {
++        if (watch->drawn) {
++            watch->drawn = FALSE;
++            if (__atomic_exchange_n(&watch->map->armed, 0, __ATOMIC_ACQ_REL))
++                signal_watch(watch);
++        }
++    }
++}
++
++static void
++damage_after(DamagePtr damage, RegionPtr region, void *closure)
++{
++    drawn(closure);
++    DamageEmpty(damage);
++}
++
++/* No drawing operation spans two batches of requests, so one left open by an
++ * operation that reported no end is closed here. */
++static void
++block_handler(void *data, void *timeout)
++{
++    for (int i = 0; i < MAXSCREENS; i++)
++        if (screens[i].drawing)
++            drawn(&screens[i]);
++}
++
++static void
++wakeup_handler(void *data, int result)
++{
++}
++
++Bool
++vfbFramebufferOf(int screen)
++{
++    return screens[screen].fb != NULL;
++}
++
++static Bool
++track_screen(ScreenPtr pScreen)
++{
++    FramebufferScreenRec *s = &screens[pScreen->myNum];
++    PixmapPtr pixmap = pScreen->GetScreenPixmap(pScreen);
++
++    if (s->before)
++        return TRUE;
++    s->before = DamageCreate(damage_before, NULL, DamageReportRawRegion, TRUE, pScreen, s);
++    s->after = DamageCreate(damage_after, NULL, DamageReportRawRegion, TRUE, pScreen, s);
++    if (!s->before || !s->after) {
++        if (s->before)
++            DamageDestroy(s->before);
++        if (s->after)
++            DamageDestroy(s->after);
++        s->before = s->after = NULL;
++        return FALSE;
++    }
++    DamageSetReportAfterOp(s->after, TRUE);
++    DamageRegister(&pixmap->drawable, s->before);
++    DamageRegister(&pixmap->drawable, s->after);
++    return TRUE;
++}
++
++static int
++watch_free(void *value, XID id)
++{
++    WatchRec *watch = value;
++
++    xorg_list_del(&watch->link);
++    munmap(watch->map, watch->size);
++    close(watch->fd);
++    close(watch->event);
++    free(watch);
++    return Success;
++}
++
++/* A read-only descriptor of the memfd fd, through the open file it names. */
++static int
++read_only(int fd)
++{
++    char path[64];
++
++    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
++    return open(path, O_RDONLY | O_CLOEXEC);
++}
++
++static WatchRec *
++watch_new(int screen, uint32_t width, uint32_t height)
++{
++    WatchRec *watch = calloc(1, sizeof(*watch));
++    uint32_t tiles_x = (width + SELKIES_FB_TILE - 1) / SELKIES_FB_TILE;
++    uint32_t tiles_y = (height + SELKIES_FB_TILE - 1) / SELKIES_FB_TILE;
++    size_t words = ((size_t) tiles_x * tiles_y + 63) / 64;
++
++    if (!watch)
++        return NULL;
++    watch->screen = screen;
++    watch->tiles_x = tiles_x;
++    watch->tiles_y = tiles_y;
++    watch->size = sizeof(struct selkies_fb_watch) + words * sizeof(uint64_t);
++    watch->event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
++    watch->fd = memfd_create("selkies-framebuffer-watch", MFD_CLOEXEC);
++    if (watch->event < 0 || watch->fd < 0 || ftruncate(watch->fd, watch->size) < 0)
++        goto fail;
++    watch->map = mmap(NULL, watch->size, PROT_READ | PROT_WRITE, MAP_SHARED, watch->fd, 0);
++    if (watch->map == MAP_FAILED)
++        goto fail;
++    watch->map->magic = SELKIES_FB_MAGIC;
++    watch->map->version = SELKIES_FB_VERSION;
++    watch->map->tile = SELKIES_FB_TILE;
++    watch->map->tiles_x = tiles_x;
++    watch->map->tiles_y = tiles_y;
++    memset(watch->map->bits, 0xff, words * sizeof(uint64_t));
++    return watch;
++
++ fail:
++    if (watch->event >= 0)
++        close(watch->event);
++    if (watch->fd >= 0)
++        close(watch->fd);
++    free(watch);
++    return NULL;
++}
++
++static int
++proc_framebuffer_query_version(ClientPtr client)
++{
++    X_REQUEST_HEAD_STRUCT(xFramebufferQueryVersionReq);
++    X_REQUEST_FIELD_CARD32(majorVersion);
++    X_REQUEST_FIELD_CARD32(minorVersion);
++
++    xFramebufferQueryVersionReply reply = {
++        .majorVersion = FRAMEBUFFER_MAJOR,
++        .minorVersion = FRAMEBUFFER_MINOR,
++    };
++
++    X_REPLY_FIELD_CARD32(majorVersion);
++    X_REPLY_FIELD_CARD32(minorVersion);
++    return X_SEND_REPLY_SIMPLE(client, reply);
++}
++
++static int
++proc_framebuffer_watch(ClientPtr client)
++{
++    X_REQUEST_HEAD_STRUCT(xFramebufferWatchReq);
++    X_REQUEST_FIELD_CARD32(watch);
++    X_REQUEST_FIELD_CARD32(drawable);
++
++    DrawablePtr drawable;
++    FramebufferScreenRec *s;
++    struct selkies_fb_header *head;
++    WatchRec *watch;
++    int status, fb, mapped, event;
++
++    LEGAL_NEW_RESOURCE(stuff->watch, client);
++    status = dixLookupDrawable(&drawable, stuff->drawable, client, M_ANY, DixReadAccess);
++    if (status != Success)
++        return status;
++    s = &screens[drawable->pScreen->myNum];
++    if (!s->fb || !track_screen(drawable->pScreen))
++        return BadMatch;
++    head = s->fb->head;
++    watch = watch_new(drawable->pScreen->myNum, head->width, head->height);
++    if (!watch)
++        return BadAlloc;
++    fb = read_only(s->fb->fd);
++    mapped = fcntl(watch->fd, F_DUPFD_CLOEXEC, 0);
++    event = fcntl(watch->event, F_DUPFD_CLOEXEC, 0);
++    xorg_list_append(&watch->link, &s->watches);
++    if (fb < 0 || mapped < 0 || event < 0) {
++        if (fb >= 0)
++            close(fb);
++        if (mapped >= 0)
++            close(mapped);
++        if (event >= 0)
++            close(event);
++        watch_free(watch, 0);
++        return BadAlloc;
++    }
++    if (!AddResource(stuff->watch, watch_type, watch)) {
++        close(fb);
++        close(mapped);
++        close(event);
++        return BadAlloc;
++    }
++    if (WriteFdToClient(client, fb, TRUE) < 0 ||
++        WriteFdToClient(client, mapped, TRUE) < 0 ||
++        WriteFdToClient(client, event, TRUE) < 0) {
++        FreeResource(stuff->watch, RT_NONE);
++        return BadAlloc;
++    }
++
++    xFramebufferWatchReply reply = {
++        .nfd = 3,
++        .width = head->width,
++        .height = head->height,
++        .stride = head->stride,
++        .bpp = head->bpp,
++        .pixelOffset = head->pixel_offset,
++        .tile = SELKIES_FB_TILE,
++    };
++
++    X_REPLY_FIELD_CARD32(width);
++    X_REPLY_FIELD_CARD32(height);
++    X_REPLY_FIELD_CARD32(stride);
++    X_REPLY_FIELD_CARD32(bpp);
++    X_REPLY_FIELD_CARD32(pixelOffset);
++    X_REPLY_FIELD_CARD32(tile);
++    return X_SEND_REPLY_SIMPLE(client, reply);
++}
++
++static int
++proc_framebuffer_unwatch(ClientPtr client)
++{
++    X_REQUEST_HEAD_STRUCT(xFramebufferUnwatchReq);
++    X_REQUEST_FIELD_CARD32(watch);
++
++    WatchRec *watch;
++    int status = dixLookupResourceByType((void **) &watch, stuff->watch,
++                                         watch_type, client, DixDestroyAccess);
++
++    if (status != Success)
++        return status;
++    FreeResource(stuff->watch, RT_NONE);
++    return Success;
++}
++
++static int
++proc_framebuffer_dispatch(ClientPtr client)
++{
++    REQUEST(xReq);
++
++    /* The framebuffer travels as an fd. */
++    if (!client->local)
++        return BadMatch;
++    switch (stuff->data) {
++    case 0:
++        return proc_framebuffer_query_version(client);
++    case 1:
++        return proc_framebuffer_watch(client);
++    case 2:
++        return proc_framebuffer_unwatch(client);
++    default:
++        return BadRequest;
++    }
++}
++
++void
++vfbFramebufferExtensionInit(void)
++{
++    Bool any = FALSE;
++
++    for (int i = 0; i < MAXSCREENS; i++) {
++        xorg_list_init(&screens[i].watches);
++        any = any || screens[i].fb;
++    }
++    if (!any)
++        return;
++    watch_type = CreateNewResourceType(watch_free, "SelkiesFramebufferWatch");
++    if (!watch_type || !RegisterBlockAndWakeupHandlers(block_handler, wakeup_handler, NULL))
++        return;
++    if (!AddExtension(SELKIES_FRAMEBUFFER_NAME, 0, 0, proc_framebuffer_dispatch,
++                      proc_framebuffer_dispatch, NULL, StandardMinorOpcode))
++        return;
++    LogMessage(X_INFO, "vfb: framebuffer shared with local clients (%s %d.%d)\n",
++               SELKIES_FRAMEBUFFER_NAME, FRAMEBUFFER_MAJOR, FRAMEBUFFER_MINOR);
++}
+diff --git a/hw/vfb/vfbframebuffer.h b/hw/vfb/vfbframebuffer.h
+new file mode 100644
+index 0000000..90a5ccf
+--- /dev/null
++++ b/hw/vfb/vfbframebuffer.h
+@@ -0,0 +1,68 @@
++#ifndef VFB_FRAMEBUFFER_H
++#define VFB_FRAMEBUFFER_H
++
++#include <stdint.h>
++
++#include "scrnintstr.h"
++
++#define SELKIES_FRAMEBUFFER_NAME "SELKIES-FRAMEBUFFER"
++
++/*
++ * The head of a framebuffer memfd, at offset 0, the pixels at pixel_offset.
++ * A client maps it read-only. seq is odd while the server draws into the
++ * pixels; retired is set once the screen has moved to another framebuffer
++ * (a resize), after which the client asks for the new one.
++ */
++#define SELKIES_FB_MAGIC 0x42464b53u
++#define SELKIES_FB_VERSION 1u
++#define SELKIES_FB_PIXEL_OFFSET 4096u
++
++struct selkies_fb_header {
++    uint32_t magic;
++    uint32_t version;
++    uint32_t width;
++    uint32_t height;
++    uint32_t stride;
++    uint32_t bpp;
++    uint32_t pixel_offset;
++    uint32_t retired;
++    uint64_t seq;
++};
++
++/*
++ * A client's watch memfd, mapped read-write by that client alone: a bitmap of
++ * the TILE x TILE tiles the server drew into since the client last cleared
++ * them, row-major, a bit a tile, and armed, which the client sets before it
++ * waits on the watch's eventfd and the server clears when it signals.
++ */
++#define SELKIES_FB_TILE 16u
++
++struct selkies_fb_watch {
++    uint32_t magic;
++    uint32_t version;
++    uint32_t tile;
++    uint32_t tiles_x;
++    uint32_t tiles_y;
++    uint32_t armed;
++    uint64_t bits[];
++};
++
++struct vfb_framebuffer;
++
++/* A framebuffer of width x height pixels, stride bytes a row, bpp bits a pixel,
++ * in a memfd of its own; NULL where the kernel offers no memfd. */
++struct vfb_framebuffer *vfbFramebufferNew(int width, int height, int stride, int bpp);
++
++/* The pixels of fb. */
++char *vfbFramebufferPixels(struct vfb_framebuffer *fb);
++
++/* Make fb the framebuffer of screen, retiring and freeing the one it replaces. */
++void vfbFramebufferSetScreen(int screen, struct vfb_framebuffer *fb);
++
++/* Whether screen keeps its pixels in a framebuffer of its own. */
++Bool vfbFramebufferOf(int screen);
++
++/* Offers SELKIES-FRAMEBUFFER where some screen has a framebuffer of its own. */
++void vfbFramebufferExtensionInit(void);
++
++#endif

@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<!--
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+-->
+
+<html>
+<head>
+    <title>pcmflux Audio Demo</title>
+    <!-- A simple data URI for a favicon to prevent 404 errors in the console. -->
+    <link rel="icon" href="data:,">
+    <style>
+        /* Basic styling for the demo page. */
+        body {
+            font-family: sans-serif;
+            background-color: #282c34;
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        /* Styling for the main status message display. */
+        #status {
+            font-size: 1.5em;
+            text-align: center;
+        }
+
+        /* CSS for the animated "blinking dots" loading indicator. */
+        .dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #bbb;
+            margin: 0 5px;
+            animation: blink 1.4s infinite both;
+        }
+
+        .dot.one { animation-delay: 0.0s; }
+        .dot.two { animation-delay: 0.2s; }
+        .dot.three { animation-delay: 0.4s; }
+
+        /* The keyframe animation that creates the blinking effect. */
+        @keyframes blink {
+            0% { opacity: .2; }
+            20% { opacity: 1; }
+            100% { opacity: .2; }
+        }
+    </style>
+</head>
+<body>
+    <!-- This div will display the connection and audio status to the user. -->
+    <div id="status">
+        Connecting...
+        <div class="dot one"></div><div class="dot two"></div><div class="dot three"></div>
+    </div>
+
+    <script>
+        /**
+         * This script demonstrates a real-time audio streaming client.
+         * It connects to a WebSocket server, receives Opus-encoded audio packets,
+         * decodes them in the browser, and plays them back with low latency
+         * using the Web Audio API.
+         */
+
+        // --- Configuration and Global Variables ---
+
+        // The address of the WebSocket server providing the audio stream.
+        // The server takes only the token of its start, which the URL it prints carries.
+        const TOKEN = new URLSearchParams(location.hash.slice(1)).get("token") || "";
+        const WEBSOCKET_URL = "ws://localhost:9000/?token=" + encodeURIComponent(TOKEN);
+        
+        // A reference to the HTML element used to display status messages.
+        const statusDiv = document.getElementById('status');
+        
+        // Variables to hold the core components of our audio pipeline.
+        let audioContext;
+        let audioDecoder;
+        let audioWorkletNode;
+        
+        // Client-side monitoring counters.
+        let workletBufferLength = 0;
+        let workletUnderruns = 0;   // reported by the worklet on buffer underrun
+        let droppedPackets = 0;     // dropped here on decoder backpressure
+        let statusTimer = null;     // handle for the periodic status logger
+
+        // Monotonic per-frame presentation timestamp (us). Wall-clock
+        // audioContext.currentTime gave non-monotonic, jittered timestamps.
+        let nextTimestampUs = 0;
+
+        // Per-frame presentation step (us). MUST equal the server's
+        // frame_duration_ms * 1000 (default 20 ms -> 20000); the server doesn't
+        // announce it, so a mismatch drifts the timeline into desync/underruns.
+        const FRAME_DURATION_US = 20000;
+
+        // --- WebSocket Connection and Event Handling ---
+
+        // Initialize the WebSocket connection.
+        const websocket = new WebSocket(WEBSOCKET_URL);
+        // Set the binary type to 'arraybuffer' to handle raw audio data efficiently.
+        websocket.binaryType = 'arraybuffer';
+
+        /**
+         * Called when the WebSocket connection is successfully established.
+         */
+        websocket.onopen = () => {
+            console.log("[WS] WebSocket connected.");
+            statusDiv.textContent = "Connected. Waiting for audio...";
+            // Modern browsers require a user interaction (like a click) to start audio playback.
+            // This adds a one-time click listener to the page to initialize the audio pipeline.
+            document.body.addEventListener('click', initAudio, { once: true });
+            statusDiv.innerHTML += "<br><small>(Click anywhere to start audio playback)</small>";
+        };
+
+        /**
+         * Called for each message received from the server.
+         * This is the entry point for incoming audio data.
+         */
+        websocket.onmessage = (event) => {
+            // Ensure the audio pipeline is ready before processing data.
+            if (!audioDecoder || audioDecoder.state !== "configured") return;
+            
+            // If the audio context was suspended, resume it.
+            if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            statusDiv.textContent = "Receiving audio stream...";
+
+            // Wire format: 2-byte header [0x01, 0x00] then Opus. byte 0 = audio-chunk
+            // tag, byte 1 = RED block count (0 here); emitted natively by pcmflux
+            // (omit_audio_header=False). A bare [0x01, 0x80] marks where the capture's
+            // silence gate closed and carries no Opus.
+            const dataView = new DataView(event.data);
+            const dataType = dataView.getUint8(0);
+
+            // Check if the data type is for an audio chunk (0x01).
+            if (dataType === 0x01) {
+                // Extract the raw Opus data, skipping the 2-byte header.
+                const opusData = event.data.slice(2);
+                if (opusData.byteLength === 0) return;
+
+                // Simple backpressure: if the decoder queue is getting too long, drop the packet.
+                if (audioDecoder.decodeQueueSize > 10) {
+                     droppedPackets++;
+                     // Still advance the timeline: a dropped frame represents elapsed
+                     // playback time, so the PTS must not compress after drops.
+                     nextTimestampUs += FRAME_DURATION_US;
+                     return;
+                }
+
+                // Wrap the Opus data in an EncodedAudioChunk for the decoder.
+                const chunk = new EncodedAudioChunk({
+                    type: 'key', // All Opus frames are treated as 'key' frames.
+                    timestamp: nextTimestampUs, // Monotonic; advances per frame.
+                    data: opusData
+                });
+                nextTimestampUs += FRAME_DURATION_US; // One frame of playback time, in microseconds.
+
+                // Send the chunk to the decoder.
+                try {
+                    audioDecoder.decode(chunk);
+                } catch (e) {
+                    console.error("[Decoder] Error decoding audio chunk:", e);
+                }
+            }
+        };
+
+        /**
+         * Called when the WebSocket connection is closed.
+         */
+        websocket.onclose = () => {
+            console.log("[WS] WebSocket disconnected.");
+            statusDiv.textContent = "Disconnected from server.";
+            // Tear down the whole pipeline, not just the context.
+            if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+            if (audioDecoder && audioDecoder.state !== 'closed') audioDecoder.close();
+            audioDecoder = null;
+            if (audioWorkletNode) { audioWorkletNode.disconnect(); audioWorkletNode = null; }
+            if (audioContext) { audioContext.close(); audioContext = null; }
+        };
+
+        /**
+         * Called if a WebSocket error occurs.
+         */
+        websocket.onerror = (err) => {
+            console.error("[WS] WebSocket error:", err);
+            statusDiv.textContent = "WebSocket connection error.";
+        };
+
+        // --- Audio Pipeline Initialization ---
+
+        // Normalize a decoded AudioData frame to interleaved stereo L,R,L,R Float32.
+        // Handles both planar (Chromium's Opus 'f32-planar') and interleaved sources,
+        // always emitting exactly 2 channels (the worklet's fixed stride).
+        function audioDataToInterleaved(audioData) {
+            const frames = audioData.numberOfFrames;
+            const channels = audioData.numberOfChannels;
+            const OUT_CHANNELS = 2;
+            const out = new Float32Array(frames * OUT_CHANNELS);
+            try {
+                if (audioData.format && audioData.format.endsWith('-planar')) {
+                    const plane = new Float32Array(frames);
+                    for (let ch = 0; ch < OUT_CHANNELS; ch++) {
+                        // Reuse the last available source plane when the source has
+                        // fewer channels than stereo (e.g. mono -> duplicate to L/R).
+                        const srcCh = Math.min(ch, channels - 1);
+                        audioData.copyTo(plane, { planeIndex: srcCh });
+                        for (let i = 0; i < frames; i++) out[i * OUT_CHANNELS + ch] = plane[i];
+                    }
+                } else if (channels === OUT_CHANNELS) {
+                    // Already interleaved stereo; copy straight through.
+                    audioData.copyTo(out, { planeIndex: 0 });
+                } else {
+                    // Interleaved with a non-stereo channel count: copy the raw
+                    // interleaved frame, then remap to a fixed stereo stride.
+                    const raw = new Float32Array(frames * channels);
+                    audioData.copyTo(raw, { planeIndex: 0 });
+                    for (let i = 0; i < frames; i++) {
+                        out[i * OUT_CHANNELS] = raw[i * channels];
+                        out[i * OUT_CHANNELS + 1] = raw[i * channels + Math.min(1, channels - 1)];
+                    }
+                }
+            } finally {
+                // Always release the decoded frame, even if copyTo throws (off-spec
+                // engines / unexpected formats), to avoid leaking the AudioData.
+                audioData.close();
+            }
+            return out;
+        }
+
+        /**
+         * Initializes the entire audio processing pipeline. This function is called
+         * only once after the first user click.
+         */
+        async function initAudio() {
+            if (audioContext) return; // Prevent re-initialization.
+
+            try {
+                console.log("[AudioInit] User clicked. Initializing audio pipeline...");
+                statusDiv.textContent = "Initializing audio pipeline...";
+
+                // 1. Create the AudioContext, the central point of the Web Audio API.
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 48000,
+                    latencyHint: 'interactive' // Prioritize low latency.
+                });
+                
+                // 2. Configure and create the AudioDecoder for the Opus codec.
+                const decoderConfig = { codec: 'opus', sampleRate: 48000, numberOfChannels: 2 };
+                const support = await AudioDecoder.isConfigSupported(decoderConfig);
+                if (!support.supported) {
+                    throw new Error("Opus decoding not supported by this browser.");
+                }
+                console.log("[AudioInit] Opus config supported.");
+
+                audioDecoder = new AudioDecoder({
+                    output: (audioData) => {
+                        // Normalize to interleaved L,R,L,R, then transfer to the
+                        // worklet (zero-copy via the transferable buffer).
+                        // audioDataToInterleaved() closes the AudioData frame itself
+                        // (via try/finally), so we must not close it again here.
+                        const pcmData = audioDataToInterleaved(audioData);
+                        if (audioWorkletNode) {
+                            audioWorkletNode.port.postMessage(pcmData.buffer, [pcmData.buffer]);
+                        }
+                    },
+                    error: (e) => console.error("[Decoder] Error:", e)
+                });
+                audioDecoder.configure(decoderConfig);
+                console.log("[AudioInit] AudioDecoder configured.");
+
+                // 3. Define and load the AudioWorkletProcessor.
+                // An AudioWorklet runs in a separate, high-priority thread to handle
+                // real-time audio processing without blocking the main UI thread.
+                const workletCode = `
+                    class PlaybackProcessor extends AudioWorkletProcessor {
+                        constructor() {
+                            super();
+                            this.queue = []; // A queue to buffer incoming audio chunks.
+                            this.currentBuffer = null; // The chunk currently being played.
+                            this.bufferOffset = 0; // Our position within the current chunk (in samples).
+                            this.reportCounter = 0; // Throttles buffer-size reports to the main thread.
+                            this.underrunCount = 0; // Silence-filled render quanta (no data).
+
+                            // Listen for messages (the PCM audio buffers) from the main thread.
+                            this.port.onmessage = (event) => {
+                                this.queue.push(new Float32Array(event.data));
+                            };
+                        }
+
+                        // Throttled (~every 100ms; process() runs ~375x/sec) status
+                        // report, so monitoring stays off the realtime hot path.
+                        maybeReport() {
+                            if (++this.reportCounter < 37) return;
+                            this.reportCounter = 0;
+                            let total = this.queue.reduce((sum, buf) => sum + buf.length, 0);
+                            if (this.currentBuffer) total += (this.currentBuffer.length - this.bufferOffset);
+                            this.port.postMessage({ type: 'buffer_size_report', size: total / 2, underruns: this.underrunCount });
+                        }
+
+                        // This is the core real-time processing function, called by the browser.
+                        process(inputs, outputs, parameters) {
+                            const output = outputs[0];
+                            const leftChannel = output[0];
+                            const rightChannel = output[1];
+                            const bufferSize = leftChannel.length; // Typically 128 samples.
+
+                            let outputPos = 0;
+                            while (outputPos < bufferSize) {
+                                // If we're out of data, try to get the next chunk from the queue.
+                                if (!this.currentBuffer || this.bufferOffset >= this.currentBuffer.length) {
+                                    if (this.queue.length > 0) {
+                                        this.currentBuffer = this.queue.shift();
+                                        this.bufferOffset = 0;
+                                    } else {
+                                        // Underrun: fill silence, count it, still report during a stall.
+                                        this.underrunCount++;
+                                        leftChannel.fill(0, outputPos);
+                                        rightChannel.fill(0, outputPos);
+                                        this.maybeReport();
+                                        return true; // Keep the processor alive.
+                                    }
+                                }
+
+                                // Calculate how many samples we can copy in this iteration.
+                                const samplesLeftInBuffer = (this.currentBuffer.length - this.bufferOffset) / 2; // /2 for stereo.
+                                const samplesToCopy = Math.min(bufferSize - outputPos, samplesLeftInBuffer);
+
+                                // De-interleave the data from our buffer into the separate L/R output channels.
+                                for (let i = 0; i < samplesToCopy; i++) {
+                                    leftChannel[outputPos + i] = this.currentBuffer[this.bufferOffset++];
+                                    rightChannel[outputPos + i] = this.currentBuffer[this.bufferOffset++];
+                                }
+                                outputPos += samplesToCopy;
+                            }
+                            
+                            this.maybeReport();
+                            return true; // Keep the processor alive.
+                        }
+                    }
+                    registerProcessor('playback-processor', PlaybackProcessor);
+                `;
+
+                // Load the worklet code into the AudioContext.
+                const workletBlob = new Blob([workletCode], { type: 'application/javascript' });
+                const workletURL = URL.createObjectURL(workletBlob);
+                await audioContext.audioWorklet.addModule(workletURL);
+                
+                // 4. Create the AudioWorkletNode and connect it to the speakers.
+                audioWorkletNode = new AudioWorkletNode(audioContext, 'playback-processor', {
+                    outputChannelCount: [2] // We are outputting stereo.
+                });
+                
+                // Listen for status messages (like buffer size) from the worklet.
+                audioWorkletNode.port.onmessage = (event) => {
+                    if (event.data.type === 'buffer_size_report') {
+                        workletBufferLength = event.data.size;
+                        workletUnderruns = event.data.underruns;
+                    }
+                };
+                
+                // Connect the worklet to the audio destination (the user's speakers).
+                audioWorkletNode.connect(audioContext.destination);
+                
+                statusDiv.textContent = "Audio pipeline ready. Listening for stream...";
+                console.log("[AudioInit] Audio pipeline initialized successfully.");
+
+                // Start a periodic logger to monitor the client's status.
+                statusTimer = setInterval(logClientStatus, 2000);
+
+            } catch (err) {
+                console.error("[AudioInit] Failed to initialize audio:", err);
+                statusDiv.textContent = "Error: Could not start audio. " + err.message;
+            }
+        }
+
+        // --- Monitoring ---
+
+        /**
+         * Periodically logs the state of the audio pipeline to the developer console.
+         */
+        function logClientStatus() {
+            if (!audioContext || !audioWorkletNode) return;
+            console.log(
+                `[Status] ` +
+                `AudioContext: ${audioContext.state}, ` +
+                `Decoder: ${audioDecoder ? audioDecoder.state : 'null'}, ` +
+                `Decoder Queue: ${audioDecoder ? audioDecoder.decodeQueueSize : 'N/A'}, ` +
+                `Worklet Buffer: ${workletBufferLength} samples, ` +
+                `Underruns: ${workletUnderruns}, Dropped: ${droppedPackets}`
+            );
+        }
+    </script>
+</body>
+</html>

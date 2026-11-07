@@ -16,10 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 import core_lib as C  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
-
-sys.path.insert(0, os.path.join(H.REPO, "src"))
-from selkies.Xlib import X, display as xdisp  # noqa: E402
-from selkies.input_handler import _X11ClipboardMonitor  # noqa: E402
+from Xlib import X, display as xdisp  # noqa: E402
 
 DASH = os.path.join(H.REPO, "addons/selkies-dashboard/dist")
 HTML, PLAIN = "<b>rich copy</b>", "rich copy"
@@ -97,7 +94,7 @@ def read_rich(page):
 def block(mode: str) -> "H.Results":
     res = H.Results(f"cliprich-{mode}")
     H.server_start(mode=mode, wayland=False, web_root=DASH,
-                   extra_env={"PYTHONPATH": os.path.join(H.REPO, "src")})
+                   extra_env={})
     with sync_playwright() as p:
         browser, page = page_with_clipboard(p, mode)
         source = None
@@ -110,8 +107,8 @@ def block(mode: str) -> "H.Results":
             res.check("its plain text reaches the session beside the markup",
                       plain is not None and plain.decode() == PLAIN, plain)
 
-            source = _X11ClipboardMonitor(H.require_display())
-            source.offer([("text/html", BACK_HTML.encode()), ("text/plain", BACK_PLAIN.encode())])
+            _, source = H.x_own_clipboard(BACK_PLAIN.encode(),
+                                          {"text/html": BACK_HTML.encode(), "text/plain": BACK_PLAIN.encode()})
             # Two gestures: the write needs a user activation, and the payload
             # has to have arrived before the one that lands it.
             for _ in range(2):
@@ -125,7 +122,8 @@ def block(mode: str) -> "H.Results":
             res.check("its plain text reaches the browser beside the markup",
                       isinstance(local, dict) and local.get("text") == BACK_PLAIN, local)
         finally:
-            source.close() if source is not None else None
+            if source is not None:
+                source["flag"] = True
             browser.close()
     res.summary()
     return res
@@ -152,10 +150,9 @@ def policy_block() -> "H.Results":
     res = H.Results("cliprich-policy")
     sentinel = "nothing moved on its own"
     H.server_start(mode="websockets", wayland=False, web_root=DASH,
-                   extra_env={"PYTHONPATH": os.path.join(H.REPO, "src"),
+                   extra_env={
                               "SELKIES_CLIPBOARD_SEAMLESS": "false"})
-    source = _X11ClipboardMonitor(H.require_display())
-    source.offer([("text/plain", sentinel.encode())])
+    _, source = H.x_own_clipboard(sentinel.encode(), {"text/plain": sentinel.encode()})
     with sync_playwright() as p:
         browser, page = page_with_clipboard(p, "websockets")
         try:
@@ -167,13 +164,13 @@ def policy_block() -> "H.Results":
             res.check("and the session's own copy is not written to the browser either",
                       not (isinstance(local, dict) and local.get("text") == sentinel), local)
         finally:
-            source.close()
+            source["flag"] = True
             browser.close()
 
     # Reading markup out of the browser is the same clipboard read images need,
     # so the image switch decides whether a rich copy leaves the browser as one.
     H.server_start(mode="websockets", wayland=False, web_root=DASH,
-                   extra_env={"PYTHONPATH": os.path.join(H.REPO, "src"),
+                   extra_env={
                               "SELKIES_ENABLE_BINARY_CLIPBOARD": "false"})
     with sync_playwright() as p:
         browser, page = page_with_clipboard(p, "websockets")
@@ -187,7 +184,7 @@ def policy_block() -> "H.Results":
 
     # The panel writes the choice and the core stores it; a reload has to find it.
     H.server_start(mode="websockets", wayland=False, web_root=DASH,
-                   extra_env={"PYTHONPATH": os.path.join(H.REPO, "src")})
+                   extra_env={})
     with sync_playwright() as p:
         browser, page = page_with_clipboard(p, "websockets")
         try:
@@ -206,7 +203,7 @@ def policy_block() -> "H.Results":
 
     for shortcuts, takes_browser in (("true", True), ("false", False)):
         H.server_start(mode="websockets", wayland=False, web_root=DASH,
-                       extra_env={"PYTHONPATH": os.path.join(H.REPO, "src"),
+                       extra_env={
                                   "SELKIES_KEYBOARD_SHORTCUTS": shortcuts})
         with sync_playwright() as p:
             browser, page = page_with_clipboard(p, "websockets")

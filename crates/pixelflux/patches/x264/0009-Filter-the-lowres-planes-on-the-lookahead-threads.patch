@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Fri, 6 Nov 2026 09:52:48 -0500
+Subject: [PATCH] Filter the lowres planes on the lookahead threads
+
+The lowres filter ran on the calling thread while a synchronous lookahead's threads sat idle until
+the frame's cost estimate, and the border of all four lowres planes was expanded again for every
+frame. With a synchronous lookahead and lookahead threads, the filter now runs on them in bands of
+macroblock rows, each lowres row reading only the input rows under it and the one below, and
+the border, which repeats the edge pixels, is expanded again only for the rows of blocks whose
+first or last block changed since the frame's lowres planes were last filtered, and the top or
+bottom where the first or last row has any block that changed. A frame filtered whole is expanded
+whole.
+
+Every stream comes out bit for bit the same: CRF at one and four threads and VBV at one, 1080p
+and 2560x1600, a scroll, a moved window, a small change, a still screen, forced IDRs, and frames
+without mb_info, between builds that write the same version string (its SEI counts toward the
+first frame's VBV budget). At 2560x1600 with four lookahead threads the lowres stage of a scroll
+took 0.28 ms where it took 0.42, of a 256x256 change 0.05 against 0.10, and of a still frame 0.012
+against 0.038.
+---
+ common/frame.c |   8 ++++
+ common/frame.h |   4 ++
+ common/mc.c    | 127 ++++++++++++++++++++++++++++++++++++-------------
+ 3 files changed, 106 insertions(+), 33 deletions(-)
+
+diff --git a/common/frame.c b/common/frame.c
+index 18c85d5..ee8dd2c 100644
+--- a/common/frame.c
++++ b/common/frame.c
+@@ -805,6 +805,14 @@ void x264_frame_expand_border_lowres( x264_frame_t *frame )
+         plane_expand_border( frame->lowres[i], frame->i_stride_lowres, frame->i_width_lowres, frame->i_lines_lowres, PADH, PADV, 1, 1, 0 );
+ }
+ 
++void x264_frame_expand_border_lowres_rows( x264_frame_t *frame, int y0, int y1 )
++{
++    y1 = X264_MIN( y1, frame->i_lines_lowres );
++    for( int i = 0; i < 4; i++ )
++        plane_expand_border( frame->lowres[i] + y0 * frame->i_stride_lowres, frame->i_stride_lowres, frame->i_width_lowres,
++                             y1 - y0, PADH, PADV, y0 == 0, y1 == frame->i_lines_lowres, 0 );
++}
++
+ void x264_frame_expand_border_chroma( x264_t *h, x264_frame_t *frame, int plane )
+ {
+     int v_shift = CHROMA_V_SHIFT;
+diff --git a/common/frame.h b/common/frame.h
+index 015e85f..1c76661 100644
+--- a/common/frame.h
++++ b/common/frame.h
+@@ -243,6 +243,10 @@ void          x264_frame_expand_border( x264_t *h, x264_frame_t *frame, int mb_y
+ void          x264_frame_expand_border_filtered( x264_t *h, x264_frame_t *frame, int mb_y, int b_end );
+ #define x264_frame_expand_border_lowres x264_template(frame_expand_border_lowres)
+ void          x264_frame_expand_border_lowres( x264_frame_t *frame );
++/* The left and right border of the lowres rows from y0 to y1, and the top or bottom border where
++ * they include the first or last row. */
++#define x264_frame_expand_border_lowres_rows x264_template(frame_expand_border_lowres_rows)
++void          x264_frame_expand_border_lowres_rows( x264_frame_t *frame, int y0, int y1 );
+ #define x264_frame_expand_border_chroma x264_template(frame_expand_border_chroma)
+ void          x264_frame_expand_border_chroma( x264_t *h, x264_frame_t *frame, int plane );
+ #define x264_frame_expand_border_mod16 x264_template(frame_expand_border_mod16)
+diff --git a/common/mc.c b/common/mc.c
+index 1097d8d..b59e19a 100644
+--- a/common/mc.c
++++ b/common/mc.c
+@@ -455,6 +455,66 @@ static void integral_init8v( uint16_t *sum8, intptr_t stride )
+         sum8[x] = (uint16_t)(sum8[x+8*stride] - sum8[x]);
+ }
+ 
++typedef struct
++{
++    x264_t *h;
++    x264_frame_t *frame;
++    int held;
++    int y0, y1;
++} lowres_rows_t;
++
++/* Whether the lowres block at (x, y), which is filtered from its 16x16 macroblock and the next
++ * ones right and below, changed after input frame held (h->frames.mb_input_changed). */
++#define LOWRES_STALE( x, y ) ( (x) < mb_w && (y) < mb_h && changed[(x) + (y)*mb_w] > held )
++#define BLOCK_STALE( x, y ) ( LOWRES_STALE( x, y ) || LOWRES_STALE( (x)+1, y ) || LOWRES_STALE( x, (y)+1 ) || LOWRES_STALE( (x)+1, (y)+1 ) )
++
++/* Filter the macroblock rows from y0 to y1 of a frame's lowres planes: the blocks that changed
++ * since input frame held, or every block where held is -1. A lowres row reads the two input rows
++ * under it and the one below, which no other band writes. */
++static void *lowres_rows( lowres_rows_t *r )
++{
++    x264_t *h = r->h;
++    x264_frame_t *frame = r->frame;
++    pixel *src = frame->plane[0];
++    const int i_stride = frame->i_stride[0];
++    const intptr_t dst_stride = frame->i_stride_lowres;
++    if( r->held < 0 )
++    {
++        intptr_t d = 8*r->y0*dst_stride;
++        h->mc.frame_init_lowres_core( src + 16*r->y0*i_stride, frame->lowres[0] + d, frame->lowres[1] + d,
++                                      frame->lowres[2] + d, frame->lowres[3] + d, i_stride, dst_stride,
++                                      frame->i_width_lowres, X264_MIN( 8*r->y1, frame->i_lines_lowres ) - 8*r->y0 );
++        return NULL;
++    }
++    /* A recycled frame's lowres planes hold the input frame they were filtered from: only the
++     * blocks whose 16x16 macroblock, or the column or row of the next ones the filter reads,
++     * changed since are filtered again. The planes hold the current picture everywhere, so a
++     * run widened to 8 blocks either side filters current pixels: that is the alignment the
++     * SIMD core reads and stores at, as from a row's start. */
++    const int *changed = h->frames.mb_input_changed;
++    const int held = r->held;
++    const int mb_w = h->mb.i_mb_width, mb_h = h->mb.i_mb_height;
++    for( int y = r->y0; y < r->y1; y++ )
++        for( int x = 0; x < mb_w; )
++        {
++            if( !BLOCK_STALE( x, y ) )
++            {
++                x++;
++                continue;
++            }
++            int x0 = x & ~7;
++            while( x < mb_w && BLOCK_STALE( x, y ) )
++                x++;
++            x = X264_MIN( (x + 7) & ~7, mb_w );
++            intptr_t d = 8*x0 + 8*y*dst_stride;
++            h->mc.frame_init_lowres_core( src + 16*x0 + 16*y*i_stride, frame->lowres[0] + d, frame->lowres[1] + d,
++                                          frame->lowres[2] + d, frame->lowres[3] + d, i_stride, dst_stride,
++                                          x == mb_w ? frame->i_width_lowres - 8*x0 : 8*(x - x0),
++                                          X264_MIN( 8, frame->i_lines_lowres - 8*y ) );
++        }
++    return NULL;
++}
++
+ void x264_frame_init_lowres( x264_t *h, x264_frame_t *frame )
+ {
+     pixel *src = frame->plane[0];
+@@ -466,45 +526,46 @@ void x264_frame_init_lowres( x264_t *h, x264_frame_t *frame )
+     for( int y = 0; y < i_height; y++ )
+         src[i_width+y*i_stride] = src[i_width-1+y*i_stride];
+     memcpy( src+i_stride*i_height, src+i_stride*(i_height-1), (i_width+1) * SIZEOF_PIXEL );
+-    /* A recycled frame's lowres planes hold the input frame they were filtered from: only the
+-     * blocks whose 16x16 macroblock, or the column or row of the next ones the filter reads,
+-     * changed since are filtered again. The planes hold the current picture everywhere, so a
+-     * run widened to 8 blocks either side filters current pixels: that is the alignment the
+-     * SIMD core reads and stores at, as from a row's start. */
+     int held = frame->i_lowres_frame;
+-    int *changed = h->frames.mb_input_changed;
+     frame->i_lowres_frame = frame->i_input_frame;
+-    if( held >= 0 && changed && frame->i_input_frame >= 0 && h->frames.i_input_all_changed <= held )
++    if( !(held >= 0 && h->frames.mb_input_changed && frame->i_input_frame >= 0 && h->frames.i_input_all_changed <= held) )
++        held = -1;
++    /* With a synchronous lookahead its threads are idle while the input is taken in, so the
++     * filter runs on them in bands of macroblock rows. */
++    const int mb_h = h->mb.i_mb_height;
++    int bands = h->lookaheadpool && !h->param.i_sync_lookahead ? X264_MIN( h->param.i_lookahead_threads, mb_h ) : 1;
++    lowres_rows_t rows[X264_LOOKAHEAD_THREAD_MAX];
++    for( int i = 0; i < bands; i++ )
+     {
+-        const int mb_w = h->mb.i_mb_width, mb_h = h->mb.i_mb_height;
+-        const intptr_t dst_stride = frame->i_stride_lowres;
+-#define LOWRES_STALE( x, y ) ( (x) < mb_w && (y) < mb_h && changed[(x) + (y)*mb_w] > held )
+-#define BLOCK_STALE( x, y ) ( LOWRES_STALE( x, y ) || LOWRES_STALE( (x)+1, y ) || LOWRES_STALE( x, (y)+1 ) || LOWRES_STALE( (x)+1, (y)+1 ) )
++        rows[i] = (lowres_rows_t){ h, frame, held, mb_h * i / bands, mb_h * (i+1) / bands };
++        if( bands > 1 )
++            x264_threadpool_run( h->lookaheadpool, (void*)lowres_rows, &rows[i] );
++        else
++            lowres_rows( &rows[i] );
++    }
++    if( bands > 1 )
++        for( int i = 0; i < bands; i++ )
++            x264_threadpool_wait( h->lookaheadpool, &rows[i] );
++    /* The border repeats the edge pixels, so it stands wherever the blocks along the edge kept
++     * theirs: a row of blocks whose first or last block changed expands its sides again, and
++     * the first or last row with any block changed its top or bottom too. */
++    if( held < 0 )
++        x264_frame_expand_border_lowres( frame );
++    else
++    {
++        const int *changed = h->frames.mb_input_changed;
++        const int mb_w = h->mb.i_mb_width;
+         for( int y = 0; y < mb_h; y++ )
+-            for( int x = 0; x < mb_w; )
+-            {
+-                if( !BLOCK_STALE( x, y ) )
+-                {
+-                    x++;
+-                    continue;
+-                }
+-                int x0 = x & ~7;
+-                while( x < mb_w && BLOCK_STALE( x, y ) )
+-                    x++;
+-                x = X264_MIN( (x + 7) & ~7, mb_w );
+-                intptr_t d = 8*x0 + 8*y*dst_stride;
+-                h->mc.frame_init_lowres_core( src + 16*x0 + 16*y*i_stride, frame->lowres[0] + d, frame->lowres[1] + d,
+-                                              frame->lowres[2] + d, frame->lowres[3] + d, i_stride, dst_stride,
+-                                              x == mb_w ? frame->i_width_lowres - 8*x0 : 8*(x - x0),
+-                                              X264_MIN( 8, frame->i_lines_lowres - 8*y ) );
+-            }
++        {
++            int stale = BLOCK_STALE( 0, y ) || BLOCK_STALE( mb_w - 1, y );
++            for( int x = 1; !stale && (y == 0 || y == mb_h - 1) && x < mb_w - 1; x++ )
++                stale = BLOCK_STALE( x, y );
++            if( stale )
++                x264_frame_expand_border_lowres_rows( frame, 8*y, 8*y + 8 );
++        }
++    }
+ #undef BLOCK_STALE
+ #undef LOWRES_STALE
+-    }
+-    else
+-        h->mc.frame_init_lowres_core( src, frame->lowres[0], frame->lowres[1], frame->lowres[2], frame->lowres[3],
+-                                      i_stride, frame->i_stride_lowres, frame->i_width_lowres, frame->i_lines_lowres );
+-    x264_frame_expand_border_lowres( frame );
+ 
+     memset( frame->i_cost_est, -1, sizeof(frame->i_cost_est) );
+ 
+-- 
+2.47.3
+

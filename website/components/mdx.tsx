@@ -26,8 +26,9 @@ const { createPythonComponents: _, ...PythonComponents } = Python;
 export function getMDXComponents(components?: MDXComponents) {
   return {
     ...defaultMdxComponents,
-    // PyFunction/PyAttribute/... and Tabs, used by the generated pages under
-    // docs/reference (see scripts/generate-python-docs.mjs).
+    // PyFunction/PyAttribute/... and Tabs, used by the reference pages
+    // scripts/generate-python-docs.mjs generates for a release whose server
+    // is Python.
     ...PythonComponents,
     PySourceCode,
     ...components,

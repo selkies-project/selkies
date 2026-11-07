@@ -1,0 +1,3 @@
+candidate:1467250027 1 udp 2122260223 192.168.1.10 54321 typ host generation 0
+candidate:3 1 udp 1686052607 203.0.113.7 61000 typ srflx raddr 192.168.1.10 rport 54321
+candidate:4 1 tcp 1518280447 192.168.1.10 9 typ host tcptype passive

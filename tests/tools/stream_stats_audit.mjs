@@ -21,10 +21,10 @@ globalThis.window = { dispatchEvent: () => { announced++; } };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const { StreamStats, HISTORY_MAX, FIRST_SAMPLE_MS, webcodecsDecoder, webrtcDecoder } =
-  await import('../../addons/selkies-web-core/lib/stream-stats.js');
+  await import('../../addons/selkies-web-core/lib/stream-stats.ts');
 const { streamRows, streamTiles, streamStrip, streamMeters, streamReport, seriesOf, graphPath, GRAPH_POINTS, OVERSHOOT } =
-  await import('../../addons/selkies-web-core/lib/stream-stats-view.js');
-const { createPresentMeter, watchVideo, DELAY_SAMPLE_MS } = await import('../../addons/selkies-web-core/lib/present-meter.js');
+  await import('../../addons/selkies-web-core/lib/stream-stats-view.ts');
+const { createPresentMeter, watchVideo, DELAY_SAMPLE_MS } = await import('../../addons/selkies-web-core/lib/present-meter.ts');
 
 let failed = 0;
 

@@ -1,0 +1,22 @@
+[package]
+name = "va-sys"
+description = "FFI bindings for the VA-API (libva) types, enums, and constants pixelflux's VA-API encoder drives, generated from the bundled libva headers in headers/ (libva 2.24, VA-API 1.24) and committed under src/bindgen/, so normal builds need no libclang. The entry points are resolved from the host's libva.so.2 at run time. The libva headers retain their own MIT license."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+publish = false
+
+[dependencies]
+libloading = "0.9"
+
+[features]
+default = []
+# Opt-in: regenerate src/bindgen/va.rs from the bundled headers. Needs libclang. OFF by
+# default so end-user / cibuildwheel builds compile the committed bindings with no extra
+# toolchain.
+regen = ["bindgen"]
+
+[build-dependencies]
+# Pinned to the version that produced the committed bindings so a regen reproduces them.
+bindgen = { version = "=0.73.2", default-features = false, features = ["runtime"], optional = true }

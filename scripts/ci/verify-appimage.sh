@@ -6,12 +6,12 @@
 # Prove the AppImage in $1 works somewhere other than where it was built.
 #
 # The build's own `--help` smoke test runs inside the AppDir at the path the
-# conda prefix was installed to, where an entry point that names that path
-# resolves anyway. What ships mounts at a path chosen at run time, and every
-# absolute path the build left inside is wrong there: the interpreter each
-# entry point names, and the module directory and startup script the bundled
-# sound server has compiled in. This runs from an extracted copy instead,
-# which is also how a user reaches the payload by hand.
+# conda prefix was installed to, where a path the build left inside resolves
+# anyway. What ships mounts at a path chosen at run time, and every absolute
+# path the build left inside is wrong there: the interpreter a script names,
+# and the module directory and startup script the bundled sound server has
+# compiled in. This runs from an extracted copy instead, which is also how a
+# user reaches the payload by hand.
 #
 # Every path checked has to be inside that copy rather than merely resolve,
 # because the build path is still there on the machine that built the AppImage.
@@ -36,12 +36,10 @@ echo "AppRun runs from an extracted copy"
 echo "AppRun runs the session launcher, and its sound server wrapper finds the daemon"
 
 # Through usr/bin too, the symlink farm linuxdeploy is given rather than the
-# scripts themselves, so an entry point that resolves its interpreter from its
-# own path has to follow the link first
+# executables themselves
 "${APP}/usr/bin/selkies" --help > /dev/null
-"${PREFIX}/bin/pip" --version > /dev/null
-"${PREFIX}/bin/conda" --version > /dev/null
-echo "the entry points run, by either name"
+"${PREFIX}/bin/selkies" --version
+echo "the server runs, by either name"
 
 # Not only the ones this project calls: a launcher left naming the build path
 # is the whole class of defect, and a script nobody here runs is a user's first
@@ -76,14 +74,25 @@ if [ -e "${PREFIX}/pkgs" ]; then
 fi
 echo "the prefix carries no conda package cache"
 
-"${PREFIX}/bin/python" -c "import selkies, pixelflux, pcmflux"
-echo "selkies, pixelflux, and pcmflux import"
+# The server reads its web client from beside the directory it is installed in
+test -f "${PREFIX}/share/selkies/web/index.html"
+echo "the web client sits beside the server"
+if find "${APP}" -name 'python*' -type f | grep -q .; then
+    echo "::error::the AppImage carries a Python interpreter:"
+    find "${APP}" -name 'python*' -type f
+    exit 1
+fi
+echo "the AppImage carries no Python interpreter"
+# pixelflux's VA-API session opens libva by name, and the bundled one is first
+test -e "${PREFIX}/lib/libva.so.2"
+echo "the AppImage carries libva"
 
 # The sound server AppRun starts, started by AppRun: a daemon that finds no
 # module directory exits with "startup without any loaded modules", taking
 # audio out of the AppImage while everything else still streams. The Wayland
 # backend is selected so no X server is started, and its compositor is checked
-# too. Its own runtime directory, never a live session's.
+# too. Its own runtime directory, never a live session's, and no login, which
+# the server otherwise refuses to start without a password for.
 RUNTIME="${WORK}/runtime"
 mkdir -p "${RUNTIME}"
 chmod 700 "${RUNTIME}"
@@ -92,7 +101,7 @@ PULSE_LOG="/tmp/pulseaudio_selkies.log"
 rm -f "${PULSE_LOG}"
 env XDG_RUNTIME_DIR="${RUNTIME}" PULSE_SERVER="unix:${RUNTIME}/pulse/native" \
     PULSE_RUNTIME_PATH="${RUNTIME}/pulse" SELKIES_WAYLAND="true" \
-    setsid "${APP}/AppRun" > "${WORK}/apprun.log" 2>&1 &
+    setsid "${APP}/AppRun" --enable-basic-auth=false > "${WORK}/apprun.log" 2>&1 &
 session="$!"
 sinks=""
 i=0

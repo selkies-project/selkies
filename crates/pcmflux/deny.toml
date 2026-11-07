@@ -1,0 +1,48 @@
+# cargo-deny policy for the pcmflux crate graph (see LICENSES.md).
+#
+#     cargo deny --exclude-dev check licenses bans sources
+#
+# Every crate license must be in the permissive allow list. The native
+# libraries behind the bindings (libpulse, LGPL-2.1-or-later, and libopus,
+# BSD-3-Clause) are outside what crate metadata describes and are inventoried
+# in LICENSES.md instead. The full `cargo deny check` additionally runs the
+# advisories check, which needs the network.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+
+[licenses]
+# Permissive licenses only: a GPL, LGPL, or AGPL crate, or a crate without
+# license metadata, fails the check. MPL-2.0 is file-level copyleft and is
+# accepted (pcmflux itself is MPL-2.0).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

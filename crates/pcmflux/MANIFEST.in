@@ -1,0 +1,10 @@
+include Cargo.toml
+include Cargo.lock
+recursive-include src *
+recursive-exclude src *.so *.pyc
+prune target
+include LICENSE
+include LICENSES.md
+include pyproject.toml
+include README.md
+include setup.py

@@ -10,14 +10,18 @@ import json
 import os
 import struct
 import sys
+import types
 import time
 import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
-sys.path.insert(0, H.SRC)
-import selkies.input_handler as ih
+# Linux input event codes (linux/input-event-codes.h), and the name of the standard pad the
+# server publishes.
+codes = types.SimpleNamespace(
+    EV_SYN=0x00, EV_KEY=0x01, EV_ABS=0x03, BTN_A=0x130, BTN_B=0x131, ABS_X=0x00, ABS_Z=0x02,
+    ABS_HAT0Y=0x11, STANDARD_XPAD_CONFIG={"name": "Microsoft X-Box 360 pad"})
 
 
 PAD_INIT: str = """
@@ -149,18 +153,18 @@ def run(mode: str, results: "H.Results") -> None:
     log = open(SHIMLOG).read()
     events = decode(STREAM)
     results.check(f"{mode}: kernel device created",
-                  H.shim_created(SHIMLOG, ih.STANDARD_XPAD_CONFIG["name"]) == 1)
+                  H.shim_created(SHIMLOG, codes.STANDARD_XPAD_CONFIG["name"]) == 1)
     results.check(f"{mode}: device is the standard pad",
                   "vendor=0x045e product=0x028e" in log and "Microsoft X-Box 360 pad" in log)
-    for name, event in (("A press", (ih.EV_KEY, ih.BTN_A, 1)),
-                        ("A release", (ih.EV_KEY, ih.BTN_A, 0)),
-                        ("dpad up", (ih.EV_ABS, ih.ABS_HAT0Y, -1)),
-                        ("dpad release", (ih.EV_ABS, ih.ABS_HAT0Y, 0)),
-                        ("stick left", (ih.EV_ABS, ih.ABS_X, -32767)),
-                        ("left trigger", (ih.EV_ABS, ih.ABS_Z, 32767))):
+    for name, event in (("A press", (codes.EV_KEY, codes.BTN_A, 1)),
+                        ("A release", (codes.EV_KEY, codes.BTN_A, 0)),
+                        ("dpad up", (codes.EV_ABS, codes.ABS_HAT0Y, -1)),
+                        ("dpad release", (codes.EV_ABS, codes.ABS_HAT0Y, 0)),
+                        ("stick left", (codes.EV_ABS, codes.ABS_X, -32767)),
+                        ("left trigger", (codes.EV_ABS, codes.ABS_Z, 32767))):
         results.check(f"{mode}: {name} reached the kernel device", event in events)
     print(f"    {mode} events:", [e for e in events if e[0] != 4])
-    synced = all(events[i + 1] == (ih.EV_SYN, 0, 0)
+    synced = all(events[i + 1] == (codes.EV_SYN, 0, 0)
                  for i in range(0, len(events) - 1, 2)) and len(events) % 2 == 0
     results.check(f"{mode}: every event is framed by SYN_REPORT", synced, f"{len(events)} events")
 
@@ -214,9 +218,9 @@ def run_player_slot(mode: str, results: "H.Results") -> None:
                   and "virtual gamepad slot 0" not in server_log,
                   f"client sent {sent[:3]}")
     results.check(f"{mode}: its pad reaches the kernel device",
-                  (ih.EV_KEY, ih.BTN_A, 1) in events, f"{len(events)} events")
+                  (codes.EV_KEY, codes.BTN_A, 1) in events, f"{len(events)} events")
     results.check(f"{mode}: no other slot was driven",
-                  H.shim_created(SHIMLOG, ih.STANDARD_XPAD_CONFIG["name"]) == 1)
+                  H.shim_created(SHIMLOG, codes.STANDARD_XPAD_CONFIG["name"]) == 1)
 
 
 def post_slot_token(token: str = SLOT_TOKEN, slot=1) -> int:
@@ -272,17 +276,17 @@ def run_two_pads(mode: str, results: "H.Results", token: bool) -> None:
         H.server_stop()
 
     events = decode(STREAM)
-    xs = [v for (t, c, v) in held if (t, c) == (ih.EV_ABS, ih.ABS_X)]
+    xs = [v for (t, c, v) in held if (t, c) == (codes.EV_ABS, codes.ABS_X)]
     results.check(f"{label}: the pad in use is the slot's controller",
                   "'Xbox Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)' (17b, 4a) is now associated"
                   " with persistent virtual gamepad slot 0" in server_log)
     results.check(f"{label}: its press reached the kernel device",
-                  (ih.EV_KEY, ih.BTN_A, 1) in events and (ih.EV_KEY, ih.BTN_A, 0) in events)
+                  (codes.EV_KEY, codes.BTN_A, 1) in events and (codes.EV_KEY, codes.BTN_A, 0) in events)
     results.check(f"{label}: its stick stayed where it was held", bool(xs) and all(v == -32767 for v in xs),
                   f"ABS_X while held: {xs[:6]}{'...' if len(xs) > 6 else ''} ({len(xs)})")
     results.check(f"{label}: nothing of the flight stick reached it",
-                  not any(t == ih.EV_ABS and abs(v) in JITTER for (t, c, v) in events),
-                  f"{sum(1 for (t, c, v) in events if t == ih.EV_ABS and abs(v) in JITTER)} jitter events")
+                  not any(t == codes.EV_ABS and abs(v) in JITTER for (t, c, v) in events),
+                  f"{sum(1 for (t, c, v) in events if t == codes.EV_ABS and abs(v) in JITTER)} jitter events")
 
 
 def run_slot_list(mode: str, results: "H.Results") -> None:
@@ -317,7 +321,7 @@ def run_slot_list(mode: str, results: "H.Results") -> None:
             held_at = len(decode(STREAM))
             deadline = time.time() + 1.0
             results.check(f"{label}: table re-slotted to 4 alone", post_slot_token(SLOTS_TOKEN, [4]) == 200)
-            released = lambda: (ih.EV_KEY, ih.BTN_A, 0) in decode(STREAM)[held_at:]
+            released = lambda: (codes.EV_KEY, codes.BTN_A, 0) in decode(STREAM)[held_at:]
             while time.time() < deadline and not released():
                 time.sleep(0.05)
             results.check(f"{label}: taking slot 3 away releases what its pad held there within 1 s", released())
@@ -339,7 +343,7 @@ def run_slot_list(mode: str, results: "H.Results") -> None:
     results.check(f"{label}: no other slot was driven",
                   not any(f"virtual gamepad slot {i}." in server_log for i in (0, 1)))
     results.check(f"{label}: both pads' presses reached the kernel",
-                  (ih.EV_KEY, ih.BTN_A, 1) in events and (ih.EV_KEY, ih.BTN_B, 1) in events)
+                  (codes.EV_KEY, codes.BTN_A, 1) in events and (codes.EV_KEY, codes.BTN_B, 1) in events)
 
 
 results = H.Results("uinput")

@@ -78,7 +78,7 @@ def request(method: str, path: str, headers: Optional[dict] = None,
 
 def client_upload(name: str, data: bytes, extra: Optional[dict] = None,
                   auth: Optional[dict] = None) -> tuple:
-    """POST /api/upload with the headers lib/file-upload.js sends.
+    """POST /api/upload with the headers lib/file-upload.ts sends.
 
     Args:
         name: Destination path relative to the file-manager root.
@@ -561,14 +561,16 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
 
 
 def transport_block(mode: str) -> "H.Results":
-    """Routes and both layouts' file UI on one transport."""
+    """Routes and both layouts' file UI on one transport. The dashboards' server
+    runs Turbo, so the still display keeps sending the frames that show a
+    download left the stream running."""
     res = H.Results(f"files-{mode}")
     fresh_files_dir()
     H.server_start(mode=mode, wayland=False, extra_env={"SELKIES_FILE_MANAGER_PATH": FILES_DIR})
     api_checks(res, full=(mode == "websockets"))
     for dashboard in H.LAYOUTS:
         H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard,
-                       extra_env={"SELKIES_FILE_MANAGER_PATH": FILES_DIR})
+                       extra_env={"SELKIES_FILE_MANAGER_PATH": FILES_DIR, "SELKIES_VIDEO_STREAMING_MODE": "true"})
         with sync_playwright() as pw:
             browser, page = dashboard_page(pw, mode)
             try:

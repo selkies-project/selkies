@@ -60,7 +60,7 @@ function item(flavours) {
     };
 }
 
-const { readLocalClipboard } = await import('../../addons/selkies-web-core/lib/clipboard-sync.js');
+const { readLocalClipboard } = await import('../../addons/selkies-web-core/lib/clipboard-sync.ts');
 
 let failed = 0;
 function check(label, ok, detail = '') {

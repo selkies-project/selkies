@@ -2,8 +2,10 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# rattler-build recipe producing the noarch `selkies` conda package (used both
-# for the AppImage environment and as a portable conda distribution artifact).
+# rattler-build recipe producing the `selkies` conda package (used both for
+# the AppImage environment and as a portable conda distribution artifact): the
+# server scripts/ci/appimage.sh built inside manylinux_2_28, with its web
+# client, and the conda-forge libraries it links as its run dependencies.
 
 context:
   name: selkies
@@ -16,59 +18,57 @@ package:
   version: ${{ version }}
 
 source:
-  path: ../..
+  # The server and its web client as infra/packaging/server.sh stages them
+  # (usr/bin/selkies, usr/share/selkies/web), which the repository's
+  # .gitignore would otherwise keep out
+  - path: ../../build/appimage/server
+    use_gitignore: false
+  - path: ../../LICENSE
 
 build:
   number: 0
-  noarch: python
   script:
-    # Same version in the package and in the metadata the installed Selkies
-    # reports, which the wheel build stamps the same way
-    - sed -i "s|^version =.*|version = \"${PKG_VERSION}\"|" pyproject.toml
-    - ./scripts/ci/build-web.sh
-    - python -m pip install . --no-deps --no-build-isolation -vv
+    - install -Dm755 usr/bin/selkies "${PREFIX}/bin/selkies"
+    - mkdir -p "${PREFIX}/share/selkies"
+    - cp -r usr/share/selkies/web "${PREFIX}/share/selkies/web"
+  dynamic_linking:
+    # The C library the server was built against, glibc 2.28, and the
+    # graphics stack are the host's: libgbm has to be the one beside the
+    # host's GPU driver for the GPU to be reachable at all
+    missing_dso_allowlist:
+      - "**/ld-linux*.so*"
+      - "**/libc.so.6"
+      - "**/libdl.so.2"
+      - "**/libm.so.6"
+      - "**/libmvec.so.1"
+      - "**/libpthread.so.0"
+      - "**/libgbm.so.1"
 
 requirements:
+  # What the server links, so the linkage check finds each one in a package
+  # and each package's run exports pin what the server needs at run time. Its
+  # codecs are linked in, and the libraries pixelflux opens at run time (libva
+  # among them) are scripts/ci/appimage.sh's to add.
   host:
-    - python 3.12.*
-    - pip
-    - setuptools
-    - nodejs 26.*
+    - libxkbcommon
+    - pixman
+    - pulseaudio-client
+    - libgcc
+    - libstdcxx
   run:
-    - python >=3.9
-    # Mirrors [project.dependencies] in pyproject.toml, which
-    # tests/unit/test_package_deps.py holds this list to; `pip install
-    # --no-deps` above deliberately leaves resolution to conda. pixelflux,
-    # pcmflux, and pulsectl-asyncio have no conda-forge packages and are
-    # pip-installed into the same environment by scripts/ci/appimage.sh.
-    - prometheus_client
-    - msgpack-python
-    - psutil
-    - watchdog
-    - pillow
-    - dnspython >=2.6.1
-    - cffi >=1.0.0
-    - cryptography >=50.0.0
-    - google-crc32c >=1.1.0
-    - pyee >=13.0.0
-    - pylibsrtp >=0.10.0
-    - pyopenssl >=26.0.0
-    - aiohttp >=3.14.1
-    - aiofiles >=25.1.0
-    - uvloop >=0.19.0
-    - importlib_resources >=5.10.0
-    - nvidia-ml-py
+    - libxkbcommon
+    - pixman
+    - pulseaudio-client
+    - libgcc
+    - libstdcxx
 
 tests:
   - script:
-      # This environment is the run dependencies and nothing else, pixelflux
-      # and pcmflux having no conda-forge package: what it proves is that the
-      # entry point conda rewrote for a prefix of its own answers, and that the
-      # web client travels inside the package rather than beside it in a source
-      # tree. Streaming needs the pip-only dependencies and is covered where
-      # they are, by scripts/ci/verify-appimage.sh.
+      # The server answers from the prefix conda installed it into, its
+      # libraries found there, and the web client travels inside the package
+      - selkies --version
       - selkies --help > /dev/null
-      - python -c "import importlib.resources as r; assert (r.files('selkies.selkies_web') / 'index.html').is_file()"
+      - test -f "${PREFIX}/share/selkies/web/index.html"
 
 about:
   summary: Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)

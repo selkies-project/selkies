@@ -1,0 +1,21 @@
+[package]
+name = "codec-sys"
+description = "FFI bindings, generated at build time from the installed headers, for the software codec libraries pixelflux links: libvpx (VP8/VP9 encode and decode), x265 or kvazaar (HEVC encode), SVT-AV1 (AV1 encode), dav1d (AV1 decode), and libde265 (HEVC decode). Each library is a feature, located through pkg-config and linked as a shared library; the bindings follow the header of the library that is linked, so a struct layout that moves between releases never goes stale."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+publish = false
+
+[features]
+default = []
+vpx = []
+x265 = []
+kvazaar = []
+svtav1 = []
+dav1d = []
+de265 = []
+
+[build-dependencies]
+bindgen = { version = "0.73", default-features = false, features = ["runtime"] }
+pkg-config = "0.3"

@@ -4,14 +4,17 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Build selkies-<ver>-<arch>.AppImage on the runner for this architecture.
-# Uses rattler-build to package selkies as a conda package, then assembles the
-# AppImage with linuxdeploy and the conda plugin in infra/appimage.
+# Builds the server inside a manylinux_2_28 container
+# (infra/appimage/build-server.sh), uses rattler-build to package it as a
+# conda package, then assembles the AppImage with linuxdeploy and the conda
+# plugin in infra/appimage. The web client has to be in dist/web already
+# (scripts/ci/build-web.sh).
 #
 # Usage: scripts/ci/appimage.sh [arch]   (any `uname -m` name; defaults to this host)
 
 set -eux
 
-# linuxdeploy and Miniforge both name their artifacts after `uname -m`
+# linuxdeploy names its artifacts after `uname -m`
 ARCH="${1:-$(uname -m)}"
 
 cd "$(readlink -f "$(dirname "$0")")/../.."
@@ -28,14 +31,30 @@ retry() {
   done
 }
 
-# 1) rattler-build: selkies conda package (noarch) from the repo
-export PATH="${HOME}/.pixi/bin:${PATH}"
-# Both solvers, because the conda plugin invoked further down prefers mamba and
-# mamba does not read the CONDA_* names.
+# 0) The server, built where glibc is the AppImage's floor, against the
+#    conda-forge libxkbcommon the AppImage carries, with the network reachable
+#    for Cargo to fetch the workspace's registry dependencies.
+#    micromamba solves every conda environment here, the plugin's included.
+test -f dist/web/index.html
 export MAMBA_REMOTE_MAX_RETRIES="5" MAMBA_REMOTE_BACKOFF_FACTOR="3" \
     MAMBA_REMOTE_CONNECT_TIMEOUT_SECS="30"
-export CONDA_REMOTE_MAX_RETRIES="5" CONDA_REMOTE_BACKOFF_FACTOR="3" \
-    CONDA_REMOTE_CONNECT_TIMEOUT_SECS="30" CONDA_REMOTE_READ_TIMEOUT_SECS="120"
+export MAMBA_ROOT_PREFIX="${WORK}/conda/root"
+case "${ARCH}" in
+  x86_64) MAMBA_ASSET="micromamba-linux-64" ;;
+  *) MAMBA_ASSET="micromamba-linux-${ARCH}" ;;
+esac
+MAMBA="${WORK}/conda/micromamba"
+addons/base/fetch-verified release mamba-org/micromamba-releases latest "${MAMBA_ASSET}" "${MAMBA}"
+chmod +x "${MAMBA}"
+docker run --rm \
+    -v "${PWD}:/repo:ro" \
+    -v "${WORK}:/work" \
+    -e SELKIES_VERSION -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    "quay.io/pypa/manylinux_2_28_${ARCH}" \
+    sh /repo/infra/appimage/build-server.sh
+
+# 1) rattler-build: selkies conda package from that server
+export PATH="${HOME}/.pixi/bin:${PATH}"
 if ! command -v pixi >/dev/null; then
   # The latest release asset, checked against the digest GitHub records for it,
   # rather than pixi's installer, whose own download makes one attempt
@@ -55,61 +74,38 @@ test -f "${PKG}"
 
 # 2) linuxdeploy (latest published build) and the conda plugin from
 #    infra/appimage: upstream publishes no release artifacts, and this one
-#    installs Miniforge, keeping the AppImage on conda-forge alone.
+#    creates the prefix with micromamba, keeping the AppImage on conda-forge
+#    alone.
 addons/base/fetch-verified release linuxdeploy/linuxdeploy continuous \
     "linuxdeploy-${ARCH}.AppImage" "${WORK}/linuxdeploy.AppImage"
 cp infra/appimage/linuxdeploy-plugin-conda.sh "${WORK}/linuxdeploy-plugin-conda.sh"
-# The plugin reads both of these from beside itself: Miniforge comes from the
-# same rate-limited host as linuxdeploy, checked the same way, and the prefix
-# it installs needs its entry points pointed at the interpreter before an
-# AppImage can carry them.
+# The plugin reads this from beside itself: micromamba comes from the same
+# rate-limited host as linuxdeploy, checked the same way.
 cp addons/base/fetch-verified "${WORK}/fetch-verified"
-cp infra/appimage/relocate-shebangs.sh "${WORK}/relocate-shebangs.sh"
 chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.sh" \
-    "${WORK}/fetch-verified" "${WORK}/relocate-shebangs.sh"
+    "${WORK}/fetch-verified"
 # linuxdeploy resolves `--plugin conda` by searching PATH
 export PATH="${WORK}:${PATH}"
 
-# 3) Assemble the AppDir: the conda plugin installs a Miniforge prefix at
-#    AppDir/usr/conda, adds the channels and packages named below, and finally
-#    pip-installs PIP_REQUIREMENTS into the same prefix.
+# 3) Assemble the AppDir: the conda plugin creates a prefix at AppDir/usr/conda
+#    holding the packages named below, from the channels named below.
 export OUTPUT="selkies-${SELKIES_VERSION:-0.0.0}-${ARCH}.AppImage"
 # conda channels are ';'-separated; the local one is the rattler-build output
-# root, the directory holding noarch/
+# root, the directory holding the platform directory of the package
 CONDA_CHANNELS="${WORK}/conda-output;conda-forge"
-CONDA_PYTHON_VERSION="3.12"
 # libva is what pixelflux's VA-API session opens at run time, and pixman is
-# what its wheel links but does not carry
+# what the server links
 CONDA_PACKAGES="selkies;libxcb;pulseaudio;libva;libxkbcommon;pixman;zlib"
-# Runtime dependencies with no conda-forge package. pixelflux and pcmflux come
-# from the wheels the run resolved (the AppImage env always runs Python 3.12,
-# see CONDA_PYTHON_VERSION above); the index only where the run chose it.
-PIP_REQUIREMENTS="pulsectl-asyncio"
-for project in pixelflux pcmflux; do
-  wheel=""
-  if [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
-    wheel="$(find "${PIXELFLUX_PCMFLUX_WHEELS_DIR}" -maxdepth 1 \
-        -name "${project}-*cp312*manylinux*${ARCH}*.whl" | head -n1)"
-  fi
-  # A wheels directory that yielded nothing means the AppImage carries whatever
-  # the index resolves rather than the build meant to ride along, so say so. No
-  # directory at all is the run's explicit choice of the index.
-  if [ -z "${wheel}" ] && [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
-    echo "::warning::No ${project} wheel in ${PIXELFLUX_PCMFLUX_WHEELS_DIR}; the AppImage resolves it from PyPI"
-  fi
-  PIP_REQUIREMENTS="${PIP_REQUIREMENTS} ${wheel:-${project}}"
-done
 
-# conda and pip read CONDA_*/PIP_* names of their own, where a ';'-separated
-# channel list parses as one channel. These four address the plugin, so they
-# reach linuxdeploy alone and the toolchain solve below stays on conda-forge.
+# micromamba reads CONDA_* names of its own, where a ';'-separated channel list
+# parses as one channel. These three address the plugin, so they reach
+# linuxdeploy alone and the toolchain solve below stays on conda-forge.
 # CONDA_OVERRIDE_GLIBC is the solver's own: it solves for the AppImage's glibc
 # floor rather than the runner's, where conda-forge carries a build for both.
 env CONDA_OVERRIDE_GLIBC="2.28" \
     CONDA_CHANNELS="${CONDA_CHANNELS}" \
-    CONDA_PYTHON_VERSION="${CONDA_PYTHON_VERSION}" \
     CONDA_PACKAGES="${CONDA_PACKAGES}" \
-    PIP_REQUIREMENTS="${PIP_REQUIREMENTS}" \
+    CONDA_DOWNLOAD_DIR="${WORK}/conda" \
     "${WORK}/linuxdeploy.AppImage" --appimage-extract-and-run \
     --appdir AppDir \
     --plugin conda
@@ -128,12 +124,11 @@ AppDir/usr/conda/bin/selkies --help > /dev/null
 #     which needs headers this toolchain has no reason to carry.
 CC_ENV="${WORK}/cc-env"
 # conda names its sysroot packages after its own subdir (linux-64,
-# linux-aarch64, ...), which no `uname -m` mapping reproduces
-CONDA_SUBDIR="$(AppDir/usr/conda/bin/conda info --json \
-    | AppDir/usr/conda/bin/python -c 'import json,sys; print(json.load(sys.stdin)["platform"])')"
-AppDir/usr/conda/bin/conda create -y -p "${CC_ENV}" -c conda-forge \
+# linux-aarch64, ...), which micromamba reports as its platform
+CONDA_SUBDIR="$("${MAMBA}" info --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["platform"])')"
+"${MAMBA}" create -y -p "${CC_ENV}" -c conda-forge \
     c-compiler "sysroot_${CONDA_SUBDIR}=2.28" \
-  || AppDir/usr/conda/bin/conda create -y -p "${CC_ENV}" -c conda-forge c-compiler
+  || "${MAMBA}" create -y -p "${CC_ENV}" -c conda-forge c-compiler
 CONDA_CC="$(find "${CC_ENV}/bin" -name '*-linux-gnu-gcc' | head -n1)"
 CONDA_SYSROOT="$(find "${CC_ENV}" -maxdepth 2 -type d -name sysroot | head -n1)"
 mkdir -p AppDir/usr/lib
@@ -145,14 +140,13 @@ ln -sf selkies_input_interposer.so AppDir/usr/lib/selkies_joystick_interposer.so
 "${CONDA_CC}" --sysroot="${CONDA_SYSROOT}" -shared -fPIC -O2 \
     -o AppDir/usr/lib/selkies_v4l2_interposer.so \
     addons/v4l2-interposer/v4l2_interposer.c -ldl -lpthread
-# The toolchain's packages stay in the cache of the conda that fetched them,
-# which is the AppImage's own
-rm -rf "${CC_ENV}" AppDir/usr/conda/pkgs
+# The toolchain's packages stay in micromamba's cache, outside the AppDir
+rm -rf "${CC_ENV}"
 
 # The floor is the whole point of building from conda, and one package built
 # for a newer glibc, or the toolchain fallback above, raises it silently, so
 # every ELF file in the AppDir is checked rather than assumed
-AppDir/usr/conda/bin/python - <<'FLOOR'
+python3 - <<'FLOOR'
 import os, re, subprocess, sys
 over = []
 for base, _, names in os.walk("AppDir"):
@@ -284,7 +278,7 @@ wayland="$(printf '%s' "${wayland%%|*}" | tr '[:upper:]' '[:lower:]' | tr -d '[:
 if [ "${wayland}" != "true" ] && [ "${wayland}" != "1" ]; then
     export DISPLAY="${DISPLAY:-:20}"
     if [ ! -S "/tmp/.X11-unix/X${DISPLAY#*:}" ] && command -v Xvfb >/dev/null 2>&1; then
-        Xvfb "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem >/tmp/Xvfb_selkies.log 2>&1 &
+        Xvfb "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset >/tmp/Xvfb_selkies.log 2>&1 &
         echo 'Waiting for X Socket'
         until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
         echo 'X Server is ready'
@@ -332,8 +326,6 @@ mv "${OUTPUT}" out/
 # a payload that runs nowhere else would pass every check below.
 rm -rf AppDir
 scripts/ci/verify-appimage.sh "out/${OUTPUT}"
-# The conda package is noarch, so exactly one architecture's job uploads it
-if [ "${ARCH}" = "${CONDA_PACKAGE_ARCH:-x86_64}" ]; then
-  cp "${PKG}" out/
-fi
+# The conda package holds this architecture's server, so each job uploads its own
+cp "${PKG}" out/
 ls -la out/

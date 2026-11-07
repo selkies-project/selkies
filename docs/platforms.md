@@ -74,11 +74,10 @@ included. The same holds under JupyterHub, where each user's server offers
 their own desktop. The environment the server starts in chooses the rest:
 `XDG_CURRENT_DESKTOP` the desktop, `SELKIES_WAYLAND` the backend. The host
 brings what the wheel leaves to it: a desktop, Xvfb for the X11 backend, and
-the libraries the capture extension
-[takes from the system](https://github.com/selkies-project/pixelflux#3-install-the-package),
-which a desktop usually carries (`libgbm1`, `libpixman-1-0`, and
-`libxkbcommon0` on Debian and Ubuntu); the log names one that is missing after
-`pixelflux library unavailable`, and the page then shows no picture.
+the libraries the server takes from the system as
+[pixelflux's own wheels do](https://github.com/selkies-project/selkies/tree/main/crates/pixelflux#3-install-the-package),
+which a desktop usually carries (`libgbm1` and `libpixman-1-0` on Debian and
+Ubuntu); without them the `selkies` executable does not start.
 
 ## Coder
 
@@ -127,7 +126,7 @@ in `selkies_command` how the node finds Selkies: `selkies session` from a native
 package or a module, `<AppImage> session`, or
 `apptainer exec --nv <image> selkies session` with the flags
 [Getting Started](start.md#apptainer) gives an image, a home of its own
-among them, so the image's Python does not import the user's packages from the
+among them, so the session keeps its settings and downloads apart from the
 host's home.
 `submit.yml.erb` takes what the site's scheduler needs beyond the hours and the
 queue, and the portal's `host_regex` has to admit the nodes, as for every

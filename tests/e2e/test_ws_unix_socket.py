@@ -80,16 +80,18 @@ def dead_socket_file(path: str) -> None:
 
 
 def spawn_server(log: str) -> subprocess.Popen:
-    """A server bound to SOCK, logging to `log`; not waited for."""
+    """A server bound to SOCK, logging to `log`; not waited for. It runs Turbo,
+    so the still test display keeps sending the frames counted."""
     env = {"PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"),
            "DISPLAY": H.require_display(),
            "XDG_RUNTIME_DIR": H.RUNTIME_DIR,
            "SELKIES_MODE": "websockets", "SELKIES_ENABLE_BASIC_AUTH": "false",
            "SELKIES_ENABLE_HTTPS": "false", "SELKIES_WEB_ROOT": H.CORE_DIST,
-           "SELKIES_PORT": str(H.PORT), "SELKIES_UNIX_SOCKET": SOCK, **H.inherited_env()}
+           "SELKIES_PORT": str(H.PORT), "SELKIES_UNIX_SOCKET": SOCK,
+           "SELKIES_VIDEO_STREAMING_MODE": "true", **H.inherited_env()}
     with open(log, "w") as lf:
         lf.write("")
-    return H.spawn([H.PYTHON, "-m", "selkies"], env=env, cwd=H.WORKDIR,
+    return H.spawn([H.SERVER], env=env, cwd=H.WORKDIR,
                    stdout=open(log, "a"), stderr=subprocess.STDOUT, start_new_session=True)
 
 

@@ -12,7 +12,7 @@
  * @module
  */
 import * as React from "react";
-import { graphPath } from "../../../selkies-web-core/lib/stream-stats-view.js";
+import { graphPath } from "../../../selkies-web-core/lib/stream-stats-view.ts";
 import type { GraphData, StatusMarkComponent, snapshotRows, snapshotTiles } from "@/panels/stats-data";
 import { t } from "@/i18n";
 

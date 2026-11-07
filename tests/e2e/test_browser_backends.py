@@ -141,9 +141,11 @@ def input_checks(res: "H.Results", page: Any, wayland: bool, wl_obs: Any) -> Non
 
 
 def cell_block(cell: str) -> "H.Results":
+    """One engine, transport, and backend through the flow checks. The server
+    runs Turbo, so the still test display keeps sending the frames counted."""
     engine, mode, wayland = cell_parts(cell)
     res = H.Results(cell)
-    H.server_start(mode=mode, wayland=wayland)
+    H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_VIDEO_STREAMING_MODE": "true"})
     with sync_playwright() as pw:
         browser, ctx = TB.engine_launch(pw, engine)
         ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")

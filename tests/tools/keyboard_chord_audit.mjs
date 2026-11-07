@@ -21,7 +21,7 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-import { Input } from '../../addons/selkies-web-core/lib/input.js';
+import { Input } from '../../addons/selkies-web-core/lib/input.ts';
 
 globalThis.window = globalThis;
 globalThis.document = { body: null, activeElement: null, fullscreenElement: null };

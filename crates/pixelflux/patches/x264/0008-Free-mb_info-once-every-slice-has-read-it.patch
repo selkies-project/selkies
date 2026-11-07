@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Fri, 6 Nov 2026 09:50:08 -0500
+Subject: [PATCH] Free mb_info once every slice has read it
+
+The caller's mb_info_free ran in the slice tail of the last sliced thread, which waits only for
+the thread before it: a thread further back could still be reading mb_info, which the mb_info
+fast skip and the constant skip read for every macroblock. It runs at the frame's end now, once
+every slice is written. A caller that passes no callback is unaffected, and every stream comes
+out bit for bit the same.
+---
+ encoder/encoder.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/encoder/encoder.c b/encoder/encoder.c
+index 8bfd9fb..9ee10a6 100644
+--- a/encoder/encoder.c
++++ b/encoder/encoder.c
+@@ -3251,14 +3251,6 @@ cont:
+                 fdec_filter_row( h, h->i_threadslice_start + (1 << SLICE_MBAFF), 2 );
+             }
+         }
+-
+-        /* Free mb info after the last thread's done using it */
+-        if( h->fdec->mb_info_free && (!h->param.b_sliced_threads || h->i_thread_idx == (h->param.i_threads-1)) )
+-        {
+-            h->fdec->mb_info_free( h->fdec->mb_info );
+-            h->fdec->mb_info = NULL;
+-            h->fdec->mb_info_free = NULL;
+-        }
+     }
+ 
+     return 0;
+@@ -4104,6 +4096,14 @@ static int encoder_frame_end( x264_t *h, x264_t *thread_current,
+         pic_out->img.plane[i] = (uint8_t*)h->fdec->plane[i];
+     }
+ 
++    /* Every slice is written by now, so no thread reads the macroblock info any more. */
++    if( h->fdec->mb_info_free )
++    {
++        h->fdec->mb_info_free( h->fdec->mb_info );
++        h->fdec->mb_info = NULL;
++        h->fdec->mb_info_free = NULL;
++    }
++
+     x264_frame_push_unused( thread_current, h->fenc );
+ 
+     /* ---------------------- Update encoder state ------------------------- */
+-- 
+2.47.3
+

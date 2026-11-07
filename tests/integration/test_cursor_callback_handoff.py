@@ -32,7 +32,7 @@ def cover_screen() -> tuple:
     """Map a raised input-only window over the whole screen, whose cursor is then the
     one on screen wherever the pointer is: a suite before this one can leave a window
     with a cursor of its own under the pointer, where a changed root cursor shows nothing."""
-    from selkies.Xlib import X, display as xdisp
+    from Xlib import X, display as xdisp
     d = xdisp.Display(H.require_display())
     screen = d.screen()
     win = screen.root.create_window(0, 0, screen.width_in_pixels, screen.height_in_pixels, 0, 0,

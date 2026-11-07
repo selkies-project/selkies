@@ -14,8 +14,8 @@
 #
 # Everything a Selkies session needs and nothing that decides what the session
 # looks like: no window manager, no panel, no file manager, no applications.
-# addons/desktop builds the reference LXQt desktop on top of this, and any
-# other desktop can be built the same way.
+# addons/desktop builds the reference desktop, selkies-desktop, on top of this,
+# and any other desktop can be built the same way.
 #
 #   - X11 display server (XLibre's Xvfb, with glamor and DRI3) and the headless Wayland backend
 #     with SELKIES_WAYLAND=true, whose nested labwc supplies window management,
@@ -29,9 +29,8 @@
 #   - Audio: PipeWire with the PulseAudio, ALSA, JACK, and V4L2 interfaces,
 #     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
-#   - Selkies installed with pip from the wheels dropped into `wheels/` (its
-#     own and the pixelflux/pcmflux ones the run resolved), else from the
-#     GitHub releases, the index last
+#   - The Selkies server, built from this tree's crates and local pixelflux and
+#     pcmflux path dependencies, and the web client it serves
 #
 # Supported bases: Ubuntu 26.04 and Debian Trixie, and later releases of both
 # (select with --build-arg DISTRIB_IMAGE=ubuntu|debian DISTRIB_RELEASE=26.04|trixie).
@@ -54,7 +53,10 @@ ARG DISTRIB_RELEASE="26.04"
 # through XFree86-VidModeExtension, which Mesa's glXGetMscRateOML reads, and
 # addons/base/patches/xvfb-zero-copy-semaphore.patch, which signals a GPU
 # semaphore the capture shares with glamor after its blit, so the encoder waits
-# for it on the GPU rather than on the CPU.
+# for it on the GPU rather than on the CPU, and
+# addons/base/patches/xvfb-zero-copy-shared-framebuffer.patch, which keeps a
+# system-memory screen in a memfd the capture reads in place, told where it
+# changed without a round trip.
 ARG WLROOTS_VERSION="0.19.3"
 ARG LABWC_VERSION="0.9.7"
 # Both come as the archives GitHub generates for their tags, with no tarball
@@ -266,6 +268,65 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-screens.patch /build/patches/
 COPY addons/base/build-labwc.sh /build/
 RUN /build/build-labwc.sh && mkdir -p /build-out/lib && cp -a /usr/lib/*.so* /build-out/lib/
+
+# The web client, through scripts/ci/build-web.sh as every channel builds it. The
+# controller database's GitHub lookups use the build secret github_token where
+# one is given (`--secret id=github_token,env=GITHUB_TOKEN`).
+FROM node:26-alpine AS web
+WORKDIR /build
+COPY Cargo.toml ./
+COPY scripts/ci/build-web.sh ./scripts/ci/
+COPY addons/selkies-web-core ./addons/selkies-web-core
+COPY addons/selkies-dashboard ./addons/selkies-dashboard
+COPY addons/universal-touch-gamepad ./addons/universal-touch-gamepad
+COPY docs/assets/logo ./docs/assets/logo
+RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
+
+# The server, built on the image's own distribution so it links the sonames the
+# final stage installs, with the toolchain pinned and its installer checked
+# against the hash rustup publishes beside it. The packages behind every
+# library the binary links are recorded for the final stage, so the image
+# declares what the server needs rather than inheriting it from whatever else
+# happens to pull those libraries in. pixelflux and pcmflux build from local
+# workspace path dependencies. libx264 is built from pixelflux's
+# scripts/build-x264.sh, with the patches whose API it reads, and linked statically.
+FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS server
+ARG DEBIAN_FRONTEND="noninteractive"
+ARG RUST_TOOLCHAIN="1.99.1"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git build-essential pkg-config cmake nasm clang libclang-dev \
+        libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
+        libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
+        libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
+        libxcb-xfixes0-dev libpulse-dev && \
+    rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME="/opt/rustup" CARGO_HOME="/opt/cargo" PATH="/opt/cargo/bin:${PATH}"
+RUN set -e; \
+    triple="$(uname -m)-unknown-linux-gnu"; \
+    url="https://static.rust-lang.org/rustup/dist/${triple}/rustup-init"; \
+    curl -fsSL --retry 5 -o /tmp/rustup-init "${url}"; \
+    echo "$(curl -fsSL --retry 5 "${url}.sha256" | cut -d' ' -f1)  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"; \
+    rm /tmp/rustup-init
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
+    --mount=type=cache,target=/src/target \
+    set -e; \
+    cargo fetch --locked; \
+    pixelflux="$(cargo metadata --locked --format-version 1 \
+        | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"; \
+    sh "$(dirname "${pixelflux}")/scripts/build-x264.sh" /usr/local; \
+    # x264-sys binds the installed x264.h without watching it, so the cached
+    # target would keep bindings from before a change to patches/x264
+    cargo clean --release -p x264-sys; \
+    SYSTEM_DEPS_X264_LINK=static cargo build --release --locked -p selkies; \
+    install -Dm755 target/release/selkies /out/selkies; \
+    ldd /out/selkies | awk '/=>/ {print $3}' | xargs -r readlink -f | xargs -r dpkg -S | \
+        cut -d: -f1 | sort -u > /out/runtime-packages; \
+    test -s /out/runtime-packages
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
@@ -551,9 +612,9 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         # The SVG loader GdkPixbuf needs, so GTK applications render scalable
         # icons rather than blanks
         librsvg2-common \
-        # Python runtime and the embedded coTURN server (WebRTC mode)
+        # Python for the image's build helper (fetch-verified) and the embedded
+        # coTURN server (WebRTC mode)
         python3 \
-        python3-pip \
         coturn \
         ssl-cert \
         # Session compositor for the Wayland backend: labwc, which draws
@@ -619,41 +680,30 @@ ENV __GL_SYNC_TO_VBLANK="0"
 # Keep the log dir present for in-session apt runs.
 RUN install -d /var/log/apt
 
-# Install Selkies with pip from the wheels dropped into `wheels/`: its own and
-# the pixelflux/pcmflux ones the run resolved, of which pip selects the ones
-# matching this image's Python and platform. A wheel missing there (a build
-# outside CI) is taken from the GitHub releases instead, and only one no
-# release carries is left to the index. The capture stack goes in from the
-# wheels ahead of the index, so its pin is met before any resolver looks
-# there. `wheels/` is bind-mounted rather than copied: it holds every
-# interpreter and platform variant while this image installs only the matching
-# ones, so a copy would commit the whole set to a layer no later removal can
-# reclaim.
-COPY .devcontainer/features/desktop-selkies/src/fetch-release-wheels.sh /tmp/fetch-release-wheels.sh
-RUN --mount=type=bind,source=addons/base/wheels,target=/tmp/wheels \
-    set -e; \
-    mkdir -p /tmp/picked; \
-    cp /tmp/wheels/*.whl /tmp/picked/ 2> /dev/null || true; \
-    bash /tmp/fetch-release-wheels.sh /tmp/picked; \
-    for project in pixelflux pcmflux; do \
-      if ls /tmp/picked/${project}-*.whl > /dev/null 2>&1; then \
-        PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --no-index --find-links /tmp/picked ${project}; \
-      fi; \
-    done; \
-    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --find-links /tmp/picked \
-      "$(ls /tmp/picked/selkies-*.whl 2> /dev/null || echo selkies)"; \
-    rm -rf /tmp/picked /tmp/fetch-release-wheels.sh
+# The Selkies server and the web client from the stages above: the binary at
+# /usr/local/bin/selkies and the bundle at /usr/local/share/selkies/web, beside
+# it, where the server looks for it. The packages behind every library the
+# binary links go in first, recorded where it was built.
+COPY --from=server /out/runtime-packages /tmp/selkies-runtime-packages
+RUN apt-get update && \
+    apt-get install --no-install-recommends -y $(cat /tmp/selkies-runtime-packages) && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/selkies-runtime-packages
+COPY --from=server --chown=1000:1000 /out/selkies /usr/local/bin/selkies
+COPY --from=web --chown=1000:1000 /build/dist/web /usr/local/share/selkies/web
 
-# Fails the image build rather than publishing one whose payload cannot start.
-# The libraries are the ones the capture stack opens by name at run time, which
-# no ELF dependency names: only the apt lines above put them here, and nothing
-# else in this repository's testing runs inside the image.
-# tests/unit/test_package_deps.py holds this list to the one the native
-# packages are verified against.
+# Fails the image build rather than publishing one whose payload cannot start:
+# every library the server links resolves, and the ones the capture stack opens
+# by name at run time, which no ELF dependency names and only the apt lines
+# above put here, are present.
 RUN set -e; \
+    selkies --version; \
     selkies --help > /dev/null; \
-    python3 -c "import selkies, pixelflux, pcmflux"; \
-    python3 -c "import ctypes; [ctypes.CDLL(name) for name in ('libwayland-server.so.0', 'libEGL.so.1', 'libgbm.so.1', 'libpulse.so.0', 'libva.so.2', 'libva-drm.so.2', 'libdrm.so.2', 'libxkbcommon.so.0', 'libpixman-1.so.0')]"
+    ! ldd /usr/local/bin/selkies | grep 'not found'; \
+    test -f /usr/local/share/selkies/web/index.html; \
+    for name in libwayland-server.so.0 libEGL.so.1 libgbm.so.1 libpulse.so.0 libva.so.2 \
+            libva-drm.so.2 libdrm.so.2 libxkbcommon.so.0 libpixman-1.so.0; do \
+        ldconfig -p | awk '{print $1}' | grep -qxF "${name}" || { echo "missing ${name}"; exit 1; }; \
+    done
 
 # XLibre's server replaces the distribution's /usr/bin/Xvfb; chowned
 # to the session user like the rest of the image so fakeroot-sudo apt can

@@ -1,0 +1,55 @@
+# rtc-sctp 0.21.1 (https://github.com/webrtc-rs/rtc, MIT/Apache-2.0), vendored with the
+# Selkies SCTP fixes applied on top; the workspace's `[patch.crates-io]` points the
+# `rtc-sctp` dependency here. `rtc-sctp-selkies.patch` beside it is the diff against the
+# published crate, the shape the fixes take upstream.
+
+[package]
+name = "rtc-sctp"
+version = "0.21.1"
+authors = ["Rain Liu <yliu@webrtc.rs>"]
+edition = "2024"
+description = "RTC SCTP in Rust"
+homepage = "https://webrtc.rs"
+documentation = "https://docs.rs/rtc-sctp"
+readme = "README.md"
+keywords = ["sansio", "networking", "protocols"]
+categories = ["network-programming"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/webrtc-rs/rtc"
+publish = false
+
+[features]
+bench = []
+
+[lib]
+name = "rtc_sctp"
+path = "src/lib.rs"
+
+[[example]]
+name = "sctp_e2e"
+path = "examples/sctp_e2e.rs"
+
+[[example]]
+name = "sctp_micro"
+path = "examples/sctp_micro.rs"
+required-features = ["bench"]
+
+[dependencies]
+bytes = "1.12.0"
+crc32c = "0.6"
+log = "0.4.33"
+rand = "0.10.1"
+rustc-hash = "2"
+shared = { package = "rtc-shared", version = "0.21.1", default-features = false }
+slab = "0.4.9"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+assert_matches = "1.5.0"
+lazy_static = "1.4.0"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(fuzzing)"]
+
+[workspace]

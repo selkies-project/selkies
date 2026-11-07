@@ -59,7 +59,7 @@ class Focus:
         return page.evaluate("document.hasFocus()")
 
     def leave(self) -> None:
-        from selkies.Xlib import X, display
+        from Xlib import X, display
         if not self.other:
             d = display.Display(H.require_display())
             w = d.screen().root.create_window(1200, 0, 60, 40, 0, d.screen().root_depth, X.InputOutput,

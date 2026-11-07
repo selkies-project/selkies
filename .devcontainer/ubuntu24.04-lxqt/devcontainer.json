@@ -42,8 +42,8 @@
 		"SELKIES_PORT": "8080"
 	},
 
-	// Build the web client from source and install Selkies editable, exactly as
-	// the CI wheel build does.
+	// Build the web client and the server from this checkout, as CI does, and
+	// install what the suites need beside them.
 	"postCreateCommand": "bash .devcontainer/postcreate.sh",
 
 	"customizations": {

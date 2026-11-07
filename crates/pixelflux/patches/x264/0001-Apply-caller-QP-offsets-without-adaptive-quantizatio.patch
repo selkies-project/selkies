@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Wed, 4 Nov 2026 22:07:43 -0500
+Subject: [PATCH] Apply caller QP offsets without adaptive quantization
+ (rc.b_qp_offsets)
+
+---
+ encoder/encoder.c | 7 +++++++
+ x264.h            | 3 +++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/encoder/encoder.c b/encoder/encoder.c
+index 20e620a..c2effa2 100644
+--- a/encoder/encoder.c
++++ b/encoder/encoder.c
+@@ -1178,6 +1178,13 @@ static int validate_parameters( x264_t *h, int b_open )
+     h->param.rc.f_aq_strength = x264_clip3f( h->param.rc.f_aq_strength, 0, 3 );
+     if( h->param.rc.f_aq_strength == 0 )
+         h->param.rc.i_aq_mode = 0;
++    /* Caller offsets alone ride AQ at strength zero, as MB-tree does, which copies them
++     * per frame and computes no variance. */
++    if( h->param.rc.b_qp_offsets )
++    {
++        h->param.rc.i_aq_mode = X264_AQ_VARIANCE;
++        h->param.rc.f_aq_strength = 0;
++    }
+ 
+     if( h->param.i_log_level < X264_LOG_INFO )
+     {
+diff --git a/x264.h b/x264.h
+index cc22f05..177d2c7 100644
+--- a/x264.h
++++ b/x264.h
+@@ -462,6 +462,9 @@ typedef struct x264_param_t
+ 
+         int         i_aq_mode;      /* psy adaptive QP. (X264_AQ_*) */
+         float       f_aq_strength;
++        int         b_qp_offsets;   /* Apply x264_image_properties_t.quant_offsets as given,
++                                     * without adaptive quantization's per-frame variance pass:
++                                     * the caller's offsets are the only per-macroblock QP. */
+         int         b_mb_tree;      /* Macroblock-tree ratecontrol. */
+         int         i_lookahead;
+ 
+-- 
+2.47.3
+

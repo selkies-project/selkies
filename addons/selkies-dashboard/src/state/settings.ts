@@ -29,22 +29,22 @@
  * one the dashboard derived (HiDPI from the resolution mode) or applied from the
  * server (paint-over). Those settings therefore carry an
  * `_explicit_choice` marker beside their value and resolve through the shared
- * specs of `selkies-web-core/lib/conditional-settings.js`, which honor pinned,
+ * specs of `selkies-web-core/lib/conditional-settings.ts`, which honor pinned,
  * locked, and operator-overridden server values: a derived write never pins
  * them, and an unmarked stored echo is dropped once the ladder moves on.
  * @module
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, canDecodeTenBit, tenBitFormat,
-    codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
-import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.js";
-import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, framerateStopIndex, stopIndex, stopsWithin, withDisplayStop } from "../../../selkies-web-core/lib/slider-stops.js";
-import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from "../../../selkies-web-core/lib/display-refresh.js";
+    codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, isMacDesktop } from "../../../selkies-web-core/lib/util.ts";
+import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.ts";
+import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, framerateStopIndex, stopIndex, stopsWithin, withDisplayStop } from "../../../selkies-web-core/lib/slider-stops.ts";
+import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from "../../../selkies-web-core/lib/display-refresh.ts";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
     tenBitStream, CPU_ENCODE_THREADING_SPEC, cpuEncodeThreadingApplies,
-    RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
+    RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.ts";
 import { getPrefixedKey, computeRenderableSettings, getLastServerSettings,
     getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay, onCoreMessage, type ServerSettings } from "@/utils";
 import { t } from "@/i18n";
@@ -52,8 +52,9 @@ import { t } from "@/i18n";
 export { displayLabel, canPlayEncoder, framerateLabel };
 
 /**
- * Mirrors the server's `audio_bitrate` allowed enum (settings.py) so the
- * slider never offers a value the server rejects; 510000 is libopus's maximum.
+ * Mirrors the server's `audio_bitrate` allowed enum (the settings table) so
+ * the slider never offers a value the server rejects; 510000 is libopus's
+ * maximum.
  */
 const audioBitrateOptions = [32000, 48000, 64000, 96000, 128000, 192000, 256000, 320000, 384000, 510000];
 const DEFAULT_AUDIO_BITRATE = 128000;
@@ -75,7 +76,7 @@ const DPI_UNITY_ROWS = 1080;
 
 /**
  * The default `scaling_dpi`, derived as the core derives it
- * (lib/stream-density.js): from a manual resolution when one is set, since
+ * (lib/stream-density.ts): from a manual resolution when one is set, since
  * that framebuffer decides how large the desktop draws its UI and the local
  * screen says nothing about it, and otherwise from the local display scaling
  * (devicePixelRatio), so the remote desktop's fonts and UI match the local
@@ -121,13 +122,13 @@ export const RESOLUTION_PRESETS = [
     "1024x768", "800x600", "640x480", "320x240",
 ];
 
-const encoderOptions = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped", "jpeg"];
+const encoderOptions = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "jpeg"];
 /** WebRTC encoders offered until the server payload arrives; its `encoder` allowed list is already filtered. */
 const encoderOptionsRTC = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"];
 /** `webcam_encoder` values; labels come from `displayLabel`. */
 export const WEBCAM_ENCODER_OPTIONS = ["auto", "h264", "h265", "vp8", "vp9", "av1", "mjpeg"];
 /** Encoders that support both CBR and CRF (constant-QP) rate control. */
-const VIDEO_ENCODERS = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped"];
+const VIDEO_ENCODERS = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"];
 
 const readStored = (key: string) => localStorage.getItem(getPrefixedKey(key));
 
@@ -148,16 +149,16 @@ const readExplicitStored = (spec: any) => (key: string) => (isExplicitChoice(spe
  * dependency's re-derivation alike). The resolver honors explicit choices, so
  * a re-resolve never clobbers a pinned value. Re-resolving writes state rather
  * than deriving during render because the caller edits the value afterwards.
- * @param spec Conditional-setting spec from `conditional-settings.js`.
+ * @param spec Conditional-setting spec from `conditional-settings.ts`.
  * @param serverSettings The last server settings payload, or null before one arrives.
  * @param ctx Resolution context the spec reads (stream mode, encoder, ...).
  * @param deps Dependencies whose change triggers a re-resolve.
  * @param read Storage reader; the explicit-choice reader for settings that are also derived.
  * @returns A `[value, setValue]` pair.
  */
-function useConditionalSetting(spec: any, serverSettings: any, ctx: any, deps: any[], read: any = readStored) {
-    const compute = () => resolveSpec(spec, serverSettings, ctx, read);
-    const [value, setValue] = useState(compute);
+function useConditionalSetting<T = boolean>(spec: any, serverSettings: any, ctx: any, deps: any[], read: any = readStored) {
+    const compute = () => resolveSpec(spec, serverSettings, ctx, read) as T;
+    const [value, setValue] = useState<T>(compute);
     // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
     useEffect(() => { setValue(compute()); }, deps);
     return [value, setValue] as const;
@@ -311,7 +312,7 @@ export function useStreamSettings() {
     };
 
     const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
-    const [rateControlMode, setRateControlMode] = useConditionalSetting(RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
+    const [rateControlMode, setRateControlMode] = useConditionalSetting<string>(RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
     /**
      * With rate control disabled the server ignores rate_control_mode and
      * keeps the encoder's built-in default, so the dashboard neither pushes a
@@ -361,7 +362,7 @@ export function useStreamSettings() {
         return () => { live = false; };
     }, [fullColorCodec]);
     const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-    // Pre-settings fallbacks mirror the server defaults (settings.py).
+    // Pre-settings fallbacks mirror the server defaults (the settings table).
     const [jpegQuality, setJpegQuality] = useState(() => parseInt(readStored("jpeg_quality") ?? "", 10) || 40);
     const [paintOverJpegQuality, setPaintOverJpegQuality] = useState(() => parseInt(readStored("paint_over_jpeg_quality") ?? "", 10) || 90);
     const [videoPaintoverCRF, setVideoPaintoverCRF] = useState(() => parseInt(readStored("video_paintover_crf") ?? "", 10) || 18);

@@ -1,0 +1,317 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "setuptools-rust"]
+build-backend = "setuptools.build_meta"
+
+[tool.cibuildwheel]
+archs = [ "x86_64", "aarch64" ]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+skip = "*t-*"
+
+[tool.cibuildwheel.environment]
+LD_LIBRARY_PATH = "/usr/local/lib:/usr/local/lib64"
+# The source-built libraries below install under /usr/local; Alpine's pkgconf
+# does not search there by default, so both platforms are told explicitly.
+PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/share/pkgconfig"
+PATH = "$HOME/.cargo/bin:$PATH"
+
+[tool.cibuildwheel.linux]
+# PIXELFLUX_ENABLE_GPL selects the wheel flavor (see setup.py): it has to reach
+# the container for both before-all (whether libx264 is built) and the build.
+environment-pass = ["PIXELFLUX_ENABLE_GPL"]
+before-all = """
+    set -euxo pipefail
+
+    # A transient clone failure fails the whole wheel build, so every source is
+    # both retried and mirrored: the upstream host is tried first and a GitHub
+    # copy of the same commit after it, because an outage that outlasts the retries
+    # is what actually breaks these builds and it rarely covers both hosts. The
+    # backoff widens to about two and a half minutes per host, which rides out a
+    # blip without stalling a run behind a host that is simply gone. Each source
+    # is its release tag, which has to resolve to the commit named beside it (git
+    # checks the objects it receives against their hashes), so a mirror serves
+    # exactly what the upstream host does and a moved tag is refused; x264, which
+    # tags no releases, is fetched by the commit of its stable branch.
+    clone_source() {
+        commit="$1"; tag="$2"; dir="$3"; shift 3
+        want="${commit}"
+        [ "${tag}" = - ] || want="refs/tags/${tag}:refs/tags/${tag}"
+        for url in "$@"; do
+            for attempt in 1 2 3 4; do
+                rm -rf "${dir}"
+                if git init -q "${dir}" && git -C "${dir}" fetch --depth 1 "${url}" "${want}"; then
+                    got="$(git -C "${dir}" rev-parse 'FETCH_HEAD^{commit}')"
+                    [ "${got}" = "${commit}" ] && git -C "${dir}" checkout -q "${commit}" && return 0
+                    echo "clone_source: ${url} has ${tag} at ${got}, not ${commit}" >&2
+                    return 1
+                fi
+                echo "clone_source: ${url} failed (attempt ${attempt}/4)" >&2
+                sleep $((attempt * 15))
+            done
+            echo "clone_source: giving up on ${url}" >&2
+        done
+        return 1
+    }
+
+    # A mirror still syncing an update answers 404 for the repodata the index it
+    # was handed names, and dnf gives up once every mirror has, so the install
+    # is retried with fresh metadata over the few minutes a sync takes.
+    dnf_install() {
+        for attempt in 1 2 3 4; do
+            dnf install -y --disablerepo='epel*' "$@" && return 0
+            echo "dnf_install: failed (attempt ${attempt}/4)" >&2
+            dnf clean metadata
+            sleep $((attempt * 30))
+        done
+        return 1
+    }
+
+    # The same native builds on both platforms, so a wheel carries the same
+    # native code whichever libc it targets. No distro package is used for any
+    # of them: manylinux has none, Alpine's are GPL builds auditwheel would
+    # bundle into the non-GPL wheel, and the wheel flavor must decide whether
+    # a GPL library exists at all.
+    #
+    # * libx264 and x265, only for the GPL wheel (the default; PIXELFLUX_ENABLE_GPL=0
+    #   builds without them: OpenH264, vendored by its crate, is the software
+    #   H.264 encoder and kvazaar, built for that wheel alone, the software H.265
+    #   encoder instead).
+    # * libvpx, SVT-AV1 (BSD), and, for the virtual camera, dav1d (BSD) and
+    #   libde265 (LGPL): the software VP8/VP9 and AV1 encoders and the AV1 and
+    #   HEVC decoders, each linked directly and bound from its own headers.
+    # libva is not built: the VA-API session carries bindings of the libva headers
+    # it vendors and opens the host's library at run time. libjpeg-turbo is NOT
+    # built either: turbojpeg-sys vendors + statically links its own copy by
+    # default (cmake + nasm are what it needs).
+    case "$(printf %s "${PIXELFLUX_ENABLE_GPL:-1}" | tr 'A-Z' 'a-z')" in
+        0|false|no|off) gpl=0 ;;
+        *) gpl=1 ;;
+    esac
+
+    # pixelflux reads the API patches/x264 adds (scripts/build-x264.sh builds the
+    # same for every other build).
+    build_x264() {
+        (cd /tmp && \
+            clone_source b35605ace3ddf7c1a5d67a2eb553f034aef41d55 - x264 \
+                https://code.videolan.org/videolan/x264.git https://github.com/mirror/x264.git && \
+            cd x264 && \
+            git apply {package}/patches/x264/*.patch && \
+            ./configure --prefix=/usr/local --enable-shared --disable-cli && \
+            make -j$(nproc) && \
+            make install)
+    }
+
+    # x265 fixes its sample depth at compile time, so the 10-bit encoder is built
+    # first as a static library and linked into the 8-bit one, which then answers
+    # x265_api_get(10) as well.
+    build_x265() {
+        (cd /tmp && \
+            clone_source e444744c03978c1fb4e037168967020cf2648427 4.2 x265 \
+                https://bitbucket.org/multicoreware/x265_git.git && \
+            cd x265 && \
+            cmake -S source -B build10 -DCMAKE_BUILD_TYPE=Release -DHIGH_BIT_DEPTH=ON \
+                -DEXPORT_C_API=OFF -DENABLE_SHARED=OFF -DENABLE_CLI=OFF \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON && \
+            cmake --build build10 -j$(nproc) && \
+            mkdir -p build && cp build10/libx265.a build/libx265_main10.a && \
+            cmake -S source -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DCMAKE_INSTALL_LIBDIR=lib -DENABLE_SHARED=ON -DENABLE_CLI=OFF \
+                -DEXTRA_LIB=x265_main10.a -DEXTRA_LINK_FLAGS=-L/tmp/x265/build -DLINKED_10BIT=ON && \
+            cmake --build build -j$(nproc) && \
+            cmake --install build)
+    }
+
+    build_kvazaar() {
+        (cd /tmp && \
+            clone_source 6040962bed5cc68c5ad01234c38c08b8b2822068 v2.3.2 kvazaar \
+                https://github.com/ultravideo/kvazaar.git && \
+            cd kvazaar && \
+            cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON && \
+            cmake --build build -j$(nproc) && \
+            cmake --install build)
+    }
+
+    build_libvpx() {
+        (cd /tmp && \
+            clone_source d168454ecd099805c675d4a98c66f4891373302a v1.15.2 libvpx \
+                https://chromium.googlesource.com/webm/libvpx https://github.com/webmproject/libvpx.git && \
+            cd libvpx && \
+            ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples \
+                --disable-tools --disable-docs --disable-unit-tests --enable-vp9-highbitdepth \
+                $([ "$(uname -m)" = x86_64 ] && echo --as=nasm) && \
+            make -j$(nproc) && \
+            make install)
+    }
+
+    build_svtav1() {
+        (cd /tmp && \
+            clone_source 9292ec8e32bce26f781f277ec8739b53426c4300 v4.2.0 svtav1 \
+                https://gitlab.com/AOMediaCodec/SVT-AV1.git https://github.com/AOMediaCodec/SVT-AV1.git && \
+            cd svtav1 && \
+            cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON -DBUILD_APPS=OFF -DBUILD_DEC=OFF && \
+            cmake --build build -j$(nproc) && \
+            cmake --install build)
+    }
+
+    build_dav1d() {
+        (cd /tmp && \
+            clone_source 42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa 1.5.1 dav1d \
+                https://code.videolan.org/videolan/dav1d.git https://github.com/videolan/dav1d.git && \
+            cd dav1d && \
+            meson setup build --prefix=/usr/local --libdir=lib --buildtype=release \
+                -Denable_tools=false -Denable_tests=false && \
+            ninja -C build && \
+            ninja -C build install)
+    }
+
+    build_de265() {
+        (cd /tmp && \
+            clone_source ba62bf4cfb3242f3bf0a45617ff09e35236e4d82 v1.1.3 libde265 \
+                https://github.com/strukturag/libde265.git && \
+            cd libde265 && \
+            cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON -DENABLE_SDL=OFF \
+                -DENABLE_DECODER=OFF -DENABLE_ENCODER=OFF && \
+            cmake --build build -j$(nproc) && \
+            cmake --install build)
+    }
+
+    # rustup's installer for this machine, checked against the SHA-256 published
+    # beside it, rather than the script that downloads it unchecked
+    install_rust() {
+        libc="$(if command -v apk > /dev/null; then echo musl; else echo gnu; fi)"
+        url="https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-${libc}/rustup-init"
+        curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 --retry-connrefused -o /tmp/rustup-init "${url}" && \
+        sum="$(curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 --retry-connrefused "${url}.sha256")" && \
+        echo "${sum%% *}  /tmp/rustup-init" | sha256sum -c - && \
+        chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal && rm -f /tmp/rustup-init
+    }
+
+    build_codec_libraries() {
+        build_libvpx && build_svtav1 && build_dav1d && build_de265 && \
+        if [ "${gpl}" = 1 ]; then build_x264 && build_x265; else build_kvazaar; fi
+    }
+
+    # --- MANYLINUX (RPM-based) ---
+    # Everything below comes from the image's AlmaLinux 8 BaseOS, AppStream and
+    # PowerTools, so no third-party repository (RPM Fusion, EPEL) is added, and
+    # the EPEL one the image carries is left out of the install.
+    if command -v dnf; then
+        dnf_install \
+            curl \
+            clang \
+            pixman-devel \
+            libX11-devel \
+            libXext-devel \
+            libXfixes-devel \
+            libdrm-devel \
+            libinput-devel \
+            libxkbcommon-devel \
+            mesa-libgbm-devel \
+            wayland-devel \
+            systemd-devel \
+            git \
+            make \
+            gcc \
+            nasm \
+            cmake \
+            gcc-c++ && \
+        \
+        install_rust && \
+        \
+        # dav1d builds with meson, which the image's own Python is too old for;
+        # the interpreters cibuildwheel ships carry a current pip.
+        /opt/python/cp311-cp311/bin/pip install meson ninja && \
+        export PATH="/opt/python/cp311-cp311/bin:$PATH" && \
+        build_codec_libraries && \
+        \
+        ldconfig
+
+    # --- ALPINE (APK-based) ---
+    # libjpeg-turbo is NOT a system dep: turbojpeg-sys builds its vendored copy
+    # (needs cmake + nasm). The codec libraries come from the source builds
+    # above; musl's loader searches /usr/local/lib on its own, so there is no
+    # ldconfig.
+    elif command -v apk; then
+        apk add --no-cache \
+            build-base \
+            clang \
+            cmake \
+            meson \
+            ninja \
+            nasm \
+            git \
+            pixman-dev \
+            libx11-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libdrm-dev \
+            libinput-dev \
+            libxkbcommon-dev \
+            mesa-dev \
+            wayland-dev \
+            eudev-dev \
+            musl-dev && \
+        \
+        # bindgen opens libclang at runtime, and Alpine names that package after
+        # the compiler's major version, which moves every release: take the one
+        # belonging to the clang just installed.
+        apk add --no-cache "clang$(clang -dumpversion | cut -d. -f1)-libclang" && \
+        \
+        install_rust && \
+        \
+        build_codec_libraries
+    else
+        echo "Unsupported package manager"
+        exit 1
+    fi
+"""
+
+# smithay is a git dependency, and cargo retries few of a git fetch's failures
+# (none of libgit2's SSL errors), so the build's crates are fetched first and
+# retried like the sources above. The build then needs no network, and a job's
+# later wheels find them fetched.
+before-build = """
+    for attempt in 1 2 3 4; do
+        cargo fetch --locked --manifest-path Cargo.toml \
+            --target "$(rustc -vV | sed -n 's/^host: //p')" && exit 0
+        echo "cargo fetch: failed (attempt ${attempt}/4)" >&2
+        sleep $((attempt * 15))
+    done
+    exit 1
+"""
+
+repair-wheel-command = """
+    auditwheel repair -w {dest_dir} {wheel} \
+    --exclude libgbm.so.1 \
+    --exclude libEGL.so.1 \
+    --exclude libgobject-2.0.so.0 \
+    --exclude libglib-2.0.so.0 \
+    --exclude libgmodule-2.0.so.0 \
+    --exclude libffi.so.6 \
+    --exclude libffi.so.7 \
+    --exclude libffi.so.8 \
+    --exclude libxkbcommon.so.0 \
+    --exclude libpixman-1.so.0 \
+    --exclude liblzma.so.5 \
+    --exclude libz.so.1 \
+    --exclude libstdc++.so.6 \
+    --exclude libgcc_s.so.1 \
+    --exclude libX11.so.6 \
+    --exclude libXext.so.6 \
+    --exclude libXfixes.so.3 \
+    --exclude libxcb.so.1 \
+    --exclude libxcb-dri3.so.0 \
+    --exclude libxcb-shm.so.0 \
+    --exclude libxcb-render.so.0
+"""
+
+# Ruff runs as a bug-finder, not a style enforcer: only rule families that flag
+# defects (pyflakes, bugbear, pycodestyle errors, pylint errors) are enabled.
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E9", "F", "B", "PLE"]

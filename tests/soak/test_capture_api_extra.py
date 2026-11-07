@@ -94,7 +94,6 @@ def make_settings(encoder: str = "h264enc", w: int = 1024, h: int = 640, **kw):
     cs.use_paint_over_quality = False
     cs.jpeg_quality = 90
     cs.codec = "h264"
-    cs.video_fullframe = True
     for k, v in kw.items():
         setattr(cs, k, v)
     return cs
@@ -138,7 +137,7 @@ class FrameCounter:
 
 def x_root_size() -> tuple[int, int]:
     """(width, height) of the test X server's root window."""
-    from selkies.Xlib import display as xdisp
+    from Xlib import display as xdisp
     d = xdisp.Display(TEST_DISPLAY)
     s = d.screen()
     w, h = s.width_in_pixels, s.height_in_pixels
@@ -414,7 +413,6 @@ def main() -> Results:
         j = make_settings(w=320, h=200)
         # JPEG capture settings, which the recorder must reject.
         j.codec = "jpeg"
-        j.video_fullframe = False
         try:
             pixelflux.start_recording(os.path.join(H.WORKDIR, "cap2-rec-jpg.mp4"), j)
             res.check("rec: JPEG settings rejected", False, "")

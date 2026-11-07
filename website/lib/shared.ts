@@ -71,9 +71,18 @@ export const currentVersion =
         (v) => v.version === versionSegment || v.aliases.includes(versionSegment),
       );
 
-/** The site-absolute address of `path` in the version served under `segment`. */
+/**
+ * `path` as the export serves it: every page is a directory index
+ * (`trailingSlash` in next.config.mjs), and its slashless address is only a
+ * redirect there.
+ */
+export function withTrailingSlash(path: string): string {
+  return path.endsWith('/') ? path : `${path}/`;
+}
+
+/** The site-absolute address of the page at `path` in the version served under `segment`. */
 export function versionPath(segment: string, path = '/'): string {
-  return `${siteRootPath}/${segment}${path}`;
+  return `${siteRootPath}/${segment}${withTrailingSlash(path)}`;
 }
 
 /**
@@ -85,14 +94,14 @@ export function servedSegment({ version, aliases }: DocsVersion): string {
 }
 
 /**
- * The published address of a page. Pages resolve with or without a trailing
- * slash, so one spelling is named as canonical and it is this one. On a
- * versioned site every version's copy of a page names the default version's,
- * so search results lead to the current release rather than to whichever
- * version was crawled.
+ * The published address of a page, with the trailing slash it is served
+ * under, since the slashless spelling is a redirect. On a versioned site every
+ * version's copy of a page names the default version's, so search results
+ * lead to the current release rather than to whichever version was crawled.
  */
 export function pageUrl(url: string): string {
-  return docsVersions ? `${siteUrl}/${docsVersions.default}${url}` : `${siteUrl}${url}`;
+  const path = withTrailingSlash(url);
+  return docsVersions ? `${siteUrl}/${docsVersions.default}${path}` : `${siteUrl}${path}`;
 }
 
 /**

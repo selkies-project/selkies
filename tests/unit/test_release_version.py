@@ -164,6 +164,20 @@ for version, (want_tilde, want_alpine) in NATIVE.items():
     got = native("alpine_version", version)
     check(f"apk builds {version} as {want_alpine}", got == want_alpine, got)
 
+# version -> what Cargo stamps into the server, the semver spelling pixelflux
+# stamps its own crate with
+CRATE = {
+    "2.0.0": "2.0.0",
+    "2.0.0rc0": "2.0.0-rc.0",
+    "2.0.0a1": "2.0.0-alpha.1",
+    "2.0.0b2": "2.0.0-beta.2",
+    "2.0.0.post1": "2.0.0-post.1",
+    "0.0.0.dev0": "0.0.0-dev.0",
+}
+for version, want in CRATE.items():
+    got = native("crate_version", version)
+    check(f"the server is built as {want} for {version}", got == want, got)
+
 # The draft names the commit the run built, which the tag is on; left to
 # GitHub, a draft names the default branch's head by the time it is published
 check("the draft release names the commit the run built",

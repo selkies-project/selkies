@@ -3,14 +3,17 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# Builds tests/fuzz in an OSS-Fuzz builder, for ClusterFuzzLite and OSS-Fuzz
-# alike. The runtime dependencies are installed without the capture stack
-# (pixelflux, pcmflux), which none of the fuzzed modules imports.
-python3 scripts/ci/unit-deps.py > /tmp/requirements.txt
-pip3 install -r /tmp/requirements.txt
-pip3 install --no-deps .
-
-for fuzzer in tests/fuzz/fuzz_*.py; do
-  compile_python_fuzzer "$fuzzer"
+# Build each independent fuzz workspace in the OSS-Fuzz builder. The native
+# targets compile their parser modules directly and need no media libraries.
+for crate in crates/selkies-rtc crates/pixelflux crates/pcmflux; do
+  (
+    cd "${crate}"
+    cargo fuzz build -O
+    for target in $(cargo fuzz list); do
+      cp "${CARGO_TARGET_DIR:-fuzz/target}/x86_64-unknown-linux-gnu/release/${target}" "$OUT/"
+      if [ -d "fuzz/seeds/${target}" ]; then
+        zip -q -j "$OUT/${target}_seed_corpus.zip" "fuzz/seeds/${target}"/*
+      fi
+    done
+  )
 done
-zip -j "$OUT/fuzz_sdp_seed_corpus.zip" tests/fuzz/corpus/sdp/*

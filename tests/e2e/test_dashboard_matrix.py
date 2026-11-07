@@ -34,9 +34,9 @@ from playwright.sync_api import sync_playwright
 WL_SOCKET = "wayland-1"
 CELLS = ("wish-webrtc-x11", "wish-ws-wl", "wish-webrtc-wl",
          "gates-webrtc-x11", "gates-ws-wl", "gates-webrtc-wl")
-# Encoders in the order a switch away from the default prefers them: the
-# striped H.264 mode keeps the WebCodecs path, JPEG needs no decoder at all.
-ENCODER_PREFERENCE = ["h264enc-striped", "jpeg", "h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"]
+# Encoders in the order a switch away from the default prefers them: JPEG
+# needs no decoder at all.
+ENCODER_PREFERENCE = ["jpeg", "h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"]
 
 # Records the core's clipboard messages (a push that arrives while the panel
 # is closed) and the server settings payload the dashboard renders from.
@@ -61,15 +61,24 @@ def wait_video(page: Any, mode: str, timeout: float = 45) -> Optional[dict]:
     return C.wait_wr_video(page, timeout) if mode == "webrtc" else C.wait_ws_video(page, timeout)
 
 
-def new_video_frames(page: Any, mode: str, timeout: float = 10) -> int:
-    """Video units that arrive from now on: WS chunks or decoded WebRTC frames."""
-    expr = ("window.videoChunksReceived || 0" if mode == "websockets"
-            else "(() => { const v = document.querySelector('video');"
-                 " return v && v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : 0; })()")
-    before = page.evaluate(expr)
+def video_frames(page: Any, mode: str) -> int:
+    """Video units the page has taken in: WS chunks or decoded WebRTC frames."""
+    return page.evaluate("window.videoChunksReceived || 0" if mode == "websockets"
+                         else "(() => { const v = document.querySelector('video');"
+                              " return v && v.getVideoPlaybackQuality"
+                              " ? v.getVideoPlaybackQuality().totalVideoFrames : 0; })()")
+
+
+def new_video_frames(page: Any, mode: str, timeout: float = 10, since: Optional[int] = None) -> int:
+    """Video units that arrive past `since`, the count when called by default.
+
+    A still screen sends only what a change or a restart sends, so a check of a
+    restart counts from before it rather than from after its key frame.
+    """
+    before = video_frames(page, mode) if since is None else since
     deadline = time.time() + timeout
     while time.time() < deadline:
-        now = page.evaluate(expr)
+        now = video_frames(page, mode)
         if now > before:
             return now - before
         time.sleep(0.5)
@@ -233,6 +242,7 @@ def wish_block(cell: str) -> "H.Results":
                 for value in ENCODER_PREFERENCE:
                     if value != current and value in offered:
                         mark = len(H.server_log())
+                        seen = video_frames(page, mode)
                         menu.select_option(value, timeout=3000)
                         picked = value
                         break
@@ -243,7 +253,8 @@ def wish_block(cell: str) -> "H.Results":
                         else "Video parameters changed for 'primary'. Restarting its capture stream")
                 res.check(f"settings: encoder change to {picked} acknowledged by the server",
                           log_since(mark, line, timeout=15), H.server_log()[mark:][-120:])
-                res.check("video still arrives after the encoder restart", new_video_frames(page, mode, 15) > 0)
+                res.check("video still arrives after the encoder restart",
+                          new_video_frames(page, mode, 15, since=seen) > 0)
             page.keyboard.press("Escape")
             time.sleep(0.3)
 

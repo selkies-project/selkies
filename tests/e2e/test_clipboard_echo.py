@@ -21,10 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 import core_lib as C  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
-
-sys.path.insert(0, os.path.join(H.REPO, "src"))
-from selkies.Xlib import X, Xatom, display as xdisp  # noqa: E402
-from selkies.Xlib.protocol import event as xevent  # noqa: E402
+from Xlib import X, Xatom, display as xdisp  # noqa: E402
+from Xlib.protocol import event as xevent  # noqa: E402
 import test_clipboard_rich as R  # noqa: E402
 
 DASH = os.path.join(H.REPO, "addons/selkies-dashboard/dist")
@@ -110,7 +108,7 @@ def gestures(page, n: int = 2) -> None:
 def block(mode: str) -> "H.Results":
     res = H.Results(f"clipecho-{mode}")
     H.server_start(mode=mode, wayland=False, web_root=DASH,
-                   extra_env={"PYTHONPATH": os.path.join(H.REPO, "src")})
+                   extra_env={})
     with sync_playwright() as p:
         browser, page = page_with_clipboard(p, mode)
         source = None

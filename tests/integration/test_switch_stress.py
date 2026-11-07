@@ -35,15 +35,15 @@ SETTINGS = {
 
 
 def shutdown_windows() -> list:
-    """The log between each `DataStreamingServer` shutdown's first and last line."""
+    """The log between each WebSockets transport shutdown's first and last line."""
     log = H.server_log()
     windows = []
     at = 0
     while True:
-        start = log.find("DataStreamingServer shutdown initiated", at)
+        start = log.find("Transport shutdown initiated", at)
         if start < 0:
             return windows
-        end = log.find("DataStreamingServer shutdown complete", start)
+        end = log.find("Transport shutdown complete", start)
         if end < 0:
             return windows
         windows.append(log[start:end])
@@ -76,9 +76,7 @@ async def flip_under_a_client(res: "H.Results") -> None:
             await asyncio.sleep(5.0)
             outputs = False
             if not IS_WAYLAND:
-                from selkies import display_utils as DU
-                os.environ["DISPLAY"] = H.require_display()
-                outputs = await DU.has_pluggable_outputs()
+                outputs = H.x_has_pluggable_outputs()
                 if outputs:
                     res.skip("the layout engine defined this client's monitor",
                              "displays are outputs; one display defines no monitor")

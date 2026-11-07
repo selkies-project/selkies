@@ -1,0 +1,27 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The window manager of the X11 session, under the desktop service's shell; on
+# Wayland the nested labwc is the window manager and container-entrypoint.sh
+# holds this service down. Its configuration is /etc/xdg/openbox/rc.xml, or the
+# copy selkies-desktop keeps of it under the home for the window style it sets.
+export DISPLAY="${DISPLAY:-:20}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
+until [ -f "${XDG_RUNTIME_DIR}/container-env" ]; do sleep 0.5; done
+# shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
+. "${XDG_RUNTIME_DIR}/container-env"
+# What the window manager's menu launches starts in its directory: the home.
+cd "${HOME}" || true
+# A base older than this image holds no service named openbox down, and Openbox
+# on the XWayland display would take the screen from labwc's own X11 manager.
+if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
+  exec sleep infinity
+fi
+until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
+echo "[openbox] managing the windows on ${DISPLAY}"
+# Selkies restarts the window manager with --replace where the X server has no
+# outputs to plug in, leaving the replacement outside supervision; replacing
+# that one in turn when this service restarts keeps the screen's manager here.
+exec openbox --replace
