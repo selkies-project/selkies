@@ -5090,9 +5090,10 @@ mod tests {
     /// The CPU path decides its cleanup inside its encode (`encode_cpu`), so a Turbo frame that
     /// codes a constant-quality software H.264 session at the paint-over quality
     /// while it holds still (`software::stripes_held_still`) is hashed before it is encoded: a
-    /// change landing on its refresh, on a frame after it, or on its key frame is coded at the
-    /// session's quality, as without Turbo. The change is `scattered`, so its size reads the
-    /// quantizer it was coded at rather than what the motion search found.
+    /// change landing on its refresh or on a frame after it is coded at the session's quality,
+    /// as without Turbo, and no key frame cleans the still screen up after the refresh. The
+    /// change is `scattered`, so its size reads the quantizer it was coded at rather than what
+    /// the motion search found.
     #[test]
     fn a_turbo_software_h264_frame_at_the_paint_over_quality_codes_a_change_at_the_session_quality()
     {
@@ -5119,7 +5120,7 @@ mod tests {
             p
         };
         let mut p = session(true);
-        let (mut held, mut key) = (None, None);
+        let mut held = None;
         for i in 0..300 {
             if held.is_none() && stripes_held_still(&p.stripes, &p.settings) {
                 held = Some(i);
@@ -5128,14 +5129,13 @@ mod tests {
             let keyed = out
                 .iter()
                 .any(|e| parse_video_type(e.data[1]).is_some_and(|(_, k)| k == FRAME_KEY));
-            if held.is_some() && keyed {
-                key = Some(i);
-                break;
-            }
+            assert!(
+                !keyed,
+                "no key frame cleans up the still screen at frame {i}"
+            );
         }
         let held = held.expect("a still stripe is cleaned up");
-        let key = key.expect("a large change is cleaned up by a key frame");
-        for at in [held, held + 15, key] {
+        for at in [held, held + 15] {
             let jump = |turbo: bool| -> usize {
                 let mut p = session(turbo);
                 for _ in 0..at {

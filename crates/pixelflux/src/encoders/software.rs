@@ -1623,8 +1623,11 @@ fn ledger_frame(
 ///    quantizer or finer in a small frame (`pipeline::convergence`), or its frames have been slice
 ///    headers alone for `pipeline::EMPTY_S`, with no key frame, and where the encoder reports no
 ///    quantizer (OpenH264) as a refresh and burst at its rate control's quality; under CRF as the
-///    session's rate factor until it changes again, as main's paint-over was, as a key frame
-///    after a run of changes and a refresh otherwise, then a burst. The JPEG stripes whose
+///    session's rate factor until it changes again, as main's paint-over was, a refresh and
+///    then a burst, with no key frame either, as `pipeline::decide_constant_quality` keeps it:
+///    the frames held at the rate factor refine the picture past what a key frame at it codes
+///    (x264 at CRF 24 and paint-over 16 on a scrolled 1440p page, 51.3 dB after the refresh,
+///    48.3 after the 2.7 MB key frame that followed it). The JPEG stripes whose
 ///    cleanups fall due on one frame are spread over `CLEANUP_STAGGER_FRAMES` frames, so a screen
 ///    going still costs no one frame the whole screen's cleanup. A region is otherwise sent when
 ///    it is dirty, while its burst runs, or when streaming mode is on, at the base quality; a
@@ -1854,7 +1857,6 @@ pub fn encode_cpu_from(
     // within its buffer, and OpenH264, which moves its quantizer only by a rebuild, past its frame
     // skip, a skipped frame telling nothing of the picture (`rc_bytes` 0).
     let converges = codec.is_video() && settings.video_cbr_mode;
-    let keys = codec.is_video() && holds && !converges;
     let paint_over_armed = |st: &StripeState| {
         if !codec.is_video() {
             return settings.use_paint_over_quality
@@ -1893,7 +1895,7 @@ pub fn encode_cpu_from(
                     trigger_frames,
                     start_frames,
                     paint_over_armed(st),
-                    keys,
+                    false,
                 )
         };
         let quiescent = if !hash_damage {
@@ -1926,7 +1928,7 @@ pub fn encode_cpu_from(
                     start_frames,
                     armed,
                     true,
-                    keys,
+                    false,
                     Damage::None,
                 );
                 st.consecutive_changes = 0;
@@ -2011,7 +2013,7 @@ pub fn encode_cpu_from(
                 trigger_frames,
                 start_frames,
                 paint_over_armed(st),
-                keys,
+                false,
             ) {
                 return true;
             }
@@ -2054,7 +2056,7 @@ pub fn encode_cpu_from(
             start_frames,
             armed,
             cleanup_allowed[i],
-            keys,
+            false,
             if is_dirty {
                 Damage::Unknown
             } else {

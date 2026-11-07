@@ -298,8 +298,8 @@ quantizer, VA-API's HEVC, whose regions Intel's iHD codes into a worse picture, 
 mode decision skips a still block whatever its segment's quantizer, and the
 other encoders keep the region-wide cleanup alone. Under a constant quality the cleanup moves the session's quality to the
 paint-over one until the region moves again (`pipeline::decide_constant_quality`, and x264's
-rate factor in `encode_cpu`), as main's paint-over did, so every encoder codes the cleanup key
-frame the way it codes one at that quality, with its own intra offset. Under a constant rate,
+rate factor in `encode_cpu`), as main's paint-over did, and no key frame follows on either path:
+the frames held there refine the picture past what a key frame at that quality codes. Under a constant rate,
 a session that holds a quantizer and whose rate control reports the quantizer and the bytes of
 its frames (NVENC, and libx264) is cleaned up through that rate
 control: the frames keep flowing, each within its budget, until it codes the region at the
