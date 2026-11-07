@@ -81,8 +81,14 @@ async def main() -> None:
 
     s.set_repair_budget(800_000, 1_000_000)
     room = 800_000 * REPAIR_SHARE / 8 * REPAIR_WINDOW_S
+    now = time.monotonic()
+    # Both calls use one instant, so a fractional refill cannot admit the next byte.
+    with patch("selkies.webrtc.rtcrtpsender.time.monotonic", return_value=now):
+        fits = s._repair_room(room)
+        s._repair_at = now
+        rejects_next_byte = not s._repair_room(1)
     res.check("measured, the budget holds REPAIR_WINDOW_S of REPAIR_SHARE of the steered rate",
-              s._repair_room(room) and not s._repair_room(1), (room, s._repair_bytes))
+              fits and rejects_next_byte, (room, s._repair_bytes))
     s._repair_at -= 0.1
     res.check("and refills at that rate", s._repair_room(room * 0.1 / REPAIR_WINDOW_S * 0.9)
               and not s._repair_room(room * 0.1 / REPAIR_WINDOW_S * 0.2))
