@@ -137,9 +137,15 @@ jobs:
         run: |
           scripts/ci/server-build-deps.sh
           sudo apt-get install -y --no-install-recommends python3-dev
-          # Noble has no Kvazaar package; the non-GPL tests need the same
-          # per-encoder rate-control ABI (2.3.2) that the wheel recipe builds.
-          sudo sh crates/pixelflux/scripts/build-kvazaar.sh /usr/local
+          # The non-GPL tests need the same rate-control ABI as the wheels.
+          # Use a carrying distribution package when available; otherwise build
+          # the exact release-pinned commit, rather than just its tag.
+          candidate="$(apt-cache policy libkvazaar-dev | sed -n 's/^[[:space:]]*Candidate: //p')"
+          if dpkg --compare-versions "${candidate:-0}" ge "2.3.2"; then
+            sudo apt-get install -y --no-install-recommends libkvazaar-dev
+          else
+            sudo sh crates/pixelflux/scripts/build-kvazaar.sh /usr/local
+          fi
           sudo ldconfig
       - name: Test the Rust and Python bridge configurations
         # GPU, render-node, encoder-device, and sound-server tests remain
