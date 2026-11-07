@@ -588,9 +588,11 @@ impl RateHold {
 /// the first congestion tick reads one: the round trips it learns its floor from have already
 /// crossed that queue, so the queue reads as the path's own. 30 Mbit/s into a 5 Mbit/s path
 /// held round trips at 3 s and more for the first seconds of every session. Starting here and
-/// climbing at `CongestionSteer::START_STEP` reaches a 30 Mbit/s ceiling in two seconds on a
-/// path that carries it.
-pub const START_KBPS: f64 = 8000.0;
+/// climbing at `CongestionSteer::START_STEP` reaches the default 8 Mbit/s target in a second
+/// and a 30 Mbit/s one in three on a path that carries it, while a path of 4 Mbit/s or more
+/// takes the start without a queue. A lower start costs a second more of climb per halving and
+/// codes the session's first key frame at it.
+pub const START_KBPS: f64 = 4000.0;
 
 /// The rate the page remembered (`ccStartKbps`), or `None` where it sent no positive number.
 pub fn remembered_kbps(remembered: Option<&serde_json::Value>) -> Option<f64> {
@@ -1575,7 +1577,7 @@ pub(crate) mod tests {
         );
         assert_eq!(start_kbps(Some(&json!(0)), 100.0, 30000.0), START_KBPS);
         assert_eq!(start_kbps(None, 100.0, 30000.0), START_KBPS);
-        assert_eq!(start_kbps(None, 100.0, 4000.0), 4000.0, "under the ceiling");
+        assert_eq!(start_kbps(None, 100.0, 2000.0), 2000.0, "under the ceiling");
     }
 
     /// One window per share, `frames` frames each, the missed ones spread through it; the
