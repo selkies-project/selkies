@@ -16,6 +16,14 @@ At runtime Selkies is a **single executable**, `selkies`, whichever package, ima
 | `pixelflux` | Screen capture on X11 and Wayland and video encoding, on the GPU where it carries the codec and in software where it does not | [pixelflux](pixelflux.md), the [Rust reference](/rustdoc/pixelflux/index.html) |
 | `pcmflux` | Audio capture from PulseAudio or PipeWire-Pulse, Opus encoding, and the microphone and recording paths | [pcmflux](pcmflux.md), the [Rust reference](/rustdoc/pcmflux/index.html) |
 
+## Legacy Repository Snapshots
+
+The `pixelflux` and `pcmflux` repositories keep their legacy `main` branches usable while canonical development lives here under `crates/`. A scheduled workflow on each legacy default branch calls `.github/workflows/sync-legacy-component.yaml` on this repository's `monorepo-import` branch. The helper copies the complete canonical tree into the component's `monorepo-import` branch with a regular fast-forward merge commit whose second parent is the exact canonical commit. Original canonical authorship stays in that ancestry. `.monorepo-transition.json` records the source commit, tree, ref, and component; the caller workflow is the only other mirror-owned path.
+
+Before every update, the helper reconstructs the preceding snapshot from its recorded canonical commit and the two mirror-owned paths. Any direct content edit, deletion, or extra path fails the run without a force push, leaving the edit intact until it lands in canonical Selkies. An unchanged canonical tree is a no-op for wheel builds even when a new source commit updates snapshot metadata. GitHub schedules only read the caller from the legacy default branch, and a `GITHUB_TOKEN` branch push cannot trigger another workflow, so synchronization, the existing native wheel build, and prerelease publication are chained in one run.
+
+A successful changed-tree build publishes only the calling component's wheels as a `monorepo-*` GitHub prerelease targeting the exact mirrored commit. It makes no standalone PyPI release. Stable central releases remain owner-controlled and carry all three wheels. After one documented stable transition release distributed through GitHub, snapshot synchronization stops at the next stable release; archival requires separate later owner approval. During the main-branch promotion, the caller and nested reusable workflow references change explicitly from `@monorepo-import` to `@main`, and `CANONICAL_REF` changes with them. Branch protection must permit these ordinary fast-forward bot pushes; no credentials beyond the caller's `GITHUB_TOKEN` are used. Schedules can be delayed or disabled by GitHub, so manual dispatch supports both a normal poll and a failed-release retry.
+
 ## Optional Components
 
 | Component | What it is for | Documented at |
