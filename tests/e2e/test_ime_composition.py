@@ -2,7 +2,7 @@
 """IME client paths: replayed composition traces must type the same text the
 IME committed locally, on every platform branch.
 
-Two event anatomies are replayed as DOM events against the real input.js in
+Two event anatomies are replayed as DOM events against the real input.ts in
 Chromium (platform-spoofed via CDP where a branch needs it):
 
 - Real IBus (Linux Chrome): the commit arrives as textInput AFTER an
@@ -245,7 +245,7 @@ def run_branch(pw: Any, tag: str, platform: Optional[str], ua: Optional[str],
         page.wait_for_function(
             "window.__ready === true || window.__errs.length > 0", timeout=15000)
         errs = page.evaluate("window.__errs")
-        check(f"{tag}: input.js constructs", not errs, errs)
+        check(f"{tag}: input.ts constructs", not errs, errs)
         if errs:
             return False
         ok = True
