@@ -288,15 +288,15 @@ RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
 # library the binary links are recorded for the final stage, so the image
 # declares what the server needs rather than inheriting it from whatever else
 # happens to pull those libraries in. pixelflux and pcmflux build from local
-# workspace path dependencies. libx264 and libvpx are built from pixelflux's
-# scripts/build-x264.sh and scripts/build-libvpx.sh, with the patches it
-# carries for them, and linked statically.
+# workspace path dependencies. libx264, x265, and libvpx are built from
+# pixelflux's scripts/build-x264.sh, build-x265.sh, and build-libvpx.sh, with
+# the patches it carries for them, and linked statically.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS server
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG RUST_TOOLCHAIN="1.99.1"
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git build-essential pkg-config cmake nasm clang libclang-dev \
-        libx265-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
+        libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
         libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
         libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
         libxcb-xfixes0-dev libpulse-dev && \
@@ -320,12 +320,13 @@ RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt
     pixelflux="$(cargo metadata --locked --format-version 1 \
         | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"; \
     sh "$(dirname "${pixelflux}")/scripts/build-x264.sh" /usr/local; \
+    sh "$(dirname "${pixelflux}")/scripts/build-x265.sh" /usr/local; \
     sh "$(dirname "${pixelflux}")/scripts/build-libvpx.sh" /usr/local; \
     # x264-sys and codec-sys bind the installed headers without watching them, so
     # the cached target would keep bindings and link lines from before a change
     # to the patches or the libraries they build
     cargo clean --release -p x264-sys -p codec-sys; \
-    SYSTEM_DEPS_X264_LINK=static VPX_STATIC=1 cargo build --release --locked -p selkies; \
+    SYSTEM_DEPS_X264_LINK=static X265_STATIC=1 VPX_STATIC=1 cargo build --release --locked -p selkies; \
     install -Dm755 target/release/selkies /out/selkies; \
     ldd /out/selkies | awk '/=>/ {print $3}' | xargs -r readlink -f | xargs -r dpkg -S | \
         cut -d: -f1 | sort -u > /out/runtime-packages; \

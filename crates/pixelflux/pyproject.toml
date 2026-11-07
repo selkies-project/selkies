@@ -109,6 +109,7 @@ before-all = """
             clone_source e444744c03978c1fb4e037168967020cf2648427 4.2 x265 \
                 https://bitbucket.org/multicoreware/x265_git.git && \
             cd x265 && \
+            git apply {package}/patches/x265/*.patch && \
             cmake -S source -B build10 -DCMAKE_BUILD_TYPE=Release -DHIGH_BIT_DEPTH=ON \
                 -DEXPORT_C_API=OFF -DENABLE_SHARED=OFF -DENABLE_CLI=OFF \
                 -DCMAKE_POSITION_INDEPENDENT_CODE=ON && \

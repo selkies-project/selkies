@@ -282,6 +282,16 @@ superblock of them as one skip (VP9), and the patches copy only the active block
 buffer last held the picture, into the lookahead buffer the frame is coded from, bit for bit the stream of a whole
 copy. A still 1080p screen took VP8 0.9 ms a frame on eight threads where it took 1.6 without the map and VP9 0.6
 where it took 1.9; a block the cleanup has not reached stays active, so the rate control refines it as before.
+x265 is built the same way too, from the release the recipe pins with the patches under `patches/x265`
+(`scripts/build-x265.sh`, its 10-bit encoder linked in), never from a distribution, since pixelflux reads the API
+they add: `x265_param_input_layout` gives the layout x265 keeps a source picture in, so the session converts into
+two such pictures in turn and x265 encodes each where it lies (`copy-pic=0`); `x265_picture.constantBlocks` carries
+the ledger's still and clean blocks, and a coding unit of them is coded as a skip from the zero-motion merge
+candidate without analysis while its blocks keep the frame before's lowres intra estimates; and `qp-offsets` keeps
+adaptive quantization's per-block quantizer at strength 0, so the session's offsets apply without the variance
+pass. Every stream a frame without a map codes comes out bit for bit as before. A still 1080p frame took 2.8 ms on
+eight threads where it took 5.7 and 6.1 on one where it took 16.5; at 2560x1600 4.6 against 10.8; a 256x256 change
+beside a clean screen 10.4 against 13.7 at 1080p.
 The crate's `Cargo.toml` is the one place the version lives: `setup.py` reads it, spelling a semver pre-release
 the PEP 440 way (`2.1.0-rc.1` is `2.1.0rc1` to pip), and the release workflow stamps the tag into the manifest
 and the lock, so a build ahead of a release carries the series version and a release the tag's.

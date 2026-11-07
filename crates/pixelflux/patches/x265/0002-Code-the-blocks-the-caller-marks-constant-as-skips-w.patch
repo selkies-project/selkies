@@ -1,0 +1,252 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Sat, 7 Nov 2026 18:22:47 -0500
+Subject: [PATCH 2/4] Code the blocks the caller marks constant as skips
+ without analysis
+
+A screen encoder knows which 16x16 blocks of a picture are the frame before's; the analysis of
+a coding unit of such blocks still derives and costs merge candidates, searches motion, tries
+intra modes, and recurses into the split. x265_picture.constantBlocks carries that map, one
+byte a block, and a P-slice coding unit whose every block is marked is coded as a 2Nx2N skip
+from the zero-motion merge candidate of the first reference, with the motion compensation, the
+skip's rate-distortion cost, and the delta-QP bookkeeping the full path gives a skip, and
+nothing else; where no merge candidate is that vector the full path decides as before. A block
+left unmarked is analysed as before, so the caller marks only blocks whose reference already
+holds them at the quality wanted.
+
+A still 1920x1080 screen, every block marked, took 8.4 ms a frame on one thread where it took
+15.1 and 4.5 on eight where it took 5.2; a 256x256 change beside marked blocks 27.8 against
+32.5 and 12.4 against 13.0; at 2560x1600 a still frame 15.7 against 29.6 and 8.8 against 9.4, a
+change 36.0 against 45.4 and 16.8 against 17.6. A frame with nothing marked codes as before, bit
+for bit.
+---
+ source/common/frame.cpp     | 10 +++++
+ source/common/frame.h       |  2 +
+ source/encoder/analysis.cpp | 90 ++++++++++++++++++++++++++++++++++++-
+ source/encoder/analysis.h   |  2 +
+ source/encoder/encoder.cpp  | 26 +++++++++++
+ 5 files changed, 129 insertions(+), 1 deletion(-)
+
+diff --git a/source/common/frame.cpp b/source/common/frame.cpp
+index ac54c34..d462928 100644
+--- a/source/common/frame.cpp
++++ b/source/common/frame.cpp
+@@ -41,6 +41,8 @@ Frame::Frame()
+     for (int i = 0; i < NUM_RECON_VERSION; i++)
+         m_reconPic[i] = NULL;
+     m_quantOffsets = NULL;
++    m_constantBlocks = NULL;
++    m_constantBlocksBuf = NULL;
+     m_next = NULL;
+     m_prev = NULL;
+     m_param = NULL;
+@@ -190,6 +192,7 @@ bool Frame::create(x265_param *param, float* quantOffsets)
+                                                         m_lowres.maxBlocksInRow * m_lowres.maxBlocksInCol;
+             m_quantOffsets = new float[cuCount];
+         }
++        m_constantBlocksBuf = new uint8_t[((param->sourceWidth + 15) >> 4) * ((param->sourceHeight + 15) >> 4)];
+         return true;
+     }
+     return false;
+@@ -371,6 +374,13 @@ void Frame::destroy()
+         delete[] m_quantOffsets;
+     }
+ 
++    if (m_constantBlocksBuf)
++    {
++        delete[] m_constantBlocksBuf;
++        m_constantBlocksBuf = NULL;
++        m_constantBlocks = NULL;
++    }
++
+     if (m_userSEI.numPayloads)
+     {
+         for (int i = 0; i < m_userSEI.numPayloads; i++)
+diff --git a/source/common/frame.h b/source/common/frame.h
+index 5b7b1e6..5c56c59 100644
+--- a/source/common/frame.h
++++ b/source/common/frame.h
+@@ -106,6 +106,8 @@ public:
+     bool                   m_reconfigureRc;
+ 
+     float*                 m_quantOffsets;       // points to quantOffsets in x265_picture
++    uint8_t*               m_constantBlocks;     // the picture's constant 16x16 blocks, NULL for none
++    uint8_t*               m_constantBlocksBuf;  // storage for m_constantBlocks
+     x265_sei               m_userSEI;
+     uint32_t               m_picStruct;          // picture structure SEI message
+     x265_dolby_vision_rpu  m_rpu;
+diff --git a/source/encoder/analysis.cpp b/source/encoder/analysis.cpp
+index 06f5385..60f985b 100644
+--- a/source/encoder/analysis.cpp
++++ b/source/encoder/analysis.cpp
+@@ -1547,6 +1547,18 @@ SplitData Analysis::compressInterCU_rd0_4(const CUData& parentCTU, const CUGeom&
+             md.pred[PRED_2Nx2N].sa8dCost = 0;
+         }
+ 
++        /* A CU of blocks the caller marked constant is a skip from the frame before,
++         * decided here without the merge, inter, intra, or split analysis */
++        bool constantSkip = false;
++        if (m_frame->m_constantBlocks && mightNotSplit && m_slice->m_sliceType == P_SLICE &&
++            cuConstant(parentCTU, cuGeom))
++        {
++            md.pred[PRED_SKIP].cu.initSubCU(parentCTU, cuGeom, qp);
++            constantSkip = checkConstantSkip(md.pred[PRED_SKIP], cuGeom);
++            if (constantSkip)
++                skipModes = skipRecursion = true;
++        }
++
+         if (m_param->bCTUInfo && depth <= parentCTU.m_cuDepth[cuGeom.absPartIdx])
+         {
+             if (bDecidedDepth && m_additionalCtuInfo[cuGeom.absPartIdx])
+@@ -1740,7 +1752,7 @@ SplitData Analysis::compressInterCU_rd0_4(const CUData& parentCTU, const CUGeom&
+          *   2  3 */
+         uint32_t allSplitRefs = splitData[0].splitRefs | splitData[1].splitRefs | splitData[2].splitRefs | splitData[3].splitRefs;
+         /* Step 3. Evaluate ME (2Nx2N, rect, amp) and intra modes at current depth */
+-        if (mightNotSplit && (depth >= minDepth || (m_param->bCTUInfo && !md.bestMode)))
++        if (mightNotSplit && (depth >= minDepth || constantSkip || (m_param->bCTUInfo && !md.bestMode)))
+         {
+             if (m_slice->m_pps->bUseDQP && depth <= m_slice->m_pps->maxCuDQPDepth && m_slice->m_pps->maxCuDQPDepth != 0)
+                 setLambdaFromQP(parentCTU, qp);
+@@ -3435,6 +3447,82 @@ void Analysis::checkMerge2Nx2N_rd0_4(Mode& skip, Mode& merge, const CUGeom& cuGe
+     checkDQP(*md.bestMode, cuGeom);
+ }
+ 
++/* whether every 16x16 block of the picture under the CU is one the caller marked constant */
++bool Analysis::cuConstant(const CUData& parentCTU, const CUGeom& cuGeom) const
++{
++    const uint8_t* map = m_frame->m_constantBlocks;
++    uint32_t width = m_param->sourceWidth;
++    uint32_t height = m_param->sourceHeight;
++    uint32_t cols = (width + 15) >> 4;
++    uint32_t x0 = parentCTU.m_cuPelX + g_zscanToPelX[cuGeom.absPartIdx];
++    uint32_t y0 = parentCTU.m_cuPelY + g_zscanToPelY[cuGeom.absPartIdx];
++    uint32_t size = 1u << cuGeom.log2CUSize;
++    uint32_t x1 = X265_MIN(x0 + size, width);
++    uint32_t y1 = X265_MIN(y0 + size, height);
++    if (x0 >= width || y0 >= height)
++        return false;
++    for (uint32_t by = y0 >> 4; by < (y1 + 15) >> 4; by++)
++        for (uint32_t bx = x0 >> 4; bx < (x1 + 15) >> 4; bx++)
++            if (!map[by * cols + bx])
++                return false;
++    return true;
++}
++
++/* code the CU as a 2Nx2N skip from the zero-motion merge candidate of the first reference,
++ * whose picture the caller says it already holds, and set md.bestMode to it; false, leaving
++ * md.bestMode as it was, where no merge candidate is that vector */
++bool Analysis::checkConstantSkip(Mode& skip, const CUGeom& cuGeom)
++{
++    ModeDepth& md = m_modeDepth[cuGeom.depth];
++
++    skip.initCosts();
++    skip.cu.setPartSizeSubParts(SIZE_2Nx2N);
++    skip.cu.setPredModeSubParts(MODE_INTER);
++    skip.cu.m_mergeFlag[0] = true;
++
++    MVField candMvField[MRG_MAX_NUM_CANDS][2];
++    uint8_t candDir[MRG_MAX_NUM_CANDS];
++    uint32_t numMergeCand = skip.cu.getInterMergeCandidates(0, 0, candMvField, candDir);
++    int cand = -1;
++    for (uint32_t i = 0; i < numMergeCand; i++)
++    {
++        if (candDir[i] == 1 && candMvField[i][0].refIdx == 0 && !candMvField[i][0].mv.notZero())
++        {
++            cand = (int)i;
++            break;
++        }
++    }
++    if (cand < 0)
++        return false;
++
++    skip.cu.m_mvpIdx[0][0] = (uint8_t)cand;
++    skip.cu.m_interDir[0] = candDir[cand];
++    skip.cu.m_mv[0][0] = candMvField[cand][0].mv;
++    skip.cu.m_mv[1][0] = candMvField[cand][1].mv;
++    skip.cu.m_refIdx[0][0] = (int8_t)candMvField[cand][0].refIdx;
++    skip.cu.m_refIdx[1][0] = (int8_t)candMvField[cand][1].refIdx;
++    PredictionUnit pu(skip.cu, cuGeom, 0);
++    motionCompensation(skip.cu, pu, skip.predYuv, true, m_csp != X265_CSP_I400);
++    skip.sa8dBits = getTUBits(cand, numMergeCand);
++    skip.sa8dCost = m_rdCost.calcRdSADCost(0, skip.sa8dBits);
++    if (m_param->rdLevel)
++        encodeResAndCalcRdSkipCU(skip);
++    else
++    {
++        skip.reconYuv.copyFromYuv(skip.predYuv);
++        skip.cu.setPredModeSubParts(MODE_SKIP);
++    }
++
++    md.bestMode = &skip;
++    md.bestMode->cu.setPUInterDir(candDir[cand], 0, 0);
++    md.bestMode->cu.setPUMv(0, candMvField[cand][0].mv, 0, 0);
++    md.bestMode->cu.setPUMv(1, candMvField[cand][1].mv, 0, 0);
++    md.bestMode->cu.setPURefIdx(0, (int8_t)candMvField[cand][0].refIdx, 0, 0);
++    md.bestMode->cu.setPURefIdx(1, (int8_t)candMvField[cand][1].refIdx, 0, 0);
++    checkDQP(*md.bestMode, cuGeom);
++    return true;
++}
++
+ /* sets md.bestMode if a valid merge candidate is found, else leaves it NULL */
+ void Analysis::checkMerge2Nx2N_rd5_6(Mode& skip, Mode& merge, const CUGeom& cuGeom)
+ {
+diff --git a/source/encoder/analysis.h b/source/encoder/analysis.h
+index 9dfb34d..a3b7ec8 100644
+--- a/source/encoder/analysis.h
++++ b/source/encoder/analysis.h
+@@ -209,6 +209,8 @@ protected:
+ 
+     /* measure merge and skip */
+     void checkMerge2Nx2N_rd0_4(Mode& skip, Mode& merge, const CUGeom& cuGeom);
++    bool cuConstant(const CUData& parentCTU, const CUGeom& cuGeom) const;
++    bool checkConstantSkip(Mode& skip, const CUGeom& cuGeom);
+     void checkMerge2Nx2N_rd5_6(Mode& skip, Mode& merge, const CUGeom& cuGeom);
+ 
+     /* measure inter options */
+diff --git a/source/encoder/encoder.cpp b/source/encoder/encoder.cpp
+index b20a0b1..0bd8c58 100644
+--- a/source/encoder/encoder.cpp
++++ b/source/encoder/encoder.cpp
+@@ -1723,6 +1723,23 @@ int Encoder::encode(const x265_picture* pic_in, x265_picture* pic_out)
+ #endif
+             }
+ 
++            if (!m_param->bCopyPicToFrame)
++            {
++                /* The frame reads the caller's planes with its own stride and pads
++                 * them in place, so they have to lie as x265_param_input_layout says */
++                const x265_picture* src = inputPic[!m_param->format ? (m_param->numScalableLayers > 1) ? 0 : layer : 0];
++                PicYuv* fenc = inFrame[layer]->m_fencPic;
++                bool laidOut = src->bitDepth == X265_DEPTH && src->colorSpace == m_param->internalCsp &&
++                    src->stride[0] == (int)(fenc->m_stride * sizeof(pixel)) &&
++                    (m_param->internalCsp == X265_CSP_I400 ||
++                     (src->stride[1] == (int)(fenc->m_strideC * sizeof(pixel)) &&
++                      src->stride[2] == (int)(fenc->m_strideC * sizeof(pixel))));
++                if (!laidOut)
++                {
++                    x265_log(m_param, X265_LOG_ERROR, "copy-pic=0 takes only a picture laid out as x265_param_input_layout says\n");
++                    return -1;
++                }
++            }
+             /* Copy input picture into a Frame and PicYuv, send to lookahead */
+             inFrame[layer]->m_fencPic->copyFromPicture(*inputPic[!m_param->format ? (m_param->numScalableLayers > 1) ? 0 : layer : 0], *m_param, m_sps.conformanceWindow.rightOffset, m_sps.conformanceWindow.bottomOffset, !layer);
+ 
+@@ -1786,6 +1803,15 @@ int Encoder::encode(const x265_picture* pic_in, x265_picture* pic_out)
+             memcpy(inFrame[0]->m_quantOffsets, inputPic[0]->quantOffsets, cuCount * sizeof(float));
+         }
+ 
++        if (inputPic[0]->constantBlocks && inFrame[0]->m_constantBlocksBuf)
++        {
++            uint32_t blocks = ((m_param->sourceWidth + 15) >> 4) * ((m_param->sourceHeight + 15) >> 4);
++            memcpy(inFrame[0]->m_constantBlocksBuf, inputPic[0]->constantBlocks, blocks);
++            inFrame[0]->m_constantBlocks = inFrame[0]->m_constantBlocksBuf;
++        }
++        else
++            inFrame[0]->m_constantBlocks = NULL;
++
+         if (m_pocLast == 0)
+             m_firstPts = inFrame[0]->m_pts;
+         if (m_bframeDelay && m_pocLast == m_bframeDelay)
+-- 
+2.47.3
+

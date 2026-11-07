@@ -10,6 +10,15 @@
 //! x264; kvazaar encodes 4:2:0. Neither library lets a session steer what a frame predicts
 //! from, so the session names no reference and refuses an invalidation, and the caller codes
 //! a key frame instead.
+//!
+//! x265 encodes a picture laid out as its own frame where it lies (`x265_param_input_layout`,
+//! `copy-pic=0`; the patches under `patches/x265`), two pictures converted into in turn since
+//! it reads one through the encode it is passed to; the blocks the ledger marks still and clean
+//! reach it as its constant-block map (`constant_blocks`, `x265_picture.constantBlocks`), coded
+//! as skips without analysis and keeping their lowres intra estimates; and its per-block
+//! quantizer offsets apply without adaptive quantization's variance pass (`qp-offsets`). A
+//! still 1080p screen took 2.8 ms a frame on eight threads where it took 5.7, and 2560x1600
+//! 4.6 where it took 10.8. kvazaar converts into the picture it allocates and encodes from.
 
 use std::ffi::CString;
 
@@ -37,6 +46,9 @@ pub struct HevcEncoder {
     /// quantizer offset of each 16x16 block of every frame, 0 where it refines nothing.
     refinement: Option<crate::ledger::Refinement>,
     offsets: Vec<f32>,
+    /// The 16x16 blocks of the next frame that held still and are clean, one byte each in
+    /// raster order, nonzero where constant (`constant_blocks`); empty where none is.
+    constant: Vec<u8>,
     /// The quantizer the rate control last coded a frame at, held frames aside.
     last_quality: Option<u32>,
     /// The bytes of that frame.
@@ -107,6 +119,7 @@ impl HevcEncoder {
             held: None,
             refinement: None,
             offsets: Vec::new(),
+            constant: Vec::new(),
             last_quality: None,
             last_bytes: None,
         })
@@ -173,6 +186,18 @@ impl HevcEncoder {
     /// control's last to the target, off the frame's own.
     pub fn refine_blocks(&mut self, refinement: &crate::ledger::Refinement) {
         self.refinement = self.refines().then(|| refinement.clone());
+    }
+
+    /// Mark the blocks of the next frame, in raster order, that held still and are clean
+    /// (`BlockLedger::constant`), which x265 codes as skips without analysis
+    /// (`x265_picture.constantBlocks`) on a frame of its rate control's; kvazaar takes no such
+    /// map. An empty slice marks none.
+    pub fn constant_blocks(&mut self, constant: &[bool]) {
+        let blocks = self.planes.width.div_ceil(16) * self.planes.height.div_ceil(16);
+        self.constant.clear();
+        if Backend::CONSTANT_BLOCKS && constant.len() == blocks && constant.contains(&true) {
+            self.constant.extend(constant.iter().map(|&c| u8::from(c)));
+        }
     }
 
     /// The quality index (HEVC's quantizer) the rate control last coded a frame at, held frames
@@ -272,6 +297,8 @@ impl HevcEncoder {
                 }
             })
         }));
+        let constant = (!key && held.is_none() && !self.constant.is_empty())
+            .then_some(self.constant.as_mut_slice());
         let coded = self.backend.encode(
             &mut self.planes,
             pixels,
@@ -283,7 +310,10 @@ impl HevcEncoder {
             key,
             held,
             Some(self.offsets.as_mut_slice()),
-        )?;
+            constant,
+        );
+        self.constant.clear();
+        let coded = coded?;
         self.next_pts += 1;
         self.fresh = false;
         self.pending.push(pts, frame_number as u16);
@@ -344,6 +374,15 @@ mod x265 {
         api: *const x265_api,
         params: *mut x265_param,
         encoder: *mut x265_encoder,
+        /// How the encoder lays out a source picture (`x265_param_input_layout`), which
+        /// `pictures` follow so x265 encodes them where they lie (`copy-pic=0`).
+        layout: x265_input_layout,
+        /// Two pictures, three planes each, converted into in turn: x265 reads a picture through
+        /// the encode it is passed to, and the other holds the frame before while it is read.
+        /// Each plane is 64-byte aligned within its buffer at `aligned`.
+        pictures: [[Vec<u64>; 3]; 2],
+        aligned: [[usize; 3]; 2],
+        current: usize,
     }
 
     impl Drop for Backend {
@@ -373,6 +412,7 @@ mod x265 {
         pub const KEY_ON_REQUEST: bool = true;
         pub const HOLDS_QUANTIZER: bool = true;
         pub const REFINES: bool = true;
+        pub const CONSTANT_BLOCKS: bool = true;
         /// Quality index steps finer than the paint-over one x265 codes a refined block at
         /// (`FrameEncoder::refines`). Its ultrafast analysis settles many a still block on its merge
         /// candidate before the offset's quantizer counts, so refining takes 1080p text beside a video
@@ -451,6 +491,10 @@ mod x265 {
                 api,
                 params,
                 encoder: ptr::null_mut(),
+                layout: unsafe { std::mem::zeroed() },
+                pictures: Default::default(),
+                aligned: [[0; 3]; 2],
+                current: 0,
             };
             let (preset, tune) = (c"ultrafast", c"zerolatency");
             if unsafe {
@@ -495,10 +539,12 @@ mod x265 {
             // on 58% fewer bytes. A 1080p scroll codes as fast, one at 4K a tenth slower.
             options.push(("min-cu-size", "8".into()));
             // A frame's per-block offsets (`refine_blocks`) reach the quantizer only under
-            // adaptive quantization, which x265 turns off at strength 0, so it runs at one that
-            // moves no block's quantizer by itself.
+            // adaptive quantization; qp-offsets keeps it at strength 0, where its variance pass
+            // over every block is skipped and the offsets apply as given.
             options.push(("aq-mode", "1".into()));
-            options.push(("aq-strength", "0.0001".into()));
+            options.push(("aq-strength", "0".into()));
+            options.push(("qp-offsets", "1".into()));
+            options.push(("copy-pic", "0".into()));
             options.extend(Self::rate_options(rate, q));
             for (name, value) in &options {
                 me.set(name, value)?;
@@ -521,9 +567,36 @@ mod x265 {
             if me.encoder.is_null() {
                 return Err("x265 refused the session".into());
             }
+            // The layout follows the parameters as the open encoder holds them.
+            let mut opened: x265_param = unsafe { std::mem::zeroed() };
+            unsafe { ((*api).encoder_parameters.unwrap())(me.encoder, &mut opened) };
+            if unsafe { ((*api).param_input_layout.unwrap())(&opened, &mut me.layout) } < 0 {
+                return Err("x265 named no input layout".into());
+            }
+            let align = (me.layout.align.max(1) as usize).max(8);
+            for (picture, aligned) in me.pictures.iter_mut().zip(me.aligned.iter_mut()) {
+                for p in 0..3 {
+                    let size = me.layout.size[p].max(0) as usize;
+                    picture[p] = vec![0u64; (size + align).div_ceil(8)];
+                    let start = picture[p].as_ptr() as usize;
+                    aligned[p] = start.next_multiple_of(align) - start;
+                }
+            }
             Ok(me)
         }
 
+        /// The first pixel of plane `p` of picture `picture`, and the bytes from it to the
+        /// buffer's end.
+        fn plane(&mut self, picture: usize, p: usize) -> (*mut u8, usize) {
+            let offset = self.aligned[picture][p] + self.layout.offset[p].max(0) as usize;
+            let buf = &mut self.pictures[picture][p];
+            let len = buf.len() * 8 - offset;
+            (unsafe { buf.as_mut_ptr().cast::<u8>().add(offset) }, len)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        /// Convert the host frame into the next in-place picture and encode it there.
+        /// `constant` marks the 16x16 blocks x265 codes as skips without analysis.
         #[allow(clippy::too_many_arguments)]
         pub fn encode(
             &mut self,
@@ -537,8 +610,72 @@ mod x265 {
             key: bool,
             held: Option<u32>,
             offsets: Option<&mut [f32]>,
+            constant: Option<&mut [u8]>,
         ) -> Result<Option<Coded>, String> {
-            planes.convert(pixels, stride, rgba, full_range, false, threads)?;
+            let picture = self.current;
+            self.current ^= 1;
+            let (w, h) = (planes.width, planes.height);
+            let ch = if planes.i444 { h } else { h.div_ceil(2) };
+            let strides = (
+                self.layout.stride[0] as usize,
+                self.layout.stride[1] as usize,
+            );
+            let [(y, ylen), (u, ulen), (v, vlen)] = [
+                self.plane(picture, 0),
+                self.plane(picture, 1),
+                self.plane(picture, 2),
+            ];
+            super::super::session::check_host_frame(pixels, stride, w, h)?;
+            if planes.bit_depth > 8 {
+                let (ys, cs) = (strides.0 / 2, strides.1 / 2);
+                // SAFETY: each plane buffer is x265's own layout for this picture, whose offset of
+                // the first pixel is a whole sample, and holds ys * h and cs * ch samples past it.
+                let (y16, u16, v16) = unsafe {
+                    (
+                        std::slice::from_raw_parts_mut(y.cast::<u16>(), (ys * h).min(ylen / 2)),
+                        std::slice::from_raw_parts_mut(u.cast::<u16>(), (cs * ch).min(ulen / 2)),
+                        std::slice::from_raw_parts_mut(v.cast::<u16>(), (cs * ch).min(vlen / 2)),
+                    )
+                };
+                crate::encoders::software::convert_to_yuv10_mt(
+                    pixels,
+                    stride,
+                    w,
+                    h,
+                    rgba,
+                    planes.i444,
+                    full_range,
+                    y16,
+                    u16,
+                    v16,
+                    (ys, cs),
+                    threads,
+                );
+            } else {
+                // SAFETY: as above, with byte samples.
+                let (y8, u8s, v8) = unsafe {
+                    (
+                        std::slice::from_raw_parts_mut(y, (strides.0 * h).min(ylen)),
+                        std::slice::from_raw_parts_mut(u, (strides.1 * ch).min(ulen)),
+                        std::slice::from_raw_parts_mut(v, (strides.1 * ch).min(vlen)),
+                    )
+                };
+                super::super::session::convert_into(
+                    pixels,
+                    stride,
+                    w,
+                    h,
+                    rgba,
+                    planes.i444,
+                    full_range,
+                    false,
+                    threads,
+                    y8,
+                    u8s,
+                    v8,
+                    strides,
+                )?;
+            }
             let api = unsafe { &*self.api };
             let mut pic: x265_picture = unsafe { std::mem::zeroed() };
             let mut out: [x265_picture; 2] = unsafe { std::mem::zeroed() };
@@ -549,14 +686,15 @@ mod x265 {
                 }
             }
             // Written per index: x265 4 declares a fourth plane for alpha, x265 3 does not.
-            let [y, u, v] = planes.pointers();
             pic.planes[0] = y.cast();
             pic.planes[1] = u.cast();
             pic.planes[2] = v.cast();
-            let bytes = planes.sample_bytes();
-            pic.stride[0] = (planes.width * bytes) as c_int;
-            pic.stride[1] = (planes.chroma_width() * bytes) as c_int;
-            pic.stride[2] = (planes.chroma_width() * bytes) as c_int;
+            pic.stride[0] = self.layout.stride[0];
+            pic.stride[1] = self.layout.stride[1];
+            pic.stride[2] = self.layout.stride[2];
+            if let Some(constant) = constant {
+                pic.constantBlocks = constant.as_mut_ptr();
+            }
             pic.pts = pts as i64;
             pic.bitDepth = planes.bit_depth as c_int;
             pic.sliceType = if key {
@@ -654,6 +792,7 @@ mod kvazaar {
         pub const KEY_ON_REQUEST: bool = false;
         pub const HOLDS_QUANTIZER: bool = false;
         pub const REFINES: bool = true;
+        pub const CONSTANT_BLOCKS: bool = false;
         /// Quality index steps finer than the paint-over one kvazaar codes a refined block at
         /// (`FrameEncoder::refines`): 1080p text beside a video went from 38.5 dB to 43.2, 45.8,
         /// and 48.0 at a constant quality at 0, 3, and 6 steps finer, where kvazaar's cleanup of
@@ -764,6 +903,7 @@ mod kvazaar {
             _key: bool,
             _held: Option<u32>,
             offsets: Option<&mut [f32]>,
+            _constant: Option<&mut [u8]>,
         ) -> Result<Option<Coded>, String> {
             let api = unsafe { &*self.api };
             let pic =
@@ -916,6 +1056,64 @@ mod tests {
             ]
         );
         assert!(!enc.invalidate_reference(1));
+    }
+
+    /// The blocks marked constant are coded as skips without analysis: a still screen's frame
+    /// comes out smaller with the map than without, where x265 takes one, at 8 bits and, where
+    /// the build carries the encoder, at 10, each picture converted into x265's own layout.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn constant_blocks_code_a_still_frame_as_skips() {
+        for depth in [8, 10] {
+            if depth == 10 && !ten_bit() {
+                continue;
+            }
+            constant_blocks_skip_at(depth);
+        }
+    }
+
+    #[cfg(feature = "gpl")]
+    fn constant_blocks_skip_at(depth: u32) {
+        let (w, h) = (320usize, 240usize);
+        let settings = CaptureSettings {
+            width: w as i32,
+            height: h as i32,
+            target_fps: 30.0,
+            codec: Codec::H265,
+            video_crf: 25,
+            video_bit_depth: depth as i32,
+            ..Default::default()
+        };
+        let mut bgra = vec![0u8; w * h * 4];
+        for (i, px) in bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let (x, y) = (i % w, i / w);
+            let text = (x / 7 + y / 11) % 3 == 0 && x % 7 < 5 && y % 11 < 8;
+            px.copy_from_slice(if text {
+                &[30, 30, 30, 255]
+            } else {
+                &[235, 235, 235, 255]
+            });
+        }
+        let mut plain = HevcEncoder::new(&settings, false).expect("session");
+        let mut mapped = HevcEncoder::new(&settings, false).expect("session");
+        let blocks = w.div_ceil(16) * h.div_ceil(16);
+        let (mut plain_bytes, mut mapped_bytes) = (0, 0);
+        for n in 0..6u64 {
+            plain_bytes = plain
+                .encode_host(&bgra, w * 4, false, n, 25, n == 0)
+                .expect("encode")
+                .len();
+            mapped.constant_blocks(&vec![true; blocks]);
+            mapped_bytes = mapped
+                .encode_host(&bgra, w * 4, false, n, 25, n == 0)
+                .expect("encode")
+                .len();
+        }
+        assert_eq!(mapped.bit_depth(), depth);
+        assert!(
+            mapped_bytes < plain_bytes,
+            "{depth} bits: {mapped_bytes} bytes with the map, {plain_bytes} without"
+        );
     }
 
     /// A constant-rate session's frames come to the paint-over quality six quantizer steps finer

@@ -8,13 +8,13 @@
 # the environment that points the build at them.
 #
 # pixelflux binds libx264, x265, libvpx, SVT-AV1, dav1d, and libde265 from the
-# copies it links. libx264 and libvpx are always built here, with the patches
-# pixelflux carries (its patches/x264 and patches/libvpx): pixelflux reads the
-# API the x264 ones add, and the libvpx ones copy only the blocks a frame's
-# active map leaves active. Each other one the distribution carries at the floor pixelflux's
+# copies it links. libx264, x265, and libvpx are always built here, with the
+# patches pixelflux carries (its patches/x264, patches/x265, and patches/libvpx):
+# pixelflux reads the API the x264 and x265 ones add, and the libvpx ones copy
+# only the blocks a frame's active map leaves active. Each other one the distribution carries at the floor pixelflux's
 # codec-sys names (pkg-config answers for it) is linked from the distribution
-# and becomes a package dependency; each one it lacks (x265 and
-# libde265 on Fedora, all of them on EL and on the AppImage's glibc floor) is
+# and becomes a package dependency; each one it lacks (libde265 on Fedora, all
+# of them on EL and on the AppImage's glibc floor) is
 # built here from the source pixelflux's own wheels build, the commit read out
 # of the pixelflux checkout the server is built against so the two never drift,
 # and linked statically, since no package on the target system would provide
@@ -102,6 +102,7 @@ build_x264() {
 build_x265() {
     fetch x265
     src="${PREFIX}/src/x265"
+    git -C "${src}" apply "${CRATE}"/patches/x265/*.patch
     cmake -S "${src}/source" -B "${src}/build10" -DCMAKE_BUILD_TYPE=Release -DHIGH_BIT_DEPTH=ON \
         -DEXPORT_C_API=OFF -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     cmake --build "${src}/build10" -j"${JOBS}"
@@ -166,7 +167,7 @@ for entry in x264:x264:SYSTEM_DEPS_X264_LINK=static x265:x265:X265_STATIC=1 \
     pkg="${rest%%:*}"
     static="${rest#*:}"
     min="$(floor "${pkg}")"
-    if [ "${name}" != x264 ] && [ "${name}" != libvpx ] && pkg-config --exists "${pkg}" \
+    if [ "${name}" != x264 ] && [ "${name}" != x265 ] && [ "${name}" != libvpx ] && pkg-config --exists "${pkg}" \
             && pkg-config --atleast-version="${min:-0}" "${pkg}"; then
         echo "codecs: ${pkg} $(pkg-config --modversion "${pkg}") from the distribution"
         continue

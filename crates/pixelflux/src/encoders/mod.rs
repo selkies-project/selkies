@@ -1369,11 +1369,14 @@ impl FrameEncoder {
     /// Mark the blocks of the next frame, in raster order, that held still and are clean
     /// (`BlockLedger::constant`), which a session codes as skips without analysis where its
     /// library takes such a map and the frame predicts from the one before: libvpx's VP8 and
-    /// VP9 through their active map. An empty slice marks none, and a session takes the map
-    /// only on a frame of its rate control's, never on a key frame or a held one.
+    /// VP9 through their active map, x265 through its constant-block map. An empty slice marks
+    /// none, and a session takes the map only on a frame of its rate control's, never on a key
+    /// frame or a held one.
     pub fn constant_blocks(&mut self, constant: &[bool]) {
-        if let FrameEncoder::Vpx(enc) = self {
-            enc.constant_blocks(constant);
+        match self {
+            FrameEncoder::Vpx(enc) => enc.constant_blocks(constant),
+            FrameEncoder::Hevc(enc) => enc.constant_blocks(constant),
+            _ => {}
         }
     }
 

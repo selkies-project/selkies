@@ -15,8 +15,8 @@
 # beside it, which puts cargo in ${CARGO_HOME:-~/.cargo}/bin. The codec
 # libraries are the distribution's: pixelflux's codec-sys names their floors,
 # and a release that falls short fails the build at pkg-config, naming the
-# library. libx264 and libvpx are the exceptions, built under /usr/local with
-# the patches the workspace pixelflux carries (infra/packaging/patched-codecs.sh).
+# library. libx264, x265, and libvpx are the exceptions, built under /usr/local
+# with the patches the workspace pixelflux carries (infra/packaging/patched-codecs.sh).
 # Root runs apt-get and that install itself, anyone else through sudo.
 #
 # Usage: server-build-deps.sh
@@ -31,7 +31,7 @@ export DEBIAN_FRONTEND=noninteractive
 ${SUDO} apt-get update
 ${SUDO} apt-get install -y --no-install-recommends \
     ca-certificates curl git build-essential pkg-config cmake nasm clang libclang-dev \
-    libx265-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
+    libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
     libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
     libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
     libxcb-xfixes0-dev libpulse-dev

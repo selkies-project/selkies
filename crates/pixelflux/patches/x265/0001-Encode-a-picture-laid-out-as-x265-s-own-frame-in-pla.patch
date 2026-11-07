@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Sat, 7 Nov 2026 18:22:47 -0500
+Subject: [PATCH 1/4] Encode a picture laid out as x265's own frame in place
+
+copy-pic=0 points the frame at the caller's planes instead of copying them, but reads them with
+the frame's own stride and pads them in place, with nothing telling the caller what that stride
+is or how far the padding reaches. x265_param_input_layout gives, for the parameters an encoder
+was opened on, each plane's stride, the offset of its first pixel, the size of its buffer, and
+the alignment the buffers need, laid out as PicYuv::create lays out a frame; the encoder refuses
+a copy-pic=0 picture whose strides, depth, or color space are not the frame's, which read with
+the frame's stride would have coded a sheared picture. The query joins the API table.
+
+Encoded in place, every stream comes out bit for bit the copied picture's: 1920x1080 and
+2560x1600, constant quantizer on one and eight threads and constant rate on one, a still screen,
+a 256x256 changing box, and a scroll. A still 1920x1080 frame took 5.3 ms on eight threads where
+it took 5.7, and a 2560x1600 scroll 14.6 where it took 15.6.
+---
+ source/encoder/api.cpp | 36 +++++++++++++++++++++++++++++++++++-
+ source/x265.h          | 32 ++++++++++++++++++++++++++++++++
+ 2 files changed, 67 insertions(+), 1 deletion(-)
+
+diff --git a/source/encoder/api.cpp b/source/encoder/api.cpp
+index 9e3e632..424c2e2 100644
+--- a/source/encoder/api.cpp
++++ b/source/encoder/api.cpp
+@@ -999,6 +999,39 @@ x265_picture *x265_picture_alloc()
+     return (x265_picture*)x265_malloc(sizeof(x265_picture));
+ }
+ 
++int x265_param_input_layout(const x265_param *param, x265_input_layout *layout)
++{
++    if (!param || !layout || !param->sourceWidth || !param->sourceHeight || !param->maxCUSize)
++        return -1;
++    /* PicYuv::create's geometry: a picture rounded up to whole coding units,
++     * a margin of a unit and the filter taps on every side */
++    uint32_t numCuInWidth = (param->sourceWidth + param->maxCUSize - 1) / param->maxCUSize;
++    uint32_t numCuInHeight = (param->sourceHeight + param->maxCUSize - 1) / param->maxCUSize;
++    uint32_t lumaMarginX = param->maxCUSize + 32;
++    uint32_t lumaMarginY = param->maxCUSize + 16;
++    uint32_t stride = numCuInWidth * param->maxCUSize + (lumaMarginX << 1);
++    uint32_t maxHeight = numCuInHeight * param->maxCUSize;
++    int hShift = CHROMA_H_SHIFT(param->internalCsp);
++    int vShift = CHROMA_V_SHIFT(param->internalCsp);
++    uint32_t strideC = ((numCuInWidth * param->maxCUSize) >> hShift) + (lumaMarginX << 1);
++    uint32_t marginYC = lumaMarginY >> vShift;
++    memset(layout, 0, sizeof(*layout));
++    layout->align = 64;
++    layout->stride[0] = (int)(stride * sizeof(pixel));
++    layout->offset[0] = (int)((lumaMarginY * stride + lumaMarginX) * sizeof(pixel));
++    layout->size[0] = (int)(stride * (maxHeight + (lumaMarginY << 1)) * sizeof(pixel));
++    if (param->internalCsp != X265_CSP_I400)
++    {
++        for (int p = 1; p < 3; p++)
++        {
++            layout->stride[p] = (int)(strideC * sizeof(pixel));
++            layout->offset[p] = (int)((marginYC * strideC + lumaMarginX) * sizeof(pixel));
++            layout->size[p] = (int)(strideC * ((maxHeight >> vShift) + (marginYC << 1)) * sizeof(pixel));
++        }
++    }
++    return 0;
++}
++
+ void x265_picture_init(x265_param *param, x265_picture *pic)
+ {
+     memset(pic, 0, sizeof(x265_picture));
+@@ -1103,7 +1136,8 @@ static const x265_api libapi =
+     &x265_calculate_vmaf_framelevelscore,
+     &x265_vmaf_encoder_log,
+ #endif
+-    &PARAM_NS::x265_zone_param_parse
++    &PARAM_NS::x265_zone_param_parse,
++    &x265_param_input_layout
+ };
+ 
+ typedef const x265_api* (*api_get_func)(int bitDepth);
+diff --git a/source/x265.h b/source/x265.h
+index 3c5d3e3..1f9d81d 100644
+--- a/source/x265.h
++++ b/source/x265.h
+@@ -504,6 +504,14 @@ typedef struct x265_picture
+ 
+     int   layerID;
+     int    format;
++
++    /* The caller's map of the picture's 16x16 blocks, one byte each in raster
++     * order, nonzero where the block is constant: its pixels are the frame
++     * before's, which the first reference holds. A coding unit of constant
++     * blocks in a P slice is coded as a skip from the zero-motion merge
++     * candidate of that reference without analysis, where the merge candidates
++     * offer one. NULL marks no block constant. */
++    uint8_t *constantBlocks;
+ } x265_picture;
+ 
+ typedef enum
+@@ -2479,6 +2487,29 @@ void x265_picture_free(x265_picture *);
+  *       type to auto - so the lookahead will determine slice type. */
+ void x265_picture_init(x265_param *param, x265_picture *pic);
+ 
++/* The layout of the planes an encoder opened on a parameter set keeps a source
++ * picture in: for each plane, the bytes per row, the byte offset of the first
++ * pixel within a buffer of size bytes, and the alignment every buffer needs.
++ * A caller that lays its picture out so (copy-pic=0) has it encoded where it
++ * lies: x265 points its frame at the planes instead of copying them, and
++ * writes the rows and columns that round the picture up to whole coding units
++ * into the padding after them. The planes stay the encoder's to read through
++ * the x265_encoder_encode they are passed to. */
++typedef struct x265_input_layout
++{
++    int stride[3];
++    int offset[3];
++    int size[3];
++    int align;
++} x265_input_layout;
++#define X265_INPUT_LAYOUT 1
++
++/* x265_param_input_layout:
++ *       Fill in the layout x265 keeps a source picture in for param, as the
++ *       parameters stand after x265_encoder_open (x265_encoder_parameters);
++ *       returns negative where param describes no picture. */
++int x265_param_input_layout(const x265_param *param, x265_input_layout *layout);
++
+ /* x265_max_bit_depth:
+  *      Specifies the numer of bits per pixel that x265 uses internally to
+  *      represent a pixel, and the bit depth of the output bitstream.
+@@ -2719,6 +2750,7 @@ typedef struct x265_api
+     void          (*vmaf_encoder_log)(x265_encoder*, int, char**, x265_param *, x265_vmaf_data *);
+ #endif
+     int           (*zone_param_parse)(x265_param*, const char*, const char*);
++    int           (*param_input_layout)(const x265_param*, x265_input_layout*);
+     /* add new pointers to the end, or increment X265_MAJOR_VERSION */
+ } x265_api;
+ 
+-- 
+2.47.3
+
