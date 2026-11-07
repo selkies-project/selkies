@@ -77,11 +77,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential pkg-config cmake nasm clang libclang-dev \
-            libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
+            libdav1d-dev libde265-dev libopus-dev \
             libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
             libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
             libxcb-xfixes0-dev libpulse-dev
-          # libx264, x265, and libvpx with the patches pixelflux carries
+          # libx264, x265, libvpx, and SVT-AV1 with the patches pixelflux carries
           sh infra/packaging/patched-codecs.sh "${HOME}/codecs"
           echo "PKG_CONFIG_PATH=${HOME}/codecs/lib/pkgconfig" >> "${GITHUB_ENV}"
 

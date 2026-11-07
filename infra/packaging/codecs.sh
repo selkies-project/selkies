@@ -8,10 +8,11 @@
 # the environment that points the build at them.
 #
 # pixelflux binds libx264, x265, libvpx, SVT-AV1, dav1d, and libde265 from the
-# copies it links. libx264, x265, and libvpx are always built here, with the
-# patches pixelflux carries (its patches/x264, patches/x265, and patches/libvpx):
-# pixelflux reads the API the x264 and x265 ones add, and the libvpx ones copy
-# only the blocks a frame's active map leaves active. Each other one the distribution carries at the floor pixelflux's
+# copies it links. libx264, x265, libvpx, and SVT-AV1 are always built here,
+# with the patches pixelflux carries (its patches/x264, x265, libvpx, and
+# svtav1): pixelflux reads the API the x264, x265, and SVT-AV1 ones add, and
+# the libvpx ones copy only the blocks a frame's active map leaves active. Each
+# other one the distribution carries at the floor pixelflux's
 # codec-sys names (pkg-config answers for it) is linked from the distribution
 # and becomes a package dependency; each one it lacks (libde265 on Fedora, all
 # of them on EL and on the AppImage's glibc floor) is
@@ -131,6 +132,7 @@ build_libvpx() {
 
 build_svtav1() {
     fetch svtav1
+    git -C "${PREFIX}/src/svtav1" apply "${CRATE}"/patches/svtav1/*.patch
     cmake_static "${PREFIX}/src/svtav1" "${PREFIX}/src/svtav1/build" -DBUILD_APPS=OFF -DBUILD_DEC=OFF
     cmake --build "${PREFIX}/src/svtav1/build" -j"${JOBS}"
     cmake --install "${PREFIX}/src/svtav1/build"
@@ -167,7 +169,11 @@ for entry in x264:x264:SYSTEM_DEPS_X264_LINK=static x265:x265:X265_STATIC=1 \
     pkg="${rest%%:*}"
     static="${rest#*:}"
     min="$(floor "${pkg}")"
-    if [ "${name}" != x264 ] && [ "${name}" != x265 ] && [ "${name}" != libvpx ] && pkg-config --exists "${pkg}" \
+    case "${name}" in
+        x264|x265|libvpx|svtav1) patched=1 ;;
+        *) patched=0 ;;
+    esac
+    if [ "${patched}" = 0 ] && pkg-config --exists "${pkg}" \
             && pkg-config --atleast-version="${min:-0}" "${pkg}"; then
         echo "codecs: ${pkg} $(pkg-config --modversion "${pkg}") from the distribution"
         continue

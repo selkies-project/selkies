@@ -1,0 +1,344 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Sat, 7 Nov 2026 18:47:59 -0500
+Subject: [PATCH] Copy only the blocks of an input picture the caller does not
+ mark constant
+
+svt_av1_enc_send_picture copies every input picture whole into the library's pooled luma and
+chroma buffers, on the calling thread; a screen encoder knows which 16x16 blocks of a picture are
+the frame before's. EbBufferHeaderType.constant_blocks carries that map, and the copy takes only
+the other blocks, and those that changed since the buffer it copies into last held the picture:
+each pooled buffer, luma and chroma apart, keeps a map of the blocks changed since it was last
+written, every push notes the picture's changes in the other buffers' maps, and a resized buffer,
+a picture without a map, an input wider than a byte, or a downsampling first pass copies the
+picture whole and marks every block of the other buffers.
+
+Every stream comes out bit for bit as with the whole copy, 1920x1080 and 1366x768, constant
+quantizer and constant rate, on a still screen, a 256x256 changing box, and a scroll. The copy of
+a still 1920x1080 frame took 0.011 ms on the calling thread where it took 0.22, and at 2560x1600
+0.025 where it took 0.52; the frame 1.23 ms where it took 1.57 and 2.20 where it took 2.81 on
+six logical processors.
+---
+ Source/API/EbSvtAv1.h           |   8 ++
+ Source/Lib/Globals/enc_handle.c | 203 +++++++++++++++++++++++++++++---
+ Source/Lib/Globals/enc_handle.h |   7 ++
+ 3 files changed, 204 insertions(+), 14 deletions(-)
+
+diff --git a/Source/API/EbSvtAv1.h b/Source/API/EbSvtAv1.h
+index 0b2f529..a0e8c94 100644
+--- a/Source/API/EbSvtAv1.h
++++ b/Source/API/EbSvtAv1.h
+@@ -111,6 +111,14 @@ typedef struct EbBufferHeaderType {
+     double cb_ssim;
+ 
+     struct SvtMetadataArray* metadata;
++
++#define SVT_CONSTANT_BLOCKS 1
++    /* The caller's map of an input picture's 16x16 blocks, one byte each in
++     * raster order, nonzero where the block's samples are the frame before's.
++     * The library then copies only the other blocks, and those changed since
++     * the buffer it copies into last held the picture, into its input buffers;
++     * NULL copies the whole picture. Read for 8-bit input only. */
++    const uint8_t* constant_blocks;
+ } EbBufferHeaderType;
+ 
+ typedef struct EbComponentType {
+diff --git a/Source/Lib/Globals/enc_handle.c b/Source/Lib/Globals/enc_handle.c
+index bd65283..13bab3d 100644
+--- a/Source/Lib/Globals/enc_handle.c
++++ b/Source/Lib/Globals/enc_handle.c
+@@ -882,9 +882,26 @@ static void svt_enc_handle_stop_threads(EbEncHandle* enc_handle_ptr) {
+ /**********************************
+ * Encoder Library Handle Deonstructor
+ **********************************/
++static void free_stale_maps(EbEncHandle* enc_handle_ptr) {
++    if (enc_handle_ptr->y8b_stale && enc_handle_ptr->input_y8b_buffer_resource_ptr) {
++        for (uint32_t i = 0; i < enc_handle_ptr->input_y8b_buffer_resource_ptr->object_total_count; i++)
++            free(enc_handle_ptr->y8b_stale[i]);
++    }
++    if (enc_handle_ptr->in_stale && enc_handle_ptr->input_buffer_resource_ptr) {
++        for (uint32_t i = 0; i < enc_handle_ptr->input_buffer_resource_ptr->object_total_count; i++)
++            free(enc_handle_ptr->in_stale[i]);
++    }
++    free(enc_handle_ptr->y8b_stale);
++    free(enc_handle_ptr->in_stale);
++    enc_handle_ptr->y8b_stale    = NULL;
++    enc_handle_ptr->in_stale     = NULL;
++    enc_handle_ptr->stale_blocks = 0;
++}
++
+ static void svt_enc_handle_dctor(EbPtr p) {
+     EbEncHandle* enc_handle_ptr = (EbEncHandle*)p;
+     svt_enc_handle_stop_threads(enc_handle_ptr);
++    free_stale_maps(enc_handle_ptr);
+     EB_FREE(enc_handle_ptr->app_callback_ptr);
+     EB_DELETE(enc_handle_ptr->scs_pool_ptr);
+     EB_DELETE(enc_handle_ptr->picture_parent_control_set_pool_ptr);
+@@ -5090,8 +5107,107 @@ static EbErrorType downsample_copy_frame_buffer(SequenceControlSet* scs, uint8_t
+ from the sample application to the library buffers
+ */
+ 
++/* The index of wrapper in the pool of res, or -1. */
++static int pool_index(const EbSystemResource* res, const EbObjectWrapper* wrapper) {
++    if (!res)
++        return -1;
++    for (uint32_t i = 0; i < res->object_total_count; i++)
++        if (res->wrapper_ptr_pool[i] == wrapper)
++            return (int)i;
++    return -1;
++}
++
++/* Size the stale maps for pictures of `blocks` 16x16 blocks, every block of every buffer stale
++ * where they did not already fit. Returns false where they could not be allocated. */
++static bool size_stale_maps(EbEncHandle* h, uint32_t blocks) {
++    if (h->stale_blocks == blocks && h->y8b_stale && h->in_stale)
++        return true;
++    free_stale_maps(h);
++    const uint32_t y8b_count = h->input_y8b_buffer_resource_ptr->object_total_count;
++    const uint32_t in_count  = h->input_buffer_resource_ptr->object_total_count;
++    h->y8b_stale             = (uint8_t**)calloc(y8b_count, sizeof(uint8_t*));
++    h->in_stale              = (uint8_t**)calloc(in_count, sizeof(uint8_t*));
++    if (!h->y8b_stale || !h->in_stale) {
++        free_stale_maps(h);
++        return false;
++    }
++    for (uint32_t i = 0; i < y8b_count; i++) {
++        h->y8b_stale[i] = (uint8_t*)malloc(blocks);
++        if (!h->y8b_stale[i]) {
++            free_stale_maps(h);
++            return false;
++        }
++        memset(h->y8b_stale[i], 1, blocks);
++    }
++    for (uint32_t i = 0; i < in_count; i++) {
++        h->in_stale[i] = (uint8_t*)malloc(blocks);
++        if (!h->in_stale[i]) {
++            free_stale_maps(h);
++            return false;
++        }
++        memset(h->in_stale[i], 1, blocks);
++    }
++    h->stale_blocks = blocks;
++    return true;
++}
++
++/* Note this picture's changes in the stale maps of the pool's buffers: the blocks constant
++ * leaves changed, or every block where constant is NULL; the buffer at target, which takes the
++ * picture, is marked whole where it was resized. */
++static void note_changes(uint8_t** stale, const EbSystemResource* res, int target, const uint8_t* constant,
++                         uint32_t blocks, bool target_resized) {
++    for (uint32_t i = 0; i < res->object_total_count; i++) {
++        uint8_t* map = stale[i];
++        if ((int)i == target) {
++            if (target_resized || !constant)
++                memset(map, 1, blocks);
++            else
++                for (uint32_t b = 0; b < blocks; b++) map[b] |= !constant[b];
++        } else if (!constant) {
++            memset(map, 1, blocks);
++        } else {
++            for (uint32_t b = 0; b < blocks; b++) map[b] |= !constant[b];
++        }
++    }
++}
++
++/* Copy the runs of 16x16 blocks `copy` marks, in a picture of mb_cols x mb_rows blocks whose
++ * sample plane is width x height, from src to dst; ss_x and ss_y are the plane's subsampling. */
++static void copy_blocks_8bit(const uint8_t* copy, uint32_t mb_cols, uint32_t mb_rows, uint8_t* src,
++                             uint32_t src_stride, uint8_t* dst, uint32_t dst_stride, uint32_t width,
++                             uint32_t height, uint8_t ss_x, uint8_t ss_y) {
++    for (uint32_t row = 0; row < mb_rows; row++) {
++        const uint8_t* marks = copy + row * mb_cols;
++        uint32_t       y     = (row * 16) >> ss_y;
++        uint32_t       h     = ((16 + ss_y) >> ss_y);
++        if (y >= height)
++            break;
++        if (y + h > height)
++            h = height - y;
++        uint32_t col = 0;
++        while (col < mb_cols) {
++            while (col < mb_cols && !marks[col]) col++;
++            if (col == mb_cols)
++                break;
++            uint32_t end = col;
++            while (end < mb_cols && marks[end]) end++;
++            uint32_t x = (col * 16) >> ss_x;
++            uint32_t w = ((end - col) * 16 + ss_x) >> ss_x;
++            if (x < width) {
++                if (x + w > width)
++                    w = width - x;
++                svt_av1_copy_wxh_8bit(src + y * src_stride + x, src_stride, dst + y * dst_stride + x, dst_stride, h, w);
++            }
++            col = end;
++        }
++    }
++}
++
++/* copy_luma and copy_chroma, where given, mark per 16x16 block what is copied into the luma
++ * (y8b) and the chroma (regular) buffers; NULL copies the plane whole. 8-bit input only. */
+ static EbErrorType copy_frame_buffer(SequenceControlSet* scs, uint8_t* destination, uint8_t* destination_y8b,
+-                                     uint8_t* source, int pass) {
++                                     uint8_t* source, int pass, const uint8_t* copy_luma,
++                                     const uint8_t* copy_chroma, uint32_t mb_cols, uint32_t mb_rows) {
+     EbErrorType return_error = EB_ErrorNone;
+ 
+     EbPictureBufferDesc* input_pic             = (EbPictureBufferDesc*)destination;
+@@ -5108,16 +5224,35 @@ static EbErrorType copy_frame_buffer(SequenceControlSet* scs, uint8_t* destinati
+     const uint32_t chroma_height = (luma_height + subsampling_y) >> subsampling_y;
+ 
+     if (scs->static_config.encoder_bit_depth == EB_EIGHT_BIT) {
+-        svt_av1_copy_wxh_8bit(input_ptr->luma,
+-                              input_ptr->y_stride,
+-                              y8b_input_picture_ptr->y_buffer,
+-                              input_pic->y_stride,
+-                              luma_height,
+-                              luma_width);
+-        svt_av1_copy_wxh_8bit(
+-            input_ptr->cb, input_ptr->cb_stride, input_pic->u_buffer, input_pic->u_stride, chroma_height, chroma_width);
+-        svt_av1_copy_wxh_8bit(
+-            input_ptr->cr, input_ptr->cr_stride, input_pic->v_buffer, input_pic->v_stride, chroma_height, chroma_width);
++        if (copy_luma)
++            copy_blocks_8bit(copy_luma, mb_cols, mb_rows, input_ptr->luma, input_ptr->y_stride,
++                             y8b_input_picture_ptr->y_buffer, input_pic->y_stride, luma_width, luma_height, 0, 0);
++        else
++            svt_av1_copy_wxh_8bit(input_ptr->luma,
++                                  input_ptr->y_stride,
++                                  y8b_input_picture_ptr->y_buffer,
++                                  input_pic->y_stride,
++                                  luma_height,
++                                  luma_width);
++        if (copy_chroma) {
++            copy_blocks_8bit(copy_chroma, mb_cols, mb_rows, input_ptr->cb, input_ptr->cb_stride, input_pic->u_buffer,
++                             input_pic->u_stride, chroma_width, chroma_height, subsampling_x, subsampling_y);
++            copy_blocks_8bit(copy_chroma, mb_cols, mb_rows, input_ptr->cr, input_ptr->cr_stride, input_pic->v_buffer,
++                             input_pic->v_stride, chroma_width, chroma_height, subsampling_x, subsampling_y);
++        } else {
++            svt_av1_copy_wxh_8bit(input_ptr->cb,
++                                  input_ptr->cb_stride,
++                                  input_pic->u_buffer,
++                                  input_pic->u_stride,
++                                  chroma_height,
++                                  chroma_width);
++            svt_av1_copy_wxh_8bit(input_ptr->cr,
++                                  input_ptr->cr_stride,
++                                  input_pic->v_buffer,
++                                  input_pic->v_stride,
++                                  chroma_height,
++                                  chroma_width);
++        }
+     } else { // 10bit packed
+         uint32_t comp_stride_y = input_pic->y_stride / 4;
+ 
+@@ -5306,7 +5441,8 @@ static void memset_input_buffer(SequenceControlSet* scs, EbBufferHeaderType* dst
+ from the sample application to the library buffers
+ */
+ static void copy_input_buffer(SequenceControlSet* scs, EbBufferHeaderType* dst, EbBufferHeaderType* dst_y8b,
+-                              EbBufferHeaderType* src, int pass) {
++                              EbBufferHeaderType* src, int pass, const uint8_t* copy_luma,
++                              const uint8_t* copy_chroma, uint32_t mb_cols, uint32_t mb_rows) {
+     // Copy the higher level structure
+     dst->n_alloc_len  = src->n_alloc_len;
+     dst->n_filled_len = src->n_filled_len;
+@@ -5325,7 +5461,8 @@ static void copy_input_buffer(SequenceControlSet* scs, EbBufferHeaderType* dst,
+         // Bypass copy for the unecessary picture in IPPP pass
+         // Copy the picture buffer
+         if (src->p_buffer != NULL) {
+-            copy_frame_buffer(scs, dst->p_buffer, dst_y8b->p_buffer, src->p_buffer, pass);
++            copy_frame_buffer(
++                scs, dst->p_buffer, dst_y8b->p_buffer, src->p_buffer, pass, copy_luma, copy_chroma, mb_cols, mb_rows);
+             // Copy the metadata array
+             if (svt_aom_copy_metadata_buffer(dst, src->metadata) != EB_ErrorNone) {
+                 dst->metadata = NULL;
+@@ -5569,8 +5706,10 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
+     EbObjectWrapper* y8b_wrapper;
+     svt_get_empty_object(enc_handle_ptr->input_y8b_buffer_producer_fifo_ptr, &y8b_wrapper);
+     // if resolution has changed, and the y8b_wrapper settings do not match scs settings, update y8b_wrapper settings
++    bool y8b_resized = false;
+     if (buffer_update_needed((EbBufferHeaderType*)y8b_wrapper->object_ptr, scs)) {
+         svt_input_y8b_update((EbBufferHeaderType*)y8b_wrapper->object_ptr, scs);
++        y8b_resized = true;
+     }
+     //set live count to 1 to be decremented at the end of the encode in RC
+     svt_object_inc_live_count(y8b_wrapper, 1);
+@@ -5579,8 +5718,10 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
+ 
+     svt_get_empty_object(enc_handle_ptr->input_buffer_producer_fifo_ptr, &eb_wrapper_ptr);
+     // if resolution has changed, and the input_buffer settings do not match scs settings, update input_buffer settings
++    bool in_resized = false;
+     if (buffer_update_needed((EbBufferHeaderType*)eb_wrapper_ptr->object_ptr, scs)) {
+         svt_input_buffer_header_update((EbBufferHeaderType*)eb_wrapper_ptr->object_ptr, scs, true);
++        in_resized = true;
+     }
+ 
+     //set live count to 1 to be decremented at the end of the encode in RC, and released
+@@ -5607,14 +5748,48 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
+     const size_t chroma_height = (luma_height + subsampling_y) >> subsampling_y;
+     const size_t read_size     = (luma_width * luma_height + 2 * chroma_width * chroma_height) << is_16bit_input;
+ 
++    // A buffer holds the picture it last took, so a picture with a constant-block map copies
++    // only the blocks the map leaves changed and those changed since the buffer last held the
++    // picture (its stale map); the other buffers note this picture's changes for their own
++    // next copy. Everything is copied where there is no map, the input is wider than a byte,
++    // the first pass downsamples, or a buffer was resized.
++    const uint32_t mb_cols = (uint32_t)((luma_width + 15) >> 4);
++    const uint32_t mb_rows = (uint32_t)((luma_height + 15) >> 4);
++    const int      y8b_idx = pool_index(enc_handle_ptr->input_y8b_buffer_resource_ptr, y8b_wrapper);
++    const int      in_idx  = pool_index(enc_handle_ptr->input_buffer_resource_ptr, eb_wrapper_ptr);
++    const uint8_t* constant = app_hdr->p_buffer != NULL ? app_hdr->constant_blocks : NULL;
++    const bool     partial  = constant && !is_16bit_input && !scs->first_pass_downsample && y8b_idx >= 0 &&
++        in_idx >= 0 && size_stale_maps(enc_handle_ptr, mb_cols * mb_rows);
++    const uint8_t* copy_luma = NULL;
++    const uint8_t* copy_chroma = NULL;
++    if (enc_handle_ptr->stale_blocks == mb_cols * mb_rows) {
++        note_changes(enc_handle_ptr->y8b_stale, enc_handle_ptr->input_y8b_buffer_resource_ptr, y8b_idx,
++                     partial ? constant : NULL, mb_cols * mb_rows, y8b_resized);
++        note_changes(enc_handle_ptr->in_stale, enc_handle_ptr->input_buffer_resource_ptr, in_idx,
++                     partial ? constant : NULL, mb_cols * mb_rows, in_resized);
++        if (partial) {
++            copy_luma   = enc_handle_ptr->y8b_stale[y8b_idx];
++            copy_chroma = enc_handle_ptr->in_stale[in_idx];
++        }
++    }
+     if (app_hdr->p_buffer != NULL && read_size > app_hdr->n_filled_len) {
+         // memset the library input buffer(s) if the API input buffer is not large enough
+         // this operation is necessary to avoid a potential crash when processing an invalid input
+         // the library will still process the current input and then exit
+         memset_input_buffer(scs, lib_reg_hdr, lib_y8b_hdr, app_hdr, 0);
+         enc_handle_ptr->is_prev_valid = false;
++        if (copy_luma)
++            memset(enc_handle_ptr->y8b_stale[y8b_idx], 1, mb_cols * mb_rows);
++        if (copy_chroma)
++            memset(enc_handle_ptr->in_stale[in_idx], 1, mb_cols * mb_rows);
+     } else {
+-        copy_input_buffer(scs, lib_reg_hdr, lib_y8b_hdr, app_hdr, 0);
++        copy_input_buffer(scs, lib_reg_hdr, lib_y8b_hdr, app_hdr, 0, copy_luma, copy_chroma, mb_cols, mb_rows);
++        if (enc_handle_ptr->stale_blocks == mb_cols * mb_rows) {
++            if (y8b_idx >= 0)
++                memset(enc_handle_ptr->y8b_stale[y8b_idx], 0, mb_cols * mb_rows);
++            if (in_idx >= 0)
++                memset(enc_handle_ptr->in_stale[in_idx], 0, mb_cols * mb_rows);
++        }
+     }
+ 
+     //Take a new App-RessCoord command
+diff --git a/Source/Lib/Globals/enc_handle.h b/Source/Lib/Globals/enc_handle.h
+index 92de931..a1fddf8 100644
+--- a/Source/Lib/Globals/enc_handle.h
++++ b/Source/Lib/Globals/enc_handle.h
+@@ -129,6 +129,13 @@ struct _EbEncHandle {
+     bool frame_received; // used to signal we received any frame from the app
+     bool is_prev_valid; // whether the previous input is valid or not
+ 
++    // Per pooled input buffer, luma (y8b) and the rest (in), the 16x16 blocks of the picture
++    // that changed since the buffer last held it: what a copy of a picture with a
++    // constant-block map copies besides the blocks the map leaves changed.
++    uint8_t** y8b_stale;
++    uint8_t** in_stale;
++    uint32_t  stale_blocks;
++
+ #if CONFIG_SINGLE_THREAD_KERNEL
+     SvtKernelDispatcher kernel_dispatcher;
+ #endif
+-- 
+2.47.3
+
