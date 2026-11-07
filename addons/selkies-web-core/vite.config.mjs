@@ -11,9 +11,9 @@ import { ViteMinifyPlugin } from 'vite-plugin-minify';
 // selkies-ws-core.ts inlines three lib modules into Blob workers by source
 // (`?raw`): a bundler rename would leave the stringified copy's bindings
 // unresolved. Vite hands back the raw file, so a TypeScript source would
-// land in the worker verbatim and fail to parse; run it through esbuild
-// (the loader is the file's own) and hand the worker the emitted
-// JavaScript instead. Only those three are inlined this way.
+// land in the worker verbatim and fail to parse; run it through the OXC
+// transform and hand the worker the emitted JavaScript instead. Only those
+// three are inlined this way.
 const RAW_TS_MODULES = new Set([
   'lib/decode-gate.ts',
   'lib/decode-pace.ts',

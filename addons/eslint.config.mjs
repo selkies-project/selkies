@@ -46,7 +46,6 @@ export default [
   { ignores: ['**/dist/'] },
   {
     files: ['selkies-web-core/**/*.{js,mjs}'],
-    ignores: ['selkies-web-core/clipboard-worker.js'],
     languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: globals.browser },
     rules,
   },
@@ -61,11 +60,6 @@ export default [
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: tsRules,
-  },
-  {
-    files: ['selkies-web-core/clipboard-worker.js'],
-    languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: globals.worker },
-    rules,
   },
   {
     files: ['selkies-web-core/clipboard-worker.ts'],
