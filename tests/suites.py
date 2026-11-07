@@ -82,7 +82,6 @@ SUITES: list = [
     {"path": "unit/test_wheel_selection.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_capture_stack.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_cursor_scaling.py", "tier": "unit", "timeout": 120},
-    {"path": "unit/test_command_dispatch.py", "tier": "unit", "timeout": 120},
 
     # integration
     {"path": "integration/test_cursor_callback_handoff.py", "tier": "integration", "timeout": 300,
@@ -117,6 +116,7 @@ SUITES: list = [
     {"path": "integration/test_frame_timing.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_wayland_seam.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_gpu_probe.py", "tier": "integration", "timeout": 180},
+    {"path": "integration/test_command_dispatch.py", "tier": "integration", "timeout": 120},
     {"path": "integration/test_two_display_pixels.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_locked_cursor_across_displays.py", "tier": "integration",
      "timeout": 600},

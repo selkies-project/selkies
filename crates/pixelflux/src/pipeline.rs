@@ -12,8 +12,8 @@
 
 use crate::CaptureSettings;
 use crate::encoders::software::{
-    EncodedStripe, HostI420, StripeState, acknowledge_reference, encode_cpu, encode_cpu_from,
-    invalidate_reference, stripes_held_still,
+    EncodedStripe, Nv12Planes, StripeState, acknowledge_reference, encode_cpu, encode_cpu_from,
+    held_input, invalidate_reference, release_input, stripes_held_still,
 };
 use crate::encoders::{self, Codec, FrameEncoder, FrameSource};
 use smithay::utils::{Physical, Rectangle};
@@ -2022,20 +2022,33 @@ impl X11Pipeline {
         self.process_frame(argb, stride, None, changed, true)
     }
 
-    /// [`Self::process_reported`] for a frame its capture already converted to the planes the
-    /// session encodes (`planes`, where [`Self::takes_host_planes`]); `argb` is left unread.
+    /// [`Self::process_reported`] for a frame its capture already converted to the picture the
+    /// session encodes (`planes`, where [`Self::takes_host_planes`]); `argb` is left unread. The
+    /// session reads the picture through the next frame's encode ([`Self::held_input`]).
     pub fn process_reported_planes(
         &mut self,
         argb: &[u8],
         stride: usize,
-        planes: HostI420<'_>,
+        planes: &Nv12Planes,
         changed: &[Rectangle<i32, Physical>],
     ) -> Vec<EncodedStripe> {
         self.process_frame(argb, stride, Some(planes), changed, true)
     }
 
-    /// Whether this pipeline encodes 8-bit 4:2:0 planes a capture converts itself: the x264
-    /// session of the CPU path.
+    /// The picture the session still reads after the last frame's encode returned, by its
+    /// [`Nv12Planes::id`], which its owner leaves unchanged until a later encode stops naming it
+    /// or [`Self::release_input`].
+    pub fn held_input(&self) -> Option<*const u8> {
+        held_input(&self.stripes)
+    }
+
+    /// Stop the session reading the picture it holds ([`Self::held_input`]).
+    pub fn release_input(&mut self) {
+        release_input(&mut self.stripes);
+    }
+
+    /// Whether this pipeline encodes 8-bit 4:2:0 pictures a capture converts itself, as NV12
+    /// laid out for x264 (`Nv12Planes`): the x264 session of the CPU path.
     pub fn takes_host_planes(&self) -> bool {
         cfg!(feature = "gpl")
             && self.hw.is_none()
@@ -2050,7 +2063,7 @@ impl X11Pipeline {
         &mut self,
         argb: &[u8],
         stride: usize,
-        planes: Option<HostI420<'_>>,
+        planes: Option<&Nv12Planes>,
         changed: &[Rectangle<i32, Physical>],
         reported: bool,
     ) -> Vec<EncodedStripe> {

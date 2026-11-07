@@ -1,0 +1,458 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Fri, 6 Nov 2026 09:07:46 -0500
+Subject: [PATCH] Encode an NV12 picture in place of copying it
+
+x264 copies every input picture into a frame of its own before it encodes it, interleaving the
+chroma of a planar one, while a caller that converts its frames itself can write NV12 where x264
+would read it. An 8-bit NV12 picture flagged X264_CSP_IN_PLACE is encoded where it lies: the
+input frame's planes point at the caller's for as long as x264 reads them, through the encode it
+is passed to and the next one, which takes it as the previous input, and are pointed back at the
+frame's own after that (or at x264_encoder_release_input). x264_param_input_layout gives the
+buffers that takes, laid out as x264's own frames (stride, offset of the first pixel, size,
+aligned to X264_IN_PLACE_ALIGN), since x264 reads the padding beside the picture and writes the
+rows and columns that round it up to whole macroblocks and one more of each. A picture is taken in
+place only where every frame is encoded in the call it is passed to (sliced threads or one thread,
+no lookahead delay, progressive, no OpenCL) and its strides and alignment are the layout's; it is
+copied otherwise. A frame records the input frame its planes hold (i_planes_frame) apart from the
+one it was given (i_input_frame), so the changed-macroblock copy brings its own planes up from
+what they last held once it is copied into again, while the lowres filter and the lookahead costs
+keep following the input.
+
+Every stream comes out bit for bit as the copied picture codes it, the version SEI aside: I420
+on the library before and after the change, and I420, NV12 copied, NV12 in place, in place mixed
+with copied frames, and in place across releases, at CRF on one and four threads and VBV on one,
+1080p and 2560x1600, a scroll, a moved window, a small change, a still screen, forced IDRs, and
+frames without mb_info; 4:4:4 and 10-bit likewise. VBV on one thread compares equal built without
+-ffast-math; with it, any change to x264_t's layout, an unused field alone, moves ratecontrol.c's
+floating point and with it that stream. With four sliced threads at CRF 25, a frame of a
+full-screen scroll at 2560x1600 (half its macroblocks changed) took 5.14 ms where it took 5.78,
+and at 1080p 3.12 where it took 3.52; a 256x256 change is unchanged.
+---
+ common/common.h   |   4 ++
+ common/frame.c    | 150 ++++++++++++++++++++++++++++++++++++----------
+ common/frame.h    |  11 +++-
+ encoder/api.c     |  22 +++++++
+ encoder/encoder.c |  27 +++++++--
+ x264.h            |  23 +++++++
+ 6 files changed, 202 insertions(+), 35 deletions(-)
+
+diff --git a/common/common.h b/common/common.h
+index 429c33b..586a28c 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -45,6 +45,7 @@
+ #define x264_encoder_maximum_delayed_frames x264_template(encoder_maximum_delayed_frames)
+ #define x264_encoder_intra_refresh x264_template(encoder_intra_refresh)
+ #define x264_encoder_invalidate_reference x264_template(encoder_invalidate_reference)
++#define x264_encoder_release_input x264_template(encoder_release_input)
+ 
+ /* This undef allows to rename the external symbol and force link failure in case
+  * of incompatible libraries. Then the define enables templating as above. */
+@@ -396,6 +397,9 @@ struct x264_t
+          * the last to change all of them (one without mb_info). */
+         int *mb_input_changed;
+         int i_input_all_changed;
++        /* The frame whose planes point at the caller's picture (X264_CSP_IN_PLACE), kept so
++         * until the end of the next x264_encoder_encode, while it is the previous input. */
++        x264_frame_t *in_place;
+ 
+         int i_max_dpb;  /* Number of frames allocated in the decoded picture buffer */
+         int i_max_ref0;
+diff --git a/common/frame.c b/common/frame.c
+index a58d0b7..18c85d5 100644
+--- a/common/frame.c
++++ b/common/frame.c
+@@ -42,6 +42,27 @@ static int align_plane_size( int x, int disalign )
+     return x;
+ }
+ 
++/* The alignment of a row of a frame's planes on this cpu. */
++static int frame_align( uint32_t cpu )
++{
++    int align = NATIVE_ALIGN / SIZEOF_PIXEL;
++#if ARCH_X86 || ARCH_X86_64
++    if( cpu&X264_CPU_CACHELINE_64 || cpu&X264_CPU_AVX512 )
++        align = 64 / SIZEOF_PIXEL;
++    else if( cpu&X264_CPU_CACHELINE_32 || cpu&X264_CPU_AVX )
++        align = 32 / SIZEOF_PIXEL;
++    else
++        align = 16 / SIZEOF_PIXEL;
++#endif
++    return align;
++}
++
++#if ARCH_PPC
++#define FRAME_DISALIGN ((1<<9) / SIZEOF_PIXEL)
++#else
++#define FRAME_DISALIGN ((1<<10) / SIZEOF_PIXEL)
++#endif
++
+ static int frame_internal_csp( int external_csp )
+ {
+     int csp = external_csp & X264_CSP_MASK;
+@@ -63,23 +84,11 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
+     int i_mb_count = h->mb.i_mb_count;
+     int i_stride, i_width, i_lines, luma_plane_count;
+     int i_padv = PADV << PARAM_INTERLACED;
+-    int align = NATIVE_ALIGN / SIZEOF_PIXEL;
+-#if ARCH_X86 || ARCH_X86_64
+-    if( h->param.cpu&X264_CPU_CACHELINE_64 || h->param.cpu&X264_CPU_AVX512 )
+-        align = 64 / SIZEOF_PIXEL;
+-    else if( h->param.cpu&X264_CPU_CACHELINE_32 || h->param.cpu&X264_CPU_AVX )
+-        align = 32 / SIZEOF_PIXEL;
+-    else
+-        align = 16 / SIZEOF_PIXEL;
+-#endif
+-#if ARCH_PPC
+-    int disalign = (1<<9) / SIZEOF_PIXEL;
+-#else
+-    int disalign = (1<<10) / SIZEOF_PIXEL;
+-#endif
++    int align = frame_align( h->param.cpu );
++    int disalign = FRAME_DISALIGN;
+ 
+     CHECKED_MALLOCZERO( frame, sizeof(x264_frame_t) );
+-    frame->i_input_frame = frame->i_lowres_frame = frame->i_cost_frame = -1;
++    frame->i_input_frame = frame->i_planes_frame = frame->i_lowres_frame = frame->i_cost_frame = -1;
+     PREALLOC_INIT
+ 
+     /* allocate frame data (+64 for extra data for me) */
+@@ -310,6 +319,33 @@ fail:
+     return NULL;
+ }
+ 
++/* The bytes from the start of a frame's buffer for plane p to its first pixel, the plane stride
++ * pixels a row: PADV rows (half of them for chroma) and PADH_ALIGN columns of padding. */
++static int frame_plane_offset( int stride, int p )
++{
++    return (stride * (PADV >> p) + PADH_ALIGN) * SIZEOF_PIXEL;
++}
++
++/* The planes of a frame of an encoder opened with param, as frame_new lays them out: the buffers
++ * a picture is encoded from in place (X264_CSP_IN_PLACE, x264_param_input_layout). */
++int x264_frame_input_layout( const x264_param_t *param, int i_stride[2], int i_offset[2], int64_t i_size[2] )
++{
++    if( HIGH_BIT_DEPTH || frame_internal_csp( param->i_csp ) != X264_CSP_NV12 || param->b_interlaced
++        || param->b_opencl || param->i_width <= 0 || param->i_height <= 0 )
++        return -1;
++    int i_width = ALIGN( param->i_width, 16 );
++    int i_lines = ALIGN( param->i_height, 16 );
++    int stride = align_stride( i_width + PADH2, frame_align( param->cpu ), FRAME_DISALIGN );
++    for( int p = 0; p < 2; p++ )
++    {
++        int lines = (i_lines >> p) + 2 * (PADV >> p);
++        i_stride[p] = stride * SIZEOF_PIXEL;
++        i_offset[p] = frame_plane_offset( stride, p );
++        i_size[p] = (int64_t)(p ? stride * lines : align_plane_size( stride * lines, FRAME_DISALIGN )) * SIZEOF_PIXEL;
++    }
++    return 0;
++}
++
+ void x264_frame_delete( x264_frame_t *frame )
+ {
+     /* Duplicate frames are blank copies of real frames (including pointers),
+@@ -361,36 +397,88 @@ static int get_plane_ptr( x264_t *h, x264_picture_t *src, uint8_t **pix, int *st
+ 
+ #define get_plane_ptr(...) do { if( get_plane_ptr(__VA_ARGS__) < 0 ) return -1; } while( 0 )
+ 
+-/* Copy into dst only the macroblocks of src that changed since the input frame dst's planes
+- * hold, for planar 4:2:0 and 4:4:4: the input frames are recycled, so on a screen where little
+- * changes most of a recycled frame already holds the picture. Which input frame last changed
+- * each macroblock comes from the caller's mb_info (X264_MBINFO_CONSTANT), a frame without it
+- * changing all of them. Returns 0, having copied nothing, where the whole picture is to be
+- * copied: another format, or a frame holding nothing of the stream. */
+-static int frame_copy_changed( x264_t *h, x264_frame_t *dst, x264_picture_t *src, int i_csp )
++/* Record the macroblocks the input frame h->frames.i_input changed, from the caller's mb_info
++ * (X264_MBINFO_CONSTANT), a frame without it changing all of them. */
++static void frame_input_changed( x264_t *h, x264_picture_t *src )
+ {
+     const int n = h->frames.i_input;
+-    const int mb_w = h->mb.i_mb_width, mb_h = h->mb.i_mb_height;
++    const int mb_count = h->mb.i_mb_width * h->mb.i_mb_height;
+     uint8_t *info = h->param.analyse.b_mb_info ? src->prop.mb_info : NULL;
+     if( !h->frames.mb_input_changed )
+     {
+-        h->frames.mb_input_changed = x264_malloc( mb_w * mb_h * sizeof(int) );
++        h->frames.mb_input_changed = x264_malloc( mb_count * sizeof(int) );
+         if( !h->frames.mb_input_changed )
+-            return 0;
+-        for( int i = 0; i < mb_w * mb_h; i++ )
++        {
++            h->frames.i_input_all_changed = n;
++            return;
++        }
++        for( int i = 0; i < mb_count; i++ )
+             h->frames.mb_input_changed[i] = -1;
+     }
+     int *changed = h->frames.mb_input_changed;
+     if( info )
+     {
+-        for( int i = 0; i < mb_w * mb_h; i++ )
++        for( int i = 0; i < mb_count; i++ )
+             if( !(info[i] & X264_MBINFO_CONSTANT) )
+                 changed[i] = n;
+     }
+     else
+         h->frames.i_input_all_changed = n;
+-    int held = dst->i_input_frame;
+-    dst->i_input_frame = n;
++}
++
++/* Point dst's planes at the caller's 8-bit NV12 picture (X264_CSP_IN_PLACE) in place of copying
++ * it, where every read of it falls within the x264_encoder_encode it is passed to and the next
++ * one, which takes it as the previous input: frame threads and a lookahead delay keep a frame
++ * longer. The strides and the alignment are checked against x264_param_input_layout, the padding
++ * past them cannot be. Returns 0, having pointed nothing, where the picture is to be copied. */
++static int frame_point_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
++{
++    if( HIGH_BIT_DEPTH || !(src->img.i_csp & X264_CSP_IN_PLACE)
++        || (src->img.i_csp & ~X264_CSP_IN_PLACE) != X264_CSP_NV12 || dst->i_csp != X264_CSP_NV12
++        || h->i_thread_frames > 1 || h->frames.i_delay || PARAM_INTERLACED || h->param.b_opencl )
++        return 0;
++    for( int p = 0; p < 2; p++ )
++        if( src->img.i_stride[p] != dst->i_stride[p] * SIZEOF_PIXEL
++            || ((intptr_t)src->img.plane[p] - frame_plane_offset( dst->i_stride[p], p )) & (X264_IN_PLACE_ALIGN - 1) )
++            return 0;
++    for( int p = 0; p < 2; p++ )
++    {
++        dst->own_plane[p] = dst->plane[p];
++        dst->plane[p] = (pixel*)src->img.plane[p];
++    }
++    dst->i_own_planes_frame = dst->i_planes_frame;
++    dst->i_input_frame = dst->i_planes_frame = h->frames.i_input;
++    h->frames.in_place = dst;
++    return 1;
++}
++
++/* Point a frame whose planes point at the caller's picture back at its own, which hold the input
++ * frame they held before. */
++void x264_frame_restore_planes( x264_frame_t *frame )
++{
++    if( !frame->own_plane[0] )
++        return;
++    for( int p = 0; p < 2; p++ )
++    {
++        frame->plane[p] = frame->own_plane[p];
++        frame->own_plane[p] = NULL;
++    }
++    frame->i_planes_frame = frame->i_own_planes_frame;
++}
++
++/* Copy into dst only the macroblocks of src that changed since the input frame dst's planes
++ * hold, for planar 4:2:0 and 4:4:4: the input frames are recycled, so on a screen where little
++ * changes most of a recycled frame already holds the picture (frame_input_changed). Returns 0, having copied nothing, where the whole picture is to be
++ * copied: another format, or a frame holding nothing of the stream. */
++static int frame_copy_changed( x264_t *h, x264_frame_t *dst, x264_picture_t *src, int i_csp )
++{
++    const int n = h->frames.i_input;
++    const int mb_w = h->mb.i_mb_width, mb_h = h->mb.i_mb_height;
++    int *changed = h->frames.mb_input_changed;
++    int held = dst->i_planes_frame;
++    dst->i_input_frame = dst->i_planes_frame = n;
++    if( !changed )
++        return 0;
+     int planar420 = i_csp == X264_CSP_I420;
+     int planar444 = i_csp == X264_CSP_I444;
+     if( held < 0 || h->frames.i_input_all_changed > held || !(planar420 || planar444) )
+@@ -492,7 +580,9 @@ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
+ 
+     uint8_t *pix[3];
+     int stride[3];
+-    if( frame_copy_changed( h, dst, src, i_csp ) )
++    x264_frame_restore_planes( dst );
++    frame_input_changed( h, src );
++    if( frame_point_picture( h, dst, src ) || frame_copy_changed( h, dst, src, i_csp ) )
+         return 0;
+     if( i_csp == X264_CSP_YUYV || i_csp == X264_CSP_UYVY )
+     {
+diff --git a/common/frame.h b/common/frame.h
+index 4b0141b..015e85f 100644
+--- a/common/frame.h
++++ b/common/frame.h
+@@ -54,7 +54,8 @@ typedef struct x264_frame
+     x264_param_t *param;
+ 
+     int     i_frame;     /* Presentation frame number */
+-    int     i_input_frame; /* The input frame whose pixels the planes hold, -1 for none */
++    int     i_input_frame; /* The input frame the frame was last given, -1 for none */
++    int     i_planes_frame; /* The input frame whose pixels the planes hold, -1 for none */
+     int     i_lowres_frame; /* The input frame the lowres planes were filtered from, -1 for none */
+     int     i_cost_frame; /* The input frame i_intra_cost was computed for, -1 for none */
+     int     i_cost_key;   /* The lookahead settings i_intra_cost was computed under */
+@@ -83,6 +84,10 @@ typedef struct x264_frame
+     int     i_lines_lowres;
+     pixel *plane[3];
+     pixel *plane_fld[3];
++    /* The frame's own planes and the input frame they hold while plane[] points at the
++     * caller's (X264_CSP_IN_PLACE), else NULL */
++    pixel *own_plane[2];
++    int    i_own_planes_frame;
+     pixel *filtered[3][4]; /* plane[0], H, V, HV */
+     pixel *filtered_fld[3][4];
+     pixel *lowres[4]; /* half-size copy of input frame: Orig, H, V, HV */
+@@ -227,6 +232,10 @@ void          x264_frame_delete( x264_frame_t *frame );
+ 
+ #define x264_frame_copy_picture x264_template(frame_copy_picture)
+ int           x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src );
++#define x264_frame_restore_planes x264_template(frame_restore_planes)
++void          x264_frame_restore_planes( x264_frame_t *frame );
++#define x264_frame_input_layout x264_template(frame_input_layout)
++int           x264_frame_input_layout( const x264_param_t *param, int i_stride[2], int i_offset[2], int64_t i_size[2] );
+ 
+ #define x264_frame_expand_border x264_template(frame_expand_border)
+ void          x264_frame_expand_border( x264_t *h, x264_frame_t *frame, int mb_y );
+diff --git a/encoder/api.c b/encoder/api.c
+index da99106..0bdc662 100644
+--- a/encoder/api.c
++++ b/encoder/api.c
+@@ -42,6 +42,8 @@ int  x264_8_encoder_delayed_frames( x264_t * );
+ int  x264_8_encoder_maximum_delayed_frames( x264_t * );
+ void x264_8_encoder_intra_refresh( x264_t * );
+ int  x264_8_encoder_invalidate_reference( x264_t *, int64_t pts );
++void x264_8_encoder_release_input( x264_t * );
++int  x264_8_frame_input_layout( const x264_param_t *, int i_stride[2], int i_offset[2], int64_t i_size[2] );
+ 
+ x264_t *x264_10_encoder_open( x264_param_t *, void * );
+ void x264_10_nal_encode( x264_t *h, uint8_t *dst, x264_nal_t *nal );
+@@ -54,6 +56,7 @@ int  x264_10_encoder_delayed_frames( x264_t * );
+ int  x264_10_encoder_maximum_delayed_frames( x264_t * );
+ void x264_10_encoder_intra_refresh( x264_t * );
+ int  x264_10_encoder_invalidate_reference( x264_t *, int64_t pts );
++void x264_10_encoder_release_input( x264_t * );
+ 
+ typedef struct x264_api_t
+ {
+@@ -71,6 +74,7 @@ typedef struct x264_api_t
+     int  (*encoder_maximum_delayed_frames)( x264_t * );
+     void (*encoder_intra_refresh)( x264_t * );
+     int  (*encoder_invalidate_reference)( x264_t *, int64_t pts );
++    void (*encoder_release_input)( x264_t * );
+ } x264_api_t;
+ 
+ REALIGN_STACK x264_t *x264_encoder_open( x264_param_t *param )
+@@ -92,6 +96,7 @@ REALIGN_STACK x264_t *x264_encoder_open( x264_param_t *param )
+         api->encoder_maximum_delayed_frames = x264_8_encoder_maximum_delayed_frames;
+         api->encoder_intra_refresh = x264_8_encoder_intra_refresh;
+         api->encoder_invalidate_reference = x264_8_encoder_invalidate_reference;
++        api->encoder_release_input = x264_8_encoder_release_input;
+ 
+         api->x264 = x264_8_encoder_open( param, api );
+     }
+@@ -110,6 +115,7 @@ REALIGN_STACK x264_t *x264_encoder_open( x264_param_t *param )
+         api->encoder_maximum_delayed_frames = x264_10_encoder_maximum_delayed_frames;
+         api->encoder_intra_refresh = x264_10_encoder_intra_refresh;
+         api->encoder_invalidate_reference = x264_10_encoder_invalidate_reference;
++        api->encoder_release_input = x264_10_encoder_release_input;
+ 
+         api->x264 = x264_10_encoder_open( param, api );
+     }
+@@ -197,3 +203,19 @@ REALIGN_STACK int x264_encoder_invalidate_reference( x264_t *h, int64_t pts )
+ 
+     return api->encoder_invalidate_reference( api->x264, pts );
+ }
++
++REALIGN_STACK void x264_encoder_release_input( x264_t *h )
++{
++    x264_api_t *api = (x264_api_t *)h;
++
++    api->encoder_release_input( api->x264 );
++}
++
++REALIGN_STACK int x264_param_input_layout( const x264_param_t *param, int i_stride[2], int i_offset[2], int64_t i_size[2] )
++{
++#if HAVE_BITDEPTH8
++    if( param->i_bitdepth == 8 )
++        return x264_8_frame_input_layout( param, i_stride, i_offset, i_size );
++#endif
++    return -1;
++}
+diff --git a/encoder/encoder.c b/encoder/encoder.c
+index 86e194c..8bfd9fb 100644
+--- a/encoder/encoder.c
++++ b/encoder/encoder.c
+@@ -3455,10 +3455,10 @@ int x264_encoder_invalidate_reference( x264_t *h, int64_t pts )
+  *       B      5   2*4
+  *       B      6   2*5
+  ****************************************************************************/
+-int     x264_encoder_encode( x264_t *h,
+-                             x264_nal_t **pp_nal, int *pi_nal,
+-                             x264_picture_t *pic_in,
+-                             x264_picture_t *pic_out )
++static int encoder_encode( x264_t *h,
++                           x264_nal_t **pp_nal, int *pi_nal,
++                           x264_picture_t *pic_in,
++                           x264_picture_t *pic_out )
+ {
+     x264_t *thread_current, *thread_prev, *thread_oldest;
+     int i_nal_type, i_nal_ref_idc, i_global_qp;
+@@ -4325,6 +4325,25 @@ static void print_intra( int64_t *i_mb_count, double i_count, int b_print_pcm, c
+         sprintf( intra, " %4.1f%%", i_mb_count[I_PCM]  / i_count );
+ }
+ 
++/* An input frame whose planes point at the caller's picture (X264_CSP_IN_PLACE) keeps them so
++ * through the next call, which takes it as the previous input, and no longer. */
++int x264_encoder_encode( x264_t *h, x264_nal_t **pp_nal, int *pi_nal, x264_picture_t *pic_in, x264_picture_t *pic_out )
++{
++    x264_frame_t *previous = h->frames.in_place;
++    h->frames.in_place = NULL;
++    int ret = encoder_encode( h, pp_nal, pi_nal, pic_in, pic_out );
++    if( previous && previous != h->frames.in_place )
++        x264_frame_restore_planes( previous );
++    return ret;
++}
++
++void x264_encoder_release_input( x264_t *h )
++{
++    if( h->frames.in_place )
++        x264_frame_restore_planes( h->frames.in_place );
++    h->frames.in_place = NULL;
++}
++
+ /****************************************************************************
+  * x264_encoder_close:
+  ****************************************************************************/
+diff --git a/x264.h b/x264.h
+index 177d2c7..811ce6e 100644
+--- a/x264.h
++++ b/x264.h
+@@ -269,6 +269,7 @@ static const char * const x264_avcintra_flavor_names[] = { "panasonic", "sony",
+ #define X264_CSP_MAX            0x0011  /* end of list */
+ #define X264_CSP_VFLIP          0x1000  /* the csp is vertically flipped */
+ #define X264_CSP_HIGH_DEPTH     0x2000  /* the csp has a depth of 16 bits per pixel component */
++#define X264_CSP_IN_PLACE       0x4000  /* encode the planes where they lie (x264_param_input_layout) */
+ 
+ /* Slice type */
+ #define X264_TYPE_AUTO          0x0000  /* Let x264 choose the right type */
+@@ -974,6 +975,28 @@ X264_API int x264_encoder_headers( x264_t *, x264_nal_t **pp_nal, int *pi_nal );
+  *      returns negative on error and zero if no NAL units returned.
+  *      the payloads of all output NALs are guaranteed to be sequential in memory. */
+ X264_API int x264_encoder_encode( x264_t *, x264_nal_t **pp_nal, int *pi_nal, x264_picture_t *pic_in, x264_picture_t *pic_out );
++/* x264_param_input_layout:
++ *      the planes an encoder opened with these parameters encodes a picture from in place, without
++ *      copying it: 8-bit NV12 (X264_CSP_NV12 | X264_CSP_IN_PLACE) with i_stride[p] bytes a row,
++ *      img.plane[p] i_offset[p] bytes into a buffer of i_size[p] bytes that starts on a multiple
++ *      of X264_IN_PLACE_ALIGN bytes. The buffers are laid out as the encoder's own: x264 reads the
++ *      picture, the padding beside it, and writes the columns and rows past it that round it up to
++ *      whole macroblocks, and one more of each.
++ *      The encoder takes the picture in place where every frame is encoded in the call it is passed
++ *      to (sliced threads or one thread, no lookahead delay, progressive), and the strides and the
++ *      alignment match; it copies the picture otherwise, which codes the same stream.
++ *      A picture passed in place is read through the next x264_encoder_encode, which reads it as
++ *      the previous input, so the caller keeps its buffers unchanged until that call returns
++ *      or until x264_encoder_release_input.
++ *      returns 0, or negative where these parameters take no picture in place (another chroma
++ *      format or bit depth, interlacing, OpenCL). */
++#define X264_IN_PLACE_ALIGN 64
++X264_API int x264_param_input_layout( const x264_param_t *, int i_stride[2], int i_offset[2], int64_t i_size[2] );
++/* x264_encoder_release_input:
++ *      stop reading the last picture passed in place (X264_CSP_IN_PLACE), which the next
++ *      x264_encoder_encode then does not read as the previous input, so the caller can
++ *      change or free its buffers. */
++X264_API void x264_encoder_release_input( x264_t * );
+ /* x264_encoder_close:
+  *      close an encoder handler */
+ X264_API void x264_encoder_close( x264_t * );
+-- 
+2.47.3
+

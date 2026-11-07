@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from types import SimpleNamespace
+from typing import Optional
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
@@ -46,11 +47,16 @@ def gate(source: str, name: str) -> str:
     return match.group(1)
 
 
-def runs(expression: str, event: str, ref: str, tag_prefix: str) -> bool:
-    """Evaluate the expressions' comparisons and boolean operators in an event context."""
+def runs(expression: str, event: str, ref: str, tag_prefix: str, release: Optional[bool] = None) -> bool:
+    """Evaluate the expressions' comparisons and boolean operators in an event context.
+
+    A called workflow sees its caller's event, so ``event`` is ``push`` or
+    ``workflow_dispatch`` and never ``workflow_call``; ``release`` is the
+    ``workflow_call`` input a standalone dispatch does not declare (``None``).
+    """
     ref_name = ref.removeprefix("refs/heads/").removeprefix("refs/tags/")
     github = SimpleNamespace(event_name=event, ref=ref, ref_name=ref_name)
-    inputs = SimpleNamespace(tag_prefix=tag_prefix)
+    inputs = SimpleNamespace(tag_prefix=tag_prefix, release=release)
     expression = expression.replace("&&", "and").replace("||", "or")
     return bool(eval(expression, {  # noqa: S307 - fixed workflow expressions, no globals or builtins
         "__builtins__": {},
@@ -62,22 +68,23 @@ images = workflow("images.yaml")
 for name in ("build", "addons"):
     expression = gate(images, name)
     cases = (
-        ("main CI call", "workflow_call", "refs/heads/main", "main", True),
-        ("main dispatch", "workflow_dispatch", "refs/heads/main", "main", True),
-        ("manual release from main", "workflow_call", "refs/heads/main", "2.0.0rc0", True),
-        ("pushed-tag release", "workflow_call", "refs/tags/2.0.0rc0", "2.0.0rc0", True),
-        ("standalone tag dispatch", "workflow_dispatch", "refs/tags/2.0.0rc0", "2.0.0rc0", False),
-        ("tag call with an empty prefix", "workflow_call", "refs/tags/2.0.0rc0", "", False),
-        ("tag call with a mismatched prefix", "workflow_call", "refs/tags/2.0.0rc0", "latest", False),
-        ("non-main branch call", "workflow_call", "refs/heads/topic", "main", False),
+        ("main CI call", "push", "refs/heads/main", "main", False, True),
+        ("main dispatch", "workflow_dispatch", "refs/heads/main", "main", None, True),
+        ("manual release from main", "workflow_dispatch", "refs/heads/main", "2.0.0rc0", True, True),
+        ("pushed-tag release", "push", "refs/tags/2.0.0rc0", "2.0.0rc0", True, True),
+        ("release dispatched from its tag", "workflow_dispatch", "refs/tags/2.0.0rc0", "2.0.0rc0", True, True),
+        ("standalone tag dispatch", "workflow_dispatch", "refs/tags/2.0.0rc0", "2.0.0rc0", None, False),
+        ("tag call with an empty prefix", "push", "refs/tags/2.0.0rc0", "", True, False),
+        ("tag call with a mismatched prefix", "push", "refs/tags/2.0.0rc0", "latest", True, False),
+        ("non-main branch call", "push", "refs/heads/topic", "main", False, False),
     )
-    for label, event, ref, prefix, expected in cases:
-        check(f"{name}: {label}", runs(expression, event, ref, prefix) == expected,
-              f"event={event} ref={ref} tag_prefix={prefix!r}")
+    for label, event, ref, prefix, release, expected in cases:
+        check(f"{name}: {label}", runs(expression, event, ref, prefix, release) == expected,
+              f"event={event} ref={ref} tag_prefix={prefix!r} release={release!r}")
 check("video and addon jobs use the same release gate", gate(images, "build") == gate(images, "addons"))
 cleanup = gate(images, "cleanup").replace(" && !cancelled()", "")
-check("tag releases leave registry cleanup alone", not runs(cleanup, "workflow_call", "refs/tags/2.0.0rc0", "2.0.0rc0"))
-check("main builds retain registry cleanup", runs(cleanup, "workflow_call", "refs/heads/main", "main"))
+check("tag releases leave registry cleanup alone", not runs(cleanup, "push", "refs/tags/2.0.0rc0", "2.0.0rc0", True))
+check("main builds retain registry cleanup", runs(cleanup, "push", "refs/heads/main", "main", False))
 
 published = workflow("release-published.yaml")
 needs = {}

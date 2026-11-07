@@ -26,6 +26,12 @@ on:
         description: Tag prefix for the images (e.g. 1.2.3 or latest)
         type: string
         default: main
+      release:
+        # A called workflow sees its caller's event, so a release says so here:
+        # it alone builds from a tag, which a standalone dispatch cannot set
+        description: Built for release.yaml, which may run from its tag
+        type: boolean
+        default: false
       floating_tags:
         description: Also move the floating `latest` tags onto this build
         type: boolean
@@ -48,7 +54,7 @@ env:
 jobs:
   build:
     name: ${{ matrix.flavor.name }} (${{ matrix.arch.name }})
-    if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'workflow_call' && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name) }}
+    if: ${{ github.ref == 'refs/heads/main' || (inputs.release && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name) }}
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -232,7 +238,7 @@ jobs:
           publish "${IMAGE_NAME}" /tmp/digests/desktop
 
   addons:
-    if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'workflow_call' && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name) }}
+    if: ${{ github.ref == 'refs/heads/main' || (inputs.release && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name) }}
     name: ${{ matrix.addon }} (${{ matrix.arch.name }})
     # The TURN server and the TURN REST credential service documented in
     # docs/components/index.md; independent of the wheel

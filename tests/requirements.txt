@@ -14,5 +14,6 @@ python-xlib
 psutil
 aiohttp
 aiortc
+Pillow
 jupyter-server
 jupyter-server-proxy

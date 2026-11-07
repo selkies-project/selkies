@@ -27,7 +27,8 @@
 //! says so in its head and signals the watch; the capture then watches again.
 //!
 //! A session whose encoder takes 8-bit 4:2:0 planes (`X11Pipeline::takes_host_planes`, x264)
-//! skips the copy: each pool surface's planes are brought up to the screen by converting the
+//! skips the copy: each pool surface's planes, NV12 laid out as x264 encodes it in place
+//! (`Nv12Planes`), are brought up to the screen by converting the
 //! rows of tiles they miss straight from the framebuffer, under the same drawing count
 //! ([`FramebufferGrab::convert`]), so the pixels are read once, by the conversion, where a copy
 //! read and wrote them first: a full-screen change at 2560x1600 took 0.85 ms to convert in place
@@ -51,6 +52,8 @@ use x11rb::errors::{ParseError, ReplyError};
 use x11rb::protocol::ErrorKind;
 use x11rb::rust_connection::RustConnection;
 use x11rb::x11_utils::TryParseFd;
+
+use crate::encoders::software::Nv12Planes;
 
 const EXTENSION: &str = "SELKIES-FRAMEBUFFER";
 const MAGIC: u32 = 0x4246_4b53;
@@ -473,14 +476,14 @@ impl SharedFramebuffer {
 
     /// Convert the rows of tiles `pending` marks within the region at (`x`, `y`) of `width` x
     /// `height` to 8-bit 4:2:0 BT.709 limited range in `planes` (the region's top-left at their
-    /// start), across the region's whole width for each run of such rows, split into `bands` of
-    /// rows converted in parallel as the encode thread's own conversion is: the conversion
-    /// reads the screen where the server keeps it, in place of copying it out first. False where
-    /// the conversion refused the geometry.
+    /// first pixel), as the NV12 x264 encodes in place, across the region's whole width for each
+    /// run of such rows, split into `bands` of rows converted in parallel as the encode thread's
+    /// own conversion is: the conversion reads the screen where the server keeps it, in place of
+    /// copying it out first. False where the conversion refused the geometry.
     fn convert_tiles(
         &self,
         pending: &[u64],
-        planes: &mut FramePlanes,
+        planes: &mut Nv12Planes,
         (x, y, width, height): (u32, u32, u32, u32),
         bands: usize,
     ) -> bool {
@@ -516,20 +519,16 @@ impl SharedFramebuffer {
             let bottom = (ty * tile).min(y + height);
             let rows = (bottom - top) as usize;
             let start = top as usize * self.stride + x as usize * 4;
-            let (ys, uvs) = (planes.y_stride, planes.uv_stride);
+            let (ys, uvs) = (planes.stride[0], planes.stride[1]);
             let off = (top - y) as usize;
-            let converted = crate::encoders::software::convert_to_yuv_mt(
+            let (luma, chroma) = planes.planes_mut();
+            let converted = crate::encoders::software::convert_to_nv12_mt(
                 &src[start..],
                 self.stride as u32,
                 width as usize,
                 rows,
-                false,
-                false,
-                false,
-                false,
-                &mut planes.y[off * ys..],
-                &mut planes.u[off / 2 * uvs..],
-                &mut planes.v[off / 2 * uvs..],
+                &mut luma[off * ys..],
+                &mut chroma[off / 2 * uvs..],
                 (ys, uvs),
                 bands,
             );
@@ -538,29 +537,6 @@ impl SharedFramebuffer {
             }
         }
         true
-    }
-}
-
-/// A frame's 8-bit 4:2:0 planes, tightly packed: what a capture that converts straight from
-/// the screen's memory hands an x264 session (`FramebufferGrab::convert`).
-pub(crate) struct FramePlanes {
-    pub y: Vec<u8>,
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
-    pub y_stride: usize,
-    pub uv_stride: usize,
-}
-
-impl FramePlanes {
-    /// Planes for a `width` x `height` frame, both even.
-    pub(crate) fn new(width: usize, height: usize) -> Self {
-        Self {
-            y: vec![16; width * height],
-            u: vec![128; width * height / 4],
-            v: vec![128; width * height / 4],
-            y_stride: width,
-            uv_stride: width / 2,
-        }
     }
 }
 
@@ -707,7 +683,7 @@ impl FramebufferGrab {
     pub(crate) fn convert(
         &mut self,
         idx: usize,
-        planes: &mut FramePlanes,
+        planes: &mut Nv12Planes,
         region: (u32, u32, u32, u32),
         bands: usize,
     ) -> bool {
@@ -716,7 +692,7 @@ impl FramebufferGrab {
             || y + height > self.fb.height
             || !(x | y | width | height).is_multiple_of(2)
             || (y + height == self.fb.height && x > 0)
-            || planes.y.len() != width as usize * height as usize
+            || (planes.width, planes.height) != (width as usize, height as usize)
         {
             return false;
         }
@@ -833,25 +809,21 @@ mod tests {
     }
 
     /// The planes `copy` would give, converting the pixels a read copied out.
-    fn converted_copy(grab: &mut FramebufferGrab, region: (u32, u32, u32, u32)) -> FramePlanes {
+    fn converted_copy(grab: &mut FramebufferGrab, region: (u32, u32, u32, u32)) -> Nv12Planes {
         let (w, h) = (region.2 as usize, region.3 as usize);
         let mut dst = vec![0u8; w * h * 4];
         assert!(grab.read(0, &mut dst, w * 4, region));
-        let mut planes = FramePlanes::new(w, h);
-        let (ys, uvs) = (planes.y_stride, planes.uv_stride);
-        crate::encoders::software::convert_to_yuv_mt(
+        let mut planes = Nv12Planes::new(w, h);
+        let strides = (planes.stride[0], planes.stride[1]);
+        let (y, uv) = planes.planes_mut();
+        crate::encoders::software::convert_to_nv12_mt(
             &dst,
             (w * 4) as u32,
             w,
             h,
-            false,
-            false,
-            false,
-            false,
-            &mut planes.y,
-            &mut planes.u,
-            &mut planes.v,
-            (ys, uvs),
+            y,
+            uv,
+            strides,
             1,
         )
         .unwrap();
@@ -863,25 +835,26 @@ mod tests {
         let region = (8, 16, 48, 32);
         let expected = converted_copy(&mut FramebufferGrab::new(fake(64, 64, 16), 1), region);
         let mut grab = FramebufferGrab::new(fake(64, 64, 16), 1);
-        let mut planes = FramePlanes::new(48, 32);
+        let mut planes = Nv12Planes::new(48, 32);
         assert!(grab.convert(0, &mut planes, region, 2));
-        assert!(planes.y == expected.y && planes.u == expected.u && planes.v == expected.v);
+        assert!(planes.planes() == expected.planes());
     }
 
     #[test]
     fn a_conversion_takes_only_the_rows_of_tiles_drawn() {
         let mut grab = FramebufferGrab::new(fake(64, 64, 16), 1);
-        let mut planes = FramePlanes::new(64, 48);
+        let mut planes = Nv12Planes::new(64, 48);
         assert!(grab.convert(0, &mut planes, (0, 0, 64, 48), 2));
-        planes.y.fill(0);
+        planes.planes_mut().0.fill(0);
         grab.fb
             .watch
             .word64(WATCH_BITS)
             .store(1 << 5, Ordering::Relaxed);
         assert!(grab.convert(0, &mut planes, (0, 0, 64, 48), 2));
-        for (row, line) in planes.y.chunks(64).enumerate() {
+        let stride = planes.stride[0];
+        for (row, line) in planes.planes().0.chunks(stride).enumerate() {
             assert_eq!(
-                line.iter().any(|&l| l != 0),
+                line[..64].iter().any(|&l| l != 0),
                 (16..32).contains(&row),
                 "tile 5 lies in rows 16..32, converted across the region's width (row {row})"
             );
@@ -891,7 +864,7 @@ mod tests {
     #[test]
     fn a_conversion_refuses_what_its_planes_cannot_hold() {
         let mut grab = FramebufferGrab::new(fake(64, 64, 16), 1);
-        let mut planes = FramePlanes::new(64, 64);
+        let mut planes = Nv12Planes::new(64, 64);
         assert!(
             !grab.convert(0, &mut planes, (1, 0, 32, 32), 1),
             "an odd edge"

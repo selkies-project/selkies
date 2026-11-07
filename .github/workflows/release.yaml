@@ -186,6 +186,7 @@ jobs:
       packages: write
     uses: ./.github/workflows/images.yaml
     with:
+      release: true
       tag_prefix: ${{ needs.check.outputs.version }}
       floating_tags: ${{ needs.check.outputs.latest == 'true' }}
 

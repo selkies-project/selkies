@@ -230,8 +230,8 @@ pub struct WlCapture {
     pub frame_counter: u16,
     pub pending_force_idr: bool,
     pub needs_full_render: bool,
-    /// One frame a period at most, a change taking its period's frame as it lands
-    /// (`FramePace::windowed`), as the X11 captures pace.
+    /// One frame a period, a change taking its period's frame as it lands, and the extra frames
+    /// a change in a taken period may spend (`FramePace::windowed`), as the X11 captures pace.
     pub pace: FramePace,
     /// A change (a client's commit, input, a host frame) found its period's frame taken and
     /// waits for the next period to open (`serve_changes`); any frame rendered clears it.

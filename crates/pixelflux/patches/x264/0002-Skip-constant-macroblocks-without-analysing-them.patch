@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: thelamer <ryankuba@gmail.com>
 Date: Wed, 4 Nov 2026 23:09:25 -0500
-Subject: [PATCH 2/5] Skip constant macroblocks without analysing them
+Subject: [PATCH] Skip constant macroblocks without analysing them
 
 A P macroblock the caller's mb_info marks constant, which the mb_info fast skip in
 x264_macroblock_analyse would code as P_SKIP (the reference is the previous frame at this
@@ -9,7 +9,8 @@ macroblock's analysis QP or finer, no weighted prediction) and whose P_SKIP vect
 coded in the slice loop directly: the reference's pixels become the reconstruction, and the
 per-macroblock arrays, the 16x16 vectors later macroblocks and the next frame predict from, the
 intra border backup, and the cache column the next macroblock's left neighbour comes from are
-left as the full path leaves them. Only CAVLC slices without deblocking, MBAFF, or intra refresh
+left as the full path leaves them. Only CAVLC slices without deblocking, MBAFF, intra refresh, or
+slice-max-size (whose limit the full path counts a skip run against)
 take it, and a row's first macroblock always takes the full path, whose analysis sets the row's
 vertical vector limits.
 
@@ -24,7 +25,7 @@ VBV.
  1 file changed, 128 insertions(+)
 
 diff --git a/encoder/encoder.c b/encoder/encoder.c
-index c2effa2..56f9821 100644
+index c2effa2..9c014a0 100644
 --- a/encoder/encoder.c
 +++ b/encoder/encoder.c
 @@ -2756,6 +2756,107 @@ static ALWAYS_INLINE void bitstream_restore( x264_t *h, x264_bs_bak_t *bak, int
@@ -141,7 +142,7 @@ index c2effa2..56f9821 100644
      int thread_last_mb = h->i_threadslice_end * h->mb.i_mb_width - 1;
 +    int b_skip_constant = h->fdec->mb_info && h->sh.i_type == SLICE_TYPE_P && !h->param.b_cabac
 +        && !SLICE_MBAFF && !PARAM_INTERLACED && !h->sh.b_weighted_pred && !h->param.b_intra_refresh
-+        && h->fdec->i_frame - h->fref[0][0]->i_frame == 1;
++        && !h->param.i_slice_max_size && h->fdec->i_frame - h->fref[0][0]->i_frame == 1;
      uint8_t *last_emu_check;
  #define BS_BAK_SLICE_MAX_SIZE 0
  #define BS_BAK_CAVLC_OVERFLOW 1
@@ -183,3 +184,6 @@ index c2effa2..56f9821 100644
          /* load cache */
          if( SLICE_MBAFF )
              x264_macroblock_cache_load_interlaced( h, i_mb_x, i_mb_y );
+-- 
+2.47.3
+

@@ -75,6 +75,7 @@ jobs:
         image: ${{ fromJSON(needs.plan.outputs.images) }}
     runs-on: ${{ matrix.image.runner }}
     steps:
+      # The recipe reads files of its crate, such as pixelflux's x264 patches
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -90,7 +91,7 @@ jobs:
           # The sources and build trees the recipe leaves are no part of the image
           docker run --name deps --env PIXELFLUX_ENABLE_GPL --workdir /tmp \
             --volume "${RUNNER_TEMP}/recipe.sh:/recipe.sh:ro" \
-            --volume "${GITHUB_WORKSPACE}/crates/${PROJECT}:/project:ro" "${BASE}" \
+            --volume "${PWD}/crates/${PROJECT}:/package:ro" "${BASE}" \
             bash -c 'bash /recipe.sh && rm -rf /tmp/* /root/.cache && { ! command -v dnf || dnf clean all; }'
           docker commit deps "${IMAGE}:${PLATFORM}"
           docker save "${IMAGE}:${PLATFORM}" | zstd -T0 > "${RUNNER_TEMP}/image.tar.zst"
@@ -140,7 +141,7 @@ jobs:
         run: |
           set -e
           crate="$(echo "${RELEASE_TAG}" | sed -E 's/rc([0-9]+)$/-rc.\1/; s/a([0-9]+)$/-alpha.\1/; s/b([0-9]+)$/-beta.\1/; s/\.post([0-9]+)$/-post.\1/; s/\.dev([0-9]+)$/-dev.\1/')"
-          sed -i "0,/^version = /s|^version = .*|version = \"${crate}\"|" "crates/${PROJECT}/Cargo.toml"
+          sed -i "1,/^version = /s|^version = .*|version = \"${crate}\"|" "crates/${PROJECT}/Cargo.toml"
           sed -i "/^name = \"${PROJECT}\"$/{n;s|^version = .*|version = \"${crate}\"|}" "crates/${PROJECT}/Cargo.lock"
           sed -i "/^name = \"${PROJECT}\"$/{n;s|^version = .*|version = \"${crate}\"|}" Cargo.lock
           grep -q "^version = \"${crate}\"$" "crates/${PROJECT}/Cargo.toml"
@@ -150,6 +151,8 @@ jobs:
         uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e # v4.3.5
         with:
           package-dir: crates/${{ matrix.group.project }}
+          # The action's output-dir is relative to the checkout, not to package-dir
+          output-dir: crates/${{ matrix.group.project }}/wheelhouse
         env:
           CIBW_BUILD: ${{ matrix.group.build }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

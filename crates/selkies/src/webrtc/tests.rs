@@ -1246,9 +1246,10 @@ async fn start_rate_seeds_the_only_controller() {
         seeded(Some(json!(2000)), 0, 8000.0, false).await.is_empty(),
         "nor without congestion control"
     );
-    assert!(
-        seeded(None, 0, 8000.0, true).await.is_empty(),
-        "nor from nothing remembered"
+    assert_eq!(
+        seeded(None, 0, 8000.0, true).await,
+        [format!("bitrate {START_KBPS:.0}")],
+        "nothing remembered climbs from the start rate"
     );
 }
 

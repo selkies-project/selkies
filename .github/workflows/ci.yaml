@@ -132,6 +132,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the native toolchain and libraries
+        # kvazaar, the non-GPL build's HEVC encoder, is built at the release the
+        # wheel recipe pins where the distribution does not carry it
         run: |
           scripts/ci/server-build-deps.sh
           sudo apt-get install -y --no-install-recommends python3-dev

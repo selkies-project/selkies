@@ -1,0 +1,333 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Fri, 6 Nov 2026 08:44:47 -0500
+Subject: [PATCH] Reuse the lowres costs of blocks the input left unchanged
+
+The lookahead's frame cost, which CRF and ABR rate control read, runs the lowres analysis over
+every block of every frame, intra cost and all. A block nothing it reads changed since keeps its
+result: one unchanged since the reference's input frame (h->frames.mb_input_changed, its 16x16
+macroblock and the next ones right and below, which the lowres filter reads) is the reference's at
+a zero vector, which the zero-vector fast skip scores 0 without a compare, and one unchanged, with
+the blocks around it whose edge pixels the intra predictions read, since its frame's intra costs
+were computed (i_cost_frame, under the same edge rows and subpel level) keeps its intra cost. A
+map of both is built once a frame, and a block with both whose motion candidates all hold a zero
+vector skips the per-block setup; the last two blocks of a row keep the full path, which sets the
+row's vertical vector limits.
+
+Every stream comes out bit for bit the same: CRF at one and four threads and VBV at one, 1080p
+and 2560x1600, 8- and 10-bit, 4:2:0 and 4:4:4, a scroll, a moved window, a small change, a still
+screen, forced IDRs, and frames without mb_info. At 2560x1600 with four sliced threads, the
+lookahead of a frame where a 256x256 area changed took 0.16 ms where it took 0.22 (the frame 0.68
+against 0.80), and of a still frame 0.10 against 0.17; on one thread a small change's frame took
+0.78 ms against 1.09. A full-screen scroll is unchanged.
+---
+ common/frame.c      |   2 +-
+ common/frame.h      |   2 +
+ encoder/slicetype.c | 183 ++++++++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 180 insertions(+), 7 deletions(-)
+
+diff --git a/common/frame.c b/common/frame.c
+index ea893c8..a58d0b7 100644
+--- a/common/frame.c
++++ b/common/frame.c
+@@ -79,7 +79,7 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
+ #endif
+ 
+     CHECKED_MALLOCZERO( frame, sizeof(x264_frame_t) );
+-    frame->i_input_frame = frame->i_lowres_frame = -1;
++    frame->i_input_frame = frame->i_lowres_frame = frame->i_cost_frame = -1;
+     PREALLOC_INIT
+ 
+     /* allocate frame data (+64 for extra data for me) */
+diff --git a/common/frame.h b/common/frame.h
+index 380d17d..4b0141b 100644
+--- a/common/frame.h
++++ b/common/frame.h
+@@ -56,6 +56,8 @@ typedef struct x264_frame
+     int     i_frame;     /* Presentation frame number */
+     int     i_input_frame; /* The input frame whose pixels the planes hold, -1 for none */
+     int     i_lowres_frame; /* The input frame the lowres planes were filtered from, -1 for none */
++    int     i_cost_frame; /* The input frame i_intra_cost was computed for, -1 for none */
++    int     i_cost_key;   /* The lookahead settings i_intra_cost was computed under */
+     int     i_coded;     /* Coded frame number */
+     int64_t i_field_cnt; /* Presentation field count */
+     int     i_frame_num; /* 7.4.3 frame_num */
+diff --git a/encoder/slicetype.c b/encoder/slicetype.c
+index 160d979..c7f9bf3 100644
+--- a/encoder/slicetype.c
++++ b/encoder/slicetype.c
+@@ -511,10 +511,57 @@ void x264_weights_analyse( x264_t *h, x264_frame_t *fenc, x264_frame_t *ref, int
+ #define NUM_ROWS 3
+ #define ROW_SATD (NUM_INTS + (h->mb.i_mb_y - h->i_threadslice_start))
+ 
++#define LOWRES_SAME_INTER 1
++#define LOWRES_SAME_INTRA 2
++
++/* Mark in same[] each lowres block that nothing it reads changed after an input frame
++ * (h->frames.mb_input_changed): LOWRES_SAME_INTER after inter_since, for the block itself, which
++ * is filtered from its 16x16 macroblock and the next ones right and below, and LOWRES_SAME_INTRA
++ * after intra_since, for it and the blocks around it whose edge pixels the intra predictions
++ * read. -1 marks neither. */
++static void lowres_same_map( uint8_t *same, uint8_t *tmp, const int *changed, int mb_w, int mb_h, int inter_since, int intra_since )
++{
++    const int n = mb_w * mb_h;
++    const int inter = inter_since < 0 ? INT_MIN : inter_since;
++    const int intra = intra_since < 0 ? INT_MIN : intra_since;
++    for( int i = 0; i < n; i++ )
++        same[i] = (changed[i] > inter) | ((changed[i] > intra) << 1);
++    for( int y = 0; y < mb_h; y++ )
++    {
++        const uint8_t *r = same + y*mb_w;
++        uint8_t *t = tmp + y*mb_w;
++        for( int x = 0; x < mb_w; x++ )
++        {
++            int l = x > 0 ? r[x-1] : 0;
++            int r1 = x + 1 < mb_w ? r[x+1] : 0;
++            int r2 = x + 2 < mb_w ? r[x+2] : 0;
++            t[x] = ((r[x] | r1) & LOWRES_SAME_INTER) | ((l | r[x] | r1 | r2) & LOWRES_SAME_INTRA);
++        }
++    }
++    for( int y = 0; y < mb_h; y++ )
++    {
++        const uint8_t *t = tmp + y*mb_w;
++        const uint8_t *up = y > 0 ? t - mb_w : NULL;
++        const uint8_t *dn = y + 1 < mb_h ? t + mb_w : NULL;
++        uint8_t *o = same + y*mb_w;
++        for( int x = 0; x < mb_w; x++ )
++        {
++            int d = dn ? dn[x] : 0;
++            int u = up ? up[x] : 0;
++            int stale = ((t[x] | d) & LOWRES_SAME_INTER) | ((u | t[x] | d) & LOWRES_SAME_INTRA);
++            o[x] = ~stale & ((inter_since >= 0 ? LOWRES_SAME_INTER : 0) | (intra_since >= 0 ? LOWRES_SAME_INTRA : 0));
++        }
++    }
++}
++
++/* same, where not NULL, marks the blocks whose lowres results stand (lowres_same_map): one
++ * unchanged since the reference (LOWRES_SAME_INTER) is the reference's at a zero vector, whose
++ * fast skip scores it 0, and one unchanged since i_intra_cost was computed (LOWRES_SAME_INTRA)
++ * keeps the intra cost held. */
+ static void slicetype_mb_cost( x264_t *h, x264_mb_analysis_t *a,
+                                x264_frame_t **frames, int p0, int p1, int b,
+                                int dist_scale_factor, int do_search[2], const x264_weight_t *w,
+-                               int *output_inter, int *output_intra )
++                               int *output_inter, int *output_intra, const uint8_t *same )
+ {
+     x264_frame_t *fref0 = frames[p0];
+     x264_frame_t *fref1 = frames[p1];
+@@ -541,8 +588,68 @@ static void slicetype_mb_cost( x264_t *h, x264_mb_analysis_t *a,
+     /* A small, arbitrary bias to avoid VBV problems caused by zero-residual lookahead blocks. */
+     int lowres_penalty = 4;
+ 
++    int inter_same = same && (same[i_mb_xy] & LOWRES_SAME_INTER);
++    int intra_same = same && (same[i_mb_xy] & LOWRES_SAME_INTRA);
++
++    /* A P block unchanged since the reference and since its intra cost, whose motion candidates
++     * (the blocks right and below, coded before it) all hold a zero vector, comes out as the full
++     * path leaves it: the zero-vector fast skip at cost 0, and the intra cost held. The last two
++     * blocks of a row take the full path, which sets the row's vertical vector limits. */
++    if( inter_same && intra_same && p0 != p1 && !b_bidir && do_search[0] && !fenc->b_intra_calculated
++        && i_mb_x < h->mb.i_mb_width - 2 )
++    {
++        int16_t (*fenc_mv)[2] = fenc_mvs[0];
++        int moved = M32( fenc_mv[1] );
++        if( i_mb_y < h->i_threadslice_end - 1 )
++            moved |= M32( fenc_mv[i_mb_stride] ) | M32( fenc_mv[i_mb_stride+1] )
++                   | (i_mb_x > 0 ? M32( fenc_mv[i_mb_stride-1] ) : 0);
++        if( !moved )
++        {
++            M32( fenc_mv[0] ) = 0;
++            *fenc_costs[0] = 0;
++            int i_icost = fenc->i_intra_cost[i_mb_xy];
++            int i_icost_aq = i_icost;
++            if( h->param.rc.i_aq_mode )
++                i_icost_aq = (i_icost_aq * fenc->i_inv_qscale_factor[i_mb_xy] + 128) >> 8;
++            output_intra[ROW_SATD] += i_icost_aq;
++            if( b_frame_score_mb )
++            {
++                output_intra[COST_EST] += i_icost;
++                output_intra[COST_EST_AQ] += i_icost_aq;
++            }
++            int bcost = (0 >> (BIT_DEPTH - 8)) + lowres_penalty;
++            int list = 1;
++            int b_intra = i_icost < bcost;
++            if( b_intra )
++            {
++                bcost = i_icost;
++                list = 0;
++            }
++            int bcost_aq = bcost;
++            if( h->param.rc.i_aq_mode )
++                bcost_aq = (bcost_aq * fenc->i_inv_qscale_factor[i_mb_xy] + 128) >> 8;
++            output_inter[ROW_SATD] += bcost_aq;
++            if( b_frame_score_mb )
++            {
++                output_inter[INTRA_MBS] += b_intra;
++                output_inter[COST_EST] += bcost;
++                output_inter[COST_EST_AQ] += bcost_aq;
++            }
++            fenc->lowres_costs[b-p0][p1-b][i_mb_xy] = X264_MIN( bcost, LOWRES_COST_MASK ) + (list << LOWRES_COST_SHIFT);
++            return;
++        }
++    }
++    int fenc_loaded = 0;
++#define LOAD_LOWRES_FENC \
++    if( !fenc_loaded ) \
++    { \
++        h->mc.copy[PIXEL_8x8]( h->mb.pic.p_fenc[0], FENC_STRIDE, &fenc->lowres[0][i_pel_offset], i_stride, 8 ); \
++        fenc_loaded = 1; \
++    }
++
+     h->mb.pic.p_fenc[0] = h->mb.pic.fenc_buf;
+-    h->mc.copy[PIXEL_8x8]( h->mb.pic.p_fenc[0], FENC_STRIDE, &fenc->lowres[0][i_pel_offset], i_stride, 8 );
++    if( !(inter_same && intra_same) )
++        LOAD_LOWRES_FENC
+ 
+     if( p0 == p1 )
+         goto lowres_intra_mb;
+@@ -683,6 +790,13 @@ static void slicetype_mb_cost( x264_t *h, x264_mb_analysis_t *a,
+              * since anything else is likely to have enough residual to not trigger the skip. */
+             if( !M32( m[l].mvp ) )
+             {
++                if( inter_same && !l && !b_bidir )
++                {
++                    m[l].cost = 0;
++                    M32( m[l].mv ) = 0;
++                    goto skip_motionest;
++                }
++                LOAD_LOWRES_FENC
+                 m[l].cost = h->pixf.mbcmp[PIXEL_8x8]( m[l].p_fenc[0], FENC_STRIDE, m[l].p_fref[0], m[l].i_stride[0] );
+                 if( m[l].cost < 64 )
+                 {
+@@ -691,6 +805,7 @@ static void slicetype_mb_cost( x264_t *h, x264_mb_analysis_t *a,
+                 }
+             }
+ 
++            LOAD_LOWRES_FENC
+             x264_me_search( h, &m[l], mvc, i_mvc );
+             m[l].cost -= a->p_cost_mv[0]; // remove mvcost from skip mbs
+             if( M32( m[l].mv ) )
+@@ -712,8 +827,21 @@ skip_motionest:
+         TRY_BIDIR( m[0].mv, m[1].mv, 5 );
+ 
+ lowres_intra_mb:
+-    if( !fenc->b_intra_calculated )
++    if( !fenc->b_intra_calculated && intra_same )
++    {
++        int i_icost_aq = fenc->i_intra_cost[i_mb_xy];
++        if( h->param.rc.i_aq_mode )
++            i_icost_aq = (i_icost_aq * fenc->i_inv_qscale_factor[i_mb_xy] + 128) >> 8;
++        output_intra[ROW_SATD] += i_icost_aq;
++        if( b_frame_score_mb )
++        {
++            output_intra[COST_EST] += fenc->i_intra_cost[i_mb_xy];
++            output_intra[COST_EST_AQ] += i_icost_aq;
++        }
++    }
++    else if( !fenc->b_intra_calculated )
+     {
++        LOAD_LOWRES_FENC
+         ALIGNED_ARRAY_16( pixel, edge,[36] );
+         pixel *pix = &pix1[8+FDEC_STRIDE];
+         pixel *src = &fenc->lowres[0][i_pel_offset];
+@@ -789,6 +917,7 @@ lowres_intra_mb:
+ 
+     fenc->lowres_costs[b-p0][p1-b][i_mb_xy] = X264_MIN( i_bcost, LOWRES_COST_MASK ) + (list_used << LOWRES_COST_SHIFT);
+ }
++#undef LOAD_LOWRES_FENC
+ #undef TRY_BIDIR
+ 
+ #define NUM_MBS\
+@@ -809,6 +938,7 @@ typedef struct
+     const x264_weight_t *w;
+     int *output_inter;
+     int *output_intra;
++    const uint8_t *same;
+ } x264_slicetype_slice_t;
+ 
+ static void slicetype_slice_cost( x264_slicetype_slice_t *s )
+@@ -830,7 +960,7 @@ static void slicetype_slice_cost( x264_slicetype_slice_t *s )
+     for( h->mb.i_mb_y = start_y; h->mb.i_mb_y >= end_y; h->mb.i_mb_y-- )
+         for( h->mb.i_mb_x = start_x; h->mb.i_mb_x >= end_x; h->mb.i_mb_x-- )
+             slicetype_mb_cost( h, s->a, s->frames, s->p0, s->p1, s->b, s->dist_scale_factor,
+-                               s->do_search, s->w, s->output_inter, s->output_intra );
++                               s->do_search, s->w, s->output_inter, s->output_intra, s->same );
+ }
+ 
+ static int slicetype_frame_cost( x264_t *h, x264_mb_analysis_t *a,
+@@ -869,6 +999,40 @@ static int slicetype_frame_cost( x264_t *h, x264_mb_analysis_t *a,
+         if( p1 != p0 )
+             dist_scale_factor = ( ((b-p0) << 8) + ((p1-p0) >> 1) ) / (p1-p0);
+ 
++        /* The macroblocks the input left unchanged keep the lowres results they had: since the
++         * reference's input frame, a P frame's zero-vector cost, and since i_intra_cost was
++         * computed under the same settings (the edge rows, which only some rate controls visit,
++         * and the subpel level, which adds predictions), the intra cost. Every frame's lowres
++         * planes are filtered from the input frame it holds (x264_frame_init_lowres). */
++        const int *changed = h->frames.mb_input_changed;
++        int inter_since = -1, intra_since = -1;
++        int do_edges = h->param.rc.b_mb_tree || h->param.rc.i_vbv_buffer_size || h->mb.i_mb_width <= 2 || h->mb.i_mb_height <= 2;
++        int cost_key = 1 + do_edges + 2 * (h->param.analyse.i_subpel_refine > 1);
++        int intra_now = !fenc->b_intra_calculated;
++        int current = changed && fenc->i_input_frame >= 0 && fenc->i_lowres_frame == fenc->i_input_frame;
++        if( current && do_search[0] && b == p1 && p0 != p1 && !w[0].weightfn
++            && frames[p0]->i_input_frame >= 0 && frames[p0]->i_lowres_frame == frames[p0]->i_input_frame
++            && h->frames.i_input_all_changed <= frames[p0]->i_input_frame )
++            inter_since = frames[p0]->i_input_frame;
++        if( current && intra_now && fenc->i_cost_frame >= 0 && fenc->i_cost_key == cost_key
++            && h->frames.i_input_all_changed <= fenc->i_cost_frame )
++            intra_since = fenc->i_cost_frame;
++        uint8_t *same = NULL;
++        uint8_t *same_tmp = NULL;
++        if( !h->param.b_opencl && (inter_since >= 0 || intra_since >= 0) )
++        {
++            same = x264_malloc( h->mb.i_mb_count );
++            same_tmp = x264_malloc( h->mb.i_mb_count );
++            if( same && same_tmp )
++                lowres_same_map( same, same_tmp, changed, h->mb.i_mb_width, h->mb.i_mb_height, inter_since, intra_since );
++            else
++            {
++                x264_free( same );
++                same = NULL;
++            }
++            x264_free( same_tmp );
++        }
++
+         int output_buf_size = h->mb.i_mb_height + (NUM_INTS + PAD_SIZE) * h->param.i_lookahead_threads;
+         int *output_inter[X264_LOOKAHEAD_THREAD_MAX+1];
+         int *output_intra[X264_LOOKAHEAD_THREAD_MAX+1];
+@@ -912,7 +1076,7 @@ static int slicetype_frame_cost( x264_t *h, x264_mb_analysis_t *a,
+                     t->mb.b_chroma_me = h->mb.b_chroma_me;
+ 
+                     s[i] = (x264_slicetype_slice_t){ t, a, frames, p0, p1, b, dist_scale_factor, do_search, w,
+-                        output_inter[i], output_intra[i] };
++                        output_inter[i], output_intra[i], same };
+ 
+                     t->i_threadslice_start = ((h->mb.i_mb_height *  i    + h->param.i_lookahead_threads/2) / h->param.i_lookahead_threads);
+                     t->i_threadslice_end   = ((h->mb.i_mb_height * (i+1) + h->param.i_lookahead_threads/2) / h->param.i_lookahead_threads);
+@@ -939,7 +1103,7 @@ static int slicetype_frame_cost( x264_t *h, x264_mb_analysis_t *a,
+                 memset( output_intra[0], 0, (output_buf_size - PAD_SIZE) * sizeof(int) );
+                 output_inter[0][NUM_ROWS] = output_intra[0][NUM_ROWS] = h->mb.i_mb_height;
+                 x264_slicetype_slice_t s = (x264_slicetype_slice_t){ h, a, frames, p0, p1, b, dist_scale_factor, do_search, w,
+-                    output_inter[0], output_intra[0] };
++                    output_inter[0], output_intra[0], same };
+                 slicetype_slice_cost( &s );
+             }
+ 
+@@ -980,6 +1144,13 @@ static int slicetype_frame_cost( x264_t *h, x264_mb_analysis_t *a,
+                 }
+             }
+ 
++            x264_free( same );
++            if( intra_now )
++            {
++                fenc->i_cost_frame = current ? fenc->i_input_frame : -1;
++                fenc->i_cost_key = cost_key;
++            }
++
+             i_score = fenc->i_cost_est[b-p0][p1-b];
+             if( b != p1 )
+                 i_score = (uint64_t)i_score * 100 / (120 + h->param.i_bframe_bias);
+-- 
+2.47.3
+
