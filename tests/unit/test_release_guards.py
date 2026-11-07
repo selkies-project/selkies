@@ -47,7 +47,8 @@ def gate(source: str, name: str) -> str:
     return match.group(1)
 
 
-def runs(expression: str, event: str, ref: str, tag_prefix: str, release: Optional[bool] = None) -> bool:
+def runs(expression: str, event: str, ref: str, tag_prefix: str, release: Optional[bool] = None,
+         repository: str = "selkies-project/selkies") -> bool:
     """Evaluate the expressions' comparisons and boolean operators in an event context.
 
     A called workflow sees its caller's event, so ``event`` is ``push`` or
@@ -55,7 +56,7 @@ def runs(expression: str, event: str, ref: str, tag_prefix: str, release: Option
     ``workflow_call`` input a standalone dispatch does not declare (``None``).
     """
     ref_name = ref.removeprefix("refs/heads/").removeprefix("refs/tags/")
-    github = SimpleNamespace(event_name=event, ref=ref, ref_name=ref_name)
+    github = SimpleNamespace(event_name=event, ref=ref, ref_name=ref_name, repository=repository)
     inputs = SimpleNamespace(tag_prefix=tag_prefix, release=release)
     expression = expression.replace("&&", "and").replace("||", "or")
     return bool(eval(expression, {  # noqa: S307 - fixed workflow expressions, no globals or builtins
@@ -81,12 +82,60 @@ for name in ("build", "addons"):
     for label, event, ref, prefix, release, expected in cases:
         check(f"{name}: {label}", runs(expression, event, ref, prefix, release) == expected,
               f"event={event} ref={ref} tag_prefix={prefix!r} release={release!r}")
+    check(f"{name}: component checkout never publishes canonical images",
+          not runs(expression, "push", "refs/heads/main", "main", False,
+                   repository="selkies-project/pixelflux"))
 check("video and addon jobs use the same release gate", gate(images, "build") == gate(images, "addons"))
 cleanup = gate(images, "cleanup").replace(" && !cancelled()", "")
 check("tag releases leave registry cleanup alone", not runs(cleanup, "push", "refs/tags/2.0.0rc0", "2.0.0rc0", True))
 check("main builds retain registry cleanup", runs(cleanup, "push", "refs/heads/main", "main", False))
+check("component builds never prune canonical images",
+      not runs(cleanup, "push", "refs/heads/main", "main", False,
+               repository="selkies-project/pcmflux"))
+
+for name in ("merge", "addons-merge"):
+    check(f"{name} is restricted to canonical Selkies",
+          "github.repository == 'selkies-project/selkies'" in job(images, name))
+for filename, names in (
+    ("ci.yaml", ("images", "pre-release")),
+    ("docs.yaml", ("publish",)),
+    ("release.yaml", ("check",)),
+    ("devcontainer-feature.yaml", ("publish",)),
+    ("build-reference.yaml", ("attach",)),
+):
+    source = workflow(filename)
+    for name in names:
+        check(f"{filename} {name} is restricted to canonical Selkies",
+              "github.repository == 'selkies-project/selkies'" in job(source, name))
+for filename, names in (
+    ("tests.yaml", ("unit", "server-unit", "wheel", "wheels", "suites")),
+    ("fuzz.yaml", ("fuzz",)),
+):
+    source = workflow(filename)
+    for name in names:
+        check(f"{filename} {name} schedules only in canonical Selkies",
+              "github.event_name != 'schedule' || github.repository == 'selkies-project/selkies'" in job(source, name))
 
 published = workflow("release-published.yaml")
+for name in ("latest", "pypi-pcmflux", "pypi-pixelflux", "pypi"):
+    check(f"published {name} is restricted to canonical Selkies",
+          "github.repository == 'selkies-project/selkies'" in job(published, name))
+transition = workflow("sync-legacy-component.yaml")
+promotion = job(transition, "promote")
+check("main promotion waits for native wheels and the exact prerelease",
+      "needs: [sync, build, release]" in promotion
+      and "needs.build.result == 'success'" in promotion
+      and "needs.release.result == 'success'" in promotion)
+check("main promotion can write pull requests but not main contents",
+      "contents: read" in promotion and "pull-requests: write" in promotion
+      and "contents: write" not in promotion)
+promoter = open(os.path.join(REPO, ".github", "scripts", "promote-component-snapshot.sh")).read()
+for command in ("gh pr merge", "gh pr review", "gh pr close", "git push"):
+    check(f"promotion never runs {command}", command not in promoter)
+check("promotion binds the reviewed PR to the exact built snapshot",
+      '--base main --head "$branch"' in promoter and 'pull["headRefOid"] == mirror' in promoter
+      and 'merge-base --is-ancestor "$mirror_commit" main' in promoter)
+
 needs = {}
 for name in ("pypi-pcmflux", "pypi-pixelflux", "pypi"):
     match = re.search(r"^    needs: (.*)$", job(published, name), re.M)

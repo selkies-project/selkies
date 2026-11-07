@@ -115,7 +115,7 @@ jobs:
   attach:
     name: Attach the reference to its release
     needs: build
-    if: ${{ inputs.attach }}
+    if: ${{ github.repository == 'selkies-project/selkies' && inputs.attach }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -6,6 +6,7 @@
 set -euo pipefail
 
 readonly helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/sync-component-snapshot.sh"
+readonly promoter="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/promote-component-snapshot.sh"
 readonly evidence=${1:?usage: test-sync-component-snapshot.sh EVIDENCE_DIRECTORY}
 mkdir -p -- "$evidence"
 work="$(mktemp -d "${evidence%/}/fixture.XXXXXXXX")"
@@ -49,19 +50,20 @@ commit_all() {
 }
 
 run_helper() {
+    local source_ref=${1:-monorepo-import}
     : > "$output"
     "$helper" \
         --component pcmflux \
         --source-dir "$source" \
         --source-repository selkies-project/selkies \
-        --source-ref monorepo-import \
+        --source-ref "$source_ref" \
         --target-dir "$target" \
         --target-repository selkies-project/pcmflux \
         --output "$output"
 }
 
 sync_and_push() {
-    run_helper
+    run_helper "${1:-monorepo-import}"
     if [[ "$(output_value changed)" == true ]]; then
         git -C "$target" push -q origin refs/heads/monorepo-import:refs/heads/monorepo-import
     fi
@@ -72,8 +74,23 @@ fetch_mirror() {
     git -C "$target" fetch -q --no-tags origin refs/heads/monorepo-import:refs/remotes/origin/monorepo-import
 }
 
+run_promoter() {
+    local source_ref=$1 mirror_commit=$2 source_commit=$3
+    : > "$output"
+    "$promoter" \
+        --component pcmflux \
+        --source-ref "$source_ref" \
+        --source-commit "$source_commit" \
+        --mirror-commit "$mirror_commit" \
+        --target-dir "$target" \
+        --target-repository selkies-project/pcmflux \
+        --run-id 12345 \
+        --dry-run \
+        --output "$output"
+}
+
 assert_snapshot() {
-    local source_commit=$1 mirror_commit=$2 actual
+    local source_commit=$1 mirror_commit=$2 source_ref=${3:-monorepo-import} actual
     actual="$(git -C "$target" rev-parse "$mirror_commit^{tree}")"
     GIT_INDEX_FILE="$work/verify.index" git -C "$target" read-tree "$mirror_commit^{tree}"
     GIT_INDEX_FILE="$work/verify.index" git -C "$target" update-index --force-remove -- .monorepo-transition.json .github/workflows/monorepo-transition.yml
@@ -81,16 +98,16 @@ assert_snapshot() {
     rm -f -- "$work/verify.index"
     assert_equal "$(git -C "$source" rev-parse "$source_commit^{tree}")" "$actual" 'snapshot differs from full canonical source'
     git -C "$target" merge-base --is-ancestor "$source_commit" "$mirror_commit" || fail 'canonical source is outside snapshot ancestry'
-    python3 - "$target" "$mirror_commit" "$source_commit" <<'PY'
+    python3 - "$target" "$mirror_commit" "$source_commit" "$source_ref" <<'PY'
 import json
 import subprocess
 import sys
 
-repository, mirror, source = sys.argv[1:]
+repository, mirror, source, source_ref = sys.argv[1:]
 raw = subprocess.check_output(["git", "-C", repository, "show", f"{mirror}:.monorepo-transition.json"])
 metadata = json.loads(raw)
 assert metadata["canonical_repository"] == "selkies-project/selkies"
-assert metadata["canonical_ref"] == "monorepo-import"
+assert metadata["canonical_ref"] == source_ref
 assert metadata["canonical_commit"] == source
 assert metadata["component"] == "pcmflux"
 PY
@@ -238,4 +255,41 @@ assert_equal "$(git -C "$target" show main:.github/workflows/monorepo-transition
 assert_snapshot "$(git -C "$source" rev-parse HEAD)" "$mirror_controller"
 assert_equal "$mirror_controller" "$(sync_and_push)" 'final no-op commit'
 
-printf 'PASS initial=%s advanced=%s metadata=%s final=%s\n' "$mirror_one" "$mirror_two" "$mirror_three" "$mirror_controller"
+# A reviewed merge puts the exact consolidated tree and both histories on main.
+run_promoter monorepo-import "$mirror_controller" "$source_three"
+assert_equal open-or-update "$(output_value action)" 'pre-merge PR planning'
+git -C "$target" merge -q --no-ff monorepo-import -m 'Merge reviewed canonical component snapshot'
+git -C "$target" push -q origin main
+git -C "$target" merge-base --is-ancestor "$source_three" main || fail 'merged main lost canonical source ancestry'
+assert_equal "$(git -C "$target" rev-parse "$mirror_controller^{tree}")" "$(git -C "$target" rev-parse 'main^{tree}')" 'merged main tree'
+run_promoter monorepo-import "$mirror_controller" "$source_three"
+assert_equal none "$(output_value action)" 'post-merge PR idempotence'
+assert_equal up-to-date "$(output_value state)" 'post-merge promotion state'
+assert_equal "$mirror_controller" "$(sync_and_push)" 'post-merge snapshot no-op'
+
+# After cutover, canonical main drives the same staging branch without stale metadata.
+git -C "$repositories/canonical seed" switch -q -c main
+git -C "$repositories/canonical seed" push -q -u origin main
+git -C "$source" fetch -q origin main
+git -C "$source" switch -q -c main --track origin/main
+mirror_cutover="$(sync_and_push main)"
+assert_equal false "$(output_value build_required)" 'source-ref-only cutover build output'
+assert_snapshot "$source_three" "$mirror_cutover" main
+printf '// post-cutover owner change\n' >> "$repositories/canonical seed/crates/pcmflux/src/python.rs"
+commit_all "$repositories/canonical seed" 'Post-cutover canonical main change'
+source_four="$(git -C "$repositories/canonical seed" rev-parse HEAD)"
+git -C "$repositories/canonical seed" push -q
+git -C "$source" pull -q --ff-only
+mirror_four="$(sync_and_push main)"
+assert_equal true "$(output_value build_required)" 'post-cutover source build output'
+assert_snapshot "$source_four" "$mirror_four" main
+run_promoter main "$mirror_four" "$source_four"
+assert_equal open-or-update "$(output_value action)" 'post-cutover PR planning'
+git -C "$target" merge -q --no-ff monorepo-import -m 'Merge reviewed canonical main update'
+git -C "$target" push -q origin main
+run_promoter main "$mirror_four" "$source_four"
+assert_equal none "$(output_value action)" 'post-cutover merged PR idempotence'
+assert_equal "$mirror_four" "$(sync_and_push main)" 'canonical main no-op after merged PR'
+
+printf 'PASS initial=%s advanced=%s metadata=%s final=%s cutover=%s merged=%s\n' \
+    "$mirror_one" "$mirror_two" "$mirror_three" "$mirror_controller" "$mirror_cutover" "$mirror_four"

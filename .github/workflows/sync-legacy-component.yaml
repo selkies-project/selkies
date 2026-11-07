@@ -224,3 +224,61 @@ jobs:
           prerelease: true
           make_latest: false
           files: wheelhouse/*.whl
+
+  promote:
+    name: Propose ${{ inputs.component }} promotion to main
+    needs: [sync, build, release]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.release.result == 'success' && (needs.sync.outputs.build_required == 'true' || inputs.retry_release) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out the protected destination
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: component
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the trusted promotion helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: selkies-project/selkies
+          ref: ${{ env.CANONICAL_REF }}
+          path: canonical
+          persist-credentials: false
+
+      - name: Open or refresh the reviewed pull request
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPONENT: ${{ inputs.component }}
+          TARGET_REPOSITORY: selkies-project/${{ inputs.component }}
+          SOURCE_COMMIT: ${{ needs.sync.outputs.source_commit }}
+          MIRROR_COMMIT: ${{ needs.sync.outputs.mirror_commit }}
+        run: |
+          set -euo pipefail
+          git -C component fetch --no-tags origin refs/heads/monorepo-import:refs/remotes/origin/monorepo-import
+          canonical/.github/scripts/promote-component-snapshot.sh \
+            --component "${COMPONENT}" \
+            --source-ref "${CANONICAL_REF}" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --mirror-commit "${MIRROR_COMMIT}" \
+            --target-dir component \
+            --target-repository "${TARGET_REPOSITORY}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --output "${GITHUB_OUTPUT}"
+
+      - name: Link the reviewed promotion
+        env:
+          PULL_REQUEST_URL: ${{ steps.pull-request.outputs.pull_request_url }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PULL_REQUEST_URL}" ]; then
+            echo "Review and merge ${PULL_REQUEST_URL}" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo 'Main already contains the exact snapshot and its canonical ancestry.' >> "${GITHUB_STEP_SUMMARY}"
+          fi

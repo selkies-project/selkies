@@ -54,7 +54,7 @@ env:
 jobs:
   build:
     name: ${{ matrix.flavor.name }} (${{ matrix.arch.name }})
-    if: ${{ github.ref == 'refs/heads/main' || (inputs.release && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name) }}
+    if: ${{ github.repository == 'selkies-project/selkies' && (github.ref == 'refs/heads/main' || (inputs.release && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name)) }}
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -186,6 +186,7 @@ jobs:
   merge:
     name: Merge base and desktop manifests (${{ matrix.flavor }})
     needs: build
+    if: github.repository == 'selkies-project/selkies'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -238,7 +239,7 @@ jobs:
           publish "${IMAGE_NAME}" /tmp/digests/desktop
 
   addons:
-    if: ${{ github.ref == 'refs/heads/main' || (inputs.release && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name) }}
+    if: ${{ github.repository == 'selkies-project/selkies' && (github.ref == 'refs/heads/main' || (inputs.release && startsWith(github.ref, 'refs/tags/') && inputs.tag_prefix == github.ref_name)) }}
     name: ${{ matrix.addon }} (${{ matrix.arch.name }})
     # The TURN server and the TURN REST credential service documented in
     # docs/components/index.md; independent of the wheel
@@ -287,6 +288,7 @@ jobs:
   addons-merge:
     name: Merge multi-arch manifests (${{ matrix.addon }})
     needs: addons
+    if: github.repository == 'selkies-project/selkies'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -334,7 +336,7 @@ jobs:
     # Each push moves the `main-*` tags onto new manifests, and the ones they
     # pointed at before stay in the registry untagged, platform and attestation
     # children included. Nothing else ever removes them.
-    if: ${{ github.ref == 'refs/heads/main' && !cancelled() }}
+    if: ${{ github.repository == 'selkies-project/selkies' && github.ref == 'refs/heads/main' && !cancelled() }}
     runs-on: ubuntu-latest
     # The action is not safe to run against a package twice at once, and a
     # release build can overlap a push build

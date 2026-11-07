@@ -61,7 +61,8 @@ jobs:
     name: Unit suites (Python ${{ matrix.python-version }})
     needs: [wheel]
     if: >-
-      ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
+      ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
+          && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -118,6 +119,7 @@ jobs:
   # The server's own unit tier, which runs wherever the suites' does
   server-unit:
     name: Unit tests (server)
+    if: github.event_name != 'schedule' || github.repository == 'selkies-project/selkies'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -153,14 +155,14 @@ jobs:
   # has already built them; a standalone run builds all three here.
   wheel:
     name: Build wheel
-    if: ${{ !inputs.wheels_ready }}
+    if: ${{ !inputs.wheels_ready && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-wheel.yaml
 
   wheels:
     name: Capture stack (local crates)
-    if: ${{ !inputs.wheels_ready }}
+    if: ${{ !inputs.wheels_ready && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
@@ -172,7 +174,8 @@ jobs:
     needs: [wheel, wheels]
     if: >-
       ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
-          && contains(fromJSON('["success", "skipped"]'), needs.wheels.result) }}
+          && contains(fromJSON('["success", "skipped"]'), needs.wheels.result)
+          && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 120
     strategy:
