@@ -38,7 +38,7 @@ retry dnf install -y \
     wayland-devel libinput-devel systemd-devel libxkbcommon-devel pixman-devel libxcb-devel \
     pulseaudio-libs-devel pipewire-devel \
     ruby rubygems ruby-devel rpm-build
-for package in libvpx-devel svt-av1-devel libdav1d-devel; do
+for package in svt-av1-devel libdav1d-devel; do
     dnf install -y "${package}" || echo "${package}: not in this distribution"
 done
 # The i686 glibc builds the interposer's 32-bit variant, which the Wine and

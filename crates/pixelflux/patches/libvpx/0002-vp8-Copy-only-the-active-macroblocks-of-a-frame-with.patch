@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Sat, 7 Nov 2026 16:35:40 -0500
+Subject: [PATCH 2/2] vp8: Copy only the active macroblocks of a frame with an
+ active map
+
+The partial copy of a pushed frame ran only with a lookahead of one buffer and no frame flags,
+and the lookahead is always two buffers deep (the previous frame is kept), so it never ran.
+Each lookahead buffer now records, per macroblock, whether the picture changed since the
+buffer last held it, and a push with an active map copies the active macroblocks and those
+that changed since, whatever the frame's flags, copying whole only without a map or for a
+forced key frame. A run of macroblocks is clipped to the picture, since a height or width that
+is not a multiple of 16 leaves a partial last row or column, and the rectangle copy reads past
+the source and skips the border extension where a rectangle runs past the picture's edge.
+
+The stream comes out bit for bit the same as with the whole copy, at 1920x1080, 2560x1600 and
+1366x768, constant quantizer and constant rate, one and eight threads, on a still screen, a
+256x256 changing box and a scroll.
+---
+ vp8/encoder/lookahead.c | 61 +++++++++++++++++++++++++++++++----------
+ vp8/encoder/lookahead.h |  7 +++--
+ 2 files changed, 51 insertions(+), 17 deletions(-)
+
+diff --git a/vp8/encoder/lookahead.c b/vp8/encoder/lookahead.c
+index 49f851d..87d8b53 100644
+--- a/vp8/encoder/lookahead.c
++++ b/vp8/encoder/lookahead.c
+@@ -9,7 +9,9 @@
+  */
+ #include <assert.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include "vpx_config.h"
++#include "vpx/vpx_encoder.h"
+ #include "lookahead.h"
+ #include "vp8/common/extend.h"
+ 
+@@ -21,6 +23,7 @@ struct lookahead_ctx {
+   unsigned int read_idx;       /* Read index */
+   unsigned int write_idx;      /* Write index */
+   struct lookahead_entry *buf; /* Buffer list */
++  unsigned int mbs;            /* Macroblocks the stale maps cover */
+ };
+ 
+ /* Return the buffer at the given absolute index and increment the index */
+@@ -42,6 +45,7 @@ void vp8_lookahead_destroy(struct lookahead_ctx *ctx) {
+ 
+       for (i = 0; i < ctx->max_sz; ++i) {
+         vp8_yv12_de_alloc_frame_buffer(&ctx->buf[i].img);
++        free(ctx->buf[i].stale);
+       }
+       free(ctx->buf);
+     }
+@@ -73,6 +77,7 @@ struct lookahead_ctx *vp8_lookahead_init(unsigned int width,
+   ctx = calloc(1, sizeof(*ctx));
+   if (ctx) {
+     ctx->max_sz = depth;
++    ctx->mbs = (width >> 4) * (height >> 4);
+     ctx->buf = calloc(depth, sizeof(*ctx->buf));
+     if (!ctx->buf) goto bail;
+     for (i = 0; i < depth; ++i) {
+@@ -80,6 +85,9 @@ struct lookahead_ctx *vp8_lookahead_init(unsigned int width,
+                                       VP8BORDERINPIXELS)) {
+         goto bail;
+       }
++      ctx->buf[i].stale = malloc(ctx->mbs);
++      if (!ctx->buf[i].stale) goto bail;
++      memset(ctx->buf[i].stale, 1, ctx->mbs);
+     }
+   }
+   return ctx;
+@@ -100,43 +108,66 @@ int vp8_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
+   ctx->sz++;
+   buf = pop(ctx, &ctx->write_idx);
+ 
+-  /* Only do this partial copy if the following conditions are all met:
+-   * 1. Lookahead queue has has size of 1.
+-   * 2. Active map is provided.
+-   * 3. This is not a key frame, golden nor altref frame.
+-   */
+-  if (ctx->max_sz == 1 && active_map && !flags) {
++  /* A buffer holds the picture it last took, so a push with an active map
++   * copies the active macroblocks and those that changed since (its stale
++   * map), and the whole picture where there is no map or a key frame is
++   * forced. The other buffers note the macroblocks this frame changes, for
++   * their own next push. */
++  if (active_map && !(flags & VPX_EFLAG_FORCE_KF) &&
++      (unsigned int)(mb_rows * mb_cols) == ctx->mbs) {
++    unsigned int i;
++    for (i = 0; i < ctx->max_sz; ++i) {
++      unsigned char *stale = ctx->buf[i].stale;
++      unsigned int b;
++      if (ctx->buf + i == buf) continue;
++      for (b = 0; b < ctx->mbs; ++b) stale[b] |= active_map[b];
++    }
+     for (row = 0; row < mb_rows; ++row) {
++      const unsigned char *stale = buf->stale + row * mb_cols;
+       col = 0;
+ 
+       while (1) {
+-        /* Find the first active macroblock in this row. */
++        /* Find the first macroblock in this row to copy. */
+         for (; col < mb_cols; ++col) {
+-          if (active_map[col]) break;
++          if (active_map[col] | stale[col]) break;
+         }
+ 
+-        /* No more active macroblock in this row. */
++        /* No more such macroblock in this row. */
+         if (col == mb_cols) break;
+ 
+-        /* Find the end of active region in this row. */
++        /* Find the end of the run. */
+         active_end = col;
+ 
+         for (; active_end < mb_cols; ++active_end) {
+-          if (!active_map[active_end]) break;
++          if (!(active_map[active_end] | stale[active_end])) break;
+         }
+ 
+-        /* Only copy this active region. */
+-        vp8_copy_and_extend_frame_with_rect(src, &buf->img, row << 4, col << 4,
+-                                            16, (active_end - col) << 4);
++        /* Only copy this run, clipped to the picture: a frame whose height or
++         * width is not a multiple of 16 has a last row or column of partial
++         * macroblocks, and the rectangle copy extends the border only where a
++         * rectangle ends at the picture's edge. */
++        {
++          int h = 16, w = (active_end - col) << 4;
++          if ((row << 4) + h > src->y_height) h = src->y_height - (row << 4);
++          if ((col << 4) + w > src->y_width) w = src->y_width - (col << 4);
++          vp8_copy_and_extend_frame_with_rect(src, &buf->img, row << 4,
++                                              col << 4, h, w);
++        }
+ 
+-        /* Start again from the end of this active region. */
++        /* Start again from the end of this run. */
+         col = active_end;
+       }
+ 
+       active_map += mb_cols;
+     }
++    memset(buf->stale, 0, ctx->mbs);
+   } else {
++    unsigned int i;
++    for (i = 0; i < ctx->max_sz; ++i) {
++      if (ctx->buf + i != buf) memset(ctx->buf[i].stale, 1, ctx->mbs);
++    }
+     vp8_copy_and_extend_frame(src, &buf->img);
++    memset(buf->stale, 0, ctx->mbs);
+   }
+   buf->ts_start = ts_start;
+   buf->ts_end = ts_end;
+diff --git a/vp8/encoder/lookahead.h b/vp8/encoder/lookahead.h
+index bf04011..cfbb2d3 100644
+--- a/vp8/encoder/lookahead.h
++++ b/vp8/encoder/lookahead.h
+@@ -21,6 +21,9 @@ struct lookahead_entry {
+   int64_t ts_start;
+   int64_t ts_end;
+   unsigned int flags;
++  /* Per macroblock, whether the picture changed since this buffer last held
++   * it: what a push with an active map copies besides the active ones. */
++  unsigned char *stale;
+ };
+ 
+ struct lookahead_ctx;
+@@ -46,8 +49,8 @@ void vp8_lookahead_destroy(struct lookahead_ctx *ctx);
+  * This function will copy the source image into a new framebuffer with
+  * the expected stride/border.
+  *
+- * If active_map is non-NULL and there is only one frame in the queue, then copy
+- * only active macroblocks.
++ * If active_map is non-NULL and no key frame is forced, copy only the active
++ * macroblocks and those that changed since the buffer last held the picture.
+  *
+  * \param[in] ctx         Pointer to the lookahead context
+  * \param[in] src         Pointer to the image to enqueue
+-- 
+2.47.3
+

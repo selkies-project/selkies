@@ -19,7 +19,10 @@
 //! at most so many a frame, taken in turn from where the last plan stopped so a large set is
 //! refined across frames rather than in one, and marks them clean once coded. A whole frame
 //! coded at the paint-over quality cleans every block it did not see change; a key frame at the
-//! rate control's quality leaves every block unclean. Nothing reads pixels: the damage source
+//! rate control's quality leaves every block unclean. A block that held still and is clean is
+//! constant (`BlockLedger::constant`): a frame of the rate control's may code it as a skip
+//! without analysis (`FrameEncoder::constant_blocks`), since its reference already holds it at
+//! the cleanup's quality. Nothing reads pixels: the damage source
 //! did the detection, and a source that over-reports (a client damaging its whole surface)
 //! only refines less, never wrongly.
 
@@ -402,6 +405,18 @@ impl BlockLedger {
         self.still.iter().map(|&s| s > 0)
     }
 
+    /// Whether each block, in raster order, held still this frame and is clean: coded at the
+    /// cleanup's quality since it last changed, so a frame of the rate control's may code it as
+    /// a skip without analysis (`FrameEncoder::constant_blocks`). A still block not yet clean is
+    /// left to the encoder, whose rate control refines it as it codes the frame; a skip there
+    /// would hold it at the quality it was coded at while moving.
+    pub fn constant(&self) -> impl Iterator<Item = bool> + '_ {
+        self.still
+            .iter()
+            .zip(&self.clean)
+            .map(|(&still, &clean)| still > 0 && clean)
+    }
+
     /// The number of blocks in the region.
     pub fn blocks(&self) -> usize {
         self.cols * self.rows
@@ -435,6 +450,26 @@ mod tests {
 
     /// A refresh at the paint-over quality cleans the blocks that held still without refining
     /// them: a key-frame cleanup still has them to do.
+    /// A block is constant once it held still and was cleaned; a change makes it variable
+    /// again, and a still block the cleanup has not reached stays variable.
+    #[test]
+    fn a_still_clean_block_is_constant_until_it_changes() {
+        let mut ledger = BlockLedger::new(64, 32);
+        ledger.frame([]);
+        assert!(ledger.constant().all(|c| !c), "nothing is clean yet");
+        ledger.cleaned();
+        ledger.frame([]);
+        assert!(ledger.constant().all(|c| c));
+        ledger.frame([&Rectangle::new((0, 0).into(), (16, 16).into())]);
+        let constant: Vec<bool> = ledger.constant().collect();
+        assert_eq!(
+            constant,
+            vec![false, true, true, true, true, true, true, true]
+        );
+        ledger.frame([]);
+        assert!(!ledger.constant().next().unwrap(), "still but unclean");
+    }
+
     #[test]
     fn a_refresh_cleans_without_refining() {
         let mut ledger = BlockLedger::new(64, 64);

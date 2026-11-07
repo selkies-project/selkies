@@ -132,11 +132,14 @@ before-all = """
             cmake --install build)
     }
 
+    # patches/libvpx copies only the blocks a frame's active map leaves active
+    # (scripts/build-libvpx.sh builds the same for every other build).
     build_libvpx() {
         (cd /tmp && \
             clone_source d168454ecd099805c675d4a98c66f4891373302a v1.15.2 libvpx \
                 https://chromium.googlesource.com/webm/libvpx https://github.com/webmproject/libvpx.git && \
             cd libvpx && \
+            git apply {package}/patches/libvpx/*.patch && \
             ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples \
                 --disable-tools --disable-docs --disable-unit-tests --enable-vp9-highbitdepth \
                 $([ "$(uname -m)" = x86_64 ] && echo --as=nasm) && \

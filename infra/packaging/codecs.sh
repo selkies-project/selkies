@@ -8,10 +8,12 @@
 # the environment that points the build at them.
 #
 # pixelflux binds libx264, x265, libvpx, SVT-AV1, dav1d, and libde265 from the
-# copies it links. libx264 is always built here, with the patches pixelflux
-# carries (its patches/x264), since pixelflux reads the API they add. Each one the distribution carries at the floor pixelflux's
+# copies it links. libx264 and libvpx are always built here, with the patches
+# pixelflux carries (its patches/x264 and patches/libvpx): pixelflux reads the
+# API the x264 ones add, and the libvpx ones copy only the blocks a frame's
+# active map leaves active. Each other one the distribution carries at the floor pixelflux's
 # codec-sys names (pkg-config answers for it) is linked from the distribution
-# and becomes a package dependency; each one it lacks (x264, x265, and
+# and becomes a package dependency; each one it lacks (x265 and
 # libde265 on Fedora, all of them on EL and on the AppImage's glibc floor) is
 # built here from the source pixelflux's own wheels build, the commit read out
 # of the pixelflux checkout the server is built against so the two never drift,
@@ -117,6 +119,7 @@ build_x265() {
 
 build_libvpx() {
     fetch libvpx
+    git -C "${PREFIX}/src/libvpx" apply "${CRATE}"/patches/libvpx/*.patch
     as=""
     [ "$(uname -m)" != x86_64 ] || as="--as=nasm"
     # shellcheck disable=SC2086  # as is one flag or none
@@ -163,7 +166,8 @@ for entry in x264:x264:SYSTEM_DEPS_X264_LINK=static x265:x265:X265_STATIC=1 \
     pkg="${rest%%:*}"
     static="${rest#*:}"
     min="$(floor "${pkg}")"
-    if [ "${name}" != x264 ] && pkg-config --exists "${pkg}" && pkg-config --atleast-version="${min:-0}" "${pkg}"; then
+    if [ "${name}" != x264 ] && [ "${name}" != libvpx ] && pkg-config --exists "${pkg}" \
+            && pkg-config --atleast-version="${min:-0}" "${pkg}"; then
         echo "codecs: ${pkg} $(pkg-config --modversion "${pkg}") from the distribution"
         continue
     fi

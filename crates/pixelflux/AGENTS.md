@@ -273,6 +273,15 @@ An 8-bit 4:2:0 picture reaches x264 as NV12 laid out as its own frames (`Nv12Pla
 next encode as the previous input, so the CPU path converts into two pictures in turn and the X11 capture keeps that
 pool surface out of its pool until an encode no longer reads it (`x264_encoder_release_input` frees it for a resize):
 a 2560x1600 scroll took 6.7 ms of a frame where it took 7.4.
+libvpx is built the same way, from the release the recipe pins with the patches under `patches/libvpx`
+(`scripts/build-libvpx.sh`; `infra/packaging/patched-codecs.sh` builds both for Selkies), never from a
+distribution. The blocks the ledger marks still and clean reach every libvpx session as its active map
+(`FrameEncoder::constant_blocks`, `VpxEncoder::constant_blocks`), on a frame of the rate control's that predicts
+from the frame before: libvpx itself codes an inactive macroblock as a zero-motion skip without a search (VP8) or a
+superblock of them as one skip (VP9), and the patches copy only the active blocks, and those changed since the
+buffer last held the picture, into the lookahead buffer the frame is coded from, bit for bit the stream of a whole
+copy. A still 1080p screen took VP8 0.9 ms a frame on eight threads where it took 1.6 without the map and VP9 0.6
+where it took 1.9; a block the cleanup has not reached stays active, so the rate control refines it as before.
 The crate's `Cargo.toml` is the one place the version lives: `setup.py` reads it, spelling a semver pre-release
 the PEP 440 way (`2.1.0-rc.1` is `2.1.0rc1` to pip), and the release workflow stamps the tag into the manifest
 and the lock, so a build ahead of a release carries the series version and a release the tag's.

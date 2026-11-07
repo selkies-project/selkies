@@ -77,13 +77,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential pkg-config cmake nasm clang libclang-dev \
-            libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
+            libx265-dev libsvtav1enc-dev libdav1d-dev libde265-dev libopus-dev \
             libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
             libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
             libxcb-xfixes0-dev libpulse-dev
-          # libx264 with the patches whose API pixelflux reads
-          sh infra/packaging/x264.sh "${HOME}/x264"
-          echo "PKG_CONFIG_PATH=${HOME}/x264/lib/pkgconfig" >> "${GITHUB_ENV}"
+          # libx264 and libvpx with the patches pixelflux carries
+          sh infra/packaging/patched-codecs.sh "${HOME}/codecs"
+          echo "PKG_CONFIG_PATH=${HOME}/codecs/lib/pkgconfig" >> "${GITHUB_ENV}"
 
       - id: build
         name: Build the reference archive

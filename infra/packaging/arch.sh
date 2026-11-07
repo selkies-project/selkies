@@ -21,7 +21,7 @@ retry() {
 # pipewire carries the headers the V4L2 interposer's PipeWire frame source is
 # built against (the library is loaded at runtime when an application uses it)
 retry pacman -Syu --noconfirm --needed base-devel sudo git cmake nasm clang \
-    x265 libvpx svt-av1 dav1d libde265 libva libdrm mesa wayland libinput \
+    x265 svt-av1 dav1d libde265 libva libdrm mesa wayland libinput \
     systemd-libs libxkbcommon pixman libxcb libpulse pipewire
 /repo/infra/packaging/server.sh /pkg-root
 /repo/infra/packaging/interposer.sh /pkg-root

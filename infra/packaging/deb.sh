@@ -29,7 +29,7 @@ apt-get clean && apt-get update
 # runtime when an application uses it)
 apt-get install --no-install-recommends -y \
     ca-certificates curl git build-essential pkg-config cmake nasm clang libclang-dev \
-    libx265-dev libvpx-dev libsvtav1enc-dev libdav1d-dev libde265-dev \
+    libx265-dev libsvtav1enc-dev libdav1d-dev libde265-dev \
     libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
     libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
     libxcb-xfixes0-dev libpulse-dev libpipewire-0.3-dev \

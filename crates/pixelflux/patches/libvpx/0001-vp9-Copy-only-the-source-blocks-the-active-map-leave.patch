@@ -1,0 +1,305 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Sat, 7 Nov 2026 16:35:40 -0500
+Subject: [PATCH 1/2] vp9: Copy only the source blocks the active map leaves
+ active
+
+A pushed frame is copied whole into a lookahead buffer, and extended, whatever the active map
+says; a screen encoder marks most of its blocks inactive on most frames, and the copy is the same
+size as the picture. Each lookahead buffer now records, per 16x16 block, whether the picture
+changed since the buffer last held it (the active blocks of every push since), and a push with
+an active map copies the blocks the map leaves active and those that changed since, through a
+rectangle copy that extends the border where a rectangle ends at the picture's edge. A frame
+without a map, with a forced key frame, resized, or in high bit depth is copied whole and marks
+every block of the other buffers changed.
+
+The stream comes out bit for bit the same as with the whole copy, at 1920x1080, 2560x1600 and
+1366x768, constant quantizer and constant rate, one and eight threads, on a still screen, a
+256x256 changing box and a scroll.
+---
+ vp9/encoder/vp9_encoder.c   |   4 +-
+ vp9/encoder/vp9_extend.c    |  41 ++++++++++++++
+ vp9/encoder/vp9_extend.h    |   7 +++
+ vp9/encoder/vp9_lookahead.c | 104 ++++++++++++++++++++++++++++++++++--
+ vp9/encoder/vp9_lookahead.h |  16 +++++-
+ 5 files changed, 167 insertions(+), 5 deletions(-)
+
+diff --git a/vp9/encoder/vp9_encoder.c b/vp9/encoder/vp9_encoder.c
+index 59179fa..303cc13 100644
+--- a/vp9/encoder/vp9_encoder.c
++++ b/vp9/encoder/vp9_encoder.c
+@@ -5963,7 +5963,9 @@ int vp9_receive_raw_frame(VP9_COMP *cpi, vpx_enc_frame_flags_t frame_flags,
+   vpx_usec_timer_start(&timer);
+ 
+   if (vp9_lookahead_push(cpi->lookahead, sd, time_stamp, end_time,
+-                         use_highbitdepth, frame_flags))
++                         use_highbitdepth, frame_flags,
++                         cpi->active_map.enabled ? cpi->active_map.map : NULL,
++                         cm->mi_rows, cm->mi_cols))
+     res = -1;
+   vpx_usec_timer_mark(&timer);
+   cpi->time_receive_data += vpx_usec_timer_elapsed(&timer);
+diff --git a/vp9/encoder/vp9_extend.c b/vp9/encoder/vp9_extend.c
+index 69261ac..e614ccb 100644
+--- a/vp9/encoder/vp9_extend.c
++++ b/vp9/encoder/vp9_extend.c
+@@ -109,6 +109,47 @@ static void highbd_copy_and_extend_plane(const uint8_t *src8, int src_pitch,
+ }
+ #endif  // CONFIG_VP9_HIGHBITDEPTH
+ 
++void vp9_copy_and_extend_frame_with_rect(const YV12_BUFFER_CONFIG *src,
++                                         YV12_BUFFER_CONFIG *dst, int srcy,
++                                         int srcx, int srch, int srcw) {
++  const int width = src->y_crop_width;
++  const int height = src->y_crop_height;
++  const int ss_x = src->uv_width != src->y_width;
++  const int ss_y = src->uv_height != src->y_height;
++  const int chroma_step = src->v_buffer - src->u_buffer == 1 ? 2 : 1;
++  int et_y = 16, el_y = 16;
++  int er_y = VPXMAX(src->y_width + 16, ALIGN_POWER_OF_TWO(src->y_width, 6)) -
++             width;
++  int eb_y = VPXMAX(src->y_height + 16, ALIGN_POWER_OF_TWO(src->y_height, 6)) -
++             height;
++  int uvy, uvx, uvh, uvw;
++
++  if (srcx + srcw > width) srcw = width - srcx;
++  if (srcy + srch > height) srch = height - srcy;
++  if (srcw <= 0 || srch <= 0) return;
++  if (srcy) et_y = 0;
++  if (srcx) el_y = 0;
++  if (srcy + srch != height) eb_y = 0;
++  if (srcx + srcw != width) er_y = 0;
++
++  copy_and_extend_plane(src->y_buffer + srcy * src->y_stride + srcx,
++                        src->y_stride, dst->y_buffer + srcy * dst->y_stride + srcx,
++                        dst->y_stride, srcw, srch, et_y, el_y, eb_y, er_y, 1);
++
++  uvy = srcy >> ss_y;
++  uvx = srcx >> ss_x;
++  uvh = ((srcy + srch + ss_y) >> ss_y) - uvy;
++  uvw = ((srcx + srcw + ss_x) >> ss_x) - uvx;
++  copy_and_extend_plane(src->u_buffer + uvy * src->uv_stride + uvx * chroma_step,
++                        src->uv_stride, dst->u_buffer + uvy * dst->uv_stride + uvx,
++                        dst->uv_stride, uvw, uvh, et_y >> ss_y, el_y >> ss_x,
++                        eb_y >> ss_y, er_y >> ss_x, chroma_step);
++  copy_and_extend_plane(src->v_buffer + uvy * src->uv_stride + uvx * chroma_step,
++                        src->uv_stride, dst->v_buffer + uvy * dst->uv_stride + uvx,
++                        dst->uv_stride, uvw, uvh, et_y >> ss_y, el_y >> ss_x,
++                        eb_y >> ss_y, er_y >> ss_x, chroma_step);
++}
++
+ void vp9_copy_and_extend_frame(const YV12_BUFFER_CONFIG *src,
+                                YV12_BUFFER_CONFIG *dst) {
+   // Extend src frame in buffer
+diff --git a/vp9/encoder/vp9_extend.h b/vp9/encoder/vp9_extend.h
+index 21d7e68..4f64bbd 100644
+--- a/vp9/encoder/vp9_extend.h
++++ b/vp9/encoder/vp9_extend.h
+@@ -21,6 +21,13 @@ extern "C" {
+ void vp9_copy_and_extend_frame(const YV12_BUFFER_CONFIG *src,
+                                YV12_BUFFER_CONFIG *dst);
+ 
++/* Copy the luma rectangle at (srcx, srcy) of srcw x srch pixels, and the
++ * chroma under it, extending the border on the sides the rectangle touches as
++ * vp9_copy_and_extend_frame does. 8-bit samples only. */
++void vp9_copy_and_extend_frame_with_rect(const YV12_BUFFER_CONFIG *src,
++                                         YV12_BUFFER_CONFIG *dst, int srcy,
++                                         int srcx, int srch, int srcw);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/vp9/encoder/vp9_lookahead.c b/vp9/encoder/vp9_lookahead.c
+index b6be4f8..59a356c 100644
+--- a/vp9/encoder/vp9_lookahead.c
++++ b/vp9/encoder/vp9_lookahead.c
+@@ -35,13 +35,63 @@ void vp9_lookahead_destroy(struct lookahead_ctx *ctx) {
+     if (ctx->buf) {
+       int i;
+ 
+-      for (i = 0; i < ctx->max_sz; i++) vpx_free_frame_buffer(&ctx->buf[i].img);
++      for (i = 0; i < ctx->max_sz; i++) {
++        vpx_free_frame_buffer(&ctx->buf[i].img);
++        free(ctx->buf[i].stale);
++      }
+       free(ctx->buf);
+     }
++    free(ctx->changed);
+     free(ctx);
+   }
+ }
+ 
++/* Size the stale maps for a picture of mb_rows x mb_cols blocks, every block
++ * of every buffer stale. Returns 0 on failure. */
++static int size_stale_maps(struct lookahead_ctx *ctx, int mb_rows,
++                           int mb_cols) {
++  const int mbs = mb_rows * mb_cols;
++  int i;
++  if (ctx->mbs == mbs && ctx->changed) return 1;
++  for (i = 0; i < ctx->max_sz; i++) {
++    unsigned char *stale = realloc(ctx->buf[i].stale, mbs);
++    if (!stale) return 0;
++    memset(stale, 1, mbs);
++    ctx->buf[i].stale = stale;
++  }
++  free(ctx->changed);
++  ctx->changed = malloc(mbs);
++  if (!ctx->changed) return 0;
++  ctx->mbs = mbs;
++  return 1;
++}
++
++/* Mark in changed the 16x16 blocks of a frame the active map, one byte per
++ * 8x8 block and nonzero where inactive, leaves active. */
++static void changed_blocks(unsigned char *changed, int mb_rows, int mb_cols,
++                           const unsigned char *inactive_mi, int mi_rows,
++                           int mi_cols) {
++  int r, c;
++  for (r = 0; r < mb_rows; r++) {
++    for (c = 0; c < mb_cols; c++) {
++      int dr, dc, active = 0;
++      for (dr = 0; dr < 2 && !active; dr++) {
++        const int mr = 2 * r + dr;
++        if (mr >= mi_rows) break;
++        for (dc = 0; dc < 2; dc++) {
++          const int mc = 2 * c + dc;
++          if (mc >= mi_cols) break;
++          if (!inactive_mi[mr * mi_cols + mc]) {
++            active = 1;
++            break;
++          }
++        }
++      }
++      changed[r * mb_cols + c] = (unsigned char)active;
++    }
++  }
++}
++
+ struct lookahead_ctx *vp9_lookahead_init(unsigned int width,
+                                          unsigned int height,
+                                          unsigned int subsampling_x,
+@@ -92,7 +142,9 @@ int vp9_lookahead_next_show_idx(const struct lookahead_ctx *ctx) {
+ 
+ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
+                        int64_t ts_start, int64_t ts_end, int use_highbitdepth,
+-                       vpx_enc_frame_flags_t flags) {
++                       vpx_enc_frame_flags_t flags,
++                       const unsigned char *inactive_mi, int mi_rows,
++                       int mi_cols) {
+   struct lookahead_entry *buf;
+   int width = src->y_crop_width;
+   int height = src->y_crop_height;
+@@ -101,6 +153,9 @@ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
+   int subsampling_x = src->subsampling_x;
+   int subsampling_y = src->subsampling_y;
+   int larger_dimensions, new_dimensions;
++  const int mb_rows = (height + 15) >> 4;
++  const int mb_cols = (width + 15) >> 4;
++  int partial, i;
+ #if !CONFIG_VP9_HIGHBITDEPTH
+   (void)use_highbitdepth;
+   assert(use_highbitdepth == 0);
+@@ -143,7 +198,50 @@ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
+     buf->img.subsampling_x = src->subsampling_x;
+     buf->img.subsampling_y = src->subsampling_y;
+   }
+-  vp9_copy_and_extend_frame(src, &buf->img);
++
++  /* A buffer holds the picture it last took; a push copies the blocks the
++   * active map leaves active and those that changed since, and the whole
++   * picture where there is no map, a key frame is forced, the picture is
++   * resized, or the samples are wider than a byte. The other buffers note the
++   * blocks this frame changes, for their own next push. */
++  partial = inactive_mi && !(flags & VPX_EFLAG_FORCE_KF) && !new_dimensions &&
++            !use_highbitdepth && size_stale_maps(ctx, mb_rows, mb_cols);
++  if (partial) {
++    changed_blocks(ctx->changed, mb_rows, mb_cols, inactive_mi, mi_rows,
++                   mi_cols);
++  }
++  for (i = 0; i < ctx->max_sz; i++) {
++    struct lookahead_entry *other = ctx->buf + i;
++    if (other == buf || !other->stale) continue;
++    if (partial) {
++      int b;
++      for (b = 0; b < ctx->mbs; b++) other->stale[b] |= ctx->changed[b];
++    } else {
++      memset(other->stale, 1, ctx->mbs);
++    }
++  }
++  if (partial) {
++    int row;
++    for (row = 0; row < mb_rows; row++) {
++      const unsigned char *changed = ctx->changed + row * mb_cols;
++      const unsigned char *stale = buf->stale + row * mb_cols;
++      int col = 0;
++      while (col < mb_cols) {
++        int end;
++        while (col < mb_cols && !(changed[col] | stale[col])) col++;
++        if (col == mb_cols) break;
++        end = col;
++        while (end < mb_cols && (changed[end] | stale[end])) end++;
++        vp9_copy_and_extend_frame_with_rect(src, &buf->img, row << 4, col << 4,
++                                            16, (end - col) << 4);
++        col = end;
++      }
++    }
++    memset(buf->stale, 0, ctx->mbs);
++  } else {
++    vp9_copy_and_extend_frame(src, &buf->img);
++    if (buf->stale) memset(buf->stale, 0, ctx->mbs);
++  }
+ 
+   buf->ts_start = ts_start;
+   buf->ts_end = ts_end;
+diff --git a/vp9/encoder/vp9_lookahead.h b/vp9/encoder/vp9_lookahead.h
+index 6ac6736..f4e3835 100644
+--- a/vp9/encoder/vp9_lookahead.h
++++ b/vp9/encoder/vp9_lookahead.h
+@@ -27,6 +27,9 @@ struct lookahead_entry {
+   int64_t ts_end;
+   int show_idx; /*The show_idx of this frame*/
+   vpx_enc_frame_flags_t flags;
++  /* Per 16x16 block, whether the picture changed since this buffer last held
++   * it: what a push with an active map copies besides the active blocks. */
++  unsigned char *stale;
+ };
+ 
+ // The max of past frames we want to keep in the queue.
+@@ -40,6 +43,8 @@ struct lookahead_ctx {
+   int next_show_idx; /* The show_idx that will be assigned to the next frame
+                         being pushed in the queue*/
+   struct lookahead_entry *buf; /* Buffer list */
++  int mbs;                     /* 16x16 blocks the stale maps cover */
++  unsigned char *changed;      /* Scratch: the blocks the pushed frame changed */
+ };
+ 
+ /**\brief Initializes the lookahead stage
+@@ -82,15 +87,24 @@ int vp9_lookahead_next_show_idx(const struct lookahead_ctx *ctx);
+  * This function will copy the source image into a new framebuffer with
+  * the expected stride/border.
+  *
++ * If inactive_mi is non-NULL (the encoder's active map, one byte per 8x8 block,
++ * nonzero where inactive), only the 16x16 blocks that are active, or that
++ * changed since the buffer last held the picture, are copied.
++ *
+  * \param[in] ctx         Pointer to the lookahead context
+  * \param[in] src         Pointer to the image to enqueue
+  * \param[in] ts_start    Timestamp for the start of this frame
+  * \param[in] ts_end      Timestamp for the end of this frame
+  * \param[in] flags       Flags set on this frame
++ * \param[in] inactive_mi Active map in 8x8 units, or NULL to copy whole
++ * \param[in] mi_rows     Rows of inactive_mi
++ * \param[in] mi_cols     Columns of inactive_mi
+  */
+ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
+                        int64_t ts_start, int64_t ts_end, int use_highbitdepth,
+-                       vpx_enc_frame_flags_t flags);
++                       vpx_enc_frame_flags_t flags,
++                       const unsigned char *inactive_mi, int mi_rows,
++                       int mi_cols);
+ 
+ /**\brief Get the next source buffer to encode
+  *
+-- 
+2.47.3
+

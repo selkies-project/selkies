@@ -619,6 +619,9 @@ pub struct HwFrameDecision {
     pub cap: Option<usize>,
     /// The blocks this frame refines (`plan_refinement`).
     pub refine: Option<crate::ledger::Refinement>,
+    /// The blocks this frame may code as skips without analysis, in raster order
+    /// (`plan_refinement`, `BlockLedger::constant`); `None` where none may be.
+    pub constant: Option<Vec<bool>>,
 }
 
 impl HwFrameDecision {
@@ -645,6 +648,7 @@ impl HwFrameDecision {
         if let Some(refinement) = &self.refine {
             encoder.refine_blocks(refinement);
         }
+        encoder.constant_blocks(self.constant.as_deref().unwrap_or(&[]));
     }
 }
 
@@ -674,16 +678,21 @@ pub fn plan_refinement(
         None => st.ledger.frame([]),
     }
     let normal = settings.video_crf as u32;
-    let Some(refiner) = refines else {
-        return;
-    };
-    if !(settings.cleans_up()
-        && damage.is_dirty()
+    let own_quality = settings.cleans_up()
         && d.send
         && !d.force_idr
         && d.hold_qp.is_none()
-        && d.target_qp == normal)
-    {
+        && d.target_qp == normal;
+    if own_quality {
+        let constant: Vec<bool> = st.ledger.constant().collect();
+        if constant.contains(&true) {
+            d.constant = Some(constant);
+        }
+    }
+    let Some(refiner) = refines else {
+        return;
+    };
+    if !(own_quality && damage.is_dirty()) {
         return;
     }
     let blocks = st.ledger.blocks();
@@ -994,6 +1003,7 @@ fn decide_constant_rate(
         measure: false,
         cap: None,
         refine: None,
+        constant: None,
     };
     if damage.is_dirty() {
         if !converges || damage.is_motion() {
@@ -1403,6 +1413,7 @@ fn decide_constant_quality(
         measure: false,
         cap: None,
         refine: None,
+        constant: None,
     };
     if recovery_idr && cleanup == Cleanup::None {
         d.target_qp = normal_qp;
