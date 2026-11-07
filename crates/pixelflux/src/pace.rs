@@ -10,8 +10,10 @@
 //! arriving on its own schedule is published as it lands rather than up to a period later.
 //!
 //! The X11 captures, which the X server's damage reports wake, pace in windows instead
-//! (`FramePace::windowed`): one frame a period at most, a change taking its period's frame as it
-//! lands, as the NvFBC driver pushes frames.
+//! (`FramePace::windowed`): one frame a period, a change taking its period's frame as it lands,
+//! as the NvFBC driver pushes frames, and a change landing in a period a frame already took
+//! sent as an extra frame from a budget that refills slowly, so a source drawing at the cadence
+//! keeps its own periods.
 
 use std::time::{Duration, Instant};
 
@@ -61,6 +63,16 @@ const TIMER_GRACE_AFTER_PULL: f64 = 0.25;
 /// short of the boundary otherwise waits for it every frame (a 60 fps full-screen animation on
 /// Xvfb waited 0.8 ms a frame on average, in some phases of its clock against the windows').
 const WINDOW_EARLY_FRACTION: f64 = 0.25;
+/// The share of a period after the last frame from which a change landing in a window a frame
+/// already took may be sent as an extra frame (`FramePace::windowed`).
+const EXTRA_MIN_FRACTION: f64 = 0.5;
+/// The extra frames a capture paced in windows holds in reserve.
+const EXTRA_CAP: f64 = 2.0;
+/// The share of an extra frame each period adds to that reserve: the sustained rate rises
+/// above the configured one by at most this share. A slower refill leaves a source at the
+/// cadence locked behind a keystroke's extra frame for longer (a 60 Hz animation with a
+/// keystroke every 0.7 s waited 7.6 ms a frame at the median at 1/64, 12.5 ms at 1/128).
+const EXTRA_REFILL: f64 = 1.0 / 32.0;
 /// The periods without a reported change after which the screen counts as still
 /// (`FramePace::still`): more than the timer waits after a change's frame.
 const STILL_PERIODS: f64 = 1.5;
@@ -123,19 +135,30 @@ pub struct FramePace {
     /// Paced in windows (`Self::windowed`): the end of the last period a frame closed.
     window_end: Option<Instant>,
     windowed: bool,
+    /// Paced in windows, the extra frames left when one was last sent, and when; a fresh
+    /// capture holds the cap.
+    extra: Option<(f64, Instant)>,
 }
 
 impl FramePace {
     /// Pacing in windows, for a capture a change wakes (XShm and DRI3 on the X server's damage
     /// reports, the compositor on a client's commit, input or a host frame): each
-    /// period is a window holding one frame at most. A change takes its window's frame as it
-    /// lands; a window no change took ends on the timer's frame. The rate never rises above the
-    /// cadence, and a change is published at once unless a change already took its window, in
-    /// which case it waits for the next window, taking it `WINDOW_EARLY_FRACTION` of a period
-    /// before it opens: the NvFBC capture's schedule,
-    /// whose driver pushes frames the same way. Without windows a change could come forward no
+    /// period is a window holding one frame. A change takes its window's frame as it lands; a
+    /// window no change took ends on the timer's frame. A change is published at once unless a
+    /// change already took its window, in which case it waits for the next window, taking it
+    /// `WINDOW_EARLY_FRACTION` of a period before it opens: the NvFBC capture's schedule, whose
+    /// driver pushes frames the same way. Without windows a change could come forward no
     /// earlier than half a period after the last frame, and one landing just after a timer
     /// frame waited that long.
+    ///
+    /// Such a change is instead sent as an extra frame where the reserve holds one
+    /// (`EXTRA_CAP`, refilled at `EXTRA_REFILL` a period), from `EXTRA_MIN_FRACTION` of a
+    /// period after the last frame, and leaves the windows as they were. Taken from the next
+    /// window, it would close that window ahead of a source drawing at the cadence, whose next
+    /// frame then lands in a window already taken and waits as long again: any wait sustains
+    /// itself, a source a hair faster than the cadence grows it to a period, and a 60 Hz
+    /// application on its own clock under a 60 fps capture waited a median 6 ms a frame and up
+    /// to 15, and one keystroke during a 60 Hz animation held each of its frames 12.5 ms.
     pub fn windowed() -> Self {
         Self {
             windowed: true,
@@ -166,7 +189,9 @@ impl FramePace {
     /// the time it was late by, every time, and a loaded session streamed below its rate. A
     /// change taken less than a window after the open window's timer was due ends that window
     /// too, or a screen changing a little slower than the cadence lost a window to each encode
-    /// that ran past a period. Only windows that passed whole without a tick are given up.
+    /// that ran past a period. Only windows that passed whole without a tick are given up. A
+    /// change sent before the next window would take it is an extra frame, which spends the
+    /// reserve and leaves the windows as they were.
     fn window_tick(&mut self, trigger: TickTrigger, period: Duration, now: Instant, sent: bool) {
         let scheduled = self.next_due(period, now);
         if trigger == TickTrigger::Timer {
@@ -176,6 +201,9 @@ impl FramePace {
                 scheduled
                     + period * ((now - scheduled).as_nanos() / period.as_nanos().max(1)) as u32
             });
+        } else if sent && now < self.window_pull(period, now) {
+            let left = (self.extra_frames(period, now) - 1.0).max(0.0);
+            self.extra = Some((left, now));
         } else if sent {
             self.window_end = Some(
                 if self.window_end.is_some() && now > scheduled && now < scheduled + period {
@@ -382,14 +410,31 @@ impl FramePace {
     /// then need not test `due` again, since a budget only grows with time.
     pub fn pull_at(&self, trigger: TickTrigger, period: Duration, now: Instant) -> Instant {
         if self.windowed {
-            // The window after the one the last frame closed is open from its start, and a
-            // change that close to it takes its frame now.
-            return self
-                .window_end
-                .map_or(now, |end| end - period.mul_f64(WINDOW_EARLY_FRACTION));
+            let window = self.window_pull(period, now);
+            return match self.last_tick {
+                Some(last) if self.extra_frames(period, now) >= 1.0 => {
+                    window.min(last + period.mul_f64(EXTRA_MIN_FRACTION))
+                }
+                _ => window,
+            };
         }
         self.last_tick.map_or(now, |last| {
             last + period.saturating_sub(self.budget(trigger, period, now))
+        })
+    }
+
+    /// Paced in windows, when a change may take the window after the one the last frame
+    /// closed: from `WINDOW_EARLY_FRACTION` of a period before it opens.
+    fn window_pull(&self, period: Duration, now: Instant) -> Instant {
+        self.window_end
+            .map_or(now, |end| end - period.mul_f64(WINDOW_EARLY_FRACTION))
+    }
+
+    /// The extra frames a capture paced in windows may send at `now`.
+    fn extra_frames(&self, period: Duration, now: Instant) -> f64 {
+        self.extra.map_or(EXTRA_CAP, |(left, at)| {
+            let periods = now.saturating_duration_since(at).as_secs_f64() / period.as_secs_f64();
+            (left + periods * EXTRA_REFILL).min(EXTRA_CAP)
         })
     }
 
@@ -490,33 +535,69 @@ mod pacing_tests {
         );
     }
 
-    /// A second change in a window a change already took waits for the next window, and is
-    /// taken `WINDOW_EARLY_FRACTION` of a period before it opens.
+    /// A second change in a window a change already took is sent as an extra frame half a
+    /// period after the last, leaving the windows as they were, and once the reserve is spent
+    /// waits for the next window, taken `WINDOW_EARLY_FRACTION` of a period before it opens.
     #[test]
-    fn a_second_change_in_a_window_waits_for_the_next() {
+    fn a_second_change_in_a_window_spends_the_reserve_then_waits_for_the_next() {
         let base = Instant::now();
         let mut pace = FramePace::windowed();
         pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
         pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 3), true);
         assert_eq!(
             pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 5)),
-            at(base, 15)
+            at(base, 13)
         );
         assert_eq!(
             pace.next_due(PERIOD, at(base, 5)),
             at(base, 40),
             "its window's timer frame is skipped"
         );
-        pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 20), true);
+        pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 13), true);
         assert_eq!(
-            pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 21)),
-            at(base, 35)
+            pace.next_due(PERIOD, at(base, 14)),
+            at(base, 40),
+            "the extra frame leaves the windows"
+        );
+        assert_eq!(
+            pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 14)),
+            at(base, 15)
+        );
+        pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 15), true);
+        pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 25), true);
+        assert_eq!(
+            pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 26)),
+            at(base, 35),
+            "the reserve is spent"
         );
     }
 
-    /// Changes faster than the cadence are published one a window, never faster.
+    /// A source drawing at the cadence keeps its own windows through a change landing between
+    /// two of its frames: each of its frames is taken as it lands.
     #[test]
-    fn windowed_changes_faster_than_the_cadence_hold_its_rate() {
+    fn a_source_at_the_cadence_keeps_its_windows_through_a_stray_change() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
+        for k in 0..20u64 {
+            let frame = at(base, 2 + 20 * k);
+            assert!(
+                pace.pull_at(TickTrigger::Damage, PERIOD, frame) <= frame,
+                "frame {k}"
+            );
+            pace.record_tick(TickTrigger::Damage, PERIOD, frame, true);
+            if k == 5 {
+                let stray = at(base, 2 + 20 * k + 12);
+                assert!(pace.pull_at(TickTrigger::Damage, PERIOD, stray) <= stray);
+                pace.record_tick(TickTrigger::Damage, PERIOD, stray, true);
+            }
+        }
+    }
+
+    /// Changes faster than the cadence are published one a window, and the extra frames the
+    /// reserve and its refill allow.
+    #[test]
+    fn windowed_changes_faster_than_the_cadence_raise_its_rate_by_the_refill_at_most() {
         let base = Instant::now();
         let mut pace = FramePace::windowed();
         pace.record_tick(TickTrigger::Timer, PERIOD, base, true);
@@ -539,13 +620,14 @@ mod pacing_tests {
                 frames += 1;
             }
         }
-        // One frame for each window closed, no more: the first frame's, then one a window.
+        // The first frame's, one for each window closed, and the extra frames.
         let closed =
             (pace.window_end.expect("windows") - base).as_secs_f64() / PERIOD.as_secs_f64();
+        let extra = EXTRA_CAP + closed * EXTRA_REFILL;
         assert!(changes > 130, "{changes} changes");
-        assert_eq!(
-            f64::from(frames),
-            closed.round() + 1.0,
+        assert!(
+            f64::from(frames) >= closed.round() + 1.0
+                && f64::from(frames) <= closed.round() + 1.0 + extra,
             "{frames} frames over {closed:.1} windows"
         );
     }
@@ -561,10 +643,7 @@ mod pacing_tests {
             pace.record_tick(TickTrigger::Timer, PERIOD, at(base, 20 * k), false);
         }
         assert_eq!(pace.next_due(PERIOD, at(base, 200)), at(base, 220));
-        assert_eq!(
-            pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 207)),
-            at(base, 195)
-        );
+        assert!(pace.due(TickTrigger::Damage, PERIOD, at(base, 207)));
         pace.record_tick(TickTrigger::Damage, PERIOD, at(base, 207), true);
         assert_eq!(pace.next_due(PERIOD, at(base, 207)), at(base, 240));
     }
@@ -580,12 +659,12 @@ mod pacing_tests {
         assert!(pace.due(TickTrigger::Damage, PERIOD, at(base, 3)));
         assert!(pace.due(TickTrigger::Input, PERIOD, at(base, 3)));
         assert!(!pace.due(TickTrigger::Timer, PERIOD, at(base, 3)));
-        // A change takes it; the next change waits for the next window, taking it from 15 ms.
+        // A change takes it; the next is an extra frame from half a period on, at 13 ms.
         pace.ticked(TickTrigger::Damage, PERIOD, at(base, 3), false);
         assert!(!pace.due(TickTrigger::Damage, PERIOD, at(base, 12)));
         assert_eq!(
             pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 12)),
-            at(base, 15)
+            at(base, 13)
         );
         assert!(pace.due(TickTrigger::Damage, PERIOD, at(base, 20)));
         // The timer skips the window the change took and ends the next one, at 40 ms, a
@@ -653,14 +732,16 @@ mod pacing_tests {
 
     /// A client that waits for its callback goes quiet after its commit, so only the timer can
     /// take a commit that landed in a window a frame already took: it wakes as each window opens,
-    /// and the client keeps the cadence however early in the period it commits. A commit taken
-    /// ahead of its window may take the one that ends just past the run, one frame more.
+    /// and the client keeps the cadence however early in the period it commits, and the extra
+    /// frames at most. A commit taken ahead of its window may take the one that ends just past
+    /// the run, one frame more.
     #[test]
     fn a_client_drawing_on_frame_callbacks_keeps_the_cadence() {
+        let most = 102.0 + EXTRA_CAP + 100.0 * EXTRA_REFILL;
         for draws_us in [100, 2_000, 10_000, 19_000] {
             let frames = frames_of_a_callback_client(Duration::from_micros(draws_us));
             assert!(
-                (99..=102).contains(&frames),
+                frames >= 99 && f64::from(frames) <= most,
                 "{frames} frames in two seconds at 50 fps, drawing {draws_us} us"
             );
         }
@@ -691,9 +772,9 @@ mod pacing_tests {
         assert_eq!(pace.next_wake(PERIOD, at(base, 1), false), at(base, 20));
         assert!(pace.next_wake(PERIOD, at(base, 1), true) <= at(base, 1));
         pace.ticked(TickTrigger::Damage, PERIOD, at(base, 3), false);
-        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 15));
+        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 13));
         pace.defer(at(base, 70));
-        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 15));
+        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 13));
         assert_eq!(pace.next_wake(PERIOD, at(base, 21), false), at(base, 70));
     }
 

@@ -388,7 +388,7 @@ pays about 7 ms once per capture start to find that out.
 All three publish a change as it lands rather than on the next tick: NvFBC because the driver
 generates a frame on damage and the grab waits for it, DRI3 and XShm because the X server's
 DAMAGE reports end the wait early, and a shared framebuffer because its watch's eventfd does. How far any of them may come early is the frame pacing the
-Wayland backend also keeps (`pace.rs`), so the rate stays the configured one. NvFBC's driver says
+Wayland backend also keeps (`pace.rs`), so the rate stays within a thirty-second of the configured one. NvFBC's driver says
 only that a frame is new; how much of it changed comes from a hash of its bands on the GPU
 (`band_hash`, in the convert's module, read back as one word a band), the XShm path's band damage
 computed where the frame lies, so a caret reads as the small change it is and directly rendered GL,

@@ -1500,7 +1500,7 @@ where
         }
     });
 
-    // One frame a period at most, a change taking its period's frame as it lands (FramePace::windowed).
+    // One frame a period and the extras a change in a taken one spends (FramePace::windowed).
     let mut pace = FramePace::windowed();
     // Each pool surface's planes, where the pipeline takes them (`Controls::takes_planes`), and
     // whether the last frame was converted into them rather than copied.
