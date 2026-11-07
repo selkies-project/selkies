@@ -5155,6 +5155,62 @@ mod tests {
         }
     }
 
+    /// A constant-rate x264 session given more rate than its moving picture needs codes it no
+    /// finer than the paint-over quantizer, unless the caller floors it elsewhere, and once
+    /// the screen holds still its cleanup codes finer than that floor.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn a_constant_rate_software_h264_session_floors_motion_at_the_paint_over_quantizer() {
+        let session = |min_qp: i32| {
+            X11Pipeline::new(CaptureSettings {
+                width: 640,
+                height: 384,
+                codec: Codec::H264,
+                use_cpu: true,
+                video_cbr_mode: true,
+                video_bitrate_kbps: 200_000,
+                video_paintover_crf: 18,
+                video_min_qp: min_qp,
+                paint_over_trigger_frames: 15,
+                use_paint_over_quality: true,
+                target_fps: 60.0,
+                ..Default::default()
+            })
+        };
+        let qp = |p: &X11Pipeline| {
+            p.stripes[0]
+                .h264_encoder
+                .as_ref()
+                .and_then(|e| e.last_qp())
+                .expect("the rate control says its quantizer")
+        };
+        let mut floored = session(0);
+        let mut own = session(1);
+        for i in 0..40u8 {
+            floored.process(&noise(i), 640 * 4);
+            own.process(&noise(i), 640 * 4);
+        }
+        assert!(
+            qp(&floored) >= 17,
+            "a moving frame is floored at the paint-over quantizer: {}",
+            qp(&floored)
+        );
+        assert!(
+            qp(&own) < 17,
+            "a floor the caller names is kept instead: {}",
+            qp(&own)
+        );
+        let mut finest = qp(&floored);
+        for _ in 0..240 {
+            floored.process(&noise(39), 640 * 4);
+            finest = finest.min(qp(&floored));
+        }
+        assert!(
+            finest < 17,
+            "the cleanup codes the still screen finer than the floor: {finest}"
+        );
+    }
+
     /// The software path carries a 4:4:4 request exactly when the build's encoder does —
     /// libx264 at full range, so its log line says so; OpenH264 never, reporting the 4:2:0 it
     /// encodes — and without the request it reports 4:2:0. This is the same string the Wayland log

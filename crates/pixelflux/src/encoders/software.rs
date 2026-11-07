@@ -476,6 +476,9 @@ pub struct H264EncoderWrapper {
     last_reference: Reference,
     /// The stream's `frame_num`, widened from x264's sixteen values to 4096.
     frame_num: WideFrameNum,
+    /// The floor the rate control's quantizer stands at now (`reconfigure_floor`), on the
+    /// H.264 scale; 0 is x264's own.
+    current_min_qp: i32,
     /// The quantizer the next frame is held at whatever the rate control (`hold_quantizer`).
     held_qp: Option<i32>,
     /// The mean quantizer the rate control last coded a frame's rows at, held frames aside.
@@ -798,6 +801,7 @@ impl H264EncoderWrapper {
                     reference_frames,
                     last_reference: Reference::Untracked,
                     frame_num: WideFrameNum::default(),
+                    current_min_qp: min_qp,
                     held_qp: None,
                     last_qp: None,
                     rf_constant: param.rc.f_rf_constant as f64,
@@ -903,6 +907,32 @@ impl H264EncoderWrapper {
     /// The mean quantizer the rate control last coded a frame's rows at, held frames aside.
     pub fn last_qp(&self) -> Option<u32> {
         self.last_qp
+    }
+
+    /// Move the floor of a constant-rate session's quantizer live, `min_qp` on the H.264 scale
+    /// and 0 for x264's own, through `x264_encoder_reconfig` with the bounds the carried patch
+    /// lets it take. A floor at the paint-over quality while the screen moves holds the rate
+    /// control from spending a generous budget on coding motion finer than the still picture
+    /// it leaves (a 1440p scroll at 30 Mbit/s: 22.3 Mbit/s at 57 dB against 13.5 at 46 dB),
+    /// lifted while a still screen is cleaned up, which then reaches what the rate control
+    /// gives it; the blocks a moving frame refines code below the floor, as the patch keeps
+    /// the caller's offsets.
+    pub fn reconfigure_floor(&mut self, min_qp: i32) {
+        if !self.is_cbr || min_qp == self.current_min_qp {
+            return;
+        }
+        unsafe {
+            let mut param: x264_sys::x264_param_t = std::mem::zeroed();
+            x264_sys::x264_encoder_parameters(self.encoder, &mut param);
+            param.rc.i_qp_min = if min_qp > 0 {
+                min_qp.min(51) + qp_offset(self.bit_depth)
+            } else {
+                0
+            };
+            if x264_sys::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
+                self.current_min_qp = min_qp;
+            }
+        }
     }
 
     /// Encode the next frame at quantizer `qp` whatever the rate control, leaving the session's
@@ -1631,7 +1661,13 @@ fn ledger_frame(
 ///    cleanups fall due on one frame are spread over `CLEANUP_STAGGER_FRAMES` frames, so a screen
 ///    going still costs no one frame the whole screen's cleanup. A region is otherwise sent when
 ///    it is dirty, while its burst runs, or when streaming mode is on, at the base quality; a
-///    newly dirty frame cancels its burst.
+///    newly dirty frame cancels its burst. A constant-rate x264 session is floored at the
+///    paint-over quantizer while it moves and the floor lifted for its cleanup
+///    (`H264EncoderWrapper::reconfigure_floor`), unless the caller names a floor of its own
+///    (`video_min_qp`): the rate control otherwise spends a generous budget coding motion finer
+///    than the still picture it leaves (a 1440p scroll at 30 Mbit/s, 22.3 Mbit/s at 57 dB
+///    against 13.5 at 46 dB), where the still screen reaches what the rate control gives it
+///    either way, and the blocks a moving frame refines code below the floor.
 /// 5. **Recovery IDR** (`requested_idr`): forces a send even when static so a reconnecting
 ///    client can resume. A scheduled one (`pipeline::periodic_idr_due`) waits for the region to
 ///    change (`StripeState::scheduled_key`): a hashed change has no known extent, so any counts as
@@ -1857,6 +1893,11 @@ pub fn encode_cpu_from(
     // within its buffer, and OpenH264, which moves its quantizer only by a rebuild, past its frame
     // skip, a skipped frame telling nothing of the picture (`rc_bytes` 0).
     let converges = codec.is_video() && settings.video_cbr_mode;
+    let motion_floor = if settings.video_min_qp > 0 || !converges {
+        settings.video_min_qp
+    } else {
+        settings.video_paintover_crf.max(0)
+    };
     let paint_over_armed = |st: &StripeState| {
         if !codec.is_video() {
             return settings.use_paint_over_quality
@@ -2262,6 +2303,7 @@ pub fn encode_cpu_from(
                     let cleaning = converges && stripe_state.h264_burst_frames_remaining > 0;
                     let vbv = if cleaning { cleanup_vbv } else { video_vbv };
                     enc.reconfigure_rate(video_bitrate, vbv, target_fps);
+                    enc.reconfigure_floor(if cleaning { settings.video_min_qp } else { motion_floor });
                 }
 
                 // A stripe moving at the session's quality refines the blocks of it that held

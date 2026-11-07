@@ -260,7 +260,8 @@ libx264 is built from the commit the recipe pins with the patches under `patches
 the API they add: every other build (CI, the devcontainer, the scanner image, Selkies' packaging) takes it from
 `scripts/build-x264.sh`, never from a distribution. The patches make x264 the screen encoder it is used as: the
 caller's per-macroblock quantizer offsets apply without adaptive quantization's variance pass (`rc.b_qp_offsets`),
-and the macroblocks the caller's `mb_info` marks unchanged (`H264EncoderWrapper::constant_blocks`, from the block
+the quantizer bounds move live and an offset codes a block below the floor (`H264EncoderWrapper::reconfigure_floor`,
+which floors a moving screen at the paint-over quantizer and lifts the floor for the cleanup), and the macroblocks the caller's `mb_info` marks unchanged (`H264EncoderWrapper::constant_blocks`, from the block
 ledger, given only where the source reports every change) are coded as skips without analysis, copied from the
 input, filtered into the lowres picture again, or costed again by the lookahead, each where the full path would
 code, copy, filter, or cost them the same: a stream comes out bit for bit as without them; and the lowres planes are
@@ -333,7 +334,9 @@ the one before for `EMPTY_S` at a quantizer as coarse as the floor's, and any of
 `REFINE_S`. That cleanup then counts as settled, and only more than a small change arms another, so
 a caret on a clean screen costs its own frames. A session that reports no bytes (Tegra, a stateful
 V4L2 device) gets a refresh and its burst at the rate control's own quality. A constant-rate x264
-session is given a buffer of `CLEANUP_VBV_FRAMES` frames while it is cleaned up, since in a frame and a half
+session is floored at the paint-over quantizer while it moves, where a generous rate would otherwise be spent
+coding motion finer than the still picture it leaves (a 1440p scroll at 30 Mbit/s, 22.3 Mbit/s against 13.5),
+the floor lifted for its cleanup, and is given a buffer of `CLEANUP_VBV_FRAMES` frames while it is cleaned up, since in a frame and a half
 its row-level control coarsens the rows it names a fine quantizer for, and its cleanup ends once its
 frames have been slice headers alone for `EMPTY_S`: x264 keeps its quantizer on a screen that does
 not change. On Intel's iHD the VA-API rate control itself is bounded per codec

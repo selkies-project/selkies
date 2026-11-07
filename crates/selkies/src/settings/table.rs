@@ -454,7 +454,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "video_min_qp",
         kind: Kind::Int,
         default: "0",
-        help: "CBR-mode minimum quantizer on the H.264 QP scale, mapped onto each codec's own quantizer range (0 = encoder default). Raising it caps bit spend on easy content when the bitrate budget is generous.",
+        help: "CBR-mode minimum quantizer on the H.264 QP scale, mapped onto each codec's own quantizer range. 0 leaves the encoder its own: software H.264 (x264) then floors a moving screen at video_paintover_crf, so a generous bitrate is not spent coding motion finer than the still picture it leaves, and lifts the floor while a still screen is cleaned up; the other encoders have no floor. Raising it caps bit spend on easy content when the bitrate budget is generous, still screens included.",
         env_vars: &[],
         allowed: &[],
         value_range: None,

@@ -12,7 +12,7 @@
 //!
 //! `CODEC` (h264, h265, vp8, vp9, av1, jpeg), `CPU` (1 forces software),
 //! `FULLCOLOR` (1 for 4:4:4), `DEPTH` (bits per sample),
-//! `TURBO` (1), `CBR` (1), `KBPS`, `CRF`, `PAINT_CRF`, `PAINT` (use_paint_over_quality, 1),
+//! `TURBO` (1), `CBR` (1), `KBPS`, `MIN_QP` (the constant-rate quantizer floor), `CRF`, `PAINT_CRF`, `PAINT` (use_paint_over_quality, 1),
 //! `KEYFRAME_S` (the scheduled key-frame interval), `W`, `H`, `FPS`, `MOTION` and `STILL` (frames), `STEP` (rows the scroll moves a frame, 4), `CARET`
 //! (frames per caret toggle, 0 none), `VIDEO` (`WxH`, a box at the bottom right repainted with a
 //! moving picture every frame for the whole run, the PSNR then measured outside it),
@@ -375,6 +375,7 @@ fn cleanup_bench() {
         jpeg_quality: env("JPEG_Q", 40),
         paint_over_jpeg_quality: env("PAINT_JPEG_Q", 90),
         video_vbv_multiplier: env("VBV", 0.0),
+        video_min_qp: env("MIN_QP", 0),
         video_fullcolor: env("FULLCOLOR", 0) == 1,
         video_bit_depth: env("DEPTH", 8),
         keyframe_interval_s: env("KEYFRAME_S", 0.0),

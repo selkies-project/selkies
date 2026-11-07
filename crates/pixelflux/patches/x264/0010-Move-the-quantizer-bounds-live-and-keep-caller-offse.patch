@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Sat, 7 Nov 2026 16:02:08 -0500
+Subject: [PATCH] Move the quantizer bounds live and keep caller offsets below
+ the floor
+
+x264_encoder_reconfig took no change to rc.i_qp_min or rc.i_qp_max, and the floor
+clipped a macroblock after the caller's offset was added, so a floor set on the rate
+control also floored every block a caller asked to code finer. The bounds are now
+copied by a reconfigure and the rate control's limits re-derived from them, and with
+rc.b_qp_offsets the frame's quantizer is clipped to the bounds before the offset is
+added, the block then clipped between zero and the ceiling alone: a screen encoder can
+floor the quantizer its moving frames are coded at and still refine the blocks that
+held still as far below it as the picture they leave needs.
+---
+ encoder/encoder.c     |  7 +++++++
+ encoder/ratecontrol.c | 13 +++++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/encoder/encoder.c b/encoder/encoder.c
+index 9ee10a6..19cfa20 100644
+--- a/encoder/encoder.c
++++ b/encoder/encoder.c
+@@ -1931,6 +1931,13 @@ static int encoder_try_reconfig( x264_t *h, x264_param_t *param, int *rc_reconfi
+     *rc_reconfig |= h->param.rc.f_rf_constant_max != param->rc.f_rf_constant_max;
+     COPY( rc.f_rf_constant );
+     COPY( rc.f_rf_constant_max );
++    /* The quantizer bounds move live, clipped as at open. */
++    param->rc.i_qp_max = x264_clip3( param->rc.i_qp_max, 0, QP_MAX );
++    param->rc.i_qp_min = x264_clip3( param->rc.i_qp_min, 0, param->rc.i_qp_max );
++    *rc_reconfig |= h->param.rc.i_qp_min != param->rc.i_qp_min;
++    *rc_reconfig |= h->param.rc.i_qp_max != param->rc.i_qp_max;
++    COPY( rc.i_qp_min );
++    COPY( rc.i_qp_max );
+ #undef COPY
+ 
+     return validate_parameters( h, 0 );
+diff --git a/encoder/ratecontrol.c b/encoder/ratecontrol.c
+index a42305c..93d5325 100644
+--- a/encoder/ratecontrol.c
++++ b/encoder/ratecontrol.c
+@@ -635,6 +635,12 @@ void x264_ratecontrol_init_reconfigurable( x264_t *h, int b_init )
+     if( !b_init && rc->b_2pass )
+         return;
+ 
++    for( int i = 0; i < 3; i++ )
++    {
++        rc->lmin[i] = qp2qscale( h->param.rc.i_qp_min );
++        rc->lmax[i] = qp2qscale( h->param.rc.i_qp_max );
++    }
++
+     if( h->param.rc.i_rc_method == X264_RC_CRF )
+     {
+         /* Arbitrary rescaling to make CRF somewhat similar to QP.
+@@ -1762,6 +1768,13 @@ int x264_ratecontrol_mb_qp( x264_t *h )
+         /* Scale AQ's effect towards zero in emergency mode. */
+         if( qp > QP_MAX_SPEC )
+             qp_offset *= (QP_MAX - qp) / (QP_MAX - QP_MAX_SPEC);
++        /* A caller's offset moves a block from the floored frame quantizer, below the floor
++         * where it asks, so a floor on the rate control leaves the blocks it refines finer. */
++        if( h->param.rc.b_qp_offsets )
++        {
++            qp = x264_clip3f( qp, h->param.rc.i_qp_min, h->param.rc.i_qp_max );
++            return x264_clip3( qp + qp_offset + 0.5f, 0, h->param.rc.i_qp_max );
++        }
+         qp += qp_offset;
+     }
+     return x264_clip3( qp + 0.5f, h->param.rc.i_qp_min, h->param.rc.i_qp_max );
+-- 
+2.47.3
+

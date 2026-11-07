@@ -417,7 +417,9 @@ pub struct CaptureSettings {
     pub keyframe_interval_s: f64,
     /// Rate-controlled (CBR) QP clamp: `video_max_qp` bounds the quality FLOOR (screen text stays
     /// legible under motion at the cost of overshooting impossible targets), `video_min_qp` bounds
-    /// bit WASTE on easy content. 0 keeps the encoder's own default; CRF/CQP modes pin their QP
+    /// bit WASTE on easy content. 0 keeps the encoder's own default, which for the software
+    /// H.264 session is the paint-over quality while the screen moves and none while a still
+    /// screen is cleaned up (`encoders::software::encode_cpu`); CRF/CQP modes pin their QP
     /// directly and ignore these.
     pub video_min_qp: i32,
     pub video_max_qp: i32,
