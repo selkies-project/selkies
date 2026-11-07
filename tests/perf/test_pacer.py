@@ -19,6 +19,7 @@ import os
 import random
 import re
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -34,6 +35,9 @@ from aiortc import (  # noqa: E402
     RTCPeerConnection, RTCConfiguration, RTCSessionDescription,
 )
 from aiortc.sdp import candidate_from_sdp  # noqa: E402
+from aiortc.rtp import RTCP_RTPFB, RtcpRtpfbPacket, pack_rtcp_packet  # noqa: E402
+from aiortc.rtcpeerconnection import HEADER_EXTENSIONS  # noqa: E402
+from aiortc.rtcrtpparameters import RTCRtpHeaderExtensionParameters  # noqa: E402
 import aiortc.rtcrtpreceiver as rrx_mod  # noqa: E402
 from aiortc.clock import current_ntp_time  # noqa: E402
 
@@ -73,6 +77,135 @@ class Recorder:
         self.rtx_map: dict = {}
 
 REC = Recorder()
+
+
+class ObservedTwccPacket(RtcpRtpfbPacket):
+    """RTCP RTPFB fmt=15; aiortc's base class serializes only NACK."""
+
+    def __init__(self, ssrc: int, fci: bytes) -> None:
+        super().__init__(fmt=15, ssrc=ssrc, media_ssrc=0)
+        self.fci = fci
+
+    def __bytes__(self) -> bytes:
+        return pack_rtcp_packet(RTCP_RTPFB, self.fmt,
+                                struct.pack("!LL", self.ssrc, self.media_ssrc) + self.fci)
+
+
+def encode_twcc(base: int, entries: dict) -> tuple:
+    """Two-bit status vectors and measured deltas per RFC 8888 section 3.1."""
+    entries = entries.copy()
+    status_count = max(((seq - base) & 0xFFFF for seq in entries), default=0) + 1
+    first_received = next(seq for offset in range(status_count)
+                          if (seq := (base + offset) & 0xFFFF) in entries)
+    reference_us = entries[first_received]
+    previous_us = reference_us
+    symbols, delta_bytes = {}, b""
+    for offset in range(status_count):
+        seq = (base + offset) & 0xFFFF
+        if seq not in entries:
+            symbols[offset] = 0
+            continue
+        now_us = entries[seq]
+        delta = now_us - previous_us
+        if 0 <= delta <= 8000:
+            symbols[offset] = 1
+            delta_bytes += bytes([round(delta / 250)])
+        else:
+            symbols[offset] = 2
+            delta_bytes += struct.pack("!h", max(-32768, min(32767, round(delta / 250))))
+        previous_us = now_us
+    payload = struct.pack("!HHLL", base, status_count,
+                          (reference_us // 64) & 0xFFFFFF, 0)
+    for start in range(0, status_count, 7):
+        chunk = 0xC000
+        for offset in range(start, min(start + 7, status_count)):
+            chunk |= symbols[offset] << (12 - 2 * (offset - start))
+        payload += struct.pack("!H", chunk)
+    payload += delta_bytes
+    return payload + b"\0" * (-len(payload) % 4), reference_us, status_count
+
+
+def configure_offer_feedback(sdp: str) -> None:
+    """Enable the feedback this rig implements and read the offered FID mapping.
+
+    aiortc 1.16 negotiates abs-send-time but no TWCC, and associates RTX only
+    when exactly two SSRCs are offered. Its FID association ignores the FEC
+    stream; select it by SSRC instead of the count after initialization.
+    """
+    global FID_GROUPS
+    uri = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+    ids = re.findall(rf"^a=extmap:(\d+) {re.escape(uri)}\r?$", sdp, re.MULTILINE)
+    for extension_id in ids:
+        if not any(extension.uri == uri for extension in HEADER_EXTENSIONS["video"]):
+            HEADER_EXTENSIONS["video"].append(
+                RTCRtpHeaderExtensionParameters(id=int(extension_id), uri=uri))
+    FID_GROUPS = {int(media): int(rtx) for media, rtx in re.findall(
+        r"^a=ssrc-group:FID (\d+) (\d+)\r?$", sdp, re.MULTILINE)}
+
+
+FID_GROUPS = {}
+_orig_receive = rrx_mod.RTCRtpReceiver.receive
+
+
+async def _receive_with_fid(self, parameters):
+    """Associate RTX after receive initialization, before media arrives."""
+    result = await _orig_receive(self, parameters)
+    if getattr(self, "_RTCRtpReceiver__kind", None) == "video":
+        media_ssrcs = {encoding.ssrc for encoding in parameters.encodings}
+        mapping = {rtx: media for media, rtx in FID_GROUPS.items() if media in media_ssrcs}
+        if mapping:
+            self._RTCRtpReceiver__rtx_ssrc = mapping
+    return result
+
+
+rrx_mod.RTCRtpReceiver.receive = _receive_with_fid
+
+
+async def report_twcc_arrival(receiver, packet) -> None:
+    """Report actual transport sequence arrivals over the negotiated DTLS path.
+
+    Every feedback number is computed from one arriving packet's extension and
+    the local monotonic clock. No estimate, acknowledgement, or synthetic loss
+    is emitted, and reports travel back through the test's actual UDP shaper.
+    """
+    if getattr(receiver, "_RTCRtpReceiver__kind", None) != "video":
+        return
+    seq = packet.extensions.transport_sequence_number
+    if seq is None:
+        return
+    state = getattr(receiver, "_observed_twcc", None)
+    if state is None:
+        state = {"arrivals": {}, "next": None, "last_sent": None, "counter": 0}
+        receiver._observed_twcc = state
+    state["arrivals"][seq] = time.monotonic_ns() // 1000
+    if state["next"] is None:
+        state.update(next=seq, last_sent=seq, feedback_due=time.monotonic() + 0.05)
+    elif (seq - state["last_sent"]) & 0xFFFF < 0x8000:
+        state["last_sent"] = seq
+    now = time.monotonic()
+    rtcp_ssrc = getattr(receiver, "_RTCRtpReceiver__rtcp_ssrc", None)
+    if now < state["feedback_due"] or rtcp_ssrc is None:
+        return
+    base = state["next"]
+    span = ((state["last_sent"] - base) & 0xFFFF) + 1
+    entries = {(base + i) & 0xFFFF: state["arrivals"][base + i & 0xFFFF]
+               for i in range(span) if (base + i & 0xFFFF) in state["arrivals"]}
+    if entries:
+        fci, reference_us, status_count = encode_twcc(base, entries)
+        with open(os.path.join(RUNNER_DIR, "twcc-feedback.jsonl"), "a", buffering=1) as sink:
+            sink.write(json.dumps({"time": time.time(), "base_sequence_number": base,
+                                   "packet_status_count": status_count,
+                                   "received_statuses": len(entries),
+                                   "reference_time_us": reference_us,
+                                   "fci_hex": fci.hex()}) + "\n")
+        asyncio.create_task(receiver._send_rtcp(ObservedTwccPacket(rtcp_ssrc, fci)))
+        state["counter"] += 1
+        state["next"] = (state["last_sent"] + 1) & 0xFFFF
+        state["arrivals"] = {s: at for s, at in state["arrivals"].items()
+                             if (s - state["next"]) & 0xFFFF < 0x8000}
+    state["feedback_due"] = now + 0.05
+
+
 _orig_handle_rtp = rrx_mod.RTCRtpReceiver._handle_rtp_packet
 
 async def _wrapped_handle_rtp(self, packet, arrival_time_ms):
@@ -109,6 +242,7 @@ async def _wrapped_handle_rtp(self, packet, arrival_time_ms):
                 REC.ow_audio.append(ow)
             elif kind == "video":
                 REC.ow_video.append(ow)
+    await report_twcc_arrival(self, packet)
     return await _orig_handle_rtp(self, packet, arrival_time_ms)
 
 rrx_mod.RTCRtpReceiver._handle_rtp_packet = _wrapped_handle_rtp
@@ -315,6 +449,7 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
                     if t == "offer":
                         LOG.info("offer received (%d bytes)", len(sdp or ""))
                         sdp = await rewrite_candidates(sdp, up, down, "offer")
+                        configure_offer_feedback(sdp)
                         await pc.setRemoteDescription(
                             RTCSessionDescription(sdp=sdp, type=t))
                         answer = await pc.createAnswer()
