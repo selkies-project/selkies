@@ -3,13 +3,13 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Build the selkies wheel for the platform of the manylinux_2_28 or
+# Build the selkies wheel for the platform of the manylinux2014 or
 # musllinux_1_2 image this runs in, the images pixelflux's and pcmflux's own
 # wheels are built in, and repair it so a plain `pip install` runs it there.
 #
 # The server is built by infra/packaging/server.sh --wheel, with every codec
 # library linked in from the source pixelflux's wheels build (codecs.sh) and
-# libxkbcommon linked in from a pinned release, since Enterprise Linux 8, the
+# libxkbcommon linked in from a pinned release, since Enterprise Linux 7, the
 # oldest host this platform tag admits, carries one older than the API the
 # server reads keysyms through. What it still links is what pixelflux's and
 # pcmflux's wheels link: auditwheel bundles what those bundle (libpulse and

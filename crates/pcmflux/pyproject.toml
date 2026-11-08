@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [tool.cibuildwheel]
 build = "cp311-*"
 archs = [ "x86_64", "aarch64" ]
-manylinux-x86_64-image = "manylinux_2_28"
-manylinux-aarch64-image = "manylinux_2_28"
+manylinux-x86_64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux2014"
 skip = "*t-*"
 
 [tool.cibuildwheel.environment]
@@ -21,8 +21,13 @@ before-all = """
     # rather than the script that downloads it unchecked.
     libc="$(if command -v apk > /dev/null; then echo musl; else echo gnu; fi)"
     url="https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-${libc}/rustup-init"
-    curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 --retry-connrefused -o /tmp/rustup-init "${url}"
-    sum="$(curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 --retry-connrefused "${url}.sha256")"
+    # CentOS 7's curl (manylinux2014) predates --retry-connrefused
+    case "$(curl --help all 2> /dev/null)" in
+        *--retry-connrefused*) refused=--retry-connrefused ;;
+        *) refused= ;;
+    esac
+    curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 ${refused} -o /tmp/rustup-init "${url}"
+    sum="$(curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 ${refused} "${url}.sha256")"
     echo "${sum%% *}  /tmp/rustup-init" | sha256sum -c -
     chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal && rm -f /tmp/rustup-init
     # libpulse (libpulse-sys links it) + libopus (opusic-sys builds the copy it vendors with
@@ -36,11 +41,22 @@ before-all = """
             cmake && \
         ldconfig
 
+    # manylinux2014 (CentOS 7): its devtoolset compilers and the image's cmake build libopus,
+    # and libpulse is built from its current release (scripts/build-libpulse.sh), since the
+    # image's is 10.0 and takes D-Bus and X11 along.
+    elif command -v yum; then
+        /opt/python/cp311-cp311/bin/pip install meson ninja && \
+        PATH="/opt/python/cp311-cp311/bin:$PATH" sh {package}/scripts/build-libpulse.sh /usr lib64 && \
+        ldconfig
+
+    # musllinux (Alpine): libpulse is built the same way, since Alpine's takes D-Bus, the X11
+    # client libraries, and libsndfile's codecs along.
     elif command -v apk; then
         apk add --no-cache \
             build-base \
-            cmake \
-            pulseaudio-dev
+            cmake && \
+        /opt/python/cp311-cp311/bin/pip install meson ninja && \
+        PATH="/opt/python/cp311-cp311/bin:$PATH" sh {package}/scripts/build-libpulse.sh /usr lib
     else
         echo "Unsupported package manager"
         exit 1

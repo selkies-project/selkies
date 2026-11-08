@@ -60,6 +60,12 @@ if ! command -v cargo > /dev/null; then
     /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
     rm -f /tmp/rustup-init
 fi
+# manylinux2014's libclang comes from PyPI without the compiler's builtin
+# headers (it looks for them relative to the working directory): GCC's serve.
+if command -v yum > /dev/null && ! command -v dnf > /dev/null; then
+    BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include)"
+    export BINDGEN_EXTRA_CLANG_ARGS
+fi
 
 # shellcheck source=infra/packaging/version.sh
 . "${REPO}/infra/packaging/version.sh"
@@ -97,8 +103,10 @@ if [ -n "${WHEEL_OUT}" ]; then
     cp -r "${REPO}/infra/wheel" "${SRC}/infra/wheel"
     cp -r "${REPO}/dist/web" "${SRC}/build/wheel/data/data/share/selkies/web"
     sed -i "s|^version =.*|version = \"${SELKIES_VERSION:-0.0.0.dev0}\"|" "${SRC}/pyproject.toml"
-    # The tag the repair checks the wheel against, not a promise made here
-    if [ "${libc}" = musl ]; then tag=musllinux_1_2; else tag=manylinux_2_28; fi
+    # The tag the repair checks the wheel against, not a promise made here:
+    # the glibc the image carries, 2.17 in manylinux2014
+    glibc="$(ldd --version 2>&1 | head -n 1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
+    if [ "${libc}" = musl ]; then tag=musllinux_1_2; else tag="manylinux_${glibc%.*}_${glibc#*.}"; fi
     (cd "${SRC}" && CARGO_TARGET_DIR="${BUILD}/target" maturin build --release --locked \
         --compatibility "${tag}" --auditwheel skip --out "${WHEEL_OUT}")
     if [ -n "${SELKIES_SDIST:-}" ]; then

@@ -99,50 +99,27 @@ jobs:
           /tmp/selkies-venv/bin/selkies --help >/dev/null && echo "selkies --help OK"
           test -f /tmp/selkies-venv/share/selkies/web/index.html && echo "bundled web client OK"
           /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()['command'][0] == '/tmp/selkies-venv/bin/selkies'; print('Jupyter entry point OK')"
-      - name: Set up the oldest Python CI checks
-        id: oldest-python-first
-        # A download GitHub fails is tried again after a wait, twice.
-        continue-on-error: true
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.9"
-          update-environment: false
-      - name: Wait out a download outage
-        if: steps.oldest-python-first.outcome == 'failure'
-        run: sleep 120
-      - name: Set up the oldest Python CI checks, again
-        id: oldest-python-again
-        if: steps.oldest-python-first.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.9"
-          update-environment: false
-      - name: Wait out a longer download outage
-        if: steps.oldest-python-again.outcome == 'failure'
-        run: sleep 300
-      - name: Set up the oldest Python CI checks, a third time
-        id: oldest-python-third
-        if: steps.oldest-python-again.outcome == 'failure'
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.9"
-          update-environment: false
-      - name: Install smoke test (oldest Python CI checks)
-        # The same checks on the oldest interpreter CI keeps; the wheel itself
-        # names no floor
+      - name: Install smoke test (oldest Python and glibc, on manylinux2014)
+        # The same checks on the oldest interpreter CI keeps (the wheel itself
+        # names no floor) and on CentOS 7's glibc 2.17, the wheel's own floor:
+        # manylinux2014 carries both for both architectures, and GitHub builds
+        # no Python 3.9 for the Ubuntu 26.04 runners
         run: |
-          "${{ steps.oldest-python-first.outputs.python-path || steps.oldest-python-again.outputs.python-path || steps.oldest-python-third.outputs.python-path }}" -m venv /tmp/selkies-venv-oldest
-          /tmp/selkies-venv-oldest/bin/pip install --no-index --find-links "$PWD/dist" --only-binary=:all: selkies
-          /tmp/selkies-venv-oldest/bin/selkies --help >/dev/null && echo "selkies --help OK"
-          test -f /tmp/selkies-venv-oldest/share/selkies/web/index.html && echo "bundled web client OK"
-          /tmp/selkies-venv-oldest/bin/python -c "from selkies.session import jupyter; assert jupyter()['command'][0] == '/tmp/selkies-venv-oldest/bin/selkies'; print('Jupyter entry point OK')"
+          image="quay.io/pypa/manylinux2014_$(uname -m)"
+          scripts/ci/retry.sh 5 60 docker pull "${image}"
+          docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/scripts/ci/retry.sh:/retry.sh:ro" "${image}" sh -euxc '
+            /retry.sh 5 60 yum install -y -q mesa-libgbm pixman
+            /opt/python/cp39-cp39/bin/python -m venv /tmp/selkies-venv
+            /tmp/selkies-venv/bin/pip install --no-index --find-links /dist --only-binary=:all: selkies
+            /tmp/selkies-venv/bin/selkies --version
+            /tmp/selkies-venv/bin/selkies --help > /dev/null && echo "selkies --help OK"
+            test -f /tmp/selkies-venv/share/selkies/web/index.html && echo "bundled web client OK"
+            /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()[\"command\"][0] == \"/tmp/selkies-venv/bin/selkies\"; print(\"Jupyter entry point OK\")"'
       - name: Install smoke test (musllinux, on Alpine)
-        # libxcb is what the bundled libpulse leaves to the host, as pcmflux's does
         run: |
           scripts/ci/retry.sh 5 60 docker pull python:3-alpine
           docker run --rm -v "$PWD/dist:/dist:ro" python:3-alpine sh -euxc '
-            apk add --no-cache mesa-gbm pixman libxcb
+            apk add --no-cache mesa-gbm pixman
             python3 -m venv /tmp/selkies-venv
             /tmp/selkies-venv/bin/pip install --no-index --find-links /dist --only-binary=:all: selkies
             /tmp/selkies-venv/bin/selkies --version

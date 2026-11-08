@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [tool.cibuildwheel]
 build = "cp311-*"
 archs = [ "x86_64", "aarch64" ]
-manylinux-x86_64-image = "manylinux_2_28"
-manylinux-aarch64-image = "manylinux_2_28"
+manylinux-x86_64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux2014"
 skip = "*t-*"
 
 [tool.cibuildwheel.environment]
@@ -66,6 +66,27 @@ before-all = """
             sleep $((attempt * 30))
         done
         return 1
+    }
+
+    yum_install() {
+        for attempt in 1 2 3 4; do
+            yum install -y --disablerepo='epel*' "$@" && return 0
+            echo "yum_install: failed (attempt ${attempt}/4)" >&2
+            yum clean metadata
+            sleep $((attempt * 30))
+        done
+        return 1
+    }
+
+    # nasm 3.02, checked against the hash pinned here, for an image whose own is
+    # older than x264, dav1d, and SVT-AV1 take.
+    build_nasm() {
+        curl -fsSL --retry 5 -o /tmp/nasm.tar.xz \
+            https://www.nasm.us/pub/nasm/releasebuilds/3.02/nasm-3.02.tar.xz && \
+        echo "87336eba53b4acfe917424ab5d500d2b0054d9f5148d35c2273ccf2cfb712f0d  /tmp/nasm.tar.xz" | sha256sum -c - && \
+        mkdir -p /tmp/nasm && tar -xJf /tmp/nasm.tar.xz -C /tmp/nasm --strip-components=1 && \
+        (cd /tmp/nasm && ./configure --prefix=/usr/local && make -j"$(nproc)" && make install) && \
+        rm -rf /tmp/nasm /tmp/nasm.tar.xz
     }
 
     # The same native builds on both platforms, so a wheel carries the same
@@ -190,8 +211,13 @@ before-all = """
     install_rust() {
         libc="$(if command -v apk > /dev/null; then echo musl; else echo gnu; fi)"
         url="https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-${libc}/rustup-init"
-        curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 --retry-connrefused -o /tmp/rustup-init "${url}" && \
-        sum="$(curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 --retry-connrefused "${url}.sha256")" && \
+        # CentOS 7's curl (manylinux2014) predates --retry-connrefused
+        case "$(curl --help all 2> /dev/null)" in
+            *--retry-connrefused*) refused=--retry-connrefused ;;
+            *) refused= ;;
+        esac
+        curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 ${refused} -o /tmp/rustup-init "${url}" && \
+        sum="$(curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 3 ${refused} "${url}.sha256")" && \
         echo "${sum%% *}  /tmp/rustup-init" | sha256sum -c - && \
         chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal && rm -f /tmp/rustup-init
     }
@@ -231,6 +257,36 @@ before-all = """
         # dav1d builds with meson, which the image's own Python is too old for;
         # the interpreters cibuildwheel ships carry a current pip.
         /opt/python/cp311-cp311/bin/pip install meson ninja && \
+        export PATH="/opt/python/cp311-cp311/bin:$PATH" && \
+        build_codec_libraries && \
+        \
+        ldconfig
+
+    # --- MANYLINUX2014 (CentOS 7, yum) ---
+    # The image's own packages for the headers; nasm is built (build_nasm), and
+    # bindgen's libclang comes from PyPI, linked where clang-sys looks for it
+    # (the manylinux override below hands it GCC's builtin headers).
+    elif command -v yum; then
+        yum_install \
+            curl \
+            xz \
+            pixman-devel \
+            libX11-devel \
+            libXext-devel \
+            libXfixes-devel \
+            libdrm-devel \
+            libinput-devel \
+            libxkbcommon-devel \
+            mesa-libgbm-devel \
+            wayland-devel \
+            systemd-devel \
+            git \
+            make && \
+        \
+        build_nasm && \
+        install_rust && \
+        /opt/python/cp311-cp311/bin/pip install meson ninja libclang && \
+        ln -sf "$(/opt/python/cp311-cp311/bin/python -c 'import clang, os; print(os.path.join(os.path.dirname(clang.__file__), "native", "libclang.so"))')" /usr/lib64/libclang.so && \
         export PATH="/opt/python/cp311-cp311/bin:$PATH" && \
         build_codec_libraries && \
         \
@@ -314,6 +370,13 @@ repair-wheel-command = """
     --exclude libxcb-shm.so.0 \
     --exclude libxcb-render.so.0
 """
+
+# manylinux2014's libclang comes from PyPI without the compiler's builtin headers (it looks for
+# them relative to the working directory), so bindgen is handed GCC's.
+[[tool.cibuildwheel.overrides]]
+select = "*-manylinux_*"
+inherit.environment = "append"
+environment = { BINDGEN_EXTRA_CLANG_ARGS = "-isystem $(gcc -print-file-name=include)" }
 
 # Ruff runs as a bug-finder, not a style enforcer: only rule families that flag
 # defects (pyflakes, bugbear, pycodestyle errors, pylint errors) are enabled.

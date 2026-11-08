@@ -57,22 +57,20 @@ covered by cargo-deny.
 
 ## What the wheels bundle
 
-- manylinux wheels (cibuildwheel, `pyproject.toml`): `pulseaudio-libs-devel`
-  comes from the manylinux_2_28 (AlmaLinux 8) image and auditwheel bundles
-  libpulse together with everything it links into
-  `pcmflux.libs/` (the published 2.0.0 wheel: libpulse, libpulsecommon,
-  libasyncns, libsndfile, libsystemd, libgcrypt, libgpg-error, libmount,
-  libblkid under LGPL-2.1-or-later; libdbus-1 under AFL-2.1 OR
-  GPL-2.0-or-later and libcap under BSD-3-Clause OR GPL-2.0-only, both usable
-  under their permissive option; libFLAC, libvorbis, libvorbisenc,
-  libogg, libuuid, libpcre2-8 under BSD-3-Clause; liblz4 BSD-2-Clause; libgsm
-  under its ISC-style license; liblzma and libselinux public domain;
-  libxcb, libX11-xcb, libXau, libXi, libXtst under MIT). Nothing in the wheel
-  is GPL-only; the LGPL libraries stay separate `.so` files and can be
-  replaced, which is what the LGPL asks for.
-- musllinux wheels: Alpine's `pulseaudio-dev`; the same libraries under the
-  same licenses. libopus is not among them in either wheel: it is compiled from
-  the source `opusic-sys` vendors and linked into the extension itself.
+- Every wheel (cibuildwheel, `pyproject.toml`): `scripts/build-libpulse.sh`
+  builds PulseAudio 17.0's client libraries alone in the wheel image, with a
+  libsndfile 1.2.2 built without codecs linked into libpulsecommon, and
+  auditwheel bundles libpulse and libpulsecommon into `pcmflux.libs/`, both
+  LGPL-2.1-or-later. No D-Bus, systemd, X11 client, or codec library comes
+  along.
+- musllinux wheels also bundle GNU gettext's libintl (LGPL-2.1-or-later), which
+  the image's gettext links PulseAudio's translations through, and libgcc_s
+  (GPL-3.0-or-later WITH GCC-exception-3.1), which the manylinux policy leaves
+  to the host.
+- Nothing in a wheel is GPL-only; the LGPL libraries stay separate `.so` files
+  and can be replaced, which is what the LGPL asks for. libopus is in none of
+  the bundled libraries: it is compiled from the source `opusic-sys` vendors and
+  linked into the extension itself.
 - The wheels carry pcmflux's own LICENSE only; this file is the inventory of
   the rest, whose license texts live in the upstream packages named above.
 

@@ -10,9 +10,9 @@ It is designed to capture system audio using PulseAudio, encode it into the Opus
 
 ## Installation
 
-Every release on the [GitHub Releases page](https://github.com/selkies-project/selkies/releases) carries one `cp311-abi3` wheel per platform (`manylinux_2_28` and `musllinux_1_2`, x86_64 and aarch64), the pre-releases cut per commit included. A wheel installs on GIL-enabled CPython 3.11 and newer on its own libc and architecture; free-threaded CPython is not supported by ordinary abi3 wheels. The stable ABI covers only the CPython extension interface, not the native Opus, PulseAudio, Rust, libc, OS, or CPU-architecture interfaces. Native releases publish wheels only: on CPython 3.9/3.10, build the full-CPython-API extension from a source tree with `pip wheel . --no-deps` (or `pip install .`). Package `Requires-Python: >=3.9` covers that source build; it does not make a `cp311-abi3` wheel compatible with an older interpreter.
+Every release on the [GitHub Releases page](https://github.com/selkies-project/selkies/releases) carries one `cp311-abi3` wheel per platform (`manylinux_2_17` and `musllinux_1_2`, x86_64 and aarch64), the pre-releases cut per commit included. A wheel installs on GIL-enabled CPython 3.11 and newer on its own libc and architecture; free-threaded CPython is not supported by ordinary abi3 wheels. The stable ABI covers only the CPython extension interface, not the native Opus, PulseAudio, Rust, libc, OS, or CPU-architecture interfaces. Native releases publish wheels only: on CPython 3.9/3.10, build the full-CPython-API extension from a source tree with `pip wheel . --no-deps` (or `pip install .`). Package `Requires-Python: >=3.9` covers that source build; it does not make a `cp311-abi3` wheel compatible with an older interpreter.
 ```bash
-pip install ./pcmflux-<version>-cp311-abi3-manylinux_2_28_x86_64.whl
+pip install ./pcmflux-<version>-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
 ```
 
 A wheel carries the PulseAudio client library it links, so all a host needs is a PulseAudio server, or PipeWire through `pipewire-pulse`, to capture from and play into.

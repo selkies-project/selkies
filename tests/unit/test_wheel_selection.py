@@ -26,14 +26,14 @@ def check(label: str, ok: bool, detail: str = "") -> None:
     print(f"{'PASS' if ok else 'FAIL'}  [wheel-selection] {label}  {detail}", flush=True)
 
 
-def tags(interpreter: str, abi: str, platform: str = "manylinux_2_28_x86_64"):
+def tags(interpreter: str, abi: str, platform: str = "manylinux_2_17_x86_64"):
     return {Tag(interpreter, abi, platform), Tag("py3", "none", platform)}
 
 
-P = "manylinux_2_28_x86_64"
-ABI3 = "pixelflux-2.3.0-cp311-abi3-manylinux_2_28_x86_64.whl"
-PCM = "pcmflux-2.2.2-cp311-abi3-manylinux_2_28_x86_64.whl"
-ROOT = "selkies-2.3.0-py3-none-manylinux_2_28_x86_64.whl"
+P = "manylinux_2_17_x86_64"
+ABI3 = "pixelflux-2.3.0-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+PCM = "pcmflux-2.2.2-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+ROOT = "selkies-2.3.0-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
 OLD = "pixelflux-2.2.3-cp312-cp312-manylinux_2_28_x86_64.whl"
 
 for minor in range(11, 16):
@@ -45,7 +45,8 @@ for minor in (9, 10):
           not selector.compatible("pixelflux", ABI3, tags(f"cp{minor}", f"cp{minor}")))
     check(f"the server wheel still fits CPython 3.{minor}",
           selector.compatible("selkies", ROOT, tags(f"cp{minor}", f"cp{minor}")))
-check("old full-API wheels fit their own interpreter", selector.compatible("pixelflux", OLD, tags("cp312", "cp312")))
+check("old full-API wheels fit their own interpreter", selector.compatible(
+    "pixelflux", OLD, tags("cp312", "cp312", "manylinux_2_28_x86_64")))
 check("old full-API wheels do not fit a newer interpreter", not selector.compatible(
     "pixelflux", OLD, {Tag("cp313", "cp313", P), Tag("cp311", "abi3", P)}))
 check("abi3 is refused on free-threaded CPython",
@@ -53,7 +54,7 @@ check("abi3 is refused on free-threaded CPython",
 check("abi3 is refused for another project", not selector.compatible(
     "pcmflux", ABI3, {Tag("cp311", "abi3", P)}))
 check("abi3 is refused for another platform", not selector.compatible(
-    "pixelflux", ABI3, {Tag("cp311", "abi3", "manylinux_2_28_aarch64")}))
+    "pixelflux", ABI3, {Tag("cp311", "abi3", "manylinux_2_17_aarch64")}))
 check("a malformed filename is not a wheel", not selector.compatible(
     "pixelflux", "pixelflux-2.3.0-abi3.tar.gz", {Tag("cp311", "abi3", P)}))
 check("an unrelated abi3 asset is not accepted as pcmflux", not selector.compatible(

@@ -8,3 +8,4 @@ include LICENSES.md
 include pyproject.toml
 include README.md
 include setup.py
+include scripts/build-libpulse.sh
