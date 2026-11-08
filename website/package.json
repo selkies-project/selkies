@@ -41,6 +41,6 @@
     "typescript": "^6.0.3"
   },
   "overrides": {
-    "minimatch": "^11.0.1"
+    "minimatch": "$minimatch"
   }
 }
