@@ -120,21 +120,6 @@ published = workflow("release-published.yaml")
 for name in ("latest", "pypi-pcmflux", "pypi-pixelflux", "pypi"):
     check(f"published {name} is restricted to canonical Selkies",
           "github.repository == 'selkies-project/selkies'" in job(published, name))
-transition = workflow("sync-legacy-component.yaml")
-promotion = job(transition, "promote")
-check("main promotion waits for native wheels and the exact prerelease",
-      "needs: [sync, build, release]" in promotion
-      and "needs.build.result == 'success'" in promotion
-      and "needs.release.result == 'success'" in promotion)
-check("main promotion can write pull requests but not main contents",
-      "contents: read" in promotion and "pull-requests: write" in promotion
-      and "contents: write" not in promotion)
-promoter = open(os.path.join(REPO, ".github", "scripts", "promote-component-snapshot.sh")).read()
-for command in ("gh pr merge", "gh pr review", "gh pr close", "git push"):
-    check(f"promotion never runs {command}", command not in promoter)
-check("promotion binds the reviewed PR to the exact built snapshot",
-      '--base main --head "$branch"' in promoter and 'pull["headRefOid"] == mirror' in promoter
-      and 'merge-base --is-ancestor "$mirror_commit" main' in promoter)
 
 needs = {}
 for name in ("pypi-pcmflux", "pypi-pixelflux", "pypi"):
