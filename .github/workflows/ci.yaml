@@ -172,9 +172,9 @@ jobs:
           # its final release
           allow-prereleases: true
       - name: Byte-compile every module
-        # pyproject.toml claims 3.9 through 3.15 for the wheel's Python, the
-        # Jupyter entry point; this catches syntax that only the newer
-        # interpreters accept
+        # The wheel's one Python module, the Jupyter entry point, on the
+        # interpreters a Jupyter server runs on; this catches syntax that only
+        # the newer ones accept
         run: python -m compileall -q infra/wheel/selkies
 
   tests:

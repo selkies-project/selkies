@@ -4,9 +4,10 @@
 
 # The selkies wheel: the Rust server as the `selkies` executable, built by
 # maturin, with the web client installed at <prefix>/share/selkies/web beside
-# it. Nothing in it is Python but the Jupyter entry point below, so one wheel
-# per platform installs on every interpreter from 3.9. infra/wheel/build.sh
-# builds and repairs it.
+# it. Nothing in it is Python but the Jupyter entry point below, which only a
+# Jupyter server imports, so one py3-none wheel per platform installs on any
+# Python 3 and names no floor of its own. infra/wheel/build.sh builds and
+# repairs it.
 [build-system]
 requires = ["maturin>=1.9,<2"]
 build-backend = "maturin"
@@ -20,15 +21,7 @@ readme = "README.md"
 license = "MPL-2.0"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "Programming Language :: Python :: 3.15",
 ]
-requires-python = ">=3.9"
 
 [project.optional-dependencies]
 # The Jupyter launcher item and route: `pip install selkies[jupyter]` beside the

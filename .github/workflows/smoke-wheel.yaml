@@ -75,14 +75,15 @@ jobs:
           /tmp/selkies-venv/bin/selkies --help >/dev/null && echo "selkies --help OK"
           test -f /tmp/selkies-venv/share/selkies/web/index.html && echo "bundled web client OK"
           /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()['command'][0] == '/tmp/selkies-venv/bin/selkies'; print('Jupyter entry point OK')"
-      - name: Set up the oldest supported Python
+      - name: Set up the oldest Python CI checks
         id: oldest-python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.9"
           update-environment: false
-      - name: Install smoke test (oldest supported Python)
-        # The same checks on the oldest interpreter the wheel claims
+      - name: Install smoke test (oldest Python CI checks)
+        # The same checks on the oldest interpreter CI keeps; the wheel itself
+        # names no floor
         run: |
           "${{ steps.oldest-python.outputs.python-path }}" -m venv /tmp/selkies-venv-oldest
           /tmp/selkies-venv-oldest/bin/pip install --no-index --find-links "$PWD/dist" --only-binary=:all: selkies
