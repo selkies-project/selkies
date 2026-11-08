@@ -168,6 +168,11 @@ impl Arm {
         self.slices
     }
 
+    /// The `general_level_idc` the sequence names.
+    pub(super) fn level(&self) -> u32 {
+        self.level_idc
+    }
+
     /// The profile a session declares: the range extensions for 4:4:4, else Main 10 or Main.
     fn profile_idc(n: &Negotiated) -> u32 {
         match (n.fullcolor, n.bit_depth) {

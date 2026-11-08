@@ -142,6 +142,11 @@ impl Arm {
         (64, 64)
     }
 
+    /// The `seq_level_idx` the sequence names.
+    pub(super) fn level(&self) -> u32 {
+        self.level_idx
+    }
+
     /// The uniform tiling of a `width` x `height` picture: as few tile columns as the
     /// codec's widest tile allows and one tile row, or more rows where the area limit asks.
     fn tiles(width: u32, height: u32) -> Result<Tiles, String> {

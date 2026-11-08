@@ -940,6 +940,17 @@ impl Arm {
         }
     }
 
+    /// The level the codec's sequence names for the configured geometry and rate, zero for a
+    /// codec that names none.
+    fn level(&self) -> u32 {
+        match self {
+            Arm::H264(a) => a.level(),
+            Arm::H265(a) => a.level(),
+            Arm::Av1(a) => a.level(),
+            Arm::Vp8(_) | Arm::Vp9(_) => 0,
+        }
+    }
+
     fn picture(
         &mut self,
         negotiated: &Negotiated,
@@ -1052,6 +1063,9 @@ pub struct VaapiEncoder {
     /// Whether the next frame opens a sequence: a key frame carrying the sequence parameters
     /// and the rate control.
     sequence_start: bool,
+    /// The level the last sequence named (`Arm::level`), which a constant-rate target taken
+    /// with a picture has to stay within.
+    declared_level: u32,
     omit_headers: bool,
     fresh: bool,
     /// The reorder bound the H.264 stream is held to. A driver may write its own sequence
@@ -1387,6 +1401,7 @@ impl VaapiEncoder {
             measures: true,
             quality_level: None,
             sequence_start: true,
+            declared_level: 0,
             omit_headers: settings.omit_stripe_headers,
             fresh: true,
             reorder: NoReorder::new("The VA-API driver", true),
@@ -1770,12 +1785,20 @@ impl VaapiEncoder {
         }
     }
 
-    /// Take a rate or frame-rate change: the next frame opens a sequence with the new rate
-    /// control, as a key frame.
+    /// Take a rate or frame-rate change. A constant-rate target that moved alone goes out with
+    /// the next picture's rate control, as a still screen's cleanup rate does (`encode`), so
+    /// congestion control steering the target costs no key frame. Any other change, or a target
+    /// the declared level does not admit, opens a sequence with the new rate control, as a key
+    /// frame: the decoder learns a level only from a sequence header.
     pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> Result<(), String> {
         let Some(rate) = self.rate.changed(settings) else {
             return Ok(());
         };
+        let target_only = rate.cbr
+            && RateSettings {
+                bitrate_kbps: rate.bitrate_kbps,
+                ..self.rate
+            } == rate;
         self.rate = rate;
         self.negotiated.fps = rate.fps;
         self.negotiated.bits_per_second = if rate.cbr {
@@ -1808,7 +1831,9 @@ impl VaapiEncoder {
                 a.configure(&self.negotiated, self.surface_width, self.surface_height)?
             }
         }
-        self.sequence_start = true;
+        if !target_only || self.arm.level() > self.declared_level {
+            self.sequence_start = true;
+        }
         Ok(())
     }
 
@@ -2589,6 +2614,7 @@ impl VaapiEncoder {
         }
         if key {
             self.arm.sequence(&self.negotiated, &mut out);
+            self.declared_level = self.arm.level();
             self.rate_control_at(&mut out, bps);
             self.sent_bps = bps;
         } else if self.rate.cbr && bps != self.sent_bps {

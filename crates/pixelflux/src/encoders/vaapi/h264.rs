@@ -69,6 +69,11 @@ impl Arm {
         self.slices
     }
 
+    /// The `level_idc` the sequence names.
+    pub(super) fn level(&self) -> u32 {
+        self.level_idc
+    }
+
     /// The stream's sequence: the level the ladder names at this geometry and rate, never
     /// below the one the decoded picture buffer was sized for, the picture size in macroblocks
     /// with the cropping that trims it, and the SPS and PPS the key frames carry.

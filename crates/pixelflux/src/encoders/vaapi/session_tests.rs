@@ -1227,30 +1227,38 @@ fn a_capped_cleanup_frame_carries_its_rate_and_the_next_the_sessions() {
     assert!(rate_control().is_none());
 }
 
-/// A rate change opens a new sequence: the next frame is a key frame carrying the new rate
+/// A constant-rate target that moved alone reaches the next picture with its rate control and no
+/// new sequence; a frame-rate change opens a new sequence, a key frame carrying the new rate
 /// control; a quality change in constant-quantizer mode reaches the next frame as it is.
 #[test]
-fn a_rate_change_restarts_the_sequence_and_a_quality_change_does_not() {
+fn a_target_change_rides_the_next_picture_and_a_frame_rate_change_restarts_the_sequence() {
     mock::reset(Driver::generous());
     let mut enc = session(Codec::H264, true);
+    let rate_control = || {
+        mock::with(|d| {
+            d.last_misc()
+                .into_iter()
+                .find(|m| m.0 == VAEncMiscParameterTypeRateControl)
+                .map(|m| unsafe {
+                    ptr::read_unaligned(m.1.as_ptr() as *const VAEncMiscParameterRateControl)
+                })
+        })
+    };
     encode(&mut enc, 0, true);
     encode(&mut enc, 1, false);
     let mut s = settings(Codec::H264, true);
     s.video_bitrate_kbps = 8000;
     enc.reconfigure_rate(&s).unwrap();
     let out = encode(&mut enc, 2, false);
+    assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_DELTA)));
+    assert_eq!(rate_control().map(|rc| rc.bits_per_second), Some(8_000_000));
+    encode(&mut enc, 3, false);
+    assert!(rate_control().is_none());
+    s.target_fps = 60.0;
+    enc.reconfigure_rate(&s).unwrap();
+    let out = encode(&mut enc, 4, false);
     assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_KEY)));
-    mock::with(|d| {
-        let rc = d
-            .last_misc()
-            .into_iter()
-            .find(|m| m.0 == VAEncMiscParameterTypeRateControl)
-            .unwrap()
-            .1;
-        let rc: VAEncMiscParameterRateControl =
-            unsafe { ptr::read_unaligned(rc.as_ptr() as *const _) };
-        assert_eq!(rc.bits_per_second, 8_000_000);
-    });
+    assert_eq!(rate_control().map(|rc| rc.bits_per_second), Some(8_000_000));
     mock::reset(Driver::generous());
     let mut enc = session(Codec::H264, false);
     encode(&mut enc, 0, true);
@@ -1749,6 +1757,49 @@ fn a_rate_change_keeps_the_level_the_buffer_needs() {
                 "general_level_idc {level} admits {buffered} buffered pictures"
             );
         }
+    }
+}
+
+/// A constant-rate target past what the declared level admits opens a new sequence at the
+/// level the new rate needs, since a decoder learns the level only from a sequence header.
+#[test]
+fn a_target_past_the_declared_level_restarts_the_sequence_at_a_higher_level() {
+    let (w, h) = (1920, 1080);
+    mock::reset(Driver::generous());
+    let mut s = sized(Codec::H264, true, w, h, 30.0);
+    let mut enc = open(Codec::H264, &s).unwrap();
+    let first = encode_sized(&mut enc, w, h, 0, true);
+    let declared = nal(&first[VIDEO_HEADER_LEN..], 7, false)[2];
+    s.video_bitrate_kbps = 100_000;
+    enc.reconfigure_rate(&s).unwrap();
+    let out = encode_sized(&mut enc, w, h, 1, false);
+    assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_KEY)));
+    let raised = nal(&out[VIDEO_HEADER_LEN..], 7, false)[2];
+    assert!(raised > declared, "level_idc {declared} -> {raised}");
+}
+
+/// Once a sequence has declared the level a constant-rate target needs, the target can fall and
+/// come back to it with the next picture each time, since a level only has to be high enough.
+#[test]
+fn a_target_back_within_the_declared_level_rides_the_next_picture() {
+    let (w, h) = (1920, 1080);
+    mock::reset(Driver::generous());
+    let mut s = sized(Codec::H264, true, w, h, 30.0);
+    let mut enc = open(Codec::H264, &s).unwrap();
+    encode_sized(&mut enc, w, h, 0, true);
+    s.video_bitrate_kbps = 100_000;
+    enc.reconfigure_rate(&s).unwrap();
+    let out = encode_sized(&mut enc, w, h, 1, false);
+    assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_KEY)));
+    for (n, kbps) in [(2, 8_000), (3, 100_000)] {
+        s.video_bitrate_kbps = kbps;
+        enc.reconfigure_rate(&s).unwrap();
+        let out = encode_sized(&mut enc, w, h, n, false);
+        assert_eq!(
+            parse_video_type(out[1]),
+            Some((Codec::H264, FRAME_DELTA)),
+            "{kbps} kbit/s"
+        );
     }
 }
 
