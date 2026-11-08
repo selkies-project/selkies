@@ -136,8 +136,8 @@ package's lockfile) into `Dockerfile`.
 `.clusterfuzzlite/` builds the independent `cargo fuzz` workspaces of `crates/selkies-rtc`, `crates/pixelflux`, and
 `crates/pcmflux` in an OSS-Fuzz builder for ClusterFuzzLite (`.github/workflows/fuzz.yaml`: changed code for five
 minutes, every target for an hour a day) and OSS-Fuzz. `build.sh` builds every target each `cargo fuzz list` names
-and zips its seeds from `fuzz/seeds/<target>/`. The targets are `rtp`, `sctp`, `sdp`, `stun`, and `datagrams` for the
-WebRTC stack, `sps` and `keyframe` for pixelflux (the sequence parameter set reads and rewrites, and the frame-kind reads
+and zips its seeds from `fuzz/seeds/<target>/`. The targets are `rtp`, `sctp`, `sdp`, and `stun` for the WebRTC
+stack (`datagrams` is the framing `rtp` and `sctp` split their input with), `sps` and `keyframe` for pixelflux (the sequence parameter set reads and rewrites, and the frame-kind reads
 the webcam uplink runs on a client's bitstream before any decoder), and `red` for pcmflux. DTLS and SRTP have none:
 the pinned `rtc-dtls` and `rtc-srtp` crates parse them, and a finding there is theirs to fix.
 Code that parses bytes a peer, a client, or another local account controls gets a target, a seed corpus where valid
@@ -289,7 +289,11 @@ Each is documented in full where named; read that before changing the subsystem.
   `crates/selkies-rtc/src/rtp/sender.rs`, the `lost_frame` hook, which the WebRTC engine answers). A stream whose
   encoder names no reference -- a session that cannot invalidate -- gets the key frame instead, and so does a run
   of drops the encoder never predicts past, or an H.264 loss covering the frame at the encoder's
-  `frame_num` wrap, which the browsers' FFmpeg decoder cannot be predicted past.
+  `frame_num` wrap, which the browsers' FFmpeg decoder cannot be predicted past. A WebSockets stream keeps one
+  reference frame (`video_reference_frames`, the WebSockets server's `capture_settings`) on every encoder but
+  NVENC: every client decodes against the whole buffer on every frame, and TCP loses nothing, so there x264 and
+  VA-API's H.264 and H.265 answer a drop with the key frame, while NVENC and the encoders that keep a buffer of
+  their own (libvpx, SVT-AV1, VA-API's VP8, VP9, and AV1) still predict past it.
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in the server
   (`addons/selkies-web-core/lib/webcam-capture.ts` header, `crates/selkies/src/webcam` module docblock,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).
