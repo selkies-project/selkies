@@ -149,6 +149,16 @@ export function shownCards(panel: PanelSpec, ctx: PanelContext): PanelCard[] {
   return (panel.cards ?? []).filter((card) => card.shown(ctx));
 }
 
+/**
+ * The panels that float beside a bar, which the page shows: each has a button
+ * on the bar and a card the button opens.
+ * @param ctx What decides whether a panel shows.
+ * @returns The panels in catalog order.
+ */
+export function shownFloats(ctx: PanelContext): PanelSpec[] {
+  return PANELS.filter((panel) => panel.floats && panel.shown(ctx, "float"));
+}
+
 /** One stream toggle of the catalog. */
 export interface StreamSpec {
   id: string;

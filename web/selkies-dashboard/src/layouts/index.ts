@@ -32,10 +32,10 @@
  * @module
  */
 import * as React from "react";
-import { Columns2, PanelTop } from "lucide-react";
-import { FloatingStats } from "@/panels/stats";
-import { StreamStrip } from "@/panels/stats-section";
+import { CircleDot, PanelLeft, PanelTop } from "lucide-react";
+import { FloatingStats, StreamStrip } from "@/panels/stats";
 import { getPrefixedKey } from "@/utils";
+import EdgeLayout from "./edge";
 import SidebarLayout from "./sidebar";
 import ToolbarLayout from "./toolbar";
 
@@ -58,7 +58,7 @@ export const LAYOUTS: LayoutSpec[] = [
   {
     id: "default",
     labelKey: "layout.default",
-    icon: Columns2,
+    icon: PanelLeft,
     component: SidebarLayout,
     stats: StreamStrip,
   },
@@ -67,6 +67,13 @@ export const LAYOUTS: LayoutSpec[] = [
     labelKey: "layout.wish",
     icon: PanelTop,
     component: ToolbarLayout,
+    stats: FloatingStats,
+  },
+  {
+    id: "edge",
+    labelKey: "layout.edge",
+    icon: CircleDot,
+    component: EdgeLayout,
     stats: FloatingStats,
   },
 ];

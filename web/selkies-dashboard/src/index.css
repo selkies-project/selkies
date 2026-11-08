@@ -70,6 +70,10 @@
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
+  /* Concrete bases the translucency tints from; solid the day it is off. */
+  --background-solid: oklch(1 0 0);
+  --card-solid: oklch(1 0 0);
+  --popover-solid: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
   --primary: #b83280;
   --primary-foreground: #ffffff;
@@ -116,6 +120,9 @@
   --card: oklch(0.205 0 0);
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.205 0 0);
+  --background-solid: oklch(0.145 0 0);
+  --card-solid: oklch(0.205 0 0);
+  --popover-solid: oklch(0.205 0 0);
   --popover-foreground: oklch(0.985 0 0);
   --primary: #db5ba7;
   --primary-foreground: oklch(0.145 0 0);
@@ -463,3 +470,46 @@ select optgroup {
 .toaster[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-close-button]:focus-visible {
   box-shadow: 0 0 0 2px var(--ring);
 }
+
+/* The edge layout's floating button while it rests half hidden: it glows from
+   within, the logo's pink (`--ring`) at its rim and the logo's purple
+   (`--chart-2`) deeper in, both set by `selkies-accent.js` from the logo's
+   colors, and nothing glows outside it. The glow is inside the button's own
+   fill, so it reads the same over any part of the stream; the pink rim and a
+   dark hairline outside it keep the button's edge findable where the stream
+   is pink or pale. */
+.edge-halo {
+  border-color: var(--ring);
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.35),
+    inset 0 0 8px 1px var(--ring),
+    inset 0 0 18px 4px color-mix(in oklab, var(--chart-2) 60%, transparent);
+}
+
+/* The translucent-panels knob (`useBarPrefs`' level, mirrored on
+   `data-translucency`): the page's three surface tokens tint to an alpha of
+   their own solid colors, so the bar and every shared panel read the stream
+   through them; borders and text keep their own weights. And a window of the
+   kind it opens is glass only when its backdrop is filtered: the chrome that
+   sits over the stream blurs with the level, paneled by a class of its own
+   (`chrome-panel`) or by a slot the kit names. Blur is a GPU cost paid per
+   surface per frame it shows; the degree stays the one knob that decides it,
+   off at solid. */
+html[data-translucency="1"] {
+  --background: color-mix(in oklab, var(--background-solid) 80%, transparent);
+  --card: color-mix(in oklab, var(--card-solid) 80%, transparent);
+  --popover: color-mix(in oklab, var(--popover-solid) 80%, transparent);
+}
+html[data-translucency="2"] {
+  --background: color-mix(in oklab, var(--background-solid) 65%, transparent);
+  --card: color-mix(in oklab, var(--card-solid) 65%, transparent);
+  --popover: color-mix(in oklab, var(--popover-solid) 65%, transparent);
+}
+html[data-translucency="3"] {
+  --background: color-mix(in oklab, var(--background-solid) 50%, transparent);
+  --card: color-mix(in oklab, var(--card-solid) 50%, transparent);
+  --popover: color-mix(in oklab, var(--popover-solid) 50%, transparent);
+}
+html[data-translucency="1"] :where(.edge-glass, .toolbar, .chrome-panel, [data-slot=card], [data-slot=menu-popup], [data-slot=menu-sub-content], [data-slot=dialog-content], [data-slot=tooltip-content]) { backdrop-filter: blur(6px); }
+html[data-translucency="2"] :where(.edge-glass, .toolbar, .chrome-panel, [data-slot=card], [data-slot=menu-popup], [data-slot=menu-sub-content], [data-slot=dialog-content], [data-slot=tooltip-content]) { backdrop-filter: blur(10px); }
+html[data-translucency="3"] :where(.edge-glass, .toolbar, .chrome-panel, [data-slot=card], [data-slot=menu-popup], [data-slot=menu-sub-content], [data-slot=dialog-content], [data-slot=tooltip-content]) { backdrop-filter: blur(14px); }

@@ -6,9 +6,9 @@
 
 /**
  * What every stats view reads: the core's stream state, the rows and tiles
- * worded from it, the graphs' series and scales, and the copied report. The
- * views themselves are `stats-view.tsx`; what a row says and when it warns is
- * `lib/stream-stats-view.ts`.
+ * worded from it, the graphs' series and scales, the gauges' readings, and the
+ * copied report. The views that draw them are in `stats.tsx`; what a row says
+ * and when it warns is `lib/stream-stats-view.ts`.
  *
  * The state is the core's `window.stream_info`, `window.stream_client`, and
  * `window.stream_stats` (`selkies-web-core/lib/stream-stats.ts`), read each
@@ -20,8 +20,8 @@
  */
 import * as React from "react";
 import { STATS_EVENT, type StreamClient, type StreamInfo, type StreamSample } from "../../../selkies-web-core/lib/stream-stats.ts";
-import { seriesOf, streamReport, streamRows, streamTiles } from "../../../selkies-web-core/lib/stream-stats-view.ts";
-import { holdStats } from "@/panels/stats-hold";
+import { seriesOf, streamMeters, streamReport, streamRows, streamStrip, streamTiles } from "../../../selkies-web-core/lib/stream-stats-view.ts";
+import { useSettings } from "@/state/settings-context";
 import { t } from "@/i18n";
 
 /** The stream state the cores publish on `window`. */
@@ -52,6 +52,22 @@ export interface Snapshot {
   history: StreamSample[];
   /** The history's length at the read, which is what changes between reads. */
   length: number;
+}
+
+/** How many views are showing the stream's numbers: a section, the strip, a bar, or the floating panel. */
+let holders = 0;
+
+/**
+ * Counts one view in or out. The core is told the stats are open when the
+ * first view comes and shut only when the last one goes.
+ * @param delta 1 as a view mounts, -1 as it goes.
+ */
+function holdStats(delta: 1 | -1): void {
+  const before = holders;
+  holders += delta;
+  if ((before === 0) !== (holders === 0)) {
+    window.postMessage({ type: "statsOpen", open: holders > 0 }, window.location.origin);
+  }
 }
 
 /**
@@ -113,6 +129,85 @@ export function snapshotTiles(snapshot: Snapshot | null) {
   return streamTiles(snapshot?.latest ?? null, snapshot?.client ? snapshot.client.transport : "websockets", snapshot?.history ?? null);
 }
 
+/** The host's meters (`streamMeters`): the load of the CPU, memory, GPU, and its memory, as shares where the host reports them. */
+export function snapshotMeters(snapshot: Snapshot | null) {
+  return streamMeters(snapshot?.latest ?? null);
+}
+
+/** The label each strip figure is captioned with, the tile's or graph's that shows it in the views. */
+const STRIP_CAPTIONS: Record<string, string> = { fps: "sections.stats.fpsLabel", rtt_ms: "sections.stats.latencyLabel" };
+
+/**
+ * The figures a glance needs (`streamStrip`), each with the caption the views
+ * name it by, for a strip over the stream or on a bar.
+ * @param snapshot The latest read.
+ * @returns The figures, each carrying its translated `caption`.
+ */
+export function snapshotStrip(snapshot: Snapshot | null) {
+  return streamStrip(snapshot?.latest ?? null, snapshot?.client ? snapshot.client.transport : "websockets")
+    .map((figure) => ({ ...figure, caption: t(STRIP_CAPTIONS[figure.key] || `sections.stats.tiles.${figure.key}`) }));
+}
+
+/** One half-circle gauge's reading: its identity, the figure in its bowl, and how full its arc is. */
+export interface GaugeSpec {
+  /** Tells the gauges apart in their row. */
+  key: string;
+  /** The gauge's short name, drawn under the base line. */
+  label: string;
+  /** The figure drawn in the bowl. */
+  value: string;
+  /** The share of the half circle the arc fills, 0-100. */
+  percent: number;
+  /** Draws the arc in the warn color; set by the figure that fell short. */
+  warn?: boolean;
+  /** A hover note carrying what the arc alone omits, the memory amounts. */
+  title?: string;
+}
+
+/**
+ * The short name a host meter is drawn under, in a gauge or on a bar.
+ * @param key The meter's key from `streamMeters`: `cpu`, `mem`, `gpu`, or `gpumem`.
+ * @returns `CPU`, `MEM`, `GPU`, or `VRAM`.
+ */
+export function meterLabel(key: string): string {
+  return key === "gpumem" ? "VRAM" : key.toUpperCase();
+}
+
+/**
+ * The gauges of a snapshot: the stream's three, then the host's meters. The
+ * fps arc fills to the configured frame rate and warns under nine tenths of
+ * it, the one figure with a configured value to fall short of; the latency
+ * arc fills as the reading leaves its axis, so a full arc is the best
+ * reading; the bitrate arc is the reading against the graph's own top, a
+ * scale with no good or bad end, and reads the graph's newest point so the
+ * two always agree (the graph is bucketed by maximum once the history is
+ * long). The meters fill as shares of their wholes.
+ * @param snapshot The latest read.
+ * @param graphs The graphs' series and scales (`useStatsGraphs`).
+ * @param framerate The configured frame rate, the fps arc's whole.
+ * @returns The stream's gauges and the host's.
+ */
+export function snapshotGauges(snapshot: Snapshot | null, graphs: Record<"fps" | "mbps" | "rtt", GraphData>, framerate: number) {
+  const latest = snapshot ? snapshot.latest : null;
+  const number = (key: string): number => (latest && typeof latest[key] === "number" ? (latest[key] as number) : 0);
+  const mbpsValues = graphs.mbps.series[0].values;
+  const mbpsNow = mbpsValues.length ? mbpsValues[mbpsValues.length - 1] : 0;
+  const stream: GaugeSpec[] = [
+    { key: "fps", label: "FPS", value: `${Math.round(number("fps"))}`, percent: (number("fps") / framerate) * 100,
+      warn: number("fps") > 0 && number("fps") < framerate * 0.9 },
+    { key: "mbps", label: "Mbps", value: mbpsNow.toFixed(1), percent: (mbpsNow / graphs.mbps.max) * 100 },
+    { key: "rtt_ms", label: "RTT", value: `${Math.round(number("rtt_ms"))}`, percent: 100 - (number("rtt_ms") / graphs.rtt.max) * 100 },
+  ];
+  const meters: GaugeSpec[] = snapshotMeters(snapshot).map((meter) => ({
+    key: meter.key,
+    label: meterLabel(meter.key),
+    value: `${Math.round(meter.percent)}`,
+    percent: meter.percent,
+    title: meter.text,
+  }));
+  return { stream, meters };
+}
+
 /** The top of a graph's axis: the largest value drawn with a little headroom, never under `floor`. */
 const axisTop = (floor: number, ...lists: number[][]): number => Math.max(floor, Math.ceil(Math.max(0, ...lists.flat()) * 1.1));
 
@@ -171,6 +266,16 @@ export function useCopyReport(snapshot: Snapshot | null): { copied: boolean; cop
     }
   };
   return { copied, copy };
+}
+
+/**
+ * The frame rate the stats read their fps against: the configured one, else
+ * 60 where the setting names none.
+ * @returns The frame rate in frames per second.
+ */
+export function useStatsFramerate(): number {
+  const { framerate } = useSettings();
+  return framerate > 0 ? framerate : 60;
 }
 
 /** A row's state; its mark carries it as a shape as well as a color. */
