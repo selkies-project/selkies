@@ -8,6 +8,12 @@
 //! bindings from the installed headers into `OUT_DIR`, one file per library. The SVT-AV1
 //! release is read from its header, since the encoder's handle and option surface moved
 //! between releases and the caller selects on it.
+//!
+//! The patches under pixelflux's `patches/` add API to x264, x265, and SVT-AV1, which a library
+//! a distribution packages does not have. Each such API the generated bindings declare is
+//! reported to pixelflux as `cargo::metadata` (DEP_PIXELFLUX_CODEC_<NAME>), which its build
+//! script turns into a cfg of the same name; where one is missing, pixelflux takes the path an
+//! unpatched library supports.
 
 use std::env;
 use std::io::Write;
@@ -44,7 +50,7 @@ const LIBS: &[Lib] = &[
     Lib {
         feature: "x264",
         pkg: "x264",
-        min: "0.165",
+        min: "0.155",
         header: "x264w.h",
         allow: &["x264_.*", "X264_.*"],
     },
@@ -90,6 +96,22 @@ const LIBS: &[Lib] = &[
         header: "de265w.h",
         allow: &["de265_.*", "DE265_.*", "LIBDE265_.*"],
     },
+];
+
+/// The patched APIs, by library: the cfg pixelflux selects on, and a name only the patched
+/// header declares.
+const PATCHED: &[(&str, &str, &str)] = &[
+    ("x264", "x264_in_place", "x264_encoder_release_input"),
+    ("x264", "x264_qp_offsets", "b_qp_offsets"),
+    ("x265", "x265_input_layout", "param_input_layout"),
+    ("x265", "x265_constant_blocks", "constantBlocks"),
+    ("x265", "x265_qp_offsets", "bQpOffsets"),
+    ("svtav1", "svtav1_constant_blocks", "constant_blocks"),
+    (
+        "svtav1",
+        "svtav1_constant_blocks_skip",
+        "constant_blocks_skip",
+    ),
 ];
 
 fn main() {
@@ -142,6 +164,15 @@ fn main() {
         bindings
             .write_to_file(out.join(format!("{}.rs", lib.feature)))
             .unwrap_or_else(|e| panic!("{}: writing the bindings failed: {e}", lib.pkg));
+        let generated = std::fs::read_to_string(out.join(format!("{}.rs", lib.feature))).unwrap();
+        for (feature, cfg, name) in PATCHED {
+            let declared = generated
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|word| word == *name);
+            if *feature == lib.feature && declared {
+                println!("cargo::metadata={cfg}=1");
+            }
+        }
         if lib.feature == "x264" {
             // x264.h names the encoder's constructor after the build through a macro, which
             // bindgen does not expand, so the shim below names the one this header declares.

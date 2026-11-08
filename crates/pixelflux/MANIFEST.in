@@ -1,5 +1,6 @@
 include Cargo.toml
 include Cargo.lock
+include build.rs
 recursive-include src *
 recursive-include protocols *
 recursive-include nvcodec-sys *

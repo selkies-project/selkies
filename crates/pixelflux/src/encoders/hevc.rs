@@ -11,14 +11,16 @@
 //! from, so the session names no reference and refuses an invalidation, and the caller codes
 //! a key frame instead.
 //!
-//! x265 encodes a picture laid out as its own frame where it lies (`x265_param_input_layout`,
-//! `copy-pic=0`; the patches under `patches/x265`), two pictures converted into in turn since
+//! With the patches under `patches/x265`, x265 encodes a picture laid out as its own frame where
+//! it lies (`x265_param_input_layout`, `copy-pic=0`), two pictures converted into in turn since
 //! it reads one through the encode it is passed to; the blocks the ledger marks still and clean
 //! reach it as its constant-block map (`constant_blocks`, `x265_picture.constantBlocks`), coded
 //! as skips without analysis and keeping their lowres intra estimates; and its per-block
 //! quantizer offsets apply without adaptive quantization's variance pass (`qp-offsets`). A
 //! still 1080p screen took 2.8 ms a frame on eight threads where it took 5.7, and 2560x1600
-//! 4.6 where it took 10.8. kvazaar converts into the picture it allocates and encodes from.
+//! 4.6 where it took 10.8. An x265 a distribution packages copies each picture from plain
+//! planes, analyses every block, and weighs the offsets against adaptive quantization. kvazaar
+//! converts into the picture it allocates and encodes from.
 
 use std::ffi::CString;
 
@@ -370,13 +372,51 @@ mod x265 {
     /// HEVC's filler data NAL unit type (FD_NUT).
     const FILLER_NAL: u32 = 38;
 
+    /// How a session lays out a source picture: the layout a patched x265 names
+    /// (`x265_param_input_layout`), which it encodes in place, or plain planes an unpatched one
+    /// copies from. Per plane, the bytes per row, the offset of the first pixel, and the buffer's
+    /// size; and the alignment every buffer takes.
+    #[derive(Clone, Copy, Default)]
+    struct InputLayout {
+        stride: [c_int; 3],
+        offset: [c_int; 3],
+        size: [c_int; 3],
+        align: c_int,
+    }
+
+    impl InputLayout {
+        /// Plain planes of a `width` x `height` picture, each row starting 64-byte aligned.
+        #[cfg(not(x265_input_layout))]
+        fn plain(width: usize, height: usize, i444: bool, bit_depth: u32) -> Self {
+            let bytes = if bit_depth > 8 { 2 } else { 1 };
+            let (cw, ch) = if i444 {
+                (width, height)
+            } else {
+                (width.div_ceil(2), height.div_ceil(2))
+            };
+            let (luma, chroma) = (
+                (width * bytes).next_multiple_of(64),
+                (cw * bytes).next_multiple_of(64),
+            );
+            InputLayout {
+                stride: [luma as c_int, chroma as c_int, chroma as c_int],
+                offset: [0; 3],
+                size: [
+                    (luma * height) as c_int,
+                    (chroma * ch) as c_int,
+                    (chroma * ch) as c_int,
+                ],
+                align: 64,
+            }
+        }
+    }
+
     pub struct Backend {
         api: *const x265_api,
         params: *mut x265_param,
         encoder: *mut x265_encoder,
-        /// How the encoder lays out a source picture (`x265_param_input_layout`), which
-        /// `pictures` follow so x265 encodes them where they lie (`copy-pic=0`).
-        layout: x265_input_layout,
+        /// How the session lays out a source picture, which `pictures` follow.
+        layout: InputLayout,
         /// Two pictures, three planes each, converted into in turn: x265 reads a picture through
         /// the encode it is passed to, and the other holds the frame before while it is read.
         /// Each plane is 64-byte aligned within its buffer at `aligned`.
@@ -491,7 +531,7 @@ mod x265 {
                 api,
                 params,
                 encoder: ptr::null_mut(),
-                layout: unsafe { std::mem::zeroed() },
+                layout: InputLayout::default(),
                 pictures: Default::default(),
                 aligned: [[0; 3]; 2],
                 current: 0,
@@ -543,7 +583,9 @@ mod x265 {
             // over every block is skipped and the offsets apply as given.
             options.push(("aq-mode", "1".into()));
             options.push(("aq-strength", "0".into()));
+            #[cfg(x265_qp_offsets)]
             options.push(("qp-offsets", "1".into()));
+            #[cfg(x265_input_layout)]
             options.push(("copy-pic", "0".into()));
             options.extend(Self::rate_options(rate, q));
             for (name, value) in &options {
@@ -568,10 +610,24 @@ mod x265 {
                 return Err("x265 refused the session".into());
             }
             // The layout follows the parameters as the open encoder holds them.
-            let mut opened: x265_param = unsafe { std::mem::zeroed() };
-            unsafe { ((*api).encoder_parameters.unwrap())(me.encoder, &mut opened) };
-            if unsafe { ((*api).param_input_layout.unwrap())(&opened, &mut me.layout) } < 0 {
-                return Err("x265 named no input layout".into());
+            #[cfg(x265_input_layout)]
+            {
+                let mut opened: x265_param = unsafe { std::mem::zeroed() };
+                unsafe { ((*api).encoder_parameters.unwrap())(me.encoder, &mut opened) };
+                let mut layout: x265_input_layout = unsafe { std::mem::zeroed() };
+                if unsafe { ((*api).param_input_layout.unwrap())(&opened, &mut layout) } < 0 {
+                    return Err("x265 named no input layout".into());
+                }
+                me.layout = InputLayout {
+                    stride: layout.stride,
+                    offset: layout.offset,
+                    size: layout.size,
+                    align: layout.align,
+                };
+            }
+            #[cfg(not(x265_input_layout))]
+            {
+                me.layout = InputLayout::plain(width, height, i444, bit_depth);
             }
             let align = (me.layout.align.max(1) as usize).max(8);
             for (picture, aligned) in me.pictures.iter_mut().zip(me.aligned.iter_mut()) {
@@ -692,9 +748,13 @@ mod x265 {
             pic.stride[0] = self.layout.stride[0];
             pic.stride[1] = self.layout.stride[1];
             pic.stride[2] = self.layout.stride[2];
+            // Only a patched x265 reads a constant-block map.
+            #[cfg(x265_constant_blocks)]
             if let Some(constant) = constant {
                 pic.constantBlocks = constant.as_mut_ptr();
             }
+            #[cfg(not(x265_constant_blocks))]
+            let _ = constant;
             pic.pts = pts as i64;
             pic.bitDepth = planes.bit_depth as c_int;
             pic.sliceType = if key {
@@ -1061,7 +1121,7 @@ mod tests {
     /// The blocks marked constant are coded as skips without analysis: a still screen's frame
     /// comes out smaller with the map than without, where x265 takes one, at 8 bits and, where
     /// the build carries the encoder, at 10, each picture converted into x265's own layout.
-    #[cfg(feature = "gpl")]
+    #[cfg(all(feature = "gpl", x265_constant_blocks))]
     #[test]
     fn constant_blocks_code_a_still_frame_as_skips() {
         for depth in [8, 10] {
@@ -1072,7 +1132,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "gpl")]
+    #[cfg(all(feature = "gpl", x265_constant_blocks))]
     fn constant_blocks_skip_at(depth: u32) {
         let (w, h) = (320usize, 240usize);
         let settings = CaptureSettings {
@@ -1120,7 +1180,7 @@ mod tests {
     /// divides: the coding units the box touches and the partial ones along the edges are
     /// analyzed as before, the rest skipped, and the box and the still screen decode as close to
     /// the source as without the map, each picture converted in place into x265's own layout.
-    #[cfg(feature = "gpl")]
+    #[cfg(all(feature = "gpl", x265_constant_blocks))]
     #[test]
     fn constant_blocks_leave_a_change_beside_them_coded() {
         use super::super::mixed_screen;

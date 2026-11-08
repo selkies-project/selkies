@@ -5,6 +5,8 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 build = "build.rs"
+# The patched APIs the build finds reach pixelflux as DEP_PIXELFLUX_CODEC_* metadata.
+links = "pixelflux-codec"
 publish = false
 
 [features]

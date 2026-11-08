@@ -5181,7 +5181,7 @@ mod tests {
     /// A constant-rate x264 session given more rate than its moving picture needs codes it no
     /// finer than the paint-over quantizer, unless the caller floors it elsewhere, and once
     /// the screen holds still its cleanup codes finer than that floor.
-    #[cfg(feature = "gpl")]
+    #[cfg(all(feature = "gpl", x264_qp_offsets))]
     #[test]
     fn a_constant_rate_software_h264_session_floors_motion_at_the_paint_over_quantizer() {
         let session = |min_qp: i32| {
