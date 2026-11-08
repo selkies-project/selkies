@@ -91,7 +91,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -e
-          (cd website && npm ci --no-audit --no-fund)
+          (cd website && npm ci --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000)
           if [ -n "${TAG}" ]; then
             git rev-parse --verify --quiet "refs/tags/${TAG}" > /dev/null \
               || { echo "::error::${TAG} is not a tag"; exit 1; }

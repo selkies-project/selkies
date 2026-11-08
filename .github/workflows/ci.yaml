@@ -47,6 +47,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Python
+        id: python-first
+        # A download GitHub fails is tried once more by the step after.
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Set up Python, again
+        id: python-again
+        if: steps.python-first.outcome == 'failure'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -57,7 +67,9 @@ jobs:
         # .pre-commit-config.yaml. The web hook runs in its own job, which is
         # what keeps the slow npm install off this one.
         run: |
-          python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
+          scripts/ci/retry.sh 4 30 python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
+          # ruff's and codespell's hooks are cloned from GitHub, with retries
+          scripts/ci/retry.sh 4 30 pre-commit install-hooks
           pre-commit run --all-files --show-diff-on-failure ruff-check
           pre-commit run --all-files --show-diff-on-failure codespell
           pre-commit run --all-files --show-diff-on-failure settings-doc
@@ -91,7 +103,7 @@ jobs:
       - name: ESLint and TypeScript
         # Through pre-commit so the hook definition is the single source of truth
         run: |
-          python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
+          scripts/ci/retry.sh 4 30 python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
           pre-commit run --all-files --show-diff-on-failure web-lint
 
   rust-lint:
@@ -108,7 +120,7 @@ jobs:
       - name: rustfmt and clippy
         # Through pre-commit so the hook definitions are the single source of truth
         run: |
-          python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
+          scripts/ci/retry.sh 4 30 python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
           pre-commit run --all-files --show-diff-on-failure rustfmt
           pre-commit run --all-files --show-diff-on-failure clippy
           pre-commit run --all-files --show-diff-on-failure clippy-pixelflux-python
@@ -165,7 +177,20 @@ jobs:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - name: Set up Python
+        id: python-matrix-first
+        # A download GitHub fails is tried once more by the step after.
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          # The newest interpreter is taken from its release candidates until
+          # its final release
+          allow-prereleases: true
+      - name: Set up Python, again
+        id: python-matrix-again
+        if: steps.python-matrix-first.outcome == 'failure'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
           # The newest interpreter is taken from its release candidates until

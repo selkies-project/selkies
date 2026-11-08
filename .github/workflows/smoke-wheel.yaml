@@ -53,6 +53,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Python
+        id: python-first
+        # A download GitHub fails is tried once more by the step after.
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Set up Python, again
+        id: python-again
+        if: steps.python-first.outcome == 'failure'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -76,7 +86,16 @@ jobs:
           test -f /tmp/selkies-venv/share/selkies/web/index.html && echo "bundled web client OK"
           /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()['command'][0] == '/tmp/selkies-venv/bin/selkies'; print('Jupyter entry point OK')"
       - name: Set up the oldest Python CI checks
-        id: oldest-python
+        id: oldest-python-first
+        # A download GitHub fails is tried once more by the step after.
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.9"
+          update-environment: false
+      - name: Set up the oldest Python CI checks, again
+        id: oldest-python-again
+        if: steps.oldest-python-first.outcome == 'failure'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.9"
@@ -85,7 +104,7 @@ jobs:
         # The same checks on the oldest interpreter CI keeps; the wheel itself
         # names no floor
         run: |
-          "${{ steps.oldest-python.outputs.python-path }}" -m venv /tmp/selkies-venv-oldest
+          "${{ steps.oldest-python-first.outputs.python-path || steps.oldest-python-again.outputs.python-path }}" -m venv /tmp/selkies-venv-oldest
           /tmp/selkies-venv-oldest/bin/pip install --no-index --find-links "$PWD/dist" --only-binary=:all: selkies
           /tmp/selkies-venv-oldest/bin/selkies --help >/dev/null && echo "selkies --help OK"
           test -f /tmp/selkies-venv-oldest/share/selkies/web/index.html && echo "bundled web client OK"
@@ -93,6 +112,7 @@ jobs:
       - name: Install smoke test (musllinux, on Alpine)
         # libxcb is what the bundled libpulse leaves to the host, as pcmflux's does
         run: |
+          scripts/ci/retry.sh 4 30 docker pull python:3-alpine
           docker run --rm -v "$PWD/dist:/dist:ro" python:3-alpine sh -euxc '
             apk add --no-cache mesa-gbm pixman libxcb
             python3 -m venv /tmp/selkies-venv

@@ -72,7 +72,20 @@ jobs:
         python-version: ["3.9", "3.15"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - name: Set up Python
+        id: python-matrix-first
+        # A download GitHub fails is tried once more by the step after.
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          # The newest interpreter is taken from its release candidates until
+          # its final release
+          allow-prereleases: true
+      - name: Set up Python, again
+        id: python-matrix-again
+        if: steps.python-matrix-first.outcome == 'failure'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
           # The newest interpreter is taken from its release candidates until
@@ -110,7 +123,7 @@ jobs:
         run: |
           # Apart from the current server, the tier needs only the source tree,
           # the standard library, and pytest
-          python -m pip install pytest
+          scripts/ci/retry.sh 4 30 python -m pip install pytest
           python -m pytest tests -m unit -v --junitxml=unit-report.xml
       - name: Fail if any suite skipped
         if: ${{ !cancelled() }}
@@ -201,7 +214,18 @@ jobs:
           cache-dependency-path: |
             web/selkies-web-core/package.json
             web/selkies-dashboard/package.json
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - name: Set up Python
+        id: python-first
+        # A download GitHub fails is tried once more by the step after.
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Set up Python, again
+        id: python-again
+        if: steps.python-first.outcome == 'failure'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -360,14 +384,14 @@ jobs:
           merge-multiple: true
       - name: Install selkies and the test dependencies
         run: |
-          python -m pip install --upgrade pip
+          scripts/ci/retry.sh 4 30 python -m pip install --upgrade pip
           # The server under test is the one the wheel carries, installed as a
           # user installs it: pip picks this platform's out of dist/
           python -m pip install --no-index --find-links "$PWD/dist" --only-binary=:all: selkies
           server="$(python -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/selkies"
           "${server}" --version
           echo "SELKIES_TEST_SERVER=${server}" >> "$GITHUB_ENV"
-          python -m pip install -r tests/requirements.txt
+          scripts/ci/retry.sh 4 30 python -m pip install -r tests/requirements.txt
           # Install the exact local native wheels downloaded above.
           mkdir -p pixelflux-pcmflux-wheels
           SELECTOR="${GITHUB_WORKSPACE}/.devcontainer/features/desktop-selkies/src/select-compatible-wheels.py"

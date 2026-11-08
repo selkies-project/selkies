@@ -46,6 +46,7 @@ esac
 MAMBA="${WORK}/conda/micromamba"
 addons/base/fetch-verified release mamba-org/micromamba-releases latest "${MAMBA_ASSET}" "${MAMBA}"
 chmod +x "${MAMBA}"
+scripts/ci/retry.sh 4 30 docker pull "quay.io/pypa/manylinux_2_28_${ARCH}"
 docker run --rm \
     -v "${PWD}:/repo:ro" \
     -v "${WORK}:/work" \
