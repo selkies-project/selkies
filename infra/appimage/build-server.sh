@@ -4,12 +4,12 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Build the server the AppImage's conda package carries (run inside the
-# manylinux_2_28 container scripts/ci/appimage.sh starts, with the checkout at
+# manylinux2014 container scripts/ci/appimage.sh starts, with the checkout at
 # /repo and its work directory, holding micromamba, at /work), staging it with
 # its web client under /work/server.
 #
-# glibc 2.28 is the AppImage's floor, and the server built here links nothing
-# newer. It is built as every native package builds it
+# This image's glibc, GLIBC_FLOOR, is the AppImage's floor, and the server
+# built here links nothing newer. It is built as every native package builds it
 # (infra/packaging/server.sh), its codecs linked in from the source
 # pixelflux's wheels build, and it runs against the conda-forge libraries the
 # AppImage bundles. libxkbcommon is linked against conda-forge's own, solved
@@ -22,7 +22,7 @@ set -eux
 
 XKB=/build/xkbcommon
 rm -rf "${XKB}" "${XKB}-link"
-env CONDA_OVERRIDE_GLIBC=2.28 MAMBA_ROOT_PREFIX=/build/mamba \
+env CONDA_OVERRIDE_GLIBC="${GLIBC_FLOOR}" MAMBA_ROOT_PREFIX=/build/mamba \
     /work/conda/micromamba create -y -p "${XKB}" -c conda-forge libxkbcommon
 mkdir -p "${XKB}-link"
 ln -s "${XKB}/lib/libxkbcommon.so.0" "${XKB}-link/libxkbcommon.so.0"

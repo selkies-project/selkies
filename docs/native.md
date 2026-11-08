@@ -55,7 +55,7 @@ For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVID
 
 ## The AppImage
 
-Runs from wherever you put it, on any distribution with glibc 2.28 or newer (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. Every native dependency is inside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
+Runs from wherever you put it, on any distribution with glibc 2.17 or newer (Enterprise Linux 7, Debian 8, Ubuntu 13.04, and later), without touching the system. Every native dependency is inside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
 
 ```bash
 APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"

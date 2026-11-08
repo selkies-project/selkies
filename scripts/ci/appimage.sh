@@ -4,7 +4,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Build selkies-<ver>-<arch>.AppImage on the runner for this architecture.
-# Builds the server inside a manylinux_2_28 container
+# Builds the server inside a manylinux2014 container
 # (infra/appimage/build-server.sh), uses rattler-build to package it as a
 # conda package, then assembles the AppImage with linuxdeploy and the conda
 # plugin in infra/appimage. The web client has to be in dist/web already
@@ -16,6 +16,10 @@ set -eux
 
 # linuxdeploy names its artifacts after `uname -m`
 ARCH="${1:-$(uname -m)}"
+# The AppImage's glibc floor, manylinux2014's: the server is built there, every
+# conda environment is solved for it, and every file the AppImage carries is
+# checked against it
+export GLIBC_FLOOR=2.17
 
 cd "$(readlink -f "$(dirname "$0")")/../.."
 WORK="${PWD}/build/appimage"
@@ -46,12 +50,12 @@ esac
 MAMBA="${WORK}/conda/micromamba"
 addons/base/fetch-verified release mamba-org/micromamba-releases latest "${MAMBA_ASSET}" "${MAMBA}"
 chmod +x "${MAMBA}"
-scripts/ci/retry.sh 5 60 docker pull "quay.io/pypa/manylinux_2_28_${ARCH}"
+scripts/ci/retry.sh 5 60 docker pull "quay.io/pypa/manylinux2014_${ARCH}"
 docker run --rm \
     -v "${PWD}:/repo:ro" \
     -v "${WORK}:/work" \
-    -e SELKIES_VERSION -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-    "quay.io/pypa/manylinux_2_28_${ARCH}" \
+    -e SELKIES_VERSION -e GLIBC_FLOOR -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    "quay.io/pypa/manylinux2014_${ARCH}" \
     sh /repo/infra/appimage/build-server.sh
 
 # 1) rattler-build: selkies conda package from that server
@@ -103,7 +107,7 @@ CONDA_PACKAGES="selkies;libxcb;pulseaudio;libva;libxkbcommon;pixman;zlib"
 # linuxdeploy alone and the toolchain solve below stays on conda-forge.
 # CONDA_OVERRIDE_GLIBC is the solver's own: it solves for the AppImage's glibc
 # floor rather than the runner's, where conda-forge carries a build for both.
-env CONDA_OVERRIDE_GLIBC="2.28" \
+env CONDA_OVERRIDE_GLIBC="${GLIBC_FLOOR}" \
     CONDA_CHANNELS="${CONDA_CHANNELS}" \
     CONDA_PACKAGES="${CONDA_PACKAGES}" \
     CONDA_DOWNLOAD_DIR="${WORK}/conda" \
@@ -121,8 +125,10 @@ AppDir/usr/conda/bin/selkies --help > /dev/null
 #     /dev/video*. Compiled with the conda-forge toolchain rather than the
 #     runner's gcc, whose glibc is far newer than the rest of the AppImage
 #     needs; 2.28 is the oldest sysroot still carrying the kernel input
-#     headers. The V4L2 interposer is built without its PipeWire frame source,
-#     which needs headers this toolchain has no reason to carry.
+#     headers, and what they take of its C library is within the AppImage's
+#     floor (the check below covers every file).
+#     The V4L2 interposer is built without its PipeWire frame source, which
+#     needs headers this toolchain has no reason to carry.
 CC_ENV="${WORK}/cc-env"
 # conda names its sysroot packages after its own subdir (linux-64,
 # linux-aarch64, ...), which micromamba reports as its platform
@@ -149,6 +155,7 @@ rm -rf "${CC_ENV}"
 # every ELF file in the AppDir is checked rather than assumed
 python3 - <<'FLOOR'
 import os, re, subprocess, sys
+floor = tuple(int(part) for part in os.environ["GLIBC_FLOOR"].split("."))
 over = []
 for base, _, names in os.walk("AppDir"):
     for name in names:
@@ -160,11 +167,11 @@ for base, _, names in os.walk("AppDir"):
                 continue
         symbols = subprocess.run(["objdump", "-T", path], capture_output=True, text=True).stdout
         need = max(((int(a), int(b)) for a, b in re.findall(r"GLIBC_(\d+)\.(\d+)", symbols)), default=(0, 0))
-        if need > (2, 28):
+        if need > floor:
             over.append(f"GLIBC_{need[0]}.{need[1]} {path}")
 if over:
-    sys.exit("these need a glibc newer than 2.28:\n" + "\n".join(sorted(over)))
-print("every ELF file in the AppDir needs at most GLIBC_2.28")
+    sys.exit(f"these need a glibc newer than {os.environ['GLIBC_FLOOR']}:\n" + "\n".join(sorted(over)))
+print(f"every ELF file in the AppDir needs at most GLIBC_{os.environ['GLIBC_FLOOR']}")
 FLOOR
 
 # 4) Custom AppRun + desktop integration. No desktop session is bundled: the
