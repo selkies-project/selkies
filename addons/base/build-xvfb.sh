@@ -58,5 +58,8 @@ meson setup build \
     -Ddocs=false -Ddevel-docs=false
 ninja -C build hw/vfb/Xvfb
 install -Dm755 build/hw/vfb/Xvfb "${DESTDIR}${PREFIX}/bin/Xvfb"
-"${DESTDIR}${PREFIX}/bin/Xvfb" -help 2>&1 | grep -q -- '-glamor'
-"${DESTDIR}${PREFIX}/bin/Xvfb" -help 2>&1 | grep -q -- 'CRTCs per screen (default: 4)'
+# Read whole before grep: under pipefail, grep -q leaving at its match kills a
+# writer still printing with SIGPIPE and fails the build.
+usage="$("${DESTDIR}${PREFIX}/bin/Xvfb" -help 2>&1)"
+grep -q -- '-glamor' <<< "${usage}"
+grep -q -- 'CRTCs per screen (default: 4)' <<< "${usage}"
