@@ -39,13 +39,13 @@ jobs:
             # The sdist is the same file from any job, so one writes it
             sdist: "1"
           - arch: aarch64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             platform: manylinux_2_28
           - arch: x86_64
             runner: ubuntu-latest
             platform: musllinux_1_2
           - arch: aarch64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             platform: musllinux_1_2
     runs-on: ${{ matrix.target.runner }}
     steps:

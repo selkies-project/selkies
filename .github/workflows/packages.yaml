@@ -76,7 +76,7 @@ jobs:
           - name: amd64
             runner: ubuntu-latest
           - name: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
         kind:
           - name: deb-ubuntu24.04
             tag: ubuntu24.04
@@ -124,7 +124,7 @@ jobs:
           # Arch Linux publishes an x86_64-only image
           - arch:
               name: arm64
-              runner: ubuntu-24.04-arm
+              runner: ubuntu-26.04-arm
             kind:
               name: arch
               image: archlinux:base-devel
@@ -202,7 +202,7 @@ jobs:
           - name: x86_64
             runner: ubuntu-latest
           - name: aarch64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
