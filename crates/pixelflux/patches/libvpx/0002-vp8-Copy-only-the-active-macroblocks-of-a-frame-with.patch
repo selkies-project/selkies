@@ -17,12 +17,12 @@ The stream comes out bit for bit the same as with the whole copy, at 1920x1080, 
 1366x768, constant quantizer and constant rate, one and eight threads, on a still screen, a
 256x256 changing box and a scroll.
 ---
- vp8/encoder/lookahead.c | 61 +++++++++++++++++++++++++++++++----------
+ vp8/encoder/lookahead.c | 63 +++++++++++++++++++++++++++++++----------
  vp8/encoder/lookahead.h |  7 +++--
- 2 files changed, 51 insertions(+), 17 deletions(-)
+ 2 files changed, 53 insertions(+), 17 deletions(-)
 
 diff --git a/vp8/encoder/lookahead.c b/vp8/encoder/lookahead.c
-index 49f851d..87d8b53 100644
+index 49f851d..c95286c 100644
 --- a/vp8/encoder/lookahead.c
 +++ b/vp8/encoder/lookahead.c
 @@ -9,7 +9,9 @@
@@ -69,7 +69,7 @@ index 49f851d..87d8b53 100644
      }
    }
    return ctx;
-@@ -100,43 +108,66 @@ int vp8_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
+@@ -100,43 +108,68 @@ int vp8_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
    ctx->sz++;
    buf = pop(ctx, &ctx->write_idx);
  
@@ -81,11 +81,13 @@ index 49f851d..87d8b53 100644
 -  if (ctx->max_sz == 1 && active_map && !flags) {
 +  /* A buffer holds the picture it last took, so a push with an active map
 +   * copies the active macroblocks and those that changed since (its stale
-+   * map), and the whole picture where there is no map or a key frame is
-+   * forced. The other buffers note the macroblocks this frame changes, for
-+   * their own next push. */
++   * map), and the whole picture where there is no map, a key frame is forced,
++   * or a side is odd, where the rectangle copy would extend the chroma border
++   * a row or column past the plane. The other buffers note the macroblocks
++   * this frame changes, for their own next push. */
 +  if (active_map && !(flags & VPX_EFLAG_FORCE_KF) &&
-+      (unsigned int)(mb_rows * mb_cols) == ctx->mbs) {
++      (unsigned int)(mb_rows * mb_cols) == ctx->mbs &&
++      !(src->y_width & 1) && !(src->y_height & 1)) {
 +    unsigned int i;
 +    for (i = 0; i < ctx->max_sz; ++i) {
 +      unsigned char *stale = ctx->buf[i].stale;

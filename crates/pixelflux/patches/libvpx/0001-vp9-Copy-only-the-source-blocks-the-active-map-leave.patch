@@ -20,9 +20,9 @@ The stream comes out bit for bit the same as with the whole copy, at 1920x1080, 
  vp9/encoder/vp9_encoder.c   |   4 +-
  vp9/encoder/vp9_extend.c    |  41 ++++++++++++++
  vp9/encoder/vp9_extend.h    |   7 +++
- vp9/encoder/vp9_lookahead.c | 104 ++++++++++++++++++++++++++++++++++--
+ vp9/encoder/vp9_lookahead.c | 106 +++++++++++++++++++++++++++++++++++-
  vp9/encoder/vp9_lookahead.h |  16 +++++-
- 5 files changed, 167 insertions(+), 5 deletions(-)
+ 5 files changed, 169 insertions(+), 5 deletions(-)
 
 diff --git a/vp9/encoder/vp9_encoder.c b/vp9/encoder/vp9_encoder.c
 index 59179fa..303cc13 100644
@@ -110,10 +110,10 @@ index 21d7e68..4f64bbd 100644
  }  // extern "C"
  #endif
 diff --git a/vp9/encoder/vp9_lookahead.c b/vp9/encoder/vp9_lookahead.c
-index b6be4f8..59a356c 100644
+index b6be4f8..3eb28a4 100644
 --- a/vp9/encoder/vp9_lookahead.c
 +++ b/vp9/encoder/vp9_lookahead.c
-@@ -35,13 +35,63 @@ void vp9_lookahead_destroy(struct lookahead_ctx *ctx) {
+@@ -35,13 +35,65 @@ void vp9_lookahead_destroy(struct lookahead_ctx *ctx) {
      if (ctx->buf) {
        int i;
  
@@ -130,12 +130,14 @@ index b6be4f8..59a356c 100644
  }
  
 +/* Size the stale maps for a picture of mb_rows x mb_cols blocks, every block
-+ * of every buffer stale. Returns 0 on failure. */
++ * of every buffer stale. Returns 0 on failure, with ctx->mbs 0 until a later
++ * call sizes every map, since the maps may then differ in size. */
 +static int size_stale_maps(struct lookahead_ctx *ctx, int mb_rows,
 +                           int mb_cols) {
 +  const int mbs = mb_rows * mb_cols;
 +  int i;
 +  if (ctx->mbs == mbs && ctx->changed) return 1;
++  ctx->mbs = 0;
 +  for (i = 0; i < ctx->max_sz; i++) {
 +    unsigned char *stale = realloc(ctx->buf[i].stale, mbs);
 +    if (!stale) return 0;
@@ -178,7 +180,7 @@ index b6be4f8..59a356c 100644
  struct lookahead_ctx *vp9_lookahead_init(unsigned int width,
                                           unsigned int height,
                                           unsigned int subsampling_x,
-@@ -92,7 +142,9 @@ int vp9_lookahead_next_show_idx(const struct lookahead_ctx *ctx) {
+@@ -92,7 +144,9 @@ int vp9_lookahead_next_show_idx(const struct lookahead_ctx *ctx) {
  
  int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
                         int64_t ts_start, int64_t ts_end, int use_highbitdepth,
@@ -189,7 +191,7 @@ index b6be4f8..59a356c 100644
    struct lookahead_entry *buf;
    int width = src->y_crop_width;
    int height = src->y_crop_height;
-@@ -101,6 +153,9 @@ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
+@@ -101,6 +155,9 @@ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
    int subsampling_x = src->subsampling_x;
    int subsampling_y = src->subsampling_y;
    int larger_dimensions, new_dimensions;
@@ -199,7 +201,7 @@ index b6be4f8..59a356c 100644
  #if !CONFIG_VP9_HIGHBITDEPTH
    (void)use_highbitdepth;
    assert(use_highbitdepth == 0);
-@@ -143,7 +198,50 @@ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
+@@ -143,7 +200,50 @@ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
      buf->img.subsampling_x = src->subsampling_x;
      buf->img.subsampling_y = src->subsampling_y;
    }
