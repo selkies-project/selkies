@@ -42,7 +42,7 @@ if (typeof Minimatch.prototype.matchOne !== 'function') {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = join(root, '..');
-// A release from before the web client moved out of addons/ keeps its packages there.
+// The releases before 2.3.0 keep the web packages under addons/.
 const web = join(repoRoot, (await fs.stat(join(repoRoot, 'web')).catch(() => null)) ? 'web' : 'addons');
 const referenceDir = join(repoRoot, 'docs', 'reference');
 
