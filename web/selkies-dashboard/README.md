@@ -24,7 +24,7 @@ A layout only arranges: the sidebar lays the panels out as sections of a drawer;
 - the stats, by `panels/stats.tsx`: the floating card, the strip a bar carries, and the sidebar's section, so a layout takes one and writes no stats component;
 - the controls' sizes, by the tokens on `:root` in `index.css` (`--control-h`, `--control-font`, `--stack-gap`, `--field-gap`, the `--switch-*` set, `--bar-button`), which a layout sets again on its own root to change them; the sidebar's are on `.sidebar` in `layouts/sidebar/sidebar.css`.
 
-Adding a layout is a component over those, its stylesheet, one entry in `layouts/index.ts`, its value in the server's `ui_layout` enum (`src/selkies/settings.py`), and its name in the dictionary (`layout.<id>`).
+Adding a layout is a component over those, its stylesheet, one entry in `layouts/index.ts`, its value in the server's `ui_layout` enum and in `ui_layout_allowed`'s default (`crates/selkies/src/settings/table.rs`, `crates/selkies/src/http/mod.rs`), and its name in the dictionary (`layout.<id>`).
 
 ## Core interaction
 
