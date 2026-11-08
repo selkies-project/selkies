@@ -417,7 +417,9 @@ impl SvtAv1Encoder {
     /// (`BlockLedger::constant`): the library copies only the other blocks, and those changed
     /// since its buffer last held the picture, into the buffers it codes from
     /// (`EbBufferHeaderType.constant_blocks`), and at a constant quantizer codes a superblock
-    /// of them as a zero-motion skip without analysis (`constant_blocks_skip`). A constant rate
+    /// of them as a zero-motion skip without analysis (`constant_blocks_skip`), which only a
+    /// session that names no references takes, since only there does every frame predict from
+    /// the one before (a loss is answered with a key frame). A constant rate
     /// leaves its mode decision to find the skips: its refresh of a still picture at a finer
     /// quantizer runs through the blocks a map would hold. An empty slice marks none.
     pub fn constant_blocks(&mut self, constant: &[bool]) {
@@ -529,7 +531,7 @@ impl SvtAv1Encoder {
             } else {
                 self.constant.as_ptr()
             };
-            header.constant_blocks_skip = u8::from(!self.rate.cbr);
+            header.constant_blocks_skip = u8::from(!self.rate.cbr && self.references.is_none());
         }
         if self.rate.cbr && HAS_EVENTS {
             let held_key = key && self.held.is_some();

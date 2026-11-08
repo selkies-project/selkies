@@ -746,8 +746,9 @@ impl VpxEncoder {
     /// Mark the macroblocks of the next frame that held still and are clean (`constant`, in
     /// raster order, empty for none), which libvpx codes as skips without analysis through its
     /// active map: VP8 picks ZEROMV from the frame before at once, VP9 codes the superblock
-    /// whose every block is marked as one skip. The map goes to the encoder with the frame
-    /// (`arm_active_map`), and only where the frame predicts from the one before.
+    /// whose every block is marked as one skip. The map goes to the encoder with the next frame
+    /// alone (`arm_active_map`), and only where that frame predicts from the one before; a frame
+    /// coded without a map of its own takes none.
     pub fn constant_blocks(&mut self, constant: &[bool]) {
         let blocks = self.planes.width.div_ceil(16) * self.planes.height.div_ceil(16);
         self.active_map.clear();
@@ -805,6 +806,7 @@ impl VpxEncoder {
         let mut flags: c_long = if key { VPX_EFLAG_FORCE_KF as c_long } else { 0 };
         self.plan = self.references.plan(key);
         self.arm_active_map(!key && self.last_refresh.refreshes(self.plan.predict_from))?;
+        self.active_map.clear();
         match self.codec {
             Codec::Vp9 => {
                 let mut refs: vpx_svc_ref_frame_config = unsafe { std::mem::zeroed() };
