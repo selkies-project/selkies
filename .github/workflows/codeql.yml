@@ -34,6 +34,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Initialize CodeQL
+        id: codeql-first
+        # The CodeQL bundle comes from GitHub's release downloads, which answer 5xx for
+        # minutes at a time: a failed download is tried again after a wait, twice.
+        continue-on-error: true
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - name: Wait out a download outage
+        if: steps.codeql-first.outcome == 'failure'
+        run: sleep 120
+      - name: Initialize CodeQL, again
+        id: codeql-again
+        if: steps.codeql-first.outcome == 'failure'
+        continue-on-error: true
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - name: Wait out a longer download outage
+        if: steps.codeql-again.outcome == 'failure'
+        run: sleep 300
+      - name: Initialize CodeQL, a third time
+        if: steps.codeql-again.outcome == 'failure'
         uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: ${{ matrix.language }}
