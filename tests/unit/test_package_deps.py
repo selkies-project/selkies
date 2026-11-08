@@ -4,7 +4,7 @@
 The base image, the native packages, and the AppImage each build the Rust
 server on their own distribution and each declare what it needs there, so a
 fact one of them states the others have to state the same way, or one channel
-ships a server another would not. Held here: the libraries the capture stack
+ships a server another would not. Held here: the libraries pixelflux and pcmflux
 opens by name at run time (no ELF dependency names them, so the image build,
 the packages' dependency resolution, and the pristine-install check each carry
 the list), the toolchain the server is built with, and that every packager

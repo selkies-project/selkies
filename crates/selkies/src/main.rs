@@ -9,7 +9,7 @@
 //! Resolves the settings, configures logging, publishes the socket directories the
 //! interposers read, settles the desktop's density on X11, probes the encoders this host
 //! serves once, and runs the stream server on a tokio runtime until a signal unwinds it.
-//! `selkies --version` prints the package version and the capture stack it links and exits,
+//! `selkies --version` prints the package version and the pixelflux and pcmflux it links and exits,
 //! `selkies --help` the settings, and `selkies <command>` runs one of the tools `commands`
 //! lists instead.
 
@@ -66,7 +66,7 @@ fn main() -> ExitCode {
         println!(
             "selkies {} ({})",
             env!("CARGO_PKG_VERSION"),
-            selkies::capture_stack()
+            selkies::native_libraries()
         );
         return ExitCode::SUCCESS;
     }

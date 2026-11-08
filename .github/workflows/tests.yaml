@@ -150,7 +150,7 @@ jobs:
         run: cargo test --locked --workspace
 
   # The server the suites drive is the one this run's selkies wheel carries,
-  # and the capture stack they drive beside it rides wheels this run has in
+  # and the pixelflux and pcmflux they drive beside it ride wheels this run has in
   # hand rather than an index. The caller passes them in as artifacts when it
   # has already built them; a standalone run builds all three here.
   wheel:
@@ -161,7 +161,7 @@ jobs:
     uses: ./.github/workflows/build-wheel.yaml
 
   wheels:
-    name: Capture stack (local crates)
+    name: pixelflux and pcmflux wheels
     if: ${{ !inputs.wheels_ready && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
     permissions:
       contents: read
@@ -372,7 +372,7 @@ jobs:
           mkdir -p capture-wheels
           SELECTOR="${GITHUB_WORKSPACE}/.devcontainer/features/desktop-selkies/src/select-compatible-wheels.py"
           # Fatal rather than a note: a run that quietly took an index's copy
-          # tests a capture stack the server does not link, and reports it as a pass.
+          # tests a pixelflux and pcmflux the server does not link, and reports it as a pass.
           for project in pixelflux pcmflux; do
             mapfile -t found < <(find capture-wheels -maxdepth 1 -name "${project}-*.whl" -print \
               | python "${SELECTOR}" "${project}")
@@ -382,7 +382,7 @@ jobs:
             fi
             python -m pip install --force-reinstall --no-deps "${found[0]}"
           done
-          python -c 'import pixelflux, pcmflux; print("capture stack:", pixelflux.__file__)'
+          python -c 'import pixelflux, pcmflux; print("pixelflux and pcmflux:", pixelflux.__file__)'
       - name: Build the web client
         env:
           # For the controller database's lookups (gendb.js)

@@ -33,8 +33,8 @@ pub mod webcam;
 pub mod webrtc;
 pub mod ws;
 
-/// The capture stack this build links, as the startup line names it.
-pub fn capture_stack() -> String {
+/// The pixelflux and pcmflux this build links, as `selkies --version` names them.
+pub fn native_libraries() -> String {
     format!(
         "pixelflux {} (software {}), pcmflux {}",
         pixelflux_version(),

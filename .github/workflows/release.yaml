@@ -162,7 +162,7 @@ jobs:
       package_version: ${{ needs.check.outputs.version }}
 
   capture-wheels:
-    name: Build capture stack wheels
+    name: Build pixelflux and pcmflux wheels
     needs: check
     permissions:
       contents: read

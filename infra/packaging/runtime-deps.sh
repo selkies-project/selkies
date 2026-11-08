@@ -8,7 +8,7 @@
 #
 # The list is read off the build rather than written down per distribution:
 # every library the binary links, as the loader resolves it here, and the
-# libraries the capture stack opens by name at run time, which no ELF
+# libraries pixelflux and pcmflux open by name at run time, which no ELF
 # dependency names, each traced to the package that installed it. A library
 # no package owns was built for this package and has no business being linked
 # dynamically, so it fails the build. The runtime-loaded list is the one the

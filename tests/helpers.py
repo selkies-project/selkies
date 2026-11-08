@@ -872,7 +872,7 @@ def tail(path: str, lines: int = 12) -> str:
 
 def skip_suite(reason: str) -> NoReturn:
     """End the suite as skipped rather than failed. For a capability the
-    installed capture stack does not expose at all, where every check would only
+    installed pixelflux or pcmflux does not expose at all, where every check would only
     report the same absence."""
     print(f"SKIP {reason}", flush=True)
     sys.exit(SKIP_EXIT)

@@ -2,7 +2,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# The Rust Selkies: one workspace for the server and its native capture stack.
+# The Rust Selkies: one workspace for the server and its capture and encode libraries.
 [workspace]
 resolver = "3"
 members = ["crates/selkies", "crates/selkies-rtc", "crates/pixelflux", "crates/pcmflux"]
@@ -21,7 +21,7 @@ license = "MPL-2.0"
 repository = "https://github.com/selkies-project/selkies"
 
 [workspace.dependencies]
-# The server links the capture stack directly, without either crate's optional Python bridge.
+# The server links pixelflux and pcmflux directly, without either crate's optional Python bridge.
 pixelflux = { path = "crates/pixelflux", default-features = false, features = ["gpl"] }
 pcmflux = { path = "crates/pcmflux", default-features = false }
 

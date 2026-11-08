@@ -140,7 +140,7 @@ pub mod encoders;
 /// The one error type the public API returns.
 pub mod error;
 pub use error::Error;
-/// The crate version compiled in, for a host that names the capture stack it links.
+/// The crate version compiled in, for a host that names the pixelflux it links.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The debug switch behind every backend's tagged line.
 pub mod log;

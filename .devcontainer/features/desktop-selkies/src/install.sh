@@ -78,7 +78,7 @@ fi
 
 # Install Selkies from the wheel its GitHub release carries -- the release asked
 # for, else the newest one -- looked in ahead of the index, which only resolves
-# what no release carries, as it does the capture stack a release from before
+# what no release carries, as it does pixelflux and pcmflux for a release from before
 # the server was a binary depends on.
 WHEELS="$(mktemp -d)"
 ./fetch-release-wheels.sh "${WHEELS}" "${RELEASE:-latest}"

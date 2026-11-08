@@ -1,4 +1,4 @@
-name: Capture stack wheels
+name: pixelflux and pcmflux wheels
 
 # Build pixelflux and pcmflux from this checkout, so their Python modules and
 # the server's direct Rust linkage always come from the same native sources.
@@ -32,7 +32,7 @@ permissions:
 
 jobs:
   plan:
-    name: Capture stack (plan)
+    name: Plan
     runs-on: ubuntu-latest
     outputs:
       groups: ${{ steps.plan.outputs.groups }}

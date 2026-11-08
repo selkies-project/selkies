@@ -209,7 +209,7 @@ what runs where.
   Gate on capabilities, never on versions: prefer the API that already encapsulates the difference, else probe the
   feature itself (a symbol resolved at run time, a capability the driver reports, an error the API returns) —
   never compare a version number.
-- The capture stack is built from the workspace's path dependencies, never fetched from a second revision or
+- pixelflux and pcmflux are built from the workspace's path dependencies, never fetched from a second revision or
   detected through a compatibility probe: every build and release uses the pixelflux and pcmflux sources beside the
   server. Call their Rust APIs directly and change caller and callee together. A suite that skips because the build
   lacks an API hedges a combination that never ships and hides the path it was meant to measure. Each native crate

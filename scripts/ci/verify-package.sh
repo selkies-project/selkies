@@ -10,7 +10,7 @@
 # package forgot to declare is satisfied there and missing on a user's machine.
 # This runs in a pristine image of the same distribution instead, and checks
 # what a bare `--help` does not: that every library the server and the
-# interposers link resolves, that the libraries the capture stack opens by name
+# interposers link resolves, that the libraries pixelflux and pcmflux open by name
 # at runtime (no ELF dependency names them) are present, and that the server
 # finds its web client where it looks for it.
 #

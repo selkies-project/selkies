@@ -1,6 +1,6 @@
 # Builds Selkies for Anthropic's OSS Scanner (github.com/anthropics/oss-scanner) the way CI's unit tier does: the
 # server's crates with the toolchain and libraries they build with and every crate they depend on (pixelflux and
-# pcmflux, the capture stack, among them), the LD_PRELOAD interposers and test tools with debug info, and the web
+# pcmflux among them), the LD_PRELOAD interposers and test tools with debug info, and the web
 # client's npm dependencies and bundle. The scan runs offline, so everything a test needs is fetched here.
 FROM node:26-trixie
 ENV DEBIAN_FRONTEND=noninteractive \

@@ -5,7 +5,7 @@ These checks guard the workspace path dependencies, local wheel package
 folders, dependency-image recipes, and artifact names consumed by the suites.
 They do not build the native libraries or contact an external repository.
 
-Usage: python3 tests/unit/test_capture_stack.py
+Usage: python3 tests/unit/test_pixelflux_pcmflux_wheels.py
 """
 import os
 import re
@@ -24,7 +24,7 @@ def check(label: str, ok: bool, detail: str = "") -> None:
         passed += 1
     else:
         failed += 1
-    print(f"{'PASS' if ok else 'FAIL'}  [capture-stack] {label}  {detail}", flush=True)
+    print(f"{'PASS' if ok else 'FAIL'}  [pixelflux-pcmflux-wheels] {label}  {detail}", flush=True)
 
 
 manifest = open(os.path.join(REPO, "Cargo.toml")).read()
@@ -86,5 +86,5 @@ check("every native build is pinned to the exact planned checkout",
       and workflow.count('ref: ${{ needs.plan.outputs.checkout_commit }}') == 2
       and workflow.count("test \"$(git rev-parse HEAD)\" = '${{ needs.plan.outputs.checkout_commit }}'") == 2)
 
-print(f"[capture-stack] {passed}/{passed + failed} passed")
+print(f"[pixelflux-pcmflux-wheels] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

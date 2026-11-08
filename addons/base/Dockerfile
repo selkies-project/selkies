@@ -698,7 +698,7 @@ COPY --from=server --chown=1000:1000 /out/selkies /usr/local/bin/selkies
 COPY --from=web --chown=1000:1000 /build/dist/web /usr/local/share/selkies/web
 
 # Fails the image build rather than publishing one whose payload cannot start:
-# every library the server links resolves, and the ones the capture stack opens
+# every library the server links resolves, and the ones pixelflux and pcmflux open
 # by name at run time, which no ELF dependency names and only the apt lines
 # above put here, are present.
 RUN set -e; \

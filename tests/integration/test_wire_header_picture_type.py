@@ -14,7 +14,7 @@ nothing else in the tree would notice them moving. The codec rides the high
 nibble, so a reader comparing the whole byte sees no keyframe ever, and the
 payload starts at `STRIPE_HEADER_LEN`, so a header that grew feeds its own
 tail to the decoder as bitstream. Both were how a released build went blank
-against a newer capture stack while the server logged a healthy encode, and
+against a newer pixelflux while the server logged a healthy encode, and
 neither shows up as an error anywhere: the check is that the bitstream really
 begins where the slice is taken, an Annex-B start code for H.264 and SOI for
 JPEG.

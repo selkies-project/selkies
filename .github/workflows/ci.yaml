@@ -182,7 +182,7 @@ jobs:
   tests:
     name: Test suites
     # The wheels are a dependency, not just an ordering constraint: the suites
-    # run the server this run's wheel carries, and drive the capture stack it
+    # run the server this run's wheel carries, and drive the pixelflux and pcmflux it
     # links through that stack's own wheels
     needs: [python-compat, wheel, pixelflux-pcmflux]
     # The browser tier runs nightly from tests.yaml; this keeps the push and
@@ -197,7 +197,7 @@ jobs:
 
   wheel:
     name: Build wheel
-    # Built while the capture stack's wheels still are: it depends on nothing
+    # Built while the pixelflux and pcmflux wheels still are: it depends on nothing
     # but the interpreters.
     needs: [python-compat]
     permissions:
@@ -212,7 +212,7 @@ jobs:
     uses: ./.github/workflows/smoke-wheel.yaml
 
   pixelflux-pcmflux:
-    name: Capture stack (local crates)
+    name: pixelflux and pcmflux wheels
     # Both optional Python bridges build from the crates the server links.
     # Their wheels land in this run's artifacts, where the suites read them.
     permissions:
