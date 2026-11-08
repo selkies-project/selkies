@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: thelamer <ryankuba@gmail.com>
 Date: Sat, 7 Nov 2026 18:47:59 -0500
-Subject: [PATCH] Copy only the blocks of an input picture the caller does not
- mark constant
+Subject: [PATCH 1/2] Copy only the blocks of an input picture the caller does
+ not mark constant
 
 svt_av1_enc_send_picture copies every input picture whole into the library's pooled luma and
 chroma buffers, on the calling thread; a screen encoder knows which 16x16 blocks of a picture are

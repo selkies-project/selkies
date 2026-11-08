@@ -18,11 +18,17 @@
 //! before 2.0 codes only from a re-open as well.
 //!
 //! The blocks the ledger marks still and clean reach the library as the picture's
-//! constant-block map (`constant_blocks`, `EbBufferHeaderType.constant_blocks`; the patch under
-//! `patches/svtav1`): it copies only the other blocks, and those changed since its pooled buffer
-//! last held the picture, into the buffers it codes from, bit for bit the stream of a whole
-//! copy. The copy of a still 1080p frame took 0.011 ms on the calling thread where it took
-//! 0.22, and at 2560x1600 0.025 where it took 0.52.
+//! constant-block map (`constant_blocks`, `EbBufferHeaderType.constant_blocks`; the patches
+//! under `patches/svtav1`): it copies only the other blocks, and those changed since its pooled
+//! buffer last held the picture, into the buffers it codes from, bit for bit the stream of a
+//! whole copy (the copy of a still 1080p frame took 0.011 ms on the calling thread where it took
+//! 0.22, and at 2560x1600 0.025 where it took 0.52), and at a constant quantizer codes a 64x64
+//! superblock of them as a zero-motion skip with no motion search, partition pass, candidate
+//! search, or transform (a still 1080p frame took 1.08 ms on six logical processors where it
+//! took 1.70, and at 2560x1600 1.88 where it took 2.86). A constant rate takes the copy alone:
+//! its refresh of a still picture at a finer quantizer runs through the blocks a map would hold,
+//! and holding them let its quantizer fall until a frame coded whole came out at many times
+//! the budget.
 //!
 //! The session refines no blocks (`FrameEncoder::refines`): the library's region map sets a
 //! segment's quantizer under a constant quantizer alone, its constant rate never setting up
@@ -410,8 +416,10 @@ impl SvtAv1Encoder {
     /// Mark the blocks of the next picture, in raster order, that held still and are clean
     /// (`BlockLedger::constant`): the library copies only the other blocks, and those changed
     /// since its buffer last held the picture, into the buffers it codes from
-    /// (`EbBufferHeaderType.constant_blocks`). Its mode decision is left to find the skips
-    /// itself. An empty slice marks none.
+    /// (`EbBufferHeaderType.constant_blocks`), and at a constant quantizer codes a superblock
+    /// of them as a zero-motion skip without analysis (`constant_blocks_skip`). A constant rate
+    /// leaves its mode decision to find the skips: its refresh of a still picture at a finer
+    /// quantizer runs through the blocks a map would hold. An empty slice marks none.
     pub fn constant_blocks(&mut self, constant: &[bool]) {
         let blocks = self.planes.width.div_ceil(16) * self.planes.height.div_ceil(16);
         self.constant.clear();
@@ -521,6 +529,7 @@ impl SvtAv1Encoder {
             } else {
                 self.constant.as_ptr()
             };
+            header.constant_blocks_skip = u8::from(!self.rate.cbr);
         }
         if self.rate.cbr && HAS_EVENTS {
             let held_key = key && self.held.is_some();
@@ -651,10 +660,13 @@ mod tests {
         );
     }
 
-    /// The blocks marked constant change only how the picture is copied into the library: a
-    /// session given the map codes every frame of a still screen bit for bit as one without.
+    /// The blocks marked constant are copied no more and, at a constant quantizer, coded as skips
+    /// without analysis: a still screen's stream comes out within a few bytes of the one the
+    /// mode decision codes, the GLOBALMV skip costing a bit more than its own skip, and decodes
+    /// to the same picture.
     #[test]
-    fn constant_blocks_leave_the_stream_as_it_was() {
+    fn constant_blocks_code_a_still_screen_as_skips() {
+        use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h) = (320usize, 240usize);
         let settings = CaptureSettings {
             width: w as i32,
@@ -676,7 +688,10 @@ mod tests {
         }
         let mut plain = SvtAv1Encoder::new(&settings, false).expect("session");
         let mut mapped = SvtAv1Encoder::new(&settings, false).expect("session");
+        let mut plain_dec = VideoDecoder::new(Codec::Av1).expect("decoder");
+        let mut mapped_dec = VideoDecoder::new(Codec::Av1).expect("decoder");
         let blocks = w.div_ceil(16) * h.div_ceil(16);
+        let (mut plain_bytes, mut mapped_bytes) = (0, 0);
         for n in 0..6u64 {
             let a = plain
                 .encode_host(&bgra, w * 4, false, n, 25, n == 0)
@@ -685,8 +700,35 @@ mod tests {
             let b = mapped
                 .encode_host(&bgra, w * 4, false, n, 25, n == 0)
                 .expect("encode");
-            assert_eq!(a, b, "frame {n} differs with the map");
+            plain_bytes += a.len();
+            mapped_bytes += b.len();
+            assert!(plain_dec.decode(&a[VIDEO_HEADER_LEN..]).expect("decode"));
+            assert!(mapped_dec.decode(&b[VIDEO_HEADER_LEN..]).expect("decode"));
         }
+        assert!(
+            mapped_bytes <= plain_bytes + 64,
+            "{mapped_bytes} bytes with the map, {plain_bytes} without"
+        );
+        let (pa, pb) = (
+            plain_dec.frame().expect("picture"),
+            mapped_dec.frame().expect("picture"),
+        );
+        let distance =
+            pa.y.chunks(pa.y_stride)
+                .zip(pb.y.chunks(pb.y_stride))
+                .take(h)
+                .flat_map(|(ra, rb)| {
+                    ra[..w]
+                        .iter()
+                        .zip(&rb[..w])
+                        .map(|(&x, &y)| (x as f64 - y as f64).abs())
+                })
+                .sum::<f64>()
+                / (w * h) as f64;
+        assert!(
+            distance < 0.5,
+            "the pictures differ by {distance} luma levels on average"
+        );
     }
 
     /// The library is configured at the capture's rate as the fraction it names, a live change

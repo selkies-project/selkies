@@ -1,0 +1,348 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Sat, 7 Nov 2026 19:27:00 -0500
+Subject: [PATCH 2/2] Code the superblocks the caller marks constant as skips
+ without analysis
+
+A 64x64 superblock whose every 16x16 block the picture's constant-block map marks is the frame
+before's, yet the light mode decision still refines its motion vector at sub-pixel precision,
+costs its candidates, decides its partition, and transforms its residual. Where the caller also
+asks for it (EbBufferHeaderType.constant_blocks_skip), such a superblock takes motion estimation's
+static bypass whatever its zero-motion SAD measures, is coded by the light PD1 path as one 64x64
+GLOBALMV skip through the existing bypass, with no partition pass, candidate search, transform, or
+chroma complexity check, and its map travels with the library's own copy of it so the processes
+behind read it after the caller's is gone. A superblock the regular path codes, a cyclic-refresh
+or base-layer one under a constant rate, is left to it: that path refreshes a still picture at a
+finer quantizer, which a map would hold at its old one and let the rate control's quantizer fall
+until a frame coded whole came out at many times the budget.
+
+At a constant quantizer a still 1920x1080 frame took 1.08 ms on six logical processors where it
+took 1.70, and 1.13 on one where it took 2.00; at 2560x1600 1.88 against 2.86 and 2.90 against
+4.78; a 256x256 change beside marked blocks 3.28 against 3.88 and 3.70 against 4.83 at 1080p.
+A still frame codes to 21 bytes where it coded to 22, a frame with the change to 36220 where it
+coded to 36199, and a frame of a scroll, which marks nothing, the same stream bit for bit.
+---
+ Source/API/EbSvtAv1.h                  |  6 +++++
+ Source/Lib/Codec/enc_dec_process.c     | 20 ++++++++++++++++-
+ Source/Lib/Codec/md_process.h          |  3 +++
+ Source/Lib/Codec/motion_estimation.c   | 13 +++++++----
+ Source/Lib/Codec/pcs.c                 | 19 ++++++++++++++++
+ Source/Lib/Codec/pcs.h                 |  7 +++++-
+ Source/Lib/Codec/product_coding_loop.c | 18 ++++++++++-----
+ Source/Lib/Globals/enc_handle.c        | 31 +++++++++++++++++++++-----
+ Source/Lib/Globals/enc_handle.h        |  3 +++
+ 9 files changed, 103 insertions(+), 17 deletions(-)
+
+diff --git a/Source/API/EbSvtAv1.h b/Source/API/EbSvtAv1.h
+index a0e8c94..cb895f0 100644
+--- a/Source/API/EbSvtAv1.h
++++ b/Source/API/EbSvtAv1.h
+@@ -119,6 +119,12 @@ typedef struct EbBufferHeaderType {
+      * the buffer it copies into last held the picture, into its input buffers;
+      * NULL copies the whole picture. Read for 8-bit input only. */
+     const uint8_t* constant_blocks;
++    /* Nonzero asks that a 64x64 superblock of constant blocks also be coded as a
++     * zero-motion skip without analysis where the light mode decision codes it;
++     * zero leaves the mode decision to find the skips, which a constant rate
++     * wants, since its refresh of a still picture at a finer quantizer runs
++     * through the blocks a map would hold. */
++    uint8_t constant_blocks_skip;
+ } EbBufferHeaderType;
+ 
+ typedef struct EbComponentType {
+diff --git a/Source/Lib/Codec/enc_dec_process.c b/Source/Lib/Codec/enc_dec_process.c
+index 541a104..20b83f0 100644
+--- a/Source/Lib/Codec/enc_dec_process.c
++++ b/Source/Lib/Codec/enc_dec_process.c
+@@ -2932,6 +2932,19 @@ EbErrorType svt_aom_mode_decision_kernel_iter(void* context) {
+                                            (scs->super_block_size == 64 || ed_ctx->md_ctx->max_block_size == 64)) ||
+                         (ed_ctx->md_ctx->depth_removal_ctrls.disallow_below_32x32 &&
+                          ed_ctx->md_ctx->max_block_size == 32);
++                    // A superblock the caller's constant-block map covers, and asks to have coded as a
++                    // skip, is the frame before's: the light PD1 path codes it as one 64x64 GLOBALMV
++                    // skip with no partition pass, candidate search, or transform. A superblock the
++                    // regular path codes (a cyclic-refresh or base-layer one) is left to it, since a
++                    // picture coded whole at a finer quantizer there is what that path is for.
++                    md_ctx->constant_sb = md_ctx->lpd1_ctrls.pd1_level > REGULAR_PD1 && pcs->slice_type != I_SLICE &&
++                        !scs->allintra && md_ctx->hbd_md == 0 && md_ctx->disallow_4x4 &&
++                        scs->super_block_size == 64 && pcs->ppcs->input_ptr->constant_blocks_skip &&
++                        svt_aom_constant_blocks_cover(pcs->ppcs, sb_origin_x, sb_origin_y, 64, 64);
++                    if (md_ctx->constant_sb) {
++                        skip_pd_pass_0          = true;
++                        md_ctx->pred_depth_only = 1;
++                    }
+                     if (scs->allintra) {
+                         pd0_detector_allintra(pcs, md_ctx);
+                     } else {
+@@ -3010,7 +3023,7 @@ EbErrorType svt_aom_mode_decision_kernel_iter(void* context) {
+                     ed_ctx->md_ctx->pd_pass = PD_PASS_1;
+                     // This classifier is used for the case PD0 is bypassed and for pd0_level 2
+                     // where the cnt_nz_coeff is not derived @ PD0
+-                    if (skip_pd_pass_0 || md_ctx->pd0_ctrls.pd0_level == PD0_LVL_6) {
++                    if (!md_ctx->constant_sb && (skip_pd_pass_0 || md_ctx->pd0_ctrls.pd0_level == PD0_LVL_6)) {
+                         lpd1_detector_skip_pd0(pcs, md_ctx, pic_width_in_sb);
+                     }
+ 
+@@ -3033,6 +3046,11 @@ EbErrorType svt_aom_mode_decision_kernel_iter(void* context) {
+                     } else {
+                         svt_aom_sig_deriv_enc_dec_default(pcs, ed_ctx->md_ctx);
+                     }
++                    if (md_ctx->constant_sb) {
++                        md_ctx->depth_removal_ctrls.enabled             = true;
++                        md_ctx->depth_removal_ctrls.disallow_below_64x64 = true;
++                        md_ctx->md_disallow_nsq_search                  = true;
++                    }
+                     // If there is only one depth and no NSQ search at PD1, then the partition structure
+                     // is fixed.
+                     md_ctx->fixed_partition = md_ctx->pred_depth_only && md_ctx->md_disallow_nsq_search;
+diff --git a/Source/Lib/Codec/md_process.h b/Source/Lib/Codec/md_process.h
+index 154165c..31f90d8 100644
+--- a/Source/Lib/Codec/md_process.h
++++ b/Source/Lib/Codec/md_process.h
+@@ -1271,6 +1271,9 @@ typedef struct ModeDecisionContext {
+     // Per-pixel residual-cost threshold for the LPD1 GLOBALMV (MDS0-2) bypass.
+     // 0: OFF. Otherwise: bypass fires when pd0_mds0_best_cost[mds_idx] < th * blk_area.
+     uint8_t lpd1_globalmv_bypass_th;
++    // The superblock is one the caller's constant-block map covers: coded as one 64x64 GLOBALMV
++    // skip by the light PD1 path, with no partition pass, candidate search, or transform.
++    bool constant_sb;
+     // Parallel-to-md_blk_arr_nsq array of PD0 MDS0 best costs, consumed by the LPD1
+     // GLOBALMV-bypass classifier. Reset to UINT32_MAX per SB via a single memset; PD0 storage
+     // sites overwrite per block. UINT32_MAX => "not available" => bypass declines (safe fallback).
+diff --git a/Source/Lib/Codec/motion_estimation.c b/Source/Lib/Codec/motion_estimation.c
+index 7a7281b..199a3eb 100644
+--- a/Source/Lib/Codec/motion_estimation.c
++++ b/Source/Lib/Codec/motion_estimation.c
+@@ -2829,8 +2829,8 @@ static INLINE void init_me_hme_data(MeContext* me_ctx) {
+ // below me_ctx->me_static_b64_th, populate the minimal set of outputs that
+ // downstream consumers (construct_me_candidate_array*, compute_distortion)
+ // need and return true so the caller can skip init/HME/integer ME.
+-static bool me_static_b64_bypass(MeContext* me_ctx, uint32_t b64_origin_x, uint32_t b64_origin_y) {
+-    if (!me_ctx->me_static_b64_th) {
++static bool me_static_b64_bypass(MeContext* me_ctx, uint32_t b64_origin_x, uint32_t b64_origin_y, bool constant) {
++    if (!me_ctx->me_static_b64_th && !constant) {
+         return false;
+     }
+ 
+@@ -2842,7 +2842,10 @@ static bool me_static_b64_bypass(MeContext* me_ctx, uint32_t b64_origin_x, uint3
+                                          b64_origin_y,
+                                          me_ctx->b64_width,
+                                          me_ctx->b64_height);
+-    if ((uint64_t)l0r0_raw * 64 * 64 >= (uint64_t)me_ctx->me_static_b64_th * me_ctx->b64_width * me_ctx->b64_height) {
++    // A block the caller marks constant is the frame before's: its zero-motion SAD is kept for
++    // the consumers that read it, and the search is skipped whatever it measures.
++    if (!constant &&
++        (uint64_t)l0r0_raw * 64 * 64 >= (uint64_t)me_ctx->me_static_b64_th * me_ctx->b64_width * me_ctx->b64_height) {
+         return false;
+     }
+ 
+@@ -2917,7 +2920,9 @@ EbErrorType svt_aom_motion_estimation_b64(
+     // processed b64, which can drive an out-of-bounds reference fetch in inter prediction
+     // (observed as a SIGSEGV in svt_av1_convolve_2d_copy_sr_neon on edge SBs at >=1080p RTC).
+     init_me_hme_data(me_ctx);
+-    if (!me_static_b64_bypass(me_ctx, b64_origin_x, b64_origin_y)) {
++    const bool constant_b64 = me_ctx->me_type != ME_MCTF && pcs->input_ptr->constant_blocks_skip &&
++        svt_aom_constant_blocks_cover(pcs, b64_origin_x, b64_origin_y, me_ctx->b64_width, me_ctx->b64_height);
++    if (!me_static_b64_bypass(me_ctx, b64_origin_x, b64_origin_y, constant_b64)) {
+         // HME: Perform Hierarchical Motion Estimation for all reference frames for the current 64x64 block.
+         hme_b64(pcs, b64_origin_x, b64_origin_y, me_ctx, input_ptr);
+ 
+diff --git a/Source/Lib/Codec/pcs.c b/Source/Lib/Codec/pcs.c
+index 44f7252..286de8e 100644
+--- a/Source/Lib/Codec/pcs.c
++++ b/Source/Lib/Codec/pcs.c
+@@ -1568,3 +1568,22 @@ EbErrorType svt_aom_me_creator(EbPtr* object_dbl_ptr, EbPtr object_init_data_ptr
+ 
+     return EB_ErrorNone;
+ }
++
++bool svt_aom_constant_blocks_cover(const PictureParentControlSet* ppcs, uint32_t x, uint32_t y, uint32_t w,
++                                   uint32_t h) {
++    const uint8_t* map = ppcs->input_ptr ? ppcs->input_ptr->constant_blocks : NULL;
++    if (!map || !ppcs->enhanced_pic)
++        return false;
++    const uint32_t width  = ppcs->enhanced_pic->width - ppcs->scs->max_input_pad_right;
++    const uint32_t height = ppcs->enhanced_pic->height - ppcs->scs->max_input_pad_bottom;
++    if (x >= width || y >= height)
++        return false;
++    const uint32_t cols = (width + 15) >> 4;
++    const uint32_t x1   = MIN(x + w, width);
++    const uint32_t y1   = MIN(y + h, height);
++    for (uint32_t by = y >> 4; by < (y1 + 15) >> 4; by++)
++        for (uint32_t bx = x >> 4; bx < (x1 + 15) >> 4; bx++)
++            if (!map[by * cols + bx])
++                return false;
++    return true;
++}
+diff --git a/Source/Lib/Codec/pcs.h b/Source/Lib/Codec/pcs.h
+index c5c6ce0..bcefe27 100644
+--- a/Source/Lib/Codec/pcs.h
++++ b/Source/Lib/Codec/pcs.h
+@@ -766,7 +766,7 @@ typedef struct PictureParentControlSet {
+ 
+     uint8_t hbd_md;
+ 
+-    EbBufferHeaderType* input_ptr; // input picture buffer
++    EbBufferHeaderType* input_ptr; // input picture buffer, whose constant_blocks the processes read
+     uint8_t             log2_tile_rows;
+     uint8_t             log2_tile_cols;
+     uint8_t             log2_sb_size;
+@@ -1259,6 +1259,11 @@ EbErrorType alloc_sb_geoms(SbGeom** geom, int width, int height);
+ void        free_sb_geoms(SbGeom* geom);
+ void        copy_sb_geoms(SbGeom* dst_geom, SbGeom* src_geom, uint16_t width, uint16_t height);
+ 
++/* Whether every 16x16 block of the picture under the rectangle at (x, y) of w x h luma samples,
++ * clipped to the picture, is one the caller's constant-block map marks (false without a map). */
++bool svt_aom_constant_blocks_cover(const PictureParentControlSet* ppcs, uint32_t x, uint32_t y, uint32_t w,
++                                   uint32_t h);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Source/Lib/Codec/product_coding_loop.c b/Source/Lib/Codec/product_coding_loop.c
+index 0122868..f2f8ccb 100644
+--- a/Source/Lib/Codec/product_coding_loop.c
++++ b/Source/Lib/Codec/product_coding_loop.c
+@@ -6218,6 +6218,9 @@ static bool lpd1_should_perform_tx(PictureControlSet* pcs, ModeDecisionContext*
+     if (!is_inter_mode(cand->block_mi.mode)) {
+         return true;
+     }
++    if (ctx->constant_sb) {
++        return false;
++    }
+ 
+     if (!ctx->lpd1_tx_skip_decision_ctrls.skip_tx_score_th) {
+         return true;
+@@ -6471,7 +6474,8 @@ static void full_loop_core_light_pd1(PictureControlSet* pcs, ModeDecisionContext
+     cand_bf->cnt_nz_coeff    = cand_bf->eob.y[0];
+     // Skip-prediction (luma-only RD). See lpd1_blk_skip_luma_rd().
+     // Inputs (prediction-SSD + residual-SSD) are produced by perform_dct_dct_tx_light_pd1 above.
+-    uint8_t perform_chroma = cand_bf->block_has_coeff || !(ctx->lpd1_tx_ctrls.zero_y_coeff_exit);
++    uint8_t perform_chroma = (cand_bf->block_has_coeff || !(ctx->lpd1_tx_ctrls.zero_y_coeff_exit)) &&
++        !ctx->constant_sb;
+     if (ctx->lpd1_blk_skip_luma_rd_pct && perform_tx && cand_bf->block_has_coeff &&
+         is_inter_mode(cand->block_mi.mode)) {
+         if (lpd1_blk_skip_luma_rd(ctx, cand_bf, y_coeff_bits, y_full_distortion[DIST_SSD])) {
+@@ -6483,7 +6487,7 @@ static void full_loop_core_light_pd1(PictureControlSet* pcs, ModeDecisionContext
+ 
+     // If going to skip chroma TX, detect if block is complex in chroma, and if so, force chroma to be performed.
+     if (!perform_chroma) {
+-        if (ctx->lpd1_tx_ctrls.chroma_detector_level) {
++        if (ctx->lpd1_tx_ctrls.chroma_detector_level && !ctx->constant_sb) {
+             chroma_component = chroma_complexity_check(pcs, ctx, cand, input_pic, loc);
+ 
+             if (ctx->lpd1_tx_ctrls.chroma_detector_level <= 3) {
+@@ -8792,8 +8796,11 @@ static void convert_md_recon_16bit_to_8bit(PictureControlSet* pcs, ModeDecisionC
+ static bool lpd1_try_mds0_bypass(PictureControlSet* pcs, ModeDecisionContext* ctx, EbPictureBufferDesc* input_pic,
+                                  const BlockLocation* loc, ModeDecisionCandidateBuffer** cand_bf_ptr_array_base,
+                                  ModeDecisionCandidate* fast_cand_array, uint32_t* fast_candidate_total_count) {
+-    if (pcs->slice_type == I_SLICE || !ctx->lpd1_globalmv_bypass_th || ctx->shape != PART_N ||
+-        pcs->ppcs->frm_hdr.use_ref_frame_mvs) {
++    if (pcs->slice_type == I_SLICE || ctx->shape != PART_N || pcs->ppcs->frm_hdr.use_ref_frame_mvs) {
++        return false;
++    }
++    // A constant superblock takes the bypass whatever the thresholds say of it
++    if (!ctx->constant_sb && !ctx->lpd1_globalmv_bypass_th) {
+         return false;
+     }
+ 
+@@ -8813,7 +8820,8 @@ static bool lpd1_try_mds0_bypass(PictureControlSet* pcs, ModeDecisionContext* ct
+ 
+     // PD0 residual variance must be low (per-pixel). UINT32_MAX sentinel (PD0 skipped) fails this check.
+     const uint32_t blk_area = (uint32_t)(ctx->blk_geom->bwidth * ctx->blk_geom->bheight);
+-    if (ctx->pd0_mds0_best_cost[ctx->blk_ptr->mds_idx] >= (uint32_t)ctx->lpd1_globalmv_bypass_th * blk_area) {
++    if (!ctx->constant_sb &&
++        ctx->pd0_mds0_best_cost[ctx->blk_ptr->mds_idx] >= (uint32_t)ctx->lpd1_globalmv_bypass_th * blk_area) {
+         return false;
+     }
+ 
+diff --git a/Source/Lib/Globals/enc_handle.c b/Source/Lib/Globals/enc_handle.c
+index 13bab3d..eebef00 100644
+--- a/Source/Lib/Globals/enc_handle.c
++++ b/Source/Lib/Globals/enc_handle.c
+@@ -891,10 +891,16 @@ static void free_stale_maps(EbEncHandle* enc_handle_ptr) {
+         for (uint32_t i = 0; i < enc_handle_ptr->input_buffer_resource_ptr->object_total_count; i++)
+             free(enc_handle_ptr->in_stale[i]);
+     }
++    if (enc_handle_ptr->in_constant && enc_handle_ptr->input_buffer_resource_ptr) {
++        for (uint32_t i = 0; i < enc_handle_ptr->input_buffer_resource_ptr->object_total_count; i++)
++            free(enc_handle_ptr->in_constant[i]);
++    }
+     free(enc_handle_ptr->y8b_stale);
+     free(enc_handle_ptr->in_stale);
++    free(enc_handle_ptr->in_constant);
+     enc_handle_ptr->y8b_stale    = NULL;
+     enc_handle_ptr->in_stale     = NULL;
++    enc_handle_ptr->in_constant  = NULL;
+     enc_handle_ptr->stale_blocks = 0;
+ }
+ 
+@@ -5120,14 +5126,15 @@ static int pool_index(const EbSystemResource* res, const EbObjectWrapper* wrappe
+ /* Size the stale maps for pictures of `blocks` 16x16 blocks, every block of every buffer stale
+  * where they did not already fit. Returns false where they could not be allocated. */
+ static bool size_stale_maps(EbEncHandle* h, uint32_t blocks) {
+-    if (h->stale_blocks == blocks && h->y8b_stale && h->in_stale)
++    if (h->stale_blocks == blocks && h->y8b_stale && h->in_stale && h->in_constant)
+         return true;
+     free_stale_maps(h);
+     const uint32_t y8b_count = h->input_y8b_buffer_resource_ptr->object_total_count;
+     const uint32_t in_count  = h->input_buffer_resource_ptr->object_total_count;
+     h->y8b_stale             = (uint8_t**)calloc(y8b_count, sizeof(uint8_t*));
+     h->in_stale              = (uint8_t**)calloc(in_count, sizeof(uint8_t*));
+-    if (!h->y8b_stale || !h->in_stale) {
++    h->in_constant           = (uint8_t**)calloc(in_count, sizeof(uint8_t*));
++    if (!h->y8b_stale || !h->in_stale || !h->in_constant) {
+         free_stale_maps(h);
+         return false;
+     }
+@@ -5140,8 +5147,9 @@ static bool size_stale_maps(EbEncHandle* h, uint32_t blocks) {
+         memset(h->y8b_stale[i], 1, blocks);
+     }
+     for (uint32_t i = 0; i < in_count; i++) {
+-        h->in_stale[i] = (uint8_t*)malloc(blocks);
+-        if (!h->in_stale[i]) {
++        h->in_stale[i]    = (uint8_t*)malloc(blocks);
++        h->in_constant[i] = (uint8_t*)malloc(blocks);
++        if (!h->in_stale[i] || !h->in_constant[i]) {
+             free_stale_maps(h);
+             return false;
+         }
+@@ -5758,8 +5766,19 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
+     const int      y8b_idx = pool_index(enc_handle_ptr->input_y8b_buffer_resource_ptr, y8b_wrapper);
+     const int      in_idx  = pool_index(enc_handle_ptr->input_buffer_resource_ptr, eb_wrapper_ptr);
+     const uint8_t* constant = app_hdr->p_buffer != NULL ? app_hdr->constant_blocks : NULL;
+-    const bool     partial  = constant && !is_16bit_input && !scs->first_pass_downsample && y8b_idx >= 0 &&
+-        in_idx >= 0 && size_stale_maps(enc_handle_ptr, mb_cols * mb_rows);
++    const bool     mapped   = constant && y8b_idx >= 0 && in_idx >= 0 &&
++        size_stale_maps(enc_handle_ptr, mb_cols * mb_rows);
++    const bool partial = mapped && !is_16bit_input && !scs->first_pass_downsample;
++    // The processes behind read the map from the library's own copy, since the caller's
++    // may be gone by the time they run.
++    if (mapped) {
++        memcpy(enc_handle_ptr->in_constant[in_idx], constant, mb_cols * mb_rows);
++        lib_reg_hdr->constant_blocks      = enc_handle_ptr->in_constant[in_idx];
++        lib_reg_hdr->constant_blocks_skip = app_hdr->constant_blocks_skip;
++    } else {
++        lib_reg_hdr->constant_blocks      = NULL;
++        lib_reg_hdr->constant_blocks_skip = 0;
++    }
+     const uint8_t* copy_luma = NULL;
+     const uint8_t* copy_chroma = NULL;
+     if (enc_handle_ptr->stale_blocks == mb_cols * mb_rows) {
+diff --git a/Source/Lib/Globals/enc_handle.h b/Source/Lib/Globals/enc_handle.h
+index a1fddf8..67a4462 100644
+--- a/Source/Lib/Globals/enc_handle.h
++++ b/Source/Lib/Globals/enc_handle.h
+@@ -134,6 +134,9 @@ struct _EbEncHandle {
+     // constant-block map copies besides the blocks the map leaves changed.
+     uint8_t** y8b_stale;
+     uint8_t** in_stale;
++    // Per pooled input buffer, the library's copy of the picture's constant-block map, which
++    // its header points at (EbBufferHeaderType.constant_blocks) for the processes behind.
++    uint8_t** in_constant;
+     uint32_t  stale_blocks;
+ 
+ #if CONFIG_SINGLE_THREAD_KERNEL
+-- 
+2.47.3
+

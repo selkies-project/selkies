@@ -292,12 +292,17 @@ adaptive quantization's per-block quantizer at strength 0, so the session's offs
 pass. Every stream a frame without a map codes comes out bit for bit as before. A still 1080p frame took 2.8 ms on
 eight threads where it took 5.7 and 6.1 on one where it took 16.5; at 2560x1600 4.6 against 10.8; a 256x256 change
 beside a clean screen 10.4 against 13.7 at 1080p.
-SVT-AV1 is built the same way, from the release the recipe pins with the patch under `patches/svtav1`
+SVT-AV1 is built the same way, from the release the recipe pins with the patches under `patches/svtav1`
 (`scripts/build-svtav1.sh`), never from a distribution: `EbBufferHeaderType.constant_blocks` carries the ledger's
 still and clean blocks, and the library copies only the other blocks, and those changed since its pooled buffer last
-held the picture, into the buffers it codes from, bit for bit the stream of a whole copy; its mode decision is left
-to find the skips itself. The copy of a still 1080p frame took 0.011 ms on the calling thread where it took 0.22,
-and at 2560x1600 0.025 where it took 0.52.
+held the picture, into the buffers it codes from, bit for bit the stream of a whole copy (the copy of a still 1080p
+frame took 0.011 ms on the calling thread where it took 0.22, and at 2560x1600 0.025 where it took 0.52); at a
+constant quantizer the session asks as well (`constant_blocks_skip`) that a 64x64 superblock of them be coded as a
+zero-motion skip with no motion search, partition pass, candidate search, or transform, through the library's own
+light mode decision (a still 1080p frame took 1.08 ms on six logical processors where it took 1.70, and at 2560x1600
+1.88 where it took 2.86). A constant rate takes the copy alone: SVT-AV1's refresh of a still picture at a finer
+quantizer runs through the blocks a map would hold, and holding them let its quantizer fall until a frame coded whole
+came out at many times the budget.
 The crate's `Cargo.toml` is the one place the version lives: `setup.py` reads it, spelling a semver pre-release
 the PEP 440 way (`2.1.0-rc.1` is `2.1.0rc1` to pip), and the release workflow stamps the tag into the manifest
 and the lock, so a build ahead of a release carries the series version and a release the tag's.
