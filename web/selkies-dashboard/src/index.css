@@ -510,6 +510,6 @@ html[data-translucency="3"] {
   --card: color-mix(in oklab, var(--card-solid) 50%, transparent);
   --popover: color-mix(in oklab, var(--popover-solid) 50%, transparent);
 }
-html[data-translucency="1"] :where(.edge-glass, .toolbar, .chrome-panel, [data-slot=card], [data-slot=menu-popup], [data-slot=menu-sub-content], [data-slot=dialog-content], [data-slot=tooltip-content]) { backdrop-filter: blur(6px); }
-html[data-translucency="2"] :where(.edge-glass, .toolbar, .chrome-panel, [data-slot=card], [data-slot=menu-popup], [data-slot=menu-sub-content], [data-slot=dialog-content], [data-slot=tooltip-content]) { backdrop-filter: blur(10px); }
-html[data-translucency="3"] :where(.edge-glass, .toolbar, .chrome-panel, [data-slot=card], [data-slot=menu-popup], [data-slot=menu-sub-content], [data-slot=dialog-content], [data-slot=tooltip-content]) { backdrop-filter: blur(14px); }
+html[data-translucency="1"] :where(.edge-glass, .toolbar, .sidebar, .chrome-panel, [data-slot=card], [data-slot=menu-popup], [data-slot=menu-sub-content], [data-slot=dialog-content], [data-slot=tooltip-content]) { backdrop-filter: blur(6px); }
+html[data-translucency="2"] :where(.edge-glass, .toolbar, .sidebar, .chrome-panel, [data-slot=card], [data-slot=menu-popup], [data-slot=menu-sub-content], [data-slot=dialog-content], [data-slot=tooltip-content]) { backdrop-filter: blur(10px); }
+html[data-translucency="3"] :where(.edge-glass, .toolbar, .sidebar, .chrome-panel, [data-slot=card], [data-slot=menu-popup], [data-slot=menu-sub-content], [data-slot=dialog-content], [data-slot=tooltip-content]) { backdrop-filter: blur(14px); }

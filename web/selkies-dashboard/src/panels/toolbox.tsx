@@ -39,7 +39,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { SelkiesLogo } from "@/components/logo";
 import { cn } from "@/lib/utils";
 import { useActions, type BarState } from "@/layouts/actions";
-import { LayoutToggle, ThemeToggle } from "@/panels/appearance";
+import { LayoutToggle, ThemeToggle, TranslucencyToggle } from "@/panels/appearance";
 import { PANELS, shownFloats, usePanelContext } from "@/panels/catalog";
 import { Clip } from "@/panels/controls";
 import { FloatingPanel } from "@/panels/floating-panel";
@@ -179,7 +179,7 @@ export function ToolboxMenu({ open, onOpenChange, side = "bottom", tooltipSide, 
             {d.uiShowLogo && <SelkiesLogo width={16} height={16} />}
             <span>{d.uiTitle}</span>
           </a>
-          <span className="ms-auto flex items-center gap-1"><LayoutToggle /><ThemeToggle /></span>
+          <span className="ms-auto flex items-center gap-1"><LayoutToggle /><TranslucencyToggle /><ThemeToggle /></span>
         </div>
         {actions.cite && <div className="px-2 pb-1.5"><CiteLink /></div>}
       </MenuPopup>

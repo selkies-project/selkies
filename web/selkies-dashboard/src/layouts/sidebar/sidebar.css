@@ -24,9 +24,12 @@
   --sk-violet: #c3b1f7;
   --sk-wordmark-from: #f4a6cf;
   --sk-wordmark-to: #c3b1f7;
-  --sk-surface: #181d26;
-  --sk-surface-alt: #1f2530;
-  --sk-surface-inset: #12161d;
+  --sk-surface-solid: #181d26;
+  --sk-surface-alt-solid: #1f2530;
+  --sk-surface-inset-solid: #12161d;
+  --sk-surface: var(--sk-surface-solid);
+  --sk-surface-alt: var(--sk-surface-alt-solid);
+  --sk-surface-inset: var(--sk-surface-inset-solid);
   --sk-border-soft: #2b3441;
   --sk-border-strong: #6e7b94;
   --sk-item-bg-hover: #2a3240;
@@ -57,9 +60,9 @@
   --sk-violet: #5b4ba3;
   --sk-wordmark-from: #b93a82;
   --sk-wordmark-to: #7b52b0;
-  --sk-surface: #ffffff;
-  --sk-surface-alt: #f6f7f9;
-  --sk-surface-inset: #ffffff;
+  --sk-surface-solid: #ffffff;
+  --sk-surface-alt-solid: #f6f7f9;
+  --sk-surface-inset-solid: #ffffff;
   --sk-border-soft: #dfe2ea;
   --sk-border-strong: #7a8496;
   --sk-item-bg-hover: #eceef3;
@@ -76,6 +79,31 @@
   --sk-icon-sun: #b45309;
   --sk-icon-moon: #b7791f;
 }
+
+/* The translucency knob (`useBarPrefs`, mirrored on `data-translucency`):
+   the skin's surfaces tint to an alpha of their solid colors in the steps the
+   kit's tokens take in `index.css`, the drawer and its dialogs blurring what
+   lies behind them, and the strip over the stream thins with them. */
+html[data-translucency="1"] :is(.sidebar, .sidebar-skin),
+html[data-translucency="1"][data-layout="default"] [data-slot="dialog-content"] {
+  --sk-surface: color-mix(in oklab, var(--sk-surface-solid) 80%, transparent);
+  --sk-surface-alt: color-mix(in oklab, var(--sk-surface-alt-solid) 80%, transparent);
+  --sk-surface-inset: color-mix(in oklab, var(--sk-surface-inset-solid) 80%, transparent);
+}
+html[data-translucency="2"] :is(.sidebar, .sidebar-skin),
+html[data-translucency="2"][data-layout="default"] [data-slot="dialog-content"] {
+  --sk-surface: color-mix(in oklab, var(--sk-surface-solid) 65%, transparent);
+  --sk-surface-alt: color-mix(in oklab, var(--sk-surface-alt-solid) 65%, transparent);
+  --sk-surface-inset: color-mix(in oklab, var(--sk-surface-inset-solid) 65%, transparent);
+}
+html[data-translucency="3"] :is(.sidebar, .sidebar-skin),
+html[data-translucency="3"][data-layout="default"] [data-slot="dialog-content"] {
+  --sk-surface: color-mix(in oklab, var(--sk-surface-solid) 50%, transparent);
+  --sk-surface-alt: color-mix(in oklab, var(--sk-surface-alt-solid) 50%, transparent);
+  --sk-surface-inset: color-mix(in oklab, var(--sk-surface-inset-solid) 50%, transparent);
+}
+html[data-translucency="2"] .stream-strip { background: rgba(0, 0, 0, 0.45); }
+html[data-translucency="3"] .stream-strip { background: rgba(0, 0, 0, 0.35); }
 
 /* The dialogs the sidebar opens (apps, files) are the kit's, portaled to
    the body: with the sidebar on screen they take its palette through the
@@ -531,7 +559,10 @@
   overflow-wrap: anywhere;
 }
 /* The citation at the drawer's foot, as far under the last section as the drawer's padding leaves below it. */
-.sidebar-footer { padding: 9px 0 2px; text-align: center; }
+.sidebar-footer { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 9px 0 2px; }
+.sidebar .sidebar-translucency { border-color: var(--sk-border-soft); color: var(--sk-text-muted); }
+.sidebar .sidebar-translucency:hover { color: var(--sk-text); }
+.sidebar .sidebar-translucency[aria-pressed="true"] { color: var(--sk-accent-text); }
 .sidebar .muted { color: var(--sk-text-muted); }
 .sidebar a.cite-link { color: var(--sk-violet); text-decoration: underline; text-underline-offset: 2px; font-size: 12px; }
 .sidebar [data-slot="kbd"] { background-color: var(--sk-surface-inset); border: 1px solid var(--sk-border-soft); color: var(--sk-text); }

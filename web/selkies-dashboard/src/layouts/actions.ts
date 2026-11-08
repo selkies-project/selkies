@@ -147,11 +147,11 @@ export interface BarPrefs {
   /** The figures strip a bar's middle shows; false mounts nothing of it. */
   barStrip: boolean;
   toggleBarStrip: () => void;
-  /** How see-through the panels are: 0 solid, 1 light, 2 strong, the shared
-   * pages' own surface tokens tinted (the `data-translucency` rules in
+  /** How see-through the panels are: 0 solid, 1 light, 2 medium, 3 strong, the
+   * page's own surface tokens tinted (the `data-translucency` rules in
    * `index.css`), so one point of adjustment covers the bar and every panel. */
   translucency: Translucency;
-  /** Lands the slider's stop; clamps anything outside the three levels to solid. */
+  /** Sets the level; anything outside the four levels lands at solid. */
   setTranslucency: (level: Translucency) => void;
 }
 

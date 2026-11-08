@@ -5,15 +5,17 @@
  */
 
 /**
- * The two appearance toggles every layout carries: the theme (dark or light,
+ * The appearance toggles every layout carries: the theme (dark or light,
  * kept per browser under the unprefixed `theme` key the served file index
- * mirrors) and the layout, which cycles the registry and stores the pick
- * under the prefixed `ui_layout` key. Icons name the state they show, as the
+ * mirrors), the layout, which cycles the registry and stores the pick under
+ * the prefixed `ui_layout` key, and the translucency (`useBarPrefs`). Icons name the state they show, as the
  * theme toggle does: the moon while dark, the layout's own mark while shown.
  * @module
  */
-import { Moon, Sun } from "lucide-react";
+import { Blend, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useBarPrefs, type Translucency } from "@/layouts/actions";
+import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useTheme } from "@/components/ui/theme-provider";
 import { useDashboard } from "@/state/dashboard";
@@ -60,6 +62,28 @@ export function LayoutToggle({ className }: { className?: string }) {
         <Icon className="size-3.5" />
       </TooltipTrigger>
       <TooltipContent>{`${label} → ${t(next.labelKey)}`}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * Steps the panels one level more see-through, and from the strongest back to
+ * solid; the button's fill grades with the level, and its tooltip names it.
+ * @param props.className Classes the layout adds to fit its own skin.
+ */
+export function TranslucencyToggle({ className }: { className?: string }) {
+  const { translucency, setTranslucency } = useBarPrefs();
+  const label = t('topMenu.translucentPanels');
+  const grade = translucency === 1 ? "bg-primary/35 hover:bg-primary/55" : translucency === 2 ? "bg-primary/60 hover:bg-primary/85" : translucency === 3 ? "bg-primary hover:bg-primary" : "";
+  return (
+    <Tooltip>
+      <TooltipTrigger render={
+        <Button variant="outline" size="icon-sm" className={cn("translucency-button", grade, className)} aria-label={label} aria-pressed={translucency > 0}
+          onClick={() => setTranslucency(((translucency + 1) % 4) as Translucency)} />
+      }>
+        <Blend className="size-3.5" />
+      </TooltipTrigger>
+      <TooltipContent>{`${label}: ${translucency + 1}/4`}</TooltipContent>
     </Tooltip>
   );
 }

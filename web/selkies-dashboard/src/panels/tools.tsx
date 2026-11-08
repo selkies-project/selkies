@@ -9,11 +9,13 @@
  * `ToolSpec`: its name, mark, state, class, and what a press does, which a
  * layout draws wherever it places it. `useMainTools` lists the bar's main
  * group (the settings button, a button for each panel that floats, the stats,
- * fullscreen, and the chrome knobs every bar layout shares), `useGamingTool`
- * gaming mode, `useLayoutTool` the layout toggle, and `useTouchTools` a touch
- * client's buttons and the soft keys' (`useToolboxHasItems` says whether the
- * toolbox menu, which is not a spec, has an entry); each lists only what the session allows and this page can use, in the
- * order the bar draws them. The toolbar draws them as groups
+ * fullscreen, and the edge layout's figures strip), `useGamingTool` gaming
+ * mode, `useLayoutTool` and `useTranslucencyTool` the layout toggle and the
+ * translucency knob for a layout that places them as buttons, and
+ * `useTouchTools` a touch client's buttons and the soft keys'
+ * (`useToolboxHasItems` says whether the toolbox menu, which is not a spec,
+ * has an entry); each lists only what the session allows and this page can
+ * use, in the order the bar draws them. The toolbar draws them as groups
  * (`panels/toolbox.tsx`) and the edge layout fans them out one by one. The
  * controls they wrap, which exist and what they are called, are the shared
  * list in `layouts/actions.ts`.
@@ -61,9 +63,7 @@ export function useMainTools(bar: BarState): ToolSpec[] {
   const ctx = usePanelContext();
   const d = useDashboard();
   const actions = useActions();
-  const { barStrip, toggleBarStrip, translucency, setTranslucency } = useBarPrefs();
-  // The level reads on the button's own fill: plain at solid, graded washes for light and medium, full at strong.
-  const translucentGrade = translucency === 1 ? "bg-primary/35 hover:bg-primary/55" : translucency === 2 ? "bg-primary/60 hover:bg-primary/85" : translucency === 3 ? "bg-primary hover:bg-primary" : "";
+  const { barStrip, toggleBarStrip } = useBarPrefs();
   const specs: ToolSpec[] = [
     { key: "settings", label: t('topMenu.settings'), active: bar.settingsOpen, className: "settings-button", icon: <Settings2 className="size-4" />, run: bar.toggleSettings },
     ...shownFloats(ctx).map(({ id, title, icon: Icon }): ToolSpec => (
@@ -74,11 +74,24 @@ export function useMainTools(bar: BarState): ToolSpec[] {
   if (d.layout.id === "edge") {
     specs.push({ key: "figures-strip", label: t('topMenu.figuresStrip'), active: barStrip, className: "figures-strip-button", icon: <Activity className="size-4" />, run: toggleBarStrip });
   }
-  specs.push({
-    key: "translucency", label: t('topMenu.translucentPanels'), tip: `${t('topMenu.translucentPanels')}: ${translucency + 1}/4`, active: translucency > 0,
-    className: cn("translucency-button", translucentGrade), icon: <Blend className="size-4" />, run: () => setTranslucency(((translucency + 1) % 4) as Translucency),
-  });
   return specs;
+}
+
+/**
+ * The translucency knob, as a spec, for a layout that places it as a button
+ * of its own rather than beside the menu's appearance toggles: each press
+ * steps the panels one level more see-through, and from the strongest back to
+ * solid.
+ * @returns The button.
+ */
+export function useTranslucencyTool(): ToolSpec {
+  const { translucency, setTranslucency } = useBarPrefs();
+  // The level reads on the button's own fill: plain at solid, graded washes for light and medium, full at strong.
+  const grade = translucency === 1 ? "bg-primary/35 hover:bg-primary/55" : translucency === 2 ? "bg-primary/60 hover:bg-primary/85" : translucency === 3 ? "bg-primary hover:bg-primary" : "";
+  return {
+    key: "translucency", label: t('topMenu.translucentPanels'), tip: `${t('topMenu.translucentPanels')}: ${translucency + 1}/4`, active: translucency > 0,
+    className: cn("translucency-button", grade), icon: <Blend className="size-4" />, run: () => setTranslucency(((translucency + 1) % 4) as Translucency),
+  };
 }
 
 /**

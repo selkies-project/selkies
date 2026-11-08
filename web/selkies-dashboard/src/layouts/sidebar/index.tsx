@@ -9,7 +9,8 @@
  * handle there or by Ctrl+Shift+M. Its header carries the wordmark, the
  * theme pill, the layout toggle, fullscreen, and gaming mode; a row of tiles
  * toggles the streams; a touch client gets the soft keys under them; every
- * panel is a section below, each folding on its own. The sections hold the
+ * panel is a section below, each folding on its own, and the footer carries
+ * the translucency knob, which the header has no room for. The sections hold the
  * same panels the toolbar carries, drawn in this layout's own skin
  * (`sidebar.css`), and the stats section's switch lays the strip over the
  * stream. Entering fullscreen or gaming mode folds the drawer, and the
@@ -23,7 +24,7 @@
 import * as React from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { SelkiesLogo } from "@/components/logo";
-import { LayoutToggle, ThemePill } from "@/panels/appearance";
+import { LayoutToggle, ThemePill, TranslucencyToggle } from "@/panels/appearance";
 import { fractionOf, place, useViewport } from "@/panels/anchor";
 import { PANELS, shownCards, usePanelContext, type PanelSpec } from "@/panels/catalog";
 import { CardList } from "@/panels/catalog-bodies";
@@ -184,7 +185,10 @@ export default function SidebarLayout() {
           </Section>
         ))}
 
-        {actions.cite && <footer className="sidebar-footer"><CiteLink /></footer>}
+        <footer className="sidebar-footer">
+          <TranslucencyToggle className="sidebar-translucency" />
+          {actions.cite && <CiteLink />}
+        </footer>
       </aside>
     </>
   );
