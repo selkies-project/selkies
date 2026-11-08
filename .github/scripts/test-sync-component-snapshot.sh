@@ -5,8 +5,9 @@
 # Exercise real snapshot branches, including failure paths, in temporary repositories.
 set -euo pipefail
 
-readonly helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/sync-component-snapshot.sh"
-readonly promoter="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/promote-component-snapshot.sh"
+scripts="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly helper="$scripts/sync-component-snapshot.sh"
+readonly promoter="$scripts/promote-component-snapshot.sh"
 readonly evidence=${1:?usage: test-sync-component-snapshot.sh EVIDENCE_DIRECTORY}
 mkdir -p -- "$evidence"
 work="$(mktemp -d "${evidence%/}/fixture.XXXXXXXX")"

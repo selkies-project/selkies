@@ -208,9 +208,9 @@ jobs:
           {
             echo "TAG=${tag}"
             echo 'BODY<<EOF'
-            printf 'Full-source Selkies snapshot for `%s`.\n\n' "${COMPONENT}"
-            printf 'Canonical source: `selkies-project/selkies@%s` (`%s`).\n\n' "${SOURCE_COMMIT}" "${SOURCE_REF}"
-            printf 'Snapshot commit: `%s`.\n\nOnly these %s wheels are attached; no standalone PyPI release is made.\n' "${MIRROR_COMMIT}" "${COMPONENT}"
+            printf "Full-source Selkies snapshot for \`%s\`.\n\n" "${COMPONENT}"
+            printf "Canonical source: \`selkies-project/selkies@%s\` (\`%s\`).\n\n" "${SOURCE_COMMIT}" "${SOURCE_REF}"
+            printf "Snapshot commit: \`%s\`.\n\nOnly these %s wheels are attached; no standalone PyPI release is made.\n" "${MIRROR_COMMIT}" "${COMPONENT}"
             echo 'EOF'
           } >> "${GITHUB_ENV}"
 

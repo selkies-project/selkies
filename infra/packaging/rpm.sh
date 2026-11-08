@@ -27,8 +27,8 @@ if [ -e /etc/redhat-release ] && ! grep -q Fedora /etc/redhat-release; then
     dnf config-manager --set-enabled crb
 fi
 # The server's build: the toolchain bindgen and the vendored C sources need,
-# the headers of every library it links, and the codec headers the
-# distribution carries, each tried on its own since a release may lack it
+# the headers of every library it links, and dav1d's headers where the
+# distribution carries them, tried on their own since a release may lack them
 # (codecs.sh builds whatever is missing or older than pixelflux needs). pipewire-devel
 # gives the V4L2 interposer its PipeWire frame source (headers only; the
 # library is loaded at runtime when an application uses it)
@@ -38,9 +38,7 @@ retry dnf install -y \
     wayland-devel libinput-devel systemd-devel libxkbcommon-devel pixman-devel libxcb-devel \
     pulseaudio-libs-devel pipewire-devel \
     ruby rubygems ruby-devel rpm-build
-for package in libdav1d-devel; do
-    dnf install -y "${package}" || echo "${package}: not in this distribution"
-done
+dnf install -y libdav1d-devel || echo "libdav1d-devel: not in this distribution"
 # The i686 glibc builds the interposer's 32-bit variant, which the Wine and
 # Steam catalog loads through `/usr/$LIB`
 if [ "$(uname -m)" = "x86_64" ]; then
