@@ -17,7 +17,7 @@ The mark has its own setting, ui_show_connection_indicator: it hides the mark,
 and hiding the sidebar does not. On a touch page the mark sits clear of the
 soft keys.
 
-Usage: python3 tests/e2e/test_connection_indicator.py [default|wish|engines|webrtc|settings|all]
+Usage: python3 tests/e2e/test_connection_indicator.py [default|wish|edge|engines|webrtc|settings|all]
 (`engines` runs the default dashboard in Firefox and WebKit, whose session
 socket can run in a worker.)
 """
@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "perf"))
 import helpers as H  # noqa: E402
 import core_lib as C  # noqa: E402
+from test_dashboards import bar_tool  # noqa: E402
 
 WIDTH, HEIGHT = 1280, 720
 PAINTER = os.path.join(H.TOOLS, "motion_scene.py")
@@ -171,7 +172,7 @@ FORCE_POOR = """() => { window.stream_client = window.stream_client || {};
   window.stream_client.connection = 'poor';
   window.dispatchEvent(new Event('selkies-stream-stats')); }"""
 # Whether the mark and the soft keys overlap, or null without either.
-OVERLAP = """() => { const m = document.querySelector('[role=status]'), k = document.querySelector('[data-soft-keys]');
+OVERLAP = """() => { const m = document.querySelector('.connection-indicator'), k = document.querySelector('[data-soft-keys]');
   if (!m || !k) return null; const a = m.getBoundingClientRect(), b = k.getBoundingClientRect();
   return a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom; }"""
 
@@ -198,7 +199,7 @@ def settings_block(dashboard: str) -> "H.Results":
                 C.close_browser(browser)
         finally:
             H.server_stop()
-    if dashboard == "wish":
+    if dashboard != "default":
         H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=dashboard)
         try:
             with sync_playwright() as p:
@@ -212,8 +213,8 @@ def settings_block(dashboard: str) -> "H.Results":
                     C.wait_ws_video(page, timeout=45)
                     page.evaluate(FORCE_POOR)
                     # The soft keys open from the bar's button; shut, there is nothing to overlap.
-                    keys = page.locator('.soft-keys-button').first
-                    if keys.count():
+                    keys = bar_tool(page, '.soft-keys-button')
+                    if keys is not None:
                         keys.click()
                     time.sleep(1.0)
                     overlap = page.evaluate(OVERLAP)
@@ -230,10 +231,9 @@ def settings_block(dashboard: str) -> "H.Results":
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
-    if which in ("all", "default", "classic"):
-        blocks.append(ws_block("default"))
-    if which in ("all", "wish"):
-        blocks.append(ws_block("wish"))
+    for layout in H.LAYOUTS:
+        if which in ("all", layout) or (which, layout) == ("classic", "default"):
+            blocks.append(ws_block(layout))
     if which in ("all", "engines"):
         for engine in ("firefox", "webkit"):
             blocks.append(ws_block("default", engine))

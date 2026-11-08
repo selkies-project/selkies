@@ -181,8 +181,8 @@ def wait_video(page: Any, mode: str) -> Optional[dict]:
 
 
 def open_printing_ui(page: Any, dashboard: str) -> bool:
-    """Reach the printing controls: the sidebar's Printing section, or the
-    toolbar menu's Printing submenu."""
+    """Reach the printing controls: the sidebar's Printing section, or a bar
+    layout's menu's Printing submenu."""
     if dashboard == "default":
         try:
             if page.locator("#printing-content").count() == 0:
@@ -200,7 +200,7 @@ def open_printing_ui(page: Any, dashboard: str) -> bool:
             break
         page.keyboard.press("Escape")
         time.sleep(0.3)
-    return TD.wish_open_menu_item(page, "Printing")
+    return TD.bar_open_menu_item(page, "Printing")
 
 
 def rows(page: Any, dashboard: str) -> int:
@@ -286,7 +286,7 @@ def dashboard_round(res: "H.Results", pw: Any, mode: str, dashboard: str) -> Non
         time.sleep(1)
         res.check(f"{dashboard}: the print button opens it in a frame", page.evaluate(FRAMES_JS) == 2, page.evaluate(FRAMES_JS))
         drop_frames(page)
-        # The toolbar's panel is a menu, and printing from it closed it.
+        # A bar layout's panel is a menu, and printing from it closed it.
         open_printing_ui(page, dashboard)
         with page.expect_download(timeout=15000) as dl:
             press(row_control(page, dashboard, "Save", 0))

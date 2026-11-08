@@ -60,7 +60,7 @@ import core_lib as C
 import websockets
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_dashboards import wish_open_menu_item  # noqa: E402
+from test_dashboards import bar_open_menu_item  # noqa: E402
 
 MASTER = "e2e-master-token"
 CTRL_TOKEN = "e2e-ctrl-Qx9"
@@ -731,7 +731,7 @@ def run_tokens_file() -> "H.Results":
 
 def open_files_modal(page, dashboard: str) -> bool:
     """Click through the dashboard to its file manager: the sidebar's Download
-    Files button, or the toolbar menu's Files item."""
+    Files button, or a bar layout's menu's Files item."""
     try:
         if dashboard == "default":
             page.locator('.toggle-handle').first.click()
@@ -739,7 +739,7 @@ def open_files_modal(page, dashboard: str) -> bool:
             page.locator('.sidebar-section-header:has-text("Files")').first.click()
             time.sleep(0.5)
             page.locator('button:has-text("Download Files")').first.click()
-        elif not wish_open_menu_item(page, "Files"):
+        elif not bar_open_menu_item(page, "Files"):
             return False
         time.sleep(1.0)
         return True

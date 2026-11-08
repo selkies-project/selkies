@@ -349,8 +349,8 @@ BASE_URL = f"http://127.0.0.1:{PORT}"
 
 CORE_DIST = os.path.join(REPO, "web/selkies-web-core/dist")
 DASHBOARD_DIST = os.path.join(REPO, "web/selkies-dashboard/dist")
-#: The dashboard's layouts, as `ui_layout` names them: the sidebar and the toolbar.
-LAYOUTS = ("default", "wish")
+#: The dashboard's layouts, as `ui_layout` names them: the sidebar, the toolbar, and the edge button.
+LAYOUTS = ("default", "wish", "edge")
 
 WORKDIR = os.environ.get("E2E_WORKDIR", os.path.join(tempfile.gettempdir(), "selkies-tests"))
 os.makedirs(WORKDIR, exist_ok=True)

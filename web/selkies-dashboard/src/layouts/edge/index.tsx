@@ -185,7 +185,7 @@ function Fan({ dock, fabSize, anchorRef, bar, page, onPage, onClose }: FanProps)
   const current = Math.min(page, pages - 1);
   const shown = all.slice(current * perPage, (current + 1) * perPage);
   const more: ToolSpec | null = pages > 1
-    ? { key: "more", label: `${t('topMenu.more')} ${current + 1}/${pages}`, icon: <Ellipsis className="size-4" />, run: () => onPage((current + 1) % pages) }
+    ? { key: "more", label: `${t('topMenu.more')} ${current + 1}/${pages}`, className: "fan-more-button", icon: <Ellipsis className="size-4" />, run: () => onPage((current + 1) % pages) }
     : null;
   const entries: Array<ToolSpec | null> = more ? [...shown, more] : shown;
   const layout = fanLayout(dock, fabSize, viewport, item, entries.length);

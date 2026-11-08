@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from test_uinput_interposer import build_interposer  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_dashboards import wish_show_toolbar  # noqa: E402
+from test_dashboards import bar_close_panel, bar_tool  # noqa: E402
 
 # A standard pad whose motors record what they are asked to play, in the
 # shape the engine gives its pads: `vibrationActuator` for Chromium and WebKit,
@@ -372,10 +372,9 @@ def click_rumble_toggle(page, dashboard: str) -> bool:
         toggle.first.click()
         time.sleep(0.5)
         return True
-    # The toolbar keeps it in the Gamepads panel its button opens.
-    wish_show_toolbar(page)
-    panel = page.locator('button[aria-label="Gamepads"]').first
-    if not panel.count():
+    # A bar layout keeps it in the Gamepads panel its button opens.
+    panel = bar_tool(page, 'button[aria-label="Gamepads"]')
+    if panel is None:
         return False
     panel.click()
     time.sleep(0.6)
@@ -384,7 +383,7 @@ def click_rumble_toggle(page, dashboard: str) -> bool:
     if ok:
         toggle.click()
         time.sleep(0.5)
-    panel.click()
+    bar_close_panel(page, 'button[aria-label="Gamepads"]')
     return ok
 
 
@@ -464,12 +463,11 @@ def run(mode: str, res: "H.Results") -> None:
             pads(pw, mode, preload, res)
             takeover(pw, mode, preload, res)
             # The touch gamepad lives in the dashboard.
-            H.server_stop()
-            H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, layout="default")
-            touch(pw, mode, preload, res, "default", ("chromium", "firefox", "webkit"))
-            H.server_stop()
-            H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, layout="wish")
-            touch(pw, mode, preload, res, "wish", ("chromium",))
+            for layout in H.LAYOUTS:
+                H.server_stop()
+                H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, layout=layout)
+                touch(pw, mode, preload, res, layout,
+                      ("chromium", "firefox", "webkit") if layout == "default" else ("chromium",))
             dashboards(pw, mode, preload, res)
     finally:
         H.server_stop()

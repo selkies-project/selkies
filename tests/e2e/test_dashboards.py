@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Dashboard e2e: the dashboard in both its layouts, the sidebar (`default`)
-and the toolbar (`wish`), covering the settings loop, mode switching, and the
-admin UI gates in each."""
+"""Dashboard e2e: the dashboard in each of its layouts, the sidebar (`default`),
+the toolbar (`wish`), and the edge button (`edge`), covering the settings
+loop, the translucency knob, mode switching, and the admin UI gates in each;
+the edge button's own fan, dock, and figures strip; and the layout toggle
+stepping through all three."""
 import json
 import os
 import re
 import sys
 import tempfile
 import time
+from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -65,7 +68,7 @@ def sidebar_section(page, name: str, open: bool = True) -> bool:
 
 
 def open_video_settings(page, layout: str, reveal: str = "") -> bool:
-    """Reach the video settings: the sidebar's Video section, or the toolbar's
+    """Reach the video settings: the sidebar's Video section, or a bar layout's
     settings card on its Video tab with the card holding `reveal` open.
 
     Returns:
@@ -73,15 +76,15 @@ def open_video_settings(page, layout: str, reveal: str = "") -> bool:
     """
     if layout == "default":
         return sidebar_section(page, "Video")
-    return open_wish_settings_tab(page, "Video", reveal)
+    return open_bar_settings_tab(page, "Video", reveal)
 
 
 def open_screen_settings(page, layout: str, reveal: str = "") -> bool:
-    """Reach the screen settings: the sidebar's Screen section, or the toolbar's
+    """Reach the screen settings: the sidebar's Screen section, or a bar layout's
     settings card on its Resolution tab with the card holding `reveal` open."""
     if layout == "default":
         return sidebar_section(page, "Screen")
-    return open_wish_settings_tab(page, "Resolution", reveal)
+    return open_bar_settings_tab(page, "Resolution", reveal)
 
 
 def stats_overlay_check(page, res: "H.Results") -> None:
@@ -134,16 +137,22 @@ def set_range_slider(page, idx: int, value) -> None:
     }""", [idx, value])
 
 
-#: The toolbar layout's buttons that open a menu (its overflow menu).
-WISH_MENU_TRIGGERS = '[data-slot="tooltip-trigger"][aria-haspopup="menu"]'
+#: The bar layouts' buttons that open a menu (the toolbox menu).
+BAR_MENU_TRIGGERS = '[data-slot="tooltip-trigger"][aria-haspopup="menu"]'
 #: Anything in the toolbar, which the chrome checks look for.
 WISH_CHROME = '[data-slot="button-group"]'
-#: Either layout's chrome.
-CHROME = f'.sidebar, .toolbar, {WISH_CHROME}'
+#: The edge layout's floating button: a tap opens its fan of tools.
+EDGE_BUTTON = ".edge-button"
+#: A slot of the edge layout's open fan, each holding one button.
+EDGE_FAN = "[data-edge-fan]"
+#: The fan's dots button, the last slot of each page where the window holds fewer than its tools.
+EDGE_MORE = f"{EDGE_FAN} .fan-more-button"
+#: Any layout's chrome.
+CHROME = f'.sidebar, .toolbar, {WISH_CHROME}, {EDGE_BUTTON}'
 
 
-def wish_close_menus(page) -> None:
-    """Close the toolbar's menus left open: a submenu (the clipboard's) takes an
+def bar_close_menus(page) -> None:
+    """Close the bar's menus left open: a submenu (the clipboard's) takes an
     Escape of its own before the menu under it, which would take the next
     click."""
     for _ in range(3):
@@ -160,28 +169,136 @@ def wish_close_menus(page) -> None:
         time.sleep(0.3)
 
 
-def wish_show_toolbar(page) -> None:
-    """Close any toolbar menu left open, whose trigger would only close it, and
-    bring the bar back where gaming mode slid it up behind the top edge,
-    leaving only the tab that shows it again."""
-    wish_close_menus(page)
-    show = page.locator('button[aria-label="Show toolbar"]')
+def close_dialogs(page, presses: int = 3) -> None:
+    """Press Escape until no dialog is open, at most `presses` times."""
+    for _ in range(presses):
+        if not page.locator('[role="dialog"]').count():
+            return
+        page.keyboard.press("Escape")
+        time.sleep(0.5)
+
+
+def is_edge(page) -> bool:
+    """Whether the page shows the edge layout."""
+    return page.locator(EDGE_BUTTON).count() > 0
+
+
+def edge_fan_open(page) -> bool:
+    """Whether the edge button's fan is open."""
+    return page.locator(f'{EDGE_BUTTON}[aria-expanded="true"]').count() > 0
+
+
+def edge_fan_page(page) -> tuple:
+    """`(page, pages)` the fan shows, from 1, read off its dots button: `(1, 1)` without one."""
+    more = page.locator(EDGE_MORE)
+    found = re.search(r"(\d+)/(\d+)\s*$", (more.first.get_attribute("aria-label") or "") if more.count() else "")
+    return (int(found.group(1)), int(found.group(2))) if found else (1, 1)
+
+
+def edge_open_fan(page) -> bool:
+    """Open the edge button's fan. A tap first brings a folded button back or
+    shuts the settings card the button holds, so the button is tapped until
+    the fan is up.
+
+    Returns:
+        True when the fan is open.
+    """
+    button = page.locator(EDGE_BUTTON).first
+    for _ in range(4):
+        if edge_fan_open(page) or not button.count():
+            break
+        button.click(timeout=5000)
+        time.sleep(0.6)
+    return edge_fan_open(page)
+
+
+def edge_close_fan(page) -> None:
+    """Shut the edge button's fan where it is open, by a tap on the button."""
+    if edge_fan_open(page):
+        page.locator(EDGE_BUTTON).first.click(timeout=5000)
+        time.sleep(0.4)
+
+
+def takes_tap(page, locator) -> tuple:
+    """Whether the element at the center of `locator` is it or inside it, and
+    what is there: a press lands on that element.
+
+    Returns:
+        `(takes it, a short description of what is there)`.
+    """
+    return tuple(locator.evaluate("""(el) => {
+      const r = el.getBoundingClientRect();
+      const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      const name = top ? `${top.tagName.toLowerCase()}.${String(top.className).trim().split(/\\s+/).slice(0, 4).join('.')}` : 'nothing';
+      return [!!top && (top === el || el.contains(top)), name];
+    }"""))
+
+
+def edge_turn_page(page) -> bool:
+    """Turn the fan to its next page with the dots button, clicked as a user
+    does. False without one, or where something else takes the press."""
+    more = page.locator(EDGE_MORE)
+    if not more.count():
+        return False
+    try:
+        more.first.click(timeout=3000)
+    except Exception:
+        print(f"      (the fan's dots button takes no press: {takes_tap(page, more.first)[1]} is over it)", flush=True)
+        return False
+    time.sleep(0.5)
+    return True
+
+
+def bar_show(page) -> None:
+    """Close any bar menu left open, whose trigger would only close it, and
+    bring the bar's buttons into reach: the toolbar back where Ctrl+Shift+M or
+    gaming mode slid it up behind the top edge, leaving only the tab that
+    shows it again, or the edge button's fan open on its first page."""
+    bar_close_menus(page)
+    if is_edge(page):
+        if edge_fan_open(page) and edge_fan_page(page)[0] != 1:
+            edge_close_fan(page)
+        edge_open_fan(page)
+        return
+    show = page.locator('.toolbar button[aria-label="Show toolbar"]')
     if show.count():
         show.first.click()
         time.sleep(0.6)
 
 
-def wish_open_menu_item(page, label: str) -> bool:
-    """Open the toolbar menu that carries `label` and click that item.
+def bar_tool(page, selector: str) -> Optional[Any]:
+    """A bar layout's button `selector` (the class `panels/tools.tsx` gives it,
+    or its label), brought into reach as a user reaches it: the toolbar's,
+    the bar shown where it slid up, or the edge fan's, the fan opened and
+    turned with its dots button to the page that holds it.
 
-    Each menu the toolbar opens is tried in turn until one renders a menu
-    item with the label (a submenu trigger or a checkbox item counts).
+    Returns:
+        Its locator, or None where the layout offers no such button.
+    """
+    bar_show(page)
+    if not is_edge(page):
+        found = page.locator(f".toolbar {selector}")
+        return found.first if found.count() else None
+    for _ in range(8):
+        found = page.locator(f"{EDGE_FAN} {selector}")
+        if found.count():
+            return found.first
+        if not edge_turn_page(page) or edge_fan_page(page)[0] == 1:
+            return None
+    return None
+
+
+def bar_open_menu_item(page, label: str) -> bool:
+    """Open the bar's menu that carries `label` and click that item.
+
+    Each menu the bar opens is tried in turn until one renders a menu item
+    with the label (a submenu trigger or a checkbox item counts).
 
     Returns:
         True when the item was found and clicked.
     """
-    wish_show_toolbar(page)
-    triggers = page.locator(WISH_MENU_TRIGGERS)
+    bar_show(page)
+    triggers = page.locator(BAR_MENU_TRIGGERS)
     for i in range(triggers.count()):
         try:
             triggers.nth(i).click()
@@ -198,30 +315,66 @@ def wish_open_menu_item(page, label: str) -> bool:
     return False
 
 
-def wish_gamepad_panel(page) -> dict:
-    """What the toolbar's Gamepads panel offers, opened from its button and
+def bar_menu_text(page) -> str:
+    """The text of every menu the bar opens, each opened in turn and shut again."""
+    bar_show(page)
+    text = ""
+    triggers = page.locator(BAR_MENU_TRIGGERS)
+    for i in range(triggers.count()):
+        try:
+            triggers.nth(i).click()
+            time.sleep(0.6)
+            text += page.evaluate("""(() => [...document.querySelectorAll('[role="menu"]')]
+              .map(m => m.innerText).join('\\n'))()""") + "\n"
+            page.keyboard.press("Escape")
+            time.sleep(0.2)
+        except Exception:
+            pass
+    return text
+
+
+def bar_close_panel(page, selector: str) -> None:
+    """Shut the floating panel the bar's button `selector` opened: by that
+    button, as it opened it, or by the panel's own close button where the
+    panel lies over the button."""
+    button = bar_tool(page, selector)
+    if button is not None and takes_tap(page, button)[0]:
+        button.click()
+    else:
+        close = page.locator('[data-drag-handle] button[aria-label="Close"]')
+        if close.count():
+            print(f"      (the panel lies over its button {selector}; shut by its own close button)", flush=True)
+            close.first.click()
+        elif button is not None:
+            # A panel without a close button of its own (the stats) and lying over its toggle: the walk goes on
+            # past it, and the check that the fan's buttons take their own press says what covers them.
+            print(f"      (the panel lies over its button {selector} and has no close button; pressed through)", flush=True)
+            button.dispatch_event("click")
+    time.sleep(0.3)
+
+
+def bar_gamepad_panel(page) -> dict:
+    """What the bar's Gamepads panel offers, opened from its button and
     closed again: the gamepad input switch (`input`), and the pads part that
     ui_sidebar_show_gamepads gates (`pads`: the touch gamepad, rumble, and the
     pad preview), told by its Rumble switch."""
-    wish_show_toolbar(page)
-    button = page.locator('button[aria-label="Gamepads"]').first
-    if not button.count():
+    button = bar_tool(page, 'button[aria-label="Gamepads"]')
+    if button is None:
         return {"input": False, "pads": False}
     button.click()
     time.sleep(0.6)
     # A label clips its text in a span of its own, so the text is matched, not the label.
     got = {"input": page.get_by_text("Gamepad Input", exact=True).count() > 0,
            "pads": page.get_by_text("Rumble", exact=True).count() > 0}
-    button.click()
-    time.sleep(0.3)
+    bar_close_panel(page, 'button[aria-label="Gamepads"]')
     return got
 
 
-def wish_clipboard_seed_check(page, res: "H.Results") -> None:
-    """A server clipboard change that arrives while the toolbar's Clipboard
+def bar_clipboard_seed_check(page, res: "H.Results") -> None:
+    """A server clipboard change that arrives while the bar's Clipboard
     panel is closed must show in the textarea when the panel is opened: the panel
     mounts lazily, so it seeds from the last clipboardContentUpdate."""
-    push = f"e2e-wish-clip-{int(time.time())}"
+    push = f"e2e-bar-clip-{int(time.time())}"
     _, stop = H.x_own_clipboard(push.encode())
     got = []
     deadline = time.time() + 8
@@ -233,7 +386,7 @@ def wish_clipboard_seed_check(page, res: "H.Results") -> None:
     stop["flag"] = True
     res.check("clipboard event reached the page while the panel was closed",
               push in got, repr(got)[-120:])
-    opened = wish_open_menu_item(page, "Clipboard")
+    opened = bar_open_menu_item(page, "Clipboard")
     shown = ""
     if opened:
         try:
@@ -244,10 +397,10 @@ def wish_clipboard_seed_check(page, res: "H.Results") -> None:
             shown = f"<no textarea: {e}>"
     res.check("clipboard panel opens with the text that arrived while closed",
               opened and shown == push, shown[:80])
-    wish_close_menus(page)
+    bar_close_menus(page)
 
 
-def wish_stats_fit_check(page, res: "H.Results") -> None:
+def bar_stats_fit_check(page, res: "H.Results") -> None:
     """The detailed stats overlay fits a small window and reaches its last row
     by scrolling within, and it still drags.
 
@@ -271,9 +424,13 @@ def wish_stats_fit_check(page, res: "H.Results") -> None:
     try:
         page.mouse.move(640, 5)
         time.sleep(0.6)
-        page.evaluate("() => document.querySelector('svg.lucide-gauge').closest('button').click()")
+        stats = bar_tool(page, ".stats-button")
+        if stats is None:
+            res.check("the bar offers the stats", False, "no stats button")
+            return
+        stats.evaluate("(b) => b.click()")
         time.sleep(0.5)
-        page.evaluate("() => document.querySelector('svg.lucide-chevron-down').closest('button').click()")
+        page.evaluate("() => document.querySelector('.stats-overlay svg.lucide-chevron-down').closest('button').click()")
         time.sleep(1.0)
         got = page.evaluate(measure)
         res.check("the detailed stats fit a 720-px window and scroll to their last row",
@@ -294,34 +451,50 @@ def wish_stats_fit_check(page, res: "H.Results") -> None:
             res.check("the detailed stats still drag, and stay in the window",
                       bool(moved) and moved["left"] == got["left"] + 100
                       and moved["bottom"] <= moved["viewport"], (got, moved))
-        page.evaluate("() => document.querySelector('svg.lucide-gauge').closest('button').click()")
+        # The drag pressed outside the edge fan, which shut it.
+        stats = bar_tool(page, ".stats-button")
+        if stats is not None:
+            stats.evaluate("(b) => b.click()")
         time.sleep(0.5)
     finally:
         page.set_viewport_size({"width": 1440, "height": 900})
 
 
+#: Where the edge button is docked, before the transform that sinks it into its edge at rest.
+EDGE_DOCK_JS = """() => { const b = document.querySelector('.edge-button');
+  if (!b) return null; const left = parseFloat(b.style.left), top = parseFloat(b.style.top);
+  return {left, top, right: left + b.offsetWidth, bottom: top + b.offsetHeight, w: innerWidth, h: innerHeight}; }"""
+
+
 def resize_check(page, res: "H.Results", dashboard: str) -> None:
-    """The chrome the user drags (the sidebar's handle, the toolbar) keeps its
-    place in proportion to the window: dragged to the far edge, it is still
-    on screen in a window that shrank, and back at that edge in one that grew.
+    """The chrome the user drags (the sidebar's handle, the toolbar, the edge
+    button) keeps its place in proportion to the window: dragged to the far
+    edge, it is still on screen in a window that shrank, and back at that
+    edge in one that grew. The edge button is dragged across to the middle of
+    the window's left edge, and read where it docks rather than as it sinks.
     """
-    chrome = ".toggle-handle" if dashboard == "default" else ".toolbar"
-    rect = f"""() => {{ const b = document.querySelector('{chrome}').getBoundingClientRect();
+    chrome = {"default": ".toggle-handle", "edge": EDGE_BUTTON}.get(dashboard, ".toolbar")
+    rect = EDGE_DOCK_JS if dashboard == "edge" else f"""() => {{ const b = document.querySelector('{chrome}').getBoundingClientRect();
       return {{left: b.left, top: b.top, right: b.right, bottom: b.bottom, w: innerWidth, h: innerHeight}}; }}"""
     inside = lambda r: r["left"] >= 0 and r["top"] >= 0 and r["right"] <= r["w"] + 1 and r["bottom"] <= r["h"] + 1
     page.set_viewport_size({"width": 1440, "height": 900})
     try:
         time.sleep(0.3)
-        # The handle is dragged by itself, the bar by its grip, the Hand button.
-        grip = page.locator(chrome if dashboard == "default" else ".toolbar button.cursor-grab").first.bounding_box()
-        cx, cy = grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2
-        page.mouse.move(cx, cy)
-        page.mouse.down()
-        page.mouse.move(cx + (0 if dashboard == "default" else 2000), cy + (2000 if dashboard == "default" else 0), steps=8)
-        page.mouse.up()
-        time.sleep(0.3)
+        if dashboard == "edge":
+            edge_close_fan(page)
+            edge_drag(page, 1, 450)
+        else:
+            # The handle is dragged by itself, the bar by its grip, the Hand button.
+            grip = page.locator(chrome if dashboard == "default" else ".toolbar button.cursor-grab").first.bounding_box()
+            cx, cy = grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2
+            page.mouse.move(cx, cy)
+            page.mouse.down()
+            page.mouse.move(cx + (0 if dashboard == "default" else 2000), cy + (2000 if dashboard == "default" else 0), steps=8)
+            page.mouse.up()
+            time.sleep(0.3)
         far = page.evaluate(rect)
-        at_edge = (abs(far["bottom"] - far["h"]) <= 1) if dashboard == "default" else (abs(far["right"] - far["w"]) <= 1)
+        at_edge = {"default": abs(far["bottom"] - far["h"]) <= 1, "edge": abs(far["left"]) <= 1
+                   and 0.4 < (far["top"] + far["bottom"]) / 2 / far["h"] < 0.6}.get(dashboard, abs(far["right"] - far["w"]) <= 1)
         res.check(f"{dashboard}: dragged to the far edge, the chrome stops at it", at_edge and inside(far), far)
         page.set_viewport_size({"width": 800, "height": 500})
         time.sleep(0.5)
@@ -373,9 +546,9 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
 
     The header carries the fullscreen and gaming-mode pair on every client;
     the trackpad toggle joins the keyboard tile in the action-button row (in
-    Wish the bar's touch group, with no second one in the soft keys), and
-    appears only once touch is seen. The Ctrl+Shift+X chord is the core's own,
-    so it works whatever the dashboard shows.
+    a bar layout the bar's touch group, or the edge fan's, with no second one
+    in the soft keys), and appears only once touch is seen. The Ctrl+Shift+X
+    chord is the core's own, so it works whatever the dashboard shows.
     """
     if dashboard == "default":
         present = lambda: page.evaluate("""() => ({
@@ -384,11 +557,11 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
             headerTrackpad: !!document.querySelector('.header-controls .trackpad-mode-button'),
         })""")
     else:
-        present = lambda: page.evaluate("""() => ({
-            gaming: !!document.querySelector('button:has(svg.lucide-crosshair)'),
-            trackpad: !!document.querySelector('.toolbar button.trackpad-mode-button'),
-            headerTrackpad: !!document.querySelector('.fixed.bottom-4 button:has(svg.lucide-touchpad)'),
-        })""")
+        present = lambda: {
+            "gaming": bar_tool(page, ".gaming-mode-button") is not None,
+            "trackpad": bar_tool(page, ".trackpad-mode-button") is not None,
+            "headerTrackpad": page.locator('.fixed.bottom-4 button:has(svg.lucide-touchpad)').count() > 0,
+        }
     before = present()
     page.evaluate("window.dispatchEvent(new TouchEvent('touchstart', {bubbles: true}))")
     time.sleep(1.0)
@@ -527,14 +700,14 @@ def open_clipboard_panel(page, dashboard: str) -> bool:
             page.locator('.sidebar-section-header:has-text("Clipboard")').first.click()
             time.sleep(0.6)
         return page.locator('#dashboardClipboardTextarea').count() > 0
-    return wish_open_menu_item(page, "Clipboard")
+    return bar_open_menu_item(page, "Clipboard")
 
 
 def pick_clipboard_image(page, dashboard: str, file: dict) -> bool:
     """Choose `file` through the panel's Upload Image button, as a user does.
 
     The browser's file dialog takes the window's focus while it is open, which
-    closes any menu around the button (the toolbar's panel is a submenu). Playwright
+    closes any menu around the button (a bar's panel is a submenu). Playwright
     answers the dialog without showing it, so the blur the dialog would cause
     is dispatched between the click and the answer.
 
@@ -586,7 +759,7 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
     res.check(f"{dashboard}: a picked image reaches the core whole",
               page.evaluate("window.__clipImages") == [len(CLIPBOARD_PNG)],
               page.evaluate("window.__clipImages"))
-    if dashboard == "wish":
+    if dashboard != "default":
         # The dialog closed the menu; the panel shows the pick again when reopened.
         open_clipboard_panel(page, dashboard)
         time.sleep(0.4)
@@ -601,7 +774,7 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
     res.check(f"{dashboard}: the preview draws the picked image itself",
               urls == 0 and drawn is not None and [drawn["w"], drawn["h"]] == [2, 2]
               and drawn["pixel"][:3] == [255, 0, 0], drawn)
-    if dashboard == "wish":
+    if dashboard != "default":
         for _ in range(2):
             page.keyboard.press("Escape")
             time.sleep(0.2)
@@ -657,12 +830,12 @@ def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
             page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
             time.sleep(0.8)
     else:
-        # The toolbar's dialogs are portaled to the body rather than into the
+        # A bar layout's dialogs are portaled to the body rather than into the
         # dashboard root, so they are the half of its chrome that has to clear
         # the pad on their own footing. Its menus sit at the top out of the
         # pad's way; the file manager the Files item opens is the one drawn over it.
         panel = '[data-slot="dialog-overlay"]'
-        opened = wish_open_menu_item(page, "Files")
+        opened = bar_open_menu_item(page, "Files")
         if opened:
             time.sleep(1.5)
         if not opened or page.locator(panel).count() == 0:
@@ -715,8 +888,79 @@ def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
             page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
             time.sleep(0.6)
     else:
-        page.keyboard.press("Escape")
-        time.sleep(0.3)
+        close_dialogs(page)
+
+
+#: The chrome each layout draws over the stream, which blurs what lies behind it with the translucency level.
+GLASS = {"default": ".sidebar", "wish": ".toolbar", "edge": EDGE_BUTTON}
+
+
+def translucency_button(page, dashboard: str) -> Optional[Any]:
+    """The layout's translucency button: in the sidebar's footer, the drawer
+    opened first; in the toolbar menu's footer, beside the layout and theme
+    toggles, the menu opened first; or a button of the edge fan."""
+    if dashboard == "default":
+        sidebar_open(page)
+        found = page.locator(".sidebar .sidebar-footer .translucency-button")
+    elif dashboard == "wish":
+        found = page.locator('[role="menu"] .translucency-button')
+        if not found.count():
+            menu = bar_tool(page, BAR_MENU_TRIGGERS)
+            if menu is None:
+                return None
+            menu.click()
+            time.sleep(0.6)
+    else:
+        return bar_tool(page, ".translucency-button")
+    return found.first if found.count() else None
+
+
+def translucency_check(page, res: "H.Results", dashboard: str) -> None:
+    """The layout's translucency button steps the page through its four
+    levels and back to solid: the page carries the level on its root
+    (`data-translucency`), the button reads pressed above solid, and the
+    browser keeps each level. It is left on the second level, which a page
+    opened later has to come up at (`translucency_kept_check`)."""
+    start = bar_prefs(page)
+    res.check(f"{dashboard}: the page starts solid", start["level"] == "0", start)
+    seen = []
+    for _ in range(4):
+        button = translucency_button(page, dashboard)
+        if button is None:
+            break
+        button.click()
+        time.sleep(0.4)
+        try:
+            pressed = button.get_attribute("aria-pressed", timeout=2000)
+        except Exception:
+            pressed = "gone after the press"
+        seen.append(dict(bar_prefs(page), pressed=pressed))
+    res.check(f"{dashboard}: the translucency button steps the page through its four levels and back to solid",
+              [s["level"] for s in seen] == ["1", "2", "3", "0"], [s["level"] for s in seen])
+    res.check(f"{dashboard}: the button reads pressed above solid, and the browser keeps each level",
+              [s["pressed"] for s in seen] == ["true", "true", "true", "false"]
+              and [s["translucency"] for s in seen] == ["1", "2", "3", "0"],
+              [(s["pressed"], s["translucency"]) for s in seen])
+    for _ in range(2):
+        button = translucency_button(page, dashboard)
+        if button is not None:
+            button.click()
+            time.sleep(0.4)
+    if dashboard == "default":
+        sidebar_close(page)
+    else:
+        bar_close_menus(page)
+        if is_edge(page):
+            edge_close_fan(page)
+
+
+def translucency_kept_check(page, res: "H.Results", dashboard: str) -> None:
+    """A page opened later in the browser comes up at the level picked, the
+    layout's chrome blurring what lies behind it at that level."""
+    kept = bar_prefs(page)
+    blur = page.evaluate(f"getComputedStyle(document.querySelector('{GLASS[dashboard]}')).backdropFilter")
+    res.check(f"{dashboard}: a page opened later comes up at the translucency picked, its chrome blurred to match",
+              kept["level"] == "2" and "blur(10px)" in blur, (kept, blur))
 
 
 def dash_block(dashboard: str) -> "H.Results":
@@ -726,7 +970,7 @@ def dash_block(dashboard: str) -> "H.Results":
     the stats strip times on their way to the wire.
 
     Args:
-        dashboard: The layout, ``default`` or ``wish``.
+        dashboard: The layout, one of `H.LAYOUTS`.
 
     Returns:
         The Results accumulator for this layout's checks.
@@ -779,12 +1023,13 @@ def dash_block(dashboard: str) -> "H.Results":
         if dashboard == "default":
             section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
         else:
-            section = wish_gamepad_panel(page)["pads"]
+            section = bar_gamepad_panel(page)["pads"]
         res.check("gamepads section shown by default", section, section)
+        translucency_check(page, res, dashboard)
 
-        if dashboard == "wish":
-            wish_clipboard_seed_check(page, res)
-            wish_stats_fit_check(page, res)
+        if dashboard != "default":
+            bar_clipboard_seed_check(page, res)
+            bar_stats_fit_check(page, res)
         gaming_mode_check(page, res, dashboard)
         if dashboard == "default":
             sidebar_layout_check(page, res)
@@ -848,6 +1093,7 @@ def dash_block(dashboard: str) -> "H.Results":
         page3.goto(H.BASE_URL, wait_until="load")
         info3 = wait_canvas(page3)
         res.check("video flows back in websockets", info3 is not None, info3)
+        translucency_kept_check(page3, res, dashboard)
         # On the fresh page (its input context is attached, so the chord is
         # live), and last: the demotion leaves the page without a sidebar.
         if dashboard == "default":
@@ -871,7 +1117,7 @@ def gates_block(dashboard: str) -> "H.Results":
     """ui_sidebar_show_shortcuts=false and ui_sidebar_show_webcam=false must
     hide the shortcuts UI and the webcam toggle in BOTH layouts;
     ui_sidebar_show_gamepads=false hides the gamepads section (the pads part
-    of the toolbar's panel) and nothing else, so the gamepad input toggle
+    of a bar layout's panel) and nothing else, so the gamepad input toggle
     stays; and enable_resize=false offers no resolution to pick on the
     primary, whose size the server keeps."""
     res = H.Results(f"gates-{dashboard}")
@@ -927,19 +1173,8 @@ def gates_block(dashboard: str) -> "H.Results":
               !!document.querySelector('button[title$="Gamepad Input"]')])()""")
             section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
         else:
-            menu = ""
-            triggers = page.locator(WISH_MENU_TRIGGERS)
-            for i in range(triggers.count()):
-                try:
-                    triggers.nth(i).click()
-                    time.sleep(0.6)
-                    menu += page.evaluate("""(() => [...document.querySelectorAll('[role="menu"]')]
-                      .map(m => m.innerText).join('\\n'))()""") + "\n"
-                    page.keyboard.press("Escape")
-                    time.sleep(0.2)
-                except Exception:
-                    pass
-            gamepads = wish_gamepad_panel(page)
+            menu = bar_menu_text(page)
+            gamepads = bar_gamepad_panel(page)
             mic, cam, pad = "Microphone" in menu, "Webcam" in menu, gamepads["input"]
             section = gamepads["pads"]
         res.check("core buttons reachable (microphone toggle present)", mic, mic)
@@ -1125,7 +1360,7 @@ def dpi_for_resolution_block(dashboard: str) -> "H.Results":
             # reads: the display's, with no resolution of its own to follow.
             before = page.locator("#uiScalingSelect").input_value()
             res.check("the picker starts on the display's own pick", before == "96", before)
-            # The toolbar's tab holds the picker and the presets in two cards, one open at a time.
+            # A bar layout's tab holds the picker and the presets in two cards, one open at a time.
             if dashboard != "default":
                 open_screen_settings(page, dashboard, "#resolutionPresetSelect")
             page.select_option("#resolutionPresetSelect", DPI_PRESET)
@@ -1167,8 +1402,8 @@ def second_screen_block(dashboard: str) -> "H.Results":
             page = ctx.new_page()
             page.goto(H.BASE_URL, wait_until="load")
             time.sleep(8.0)
-            if dashboard == "wish":
-                opened = wish_open_menu_item(page, "Add a second screen")
+            if dashboard != "default":
+                opened = bar_open_menu_item(page, "Add a second screen")
             else:
                 opened = open_screen_settings(page, dashboard)
                 page.evaluate("""() => {
@@ -1257,8 +1492,8 @@ def second_screen_auto_block(dashboard: str) -> "H.Results":
             ctx.on("page", lambda pg: opened.append(pg))
             # Clicked through the browser, not evaluate(): opening a window needs
             # the transient activation only a real gesture carries.
-            if dashboard == "wish":
-                wish_open_menu_item(page, "Add a second screen")
+            if dashboard != "default":
+                bar_open_menu_item(page, "Add a second screen")
             else:
                 open_screen_settings(page, dashboard)
                 page.get_by_role("button", name=re.compile("add screen", re.I)).first.click()
@@ -1282,17 +1517,17 @@ def second_screen_auto_block(dashboard: str) -> "H.Results":
     return res
 
 
-def open_wish_settings_tab(page, tab: str, reveal: str = "") -> bool:
-    """Open the toolbar's settings card (the Settings2 icon in the control
-    strip) unless it is open and switch it to the tab labeled `tab`. A bar
-    that gaming mode slid up behind the top edge is brought back first. A tab
-    folds its cards in an accordion with one open at a time: where `reveal`
-    names a control the open card does not hold, the cards are opened in turn
-    until one does."""
-    wish_show_toolbar(page)
+def open_bar_settings_tab(page, tab: str, reveal: str = "") -> bool:
+    """Open the bar's settings card (its Settings2 button: the toolbar's, or
+    the edge fan's, which shuts the fan to hang the card in its place) unless
+    it is open, and switch it to the tab labeled `tab`. A bar that gaming
+    mode slid up is brought back first. A tab folds its cards in an accordion
+    with one open at a time: where `reveal` names a control the open card
+    does not hold, the cards are opened in turn until one does."""
+    bar_close_menus(page)
     if not page.locator('[role="tab"]').count():
-        trig = page.locator('button:has(svg.lucide-settings-2)').first
-        if not trig.count():
+        trig = bar_tool(page, ".settings-button")
+        if trig is None:
             return False
         trig.click(force=True, timeout=3000)
         time.sleep(1.0)
@@ -1843,10 +2078,12 @@ def layout_block() -> "H.Results":
     """The sidebar, every section open and on a touch screen the key palette
     too, keeps its contents inside it in every language the dashboard ships,
     on a desktop window, a touch laptop's (the 280-pixel sidebar with the
-    palette open) and a 320-pixel phone; the toolbar and its soft keys fit
+    palette open) and a 320-pixel phone, its header at its fullest: every
+    layout allowed, as a server left at its defaults allows them, so the
+    layout toggle is in it. Each bar layout's buttons and its soft keys fit
     that phone."""
     res = H.Results("dash-layout")
-    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout="default")
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=",".join(H.LAYOUTS))
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
@@ -1881,33 +2118,420 @@ def layout_block() -> "H.Results":
             browser.close()
     finally:
         H.server_stop()
-    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout="wish")
+    for layout in H.LAYOUTS[1:]:
+        H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=layout)
+        try:
+            with sync_playwright() as p:
+                browser = C.chromium_launch(p)
+                ctx = browser.new_context(viewport=PHONE, has_touch=True, is_mobile=True)
+                ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+                page = ctx.new_page()
+                page.goto(H.BASE_URL, wait_until="load")
+                wait_chunk(page, 40)
+                page.touchscreen.tap(PHONE["width"] // 2, PHONE["height"] // 2)
+                time.sleep(0.5)
+                keys = bar_tool(page, '.soft-keys-button')
+                res.check(f"{layout}: a touch client's soft keys start shut, their button in the bar",
+                          keys is not None and not page.locator('[data-soft-keys]').count(),
+                          (keys is not None, page.locator('[data-soft-keys]').count()))
+                if keys is not None:
+                    keys.click()
+                time.sleep(1.0)
+                res.check(f"{layout}: the button opens the soft keys", page.locator('[data-soft-keys]').count() == 1,
+                          page.locator('[data-soft-keys]').count())
+                reach = page.evaluate("""() => Math.max(...[...document.querySelectorAll('#dashboard-root button')]
+                  .filter((b) => b.offsetParent).map((b) => b.getBoundingClientRect().right))""")
+                res.check(f"{layout}: the bar and the soft keys fit a 320-pixel phone", reach <= PHONE["width"], reach)
+                # The toolbar folds by its own button, the edge button by Ctrl+Shift+M alone.
+                if layout == "wish":
+                    page.locator('button[aria-label="Hide toolbar"]').first.click()
+                else:
+                    page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+                time.sleep(0.8)
+                res.check(f"{layout}: the soft keys go with the bar when it folds away",
+                          not page.locator('[data-soft-keys]').count(), page.locator('[data-soft-keys]').count())
+                browser.close()
+        finally:
+            H.server_stop()
+    res.summary()
+    return res
+
+
+#: Each slot of the open edge fan: the tool it holds (its class, or its label where it has none), its label,
+#: whether it lies inside the window, and whether a press at its center lands on it or on what covers it.
+EDGE_SLOTS_JS = """() => [...document.querySelectorAll('[data-edge-fan]')].map((slot) => {
+  const b = slot.querySelector('button'), r = slot.getBoundingClientRect();
+  const label = b ? b.getAttribute('aria-label') : null;
+  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  return {tool: (b && [...b.classList].find((c) => /-button$/.test(c))) || label, label,
+          more: !!(b && b.classList.contains('fan-more-button')),
+          inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
+          over: !top || slot.contains(top) ? null : `${top.tagName.toLowerCase()}.${String(top.className).trim().split(/\\s+/).slice(0, 4).join('.')}`};
+})"""
+#: What the fan offers a touch client of a server left at its defaults, each as `EDGE_SLOTS_JS` names it.
+EDGE_TOUCH_TOOLS = {"settings-button", "Menu", "stats-button", "fullscreen-button", "gaming-mode-button",
+                    "touch-gamepad-button", "trackpad-mode-button", "soft-keys-button", "Gamepads", "files-button",
+                    "figures-strip-button", "translucency-button"}
+
+
+def edge_walk(page) -> list:
+    """Every page of the open fan from the first, each the list of its slots
+    (`EDGE_SLOTS_JS`), turned by the dots button until the fan is back on its
+    first. The dots button is pressed through the page, so a walk reads every
+    page even where something covers it; its slot says what does."""
+    pages = []
+    for _ in range(8):
+        time.sleep(0.7)
+        pages.append(page.evaluate(EDGE_SLOTS_JS))
+        more = page.locator(EDGE_MORE)
+        if not more.count():
+            break
+        more.first.dispatch_event("click")
+        time.sleep(0.3)
+        if edge_fan_page(page)[0] == 1:
+            break
+    return pages
+
+
+#: How many pixels the edge button is sunk out of the window along its first axis, as its transform stands now.
+EDGE_SUNK_JS = """() => { const m = new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.edge-button')).transform);
+  return Math.round(Math.abs(m.m41)); }"""
+
+
+def edge_tap(page) -> None:
+    """Tap the edge button on a touch screen, at the middle of what of it is in the window."""
+    box = page.locator(EDGE_BUTTON).first.bounding_box()
+    view = page.viewport_size
+    left, top = max(box["x"], 0), max(box["y"], 0)
+    right, bottom = min(box["x"] + box["width"], view["width"]), min(box["y"] + box["height"], view["height"])
+    page.touchscreen.tap((left + right) / 2, (top + bottom) / 2)
+    time.sleep(0.6)
+
+
+def edge_fan_checks(page, res: "H.Results") -> None:
+    """The button rests sunk into its corner and comes out for a pointer
+    resting there or a keyboard focus; a tap opens the fan inside the
+    window, and a second tap, Escape, and a press outside it each shut it.
+    Escape shuts a dialog a fan button opened, as it does over the other
+    layouts, rather than the fan the dialog covers; a panel a fan button
+    floats opens with the fan shut, and the fan opened again over it leaves
+    every button in reach."""
+    rest = page.evaluate("""() => { const r = document.querySelector('.edge-button').getBoundingClientRect();
+      return {right: Math.round(r.right), top: Math.round(r.top), w: innerWidth}; }""")
+    res.check("at rest the button sinks into the top right corner, partly out of the window",
+              rest["right"] > rest["w"] and rest["top"] < 0, rest)
+    res.check("the fan starts shut", not edge_fan_open(page) and not page.locator(EDGE_FAN).count())
+    # The pointer thrown into the corner, where what of the button shows is, and left there: the button comes
+    # out, and has to stay out under it, not slide back in once the pointer lies outside the round button.
+    page.mouse.move(700, 450)
+    time.sleep(0.5)
+    page.mouse.move(rest["w"] - 1, 1)
+    held = []
+    for _ in range(24):
+        time.sleep(0.25)
+        held.append(page.evaluate(EDGE_SUNK_JS))
+    out = held.index(0) if 0 in held else len(held)
+    res.check("a pointer resting in the corner brings the button out and keeps it out",
+              out < len(held) and set(held[out:]) == {0}, f"sunk px every 250 ms: {held}")
+    page.mouse.move(700, 450)
+    time.sleep(0.5)
+    page.keyboard.press("Shift")
+    page.evaluate("document.querySelector('.edge-button').focus()")
+    time.sleep(0.6)
+    focused = page.evaluate("""() => { const b = document.querySelector('.edge-button'), cs = getComputedStyle(b);
+      return {visible: b.matches(':focus-visible'), glow: b.classList.contains('edge-halo'),
+              ring: cs.boxShadow.split(/,(?![^(]*\\))/).some((part) => !/^\\s*rgba\\(0, 0, 0, 0\\)/.test(part)
+                && /0px 0px 0px ([3-9]|\\d{2})px/.test(part))}; }""")
+    focused["sunk"] = page.evaluate(EDGE_SUNK_JS)
+    res.check("a keyboard focus brings the button out of its corner, its glow giving way to its focus ring",
+              focused == {"visible": True, "glow": False, "ring": True, "sunk": 0}, focused)
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    time.sleep(0.4)
+    page.locator(EDGE_BUTTON).first.click()
+    time.sleep(0.7)
+    slots = page.evaluate(EDGE_SLOTS_JS)
+    res.check("a tap opens the fan, every button inside the window and taking its own press",
+              edge_fan_open(page) and slots and all(s["inside"] and not s["over"] for s in slots),
+              [(s["tool"], s["inside"], s["over"]) for s in slots if not s["inside"] or s["over"]] or len(slots))
+    res.check("a desktop's fan holds every tool on one page", slots and not any(s["more"] for s in slots),
+              [s["tool"] for s in slots])
+    page.locator(EDGE_BUTTON).first.click()
+    time.sleep(0.5)
+    res.check("a second tap shuts it", not edge_fan_open(page) and not page.locator(EDGE_FAN).count())
+    edge_open_fan(page)
+    page.keyboard.press("Escape")
+    time.sleep(0.5)
+    res.check("Escape shuts it", not edge_fan_open(page) and not page.locator(EDGE_FAN).count())
+    edge_open_fan(page)
+    page.mouse.click(700, 500)
+    time.sleep(0.5)
+    res.check("a press outside it shuts it", not edge_fan_open(page) and not page.locator(EDGE_FAN).count())
+    files = bar_tool(page, ".files-button")
+    if files is None:
+        res.check("the fan offers the files", False)
+        return
+    files.click()
+    time.sleep(1.0)
+    shown = page.locator('[role="dialog"]').count()
+    page.keyboard.press("Escape")
+    time.sleep(0.6)
+    left = {"dialog": page.locator('[role="dialog"]').count(), "fan": edge_fan_open(page)}
+    res.check("Escape shuts a dialog the fan opened in one press, as over the other layouts",
+              shown and not left["dialog"], f"dialog shown={shown}, after one Escape {left}")
+    close_dialogs(page)
+    pads = bar_tool(page, 'button[aria-label="Gamepads"]')
+    if pads is None:
+        res.check("the fan offers the gamepads panel", False)
+        return
+    pads.click()
+    time.sleep(0.8)
+    panel = page.get_by_text("Rumble", exact=True).count() > 0
+    res.check("a panel the fan floats opens with the fan shut, so neither lies over the other",
+              panel and not edge_fan_open(page) and not page.locator(EDGE_FAN).count(),
+              {"panel": panel, "fan": edge_fan_open(page)})
+    edge_open_fan(page)
+    time.sleep(0.4)
+    slots = page.evaluate(EDGE_SLOTS_JS)
+    covered = [(s["tool"], s["over"]) for s in slots if s["over"]]
+    res.check("the fan opened again over the panel has every button taking its own press, the panel's toggle among them",
+              slots and not covered, covered or len(slots))
+    bar_close_panel(page, 'button[aria-label="Gamepads"]')
+    edge_close_fan(page)
+
+
+def bar_prefs(page) -> dict:
+    """The two chrome preferences the layouts keep, as stored, and the level the page carries."""
+    return page.evaluate("""() => {
+      const stored = (name) => { for (const k of Object.keys(localStorage)) if (k.endsWith(name)) return localStorage.getItem(k); return null; };
+      return {level: document.documentElement.dataset.translucency ?? null, translucency: stored('bar_translucency'),
+              strip: stored('bar_strip')};
+    }""")
+
+
+def edge_strip_checks(page, res: "H.Results") -> None:
+    """The figures strip rides over the stream from the start, its figures
+    moving; its button takes it off and keeps that, and puts it back."""
+    strip = ".stream-strip-marks"
+    deadline = time.time() + 10
+    while time.time() < deadline and not page.locator(strip).count():
+        time.sleep(0.5)
+    first = page.evaluate("window.stream_stats && window.stream_stats.latest ? window.stream_stats.latest.t : null")
+    time.sleep(2.5)
+    later = page.evaluate("window.stream_stats && window.stream_stats.latest ? window.stream_stats.latest.t : null")
+    res.check("the figures strip rides over the stream from the start, its figures coming",
+              page.locator(strip).count() == 1 and first is not None and later != first, (first, later))
+    button = bar_tool(page, ".figures-strip-button")
+    if button is None:
+        res.check("the fan offers the figures strip's switch", False)
+        return
+    on = button.get_attribute("aria-pressed")
+    button.click()
+    time.sleep(0.6)
+    off = {"strip": page.locator(strip).count(), "pressed": button.get_attribute("aria-pressed"),
+           "stored": bar_prefs(page)["strip"]}
+    res.check("its button takes the strip off the stream and keeps that",
+              on == "true" and off == {"strip": 0, "pressed": "false", "stored": "false"}, (on, off))
+    button.click()
+    time.sleep(1.5)
+    res.check("and puts it back", page.locator(strip).count() == 1 and bar_prefs(page)["strip"] == "true",
+              page.locator(strip).count())
+    edge_close_fan(page)
+
+
+def edge_drag(page, x: float, y: float) -> None:
+    """Drag the edge button with the mouse to (`x`, `y`) and let go. The
+    pointer goes to what of the button shows, which brings it out of its edge,
+    and presses the middle of the button once it is out: the button is round,
+    so where the sunk one showed may lie outside it then."""
+    view = page.viewport_size
+    for _ in range(2):
+        box = page.locator(EDGE_BUTTON).first.bounding_box()
+        cx = min(max(box["x"] + box["width"] / 2, 2), view["width"] - 2)
+        cy = min(max(box["y"] + box["height"] / 2, 2), view["height"] - 2)
+        page.mouse.move(cx, cy)
+        time.sleep(0.4)
+    page.mouse.down()
+    page.mouse.move(x, y, steps=10)
+    page.mouse.up()
+    time.sleep(0.6)
+
+
+def edge_stored_dock(page) -> tuple:
+    """The dock the page keeps, `(placement, offset)` as stored."""
+    return tuple(page.evaluate("""() => ['edge_placement', 'edge_offset'].map((name) => {
+      for (const k of Object.keys(localStorage)) if (k.endsWith('_' + name) || k === name) return localStorage.getItem(k);
+      return null; })"""))
+
+
+def edge_dock_checks(page, res: "H.Results") -> None:
+    """Dragged to a corner, the button docks flush in it and the page keeps the
+    dock; the fan opens from there inside the window; a reload comes back to
+    it. Dragged to the middle of an edge, it docks there, in proportion."""
+    view = page.viewport_size
+    edge_drag(page, 4, view["height"] - 4)
+    dock = page.evaluate(EDGE_DOCK_JS)
+    stored = edge_stored_dock(page)
+    res.check("dragged to the bottom left, the button docks flush in that corner",
+              dock["left"] == 0 and abs(dock["bottom"] - dock["h"]) <= 1, dock)
+    res.check("and the page keeps that corner", stored in (("left", "1"), ("bottom", "0")), stored)
+    page.locator(EDGE_BUTTON).first.click()
+    time.sleep(0.7)
+    slots = page.evaluate(EDGE_SLOTS_JS)
+    res.check("a tap after the drag opens the fan from the corner, inside the window",
+              edge_fan_open(page) and slots and all(s["inside"] and not s["over"] for s in slots),
+              [(s["tool"], s["inside"], s["over"]) for s in slots if not s["inside"] or s["over"]] or len(slots))
+    edge_close_fan(page)
+    page.reload(wait_until="load")
+    wait_canvas(page)
+    again = page.evaluate(EDGE_DOCK_JS)
+    res.check("a reload comes back to the corner", again["left"] == 0 and abs(again["bottom"] - again["h"]) <= 1, again)
+    edge_drag(page, view["width"] - 4, view["height"] / 2)
+    side = page.evaluate(EDGE_DOCK_JS)
+    stored = edge_stored_dock(page)
+    middle = (side["top"] + side["bottom"]) / 2 / side["h"]
+    res.check("dragged to the middle of the right edge, it docks there",
+              abs(side["right"] - side["w"]) <= 1 and 0.45 < middle < 0.55 and stored[0] == "right", (side, stored))
+    page.reload(wait_until="load")
+    wait_canvas(page)
+    kept = page.evaluate(EDGE_DOCK_JS)
+    res.check("and a reload keeps it there", (kept["left"], kept["top"]) == (side["left"], side["top"]), (side, kept))
+
+
+def edge_paging_checks(browser, res: "H.Results") -> None:
+    """A touch client has more tools than a phone's fan holds: the fan pages
+    them, each page ending with the dots button and the last turning back to
+    the first, every button of every page inside the window and taking its
+    own press, and the pages together holding every tool once, as many as a
+    desktop's pages hold, the stats laid over the stream covering none of
+    them. A tap of the touch screen opens the fan."""
+    found = {}
+    for name, viewport, mobile in (("phone", {"width": 390, "height": 844}, True),
+                                   ("desktop", {"width": 1440, "height": 900}, False)):
+        ctx = browser.new_context(viewport=viewport, device_scale_factor=1, has_touch=True, is_mobile=mobile)
+        ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+        page = ctx.new_page()
+        page.goto(H.BASE_URL, wait_until="load")
+        wait_chunk(page, 40)
+        page.touchscreen.tap(viewport["width"] // 2, viewport["height"] // 2)
+        time.sleep(0.8)
+        edge_tap(page)
+        res.check(f"{name}: a tap of the touch screen opens the fan", edge_fan_open(page))
+        if not edge_open_fan(page):
+            ctx.close()
+            continue
+        pages = edge_walk(page)
+        tools = [s["tool"] for slots in pages for s in slots if not s["more"]]
+        found[name] = tools
+        total = edge_fan_page(page)[1] if len(pages) > 1 else 1
+        if name == "phone":
+            res.check("phone: the fan pages a touch client's tools", len(pages) > 1, [len(p) for p in pages])
+        res.check(f"{name}: each page ends with the dots button, the last turning back to the first",
+                  all(slots and slots[-1]["more"] for slots in pages) if len(pages) > 1 else True,
+                  [(len(slots), slots[-1]["tool"] if slots else None) for slots in pages] + [f"of {total}"])
+        outside = [(i + 1, s["tool"]) for i, slots in enumerate(pages) for s in slots if not s["inside"]]
+        res.check(f"{name}: every button of every page lies inside the window", not outside, outside)
+        covered = [(i + 1, s["tool"], s["over"]) for i, slots in enumerate(pages) for s in slots if s["over"]]
+        res.check(f"{name}: every button of every page takes its own press", not covered, covered)
+        res.check(f"{name}: the pages hold every tool once",
+                  len(tools) == len(set(tools)) and EDGE_TOUCH_TOOLS <= set(tools),
+                  f"missing {sorted(EDGE_TOUCH_TOOLS - set(tools))}, twice {sorted({t for t in tools if tools.count(t) > 1})}")
+        stats = bar_tool(page, ".stats-button")
+        if stats is not None:
+            stats.click()
+            time.sleep(1.0)
+            edge_open_fan(page)
+            time.sleep(0.6)
+            covered = [(s["tool"], s["over"]) for s in page.evaluate(EDGE_SLOTS_JS) if s["over"]]
+            res.check(f"{name}: with the stats over the stream, every button of the fan takes its own press, "
+                      "the stats' toggle among them", page.locator(".stats-overlay").count() and not covered, covered)
+            bar_close_panel(page, ".stats-button")
+        ctx.close()
+    if len(found) == 2:
+        res.check("a phone's pages hold the same tools as a desktop's", set(found["phone"]) == set(found["desktop"]),
+                  sorted(set(found["phone"]) ^ set(found["desktop"])))
+
+
+def edge_block() -> "H.Results":
+    """The edge layout's own: its fan, its figures strip, its dock, and its pages."""
+    res = H.Results("edge")
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout="edge")
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
-            ctx = browser.new_context(viewport=PHONE, has_touch=True, is_mobile=True)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900}, device_scale_factor=1)
             ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
             page = ctx.new_page()
             page.goto(H.BASE_URL, wait_until="load")
-            wait_chunk(page, 40)
-            page.touchscreen.tap(PHONE["width"] // 2, PHONE["height"] // 2)
-            time.sleep(0.5)
-            keys = page.locator('.soft-keys-button').first
-            res.check("wish: a touch client's soft keys start shut, their button in the bar",
-                      keys.count() == 1 and not page.locator('[data-soft-keys]').count(),
-                      (keys.count(), page.locator('[data-soft-keys]').count()))
-            if keys.count():
-                keys.click()
-            time.sleep(1.0)
-            res.check("wish: the button opens the soft keys", page.locator('[data-soft-keys]').count() == 1,
-                      page.locator('[data-soft-keys]').count())
-            reach = page.evaluate("""() => Math.max(...[...document.querySelectorAll('#dashboard-root button')]
-              .filter((b) => b.offsetParent).map((b) => b.getBoundingClientRect().right))""")
-            res.check("wish: the toolbar and the soft keys fit a 320-pixel phone", reach <= PHONE["width"], reach)
-            page.locator('button[aria-label="Hide toolbar"]').first.click()
-            time.sleep(0.8)
-            res.check("wish: the soft keys go with the bar when it slides up", not page.locator('[data-soft-keys]').count(),
-                      page.locator('[data-soft-keys]').count())
+            res.check("video streams", wait_canvas(page) is not None)
+            for run in (edge_fan_checks, edge_strip_checks, edge_dock_checks):
+                try:
+                    run(page, res)
+                except Exception as e:
+                    res.check(f"{run.__name__} ran", False, str(e).splitlines()[0][:200])
+            ctx.close()
+            edge_paging_checks(browser, res)
+            browser.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
+def shown_layout(page) -> Optional[str]:
+    """The layout the page shows, told by its chrome."""
+    if is_edge(page):
+        return "edge"
+    if page.locator(".toggle-handle").count():
+        return "default"
+    return "wish" if page.locator(".toolbar").count() else None
+
+
+def layout_toggle_block() -> "H.Results":
+    """With all three layouts allowed, each layout's toggle steps to the next in
+    the registry's order: the sidebar's to the toolbar, the toolbar menu's to
+    the edge button, and the edge fan's back to the sidebar; the page keeps
+    the pick over a reload."""
+    res = H.Results("layout-toggle")
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, layout=",".join(H.LAYOUTS))
+    try:
+        status = json.loads(H.curl("/api/status")[1])
+        res.check("the server allows the three layouts, the sidebar first",
+                  status.get("ui_layout") == "default" and status.get("ui_layout_allowed") == list(H.LAYOUTS),
+                  (status.get("ui_layout"), status.get("ui_layout_allowed")))
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900}, device_scale_factor=1)
+            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+            page = ctx.new_page()
+            page.goto(H.BASE_URL, wait_until="load")
+            res.check("video streams", wait_canvas(page) is not None)
+            res.check("the page opens on the sidebar", shown_layout(page) == "default", shown_layout(page))
+            sidebar_open(page)
+            toggle = page.locator(".sidebar .layout-toggle")
+            if toggle.count():
+                toggle.first.click()
+                time.sleep(1.5)
+            res.check("the sidebar's toggle steps to the toolbar", shown_layout(page) == "wish", shown_layout(page))
+            bar_show(page)
+            triggers = page.locator(BAR_MENU_TRIGGERS)
+            if triggers.count():
+                triggers.first.click()
+                time.sleep(0.6)
+                toggle = page.locator('[role="menu"] .layout-toggle')
+                if toggle.count():
+                    toggle.first.click()
+                    time.sleep(1.5)
+            res.check("the toolbar menu's toggle steps to the edge button", shown_layout(page) == "edge",
+                      shown_layout(page))
+            page.reload(wait_until="load")
+            wait_canvas(page)
+            res.check("a reload keeps the pick", shown_layout(page) == "edge", shown_layout(page))
+            toggle = bar_tool(page, ".layout-fan-button")
+            if toggle is not None:
+                toggle.click()
+                time.sleep(1.5)
+            res.check("the edge fan's toggle steps back to the sidebar", shown_layout(page) == "default",
+                      shown_layout(page))
             browser.close()
     finally:
         H.server_stop()
@@ -1919,10 +2543,13 @@ def main() -> None:
     """Run the dashboard blocks named on argv (default: all)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
-    if which in ("all", "default", "classic"):
-        blocks.append(dash_block("default"))
-    if which in ("all", "wish"):
-        blocks.append(dash_block("wish"))
+    for layout in H.LAYOUTS:
+        if which in ("all", layout) or (which, layout) == ("classic", "default"):
+            blocks.append(dash_block(layout))
+    if which in ("all", "fan"):
+        blocks.append(edge_block())
+    if which in ("all", "layout-toggle"):
+        blocks.append(layout_toggle_block())
     per_layout = {
         "gates": lambda layout: [gates_block(layout)],
         "hidpi": lambda layout: [hidpi_default_block(layout)],

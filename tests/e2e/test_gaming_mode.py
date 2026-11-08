@@ -35,8 +35,9 @@ deltas keep going out, with the drawing side of it read off the pixels in
 tests/integration/test_locked_cursor_across_displays.py.
 
 The `x11-dashboards` selector serves each dashboard layout and enters the mode
-the way a user does there, by a click on its gaming mode button: the keys have
-to reach the game then too, where the click left the keyboard on the button.
+the way a user does there, by a click on its gaming mode button (the edge
+layout's in the fan its button opens): the keys have to reach the game then
+too, where the click left the keyboard on the button.
 
     python3 tests/e2e/test_gaming_mode.py x11|wl|x11-two|wl-two|x11-dashboards
 """
@@ -415,13 +416,22 @@ SCREEN_JS = """(sel) => { const el = [...document.querySelectorAll(sel)].find((e
 
 
 def enter_by_button(res: "H.Results", desk: Desk, page: Any, tag: str) -> bool:
-    """Open the sidebar where the layout has one and click its gaming mode button, or the toolbar's."""
+    """Open the sidebar where the layout has one, or the edge button's fan, and
+    click its gaming mode button, or the toolbar's. The edge button slides out
+    of its corner under the pointer, so where it is is read again for a second
+    click where the first did not open the fan."""
     desk.click(*CENTER)
     time.sleep(0.5)
     handle = page.evaluate(SCREEN_JS, ".toggle-handle")
     if handle:
         desk.click(*handle)
         time.sleep(1.0)
+    for _ in range(2):
+        edge = page.evaluate(SCREEN_JS, ".edge-button")
+        if not edge or page.locator('.edge-button[aria-expanded="true"]').count():
+            break
+        desk.click(*edge)
+        time.sleep(0.8)
     button = page.evaluate(SCREEN_JS, ".gaming-mode-button")
     if not button:
         res.check(f"{tag}: the dashboard shows its gaming mode button", False, button)

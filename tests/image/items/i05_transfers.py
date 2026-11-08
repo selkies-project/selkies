@@ -124,7 +124,7 @@ def run(cell: Any) -> None:
         dialog.wait_for(timeout=45000)
         R.check("Download Files opens the session's file manager", dialog.count() > 0)
         t0 = time.time()
-        found, got_sha = FT.wish_row_download(page, dialog, down, timeout=600)
+        found, got_sha = FT.row_download(page, dialog, down, timeout=600)
         down_secs = time.time() - t0
         if not found:
             why = "the manager never listed the file"

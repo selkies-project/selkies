@@ -189,7 +189,7 @@ def pane(page, dashboard: str) -> str:
 
 
 def close_panel(page, dashboard: str) -> None:
-    if dashboard == "wish":
+    if dashboard != "default":
         page.keyboard.press("Escape")
         time.sleep(0.3)
 
@@ -330,7 +330,7 @@ def block(mode: str, wayland: bool) -> "H.Results":
             try:
                 res.check(f"{tag} the session's clipboard policy arrived", connected)
                 masked_checks(res, tag, page, wayland, dashboard, "chromium",
-                              1 if dashboard == "default" else 2)
+                              H.LAYOUTS.index(dashboard) + 1)
                 if dashboard == "default":
                     take_back_checks(res, tag, page, wayland)
                     viewer_checks(res, tag, closer, mode, wayland)

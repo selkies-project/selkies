@@ -351,7 +351,7 @@ def close_menus(page: Any) -> None:
 
 
 def open_files_ui(page: Any, dashboard: str) -> bool:
-    """Reach the Files controls: the sidebar's Files section, or the toolbar
+    """Reach the Files controls: the sidebar's Files section, or a bar layout's
     menu's Files item, which opens the file manager dialog."""
     if dashboard == "default":
         try:
@@ -361,14 +361,14 @@ def open_files_ui(page: Any, dashboard: str) -> bool:
             print(f"      (files section: {e!r})")
             return False
     close_menus(page)
-    return TD.wish_open_menu_item(page, "Files")
+    return TD.bar_open_menu_item(page, "Files")
 
 
 def files_buttons(page: Any, dashboard: str) -> tuple:
     """`(upload shown, download shown)` for the layout.
 
     The sidebar's Files section keeps two buttons, Upload Files and Download
-    Files, the second opening the file manager. The toolbar has one menu entry
+    Files, the second opening the file manager. A bar layout has one menu entry
     that opens the manager, which carries both: uploads through its Upload
     button, downloads through the Download button each file's row offers, so
     the manager's own buttons are what its answer is read from.
@@ -386,13 +386,13 @@ def files_buttons(page: Any, dashboard: str) -> tuple:
     return (upload.count() > 0, download.count() > 0)
 
 
-def wish_manager_dialog(page: Any) -> Optional[Any]:
+def manager_dialog(page: Any) -> Optional[Any]:
     """The open file manager dialog, or None when it is not up."""
     dialog = page.locator('[role="dialog"]:has-text("Files")').first
     return dialog if dialog.count() else None
 
 
-def wish_row_download(page: Any, dialog: Any, name: str, timeout: float = 30) -> tuple:
+def row_download(page: Any, dialog: Any, name: str, timeout: float = 30) -> tuple:
     """Download `name` out of the file manager, the way a user does: the
     Download button on its row, which opens the file as an attachment.
 
@@ -418,7 +418,7 @@ def wish_row_download(page: Any, dialog: Any, name: str, timeout: float = 30) ->
         path = dl.value.path()
         return (True, file_sha(path) if path else None)
     except Exception as e:
-        print(f"      (wish download: {e!r})")
+        print(f"      (row download: {e!r})")
         return (False, None)
 
 
@@ -511,7 +511,7 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
         # The manager's own Upload button asks the core's uploader for its picker.
         chosen = False
         try:
-            upload = (wish_manager_dialog(page) or page).locator('button[aria-label="Upload"]')
+            upload = (manager_dialog(page) or page).locator('button[aria-label="Upload"]')
             with page.expect_file_chooser(timeout=8000) as chooser:
                 upload.first.click()
             chooser.value.set_files({"name": name, "mimeType": "application/octet-stream", "buffer": payload})
@@ -527,12 +527,12 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
 
     # The manager lists the directory over the JSON API and downloads from a
     # row's own action rather than from a link in a rendered listing.
-    dialog = wish_manager_dialog(page)
+    dialog = manager_dialog(page)
     if dialog is None:
         res.check(f"{dashboard}: the file manager lists the upload", False, "the dialog is not open")
         return
     chunks = frames_seen(page, mode)
-    found, downloaded = wish_row_download(page, dialog, name)
+    found, downloaded = row_download(page, dialog, name)
     res.check(f"{dashboard}: the file manager lists the upload", found)
     res.check(f"{dashboard}: the row's Download action hands over the same bytes",
               downloaded == sha(payload), f"{name} -> {downloaded}")
@@ -556,12 +556,11 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
     target = on_disk(os.path.join(folder, inner))
     res.check(f"{dashboard}: an upload from inside a folder lands in that folder",
               wait_file(target, 10) and file_sha(target) == sha(inner_payload), target)
-    page.keyboard.press("Escape")
-    time.sleep(0.5)
+    TD.close_dialogs(page)
 
 
 def transport_block(mode: str) -> "H.Results":
-    """Routes and both layouts' file UI on one transport. The dashboards' server
+    """Routes and every layout's file UI on one transport. The dashboards' server
     runs Turbo, so the still display keeps sending the frames that show a
     download left the stream running."""
     res = H.Results(f"files-{mode}")

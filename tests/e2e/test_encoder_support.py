@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What a page says about encoders its browser cannot play.
 
-Either dashboard's encoder menu lists every encoder the server allows and
+Each dashboard layout's encoder menu lists every encoder the server allows and
 disables the ones this browser cannot play on the transport, each marked as
 unsupported by the browser, so a missing option reads as the browser's limit
 and never as a server feature left out. A stream the browser cannot play at

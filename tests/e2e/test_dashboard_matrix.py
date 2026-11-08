@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """The dashboard on the transport/backend cells test_dashboards.py does not
-reach: the toolbar layout on WebRTC and on Wayland, and both layouts' admin
-UI gates on WebRTC and Wayland.
+reach: the bar layouts (the toolbar and the edge button) on WebRTC and on
+Wayland, and every layout's admin UI gates on WebRTC and Wayland.
 
-wish-webrtc-x11 / wish-ws-wl / wish-webrtc-wl:
-    The toolbar renders its chrome and streams; the gamepads panel is shown
+wish-webrtc-x11 / wish-ws-wl / wish-webrtc-wl, and the same edge-* cells:
+    The bar renders its chrome and streams; the gamepads panel is shown
     by default; a server clipboard change that arrives while the Clipboard
     panel is closed seeds the panel, and text typed into the panel reaches the
     server's selection (X CLIPBOARD or the compositor's); the settings card's
@@ -12,10 +12,10 @@ wish-webrtc-x11 / wish-ws-wl / wish-webrtc-wl:
     acknowledges in its log, with video still arriving after the encoder
     restart; the Apps panel opens and, with remote commands off, says so.
 gates-webrtc-x11 / gates-ws-wl / gates-webrtc-wl:
-    ui_show_sidebar=false hides the chrome of both layouts;
+    ui_show_sidebar=false hides the chrome of every layout;
     ui_sidebar_show_shortcuts / _webcam / _gamepads=false hide the Shortcuts
     section, the webcam toggle, and the gamepads section (the pads part of
-    the toolbar's panel) while the microphone and gamepad-input toggles stay.
+    a bar layout's panel) while the microphone and gamepad-input toggles stay.
 
 Usage: python3 tests/e2e/test_dashboard_matrix.py [<cell>|all]
 """
@@ -33,6 +33,7 @@ from playwright.sync_api import sync_playwright
 
 WL_SOCKET = "wayland-1"
 CELLS = ("wish-webrtc-x11", "wish-ws-wl", "wish-webrtc-wl",
+         "edge-webrtc-x11", "edge-ws-wl", "edge-webrtc-wl",
          "gates-webrtc-x11", "gates-ws-wl", "gates-webrtc-wl")
 # Encoders in the order a switch away from the default prefers them: JPEG
 # needs no decoder at all.
@@ -109,9 +110,9 @@ def log_since(mark: int, substr: str, timeout: float = 12) -> bool:
 
 
 def open_settings(page: Any) -> bool:
-    """Open the toolbar's settings card on its Video tab, whose frame rate
+    """Open the bar's settings card on its Video tab, whose frame rate
     slider is what the block drives."""
-    if not TD.open_wish_settings_tab(page, "Video", "#framerateSlider"):
+    if not TD.open_bar_settings_tab(page, "Video", "#framerateSlider"):
         return False
     deadline = time.time() + 6
     while time.time() < deadline:
@@ -133,12 +134,12 @@ def app_runner_stub_path() -> str:
     return stub_dir
 
 
-def wish_block(cell: str) -> "H.Results":
-    """One toolbar cell: stream, clipboard panel both ways, settings applied
-    server-side, apps panel, gamepads panel."""
+def bar_block(cell: str) -> "H.Results":
+    """One bar layout's cell (the layout leads its name): stream, clipboard
+    panel both ways, settings applied server-side, apps panel, gamepads panel."""
     mode, wayland = cell_parts(cell)
     res = H.Results(cell)
-    H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, layout="wish",
+    H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, layout=cell.split("-")[0],
                    extra_env={"PATH": app_runner_stub_path() + os.pathsep
                               + os.environ.get("PATH", "")})
     with sync_playwright() as pw:
@@ -163,9 +164,9 @@ def wish_block(cell: str) -> "H.Results":
             deadline = time.time() + 10
             card = False
             while time.time() < deadline and not card:
-                card = TD.wish_gamepad_panel(page)["pads"]
+                card = TD.bar_gamepad_panel(page)["pads"]
                 time.sleep(0.5)
-            res.check("dashboard chrome renders", page.locator(TD.WISH_CHROME).count() > 0)
+            res.check("dashboard chrome renders", page.locator(TD.CHROME).count() > 0)
             res.check("gamepad card shown by default", card)
 
             push = f"e2e-{cell}-s2c-{int(time.time())}"
@@ -181,7 +182,7 @@ def wish_block(cell: str) -> "H.Results":
                 stop["flag"] = True
             res.check("clipboard: server change reached the page while the panel was closed",
                       push in got, repr(got)[-100:])
-            opened = TD.wish_open_menu_item(page, "Clipboard")
+            opened = TD.bar_open_menu_item(page, "Clipboard")
             shown = ""
             area = page.locator('#dashboardClipboardTextarea')
             if opened:
@@ -208,7 +209,7 @@ def wish_block(cell: str) -> "H.Results":
                 time.sleep(0.5)
             res.check("clipboard: text typed into the panel reached the server", sent and got_text == probe,
                       repr(got_text)[:80])
-            TD.wish_close_menus(page)
+            TD.bar_close_menus(page)
 
             res.check("settings panel opens", open_settings(page))
             mark = len(H.server_log())
@@ -227,7 +228,7 @@ def wish_block(cell: str) -> "H.Results":
             # (WebRTC streams h264enc alone, so there it is hidden).
             allowed = page.evaluate(
                 "(window.__serverSettings && window.__serverSettings.encoder || {}).allowed || []")
-            TD.open_wish_settings_tab(page, "Video", "#encoderSelect")
+            TD.open_bar_settings_tab(page, "Video", "#encoderSelect")
             menu = page.locator('#encoderSelect')
             picked = None
             if len(allowed) <= 1:
@@ -260,7 +261,7 @@ def wish_block(cell: str) -> "H.Results":
 
             opened = False
             notice = False
-            if TD.wish_open_menu_item(page, "Apps"):
+            if TD.bar_open_menu_item(page, "Apps"):
                 deadline = time.time() + 6
                 while time.time() < deadline and not opened:
                     opened = page.locator('[role="dialog"]:has-text("Apps")').count() > 0
@@ -281,7 +282,7 @@ def wish_block(cell: str) -> "H.Results":
 
 
 def gates_block(cell: str) -> "H.Results":
-    """The admin UI gates on one transport/backend for both layouts."""
+    """The admin UI gates on one transport/backend for every layout."""
     mode, wayland = cell_parts(cell)
     res = H.Results(cell)
     for dashboard in H.LAYOUTS:
@@ -327,20 +328,9 @@ def gates_block(cell: str) -> "H.Results":
                 section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
             else:
                 body = page.evaluate("document.body.innerText")
-                menu = ""
-                triggers = page.locator(TD.WISH_MENU_TRIGGERS)
-                for i in range(triggers.count()):
-                    try:
-                        triggers.nth(i).click()
-                        time.sleep(0.6)
-                        menu += page.evaluate("""(() => [...document.querySelectorAll('[role="menu"]')]
-                          .map(m => m.innerText).join('\\n'))()""") + "\n"
-                        page.keyboard.press("Escape")
-                        time.sleep(0.2)
-                    except Exception:
-                        pass
+                menu = TD.bar_menu_text(page)
                 body += menu
-                gamepads = TD.wish_gamepad_panel(page)
+                gamepads = TD.bar_gamepad_panel(page)
                 mic, cam, pad = "Microphone" in menu, "Webcam" in menu, gamepads["input"]
                 section = gamepads["pads"]
             res.check(f"{dashboard}: ui_sidebar_show_shortcuts=false hides the Shortcuts section",
@@ -364,7 +354,7 @@ def main() -> None:
     try:
         for cell in CELLS:
             if which in ("all", cell):
-                blocks.append(wish_block(cell) if cell.startswith("wish-") else gates_block(cell))
+                blocks.append(gates_block(cell) if cell.startswith("gates-") else bar_block(cell))
     finally:
         H.server_stop()
     failed = sum(len(b.failed()) for b in blocks)

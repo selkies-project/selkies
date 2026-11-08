@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Touch clients' own controls in both layouts: the special-key palette and
+"""Touch clients' own controls in every layout: the special-key palette and
 the trackpad's speed, end to end.
 
 The palette, beside the soft modifier keys a touch client gets, holds the keys
@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
+from test_dashboards import bar_tool  # noqa: E402
 from test_touch import FIREFOX_TOUCH_PREFS, Fingers, XWatcher  # noqa: E402
 
 XK = {"F5": 0xFFC2, "Tab": 0xFF09, "Alt_L": 0xFFE9, "Control_L": 0xFFE3, "Shift_L": 0xFFE1,
@@ -76,11 +77,11 @@ def touch_once(page: Any, engine: str) -> None:
 
 
 def open_soft_keys(page: Any, dashboard: str) -> None:
-    """The toolbar layout keeps its soft keys shut until the bar's button opens them."""
-    if dashboard != "wish" or page.locator("[data-soft-keys]").count():
+    """A bar layout keeps its soft keys shut until the bar's button opens them."""
+    if dashboard == "default" or page.locator("[data-soft-keys]").count():
         return
-    button = page.locator(".soft-keys-button").first
-    if button.count():
+    button = bar_tool(page, ".soft-keys-button")
+    if button is not None:
         button.click()
         time.sleep(0.6)
 
@@ -228,7 +229,7 @@ def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None
     """A tablet's attached keyboard keeps the system's on-screen one down, so
     the button that pops it goes once a key only a keyboard has is pressed,
     not on a letter, which an on-screen keyboard types too; each layout's
-    own keyboard control brings it back (the sidebar's tile, the toolbar's button)."""
+    own keyboard control brings it back (the sidebar's tile, a bar layout's button)."""
     tag = f"{dashboard} {engine}"
     H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST, layout=dashboard)
     try:
@@ -260,7 +261,9 @@ def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None
                           button.count() == 0 or not button.first.is_visible())
                 if dashboard == "default":
                     open_sidebar(page)
-                page.locator(".keyboard-toggle-button").first.click()
+                    page.locator(".keyboard-toggle-button").first.click()
+                else:
+                    bar_tool(page, ".keyboard-toggle-button").click()
                 time.sleep(0.4)
                 if dashboard == "default":
                     close_sidebar(page)
@@ -270,12 +273,11 @@ def keyboard_button_block(res: "H.Results", dashboard: str, engine: str) -> None
                 # VirtualKeyboard API (Chromium on Windows leaves it down for a field focused by script, and
                 # always with a keyboard attached), with the hidden field focused under the manual policy.
                 raisers = [("the floating keyboard button", "[data-virtual-keyboard-button]")]
-                if dashboard == "wish":
+                if dashboard != "default":
                     raisers.append(("the soft keys' keyboard button", f'[data-soft-keys] button[aria-label="{VK_LABEL}"]'))
                 for name, selector in raisers:
-                    if dashboard == "wish" and "soft keys" in name and not page.locator(selector).count():
-                        page.locator(".soft-keys-button").first.click()
-                        time.sleep(0.5)
+                    if "soft keys" in name and not page.locator(selector).count():
+                        open_soft_keys(page, dashboard)
                     page.evaluate(VK_SPY)
                     page.locator(selector).first.click()
                     time.sleep(0.5)
@@ -451,17 +453,24 @@ def trackpad_button(page: Any, dashboard: str, engine: str = "") -> bool:
     touch is made if it has not."""
     if dashboard == "default":
         open_sidebar(page)
-    button = page.locator(".trackpad-mode-button").first
     for attempt in range(3):
-        try:
-            button.wait_for(state="attached", timeout=3000)
-            break
-        except Exception:
-            if not engine or attempt == 2:
-                return False
-            touch_once(page, engine)
-            if dashboard == "default":
-                open_sidebar(page)
+        if dashboard == "default":
+            button = page.locator(".trackpad-mode-button").first
+            try:
+                button.wait_for(state="attached", timeout=3000)
+                break
+            except Exception:
+                pass
+        else:
+            button = bar_tool(page, ".trackpad-mode-button")
+            if button is not None:
+                break
+            time.sleep(3.0)
+        if not engine or attempt == 2:
+            return False
+        touch_once(page, engine)
+        if dashboard == "default":
+            open_sidebar(page)
     button.click()
     time.sleep(0.6)
     if dashboard == "default":

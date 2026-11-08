@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""How the dashboard reads: contrast and spacing, in both layouts and both themes.
+"""How the dashboard reads: contrast and spacing, in every layout and both themes.
 
 contrast: every view a user opens is held to WCAG AA, in the light and the dark
 theme, on a desktop, a touch tablet and a phone: the sidebar shut and open with
 each section, its dialogs (files, apps), the stats strip, the touch gamepad and
 the soft keys; the toolbar, each tooltip, the settings card's tabs with each card
 open, the menu with every submenu and the dialogs it opens, the floating panels,
-the stats, the soft keys and the folded bar; and in both, every toast and the
-poor-connection mark. A walk that fails to open one of those fails, so the
+the stats, the soft keys and the folded bar; the edge button at rest and folded,
+and its fan page by page with each tooltip, then what the toolbar's walk opens;
+and in every layout, every toast and the poor-connection mark. A walk that fails to open one of those fails, so the
 coverage cannot shrink unnoticed. Each view is read with every scrolling
 container swept to its end, at rest, with every control hovered (a pointer's
 client) and with every control focused, the states forced through the DevTools
@@ -21,12 +22,12 @@ separates it from the track. Disabled controls are exempt.
 
 spacing: the rows of a panel keep one rhythm. A label sits one field gap above
 its control and a row one stack gap below the last, the sidebar's sections end
-as far under their last row as each other, and the toolbar's settings card
+as far under their last row as each other, and a bar layout's settings card
 leaves as much room under its last card as above its tabs. The gaps are read
 between the rendered rows (a label, a control, a line of text), so a margin
 added under one row shows up as the row that sits lower than the rest.
 
-    python3 tests/e2e/test_dashboard_look.py [contrast|contrast-default|contrast-wish|spacing|all] [default|wish ...]
+    python3 tests/e2e/test_dashboard_look.py [contrast|contrast-default|contrast-wish|contrast-edge|spacing|all] [default|wish|edge ...]
 
 The contrast walk of one layout takes about nine minutes on an idle 32-core host: some thirty views, each read three
 times (at rest, hovered, focused) with its scrolling swept, in two themes on three clients.
@@ -50,7 +51,7 @@ DESK = {"viewport": {"width": 1440, "height": 900}, "device_scale_factor": 1}
 TOUCH = {"viewport": {"width": 1280, "height": 800}, "device_scale_factor": 1, "has_touch": True}
 PHONE = {"viewport": {"width": 390, "height": 844}, "device_scale_factor": 1, "has_touch": True, "is_mobile": True}
 # Each layout's rhythm (--field-gap, --stack-gap), as rendered between rows, and how far a gap may stray from it.
-RHYTHM = {"default": (6, 14), "wish": (6, 16)}
+RHYTHM = {"default": (6, 14), "wish": (6, 16), "edge": (6, 16)}
 SLACK = 2
 # Sections whose rows are a list or a figure with its own rhythm.
 FREE_SECTIONS = ("stats-content", "sharing-content")
@@ -215,6 +216,9 @@ AUDIT_JS = r"""
     for (const el of document.querySelectorAll(sel)) {
       const rest = window.__lookRest.get(el);
       if (!rest || !visible(el) || disabled(el) || el.closest('[aria-hidden="true"]')) continue;
+      // The edge button at rest trades its glow for its focus ring in script, on a real focus (`useReveal`),
+      // which a forced :focus never reaches; test_dashboards' edge block holds that ring.
+      if (el.matches('.edge-button.edge-halo')) continue;
       const cs = getComputedStyle(el);
       const surface = background(el.parentElement || el);
       const marks = [];
@@ -469,21 +473,51 @@ def sidebar_views(page: Any, tag: str, found: List[dict], views: List[str], touc
     TD.sidebar_close(page)
 
 
-def toolbar_views(page: Any, tag: str, found: List[dict], views: List[str], touch: bool) -> None:
-    TD.wish_show_toolbar(page)
-    audit(page, f"{tag} toolbar", found, views, touch)
-    if not touch:
-        tips = page.locator('.toolbar [data-slot="tooltip-trigger"]')
-        for i in range(tips.count()):
-            label = tips.nth(i).get_attribute("aria-label") or str(i)
-            tips.nth(i).hover()
-            if wait_for(page, '[data-slot="tooltip-content"]', 3):
-                audit(page, f"{tag} tooltip {label}", found, views, touch)
-            page.mouse.move(700, 700)
-            time.sleep(0.5)
-    if TD.open_wish_settings_tab(page, "Video"):
+def tooltip_views(page: Any, triggers: str, tag: str, found: List[dict], views: List[str], touch: bool) -> None:
+    """Each tooltip of the controls `triggers` matches, hovered in turn."""
+    tips = page.locator(triggers)
+    for i in range(tips.count()):
+        label = tips.nth(i).get_attribute("aria-label") or str(i)
+        tips.nth(i).hover()
+        if wait_for(page, '[data-slot="tooltip-content"]', 3):
+            audit(page, f"{tag} tooltip {label}", found, views, touch)
+        page.mouse.move(700, 700)
+        time.sleep(0.5)
+
+
+def bar_views(page: Any, tag: str, found: List[dict], views: List[str], touch: bool) -> None:
+    """A bar layout's views: the toolbar, or the edge button at rest and its
+    fan, page by page, with each tooltip; then what both open from their
+    buttons, the settings card's cards, the menu and its submenus and
+    dialogs, the floating panels, the stats, the soft keys, and the bar
+    folded away."""
+    edge = TD.is_edge(page)
+    if edge:
+        TD.bar_close_menus(page)
+        TD.edge_close_fan(page)
+        page.mouse.move(700, 700)
+        audit(page, f"{tag} edge button", found, views, touch)
+        TD.edge_open_fan(page)
+        for number in range(1, 9):
+            audit(page, f"{tag} fan" + (f" page {number}" if number > 1 else ""), found, views, touch)
+            if not touch:
+                tooltip_views(page, f'{TD.EDGE_FAN} [data-slot="tooltip-trigger"]', tag, found, views, touch)
+            more = page.locator(TD.EDGE_MORE)
+            if not more.count():
+                break
+            # Pressed through the page, so each page is read where something covers the dots button.
+            more.first.dispatch_event("click")
+            time.sleep(0.7)
+            if TD.edge_fan_page(page)[0] == 1:
+                break
+    else:
+        TD.bar_show(page)
+        audit(page, f"{tag} toolbar", found, views, touch)
+        if not touch:
+            tooltip_views(page, '.toolbar [data-slot="tooltip-trigger"]', tag, found, views, touch)
+    if TD.open_bar_settings_tab(page, "Video"):
         for tab in [t.strip() for t in page.locator('[role="tab"]').all_inner_texts()]:
-            if not TD.open_wish_settings_tab(page, tab):
+            if not TD.open_bar_settings_tab(page, tab):
                 continue
             triggers = page.locator('[role="tabpanel"] [data-slot="accordion-trigger"]')
             for i in range(triggers.count()):
@@ -491,10 +525,10 @@ def toolbar_views(page: Any, tag: str, found: List[dict], views: List[str], touc
                     triggers.nth(i).click()
                     time.sleep(0.4)
                 audit(page, f"{tag} {tab} card {i + 1}", found, views, touch)
-    TD.wish_close_menus(page)
+    TD.bar_close_menus(page)
     page.keyboard.press("Escape")
-    menu = page.locator('button[aria-label="Menu"]').first
-    if menu.count():
+    menu = TD.bar_tool(page, 'button[aria-label="Menu"]')
+    if menu is not None:
         menu.click()
         time.sleep(0.6)
         audit(page, f"{tag} menu", found, views, touch)
@@ -503,6 +537,7 @@ def toolbar_views(page: Any, tag: str, found: List[dict], views: List[str], touc
         page.keyboard.press("Escape")
         for i in range(subs):
             # One submenu at a time, from a freshly opened menu: an open one covers the triggers under it.
+            menu = TD.bar_tool(page, 'button[aria-label="Menu"]')
             menu.click()
             time.sleep(0.5)
             sub = page.locator('[role="menu"] [aria-haspopup="menu"]').nth(i)
@@ -511,32 +546,30 @@ def toolbar_views(page: Any, tag: str, found: List[dict], views: List[str], touc
             page.keyboard.press("ArrowRight")
             time.sleep(0.7)
             audit(page, f"{tag} menu {name}", found, views, touch)
-            TD.wish_close_menus(page)
+            TD.bar_close_menus(page)
         for name in dialogs:
             if name == "Add a second screen":
                 continue
+            menu = TD.bar_tool(page, 'button[aria-label="Menu"]')
             menu.click()
             time.sleep(0.5)
             page.locator(f'[role="menu"] [role="menuitem"]:has-text("{name}")').first.click()
             if wait_for(page, '[role="dialog"]'):
                 audit(page, f"{tag} {name} dialog", found, views, touch)
-            page.keyboard.press("Escape")
-            time.sleep(0.5)
+            TD.close_dialogs(page)
     # The floating panels and the stats, each opened by its own button and closed by it again.
-    for sel, name in (('.toolbar button[aria-label="Gamepads"]', "gamepads panel"), (".toolbar .stats-button", "stats"),
-                      (".toolbar .touch-gamepad-button", "touch gamepad")):
-        button = page.locator(sel)
-        if not button.count():
+    for sel, name in (('button[aria-label="Gamepads"]', "gamepads panel"), (".stats-button", "stats"),
+                      (".touch-gamepad-button", "touch gamepad")):
+        button = TD.bar_tool(page, sel)
+        if button is None:
             continue
-        button.first.click()
+        button.click()
         time.sleep(1.0)
         audit(page, f"{tag} {name}", found, views, touch)
-        TD.wish_show_toolbar(page)
-        page.locator(sel).first.click()
-        time.sleep(0.5)
+        TD.bar_close_panel(page, sel)
     if touch:
-        keys = page.locator(".soft-keys-button").first
-        if keys.count():
+        keys = TD.bar_tool(page, ".soft-keys-button")
+        if keys is not None:
             keys.click()
             time.sleep(0.5)
             toggle = page.locator(".key-palette-toggle").first
@@ -544,14 +577,22 @@ def toolbar_views(page: Any, tag: str, found: List[dict], views: List[str], touc
                 toggle.click()
                 time.sleep(0.4)
             audit(page, f"{tag} soft keys", found, views, touch)
-            page.locator(".soft-keys-button").first.click()
+            TD.bar_tool(page, ".soft-keys-button").click()
             time.sleep(0.4)
+    # The toolbar folds by its own button, the edge button by Ctrl+Shift+M alone.
     hide = page.locator('.toolbar button[aria-label="Hide toolbar"]')
-    if hide.count():
-        hide.first.click()
+    if edge or hide.count():
+        TD.bar_close_menus(page)
+        if edge:
+            TD.edge_close_fan(page)
+            page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+        else:
+            hide.first.click()
         time.sleep(0.8)
-        audit(page, f"{tag} toolbar folded", found, views, touch)
-        TD.wish_show_toolbar(page)
+        audit(page, f"{tag} {'edge button' if edge else 'toolbar'} folded", found, views, touch)
+        TD.bar_show(page)
+        if edge:
+            TD.edge_close_fan(page)
 
 
 # A desktop, a touch tablet and a phone: the phone's layout is the narrow one (max-sm), with its own controls.
@@ -563,8 +604,13 @@ MUST = {
     "wish": ("toolbar", "Video card 1", "Resolution card 1", "Audio card 1", "menu", "menu Shortcuts", "menu Clipboard",
              "Files dialog", "gamepads panel", "stats", "toolbar folded", "toast upload", "toast uploaded",
              "toast upload failed", "toast warning", "toast transport advice", "poor connection"),
+    "edge": ("edge button", "fan", "Video card 1", "Resolution card 1", "Audio card 1", "menu", "menu Shortcuts",
+             "menu Clipboard", "Files dialog", "gamepads panel", "stats", "edge button folded", "toast upload",
+             "toast uploaded", "toast upload failed", "toast warning", "toast transport advice", "poor connection"),
 }
-MUST_TOUCH = {"default": ("soft keys", "touch gamepad", "toast print"), "wish": ("soft keys", "touch gamepad", "toast print")}
+# A touch client's own views; its tools are more than a fan holds, so the edge fan has a second page there.
+MUST_TOUCH = {"default": ("soft keys", "touch gamepad", "toast print"), "wish": ("soft keys", "touch gamepad", "toast print"),
+              "edge": ("fan page 2", "soft keys", "touch gamepad", "toast print")}
 
 
 def page_for(browser: Any, theme: str, client: dict) -> Any:
@@ -592,7 +638,7 @@ def contrast_block(layout: str) -> "H.Results":
                     page = page_for(browser, theme, client)
                     tag = f"{theme} {name}"
                     views: List[str] = []
-                    (sidebar_views if layout == "default" else toolbar_views)(page, tag, found, views, touch)
+                    (sidebar_views if layout == "default" else bar_views)(page, tag, found, views, touch)
                     notice_views(page, tag, found, views, touch)
                     page.context.close()
                     want = MUST[layout] + (MUST_TOUCH[layout] if touch else ())
@@ -721,10 +767,10 @@ def spacing_block(layout: str) -> "H.Results":
                 spread = max(ends.values()) - min(ends.values()) if ends else 0
                 res.check("default: every section ends as far under its last row", ends and spread <= SLACK, ends)
             else:
-                TD.wish_show_toolbar(page)
+                TD.bar_show(page)
                 for tab in ("Video", "Resolution", "Audio"):
-                    if not TD.open_wish_settings_tab(page, tab):
-                        res.check(f"wish: the {tab} tab opens", False)
+                    if not TD.open_bar_settings_tab(page, tab):
+                        res.check(f"{layout}: the {tab} tab opens", False)
                         continue
                     triggers = page.locator('[role="tabpanel"] [data-slot="accordion-trigger"]')
                     for i in range(triggers.count()):
@@ -736,13 +782,13 @@ def spacing_block(layout: str) -> "H.Results":
                             || document.body)""".replace("{ROWS}", ROWS_JS))
                         if body and body["rows"]:
                             off = gaps_off(layout, body["rows"])
-                            res.check(f"wish: the {tab} tab's card {i + 1} keeps the rhythm between its rows", not off, off)
-                            res.check(f"wish: the {tab} tab's card {i + 1} pads its first and last rows alike",
+                            res.check(f"{layout}: the {tab} tab's card {i + 1} keeps the rhythm between its rows", not off, off)
+                            res.check(f"{layout}: the {tab} tab's card {i + 1} pads its first and last rows alike",
                                       abs((body["rows"][0][0] - body["top"]) - (body["bottom"] - body["rows"][-1][1])) <= 2 * SLACK + 2,
                                       (round(body["rows"][0][0] - body["top"]), round(body["bottom"] - body["rows"][-1][1])))
                         room = page.evaluate(CARD_JS)
                         if room:
-                            res.check(f"wish: the card leaves as much room under its last card as above its tabs ({tab}, {i + 1})",
+                            res.check(f"{layout}: the card leaves as much room under its last card as above its tabs ({tab}, {i + 1})",
                                       abs(room["above"] - room["under"]) <= SLACK, room)
             page.context.close()
             browser.close()
