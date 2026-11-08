@@ -15,8 +15,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
@@ -25,11 +23,14 @@ use axum::routing::get;
 use futures::{SinkExt, StreamExt};
 use selkies_rtc::signaling::{ClientType, Inbound, Outbound, PeerRegistry, socket};
 use tokio::sync::mpsc;
+use tokio_websockets::Message;
 
 use crate::core::Role;
 use crate::http::auth::RoleCeiling;
 use crate::http::listen::ConnInfo;
 use crate::webrtc::service::WebRtcService;
+use crate::ws::client::close_message;
+use crate::ws::upgrade::{UpgradeRejection, WebSocket, WebSocketUpgrade};
 
 /// The routes this transport mounts: `/api/ws` and `/api/webrtc/signaling`. `/api/turn` is served by
 /// `crate::http`, which reads the service as its `TurnSource`.
@@ -45,7 +46,7 @@ pub fn routes<S: Clone + Send + Sync + 'static>(service: Arc<WebRtcService>) -> 
 pub async fn signaling_handler(
     State(service): State<Arc<WebRtcService>>,
     parts: Parts,
-    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+    upgrade: Result<WebSocketUpgrade, UpgradeRejection>,
 ) -> Response {
     if service.current_mode().as_deref() != Some("webrtc") {
         return (StatusCode::CONFLICT, "WebRTC mode is inactive").into_response();
@@ -106,16 +107,11 @@ pub async fn serve_signaling(
     let writer = tokio::spawn(async move {
         while let Some(outbound) = outbox.recv().await {
             let sent = match outbound {
-                Outbound::Text(text) => sink.send(Message::Text(text.into())).await,
-                Outbound::Ping(data) => sink.send(Message::Ping(data.into())).await,
-                Outbound::Pong(data) => sink.send(Message::Pong(data.into())).await,
+                Outbound::Text(text) => sink.send(Message::text(text)).await,
+                Outbound::Ping(data) => sink.send(Message::ping(data)).await,
+                Outbound::Pong(data) => sink.send(Message::pong(data)).await,
                 Outbound::Close { code, reason } => {
-                    let _ = sink
-                        .send(Message::Close(Some(CloseFrame {
-                            code,
-                            reason: reason.into(),
-                        })))
-                        .await;
+                    let _ = sink.send(close_message(code, &reason)).await;
                     return;
                 }
                 Outbound::Abort => return,
@@ -128,14 +124,16 @@ pub async fn serve_signaling(
     let reader = tokio::spawn(async move {
         loop {
             let inbound = match stream.next().await {
-                Some(Ok(Message::Text(text))) => Inbound::Text(text.to_string()),
-                Some(Ok(Message::Binary(_))) => Inbound::Binary,
-                Some(Ok(Message::Ping(data))) => Inbound::Ping(data.to_vec()),
-                Some(Ok(Message::Pong(data))) => Inbound::Pong(data.to_vec()),
-                Some(Ok(Message::Close(_))) => {
+                Some(Ok(message)) if message.is_close() => {
                     let _ = inbound_tx.send(Inbound::CloseFrame).await;
                     return;
                 }
+                Some(Ok(message)) => match message.as_text() {
+                    Some(text) => Inbound::Text(text.to_string()),
+                    None if message.is_binary() => Inbound::Binary,
+                    None if message.is_ping() => Inbound::Ping(message.as_payload().to_vec()),
+                    None => Inbound::Pong(message.as_payload().to_vec()),
+                },
                 Some(Err(_)) | None => {
                     let _ = inbound_tx.send(Inbound::Cut).await;
                     return;

@@ -12,9 +12,9 @@
 //! transport is active, and 401 that secure mode wants a token. The socket runs uncompressed
 //! (the frames are already H.264, JPEG, or Opus), selects the `selkies` subprotocol, and takes
 //! messages up to `WS_MAX_MESSAGE_BYTES`. Protocol pings go out every 30 s, and a socket
-//! unanswered 15 s later is cut as a cut peer would be (1006). Tungstenite answers an incoming
-//! ping inside its read, so the loop needs no pong of its own; a pong reaches the loop, which
-//! feeds it to the uplink clock.
+//! unanswered 15 s later is cut as a cut peer would be (1006). tokio-websockets answers an
+//! incoming ping inside its read, so the loop needs no pong of its own; a pong reaches the loop,
+//! which feeds it to the uplink clock.
 //!
 //! Dispatch order: `_gz,1` and `_pad,1`; the viewer gate; `SETTINGS,`; `_stats,`;
 //! `CLIENT_FRAME_ACK`; `START_VIDEO`; `PAGE_HIDDEN`/`PAGE_SHOWN`; `STOP_VIDEO`; `DECODE_PACE `;
@@ -33,8 +33,6 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::ConnectInfo;
 use axum::extract::State;
-use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
@@ -70,6 +68,7 @@ use crate::ws::server::{
     session_time,
 };
 use crate::ws::state::{DisplayState, json_f64, sanitize, settings_changed_by};
+use crate::ws::upgrade::{UpgradeRejection, WebSocket, WebSocketUpgrade};
 
 /// How often a protocol ping goes out, and how long it may go unanswered after.
 const HEARTBEAT_S: f64 = 30.0;
@@ -132,7 +131,7 @@ pub fn routes<S: Clone + Send + Sync + 'static>(service: Arc<WsService>) -> Rout
 pub async fn websocket_handler(
     State(service): State<Arc<WsService>>,
     parts: Parts,
-    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+    upgrade: Result<WebSocketUpgrade, UpgradeRejection>,
 ) -> Response {
     if service.deps.supervisor.current_mode().as_deref() != Some("websockets") {
         return (StatusCode::CONFLICT, "WebSocket mode is inactive").into_response();
@@ -175,7 +174,6 @@ pub async fn websocket_handler(
     upgrade
         .protocols([SESSION_TOKEN_PROTOCOL])
         .max_message_size(WS_MAX_MESSAGE_BYTES)
-        .max_frame_size(WS_MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             run_socket(service, socket, peer, token, query_role, query_slot).await;
         })
@@ -260,26 +258,24 @@ async fn run_socket(
                     break;
                 }
             };
-            match message {
-                Message::Ping(_) => {}
-                Message::Pong(payload) => {
-                    client.note_pong(&payload);
-                }
-                Message::Close(frame) => {
-                    client.set_closed(Some(frame.map(|f| f.code).unwrap_or(1005)));
+            if message.is_pong() {
+                client.note_pong(message.as_payload());
+            } else if let Some((code, _)) = message.as_close() {
+                client.set_closed(Some(code.into()));
+                break;
+            } else if let Some(text) = message.as_text() {
+                client.heard();
+                if conn.handle_text(text).await.is_break() {
                     break;
                 }
-                Message::Text(text) => {
-                    client.heard();
-                    if conn.handle_text(text.as_str()).await.is_break() {
-                        break;
-                    }
-                }
-                Message::Binary(data) => {
-                    client.heard();
-                    if conn.handle_binary(data).await.is_break() {
-                        break;
-                    }
+            } else if message.is_binary() {
+                client.heard();
+                if conn
+                    .handle_binary(Bytes::from(message.into_payload()))
+                    .await
+                    .is_break()
+                {
+                    break;
                 }
             }
         }

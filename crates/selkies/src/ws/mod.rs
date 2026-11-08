@@ -38,6 +38,7 @@ pub mod relay;
 pub mod server;
 pub mod state;
 pub mod steer;
+pub mod upgrade;
 pub mod uplink;
 pub mod wiring;
 

@@ -56,7 +56,7 @@ dependency of the workspace's crates, by what it does:
 | `selkies-rtc` | MPL-2.0 | weak copyleft | the WebRTC stack, in this repository under `crates/selkies-rtc` |  |
 | `rtc-crypto`, `rtc-dtls`, `rtc-ice`, `rtc-mdns`, `rtc-sctp`, `rtc-sdp`, `rtc-shared`, `rtc-srtp`, `rtc-stun`, `rtc-turn`, `sansio` | Apache-2.0 OR MIT | permissive | the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over | `rtc-sctp` vendored (below) |
 | `tokio`, `tokio-util`, `futures`, `async-trait`, `bytes` | MIT; Apache-2.0 OR MIT | permissive | async runtime |  |
-| `axum`, `hyper`, `hyper-util`, `tower`, `tower-http`, `http`, `http-body-util` | MIT; Apache-2.0 OR MIT | permissive | HTTP and WebSocket server |  |
+| `axum`, `tokio-websockets`, `hyper`, `hyper-util`, `tower`, `tower-http`, `http`, `http-body-util` | MIT; Apache-2.0 OR MIT | permissive | HTTP and WebSocket server |  |
 | `rustls`, `tokio-rustls`, `hyper-rustls`, `rustls-native-certs` | Apache-2.0 OR ISC OR MIT; Apache-2.0 OR MIT | permissive | HTTPS, TLS to TURN servers, and the outgoing requests of the TURN REST and Cloudflare sources | cryptography from `aws-lc-rs` |
 | `rcgen` | Apache-2.0 OR MIT | permissive | self-signed certificates |  |
 | `aws-lc-rs`, `rand` | (Apache-2.0 OR ISC) AND ISC; Apache-2.0 OR MIT | permissive | hashes, HMAC credentials, constant-time comparison, random identifiers |  |

@@ -362,7 +362,7 @@ ROLES: Tuple[Role, ...] = (
          "the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over",
          "`rtc-sctp` vendored (below)"),
     Role(("tokio", "tokio-util", "futures", "async-trait", "bytes"), "async runtime"),
-    Role(("axum", "hyper", "hyper-util", "tower", "tower-http", "http", "http-body-util"),
+    Role(("axum", "tokio-websockets", "hyper", "hyper-util", "tower", "tower-http", "http", "http-body-util"),
          "HTTP and WebSocket server"),
     Role(("rustls", "tokio-rustls", "hyper-rustls", "rustls-native-certs"),
          "HTTPS, TLS to TURN servers, and the outgoing requests of the TURN REST and Cloudflare sources",

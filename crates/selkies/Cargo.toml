@@ -30,7 +30,8 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 futures = "0.3"
 bytes = "1"
-axum = { version = "0.8", features = ["ws", "http2", "macros", "multipart"] }
+axum = { version = "0.8", features = ["http2", "macros", "multipart"] }
+tokio-websockets = { version = "0.13", default-features = false, features = ["server", "aws_lc_rs"] }
 tower = { version = "0.5", features = ["util", "timeout", "limit"] }
 tower-http = { version = "0.7", features = ["fs", "trace", "set-header", "compression-gzip"] }
 hyper = { version = "1", features = ["full"] }

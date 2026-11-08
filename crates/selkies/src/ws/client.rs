@@ -25,13 +25,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
-use axum::extract::ws::{CloseFrame, Message, Utf8Bytes};
 use bytes::Bytes;
 use futures::{Sink, SinkExt};
 use log::{debug, error, warn};
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value as Json;
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio_websockets::{CloseCode, Message};
 
 use crate::files::pacing::{SessionPing, UplinkClock};
 use crate::settings::WS_MESSAGE_SIZE_HARD_CAP;
@@ -53,6 +53,41 @@ pub const SEND_STALL_SECONDS: f64 = 10.0;
 pub const SEND_PROBE_SECONDS: f64 = 0.5;
 /// How long a bounded control send (a kill, a `VIDEO_STOPPED` to a superseded page) waits.
 pub const BOUNDED_SEND_SECONDS: f64 = 2.0;
+
+/// UTF-8 text that many frames share without copying.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Utf8Bytes(Bytes);
+
+impl Utf8Bytes {
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("built from a String")
+    }
+}
+
+impl From<String> for Utf8Bytes {
+    fn from(text: String) -> Self {
+        Utf8Bytes(Bytes::from(text))
+    }
+}
+
+impl std::ops::Deref for Utf8Bytes {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// A close frame of `code` and `reason`: a code the wire cannot carry is left out, and the reason
+/// is cut to the 123 bytes a close frame holds.
+pub fn close_message(code: u16, reason: &str) -> Message {
+    let code = CloseCode::try_from(code).ok().filter(|c| !c.is_reserved());
+    let mut end = reason.len().min(123);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    Message::close(code, &reason[..end])
+}
 
 /// One frame to write.
 #[derive(Clone, Debug)]
@@ -82,16 +117,13 @@ impl Frame {
         self.len() == 0
     }
 
-    /// The axum message this frame is.
+    /// The WebSocket message this frame is; a payload goes out as the `Bytes` it is.
     pub fn into_message(self) -> Message {
         match self {
-            Frame::Text(t) => Message::Text(t),
-            Frame::Binary(b) => Message::Binary(b),
-            Frame::Ping(b) => Message::Ping(b),
-            Frame::Close { code, reason } => Message::Close(Some(CloseFrame {
-                code,
-                reason: Utf8Bytes::from(reason),
-            })),
+            Frame::Text(t) => Message::text(t.0),
+            Frame::Binary(b) => Message::binary(b),
+            Frame::Ping(b) => Message::ping(b),
+            Frame::Close { code, reason } => close_message(code, &reason),
         }
     }
 }

@@ -2114,14 +2114,15 @@ fn hdrs_of<'a>(pairs: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a st
 /// is selected, and the socket carries a frame both ways.
 #[tokio::test]
 async fn websocket_handshake_through_the_listener() {
-    use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+    use crate::ws::upgrade::{WebSocket, WebSocketUpgrade};
     use axum::http::HeaderMap;
     use base64::Engine;
+    use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn echo(mut socket: WebSocket) {
-        while let Some(Ok(message)) = socket.recv().await {
-            if matches!(message, Message::Text(_)) && socket.send(message).await.is_err() {
+        while let Some(Ok(message)) = socket.next().await {
+            if message.is_text() && socket.send(message).await.is_err() {
                 return;
             }
         }
