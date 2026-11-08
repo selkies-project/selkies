@@ -31,7 +31,8 @@ pub struct SinkError(pub String);
 /// Protect and write one packet to the peer. Implemented over the transport handle's
 /// `send_rtp`, `send_rtcp`, and `peer_heard_at` (as `clock::monotonic` seconds).
 pub trait PacketSink {
-    fn send_rtp(&mut self, packet: &[u8]) -> Result<(), SinkError>;
+    /// One RTP packet, its buffer handed over with room for the SRTP tag.
+    fn send_rtp(&mut self, packet: Bytes) -> Result<(), SinkError>;
     fn send_rtcp(&mut self, compound: &[u8]) -> Result<(), SinkError>;
     /// One SCTP packet for the DTLS association.
     fn send_data(&mut self, packet: &[u8]) -> Result<(), SinkError>;
@@ -86,7 +87,7 @@ impl<S: PacketSink> PacedTransport<S> {
             }
             let written = match item.class {
                 Class::Data => self.sink.send_data(&item.data),
-                _ => self.sink.send_rtp(&item.data),
+                _ => self.sink.send_rtp(item.data),
             };
             if let Err(e) = written {
                 log::warn!(target: "webrtc", "pacer: send failed: {e}");
@@ -123,7 +124,7 @@ impl<S: PacketSink> SenderTransport for PacedTransport<S> {
         now: f64,
     ) -> Verdict {
         let Some(pacer) = self.pacer.as_mut() else {
-            match self.sink.send_rtp(&packet.to_vec()) {
+            match self.sink.send_rtp(packet.to_bytes(SRTP_PADDING_OVERHEAD)) {
                 Ok(()) => {
                     if let Some(seq) = twcc_seq {
                         self.twcc.released(seq, now);
@@ -133,10 +134,10 @@ impl<S: PacketSink> SenderTransport for PacedTransport<S> {
             }
             return Verdict::SendNow;
         };
-        let data = Bytes::from(packet.to_vec());
+        let data = packet.to_bytes(SRTP_PADDING_OVERHEAD);
         let verdict = pacer.send(data.clone(), class, twcc_seq, now);
         if verdict == Verdict::SendNow {
-            match self.sink.send_rtp(&data) {
+            match self.sink.send_rtp(data) {
                 Ok(()) => {
                     if let Some(seq) = twcc_seq {
                         self.twcc.released(seq, now);
@@ -180,7 +181,7 @@ impl<S: PacketSink> SenderTransport for PacedTransport<S> {
             return;
         };
         pacer.take_padding(packet.len() + SRTP_PADDING_OVERHEAD);
-        match self.sink.send_rtp(&packet.to_vec()) {
+        match self.sink.send_rtp(packet.to_bytes(SRTP_PADDING_OVERHEAD)) {
             Ok(()) => self.twcc.released(twcc_seq, now),
             Err(e) => {
                 log::debug!(target: "webrtc", "padding send failed: {e}");
@@ -201,7 +202,7 @@ mod tests {
     }
 
     impl PacketSink for TestSink {
-        fn send_rtp(&mut self, packet: &[u8]) -> Result<(), SinkError> {
+        fn send_rtp(&mut self, packet: Bytes) -> Result<(), SinkError> {
             self.rtp.push(packet.to_vec());
             Ok(())
         }

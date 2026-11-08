@@ -31,10 +31,11 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
-# rtc-sctp carries the Selkies SCTP fixes until they land upstream
-# (crates/selkies-rtc/vendor/rtc-sctp/rtc-sctp-selkies.patch).
+# rtc-sctp carries the Selkies SCTP fixes and rtc-srtp the in-place RTP encryption until they
+# land upstream (crates/selkies-rtc/vendor/*/*-selkies.patch).
 [patch.crates-io]
 rtc-sctp = { path = "crates/selkies-rtc/vendor/rtc-sctp" }
+rtc-srtp = { path = "crates/selkies-rtc/vendor/rtc-srtp" }
 
 # Optimized enough to time and to drive a browser with, and rebuilt in seconds rather than the
 # minutes fat LTO takes; numbers quoted anywhere come from `release`.

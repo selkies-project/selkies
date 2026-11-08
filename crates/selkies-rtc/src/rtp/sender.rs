@@ -86,7 +86,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use rand::RngExt;
 
 use super::clock::ntp_from_monotonic_ns;
@@ -265,6 +265,16 @@ impl Datagram<'_> {
         let mut out = Vec::with_capacity(self.len());
         self.write_to(&mut out);
         out
+    }
+
+    /// The datagram in one buffer with `room` bytes to spare, where SRTP appends its tag.
+    pub fn to_bytes(&self, room: usize) -> Bytes {
+        let mut out = BytesMut::with_capacity(self.len() + room);
+        out.extend_from_slice(self.header);
+        for p in self.payload {
+            out.extend_from_slice(p);
+        }
+        out.freeze()
     }
 }
 

@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use log::{debug, error, info, warn};
 use selkies_rtc::dtls::{self, Certificate, DtlsRole as TransportDtlsRole, DtlsState};
 use selkies_rtc::ice::connection::IceParameters as TransportIceParameters;
@@ -218,9 +218,13 @@ fn sink_error(e: TransportError) -> SinkError {
 }
 
 impl PacketSink for TransportSink {
-    fn send_rtp(&mut self, packet: &[u8]) -> Result<(), SinkError> {
+    fn send_rtp(&mut self, packet: Bytes) -> Result<(), SinkError> {
+        // The pacer has let go of the packet, so SRTP seals the buffer it was marshaled into.
+        let packet = packet
+            .try_into_mut()
+            .unwrap_or_else(|shared| BytesMut::from(&shared[..]));
         self.transport
-            .send_rtp(packet)
+            .send_rtp_owned(packet)
             .map(|_| ())
             .map_err(sink_error)
     }

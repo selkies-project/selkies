@@ -360,7 +360,7 @@ ROLES: Tuple[Role, ...] = (
     Role(("rtc-crypto", "rtc-dtls", "rtc-ice", "rtc-mdns", "rtc-sctp", "rtc-sdp", "rtc-shared", "rtc-srtp",
           "rtc-stun", "rtc-turn", "sansio"),
          "the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over",
-         "`rtc-sctp` vendored (below)"),
+         "`rtc-sctp` and `rtc-srtp` vendored (below)"),
     Role(("tokio", "tokio-util", "futures", "async-trait", "bytes"), "async runtime"),
     Role(("axum", "tokio-websockets", "hyper", "hyper-util", "tower", "tower-http", "http", "http-body-util"),
          "HTTP and WebSocket server"),
@@ -389,6 +389,8 @@ ROLES: Tuple[Role, ...] = (
 # Crates vendored under crates/*/vendor and what Selkies does with each.
 VENDORED: Dict[str, str] = {
     "rtc-sctp": "the workspace patches the published crate with it; `rtc-sctp-selkies.patch` beside it is the "
+                "diff, whose changes are MPL-2.0",
+    "rtc-srtp": "the workspace patches the published crate with it; `rtc-srtp-selkies.patch` beside it is the "
                 "diff, whose changes are MPL-2.0",
 }
 

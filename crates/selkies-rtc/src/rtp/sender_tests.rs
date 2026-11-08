@@ -2639,7 +2639,7 @@ impl super::super::transport::PacketSink for Sink {
         Ok(())
     }
 
-    fn send_rtp(&mut self, packet: &[u8]) -> Result<(), super::super::transport::SinkError> {
+    fn send_rtp(&mut self, packet: Bytes) -> Result<(), super::super::transport::SinkError> {
         if self.fail {
             return Err(super::super::transport::SinkError("wire gone".into()));
         }
@@ -2916,9 +2916,14 @@ struct BenchSink {
 }
 
 impl super::super::transport::PacketSink for BenchSink {
-    fn send_rtp(&mut self, packet: &[u8]) -> Result<(), super::super::transport::SinkError> {
+    fn send_rtp(&mut self, packet: Bytes) -> Result<(), super::super::transport::SinkError> {
         if let Some(srtp) = self.srtp.as_mut() {
-            let protected = srtp.tx.protect_rtp(packet).expect("protects");
+            let mut protected = packet
+                .try_into_mut()
+                .unwrap_or_else(|shared| bytes::BytesMut::from(&shared[..]));
+            srtp.tx
+                .protect_rtp_in_place(&mut protected)
+                .expect("protects");
             if let Some(socket) = &self.socket {
                 // A full socket buffer is the wire's loss, not the benchmark's concern.
                 let _ = socket.send(&protected);

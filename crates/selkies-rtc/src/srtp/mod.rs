@@ -118,6 +118,14 @@ impl SrtpContext {
             .map_err(|e| SrtpError::Protect(e.to_string()))
     }
 
+    /// Protect one RTP packet where it lies; it grows by its tag, in place when its capacity has
+    /// room for it.
+    pub fn protect_rtp_in_place(&mut self, packet: &mut BytesMut) -> Result<(), SrtpError> {
+        self.inner
+            .encrypt_rtp_in_place(packet)
+            .map_err(|e| SrtpError::Protect(e.to_string()))
+    }
+
     /// Protect one RTCP packet.
     pub fn protect_rtcp(&mut self, packet: &[u8]) -> Result<BytesMut, SrtpError> {
         self.inner
@@ -204,7 +212,8 @@ mod tests {
         p
     }
 
-    /// What one send costs in `rtc_srtp`, whose copy of the packet is the one a media send pays.
+    /// What one send costs in `rtc_srtp`: sealing a copy of the packet, and sealing it where it
+    /// lies as a media send does.
     #[test]
     #[ignore = "prints a measurement to quote; run with --release"]
     fn bench_protect_rtp() {
@@ -220,13 +229,68 @@ mod tests {
             for size in [200usize, 1200] {
                 let mut packet = rtp_packet(0, &vec![0xA5; size]);
                 let count: u32 = 200_000;
+                // A send before: the marshal into a buffer of its own, then rtc_srtp's copy.
                 let started = std::time::Instant::now();
                 for seq in 0..count {
                     packet[2..4].copy_from_slice(&(seq as u16).to_be_bytes());
-                    std::hint::black_box(session.tx.protect_rtp(&packet).unwrap());
+                    let marshaled = packet.to_vec();
+                    std::hint::black_box(session.tx.protect_rtp(&marshaled).unwrap());
                 }
-                let per_packet = started.elapsed() / count;
-                println!("{} {size} bytes: {per_packet:?} per packet", profile.name());
+                let copying = started.elapsed() / count;
+                // A send now: the marshal with room for the tag, sealed where it lies.
+                let started = std::time::Instant::now();
+                for seq in 0..count {
+                    packet[2..4].copy_from_slice(&(seq as u16).to_be_bytes());
+                    let mut marshaled = BytesMut::with_capacity(packet.len() + 16);
+                    marshaled.extend_from_slice(&packet);
+                    session.tx.protect_rtp_in_place(&mut marshaled).unwrap();
+                    std::hint::black_box(marshaled);
+                }
+                let in_place = started.elapsed() / count;
+                println!(
+                    "{} {size} bytes: {copying:?} marshaled then copied, {in_place:?} sealed in place",
+                    profile.name()
+                );
+            }
+        }
+    }
+
+    /// A packet marshaled with room for its tag and handed through the pacer as `Bytes` is
+    /// sealed where it lies, to the bytes the copying path produces.
+    #[test]
+    fn a_packet_with_room_is_sealed_where_it_lies_in_every_profile() {
+        for profile in [
+            SrtpProfile::AeadAes256Gcm,
+            SrtpProfile::AeadAes128Gcm,
+            SrtpProfile::Aes128CmHmacSha1_80,
+        ] {
+            let material: Vec<u8> = (0..profile.keying_material_len())
+                .map(|i| i as u8)
+                .collect();
+            let mut copying = SrtpSession::from_keying_material(profile, &material, false).unwrap();
+            let mut in_place =
+                SrtpSession::from_keying_material(profile, &material, false).unwrap();
+            let mut client = SrtpSession::from_keying_material(profile, &material, true).unwrap();
+            for seq in 0..3u16 {
+                let packet = rtp_packet(seq, &[0xA5; 1200]);
+                let mut room = BytesMut::with_capacity(packet.len() + 16);
+                room.extend_from_slice(&packet);
+                let handed = room.freeze().try_into_mut().expect("the only handle");
+                let at = handed.as_ptr();
+                let mut sealed = handed;
+                in_place.tx.protect_rtp_in_place(&mut sealed).unwrap();
+                assert_eq!(
+                    sealed.as_ptr(),
+                    at,
+                    "{}: sealed without moving",
+                    profile.name()
+                );
+                let copied = copying.tx.protect_rtp(&packet).unwrap();
+                assert_eq!(sealed, copied, "{}", profile.name());
+                assert_eq!(
+                    client.rx.unprotect_rtp(&sealed).unwrap().as_ref(),
+                    &packet[..]
+                );
             }
         }
     }

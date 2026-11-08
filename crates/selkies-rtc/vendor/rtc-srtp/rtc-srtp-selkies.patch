@@ -1,0 +1,143 @@
+diff --git a/src/cipher/cipher_aead_aes_gcm.rs b/src/cipher/cipher_aead_aes_gcm.rs
+index b0d87c3..d50fe5d 100644
+--- a/src/cipher/cipher_aead_aes_gcm.rs
++++ b/src/cipher/cipher_aead_aes_gcm.rs
+@@ -38,23 +38,25 @@ impl Cipher for CipherAeadAesGcm {
+         self.profile.aead_auth_tag_len()
+     }
+ 
+-    fn encrypt_rtp(&mut self, payload: &[u8], header: &rtp::Header, roc: u32) -> Result<BytesMut> {
+-        // Copy the whole packet once, then encrypt the payload region in place
+-        // with the header region as AAD and a detached tag appended afterwards.
++    fn encrypt_rtp_in_place(
++        &mut self,
++        packet: &mut BytesMut,
++        header: &rtp::Header,
++        roc: u32,
++    ) -> Result<()> {
++        // Encrypt the payload region in place with the header region as AAD, and append the
++        // detached tag.
+         let header_len = header.marshal_size();
+         let nonce = self.rtp_initialization_vector(header, roc);
+ 
+-        let mut writer = BytesMut::with_capacity(payload.len() + self.aead_auth_tag_len());
+-        writer.extend_from_slice(payload);
+-
+-        let (aad, plaintext) = writer.split_at_mut(header_len);
++        let (aad, plaintext) = packet.split_at_mut(header_len);
+         let mut tag = [0; CIPHER_AEAD_AES_GCM_AUTH_TAG_LEN];
+         self.srtp_cipher
+             .seal_in_place(&nonce, aad, plaintext, &mut tag)
+             .map_err(crypto_error)?;
+ 
+-        writer.extend_from_slice(&tag);
+-        Ok(writer)
++        packet.extend_from_slice(&tag);
++        Ok(())
+     }
+ 
+     fn decrypt_rtp(
+diff --git a/src/cipher/cipher_aes_cm_hmac_sha1.rs b/src/cipher/cipher_aes_cm_hmac_sha1.rs
+index 96db595..356fb54 100644
+--- a/src/cipher/cipher_aes_cm_hmac_sha1.rs
++++ b/src/cipher/cipher_aes_cm_hmac_sha1.rs
+@@ -166,17 +166,12 @@ impl Cipher for CipherAesCmHmacSha1 {
+             as usize
+     }
+ 
+-    fn encrypt_rtp(
++    fn encrypt_rtp_in_place(
+         &mut self,
+-        plaintext: &[u8],
++        writer: &mut BytesMut,
+         header: &rtp::Header,
+         roc: u32,
+-    ) -> Result<BytesMut> {
+-        let mut writer = BytesMut::with_capacity(plaintext.len() + self.rtp_auth_tag_len());
+-
+-        // Write the plaintext to the destination buffer.
+-        writer.extend_from_slice(plaintext);
+-
++    ) -> Result<()> {
+         // Encrypt the payload
+         let counter = generate_counter(
+             header.sequence_number,
+@@ -190,11 +185,11 @@ impl Cipher for CipherAesCmHmacSha1 {
+             .map_err(crypto_error)?;
+ 
+         // Generate the auth tag.
+-        let full_auth_tag = self.generate_srtp_auth_tag(&writer, roc)?;
++        let full_auth_tag = self.generate_srtp_auth_tag(writer, roc)?;
+         let auth_tag = &full_auth_tag[..self.rtp_auth_tag_len()];
+         writer.extend_from_slice(auth_tag);
+ 
+-        Ok(writer)
++        Ok(())
+     }
+ 
+     fn decrypt_rtp(
+diff --git a/src/cipher/mod.rs b/src/cipher/mod.rs
+index 4962931..9ace93c 100644
+--- a/src/cipher/mod.rs
++++ b/src/cipher/mod.rs
+@@ -50,8 +50,24 @@ pub(crate) trait Cipher: Send {
+     /// Retrieved RTCP index.
+     fn get_rtcp_index(&self, input: &[u8]) -> usize;
+ 
++    /// Encrypt an RTP packet where it lies: `packet` holds the header and the payload, and
++    /// grows by the auth tag, without moving when its capacity has room for it.
++    fn encrypt_rtp_in_place(
++        &mut self,
++        packet: &mut BytesMut,
++        header: &rtp::Header,
++        roc: u32,
++    ) -> Result<()>;
++
+     /// Encrypt RTP payload.
+-    fn encrypt_rtp(&mut self, payload: &[u8], header: &rtp::Header, roc: u32) -> Result<BytesMut>;
++    fn encrypt_rtp(&mut self, payload: &[u8], header: &rtp::Header, roc: u32) -> Result<BytesMut> {
++        let mut writer = BytesMut::with_capacity(
++            payload.len() + self.rtp_auth_tag_len() + self.aead_auth_tag_len(),
++        );
++        writer.extend_from_slice(payload);
++        self.encrypt_rtp_in_place(&mut writer, header, roc)?;
++        Ok(writer)
++    }
+ 
+     /// Decrypt RTP payload.
+     fn decrypt_rtp(&mut self, payload: &[u8], header: &rtp::Header, roc: u32) -> Result<BytesMut>;
+diff --git a/src/context/srtp.rs b/src/context/srtp.rs
+index 80f4c39..d5b1fd7 100644
+--- a/src/context/srtp.rs
++++ b/src/context/srtp.rs
+@@ -88,6 +88,30 @@ impl Context {
+         Ok(dst)
+     }
+ 
++    /// Encrypts an RTP packet where it lies: `packet` grows by the profile's auth tag, without
++    /// moving when its capacity has room for it.
++    ///
++    /// # Errors
++    ///
++    /// Fails if the packet's header does not parse, the SRTP context has no key for its SSRC,
++    /// or the cipher rejects it.
++    pub fn encrypt_rtp_in_place(&mut self, packet: &mut BytesMut) -> Result<()> {
++        let header = rtp::Header::unmarshal(&mut &packet[..])?;
++        let (roc, diff, ovf) = self
++            .get_srtp_ssrc_state(header.ssrc)
++            .next_rollover_count(header.sequence_number);
++        if ovf {
++            return Err(Error::ErrExceededMaxPackets);
++        }
++
++        self.cipher.encrypt_rtp_in_place(packet, &header, roc)?;
++
++        self.get_srtp_ssrc_state(header.ssrc)
++            .update_rollover_count(header.sequence_number, diff);
++
++        Ok(())
++    }
++
+     /// EncryptRTP marshals and encrypts an RTP packet, writing to the dst buffer provided.
+     /// If the dst buffer does not have the capacity to hold `len(plaintext) + 10` bytes, a new one will be allocated and returned.
+     pub fn encrypt_rtp(&mut self, plaintext: &[u8]) -> Result<BytesMut> {

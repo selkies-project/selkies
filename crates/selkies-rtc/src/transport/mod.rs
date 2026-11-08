@@ -273,6 +273,19 @@ impl Transport {
         self.send_protected(&protected, "RTP")
     }
 
+    /// Protect one RTP packet in its own buffer, where it lies, and send it on the selected pair.
+    ///
+    /// # Errors
+    /// `NotConnected` before DTLS completed or a pair is selected.
+    pub fn send_rtp_owned(&self, mut packet: BytesMut) -> Result<Instant, TransportError> {
+        {
+            let mut guard = self.shared.tx_srtp.lock().unwrap();
+            let srtp = guard.as_mut().ok_or(TransportError::NotConnected("RTP"))?;
+            srtp.protect_rtp_in_place(&mut packet)?;
+        }
+        self.send_protected(&packet, "RTP")
+    }
+
     /// Protect and send one RTCP packet on the selected pair.
     ///
     /// # Errors
