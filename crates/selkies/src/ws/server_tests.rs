@@ -13,8 +13,9 @@ use bytes::Bytes;
 use serde_json::{Value as Json, json};
 
 use crate::core::PRIMARY_DISPLAY;
+use crate::ws::client::testing::FakeSocket;
 use crate::ws::clock_tests::{advance, reset_clock};
-use crate::ws::host::TokenEntry;
+use crate::ws::host::{CaptureHandle, TokenEntry};
 use crate::ws::protocol::gzip_frame;
 use crate::ws::relay::RelayHost;
 use crate::ws::testkit::*;
@@ -981,6 +982,76 @@ async fn stats_go_only_to_a_page_that_asked() {
 }
 
 #[tokio::test]
+async fn reconciliation_waits_for_publication_and_leaves_the_send_set_clean() {
+    let rig = Rig::new();
+    let owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    let actual = settled_encoder("x264", false);
+    *capture.info.lock() = Some(actual.clone());
+    *capture.info_delay.lock() = Duration::ZERO;
+    rig.service
+        .st
+        .lock()
+        .instances
+        .get_mut(PRIMARY_DISPLAY)
+        .unwrap()
+        .settings
+        .video_reference_frames = 0;
+    let starts = capture.count("start");
+    let socket = FakeSocket::new(owner.id(), 0.0, 0, crate::ws::client::Liveness::default());
+    socket
+        .hold_stream_info
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    rig.service
+        .reg
+        .lock()
+        .clients
+        .insert(owner.id(), socket.client.clone());
+    let service = rig.service.clone();
+    let socket_client = socket.client.clone();
+    let publication = tokio::spawn(async move {
+        service
+            .send_stream_message(
+                socket_client,
+                json!({"type": "stream_info", "displayId": PRIMARY_DISPLAY}),
+            )
+            .await;
+    });
+    for _ in 0..20 {
+        if rig.service.reg.lock().stats_sending.contains(&owner.id()) {
+            break;
+        }
+        settle().await;
+    }
+    assert!(rig.service.reg.lock().stats_sending.contains(&owner.id()));
+    publication.abort();
+    let _ = publication.await;
+    socket
+        .hold_stream_info
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        !rig.service.reg.lock().stats_sending.contains(&owner.id()),
+        "cancelling an in-flight publication releases its send-set membership"
+    );
+
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(capture.count("start"), starts + 1);
+    let writes = socket.writes.lock().len();
+    rig.service
+        .send_stream_message(
+            socket.client.clone(),
+            json!({"type": "stream_info", "probe": true}),
+        )
+        .await;
+    assert!(socket.writes.lock().len() > writes);
+    socket.stop();
+}
+
+#[tokio::test]
 async fn a_stream_box_is_rebroadcast_with_the_layout() {
     let rig = Rig::new();
     let owner = rig.owner("a").await;
@@ -1147,6 +1218,178 @@ async fn a_demoted_codec_reaches_the_pages() {
     );
 }
 
+fn settled_encoder(name: &str, hardware: bool) -> pixelflux::StreamInfo {
+    pixelflux::StreamInfo {
+        info: pixelflux::report::StreamInfo {
+            encoder: name.into(),
+            hardware,
+            codec: "h264",
+            ..Default::default()
+        },
+        renderer: None,
+    }
+}
+
+#[tokio::test]
+async fn an_nvenc_planned_capture_that_settles_on_software_restores_one_reference() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    {
+        let mut st = rig.service.st.lock();
+        st.displays.get_mut(PRIMARY_DISPLAY).unwrap().framerate = 8.0;
+        let settings = &mut st.instances.get_mut(PRIMARY_DISPLAY).unwrap().settings;
+        settings.video_reference_frames = 0;
+        settings.target_fps = 8.0;
+    }
+    *capture.reselect_backend.lock() = true;
+    let nvenc = settled_encoder("NVENC", true);
+    *capture.info.lock() = Some(nvenc.clone());
+    let starts = capture.count("start");
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&nvenc))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(capture.count("start"), starts);
+
+    // Mid-stream failure demotion reports the same actual software encoder as startup fallback.
+    let actual = settled_encoder("x264", false);
+    *capture.info.lock() = Some(actual.clone());
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    {
+        let starts_now = capture.starts.lock();
+        assert_eq!(
+            starts_now.len(),
+            starts + 1,
+            "the actual software session is reopened with the WebSocket cap"
+        );
+        assert_eq!(starts_now.last().unwrap().video_reference_frames, 1);
+        assert_eq!(starts_now.last().unwrap().encode_node_index, -1);
+        assert_eq!(starts_now.last().unwrap().target_fps, 8.0);
+        assert_eq!(
+            capture.info.lock().as_ref().unwrap().info.encoder,
+            "x264",
+            "the corrected reopen stays on the actual software backend"
+        );
+        assert_eq!(
+            rig.service.st.lock().instances[PRIMARY_DISPLAY]
+                .settings
+                .video_reference_frames,
+            1
+        );
+        assert_eq!(
+            rig.service
+                .capture_settings(PRIMARY_DISPLAY, rig.layout(PRIMARY_DISPLAY).unwrap())
+                .unwrap()
+                .video_reference_frames,
+            1,
+            "a later live settings refresh does not reapply the startup hint"
+        );
+        assert_eq!(
+            rig.service
+                .capture_settings(PRIMARY_DISPLAY, rig.layout(PRIMARY_DISPLAY).unwrap())
+                .unwrap()
+                .encode_node_index,
+            -1,
+            "later settings retain the software demotion"
+        );
+    }
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        capture.count("start"),
+        starts + 1,
+        "the software report does not start an NVENC/software restart cycle"
+    );
+}
+
+#[tokio::test]
+async fn an_actual_nvenc_session_keeps_its_reference_window_without_a_restart() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    rig.service
+        .st
+        .lock()
+        .instances
+        .get_mut(PRIMARY_DISPLAY)
+        .unwrap()
+        .settings
+        .video_reference_frames = 0;
+    let actual = settled_encoder("NVENC", true);
+    *capture.info.lock() = Some(actual.clone());
+    let starts = capture.count("start");
+
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(capture.count("start"), starts);
+    assert_eq!(
+        rig.service.st.lock().instances[PRIMARY_DISPLAY]
+            .settings
+            .video_reference_frames,
+        0
+    );
+}
+
+#[tokio::test]
+async fn actual_non_nvenc_sessions_keep_their_existing_reference_cap() {
+    for (encoder, hardware) in [
+        ("x264", false),
+        ("VAAPI", true),
+        ("V4L2M2M", true),
+        ("TEGRA", true),
+    ] {
+        let rig = Rig::new();
+        let _owner = rig.owner("a").await;
+        settle().await;
+        let capture = rig.primary_capture();
+        assert_eq!(
+            rig.service.st.lock().instances[PRIMARY_DISPLAY]
+                .settings
+                .video_reference_frames,
+            1
+        );
+        if !hardware {
+            rig.service
+                .st
+                .lock()
+                .instances
+                .get_mut(PRIMARY_DISPLAY)
+                .unwrap()
+                .settings
+                .encode_node_index = -1;
+        }
+        let actual = settled_encoder(encoder, hardware);
+        *capture.info.lock() = Some(actual.clone());
+        let starts = capture.count("start");
+
+        rig.service
+            .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(capture.count("start"), starts, "{encoder}");
+        assert_eq!(
+            rig.service.st.lock().instances[PRIMARY_DISPLAY]
+                .settings
+                .video_reference_frames,
+            1,
+            "{encoder}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_rate_control_and_quality_verbs_apply() {
     let rig = Rig::new();
@@ -1300,6 +1543,50 @@ async fn a_realized_root_smaller_than_the_layout_clamps_and_drops() {
             .await
     );
     assert!(!rig.service.st.lock().displays.contains_key("display2"));
+}
+
+#[tokio::test]
+async fn reconciliation_reopens_the_effective_realized_layout() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    let actual = settled_encoder("x264", false);
+    *capture.info.lock() = Some(actual);
+    *capture.info_delay.lock() = Duration::ZERO;
+    rig.service
+        .st
+        .lock()
+        .instances
+        .get_mut(PRIMARY_DISPLAY)
+        .unwrap()
+        .settings
+        .video_reference_frames = 0;
+    let starts = capture.count("start");
+    let layout_guard = rig.service.reconfigure_lock.lock().await;
+    let service = rig.service.clone();
+    let reconcile =
+        tokio::spawn(async move { service.reconcile_reference_frames("primary").await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(capture.count("start"), starts);
+
+    // A realized-root clamp followed classification while reconciliation was reading the encoder.
+    rig.service.st.lock().layouts.insert(
+        PRIMARY_DISPLAY.to_string(),
+        crate::display::Layout::new(0, 0, 1000, 700),
+    );
+    capture.update_capture_region(0, 0, 1000, 700).unwrap();
+    drop(layout_guard);
+    reconcile.await.unwrap();
+
+    assert_eq!(capture.count("start"), starts + 1);
+    let effective = rig.layout(PRIMARY_DISPLAY).unwrap();
+    let last = capture.starts.lock().last().unwrap().clone();
+    assert_eq!(
+        (last.width, last.height),
+        (effective.w, effective.h),
+        "a realized-root change cannot be undone by a stale reconciliation reopen"
+    );
 }
 
 #[tokio::test]

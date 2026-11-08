@@ -19,9 +19,12 @@ and the longest gap between frames, against the resets that caused them.
 Usage: python3 tests/e2e/test_webrtc_loss_recovery.py [bursts|narrow ...]
 """
 import asyncio
+import json
 import os
 import sys
+import threading
 import time
+import urllib.request
 from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -126,7 +129,32 @@ LINKS = {
 }
 
 
-async def session(res: H.Results, log: str, link: str) -> Optional[dict]:
+class PaceObserver:
+    """Latest live Prometheus pace, with the complete samples as evidence."""
+
+    def __init__(self, proc) -> None:
+        self.proc = proc
+        self.pace_bps = None
+        self.path = os.path.join(rig.RUNNER_DIR, f"pace-metrics-{proc.pid}.jsonl")
+        threading.Thread(target=self._observe, daemon=True).start()
+
+    def _observe(self) -> None:
+        with open(self.path, "a", buffering=1) as sink:
+            while self.proc.poll() is None:
+                try:
+                    with urllib.request.urlopen(H.BASE_URL + "/api/metrics", timeout=2) as response:
+                        lines = response.read().decode().splitlines()
+                    pacer = [line for line in lines if line.startswith("webrtc_pacer_")]
+                    for line in pacer:
+                        if line.startswith("webrtc_pacer_pace_bps"):
+                            self.pace_bps = int(float(line.rsplit(" ", 1)[1]))
+                    sink.write(json.dumps({"time": time.time(), "metrics": pacer}) + "\n")
+                except Exception as exc:
+                    sink.write(json.dumps({"time": time.time(), "error": type(exc).__name__}) + "\n")
+                time.sleep(0.25)
+
+
+async def session(res: H.Results, log: str, link: str, observer: PaceObserver) -> Optional[dict]:
     feedback = {"nack": 0, "nacked": 0, "pli": 0}
     receiver = rig.rrx_mod.RTCRtpReceiver
     send_nack, send_pli = receiver._send_rtcp_nack, receiver._send_rtcp_pli
@@ -165,6 +193,9 @@ async def session(res: H.Results, log: str, link: str) -> Optional[dict]:
             break
         await asyncio.sleep(0.05)
     seen.update(server_counts(text))
+    if seen["pace_bps"] is None:
+        seen["pace_bps"] = observer.pace_bps
+    seen["pace_source"] = "pacer closed" if "pacer closed:" in text else observer.path
     seen["lost_down"] = rig.CURRENT_SHAPER["down"].lost + rig.CURRENT_SHAPER["down"].dropped
     seen.update({k: v for k, v in feedback.items() if k != "pli_at"})
     seen["streams"] = {ssrc: n for ssrc, n in rig.REC.ssrcs.items()}
@@ -180,10 +211,12 @@ def main() -> int:
     log = os.path.join(H.WORKDIR, "selkies-server.log")
     try:
         for link in (sys.argv[1:] or LINKS):
-            H.server_start("webrtc", extra_env={
+            proc = H.server_start("webrtc", extra_env={
                 "SELKIES_WEBRTC_PACER": "true", "SELKIES_CONGESTION_CONTROL": "false", "SELKIES_STUN_HOST": "",
-                "SELKIES_TURN_REST_URI": "", "SELKIES_VIDEO_BITRATE": "4000", "SELKIES_DEBUG": "true"}, log=log)
-            seen = asyncio.run(session(res, log, link))
+                "SELKIES_TURN_REST_URI": "", "SELKIES_VIDEO_BITRATE": "4000", "SELKIES_DEBUG": "true",
+                "SELKIES_ENABLE_METRICS_HTTP": "true"}, log=log)
+            observer = PaceObserver(proc)
+            seen = asyncio.run(session(res, log, link, observer))
             H.server_stop()
             print(f"      {link}: {seen}")
             res.check(f"{link}: video crossed the link and the client saw keyframes",

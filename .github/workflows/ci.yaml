@@ -137,17 +137,16 @@ jobs:
         run: |
           scripts/ci/server-build-deps.sh
           sudo apt-get install -y --no-install-recommends python3-dev
-          if apt-cache show libkvazaar-dev > /dev/null 2>&1; then
+          # The non-GPL tests need the same rate-control ABI as the wheels.
+          # Use a carrying distribution package when available; otherwise build
+          # the exact release-pinned commit, rather than just its tag.
+          candidate="$(apt-cache policy libkvazaar-dev | sed -n 's/^[[:space:]]*Candidate: //p')"
+          if dpkg --compare-versions "${candidate:-0}" ge "2.3.2"; then
             sudo apt-get install -y --no-install-recommends libkvazaar-dev
           else
-            tag="$(sed -n 's/.*clone_source [0-9a-f]* \(v[0-9.]*\) kvazaar.*/\1/p' crates/pixelflux/pyproject.toml)"
-            git clone --depth 1 --branch "${tag}" https://github.com/ultravideo/kvazaar.git "${RUNNER_TEMP}/kvazaar"
-            cmake -S "${RUNNER_TEMP}/kvazaar" -B "${RUNNER_TEMP}/kvazaar/build" -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON
-            cmake --build "${RUNNER_TEMP}/kvazaar/build" -j"$(nproc)"
-            sudo cmake --install "${RUNNER_TEMP}/kvazaar/build"
-            sudo ldconfig
+            sudo sh crates/pixelflux/scripts/build-kvazaar.sh /usr/local
           fi
+          sudo ldconfig
       - name: Test the Rust and Python bridge configurations
         # GPU, render-node, encoder-device, and sound-server tests remain
         # explicitly ignored on runners without those devices.
@@ -223,7 +222,7 @@ jobs:
   images:
     name: Multi-arch images
     needs: [wheel, wheel-smoke]
-    if: github.event_name == 'push'
+    if: github.repository == 'selkies-project/selkies' && github.event_name == 'push'
     # A called workflow can only narrow the caller's token, so the GHCR push
     # scope has to be granted here
     permissions:
@@ -248,7 +247,7 @@ jobs:
     # AppImages. A pre-release is never the latest release, so the badge, the
     # `latest` images, and PyPI stay with tagged releases.
     needs: [native-tests, tests, wheel, wheel-smoke, packages]
-    if: github.event_name == 'push'
+    if: github.repository == 'selkies-project/selkies' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write

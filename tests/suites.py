@@ -80,6 +80,7 @@ SUITES: list = [
     {"path": "unit/test_v4l2_staging_layout.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_release_assets.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_wheel_selection.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_capture_stack.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_cursor_scaling.py", "tier": "unit", "timeout": 120},
 
@@ -229,6 +230,7 @@ SUITES: list = [
                    "inuse", "inuse-wr", "older", "frozen-wr"]},
     {"path": "e2e/test_wayland_host_portal.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc", "scaled", "gnome", "gnome-scaled", "gnome-notify", "wayland"]},
+    {"path": "e2e/test_wayland_host_menu.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_wayland_primary_shrink.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_wayland_secondary_shrink.py", "tier": "e2e", "timeout": 600,
      "selectors": ["websockets", "webrtc"]},

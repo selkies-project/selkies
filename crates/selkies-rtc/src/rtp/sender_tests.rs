@@ -1005,8 +1005,8 @@ fn a_pacer_cut_is_answered_without_a_key_frame() {
     h.clock += RESYNC_S + 0.01;
     h.send(3, Some(2), 30, false, false);
     assert!(
-        h.rec.events().contains(&"pli".to_string()) && h.s.resync_since.is_none(),
-        "never predicted past"
+        h.rec.events().contains(&"pli".to_string()) && h.s.resync_since.is_some(),
+        "never predicted past: the run holds later deltas until the requested key arrives"
     );
 
     let mut h = Harness::new(false, Some(true), true, "video/H264");
@@ -1058,6 +1058,10 @@ fn a_real_pacer_cut_reaches_the_sender_through_the_verdict() {
     // Past the 120 ms budget at the pace: the key frame sized the floor, so this overflows it.
     h.s.push_frame(frame(2, Some(1), false, 1_000_000), &mut h.tr, now);
     assert_eq!(h.s.resyncs, 1);
+    assert!(
+        h.s.key_sent_at.is_none(),
+        "a reset does not leave the key it dropped answering later repairs"
+    );
     let pacer = h.tr.pacer.as_ref().unwrap();
     assert_eq!(pacer.stats().resyncs, 1, "{:?}", pacer.snapshot());
     assert_eq!(
@@ -1078,6 +1082,189 @@ fn a_real_pacer_cut_reaches_the_sender_through_the_verdict() {
     let sent = h.tr.rtp.len();
     h.s.push_frame(frame(3, None, true, 2_000), &mut h.tr, now);
     assert!(h.tr.rtp.len() > sent, "video flows on");
+}
+
+#[test]
+fn a_receiver_pli_retires_stale_media_and_delivers_the_fresh_idr() {
+    let mut h = Harness::new(true, Some(false), true, "video/H264");
+    let mut pacer = Pacer::new(8_000_000, h.clock);
+    pacer.set_credit(0.0, h.clock);
+    h.tr.pacer = Some(pacer);
+    let frame = |id: u16, reference, key, size: usize| {
+        let mut data = vec![0, 0, 0, 1, if key { 0x65 } else { 0x41 }];
+        data.resize(5 + size, if key { 0x77 } else { 0x66 });
+        EncodedFrame {
+            data: Bytes::from(data),
+            timestamp: id as u32 * 3000,
+            keyframe: key,
+            dependency: Some((id, reference)),
+            ..Default::default()
+        }
+    };
+    let now = h.clock;
+    h.s.push_frame(frame(1, None, true, 10_000), &mut h.tr, now);
+    let mut original_key = Vec::new();
+    h.tr.pacer
+        .as_mut()
+        .unwrap()
+        .drain(now + 0.01, &mut original_key);
+    assert!(!original_key.is_empty());
+    h.tr.pacer
+        .as_mut()
+        .unwrap()
+        .force_braked(super::super::pacer::MIN_PACE_BPS, now + 0.01);
+    h.tr.pacer.as_mut().unwrap().set_credit(0.0, now + 0.01);
+    h.clock = now + 0.01;
+    h.s.push_frame(frame(2, Some(1), false, 20_000), &mut h.tr, h.clock);
+    assert!(h.tr.pacer.as_ref().unwrap().bytes_queued() > 10_000);
+    let transmitted_reference = h.tr.seqs()[0];
+    h.s.history
+        .add(payload_packet(transmitted_reference), now, Some(1));
+    assert!(h.s.history.get(transmitted_reference).is_some());
+    h.rec.0.lock().unwrap().events.clear();
+
+    pli(&mut h);
+    assert_eq!(
+        plis(&h),
+        1,
+        "the original receiver request is the only request"
+    );
+    assert!(h.tr.pacer.as_ref().unwrap().gop_dead());
+    assert_eq!(
+        h.tr.pacer.as_ref().unwrap().video_room(),
+        h.tr.pacer.as_ref().unwrap().video_cap()
+    );
+    assert!(
+        h.s.history.get(transmitted_reference).is_some(),
+        "transmitted reference history survives"
+    );
+    h.s.push_frame(frame(2, Some(1), false, 2_000), &mut h.tr, h.clock);
+    assert!(
+        !h.s.history.abandoned(transmitted_reference),
+        "an intervening delta refusal does not abandon transmitted history"
+    );
+    let attempts_before_nack = h.tr.attempts.len();
+    h.nack(&[transmitted_reference]);
+    assert!(
+        h.tr.attempts.len() > attempts_before_nack,
+        "the NACK still finds its RTP history"
+    );
+    assert!(h.s.history.get(transmitted_reference).is_some());
+
+    let attempted_before_idr = h.tr.rtp.len();
+    h.s.push_frame(frame(3, None, true, 2_000), &mut h.tr, now + 0.01);
+    assert!(!h.tr.pacer.as_ref().unwrap().gop_dead());
+    assert!(
+        h.s.history.abandoned(transmitted_reference),
+        "only the actual replacement IDR ends the older repair epoch"
+    );
+    let fresh_sequence = h.tr.seqs()[attempted_before_idr];
+    assert!(h.s.history.get(fresh_sequence).is_some());
+    assert!(
+        !h.s.history.abandoned(fresh_sequence),
+        "the replacement IDR stays repairable"
+    );
+    h.s.push_frame(frame(4, None, true, 2_000), &mut h.tr, now + 0.02);
+    assert!(
+        !h.s.history.abandoned(fresh_sequence),
+        "a later IDR cannot abandon the first unsent response's repair history"
+    );
+    let attempts_before_waiting_repair = h.tr.attempts.len();
+    h.nack(&[fresh_sequence]);
+    assert!(h.tr.attempts.len() > attempts_before_waiting_repair);
+    h.tr.pacer
+        .as_mut()
+        .unwrap()
+        .force_braked(8_000_000, h.clock);
+    let burst = h.tr.pacer.as_ref().unwrap().burst_bytes();
+    h.tr.pacer.as_mut().unwrap().set_credit(burst, now + 0.03);
+    let mut completed_key = Vec::new();
+    h.tr.pacer
+        .as_mut()
+        .unwrap()
+        .drain(now + 0.03, &mut completed_key);
+    let key_events = h.tr.pacer.as_mut().unwrap().take_events();
+    h.s.apply_pacer_events(key_events, &mut h.tr.twcc);
+    assert!(
+        h.s.key_requested.is_none(),
+        "the replacement was completely written"
+    );
+    h.s.push_frame(frame(5, None, true, 2_000), &mut h.tr, now + 0.04);
+    assert!(
+        !h.s.history.abandoned(fresh_sequence),
+        "an unrequested natural H264 IDR preserves useful prior repair history"
+    );
+    let attempts_before_fresh_repair = h.tr.attempts.len();
+    h.nack(&[fresh_sequence]);
+    assert!(
+        h.tr.attempts.len() > attempts_before_fresh_repair,
+        "the replacement IDR enters the new repair epoch and can be retransmitted"
+    );
+    let mut wire = Vec::new();
+    h.tr.pacer.as_mut().unwrap().drain(now + 0.1, &mut wire);
+    let mut fresh: Vec<Vec<u8>> = h.tr.rtp[attempted_before_idr..].to_vec();
+    fresh.extend(wire.into_iter().map(|packet| packet.data.to_vec()));
+    assert!(!fresh.is_empty());
+    let map = h.s.header_extensions().clone();
+    let parsed: Vec<RtpPacket> = fresh
+        .iter()
+        .map(|packet| RtpPacket::parse(&Bytes::from(packet.clone()), &map).unwrap())
+        .collect();
+    let has_run = |byte| {
+        parsed.iter().any(|packet| {
+            packet.payload.pieces().iter().any(|piece| {
+                piece
+                    .windows(16)
+                    .any(|window| window.iter().all(|b| *b == byte))
+            })
+        })
+    };
+    assert!(!has_run(0x66), "stale delta payloads stay out of recovery");
+    assert!(
+        has_run(0x77),
+        "the reassembled fresh IDR payload reaches the wire"
+    );
+}
+
+#[test]
+fn an_older_queued_idr_preserves_stock_history_without_gated_recovery() {
+    let mut h = Harness::new(true, Some(false), true, "video/H264");
+    let mut pacer = Pacer::new(8_000_000, h.clock);
+    pacer.set_credit(0.0, h.clock);
+    h.tr.pacer = Some(pacer);
+    let frame = |id: u16| {
+        let mut data = vec![0, 0, 0, 1, 0x65];
+        data.resize(2_005, 0x77);
+        EncodedFrame {
+            data: Bytes::from(data),
+            timestamp: id as u32 * 3000,
+            keyframe: true,
+            dependency: Some((id, None)),
+            ..Default::default()
+        }
+    };
+    let now = h.clock;
+    h.s.push_frame(frame(1), &mut h.tr, now);
+    let old_sequence = h.tr.seqs()[0];
+    h.s.history.add(payload_packet(old_sequence), now, Some(1));
+    pli(&mut h);
+    assert!(!h.s.response_history_pending);
+    let burst = h.tr.pacer.as_ref().unwrap().burst_bytes();
+    h.tr.pacer.as_mut().unwrap().set_credit(burst, now);
+    let mut older_key = Vec::new();
+    h.tr.pacer.as_mut().unwrap().drain(now, &mut older_key);
+    let events = h.tr.pacer.as_mut().unwrap().take_events();
+    h.s.apply_pacer_events(events, &mut h.tr.twcc);
+    assert!(
+        !h.s.response_history_pending,
+        "ordinary queued IDR handling adds no gated epoch"
+    );
+
+    let previous = h.tr.rtp.len();
+    h.s.push_frame(frame(2), &mut h.tr, now + 0.01);
+    assert!(!h.s.history.abandoned(old_sequence));
+    let response_sequence = h.tr.seqs()[previous];
+    assert!(!h.s.history.abandoned(response_sequence));
 }
 
 #[test]
@@ -1282,6 +1469,178 @@ fn an_anchored_run_waits_longer_for_a_key_frame() {
     h.clock += RESYNC_ANCHORED_S;
     h.send(7, Some(6), 70, false, false);
     assert!(h.rec.events().contains(&"pli".to_string()));
+}
+
+#[test]
+fn selective_repair_redrives_share_only_a_legitimate_key_frame() {
+    let mut slow = Harness::selective();
+    let mut healthy = Harness::new(true, Some(false), true, "video/H264");
+    let start = slow.clock;
+    for h in [&mut slow, &mut healthy] {
+        h.send(1, None, 10, true, false);
+        h.send(2, Some(1), 20, false, true);
+    }
+    slow.s.key_sent_at = Some(start);
+    slow.behind(RESYNC_FAR_FRAMES, 3.0);
+    let mut sync_reference = 2;
+    let mut reference = sync_reference;
+    let mut next = 3;
+    let mut key_times = Vec::new();
+    let step = RESYNC_ANCHORED_S + 0.01;
+    for _ in 0..3 {
+        if slow.s.resync_since.is_none() {
+            let blocked = next;
+            next += 1;
+            assert_eq!(
+                slow.send(blocked, Some(sync_reference), 0, false, false),
+                None,
+                "blocked frame {blocked}"
+            );
+            reference = blocked;
+        }
+        slow.clock += step;
+        let redrive = next;
+        next += 1;
+        assert_eq!(
+            slow.send(redrive, Some(reference), 0, false, false),
+            None,
+            "redrive frame {redrive}"
+        );
+        reference = redrive;
+        if plis(&slow) > key_times.len() {
+            key_times.push(slow.clock);
+            assert_eq!(
+                slow.send(next, Some(reference), 0, false, false),
+                None,
+                "a delta still waiting on that key stays in the run"
+            );
+            next += 1;
+            assert_eq!(
+                plis(&slow),
+                key_times.len(),
+                "a pre-key redrive does not bypass the pending-key guard"
+            );
+            for h in [&mut slow, &mut healthy] {
+                assert!(h.send(next, None, 0, true, false).is_some());
+            }
+            slow.s.key_sent_at = Some(slow.clock);
+            sync_reference = next;
+            reference = next;
+            next += 1;
+        } else {
+            slow.behind(RESYNC_FAR_FRAMES, 30.0);
+        }
+    }
+    assert_eq!(
+        key_times.len(),
+        1,
+        "a queued key answers one redrive window, then starvation earns exactly one new key"
+    );
+    assert!((key_times[0] - start - 2.0 * step).abs() < 1e-9);
+    slow.behind(0, 0.0);
+    assert!(
+        slow.send(next, Some(sync_reference), 0, false, false)
+            .is_some(),
+        "a frame predicting past the held run still recovers without another key"
+    );
+}
+
+#[test]
+fn a_held_resync_defers_only_one_repair_window() {
+    let mut h = Harness::selective();
+    let start = h.clock;
+    h.send(1, None, 10, true, false);
+    h.send(2, Some(1), 20, false, true);
+    h.send(3, Some(2), 30, false, false);
+    h.hold(&[1, 2]);
+    h.s.held_at = start;
+    h.behind(RESYNC_FAR_FRAMES, 3.0);
+    let mut reference = 3;
+    let mut next = 4;
+    let step = RESYNC_ANCHORED_S + 0.01;
+    for expected in 0..3 {
+        if h.s.resync_since.is_none() {
+            assert_eq!(h.send(next, Some(reference), 0, false, false), None);
+            reference = next;
+            next += 1;
+        }
+        h.clock += step;
+        assert_eq!(h.send(next, Some(reference), 0, false, false), None);
+        reference = next;
+        next += 1;
+        assert_eq!(
+            plis(&h),
+            usize::from(expected == 2),
+            "one actual resync and one waiting window precede a legitimate key request"
+        );
+    }
+    assert_eq!(plis(&h), 1, "held frames never defer starvation forever");
+    h.behind(0, 0.0);
+    assert!(h.send(next, Some(2), 0, false, false).is_some());
+}
+
+#[test]
+fn quiet_feedback_advances_deferred_and_pending_key_runs() {
+    for queued in [true, false] {
+        for kind in 0..=2 {
+            let mut h = Harness::selective();
+            h.send(1, None, 10, true, false);
+            h.send(2, Some(1), 20, false, true);
+            h.s.key_sent_at = queued.then_some(h.clock);
+            h.behind(RESYNC_FAR_FRAMES, 3.0);
+            assert_eq!(h.send(3, Some(2), 0, false, false), None);
+            let step = RESYNC_ANCHORED_S + 0.01;
+            h.clock += step;
+            assert_eq!(h.send(4, Some(3), 0, false, false), None);
+            let before = usize::from(!queued);
+            assert_eq!(plis(&h), before, "setup for queued={queued}, kind={kind}");
+            assert!(h.s.resync_since.is_some());
+            h.clock += step;
+            match kind {
+                2 => h.nack(&[9999]),
+                _ => {
+                    let packet = RtcpPacket::Psfb(PsfbPacket {
+                        fmt: if kind == 0 {
+                            RTCP_PSFB_PLI
+                        } else {
+                            RTCP_PSFB_FIR
+                        },
+                        ssrc: 1,
+                        media_ssrc: 2,
+                        fci: vec![],
+                    });
+                    h.s.handle_rtcp(&packet, &mut h.tr, h.clock);
+                }
+            }
+            assert_eq!(
+                plis(&h),
+                before + 1,
+                "quiet feedback must advance the expired run: queued={queued}, kind={kind}"
+            );
+            assert!(h.s.resync_since.is_some());
+            match kind {
+                2 => h.nack(&[9999]),
+                _ => {
+                    let packet = RtcpPacket::Psfb(PsfbPacket {
+                        fmt: if kind == 0 {
+                            RTCP_PSFB_PLI
+                        } else {
+                            RTCP_PSFB_FIR
+                        },
+                        ssrc: 1,
+                        media_ssrc: 2,
+                        fci: vec![],
+                    });
+                    h.s.handle_rtcp(&packet, &mut h.tr, h.clock);
+                }
+            }
+            assert_eq!(
+                plis(&h),
+                before + 1,
+                "nested repair must not duplicate the outer request: queued={queued}, kind={kind}"
+            );
+        }
+    }
 }
 
 #[test]

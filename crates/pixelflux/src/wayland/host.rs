@@ -1865,7 +1865,13 @@ impl HostSession {
         }
         let cx = x.clamp(0.0, (w - 1) as f64) as u32;
         let cy = y.clamp(0.0, (h - 1) as f64) as u32;
-        vp.motion_absolute(0, cx, cy, w as u32, h as u32);
+        vp.motion_absolute(
+            crate::wayland::frontend::wayland_time().millis(),
+            cx,
+            cy,
+            w as u32,
+            h as u32,
+        );
         vp.frame();
         let _ = self.conn.flush();
     }
@@ -1900,7 +1906,7 @@ impl HostSession {
             }
             return;
         };
-        vp.motion(0, dx, dy);
+        vp.motion(crate::wayland::frontend::wayland_time().millis(), dx, dy);
         vp.frame();
         let _ = self.conn.flush();
     }
@@ -1926,7 +1932,7 @@ impl HostSession {
             return;
         };
         vp.button(
-            0,
+            crate::wayland::frontend::wayland_time().millis(),
             btn,
             if pressed {
                 wl_pointer::ButtonState::Pressed
@@ -1996,6 +2002,7 @@ impl HostSession {
             }
             return;
         };
+        let time = crate::wayland::frontend::wayland_time().millis();
         for (axis, value) in [
             (wl_pointer::Axis::VerticalScroll, dy),
             (wl_pointer::Axis::HorizontalScroll, dx),
@@ -2005,9 +2012,9 @@ impl HostSession {
             }
             let steps = steps(value);
             if steps != 0 {
-                vp.axis_discrete(0, axis, value, steps);
+                vp.axis_discrete(time, axis, value, steps);
             } else {
-                vp.axis(0, axis, value);
+                vp.axis(time, axis, value);
             }
             vp.axis_source(wl_pointer::AxisSource::Wheel);
         }
@@ -2069,12 +2076,13 @@ impl HostSession {
             return;
         };
         vp.axis_source(wl_pointer::AxisSource::Finger);
+        let time = crate::wayland::frontend::wayland_time().millis();
         for (axis, value) in [
             (wl_pointer::Axis::VerticalScroll, dy),
             (wl_pointer::Axis::HorizontalScroll, dx),
         ] {
             if value != 0.0 {
-                vp.axis(0, axis, value);
+                vp.axis(time, axis, value);
             }
         }
         vp.frame();
@@ -2096,8 +2104,9 @@ impl HostSession {
             return;
         };
         vp.axis_source(wl_pointer::AxisSource::Finger);
-        vp.axis_stop(0, wl_pointer::Axis::VerticalScroll);
-        vp.axis_stop(0, wl_pointer::Axis::HorizontalScroll);
+        let time = crate::wayland::frontend::wayland_time().millis();
+        vp.axis_stop(time, wl_pointer::Axis::VerticalScroll);
+        vp.axis_stop(time, wl_pointer::Axis::HorizontalScroll);
         vp.frame();
         let _ = self.conn.flush();
     }

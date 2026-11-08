@@ -135,9 +135,9 @@ pub struct FramePace {
     /// Paced in windows (`Self::windowed`): the end of the last period a frame closed.
     window_end: Option<Instant>,
     windowed: bool,
-    /// Paced in windows, the extra frames left when one was last sent, and when; a fresh
-    /// capture holds the cap.
-    extra: Option<(f64, Instant)>,
+    /// Paced in windows, the extra frames left when one was last sent, when, and the period
+    /// that owns the elapsed time since then; a fresh capture holds the cap.
+    extra: Option<(f64, Instant, Duration)>,
 }
 
 impl FramePace {
@@ -193,6 +193,7 @@ impl FramePace {
     /// change sent before the next window would take it is an extra frame, which spends the
     /// reserve and leaves the windows as they were.
     fn window_tick(&mut self, trigger: TickTrigger, period: Duration, now: Instant, sent: bool) {
+        self.rebase_extra(period, now);
         let scheduled = self.next_due(period, now);
         if trigger == TickTrigger::Timer {
             self.window_end = Some(if now <= scheduled {
@@ -202,8 +203,8 @@ impl FramePace {
                     + period * ((now - scheduled).as_nanos() / period.as_nanos().max(1)) as u32
             });
         } else if sent && now < self.window_pull(period, now) {
-            let left = (self.extra_frames(period, now) - 1.0).max(0.0);
-            self.extra = Some((left, now));
+            let left = (self.extra_frames(now) - 1.0).max(0.0);
+            self.extra = Some((left, now, period));
         } else if sent {
             self.window_end = Some(
                 if self.window_end.is_some() && now > scheduled && now < scheduled + period {
@@ -412,7 +413,7 @@ impl FramePace {
         if self.windowed {
             let window = self.window_pull(period, now);
             return match self.last_tick {
-                Some(last) if self.extra_frames(period, now) >= 1.0 => {
+                Some(last) if self.extra_frames(now) >= 1.0 => {
                     window.min(last + period.mul_f64(EXTRA_MIN_FRACTION))
                 }
                 _ => window,
@@ -430,11 +431,29 @@ impl FramePace {
             .map_or(now, |end| end - period.mul_f64(WINDOW_EARLY_FRACTION))
     }
 
+    /// Settle the reserve at its old cadence before moving its checkpoint to a changed period.
+    /// The first mutating tick to observe the new period is the rebase anchor: `pull_at` and
+    /// `next_wake` are immutable queries, so until that tick they keep accounting at the old
+    /// period. Whole and fractional old periods are both retained in the reserve rather than
+    /// reset or reinterpreted at the new cadence.
+    fn rebase_extra(&mut self, period: Duration, now: Instant) {
+        if let Some((left, at, old_period)) = self.extra
+            && old_period != period
+        {
+            let left = Self::extra_refill(left, at, old_period, now);
+            self.extra = Some((left, now, period));
+        }
+    }
+
+    fn extra_refill(left: f64, at: Instant, period: Duration, now: Instant) -> f64 {
+        let periods = now.saturating_duration_since(at).as_secs_f64() / period.as_secs_f64();
+        (left + periods * EXTRA_REFILL).min(EXTRA_CAP)
+    }
+
     /// The extra frames a capture paced in windows may send at `now`.
-    fn extra_frames(&self, period: Duration, now: Instant) -> f64 {
-        self.extra.map_or(EXTRA_CAP, |(left, at)| {
-            let periods = now.saturating_duration_since(at).as_secs_f64() / period.as_secs_f64();
-            (left + periods * EXTRA_REFILL).min(EXTRA_CAP)
+    fn extra_frames(&self, now: Instant) -> f64 {
+        self.extra.map_or(EXTRA_CAP, |(left, at, period)| {
+            Self::extra_refill(left, at, period, now)
         })
     }
 
@@ -569,6 +588,55 @@ mod pacing_tests {
             pace.pull_at(TickTrigger::Damage, PERIOD, at(base, 26)),
             at(base, 35),
             "the reserve is spent"
+        );
+    }
+
+    /// Leave the reserve nearly spent through ticks the public gate allows, without reaching
+    /// into the accounting to manufacture a state a capture could not reach.
+    fn spend_windowed_reserve(period: Duration, base: Instant) -> FramePace {
+        let mut pace = FramePace::windowed();
+        pace.record_tick(TickTrigger::Timer, period, base, true);
+        for fraction in [0.1, 0.6, 0.75, 1.25] {
+            let now = base + period.mul_f64(fraction);
+            assert!(pace.due(TickTrigger::Damage, period, now));
+            pace.record_tick(TickTrigger::Damage, period, now, true);
+        }
+        pace
+    }
+
+    #[test]
+    fn extra_reserve_does_not_refill_old_time_at_a_faster_cadence() {
+        let base = Instant::now();
+        let old_period = Duration::from_millis(100);
+        let new_period = Duration::from_millis(10);
+        let mut pace = spend_windowed_reserve(old_period, base);
+
+        // The first ticks at the new rate settle the old reserve and take a window. Nearly a
+        // second elapsed at the old rate must not become a whole reserve at the new one.
+        pace.record_tick(TickTrigger::Timer, new_period, at(base, 1_000), true);
+        pace.record_tick(TickTrigger::Damage, new_period, at(base, 1_001), true);
+        assert_eq!(
+            pace.pull_at(TickTrigger::Damage, new_period, at(base, 1_006)),
+            base + Duration::from_micros(1_007_500),
+            "the next change waits for its window rather than getting an unearned extra"
+        );
+    }
+
+    #[test]
+    fn extra_reserve_rebases_from_a_faster_to_a_slower_cadence() {
+        let base = Instant::now();
+        let old_period = Duration::from_millis(10);
+        let new_period = Duration::from_millis(100);
+        let mut pace = spend_windowed_reserve(old_period, base);
+
+        // Rebase 53.75 old periods after the last extra, then record another tick at the new
+        // rate. The old fraction is counted once, and the last 90 ms refill at the new period.
+        pace.record_tick(TickTrigger::Timer, new_period, at(base, 550), true);
+        pace.record_tick(TickTrigger::Timer, new_period, at(base, 560), false);
+        let left = pace.extra_frames(at(base, 650));
+        assert!(
+            (left - 1.73125).abs() < 1e-9,
+            "reserve was {left}, expected 1.73125"
         );
     }
 

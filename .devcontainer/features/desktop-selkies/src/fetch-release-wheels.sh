@@ -26,7 +26,8 @@ release_asset() {  # <project> <tag, or latest> <asset name pattern>: the asset'
         api="${api}/tags/$2"
     fi
     curl -fsSL --retry 5 --connect-timeout 30 "${AUTH[@]}" "${api}" \
-        | jq -r --arg p "$3" "${query}" | head -n 1 | grep .
+        | jq -r --arg p "$3" "${query}" \
+        | python3 "$(dirname "$0")/select-compatible-wheels.py" "$1" | head -n 1 | grep .
 }
 
 fetch_wheel() {  # <project> <tag, or latest> <asset name pattern>

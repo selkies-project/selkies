@@ -36,6 +36,7 @@ concurrency:
 
 jobs:
   fuzz:
+    if: github.event_name != 'schedule' || github.repository == 'selkies-project/selkies'
     runs-on: ubuntu-latest
     steps:
       - uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1

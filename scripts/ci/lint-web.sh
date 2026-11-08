@@ -45,7 +45,7 @@ echo "tsc: addons/selkies-dashboard"
 # node_modules, unlike the lint's, exist only once its dependencies are installed.
 echo "tsc: addons/selkies-web-core"
 core=addons/selkies-web-core
-if [ ! -d "${core}/node_modules" ]; then
+if [ ! -x "${core}/node_modules/.bin/tsc" ]; then
     (cd "${core}" && npm ci --no-audit --no-fund \
         --fetch-retries=5 --fetch-retry-maxtimeout=120000)
 fi

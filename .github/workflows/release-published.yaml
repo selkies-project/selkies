@@ -21,6 +21,7 @@ permissions:
 jobs:
   latest:
     name: Apply the release's latest designation
+    if: github.repository == 'selkies-project/selkies'
     runs-on: ubuntu-latest
     steps:
       - name: Put the badge where the run decided
@@ -49,7 +50,8 @@ jobs:
     name: Publish the wheel to PyPI
     needs: pypi-pixelflux
     if: >-
-      ${{ contains(github.event.release.body, '<!-- selkies-release: pypi=true -->') }}
+      ${{ github.repository == 'selkies-project/selkies' &&
+          contains(github.event.release.body, '<!-- selkies-release: pypi=true -->') }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -70,7 +72,8 @@ jobs:
     name: Publish pixelflux wheels to PyPI
     needs: pypi-pcmflux
     if: >-
-      ${{ contains(github.event.release.body, '<!-- selkies-release: pypi=true -->') }}
+      ${{ github.repository == 'selkies-project/selkies' &&
+          contains(github.event.release.body, '<!-- selkies-release: pypi=true -->') }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -90,7 +93,8 @@ jobs:
   pypi-pcmflux:
     name: Publish pcmflux wheels to PyPI
     if: >-
-      ${{ contains(github.event.release.body, '<!-- selkies-release: pypi=true -->') }}
+      ${{ github.repository == 'selkies-project/selkies' &&
+          contains(github.event.release.body, '<!-- selkies-release: pypi=true -->') }}
     runs-on: ubuntu-latest
     environment:
       name: pypi

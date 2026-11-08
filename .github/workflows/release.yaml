@@ -69,6 +69,7 @@ env:
 jobs:
   check:
     name: Check the tag
+    if: github.repository == 'selkies-project/selkies'
     runs-on: ubuntu-latest
     permissions:
       contents: write

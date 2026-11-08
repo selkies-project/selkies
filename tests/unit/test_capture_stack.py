@@ -48,6 +48,21 @@ for project in ("pixelflux", "pcmflux"):
           "package-dir: crates/${{ matrix.group.project }}" in workflow)
     check(f"development installs the local {project} wheel",
           f"./crates/{project}" in postcreate and "pip wheel --no-deps" in postcreate)
+    package = os.path.join(REPO, "crates", project)
+    cargo = open(os.path.join(package, "Cargo.toml"), encoding="utf-8").read()
+    setup = open(os.path.join(package, "setup.py"), encoding="utf-8").read()
+    pyproject = open(os.path.join(package, "pyproject.toml"), encoding="utf-8").read()
+    check(f"{project} opt-ins separate full-API and 3.11 stable-ABI extensions",
+          'extension-module = ["python", "pyo3/extension-module"]' in cargo
+          and 'abi3-extension-module = ["extension-module", "pyo3/abi3-py311"]' in cargo
+          and 'python = ["dep:pyo3"]' in cargo)
+    check(f"{project} retains full-API source builds on Python 3.9+",
+          'options={"bdist_wheel": {"py_limited_api": "cp311"}} if _abi3 else {}' in setup
+          and '"abi3-extension-module" if _abi3 else "extension-module"' in setup
+          and 'python_requires=">=3.9"' in setup)
+    check(f"{project} builds release wheels explicitly in ABI3 mode on CPython 3.11",
+          'build = "cp311-*"' in pyproject and f'{project.upper()}_ABI3 = "1"' in pyproject
+          and 'skip = "*t-*"' in pyproject)
 
 check("no external release location or polling remains",
       "locate:" not in workflow and "gh release" not in workflow and "gh run" not in workflow
@@ -61,6 +76,15 @@ check("pcmflux keeps its dependency image and job split",
 check("release builds stamp component and root locks",
       'crates/${PROJECT}/Cargo.lock' in workflow and "Cargo.lock" in workflow
       and "inputs.package_version" in workflow)
+check("wheel checkout inputs default to the caller repository and commit",
+      re.search(r'checkout_repository:\n\s+description:.*\n\s+type: string\n\s+default: \'\'', workflow)
+      and re.search(r'checkout_ref:\n\s+description:.*\n\s+type: string\n\s+default: \'\'', workflow)
+      and '${{ inputs.checkout_repository || github.repository }}' in workflow
+      and '${{ inputs.checkout_ref || github.sha }}' in workflow)
+check("every native build is pinned to the exact planned checkout",
+      'value: ${{ jobs.plan.outputs.checkout_commit }}' in workflow
+      and workflow.count('ref: ${{ needs.plan.outputs.checkout_commit }}') == 2
+      and workflow.count("test \"$(git rev-parse HEAD)\" = '${{ needs.plan.outputs.checkout_commit }}'") == 2)
 
 print(f"[capture-stack] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)
