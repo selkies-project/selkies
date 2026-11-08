@@ -42,7 +42,7 @@ STATUS_JS = """
 
 # Log lines that mark a capture starting or stopping, per transport.
 VIDEO_STARTED = {"websockets": "Capture started for 'primary'",
-                 "webrtc": "Started screen capture module"}
+                 "webrtc": "Started screen capture of 'primary'"}
 VIDEO_STOPPED = {"websockets": "Received STOP_VIDEO for 'primary'. Stopping stream.",
                  "webrtc": "All consumers of display 'primary' are paused; capture stopped."}
 AUDIO_STARTED = "Starting pcmflux audio pipeline"
