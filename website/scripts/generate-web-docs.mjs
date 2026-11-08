@@ -42,7 +42,8 @@ if (typeof Minimatch.prototype.matchOne !== 'function') {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = join(root, '..');
-const web = join(repoRoot, 'web');
+// A release from before the web client moved out of addons/ keeps its packages there.
+const web = join(repoRoot, (await fs.stat(join(repoRoot, 'web')).catch(() => null)) ? 'web' : 'addons');
 const referenceDir = join(repoRoot, 'docs', 'reference');
 
 // Generated pages that make no sense in a reference: the translation table
@@ -100,7 +101,7 @@ async function generate({ title, source, entryPoints }, out, html) {
       excludePrivate: true,
       disableGit: true,
       basePath: join(web, source),
-      sourceLinkTemplate: `https://github.com/selkies-project/selkies/blob/${sourceRef}/web/${source}/{path}#L{line}`,
+      sourceLinkTemplate: `https://github.com/selkies-project/selkies/blob/${sourceRef}/${relative(repoRoot, web)}/${source}/{path}#L{line}`,
       logLevel: 'Warn',
       sort: ['source-order'],
       ...(html ? { githubPages: false } : MARKDOWN),
