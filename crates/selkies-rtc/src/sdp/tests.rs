@@ -358,7 +358,10 @@ fn the_offers_codec_rewrites_reach_the_displays_section_alone() {
     assert_eq!(profiles(out_webcam), profiles(webcam[0]));
     assert!(out_display.contains("sps-pps-idr-in-keyframe=1"));
     assert!(!out_webcam.contains("sps-pps-idr-in-keyframe"));
-    assert!(out_display.contains("b=AS:300000") && out_webcam.contains("b=AS:300000"));
+    assert!(out_display.contains("b=AS:300000") && out_webcam.contains("b=AS:2500\r\n"));
+    assert!(out_display.contains("x-google-max-bitrate=300000;"));
+    assert!(out_webcam.contains("x-google-max-bitrate=2500;"));
+    assert!(!out_webcam.contains("x-google-max-bitrate=300000"));
     assert!(full.contains("rtx-time=125"));
 
     let plain = munge_sdp(&raw, &format("h264enc", false, false));
