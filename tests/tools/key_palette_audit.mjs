@@ -11,10 +11,10 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-import { Input } from '../../addons/selkies-web-core/lib/input.ts';
+import { Input } from '../../web/selkies-web-core/lib/input.ts';
 import {
     PALETTE_CHORDS, PALETTE_KEYS, chordEvents, formatChord, parseChord, readUserChords, writeUserChords,
-} from '../../addons/selkies-web-core/lib/touch-controls.ts';
+} from '../../web/selkies-web-core/lib/touch-controls.ts';
 
 globalThis.window = globalThis;
 globalThis.document = { body: null, activeElement: null, fullscreenElement: null };

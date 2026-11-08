@@ -3,7 +3,9 @@
 Selkies' Rust workspace lives under `crates/`: `crates/selkies` is the executable, `crates/selkies-rtc` its WebRTC
 stack, `crates/pixelflux` its screen-capture and video-encode library, and `crates/pcmflux` its audio-capture and
 encode library. The server links both native libraries directly as Rust crates, without Python. Their optional PyO3
-features are only for standalone wheels. The web client is under `addons/`.
+features are only for standalone wheels. The web client is under `web/`: `selkies-web-core` (the streaming
+core), `selkies-dashboard` (the dashboard built on it), and `universal-touch-gamepad`; `addons/` holds what
+runs beside Selkies rather than in it: the interposers, `fake-udev`, the images, and the integrations.
 
 HTTP and WebSocket serving uses Axum and Tower because the existing `http::app` composes authentication, bounded
 request handling, operator and file routes, static content, and WebSocket upgrades in one router, with the same
@@ -48,7 +50,7 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
 - JavaScript (`.js`/`.jsx`), left only in the web core's build helpers (`gendb.js`, the vite config): the same
   JSDoc blocks, but the tags carry the types (`@param {Type} name`, `@returns {Type}`, `@typedef`/`@callback` for
   option bags and callbacks). The web core is TypeScript, checked strictly by its own `tsc -b`
-  (`addons/selkies-web-core/tsconfig.json`), and the dashboard's `tsc` compiles the `lib` modules it imports.
+  (`web/selkies-web-core/tsconfig.json`), and the dashboard's `tsc` compiles the `lib` modules it imports.
 - TypeScript and JavaScript: a `/** ... @module */` block after the license header is the module docblock;
   `_`-prefixed members are private and hidden from the reference; a React component documents what it renders and
   which core messages or `window` state it consumes. A tag TypeDoc does not know (`@constructor`) is a build
@@ -59,7 +61,7 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   hints on signatures, and ruff's rules (`ruff.toml`).
 
 Vendored code keeps upstream documentation style and is excluded from the reference: the crates under
-`crates/selkies-rtc/vendor` and the shadcn/ui primitives under `addons/selkies-dashboard/src/components/ui`; only
+`crates/selkies-rtc/vendor` and the shadcn/ui primitives under `web/selkies-dashboard/src/components/ui`; only
 Selkies-added comments there follow these rules. The vendored crates are vendored so that they can be changed here
 rather than worked around, so editing them is the expected way to fix what they do -- a change belongs upstream as
 well where upstream would take it. The translation tables and the build helpers (`copy-*.js`, `gendb.js`, the vite
@@ -284,7 +286,7 @@ Each is documented in full where named; read that before changing the subsystem.
 - A picture a client could not decode is repaired by taking it out of the encoder's references, not by a key
   frame: the client names the frame it lost, the server asks that display's capture to forget it, and the
   stream keeps predicting past it while the other clients see nothing. Over WebSockets the client's decode
-  gate names it (`addons/selkies-web-core/lib/decode-gate.ts` module docblock, the `LOST_FRAME` verb); over
+  gate names it (`web/selkies-web-core/lib/decode-gate.ts` module docblock, the `LOST_FRAME` verb); over
   WebRTC a second NACK for a packet the sender still holds does (`RtpSender::retransmit` in
   `crates/selkies-rtc/src/rtp/sender.rs`, the `lost_frame` hook, which the WebRTC engine answers). A stream whose
   encoder names no reference -- a session that cannot invalidate -- gets the key frame instead, and so does a run
@@ -295,7 +297,7 @@ Each is documented in full where named; read that before changing the subsystem.
   VA-API's H.264 and H.265 answer a drop with the key frame, while NVENC and the encoders that keep a buffer of
   their own (libvpx, SVT-AV1, VA-API's VP8, VP9, and AV1) still predict past it.
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in the server
-  (`addons/selkies-web-core/lib/webcam-capture.ts` header, `crates/selkies/src/webcam` module docblock,
+  (`web/selkies-web-core/lib/webcam-capture.ts` header, `crates/selkies/src/webcam` module docblock,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).
 - What a session starts with is one rule both transports read (`Settings::pipeline_starts_on`, the
   `*_on_start` settings): the server captures only what a page receives and the page requests only what
@@ -309,7 +311,7 @@ Each is documented in full where named; read that before changing the subsystem.
   (`ScreenCapture::stream_info`), the server relays that once and on every change as `stream_info`, and every
   periodic figure (`stream_stats`: the host's load, the encode's rate and cost, the link) is sampled and sent
   only while a controller's dashboard has its stats on screen (the `_stats` verb; `crates/selkies/src/stats`
-  module docblock, `addons/selkies-web-core/lib/stream-stats.ts`). A shared viewer is sent neither, and both
+  module docblock, `web/selkies-web-core/lib/stream-stats.ts`). A shared viewer is sent neither, and both
   dashboards draw one reading of it (`lib/stream-stats-view.ts`), where a row warns for a session that fell
   short of what it asked for, never for a choice and never for a host built without the faster path: a server
   exposed no GPU (`gpu_present`), or a display server that offers the encoder no zero-copy path

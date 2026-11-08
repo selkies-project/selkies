@@ -10,7 +10,7 @@ dependencies only, the ones compiled into the executable, over the four Linux ta
 the releases build), ranks every crate's SPDX license expression, and overlays the native
 libraries the bindings link, load, or vendor, which crate metadata cannot see
 (``x264-sys`` is an MIT binding whose only library is the GPL-2.0-or-later libx264). The
-npm side reads the license each package of the addons' lockfiles records, so it needs no
+npm side reads the license each package of the web packages' lockfiles records, so it needs no
 ``npm ci``. It fails on a copyleft component in a configuration not allowed to carry it,
 on a crate or package without usable license metadata, on a native binding, a direct
 dependency, or a vendored crate this file does not describe, and on a
@@ -54,7 +54,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST = os.path.join(REPO, "Cargo.toml")
 LOCKFILE = os.path.join(REPO, "Cargo.lock")
 PAGE = os.path.join(REPO, "docs", "licensing.md")
-NPM_ADDONS = ("addons/selkies-web-core", "addons/selkies-dashboard")
+NPM_ADDONS = ("web/selkies-web-core", "web/selkies-dashboard")
 
 # The Linux targets the releases build: the glibc and musl executables and wheels on
 # x86_64 and aarch64. The graph is their union, so the page reads the same on any host.
@@ -679,7 +679,7 @@ def render_rust_other(graphs: Dict[str, List[Crate]]) -> str:
 
 
 def npm_audit(problems: List[str]) -> Tuple[str, str]:
-    """The tables of the addons' npm licenses, read from their lockfiles.
+    """The tables of the web packages' npm licenses, read from their lockfiles.
 
     A package the lockfile marks ``dev`` or ``devOptional`` is reached only through
     ``devDependencies`` and runs at build time; every other package is what ``npm ci

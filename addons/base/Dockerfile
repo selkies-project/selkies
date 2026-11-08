@@ -276,9 +276,9 @@ FROM node:26-alpine AS web
 WORKDIR /build
 COPY Cargo.toml ./
 COPY scripts/ci/build-web.sh ./scripts/ci/
-COPY addons/selkies-web-core ./addons/selkies-web-core
-COPY addons/selkies-dashboard ./addons/selkies-dashboard
-COPY addons/universal-touch-gamepad ./addons/universal-touch-gamepad
+COPY web/selkies-web-core ./web/selkies-web-core
+COPY web/selkies-dashboard ./web/selkies-dashboard
+COPY web/universal-touch-gamepad ./web/universal-touch-gamepad
 COPY docs/assets/logo ./docs/assets/logo
 RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
 

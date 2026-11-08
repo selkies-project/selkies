@@ -61,7 +61,7 @@ repos:
         entry: scripts/ci/lint-web.sh
         language: script
         pass_filenames: false
-        files: ^(addons/(selkies-dashboard/.*\.(js|jsx|ts|tsx|json)|selkies-web-core/.*\.(js|mjs|ts)|universal-touch-gamepad/.*\.(js|mjs)|eslint\.config\.mjs)|(tests/tools|website/scripts)/.*\.mjs|tests/image/site/.*\.js|eslint\.config\.mjs)$
+        files: ^(web/(selkies-dashboard/.*\.(js|jsx|ts|tsx|json)|selkies-web-core/.*\.(js|mjs|ts)|universal-touch-gamepad/.*\.(js|mjs)|eslint\.config\.mjs)|(tests/tools|website/scripts)/.*\.mjs|tests/image/site/.*\.js|eslint\.config\.mjs)$
 
       - id: settings-doc
         name: settings reference (docs/settings.md)
@@ -81,4 +81,4 @@ repos:
         args: [--check]
         language: script
         pass_filenames: false
-        files: ^(crates/selkies/src/files/index_html\.rs|addons/selkies-web-core/nginx/.*\.html|scripts/generate-file-index\.py)$
+        files: ^(crates/selkies/src/files/index_html\.rs|web/selkies-web-core/nginx/.*\.html|scripts/generate-file-index\.py)$

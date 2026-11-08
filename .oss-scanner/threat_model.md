@@ -3,7 +3,7 @@
 ## What this project does and where untrusted input enters
 - Selkies streams a Linux desktop to a browser: a Rust server on the tokio runtime (`crates/selkies`, the `selkies`
   executable, with its WebRTC stack in `crates/selkies-rtc`) with a bundled JavaScript web client
-  (`addons/selkies-web-core`, dashboards in `addons/selkies-dashboard*`). One desktop user runs it; it injects
+  (`web/selkies-web-core`, dashboards in `web/selkies-dashboard*`). One desktop user runs it; it injects
   keyboard, mouse, touch and gamepad input, syncs the clipboard both ways, serves files under a configured root, and
   plays audio, microphone and webcam through LD_PRELOAD interposers (`addons/*-interposer`, `addons/fake-udev`).
   Screen capture, video encode, virtual-webcam decode, and Computer Use live in `crates/pixelflux`; audio capture,

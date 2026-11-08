@@ -29,9 +29,9 @@ at('http://host.test/app/');
 const {
     SESSION_TOKEN_PROTOCOL, SESSION_TOKEN_PROTOCOL_PREFIX, getSessionToken, installSessionCookie,
     sessionAuthHeaders, sessionTokenInFragment, sessionTokenProtocols, withSessionToken,
-} = await import('../../addons/selkies-web-core/lib/session-token.ts');
+} = await import('../../web/selkies-web-core/lib/session-token.ts');
 const { fragmentWithSessionToken, shareablePageURL, urlFragmentKeyword } =
-    await import('../../addons/selkies-web-core/lib/page-url.ts');
+    await import('../../web/selkies-web-core/lib/page-url.ts');
 
 at('http://host.test/app/#token=f1');
 check('a fragment token is read', getSessionToken() === 'f1' && sessionTokenInFragment(), getSessionToken());

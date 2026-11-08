@@ -10,7 +10,7 @@ release-artifacts/
 release/
 AppDir/
 infra/appimage/AppDir/
-addons/selkies-dashboard/public/selkies-core.js
+web/selkies-dashboard/public/selkies-core.js
 *.tsbuildinfo
 
 # Built by tests/tools/Makefile

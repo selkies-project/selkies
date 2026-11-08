@@ -19,7 +19,7 @@ import {
     PACE_BEHIND_RATIO,
     PACE_LAG_INTERVALS,
     PACE_MIN_SAMPLES,
-} from '../../addons/selkies-web-core/lib/webcam-capture.ts';
+} from '../../web/selkies-web-core/lib/webcam-capture.ts';
 
 let failed = 0;
 

@@ -14,7 +14,7 @@ html, body { margin: 0; height: 100%; background: #101820; }
 // Feeds real pointer-lock movement through the client's own relative-motion
 // path and reports what it would have put on the wire, so the numbers come
 // from the engine rather than from a model of it.
-import { Input } from '/addons/selkies-web-core/lib/input.ts';
+import { Input } from '/web/selkies-web-core/lib/input.ts';
 
 const element = document.getElementById('videoCanvas');
 const input = Object.create(Input.prototype);

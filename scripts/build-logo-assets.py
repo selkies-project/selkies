@@ -66,25 +66,25 @@ LOCKUPS = [
 ]
 
 # The mark verbatim, wherever a dashboard serves it.
-COPIES = ["addons/selkies-dashboard/public/selkies.svg"]
+COPIES = ["web/selkies-dashboard/public/selkies.svg"]
 
 # Bare renders of the mark: (source, width, height, destination).
 RENDERS = [
     (HORIZONTAL, 1024, 296, "docs/assets/logo/horizontal.png"),
     (HORIZONTAL, 480, 139, "docs/assets/logo/horizontal-480.png"),
     (VERTICAL, 480, 537, "docs/assets/logo/vertical.png"),
-    (MARK, 180, 180, "addons/selkies-dashboard/public/icon.png"),
+    (MARK, 180, 180, "web/selkies-dashboard/public/icon.png"),
     (MARK, 512, 512, "docs/assets/logo/mark-512x512.png"),
 ]
 
 # Single-image 256x256 containers, which is what every consumer here expects.
 ICONS = [(MARK, 256, "docs/assets/logo/favicon.ico"),
-         (MARK, 256, "addons/selkies-dashboard/public/favicon.ico")]
+         (MARK, 256, "web/selkies-dashboard/public/favicon.ico")]
 
 # The plated app icons; the proportions are of the icon's side.
 PLATED = [(MARK, 192, "docs/assets/logo/icon-192x192.png"),
           (MARK, 512, "docs/assets/logo/icon-512x512.png"),
-          (MARK, 512, "addons/selkies-dashboard/public/icon-512.png")]
+          (MARK, 512, "web/selkies-dashboard/public/icon-512.png")]
 PLATE_RADIUS = 0.4900
 MARK_WIDTH = 0.7400
 MARK_CENTER = (0.5000, 0.4844)

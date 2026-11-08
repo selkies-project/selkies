@@ -13,9 +13,9 @@
 
 const replies = [];
 globalThis.self = { postMessage: (msg) => replies.push(msg) };
-await import('../../addons/selkies-web-core/clipboard-worker.ts');
+await import('../../web/selkies-web-core/clipboard-worker.ts');
 const worker = globalThis.self;
-const { digestedPayload } = await import('../../addons/selkies-web-core/lib/clipboard-sync.ts');
+const { digestedPayload } = await import('../../web/selkies-web-core/lib/clipboard-sync.ts');
 
 let failed = 0;
 

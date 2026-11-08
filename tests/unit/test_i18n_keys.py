@@ -15,7 +15,7 @@ import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
-ADDONS = os.path.join(REPO, "addons")
+WEB = os.path.join(REPO, "web")
 AUDIT = os.path.join(TESTS, "tools", "i18n_audit.mjs")
 
 passed = failed = 0
@@ -40,7 +40,7 @@ if not node:
     # helpers.SKIP_EXIT, without importing the e2e helper module
     sys.exit(77)
 
-r = subprocess.run([node, AUDIT, ADDONS], capture_output=True, text=True, timeout=120)
+r = subprocess.run([node, AUDIT, WEB], capture_output=True, text=True, timeout=120)
 if r.returncode != 0:
     print(f"FAIL  [i18n] audit ran  {r.stderr.strip()[:400]}")
     print("[i18n] 0/1 passed")

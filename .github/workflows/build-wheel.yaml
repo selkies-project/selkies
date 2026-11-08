@@ -67,8 +67,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: |
-            addons/selkies-web-core/package-lock.json
-            addons/selkies-dashboard/package-lock.json
+            web/selkies-web-core/package-lock.json
+            web/selkies-dashboard/package-lock.json
       - name: Build the web client bundle
         env:
           # For the controller database's lookups (gendb.js)

@@ -7,7 +7,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const ADDONS = process.argv[2];
+const WEB = process.argv[2];
 const LOCALES = "en es zh_cn zh_tw hi pt fr ru de tr it nl ar ko ja vi th fil da".split(" ");
 
 // A browser tag has to read the dictionary written for it: Chinese is two
@@ -17,7 +17,7 @@ const ROUTES = {
   "zh": "zh_cn", "zh-CN": "zh_cn", "zh-SG": "zh_cn", "zh-Hans": "zh_cn", "zh-Hans-SG": "zh_cn",
   "zh-TW": "zh_tw", "zh-HK": "zh_tw", "zh-MO": "zh_tw", "zh-Hant": "zh_tw", "zh-Hant-TW": "zh_tw", "zh-Hant-HK": "zh_tw",
 };
-const DASHBOARD = `${ADDONS}/selkies-dashboard`;
+const DASHBOARD = `${WEB}/selkies-dashboard`;
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -42,7 +42,7 @@ function literal(src, name) {
   return end < 0 ? null : eval("(" + src.slice(open, end) + ")");
 }
 
-const statsView = await import(pathToFileURL(resolve(`${ADDONS}/selkies-web-core/lib/stream-stats-view.ts`)).href);
+const statsView = await import(pathToFileURL(resolve(`${WEB}/selkies-web-core/lib/stream-stats-view.ts`)).href);
 // The translator is TypeScript, which Node strips the types from on import.
 const { resolveLocale } = await import(pathToFileURL(resolve(`${DASHBOARD}/src/i18n.ts`)).href);
 const src = readFileSync(`${DASHBOARD}/src/translations.ts`, "utf8");
@@ -84,7 +84,7 @@ const unresolved = {};
 let keys = 0;
 for (const file of walk(`${DASHBOARD}/src`)) {
   const text = readFileSync(file, "utf8");
-  const rel = file.slice(ADDONS.length + 1);
+  const rel = file.slice(WEB.length + 1);
   for (const m of text.matchAll(KEY)) {
     keys++;
     const key = m[2];

@@ -347,8 +347,8 @@ PORT = int(os.environ.get("E2E_PORT") or _free_port())
 # v3 in 155; the server listens on both families either way.
 BASE_URL = f"http://127.0.0.1:{PORT}"
 
-CORE_DIST = os.path.join(REPO, "addons/selkies-web-core/dist")
-DASHBOARD_DIST = os.path.join(REPO, "addons/selkies-dashboard/dist")
+CORE_DIST = os.path.join(REPO, "web/selkies-web-core/dist")
+DASHBOARD_DIST = os.path.join(REPO, "web/selkies-dashboard/dist")
 #: The dashboard's layouts, as `ui_layout` names them: the sidebar and the toolbar.
 LAYOUTS = ("default", "wish")
 

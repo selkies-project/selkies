@@ -16,7 +16,7 @@ globalThis.window = { devicePixelRatio: 2 };
 
 const { streamDensity, publishedScale, autoScalingDpi, resolutionScalingDpi,
         DPI_STOPS } = await import(
-    '../../addons/selkies-web-core/lib/stream-density.ts');
+    '../../web/selkies-web-core/lib/stream-density.ts');
 
 let failed = 0;
 

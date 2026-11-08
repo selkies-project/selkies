@@ -88,7 +88,7 @@ def problems(path: str) -> list:
 
 
 patterns = ["*.md", "docs/*.md", "website/*.md", "tests/*.md", "scripts/*.md",
-            "infra/**/*.md", "addons/**/*.md", ".github/**/*.md"]
+            "infra/**/*.md", "addons/**/*.md", "web/**/*.md", ".github/**/*.md"]
 paths = sorted({p for pattern in patterns
                 for p in glob.glob(os.path.join(REPO, pattern), recursive=True)
                 if not any(s in p for s in SKIP)})

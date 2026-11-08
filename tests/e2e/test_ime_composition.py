@@ -46,7 +46,7 @@ import core_lib as C  # noqa: E402
 from ts_static import TypeScriptHandler  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ROOT = os.path.join(REPO, "addons", "selkies-web-core")
+ROOT = os.path.join(REPO, "web", "selkies-web-core")
 
 passed = failed = 0
 

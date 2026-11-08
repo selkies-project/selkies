@@ -15,7 +15,7 @@
 
 const {
     FRAMERATE_DISPLAY, estimateRefresh, snapRefresh, matchDisplay, followsDisplay, requestedFramerate,
-} = await import('../../addons/selkies-web-core/lib/display-refresh.ts');
+} = await import('../../web/selkies-web-core/lib/display-refresh.ts');
 
 let failed = 0;
 

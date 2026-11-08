@@ -6,7 +6,7 @@ name: Licenses
 
 # License gate for what the server links and the web client ships
 # (docs/licensing.md, "How this is kept up to date"). Everything here resolves
-# the crate graph with `cargo metadata` and reads the addons' lockfiles; nothing
+# the crate graph with `cargo metadata` and reads the web packages' lockfiles; nothing
 # is built, so no native packages are installed.
 
 on:

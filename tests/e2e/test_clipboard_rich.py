@@ -18,7 +18,7 @@ import core_lib as C  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 from Xlib import X, display as xdisp  # noqa: E402
 
-DASH = os.path.join(H.REPO, "addons/selkies-dashboard/dist")
+DASH = os.path.join(H.REPO, "web/selkies-dashboard/dist")
 HTML, PLAIN = "<b>rich copy</b>", "rich copy"
 BACK_HTML, BACK_PLAIN = "<i>from the session</i>", "from the session"
 

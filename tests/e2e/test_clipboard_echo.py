@@ -25,7 +25,7 @@ from Xlib import X, Xatom, display as xdisp  # noqa: E402
 from Xlib.protocol import event as xevent  # noqa: E402
 import test_clipboard_rich as R  # noqa: E402
 
-DASH = os.path.join(H.REPO, "addons/selkies-dashboard/dist")
+DASH = os.path.join(H.REPO, "web/selkies-dashboard/dist")
 FILES = ["file:///home/ubuntu/Documents/report.odt", "file:///home/ubuntu/Documents/notes.txt"]
 # Dolphin's cut: the URI list (CRLF-separated, as the format wants), the cut mark, and the paths as text.
 CUT = [("text/uri-list", ("\r\n".join(FILES) + "\r\n").encode()),

@@ -3,7 +3,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # Builds the selkies wheel, with the HTML5 web client built from source
-# inside this same repo (addons/) and bundled into the wheel. No external or
+# inside this same repo (web/) and bundled into the wheel. No external or
 # pre-published images are consumed. The wheel is for the platform of
 # BUILD_IMAGE, a manylinux_2_28 or musllinux_1_2 image of this machine's
 # architecture, and lands in /opt/build/dist.
@@ -19,9 +19,9 @@ WORKDIR /build
 # the bundle to dist/web
 COPY Cargo.toml ./
 COPY scripts/ci/build-web.sh ./scripts/ci/
-COPY addons/selkies-web-core ./addons/selkies-web-core
-COPY addons/selkies-dashboard ./addons/selkies-dashboard
-COPY addons/universal-touch-gamepad ./addons/universal-touch-gamepad
+COPY web/selkies-web-core ./web/selkies-web-core
+COPY web/selkies-dashboard ./web/selkies-dashboard
+COPY web/universal-touch-gamepad ./web/universal-touch-gamepad
 COPY docs/assets/logo ./docs/assets/logo
 
 # The controller database's GitHub lookups use the build secret github_token

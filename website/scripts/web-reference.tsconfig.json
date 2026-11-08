@@ -12,7 +12,7 @@
     "types": [],
     "baseUrl": "..",
     "paths": {
-      "@/*": ["../../addons/selkies-dashboard/src/*"],
+      "@/*": ["../../web/selkies-dashboard/src/*"],
       "react": ["./node_modules/@types/react"],
       "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime"],
       "react-dom": ["./node_modules/@types/react-dom"],
@@ -20,8 +20,8 @@
     }
   },
   "include": [
-    "../../addons/selkies-web-core/*.ts",
-    "../../addons/selkies-web-core/lib/*.ts",
-    "../../addons/selkies-dashboard/src/**/*"
+    "../../web/selkies-web-core/*.ts",
+    "../../web/selkies-web-core/lib/*.ts",
+    "../../web/selkies-dashboard/src/**/*"
   ]
 }

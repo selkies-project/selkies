@@ -6,10 +6,10 @@
 
 // The scripts outside the web packages: the Node audits and probes under
 // tests/tools, the site's build scripts and the image tier's tester pages. They
-// lint with the dashboard's ESLint, as addons/eslint.config.mjs does.
+// lint with the dashboard's ESLint, as web/eslint.config.mjs does.
 import { createRequire } from 'node:module'
 
-const require = createRequire(new URL('addons/selkies-dashboard/', import.meta.url))
+const require = createRequire(new URL('web/selkies-dashboard/', import.meta.url))
 const js = require('@eslint/js')
 const globals = require('globals')
 

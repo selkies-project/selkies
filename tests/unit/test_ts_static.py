@@ -25,7 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 from ts_static import TypeScriptHandler, strip_types  # noqa: E402
 
-CORE = os.path.join(ROOT, "addons", "selkies-web-core")
+CORE = os.path.join(ROOT, "web", "selkies-web-core")
 TIMEOUT = 30
 
 results = []

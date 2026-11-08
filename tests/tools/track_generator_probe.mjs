@@ -32,14 +32,14 @@ import { stripTypeScriptTypes } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { createStripeClock } from '../../addons/selkies-web-core/lib/stripe-clock.ts';
-import { createChunkStamp } from '../../addons/selkies-web-core/lib/chunk-stamp.ts';
-import { createFrameFit } from '../../addons/selkies-web-core/lib/fit-frame.ts';
-import { createPresentMeter } from '../../addons/selkies-web-core/lib/present-meter.ts';
-import { isSkiaWebKit } from '../../addons/selkies-web-core/lib/util.ts';
+import { createStripeClock } from '../../web/selkies-web-core/lib/stripe-clock.ts';
+import { createChunkStamp } from '../../web/selkies-web-core/lib/chunk-stamp.ts';
+import { createFrameFit } from '../../web/selkies-web-core/lib/fit-frame.ts';
+import { createPresentMeter } from '../../web/selkies-web-core/lib/present-meter.ts';
+import { isSkiaWebKit } from '../../web/selkies-web-core/lib/util.ts';
 
 const TOOLS = dirname(fileURLToPath(import.meta.url));
-const WEB = join(TOOLS, '..', '..', 'addons', 'selkies-web-core');
+const WEB = join(TOOLS, '..', '..', 'web', 'selkies-web-core');
 const CORE = join(WEB, 'selkies-ws-core.ts');
 const WEBCAM = join(WEB, 'lib', 'webcam-capture.ts');
 

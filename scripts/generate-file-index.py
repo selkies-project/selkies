@@ -21,7 +21,7 @@ import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NGINX = os.path.join(REPO, "addons", "selkies-web-core", "nginx")
+NGINX = os.path.join(REPO, "web", "selkies-web-core", "nginx")
 SERVER = os.path.join(REPO, "crates", "selkies", "src", "files", "index_html.rs")
 
 

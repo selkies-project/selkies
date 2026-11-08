@@ -24,14 +24,14 @@ npm_install() {
 # The core is built first: the dashboard takes it, and the gamepad DB and WASM
 # codecs built alongside it, out of its dist through its own
 # copy-core.js/copy-assets.js build steps.
-(cd addons/selkies-web-core && npm_install && npm run build)
+(cd web/selkies-web-core && npm_install && npm run build)
 
-(cd addons/selkies-dashboard && npm_install && SELKIES_INJECT=1 npm run build)
+(cd web/selkies-dashboard && npm_install && SELKIES_INJECT=1 npm run build)
 
 # .gitignore keeps dist out of git; it is generated here
 rm -rf dist/web
 mkdir -p dist
-cp -ar addons/selkies-dashboard/dist dist/web
+cp -ar web/selkies-dashboard/dist dist/web
 
 # start_url is relative so an installed client launches back into the subfolder
 # it was served from, which an absolute "/" would discard.

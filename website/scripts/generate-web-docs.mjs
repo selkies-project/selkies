@@ -1,23 +1,23 @@
 /**
  * Builds the web halves of the Developer Reference under docs/reference from
- * the JSDoc blocks and type annotations in the web addons.
+ * the JSDoc blocks and type annotations in the web packages.
  *
  * Runs after the server's half (generate-rust-docs.mjs, or
  * generate-python-docs.mjs for a release whose server is Python) from
- * generate-reference.mjs and adds one gitignored folder per addon
- * beside it. Both addons are TypeScript, so TypeDoc reads them through one
+ * generate-reference.mjs and adds one gitignored folder per package
+ * beside it. Both packages are TypeScript, so TypeDoc reads them through one
  * configuration (`allowJs` stays on for the build helpers and any JavaScript
  * a tree still carries); typedoc-plugin-markdown writes the pages
  * as Markdown (not MDX, so nothing in a comment can be mistaken for JSX) and
  * web-reference-plugin.mjs adds front matter and hides `_`-prefixed members.
  *
- * Third-party types the addons import (Base UI, lucide, ...) are not installed
+ * Third-party types the packages import (Base UI, lucide, ...) are not installed
  * here and render as `any`; React's are, so component signatures resolve.
- * Type errors never fail the build: the addons' own lint and typecheck steps
+ * Type errors never fail the build: the packages' own lint and typecheck steps
  * own correctness, this script only documents.
  *
- * `--archive <dir> --ref <ref>` writes each addon with TypeDoc's own HTML
- * theme into `<dir>/<addon>` instead, for the download
+ * `--archive <dir> --ref <ref>` writes each package with TypeDoc's own HTML
+ * theme into `<dir>/<package>` instead, for the download
  * build-reference-archive.mjs attaches to a release, its "Defined in" links
  * naming the source at `<ref>`. That theme links its pages relatively and
  * loads its search and navigation by script tag, so it opens from a file
@@ -42,7 +42,7 @@ if (typeof Minimatch.prototype.matchOne !== 'function') {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = join(root, '..');
-const addons = join(repoRoot, 'addons');
+const web = join(repoRoot, 'web');
 const referenceDir = join(repoRoot, 'docs', 'reference');
 
 // Generated pages that make no sense in a reference: the translation table
@@ -54,7 +54,7 @@ const EXCLUDE = [
 ];
 
 // `source` is the directory module names and "Defined in" paths are relative to.
-const ADDONS = [
+const PACKAGES = [
   {
     dir: 'web-core',
     title: 'Web client core',
@@ -82,13 +82,13 @@ const MARKDOWN = {
   sanitizeComments: true,
 };
 
-/** Renders one addon into `out`, as the site's Markdown or, for `html`, TypeDoc's own theme. */
+/** Renders one package into `out`, as the site's Markdown or, for `html`, TypeDoc's own theme. */
 async function generate({ title, source, entryPoints }, out, html) {
   const plugins = [join(root, 'scripts', 'web-reference-plugin.mjs')];
   const app = await Application.bootstrapWithPlugins(
     {
       name: title,
-      entryPoints: entryPoints.map((p) => join(addons, source, p)),
+      entryPoints: entryPoints.map((p) => join(web, source, p)),
       entryPointStrategy: 'expand',
       exclude: EXCLUDE,
       tsconfig: join(root, 'scripts', 'web-reference.tsconfig.json'),
@@ -99,8 +99,8 @@ async function generate({ title, source, entryPoints }, out, html) {
       excludeExternals: true,
       excludePrivate: true,
       disableGit: true,
-      basePath: join(addons, source),
-      sourceLinkTemplate: `https://github.com/selkies-project/selkies/blob/${sourceRef}/addons/${source}/{path}#L{line}`,
+      basePath: join(web, source),
+      sourceLinkTemplate: `https://github.com/selkies-project/selkies/blob/${sourceRef}/web/${source}/{path}#L{line}`,
       logLevel: 'Warn',
       sort: ['source-order'],
       ...(html ? { githubPages: false } : MARKDOWN),
@@ -117,19 +117,19 @@ async function generate({ title, source, entryPoints }, out, html) {
 }
 
 if (archiveDir) {
-  for (const addon of ADDONS) await generate(addon, join(archiveDir, addon.dir), true);
+  for (const pkg of PACKAGES) await generate(pkg, join(archiveDir, pkg.dir), true);
   process.exit(0);
 }
 
 await fs.mkdir(referenceDir, { recursive: true });
-for (const addon of ADDONS) {
-  const out = join(referenceDir, addon.dir);
-  await generate(addon, out, false);
+for (const pkg of PACKAGES) {
+  const out = join(referenceDir, pkg.dir);
+  await generate(pkg, out, false);
   // Sidebar order follows the source tree; `...` picks up the nested folders
-  // (lib/, components/) that TypeDoc mirrors from the addon.
+  // (lib/, components/) that TypeDoc mirrors from the package.
   await fs.writeFile(
     join(out, 'meta.json'),
-    JSON.stringify({ title: addon.title, pages: ['index', '...'] }, null, 2) + '\n',
+    JSON.stringify({ title: pkg.title, pages: ['index', '...'] }, null, 2) + '\n',
   );
 }
 
@@ -140,6 +140,6 @@ let meta = { title: 'Developer Reference', pages: ['index'] };
 try {
   meta = JSON.parse(await fs.readFile(metaPath, 'utf8'));
 } catch {}
-const webPages = ['---Web client---', ...ADDONS.map((a) => a.dir)];
+const webPages = ['---Web client---', ...PACKAGES.map((a) => a.dir)];
 meta.pages = [...meta.pages.filter((p) => !webPages.includes(p)), ...webPages];
 await fs.writeFile(metaPath, JSON.stringify(meta, null, 2) + '\n');

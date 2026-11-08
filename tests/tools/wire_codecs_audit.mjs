@@ -7,7 +7,7 @@
 // The codec strings the page reads off a key frame: an AV1 sequence header read
 // whole, every operating point and its own bytes as they stand.
 
-import { parseAv1CodecFromObus } from '../../addons/selkies-web-core/lib/wire-codecs.ts';
+import { parseAv1CodecFromObus } from '../../web/selkies-web-core/lib/wire-codecs.ts';
 
 let failed = 0;
 

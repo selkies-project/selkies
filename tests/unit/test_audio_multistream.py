@@ -20,7 +20,7 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CORE = os.path.join(REPO, "addons/selkies-web-core/selkies-ws-core.ts")
+CORE = os.path.join(REPO, "web/selkies-web-core/selkies-ws-core.ts")
 
 DRIVER = r"""
 __SPLIT__

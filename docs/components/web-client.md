@@ -5,7 +5,7 @@ description: The bundled HTML5 client, the dashboard and its two layouts, the on
 
 ## Web Client
 
-The HTML5 web client is installed beside the `selkies` executable in every package, image, and wheel, and served by the server on its one port. Its core, [`selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core), is the part that streams: it decodes the video with WebCodecs over WebSockets and through the browser's own receiver over WebRTC, paints without a copy where the browser allows it, sends keyboard, pointer, touch, and gamepad input, and carries the clipboard, file transfers, printing, and the microphone and webcam uplinks. It runs on Chromium, Firefox, and Safari, and everything a page can decode is measured on the page rather than assumed of the browser: an encoder the engine cannot play is greyed out in the menus, and a stream it cannot play is reported.
+The HTML5 web client is installed beside the `selkies` executable in every package, image, and wheel, and served by the server on its one port. Its core, [`selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/web/selkies-web-core), is the part that streams: it decodes the video with WebCodecs over WebSockets and through the browser's own receiver over WebRTC, paints without a copy where the browser allows it, sends keyboard, pointer, touch, and gamepad input, and carries the clipboard, file transfers, printing, and the microphone and webcam uplinks. It runs on Chromium, Firefox, and Safari, and everything a page can decode is measured on the page rather than assumed of the browser: an encoder the engine cannot play is greyed out in the menus, and a stream it cannot play is reported.
 
 Over WebSockets a browser short of WebCodecs still gets the whole session. Where it has no video decoder the screen comes as striped JPEG, and where it has no WebCodecs audio (Safari before 26, Firefox before 130, and Firefox for Android) Opus is decoded for the speakers and encoded from the microphone by libopus compiled to WebAssembly, [libopus-wasm](https://github.com/openclaw/libopus-wasm). The web build ships it in `codecs/`, about 170 KB compressed, and only such a browser loads it; it needs `import()` in a worker, which Safari has from 15 and Firefox from 114. The webcam goes up as JPEG drawn on a canvas, and a browser that cannot capture the microphone into a 24 kHz context (Firefox before 148) captures it at its own rate and the client resamples it. WebRTC needs none of this: the browser's own media stack carries the sound and the camera.
 
@@ -13,7 +13,7 @@ The core is embeddable in any HTML5 page and is what a custom interface builds o
 
 ## Dashboard
 
-One dashboard ships with the client, [`selkies-dashboard`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-dashboard): React and TypeScript over the core's `window` messaging, with one set of panels (the video, screen, and audio settings, stats, shortcuts, clipboard, files, printing, apps, sharing, and gamepads) and the stream toggles for the display, audio, microphone, webcam, and gamepad, painted by one of two layouts:
+One dashboard ships with the client, [`selkies-dashboard`](https://github.com/selkies-project/selkies/tree/main/web/selkies-dashboard): React and TypeScript over the core's `window` messaging, with one set of panels (the video, screen, and audio settings, stats, shortcuts, clipboard, files, printing, apps, sharing, and gamepads) and the stream toggles for the display, audio, microphone, webcam, and gamepad, painted by one of two layouts:
 
 | Layout | `ui_layout` | What it draws |
 | --- | --- | --- |
@@ -28,4 +28,4 @@ The apps panel is backed by [proot-apps](https://github.com/linuxserver/proot-ap
 
 ## Universal Touch Gamepad
 
-The [Universal Touch Gamepad](https://github.com/selkies-project/selkies/tree/main/addons/universal-touch-gamepad) is a JavaScript library that adds a customizable on-screen touch gamepad overlay to the web interface, toggled with `Control + Shift + G`. It intercepts `navigator.getGamepads()` to inject a virtual gamepad, making touch devices compatible with applications and games that expect the browser Gamepad API.
+The [Universal Touch Gamepad](https://github.com/selkies-project/selkies/tree/main/web/universal-touch-gamepad) is a JavaScript library that adds a customizable on-screen touch gamepad overlay to the web interface, toggled with `Control + Shift + G`. It intercepts `navigator.getGamepads()` to inject a virtual gamepad, making touch devices compatible with applications and games that expect the browser Gamepad API.

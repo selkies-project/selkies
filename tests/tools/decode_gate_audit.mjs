@@ -15,7 +15,7 @@
 
 import {
   DecodeGate, LOST_MEMORY, LOST_RECOVERY_MS, OVERLOAD_HOLD_MS, OVERLOAD_QUEUE,
-} from '../../addons/selkies-web-core/lib/decode-gate.ts';
+} from '../../web/selkies-web-core/lib/decode-gate.ts';
 
 let failed = 0;
 

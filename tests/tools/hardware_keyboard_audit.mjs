@@ -16,7 +16,7 @@
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
 const { createHardwareKeyboardWatch, isKeyboardOnlyKeystroke, HARDWARE_KEYBOARD_IDLE_MS } =
-    await import('../../addons/selkies-web-core/lib/hardware-keyboard.ts');
+    await import('../../web/selkies-web-core/lib/hardware-keyboard.ts');
 
 let failed = 0;
 function check(label, ok, detail = '') {
@@ -109,7 +109,7 @@ async function pageWatchOn(fine, maxTouchPoints, tag) {
         matchMedia: (query) => (query === '(pointer: fine)' ? pointer : { matches: false, addEventListener() {} }),
     };
     Object.defineProperty(globalThis, 'navigator', { value: { maxTouchPoints }, configurable: true, writable: true });
-    const mod = await import(`../../addons/selkies-web-core/lib/hardware-keyboard.ts?${tag}`);
+    const mod = await import(`../../web/selkies-web-core/lib/hardware-keyboard.ts?${tag}`);
     const turn = (to) => {
         pointer.matches = to;
         for (const fn of listeners) fn({ matches: to });

@@ -14,7 +14,7 @@
 
 import {
   CAP_CEILING, CAP_FLOOR, CAP_SHARE, DecodePace, ENGAGE_S, LIFT_S, LIFT_STEP, REGRET_S,
-} from '../../addons/selkies-web-core/lib/decode-pace.ts';
+} from '../../web/selkies-web-core/lib/decode-pace.ts';
 
 let failed = 0;
 

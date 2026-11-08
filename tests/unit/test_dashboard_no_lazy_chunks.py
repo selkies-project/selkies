@@ -8,7 +8,7 @@ time. That copy starts a second core, which evicts the first as the same tab
 needs a DashboardProvider". A chunk that fails to fetch also unmounts the
 dashboard. `layouts/index.ts` holds the reasoning.
 
-This scans `addons/selkies-dashboard/src` for both forms, ignoring comments
+This scans `web/selkies-dashboard/src` for both forms, ignoring comments
 and type-only `import("...").Name` references.
 
 Usage: python3 tests/unit/test_dashboard_no_lazy_chunks.py
@@ -18,7 +18,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SRC = os.path.join(ROOT, "addons", "selkies-dashboard", "src")
+SRC = os.path.join(ROOT, "web", "selkies-dashboard", "src")
 EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
 
 COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)

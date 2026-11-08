@@ -594,7 +594,7 @@ fn the_footer_function_is_the_nginx_footers() {
     };
     let nginx = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../addons/selkies-web-core/nginx/footer.html"
+        "/../../web/selkies-web-core/nginx/footer.html"
     ))
     .expect("the nginx footer beside the crate");
     assert_eq!(

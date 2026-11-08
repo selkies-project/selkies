@@ -20,7 +20,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ADDONS = os.path.join(ROOT, "addons")
+WEB = os.path.join(ROOT, "web")
 
 SOURCES = {
     "lib": "selkies-web-core/lib/stream-density.ts",
@@ -40,7 +40,7 @@ def check(label: str, ok: object, detail: object = "") -> None:
 
 
 def read(rel: str) -> str:
-    with open(os.path.join(ADDONS, rel), encoding="utf-8") as fh:
+    with open(os.path.join(WEB, rel), encoding="utf-8") as fh:
         return fh.read()
 
 

@@ -33,7 +33,7 @@ updates:
 
   # Web client: core and dashboard
   - package-ecosystem: npm
-    directories: ["/addons/selkies-web-core", "/addons/selkies-dashboard"]
+    directories: ["/web/selkies-web-core", "/web/selkies-dashboard"]
     schedule:
       interval: weekly
     groups:

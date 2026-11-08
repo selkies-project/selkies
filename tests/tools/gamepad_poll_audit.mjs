@@ -43,7 +43,7 @@ const pad = (mapping, axes, buttons = 17) => ({
 let pads = [null, null, null, null];
 navigator.getGamepads = () => pads;
 
-const { GamepadManager } = await import('../../addons/selkies-web-core/lib/gamepad.ts');
+const { GamepadManager } = await import('../../web/selkies-web-core/lib/gamepad.ts');
 
 function makeManager() {
     const sent = [];

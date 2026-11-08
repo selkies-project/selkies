@@ -14,7 +14,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ADDONS = os.path.join(ROOT, "addons")
+WEB = os.path.join(ROOT, "web")
 
 SOURCES = {
     "ws-core": "selkies-web-core/selkies-ws-core.ts",
@@ -31,7 +31,7 @@ WR_ONLY = set()
 
 def read_list(rel):
     """The PER_DISPLAY_SETTINGS keys declared in `rel`, or None if absent."""
-    path = os.path.join(ADDONS, rel)
+    path = os.path.join(WEB, rel)
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
     match = re.search(r"PER_DISPLAY_SETTINGS\s*(?::[^=]*)?=\s*\[(.*?)\]", text, re.S)
