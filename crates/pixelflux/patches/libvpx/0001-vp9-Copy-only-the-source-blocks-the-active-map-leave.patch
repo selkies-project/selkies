@@ -25,11 +25,11 @@ The stream comes out bit for bit the same as with the whole copy, at 1920x1080, 
  5 files changed, 169 insertions(+), 5 deletions(-)
 
 diff --git a/vp9/encoder/vp9_encoder.c b/vp9/encoder/vp9_encoder.c
-index 59179fa..303cc13 100644
+index 5a7e949..0eeb2a8 100644
 --- a/vp9/encoder/vp9_encoder.c
 +++ b/vp9/encoder/vp9_encoder.c
-@@ -5963,7 +5963,9 @@ int vp9_receive_raw_frame(VP9_COMP *cpi, vpx_enc_frame_flags_t frame_flags,
-   vpx_usec_timer_start(&timer);
+@@ -5773,7 +5773,9 @@ int vp9_receive_raw_frame(VP9_COMP *cpi, vpx_enc_frame_flags_t frame_flags,
+ #endif
  
    if (vp9_lookahead_push(cpi->lookahead, sd, time_stamp, end_time,
 -                         use_highbitdepth, frame_flags))
@@ -37,8 +37,8 @@ index 59179fa..303cc13 100644
 +                         cpi->active_map.enabled ? cpi->active_map.map : NULL,
 +                         cm->mi_rows, cm->mi_cols))
      res = -1;
+ #if CONFIG_INTERNAL_STATS
    vpx_usec_timer_mark(&timer);
-   cpi->time_receive_data += vpx_usec_timer_elapsed(&timer);
 diff --git a/vp9/encoder/vp9_extend.c b/vp9/encoder/vp9_extend.c
 index 69261ac..e614ccb 100644
 --- a/vp9/encoder/vp9_extend.c
@@ -110,7 +110,7 @@ index 21d7e68..4f64bbd 100644
  }  // extern "C"
  #endif
 diff --git a/vp9/encoder/vp9_lookahead.c b/vp9/encoder/vp9_lookahead.c
-index b6be4f8..3eb28a4 100644
+index ba4fe3d..8321726 100644
 --- a/vp9/encoder/vp9_lookahead.c
 +++ b/vp9/encoder/vp9_lookahead.c
 @@ -35,13 +35,65 @@ void vp9_lookahead_destroy(struct lookahead_ctx *ctx) {
@@ -201,9 +201,9 @@ index b6be4f8..3eb28a4 100644
  #if !CONFIG_VP9_HIGHBITDEPTH
    (void)use_highbitdepth;
    assert(use_highbitdepth == 0);
-@@ -143,7 +200,50 @@ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
-     buf->img.subsampling_x = src->subsampling_x;
-     buf->img.subsampling_y = src->subsampling_y;
+@@ -151,7 +208,50 @@ int vp9_lookahead_push(struct lookahead_ctx *ctx, YV12_BUFFER_CONFIG *src,
+         ALIGN_POWER_OF_TWO((aligned_width + 2 * buf->img.border), 5);
+     buf->img.uv_stride = buf->img.y_stride >> subsampling_x;
    }
 -  vp9_copy_and_extend_frame(src, &buf->img);
 +

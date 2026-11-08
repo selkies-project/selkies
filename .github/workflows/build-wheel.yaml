@@ -81,6 +81,8 @@ jobs:
           IMAGE: quay.io/pypa/${{ matrix.target.platform }}_${{ matrix.target.arch }}
         run: |
           mkdir -p wheelhouse
+          # The registry answers 5xx for minutes at a time, so the image is pulled with retries
+          scripts/ci/retry.sh 5 60 docker pull "${IMAGE}"
           docker run --rm -v "${PWD}:/repo:ro" -v "${PWD}/wheelhouse:/out" \
             -e SELKIES_VERSION -e SELKIES_SDIST "${IMAGE}" sh /repo/infra/wheel/build.sh /out
           ls -la wheelhouse/

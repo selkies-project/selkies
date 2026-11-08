@@ -768,7 +768,12 @@ impl H264EncoderWrapper {
             })
             .unwrap();
             codec_sys::x264::x264_param_apply_profile(&mut param, profile.as_ptr());
-            param.rc.b_qp_offsets = 1;
+            // A patched x264 applies the per-block offsets as given (`patches/x264`); an
+            // unpatched one weighs them against its adaptive quantization.
+            #[cfg(x264_qp_offsets)]
+            {
+                param.rc.b_qp_offsets = 1;
+            }
             param.analyse.b_mb_info = 1;
             param.analyse.i_me_method = codec_sys::x264::X264_ME_UMH as i32;
             param.analyse.i_me_range = 64;
@@ -921,7 +926,7 @@ impl H264EncoderWrapper {
     /// it leaves (a 1440p scroll at 30 Mbit/s: 22.3 Mbit/s at 57 dB against 13.5 at 46 dB),
     /// lifted while a still screen is cleaned up, which then reaches what the rate control
     /// gives it; the blocks a moving frame refines code below the floor, as the patch keeps
-    /// the caller's offsets.
+    /// the caller's offsets. An x264 without the patches keeps the bounds it opened with.
     pub fn reconfigure_floor(&mut self, min_qp: i32) {
         if !self.is_cbr || min_qp == self.current_min_qp {
             return;
@@ -1114,7 +1119,11 @@ impl H264EncoderWrapper {
 
     /// Stop x264 reading the picture it holds (`held_input`), so its buffers can change.
     pub fn release_input(&mut self) {
-        unsafe { codec_sys::x264::x264_encoder_release_input(self.encoder) };
+        // Only a patched x264 holds an input (`x264_in_place`); an unpatched one copied it.
+        #[cfg(x264_in_place)]
+        unsafe {
+            codec_sys::x264::x264_encoder_release_input(self.encoder)
+        };
         self.held_input = None;
     }
 
@@ -1167,11 +1176,15 @@ impl H264EncoderWrapper {
                     }
                 }
                 Input::Nv12(nv12) => {
+                    // A picture is laid out in place only where the linked x264 named a layout.
+                    #[cfg(x264_in_place)]
                     let in_place = if nv12.in_place {
                         codec_sys::x264::X264_CSP_IN_PLACE
                     } else {
                         0
                     };
+                    #[cfg(not(x264_in_place))]
+                    let in_place = 0;
                     pic_in.img.i_csp = (codec_sys::x264::X264_CSP_NV12 | in_place) as i32;
                     pic_in.img.i_plane = 2;
                     let (y, uv) = nv12.planes();
@@ -1811,8 +1824,8 @@ struct InputLayout {
 }
 
 /// The planes an 8-bit 4:2:0 x264 session of `width` x `height` encodes in place, which the
-/// library lays out for the CPU it runs on.
-#[cfg(feature = "gpl")]
+/// library lays out for the CPU it runs on; `None` where the linked x264 is not patched to.
+#[cfg(all(feature = "gpl", x264_in_place))]
 fn x264_input_layout(width: usize, height: usize) -> Option<InputLayout> {
     unsafe {
         let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
@@ -1839,7 +1852,7 @@ fn x264_input_layout(width: usize, height: usize) -> Option<InputLayout> {
     }
 }
 
-#[cfg(not(feature = "gpl"))]
+#[cfg(not(all(feature = "gpl", x264_in_place)))]
 fn x264_input_layout(_width: usize, _height: usize) -> Option<InputLayout> {
     None
 }
@@ -3760,6 +3773,7 @@ mod tests {
     /// as I420 code, across a release.
     #[cfg(feature = "gpl")]
     #[test]
+    #[cfg(x264_in_place)]
     fn x264_encodes_an_nv12_picture_in_place_as_it_codes_a_copy() {
         use super::{H264EncoderWrapper, Nv12Planes, convert_to_nv12_mt, convert_to_yuv_mt};
         let (w, h) = (200usize, 120usize);

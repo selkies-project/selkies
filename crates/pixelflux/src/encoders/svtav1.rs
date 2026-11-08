@@ -28,7 +28,8 @@
 //! took 1.70, and at 2560x1600 1.88 where it took 2.86). A constant rate takes the copy alone:
 //! its refresh of a still picture at a finer quantizer runs through the blocks a map would hold,
 //! and holding them let its quantizer fall until a frame coded whole came out at many times
-//! the budget.
+//! the budget. An SVT-AV1 a distribution packages copies every picture whole and analyses every
+//! superblock.
 //!
 //! The session refines no blocks (`FrameEncoder::refines`): the library's region map sets a
 //! segment's quantizer under a constant quantizer alone, its constant rate never setting up
@@ -526,12 +527,19 @@ impl SvtAv1Encoder {
             } else {
                 EB_AV1_INVALID_PICTURE
             };
-            header.constant_blocks = if key || self.held.is_some() || self.constant.is_empty() {
-                ptr::null()
-            } else {
-                self.constant.as_ptr()
-            };
-            header.constant_blocks_skip = u8::from(!self.rate.cbr && self.references.is_none());
+            // Only a patched SVT-AV1 reads a constant-block map (`patches/svtav1`).
+            #[cfg(svtav1_constant_blocks)]
+            {
+                header.constant_blocks = if key || self.held.is_some() || self.constant.is_empty() {
+                    ptr::null()
+                } else {
+                    self.constant.as_ptr()
+                };
+            }
+            #[cfg(svtav1_constant_blocks_skip)]
+            {
+                header.constant_blocks_skip = u8::from(!self.rate.cbr && self.references.is_none());
+            }
         }
         if self.rate.cbr && HAS_EVENTS {
             let held_key = key && self.held.is_some();
@@ -667,6 +675,7 @@ mod tests {
     /// mode decision codes, the GLOBALMV skip costing a bit more than its own skip, and decodes
     /// to the same picture.
     #[test]
+    #[cfg(svtav1_constant_blocks_skip)]
     fn constant_blocks_code_a_still_screen_as_skips() {
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h) = (320usize, 240usize);
@@ -740,6 +749,7 @@ mod tests {
     /// alone. Either way the box and the still screen decode as close to the source as without
     /// the map.
     #[test]
+    #[cfg(svtav1_constant_blocks)]
     fn constant_blocks_leave_a_change_beside_them_coded() {
         use super::super::mixed_screen;
         for cbr in [false, true] {

@@ -66,7 +66,7 @@ jobs:
         run: |
           set -e
           version="$(sed -n 's|.*uses: pypa/cibuildwheel@[0-9a-f]* # v\([0-9.]*\)$|\1|p' \
-                     .github/workflows/build-pixelflux-pcmflux-wheels.yaml)"
+                     .github/workflows/build-pixelflux-pcmflux-wheels.yaml | head -n 1)"
           if [ -z "${version}" ]; then
             echo "::error::this workflow pins no cibuildwheel release"
             exit 1
@@ -124,6 +124,7 @@ jobs:
           RECIPE: ${{ matrix.image.recipe }}
         run: |
           printf '%s\n' "${RECIPE}" > "${RUNNER_TEMP}/recipe.sh"
+          scripts/ci/retry.sh 5 60 docker pull "${BASE}"
           # The sources and build trees the recipe leaves are no part of the image
           docker run --name deps --env PIXELFLUX_ENABLE_GPL --workdir /tmp \
             --volume "${RUNNER_TEMP}/recipe.sh:/recipe.sh:ro" \
@@ -188,10 +189,25 @@ jobs:
           grep -A1 "^name = \"${PROJECT}\"$" "crates/${PROJECT}/Cargo.lock" | grep -q "^version = \"${crate}\"$"
           grep -A1 "^name = \"${PROJECT}\"$" Cargo.lock | grep -q "^version = \"${crate}\"$"
       - name: Build the wheels
+        id: wheels-first
+        # cibuildwheel downloads virtualenv for its audit without a retry, so a
+        # GitHub 5xx there fails a build that succeeded; the step after runs it again.
+        continue-on-error: true
         uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e # v4.3.5
         with:
           package-dir: crates/${{ matrix.group.project }}
           # The action's output-dir is relative to the checkout, not to package-dir
+          output-dir: crates/${{ matrix.group.project }}/wheelhouse
+        env:
+          CIBW_BUILD: ${{ matrix.group.build }}
+      - name: Wait out a download outage
+        if: steps.wheels-first.outcome == 'failure'
+        run: sleep 120
+      - name: Build the wheels, again
+        if: steps.wheels-first.outcome == 'failure'
+        uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e # v4.3.5
+        with:
+          package-dir: crates/${{ matrix.group.project }}
           output-dir: crates/${{ matrix.group.project }}/wheelhouse
         env:
           CIBW_BUILD: ${{ matrix.group.build }}

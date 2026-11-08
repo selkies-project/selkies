@@ -48,10 +48,7 @@ jobs:
       - name: cargo-deny, the shipped (GPL) graph
         # deny.toml: the permissive allow list, and crates.io and the pinned
         # Smithay repository as the only sources.
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
-        with:
-          command: check
-          command-arguments: licenses bans sources
+        run: scripts/ci/cargo-deny.sh licenses bans sources
 
   advisories:
     name: RustSec advisories
@@ -63,7 +60,4 @@ jobs:
         # Fetches the RustSec database and enforces the [advisories] policy in
         # deny.toml, whose every ignore names its reason. A job of its own, so
         # an advisory published against an unchanged tree reads as one.
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
-        with:
-          command: check
-          command-arguments: advisories
+        run: scripts/ci/cargo-deny.sh advisories

@@ -904,7 +904,7 @@ fn cleanup_hold_experiment() {
 /// still. The texture around the box is refined to the paint-over quality while the box keeps
 /// changing (`ledger`), where without the ledger it stayed at the session's quality. OpenH264,
 /// the H.264 encoder of a build without `gpl`, takes no quantizer per macroblock.
-#[cfg(feature = "gpl")]
+#[cfg(all(feature = "gpl", x264_qp_offsets))]
 #[test]
 fn still_blocks_beside_motion_are_refined() {
     let (w, h) = (256usize, 128usize);

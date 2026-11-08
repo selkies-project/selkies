@@ -65,7 +65,7 @@ jobs:
           # limit
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          npm ci --no-audit --no-fund
+          npm ci --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000
           npm run build:versions
 
       - name: Check every link and anchor in the built site
