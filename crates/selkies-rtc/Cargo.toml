@@ -19,20 +19,20 @@ path = "src/lib.rs"
 rtc-sctp = "=0.21.1"
 rtc-sdp = "=0.21.1"
 rtc-shared = "=0.21.1"
-rtc-ice = "=0.21.1"
-rtc-stun = "=0.21.1"
-rtc-turn = "=0.21.1"
-rtc-dtls = "=0.21.1"
-rtc-srtp = "=0.21.1"
-rtc-crypto = "=0.21.1"
+rtc-ice = { version = "=0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtc-stun = { version = "=0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtc-turn = { version = "=0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtc-dtls = { version = "=0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtc-srtp = { version = "=0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtc-crypto = { version = "=0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
 rtc-mdns = "=0.21.1"
 sansio = "1"
 base64 = "0.22"
 percent-encoding = "2"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-native-certs = "0.8"
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-sha2 = "0.10"
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 socket2 = "0.6"
 log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
@@ -45,7 +45,7 @@ libc = "0.2"
 memchr = "2"
 
 [dev-dependencies]
-rcgen = "0.14"
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 crc32c = "0.6"
 rtc-rtp = "=0.21.1"
 rtc-rtcp = "=0.21.1"

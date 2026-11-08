@@ -59,7 +59,7 @@ pub fn crypto() -> Arc<dyn RTCCryptoProvider> {
     PROVIDER
         .get_or_init(|| {
             rtc_crypto::default_provider()
-                .expect("the rtc crates are built with their ring provider")
+                .expect("the rtc crates are built with their aws-lc-rs provider")
         })
         .clone()
 }

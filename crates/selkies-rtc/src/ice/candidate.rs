@@ -20,7 +20,7 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 
-use sha2::{Digest, Sha256};
+use aws_lc_rs::digest::{SHA256, digest};
 
 use super::Protocol;
 
@@ -236,8 +236,10 @@ pub fn candidate_foundation(
     base_address: &str,
 ) -> String {
     let key = format!("{}|{}|{}", kind.as_str(), transport.as_str(), base_address);
-    let digest = Sha256::digest(key.as_bytes());
-    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+    digest(&SHA256, key.as_bytes()).as_ref()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The RFC 8445 5.1.2.1 priority of a candidate.

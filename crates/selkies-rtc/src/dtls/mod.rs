@@ -32,6 +32,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
+use aws_lc_rs::digest::{SHA256, SHA384, SHA512, digest};
 use bytes::BytesMut;
 use log::debug;
 use rtc_dtls::cipher_suite::CipherSuiteId;
@@ -40,7 +41,6 @@ use rtc_dtls::crypto::Certificate as DtlsCertificate;
 use rtc_dtls::endpoint::{Endpoint, EndpointEvent};
 use rtc_dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use rtc_shared::TransportProtocol;
-use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use crate::ice::stun::crypto;
 use crate::srtp::{KEYING_LABEL, SrtpProfile};
@@ -84,9 +84,9 @@ pub struct Fingerprint {
 /// The fingerprint of a DER certificate under `algorithm`, or `None` for an unsupported one.
 pub fn certificate_digest(der: &[u8], algorithm: &str) -> Option<String> {
     let digest: Vec<u8> = match algorithm.to_ascii_lowercase().as_str() {
-        "sha-256" => Sha256::digest(der).to_vec(),
-        "sha-384" => Sha384::digest(der).to_vec(),
-        "sha-512" => Sha512::digest(der).to_vec(),
+        "sha-256" => digest(&SHA256, der).as_ref().to_vec(),
+        "sha-384" => digest(&SHA384, der).as_ref().to_vec(),
+        "sha-512" => digest(&SHA512, der).as_ref().to_vec(),
         _ => return None,
     };
     Some(

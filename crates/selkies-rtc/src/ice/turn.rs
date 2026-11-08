@@ -117,7 +117,7 @@ async fn connect_tls(
     host: &str,
     roots: rustls::RootCertStore,
 ) -> Result<Box<dyn ServerStream>, IceError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| IceError::Config(format!("TURN TLS: {e}")))?

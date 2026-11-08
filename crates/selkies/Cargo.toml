@@ -40,14 +40,12 @@ http-body-util = "0.1"
 rustls = "0.23"
 tokio-rustls = "0.26"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "aws-lc-rs", "native-tokio"] }
-rcgen = "0.13"
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
 flate2 = "1"
 base64 = "0.22"
 rand = "0.9"
 uuid = { version = "1", features = ["v4"] }
-sha2 = "0.10"
-hmac = "0.12"
-subtle = "2"
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 hex = "0.4"
 regex = "1"
 percent-encoding = "2"

@@ -37,6 +37,7 @@
 //! fullscreen session hides, so the page stalled. Answered with a scheme no browser prompts
 //! for, the guard reloads the page and the prompt comes with the page itself.
 
+use aws_lc_rs::{constant_time, hmac};
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -44,9 +45,6 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use subtle::ConstantTimeEq;
 
 use super::AppState;
 use super::listen::ConnInfo;
@@ -103,7 +101,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Ceiling {
 
 /// Whether two byte strings are equal, in time that depends on their lengths alone.
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.ct_eq(b).into()
+    constant_time::verify_slices_are_equal(a, b).is_ok()
 }
 
 /// A header's text as UTF-8: a non-ASCII token is a valid credential, which `to_str` would
@@ -188,11 +186,9 @@ fn epoch_s() -> u64 {
 /// The socket cookie for `role` until `expires` (epoch seconds).
 pub(crate) fn socket_cookie_value(role: Role, expires: u64) -> String {
     let body = format!("{role}.{expires}");
-    let mut mac = Hmac::<Sha256>::new_from_slice(&*SOCKET_COOKIE_KEY).expect("any key length");
-    mac.update(body.as_bytes());
-    let digest: String = mac
-        .finalize()
-        .into_bytes()
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &*SOCKET_COOKIE_KEY);
+    let digest: String = hmac::sign(&key, body.as_bytes())
+        .as_ref()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
