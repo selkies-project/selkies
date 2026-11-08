@@ -1078,6 +1078,39 @@ mod tests {
         }
     }
 
+    /// A box that changes every frame beside blocks marked constant, at a size no block divides:
+    /// the partial copy fills the active blocks and the partial edge blocks from the new picture,
+    /// the map leaves the box coded, and both codecs decode the box and the still screen as
+    /// close to the source as without the map.
+    #[test]
+    fn constant_blocks_leave_a_change_beside_them_coded() {
+        use super::super::mixed_screen;
+        for codec in [Codec::Vp8, Codec::Vp9] {
+            let s = CaptureSettings {
+                width: mixed_screen::W as i32,
+                height: mixed_screen::H as i32,
+                ..settings(codec)
+            };
+            let mut plain = VpxEncoder::new(&s, codec, false).unwrap();
+            let mut mapped = VpxEncoder::new(&s, codec, false).unwrap();
+            mixed_screen::assert_decodes_alike(
+                codec,
+                &format!("{codec:?}"),
+                |src, n| {
+                    plain
+                        .encode_host(src, mixed_screen::W * 4, false, n, 25, n == 0)
+                        .unwrap()
+                },
+                |src, n, map| {
+                    mapped.constant_blocks(map);
+                    mapped
+                        .encode_host(src, mixed_screen::W * 4, false, n, 25, n == 0)
+                        .unwrap()
+                },
+            );
+        }
+    }
+
     /// A frame a client lost is left out of the predictions: the next frame names the newest
     /// frame before it, and a decoder that never saw the lost frames decodes it exactly as one
     /// that saw everything. VP9 reaches back through its recent frames, VP8 through its anchors.

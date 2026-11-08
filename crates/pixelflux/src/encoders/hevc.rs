@@ -1116,6 +1116,41 @@ mod tests {
         );
     }
 
+    /// A box that changes every frame beside blocks marked constant, at a size no coding unit
+    /// divides: the coding units the box touches and the partial ones along the edges are
+    /// analyzed as before, the rest skipped, and the box and the still screen decode as close to
+    /// the source as without the map, each picture converted in place into x265's own layout.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn constant_blocks_leave_a_change_beside_them_coded() {
+        use super::super::mixed_screen;
+        let settings = CaptureSettings {
+            width: mixed_screen::W as i32,
+            height: mixed_screen::H as i32,
+            target_fps: 30.0,
+            codec: Codec::H265,
+            video_crf: 25,
+            ..Default::default()
+        };
+        let mut plain = HevcEncoder::new(&settings, false).expect("session");
+        let mut mapped = HevcEncoder::new(&settings, false).expect("session");
+        mixed_screen::assert_decodes_alike(
+            Codec::H265,
+            "x265",
+            |src, n| {
+                plain
+                    .encode_host(src, mixed_screen::W * 4, false, n, 25, n == 0)
+                    .expect("encode")
+            },
+            |src, n, map| {
+                mapped.constant_blocks(map);
+                mapped
+                    .encode_host(src, mixed_screen::W * 4, false, n, 25, n == 0)
+                    .expect("encode")
+            },
+        );
+    }
+
     /// A constant-rate session's frames come to the paint-over quality six quantizer steps finer
     /// than the paint-over quantizer, a constant quality's at it.
     #[test]

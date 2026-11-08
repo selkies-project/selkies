@@ -2946,6 +2946,132 @@ mod software_tests {
     }
 }
 
+/// The fixture the constant-block checks of every software encoder share: a screen of text
+/// with one box of it changing every frame, at a size that is no multiple of a block.
+#[cfg(test)]
+pub(crate) mod mixed_screen {
+    use crate::webcam::decode::{Decoder as _, VideoDecoder};
+
+    /// A width and height that no 16x16 block, 64x64 superblock, or 8x8 coding unit divides, so
+    /// the blocks along the right and bottom edges are partial and the chroma planes end on an
+    /// odd row pair.
+    pub const W: usize = 328;
+    pub const H: usize = 244;
+
+    /// The side of the changing box, placed off every block boundary so the blocks it touches
+    /// are partly still.
+    const BOX: usize = 64;
+    const BX: usize = W - BOX - 20;
+    const BY: usize = H - BOX - 12;
+
+    /// Whether a pixel lies in the changing box.
+    pub fn in_box(x: usize, y: usize) -> bool {
+        (BX..BX + BOX).contains(&x) && (BY..BY + BOX).contains(&y)
+    }
+
+    /// The BGRA picture at frame `t`: text on a light screen, the box a pattern that moves
+    /// every frame.
+    pub fn picture(t: usize) -> Vec<u8> {
+        let mut f = vec![0u8; W * H * 4];
+        for (i, px) in f.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let (x, y) = (i % W, i / W);
+            let text = (x / 7 + y / 11) % 3 == 0 && x % 7 < 5 && y % 11 < 8;
+            let v = if in_box(x, y) {
+                ((x * 7 + y * 13 + t * 41) % 251) as u8
+            } else if text {
+                30
+            } else {
+                235
+            };
+            px.copy_from_slice(&[v, v, v, 255]);
+        }
+        f
+    }
+
+    /// The ledger's map of the screen: every 16x16 block constant but those the box touches,
+    /// which is most of them.
+    pub fn constant() -> Vec<bool> {
+        let (cols, rows) = (W.div_ceil(16), H.div_ceil(16));
+        let map: Vec<bool> = (0..rows)
+            .flat_map(|row| {
+                (0..cols).map(move |col| {
+                    let (x0, y0) = (col * 16, row * 16);
+                    !(x0 + 16 > BX && x0 < BX + BOX && y0 + 16 > BY && y0 < BY + BOX)
+                })
+            })
+            .collect();
+        assert!(map.iter().filter(|&&c| !c).count() < map.len() / 2);
+        map
+    }
+
+    /// The decoder's current picture as a `W`x`H` luma plane.
+    pub fn luma(dec: &VideoDecoder) -> Vec<u8> {
+        let f = dec.frame().expect("a decoded picture");
+        f.y.chunks(f.y_stride)
+            .take(H)
+            .flat_map(|row| row[..W].iter().copied())
+            .collect()
+    }
+
+    /// The mean distance, in luma levels, of a decoded plane from the gray `source` picture
+    /// over the box (`boxed`) or over the still screen around it.
+    pub fn distance(decoded: &[u8], source: &[u8], boxed: bool) -> f64 {
+        let (mut sum, mut n) = (0.0, 0usize);
+        for y in 0..H {
+            for x in 0..W {
+                if in_box(x, y) == boxed {
+                    sum += (decoded[y * W + x] as f64 - source[(y * W + x) * 4] as f64).abs();
+                    n += 1;
+                }
+            }
+        }
+        sum / n as f64
+    }
+
+    /// Encodes eight frames of the screen through `plain` without a map and through `mapped`
+    /// with the ledger's, decodes both, and asserts the mapped stream lands as close to the
+    /// source as the plain one, in the box and on the still screen, within one luma level.
+    pub fn assert_decodes_alike(
+        codec: super::Codec,
+        label: &str,
+        mut plain: impl FnMut(&[u8], u64) -> Vec<u8>,
+        mut mapped: impl FnMut(&[u8], u64, &[bool]) -> Vec<u8>,
+    ) {
+        let map = constant();
+        let mut plain_dec = VideoDecoder::new(codec).expect("decoder");
+        let mut mapped_dec = VideoDecoder::new(codec).expect("decoder");
+        let mut source = Vec::new();
+        for n in 0..8u64 {
+            source = picture(n as usize);
+            let a = plain(&source, n);
+            let b = mapped(&source, n, &map);
+            assert!(
+                plain_dec
+                    .decode(&a[super::codec::VIDEO_HEADER_LEN..])
+                    .expect("decode")
+            );
+            assert!(
+                mapped_dec
+                    .decode(&b[super::codec::VIDEO_HEADER_LEN..])
+                    .expect("decode")
+            );
+        }
+        let (pa, pb) = (luma(&plain_dec), luma(&mapped_dec));
+        for boxed in [true, false] {
+            let (da, db) = (distance(&pa, &source, boxed), distance(&pb, &source, boxed));
+            assert!(
+                db <= da + 1.0,
+                "{label} {}: {db:.2} luma levels from the source with the map, {da:.2} without",
+                if boxed {
+                    "in the box"
+                } else {
+                    "on the still screen"
+                }
+            );
+        }
+    }
+}
+
 /// The fixture the chroma-siting checks of every backend share.
 #[cfg(test)]
 pub(crate) mod chroma_siting {

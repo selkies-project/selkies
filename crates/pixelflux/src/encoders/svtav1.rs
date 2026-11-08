@@ -731,6 +731,50 @@ mod tests {
         );
     }
 
+    /// A box that changes every frame beside blocks marked constant, at a size no superblock
+    /// divides: the library's partial copy merges the active blocks and the partial edge blocks
+    /// into runs, clipping the chroma rows it copies to the planes, and at a constant quantizer
+    /// the skip leaves the superblocks the box touches coded. Under a constant rate the copy runs
+    /// alone. Either way the box and the still screen decode as close to the source as without
+    /// the map.
+    #[test]
+    fn constant_blocks_leave_a_change_beside_them_coded() {
+        use super::super::mixed_screen;
+        for cbr in [false, true] {
+            let settings = CaptureSettings {
+                width: mixed_screen::W as i32,
+                height: mixed_screen::H as i32,
+                target_fps: 30.0,
+                codec: Codec::Av1,
+                video_crf: 25,
+                video_cbr_mode: cbr,
+                video_bitrate_kbps: 4000,
+                ..Default::default()
+            };
+            let mut plain = SvtAv1Encoder::new(&settings, false).expect("session");
+            let mut mapped = SvtAv1Encoder::new(&settings, false).expect("session");
+            mixed_screen::assert_decodes_alike(
+                Codec::Av1,
+                if cbr {
+                    "constant rate"
+                } else {
+                    "constant quantizer"
+                },
+                |src, n| {
+                    plain
+                        .encode_host(src, mixed_screen::W * 4, false, n, 25, n == 0)
+                        .expect("encode")
+                },
+                |src, n, map| {
+                    mapped.constant_blocks(map);
+                    mapped
+                        .encode_host(src, mixed_screen::W * 4, false, n, 25, n == 0)
+                        .expect("encode")
+                },
+            );
+        }
+    }
+
     /// The library is configured at the capture's rate as the fraction it names, a live change
     /// of rate included.
     #[test]
