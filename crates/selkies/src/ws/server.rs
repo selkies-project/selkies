@@ -2392,10 +2392,11 @@ impl WsService {
             cursor_size_cap_hint: cap,
             cpu_encode_threading: d.cpu_encode_threading,
         };
+        let backends = settings().encoder_backends();
         let hardware = if d.use_cpu {
             None
         } else {
-            settings().encoder_backends().and_then(|backends| {
+            backends.as_ref().and_then(|backends| {
                 backends
                     .get(codec_for_encoder(&d.encoder))
                     .and_then(|served| served.hardware.clone())
@@ -2412,8 +2413,16 @@ impl WsService {
                 cs.encode_node_index = -1;
                 cs.encode_node_path.clear();
             }
-        } else if hardware.as_deref() != Some("nvenc") {
-            cs.video_reference_frames = 1;
+        } else {
+            // A codec the resolved probe serves no hardware backend for opens in software, so it
+            // starts with the routing the reconciler would otherwise reopen it with.
+            if backends.is_some() && hardware.is_none() {
+                cs.encode_node_index = -1;
+                cs.encode_node_path.clear();
+            }
+            if hardware.as_deref() != Some("nvenc") {
+                cs.video_reference_frames = 1;
+            }
         }
         Some(cs)
     }
