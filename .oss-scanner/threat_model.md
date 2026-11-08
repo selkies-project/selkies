@@ -17,7 +17,7 @@
   endpoint and table in `tokens.rs`, the operator routes in `routes.rs`), `files` (upload, download, recording,
   screenshot, print, apps routes), `ws` (data plane, binary opcodes in `protocol.rs`), WebRTC signaling
   (`crates/selkies-rtc/src/signaling`, mounted by `webrtc/routes.rs`), the WebRTC stack (`crates/selkies-rtc`: `ice`,
-  `dtls`, `srtp`, `rtp`, `sctp`, `sdp`, and the vendored `rtc-sctp` and `rtc-srtp` under `vendor/`, edited in tree and in scope),
+  `dtls`, `srtp`, `rtp`, `sctp`, `sdp`, and the vendored `rtc-dtls`, `rtc-sctp`, and `rtc-srtp` under `vendor/`, edited in tree and in scope),
   `input` (`Dispatcher::receive`, the input authority in `authority.rs`), `core` (`Role`). Native media entry
   points include browser webcam bitstreams and H.264 SPS input in `crates/pixelflux/src/{webcam,encoders/sps.rs}`,
   microphone Opus and RED in `crates/pcmflux/src/red.rs`, the token-gated Computer-Use HTTP server in

@@ -57,7 +57,8 @@ bench = false
 members = ["."]
 
 # The workspace's patch, which a crate outside the workspace does not inherit: the association
-# fuzzed, and the SRTP selkies-rtc builds on, are the vendored ones the server runs.
+# fuzzed, and the DTLS and SRTP selkies-rtc builds on, are the vendored ones the server runs.
 [patch.crates-io]
+rtc-dtls = { path = "../vendor/rtc-dtls" }
 rtc-sctp = { path = "../vendor/rtc-sctp" }
 rtc-srtp = { path = "../vendor/rtc-srtp" }
