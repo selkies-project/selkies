@@ -43,11 +43,10 @@ use std::collections::VecDeque;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use crate::CaptureSettings;
 use crate::ThreadCommand;
@@ -201,7 +200,7 @@ pub struct RecordingStatus {
 #[derive(Clone)]
 struct WlTap {
     display_id: u32,
-    tx: Sender<Tap>,
+    tx: SyncSender<Tap>,
     shared: Arc<RecShared>,
     /// Standard request-IDR path for attached recordings (`None` when the recorder owns the
     /// capture and scheduled keyframes ride in its settings).
@@ -243,7 +242,7 @@ struct ActiveRecording {
     backend: &'static str,
     mode_name: &'static str,
     mode: RecordingMode,
-    tx: Sender<Tap>,
+    tx: SyncSender<Tap>,
     shared: Arc<RecShared>,
     writer: thread::JoinHandle<()>,
     audio_stop: Arc<AtomicBool>,
@@ -297,7 +296,7 @@ fn pace_idr_requests(shared: &RecShared, idr: &IdrRequester, interval_us: u64) {
 /// Enqueue one delivered frame for muxing. Only H.264 is recordable; JPEG or another codec is
 /// counted and skipped so the surfaces can report a
 /// clear "nothing recordable" error instead of writing a corrupt file.
-fn offer_frame(shared: &RecShared, tx: &Sender<Tap>, stripes: &[EncodedStripe]) {
+fn offer_frame(shared: &RecShared, tx: &SyncSender<Tap>, stripes: &[EncodedStripe]) {
     if stripes.is_empty() {
         return;
     }
@@ -494,7 +493,7 @@ fn page_start(position: u64, granule: u64, samples: u64) -> u64 {
 /// with the stream, or on stop.
 fn audio_thread(
     mut reader: ogg::PageReader<UnixStream>,
-    tx: Sender<Tap>,
+    tx: SyncSender<Tap>,
     shared: Arc<RecShared>,
     stop: Arc<AtomicBool>,
 ) {
@@ -633,7 +632,7 @@ pub fn start(opts: RecordOptions) -> Result<RecordingStatus, String> {
 
     let file = open_recording(&opts.path)?;
     let shared = RecShared::new();
-    let (tx, rx) = bounded::<Tap>(QUEUE_CAP);
+    let (tx, rx) = sync_channel::<Tap>(QUEUE_CAP);
     let audio_source = if opts.audio_socket.is_empty() {
         None
     } else {
@@ -1081,7 +1080,7 @@ mod tests {
                 .unwrap();
         }
         drop(writer);
-        let (tx, rx) = bounded::<Tap>(16);
+        let (tx, rx) = sync_channel::<Tap>(16);
         audio_thread(
             ogg::PageReader::new(reader),
             tx,

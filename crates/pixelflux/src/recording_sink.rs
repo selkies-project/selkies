@@ -17,11 +17,10 @@ use std::io::{ErrorKind, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-
-use crossbeam_channel::{Sender, TrySendError, bounded};
 
 use crate::encoders::codec::{Codec, VIDEO_HEADER_LEN, WIRE_VIDEO};
 use crate::encoders::frame_rate::FrameRate;
@@ -52,7 +51,7 @@ struct QueuedFrame {
 /// switch for its writer thread, and how many frames it has been sent (the IVF frame index).
 /// The socket itself is owned solely by that writer thread.
 struct ClientHandle {
-    tx: Sender<QueuedFrame>,
+    tx: SyncSender<QueuedFrame>,
     stop: Arc<AtomicBool>,
     frames: u64,
 }
@@ -123,7 +122,7 @@ impl RecordingSink {
                             continue;
                         }
 
-                        let (tx, rx) = bounded::<QueuedFrame>(CLIENT_QUEUE_CAP);
+                        let (tx, rx) = sync_channel::<QueuedFrame>(CLIENT_QUEUE_CAP);
                         let stop = Arc::new(AtomicBool::new(false));
                         let stop_writer = stop.clone();
                         thread::spawn(move || {
