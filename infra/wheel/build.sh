@@ -38,12 +38,25 @@ PYTHON=/opt/python/cp312-cp312/bin/python
 PATH="$(dirname "${PYTHON}"):${PATH}"
 export PATH
 
+# libxkbcommon's parser takes bison 3.6 or newer, which CentOS 7 and
+# AlmaLinux 8 predate (3.0.4): the release pinned here is built where it is.
+bison="$(bison --version | head -n 1 | grep -oE '[0-9]+\.[0-9]+' | head -n 1)"
+if [ "$(printf '%s\n3.6\n' "${bison}" | sort -V | head -n 1)" != 3.6 ]; then
+    curl -fsSL --retry 5 -o /tmp/bison.tar.xz https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz
+    echo "9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2  /tmp/bison.tar.xz" | sha256sum -c -
+    mkdir -p /tmp/bison
+    tar -xJf /tmp/bison.tar.xz -C /tmp/bison --strip-components=1
+    (cd /tmp/bison && ./configure --prefix=/usr/local > /dev/null && make -j"$(nproc)" > /dev/null \
+        && make install > /dev/null)
+    rm -rf /tmp/bison /tmp/bison.tar.xz
+fi
+
 XKB="${BUILD}/xkbcommon"
 rm -rf "${XKB}"
 git init -q "${XKB}/src"
 git -C "${XKB}/src" fetch -q --depth 1 https://github.com/xkbcommon/libxkbcommon.git \
-    refs/tags/xkbcommon-1.7.0:refs/tags/xkbcommon-1.7.0
-[ "$(git -C "${XKB}/src" rev-parse 'FETCH_HEAD^{commit}')" = 7a31e3585edf78be281559377e26d15f8c4bc655 ]
+    refs/tags/xkbcommon-1.13.2:refs/tags/xkbcommon-1.13.2
+[ "$(git -C "${XKB}/src" rev-parse 'FETCH_HEAD^{commit}')" = d1442aaa6b635551182e83c3b55037f4c118c962 ]
 git -C "${XKB}/src" checkout -q FETCH_HEAD
 meson setup "${XKB}/build" "${XKB}/src" --prefix="${XKB}" --libdir=lib --buildtype=release \
     --default-library=static -Db_staticpic=true -Denable-x11=false -Denable-wayland=false \
