@@ -59,7 +59,9 @@
   and pcmflux with `--features python`. The pixelflux suites cover SPS/webcam decoding, Computer-Use requests, and
   VA-API through a pure-Rust mock driver; pcmflux covers RED parsing and Ogg page construction and round trips.
   GPU, render-node, encoder-device, and physical sound-server tests remain `#[ignore]` without their hardware.
-  `crates/pixelflux/fuzz` drives SPS and `crates/pcmflux/fuzz` drives RED beside the WebRTC targets.
+  `crates/pixelflux/fuzz` drives the SPS reads and the frame-kind reads the webcam uplink runs on a client's
+  bitstream (`sps`, `keyframe`), and `crates/pcmflux/fuzz` drives RED, beside the WebRTC targets. DTLS and SRTP
+  are parsed by the pinned `rtc-dtls` and `rtc-srtp` crates, not here, so they have no target of their own.
 - The full server needs a display, PulseAudio and a GPU or software encoder; reproducers that need no display are
   preferred.
 

@@ -136,7 +136,10 @@ package's lockfile) into `Dockerfile`.
 `.clusterfuzzlite/` builds the independent `cargo fuzz` workspaces of `crates/selkies-rtc`, `crates/pixelflux`, and
 `crates/pcmflux` in an OSS-Fuzz builder for ClusterFuzzLite (`.github/workflows/fuzz.yaml`: changed code for five
 minutes, every target for an hour a day) and OSS-Fuzz. `build.sh` builds every target each `cargo fuzz list` names
-and zips its seeds from `fuzz/seeds/<target>/`. The targets are `rtp`, `sctp`, `sdp`, `stun`, `sps`, and `red`.
+and zips its seeds from `fuzz/seeds/<target>/`. The targets are `rtp`, `sctp`, `sdp`, `stun`, and `datagrams` for the
+WebRTC stack, `sps` and `keyframe` for pixelflux (the sequence parameter set reads and rewrites, and the frame-kind reads
+the webcam uplink runs on a client's bitstream before any decoder), and `red` for pcmflux. DTLS and SRTP have none:
+the pinned `rtc-dtls` and `rtc-srtp` crates parse them, and a finding there is theirs to fix.
 Code that parses bytes a peer, a client, or another local account controls gets a target, a seed corpus where valid
 inputs are hard to stumble on, and its source among the workflow's `pull_request` paths. Native fuzz targets compile
 their parser modules directly so the builder needs no media libraries. A crash is fixed at its cause, and its input

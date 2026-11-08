@@ -21,6 +21,18 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "keyframe"
+path = "fuzz_targets/keyframe.rs"
+test = false
+doc = false
+bench = false
+
 # A crate of its own, outside any workspace above it.
 [workspace]
 members = ["."]
+
+# codec.rs gates its x264 level tables on the crate's `gpl` feature, which this crate has no
+# use for; the cfg is declared so the check knows the name.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("gpl"))'] }

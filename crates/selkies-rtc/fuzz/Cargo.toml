@@ -5,7 +5,9 @@
 # Fuzz targets for the parsers of what a WebRTC peer sends, built with `cargo fuzz` (nightly)
 # and run by ClusterFuzzLite (.clusterfuzzlite/, .github/workflows/fuzz.yaml). Each target
 # drives selkies-rtc the way the server does; the crate links no system library, and neither
-# pixelflux nor pcmflux is in its graph.
+# pixelflux nor pcmflux is in its graph. DTLS and SRTP have no target here: selkies-rtc parses
+# neither itself, the pinned rtc-dtls and rtc-srtp crates do, and a finding there is theirs to
+# fix; the bytes they hand over (SCTP, RTP, RTCP) are what the targets below take.
 [package]
 name = "selkies-rtc-fuzz"
 version = "0.0.0"

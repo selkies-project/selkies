@@ -16,6 +16,7 @@ on:
       - "crates/selkies-rtc/vendor/**"
       - "crates/selkies-rtc/fuzz/**"
       - "crates/pixelflux/src/encoders/bits.rs"
+      - "crates/pixelflux/src/encoders/codec.rs"
       - "crates/pixelflux/src/encoders/sps.rs"
       - "crates/pixelflux/fuzz/**"
       - "crates/pcmflux/src/red.rs"
