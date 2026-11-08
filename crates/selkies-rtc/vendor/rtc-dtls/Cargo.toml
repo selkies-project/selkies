@@ -1,0 +1,49 @@
+# rtc-dtls 0.21.1 (https://github.com/webrtc-rs/rtc, MIT/Apache-2.0), vendored with the
+# retransmission fix and test of webrtc-rs/rtc#288 applied on top; the workspace's
+# `[patch.crates-io]` points the `rtc-dtls` dependency here. `rtc-dtls-selkies.patch` beside
+# it is the diff against the published crate. The examples and benchmarks, and the
+# dev-dependencies only they use, are left out.
+
+[package]
+name = "rtc-dtls"
+version = "0.21.1"
+authors = ["Rain Liu <yliu@webrtc.rs>"]
+edition = "2024"
+description = "RTC DTLS in Rust"
+homepage = "https://webrtc.rs"
+documentation = "https://docs.rs/rtc-dtls"
+readme = "README.md"
+keywords = ["sansio", "networking", "protocols"]
+categories = ["network-programming"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/webrtc-rs/rtc"
+publish = false
+
+[features]
+crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs"]
+crypto-ring = ["crypto/crypto-ring", "rustls/ring", "rcgen/ring"]
+default = ["crypto-ring"]
+
+[lib]
+name = "rtc_dtls"
+path = "src/lib.rs"
+
+[[test]]
+name = "retransmission_timer"
+path = "tests/retransmission_timer.rs"
+
+[dependencies]
+bytecheck = "0.8"
+byteorder = "1.5.0"
+bytes = "1.12.0"
+crypto = { package = "rtc-crypto", version = "0.21.1", default-features = false }
+der-parser = "9.0.0"
+log = "0.4.33"
+pem = "3.0.3"
+rcgen = { version = "0.14.8", default-features = false, features = ["pem"] }
+rkyv = "0.8.17"
+rustls = { version = "0.23.27", default-features = false, features = ["std"] }
+shared = { package = "rtc-shared", version = "0.21.1", default-features = false, features = ["replay"] }
+x509-parser = "0.16.0"
+
+[workspace]

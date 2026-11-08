@@ -54,7 +54,7 @@ dependency of the workspace's crates, by what it does:
 | `pixelflux` | MPL-2.0 | weak copyleft | screen capture and video encoding, over the native libraries below | see [pixelflux's LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pixelflux/LICENSES.md) |
 | `pcmflux` | MPL-2.0 | weak copyleft | audio capture and Opus encoding, over libpulse and libopus | see [pcmflux's LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pcmflux/LICENSES.md) |
 | `selkies-rtc` | MPL-2.0 | weak copyleft | the WebRTC stack, in this repository under `crates/selkies-rtc` |  |
-| `rtc-crypto`, `rtc-dtls`, `rtc-ice`, `rtc-mdns`, `rtc-sctp`, `rtc-sdp`, `rtc-shared`, `rtc-srtp`, `rtc-stun`, `rtc-turn`, `sansio` | Apache-2.0 OR MIT | permissive | the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over | `rtc-sctp` and `rtc-srtp` vendored (below) |
+| `rtc-crypto`, `rtc-dtls`, `rtc-ice`, `rtc-mdns`, `rtc-sctp`, `rtc-sdp`, `rtc-shared`, `rtc-srtp`, `rtc-stun`, `rtc-turn`, `sansio` | Apache-2.0 OR MIT | permissive | the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over | `rtc-dtls`, `rtc-sctp`, and `rtc-srtp` vendored (below) |
 | `tokio`, `tokio-util`, `futures`, `async-trait`, `bytes` | MIT; Apache-2.0 OR MIT | permissive | async runtime |  |
 | `axum`, `tokio-websockets`, `hyper`, `hyper-util`, `tower`, `tower-http`, `http`, `http-body-util` | MIT; Apache-2.0 OR MIT | permissive | HTTP and WebSocket server |  |
 | `rustls`, `tokio-rustls`, `hyper-rustls`, `rustls-native-certs` | Apache-2.0 OR ISC OR MIT; Apache-2.0 OR MIT | permissive | HTTPS, TLS to TURN servers, and the outgoing requests of the TURN REST and Cloudflare sources | cryptography from `aws-lc-rs` |
@@ -142,6 +142,7 @@ Selkies and keep their own licenses.
 
 | Crate | Version | Where | License | Category | Notes |
 | --- | --- | --- | --- | --- | --- |
+| `rtc-dtls` | 0.21.1 | `crates/selkies-rtc/vendor/rtc-dtls` | Apache-2.0 OR MIT | permissive | the workspace patches the published crate with it; `rtc-dtls-selkies.patch` beside it is the diff, the fix and test of webrtc-rs/rtc#288 under the crate's own license |
 | `rtc-sctp` | 0.21.1 | `crates/selkies-rtc/vendor/rtc-sctp` | Apache-2.0 OR MIT | permissive | the workspace patches the published crate with it; `rtc-sctp-selkies.patch` beside it is the diff, whose changes are MPL-2.0 |
 | `rtc-srtp` | 0.21.1 | `crates/selkies-rtc/vendor/rtc-srtp` | Apache-2.0 OR MIT | permissive | the workspace patches the published crate with it; `rtc-srtp-selkies.patch` beside it is the diff, whose changes are MPL-2.0 |
 

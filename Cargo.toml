@@ -31,9 +31,11 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
-# rtc-sctp carries the Selkies SCTP fixes and rtc-srtp the in-place RTP encryption until they
-# land upstream (crates/selkies-rtc/vendor/*/*-selkies.patch).
+# rtc-dtls carries the handshake's retransmission fix, rtc-sctp the Selkies SCTP fixes, and
+# rtc-srtp the in-place RTP encryption until they land upstream
+# (crates/selkies-rtc/vendor/*/*-selkies.patch).
 [patch.crates-io]
+rtc-dtls = { path = "crates/selkies-rtc/vendor/rtc-dtls" }
 rtc-sctp = { path = "crates/selkies-rtc/vendor/rtc-sctp" }
 rtc-srtp = { path = "crates/selkies-rtc/vendor/rtc-srtp" }
 
