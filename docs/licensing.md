@@ -85,8 +85,7 @@ contains the crate: the default GPL one, or the non-GPL one with pixelflux's
 
 | Native library | Crate | License | Category | Build | How used |
 | --- | --- | --- | --- | --- | --- |
-| libx264 | `x264-sys` | GPL-2.0-or-later | copyleft | GPL only | linked shared library, through pixelflux's `gpl` feature; software H.264 |
-| libvpx, SVT-AV1, dav1d, and libde265 in every build; x265 in the GPL build, kvazaar in the non-GPL one | `codec-sys` | BSD-3-Clause (libvpx, kvazaar; SVT-AV1 with the Alliance for Open Media patent license), BSD-2-Clause (dav1d), LGPL-3.0-or-later (libde265), GPL-2.0-or-later (x265) | weak copyleft (copyleft in the GPL build) | both | linked shared libraries, through pixelflux; the software HEVC, VP8, VP9, and AV1 encoders and the virtual camera's decoders |
+| libvpx, SVT-AV1, dav1d, and libde265 in every build; libx264 and x265 in the GPL build, kvazaar in the non-GPL one | `codec-sys` | BSD-3-Clause (libvpx, kvazaar; SVT-AV1 with the Alliance for Open Media patent license), BSD-2-Clause (dav1d), LGPL-3.0-or-later (libde265), GPL-2.0-or-later (libx264, x265) | weak copyleft (copyleft in the GPL build) | both | linked shared libraries, through pixelflux; the software H.264 (GPL build), HEVC, VP8, VP9, and AV1 encoders and the virtual camera's decoders |
 | Cisco OpenH264, and libstdc++ for its C++ | `openh264-sys2` | BSD-2-Clause (OpenH264), GPL-3.0-or-later WITH GCC-exception-3.1 (libstdc++) | permissive | both | compiled from the source vendored in the crate and linked statically, through pixelflux, libstdc++ as a shared library; full-frame software H.264 of the non-GPL build and the virtual camera's H.264 decoder |
 | libjpeg-turbo | `turbojpeg-sys` | IJG AND BSD-3-Clause AND Zlib | permissive | both | compiled from the source vendored in the crate and linked statically, through pixelflux; JPEG |
 | libva, libva-drm | `va-sys` | MIT | permissive | both | `dlopen` at run time through pixelflux, never linked; VA-API encoding |
@@ -269,8 +268,9 @@ python3 scripts/check-licenses.py --write
 ```
 
 cargo-deny audits the shipped graph on its own (`cargo deny --exclude-dev check`):
-crate licenses against a permissive allow list plus MPL-2.0, with x264-sys's
-GPL as the one exception; crates.io and pixelflux's pinned Smithay repository
+crate licenses against a permissive allow list plus MPL-2.0 (the GPL libx264 and
+x265 come in through codec-sys's features, which the inventory above gates);
+crates.io and pixelflux's pinned Smithay repository
 as the only sources; and the RustSec advisories, every one
 it ignores listed in `deny.toml` with the reason. pixelflux and pcmflux carry
 the same gate over their own graphs (pixelflux's

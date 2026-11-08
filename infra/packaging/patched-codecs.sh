@@ -7,7 +7,7 @@
 # pixelflux links them, under <prefix>: libx264, x265, libvpx, and SVT-AV1,
 # built by that checkout's scripts/build-x264.sh, build-x265.sh, build-libvpx.sh,
 # and build-svtav1.sh at the commits its wheel recipe pins with the patches
-# applied, as static archives the server links in (SYSTEM_DEPS_X264_LINK=static,
+# applied, as static archives the server links in (X264_STATIC=1,
 # X265_STATIC=1, VPX_STATIC=1, SVTAV1ENC_STATIC=1). For a build that does
 # not go through codecs.sh, which builds them the same way. Cargo runs as the
 # caller; SUDO, where set, runs the builds that install.

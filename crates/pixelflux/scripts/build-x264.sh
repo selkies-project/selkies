@@ -10,7 +10,7 @@
 #
 # Usage: build-x264.sh <prefix> [static|shared]
 #   static (the default) installs an archive with position-independent code,
-#   which pixelflux links into itself when SYSTEM_DEPS_X264_LINK=static.
+#   which pixelflux links into itself when X264_STATIC=1.
 set -eu
 PREFIX="${1:?usage: build-x264.sh <prefix> [static|shared]}"
 KIND="${2:-static}"

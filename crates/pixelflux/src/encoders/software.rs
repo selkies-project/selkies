@@ -451,7 +451,7 @@ fn x264_frame_rate(fps: f64) -> FrameRate {
 /// thread; `Drop` closes it under the global open/close lock for the same reason that lock exists.
 #[cfg(feature = "gpl")]
 pub struct H264EncoderWrapper {
-    encoder: *mut x264_sys::x264_t,
+    encoder: *mut codec_sys::x264::x264_t,
     pub width: i32,
     pub height: i32,
     current_crf: i32,
@@ -516,7 +516,7 @@ impl Drop for H264EncoderWrapper {
             let _guard = X264_OPEN_CLOSE_LOCK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            unsafe { x264_sys::x264_encoder_close(self.encoder) };
+            unsafe { codec_sys::x264::x264_encoder_close(self.encoder) };
             self.encoder = ptr::null_mut();
         }
     }
@@ -677,11 +677,16 @@ impl H264EncoderWrapper {
         key: Option<(i32, i32)>,
     ) -> Option<Self> {
         unsafe {
-            let mut param: x264_sys::x264_param_t = std::mem::zeroed();
+            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
             let preset = CString::new("ultrafast").unwrap();
             let tune = CString::new("zerolatency").unwrap();
 
-            if x264_sys::x264_param_default_preset(&mut param, preset.as_ptr(), tune.as_ptr()) < 0 {
+            if codec_sys::x264::x264_param_default_preset(
+                &mut param,
+                preset.as_ptr(),
+                tune.as_ptr(),
+            ) < 0
+            {
                 return None;
             }
 
@@ -690,7 +695,7 @@ impl H264EncoderWrapper {
             param.i_height = height;
             param.i_fps_num = frame_rate.num;
             param.i_fps_den = frame_rate.den;
-            param.i_keyint_max = x264_sys::X264_KEYINT_MAX_INFINITE as i32;
+            param.i_keyint_max = codec_sys::x264::X264_KEYINT_MAX_INFINITE as i32;
             param.i_scenecut_threshold = 0;
             let bitrate_bps = if cbr_mode {
                 bitrate_kbps.saturating_abs() as u64 * 1000
@@ -713,7 +718,7 @@ impl H264EncoderWrapper {
             param.i_dpb_size = dpb as i32;
             if cbr_mode {
                 let bk = bitrate_kbps.saturating_abs();
-                param.rc.i_rc_method = x264_sys::X264_RC_ABR as i32;
+                param.rc.i_rc_method = codec_sys::x264::X264_RC_ABR as i32;
                 param.rc.i_bitrate = bk;
                 param.rc.i_vbv_max_bitrate = bk;
                 param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
@@ -732,7 +737,7 @@ impl H264EncoderWrapper {
                 param.rc.i_qp_max =
                     if max_qp > 0 { max_qp.min(51) } else { 51 } + qp_offset(bit_depth);
             } else {
-                param.rc.i_rc_method = x264_sys::X264_RC_CRF as i32;
+                param.rc.i_rc_method = codec_sys::x264::X264_RC_CRF as i32;
                 param.rc.f_rf_constant = crf as f32;
                 if vbv_kbit > 0 {
                     param.rc.i_vbv_max_bitrate = bitrate_kbps.saturating_abs();
@@ -741,14 +746,14 @@ impl H264EncoderWrapper {
                 }
             }
             let depth_flag = if bit_depth > 8 {
-                x264_sys::X264_CSP_HIGH_DEPTH
+                codec_sys::x264::X264_CSP_HIGH_DEPTH
             } else {
                 0
             };
             param.i_csp = (if is_i444 {
-                x264_sys::X264_CSP_I444
+                codec_sys::x264::X264_CSP_I444
             } else {
-                x264_sys::X264_CSP_I420
+                codec_sys::x264::X264_CSP_I420
             } | depth_flag) as i32;
             param.i_bitdepth = bit_depth as i32;
             param.vui.b_fullrange = if is_i444 { 1 } else { 0 };
@@ -762,27 +767,27 @@ impl H264EncoderWrapper {
                 (false, false) => "baseline",
             })
             .unwrap();
-            x264_sys::x264_param_apply_profile(&mut param, profile.as_ptr());
+            codec_sys::x264::x264_param_apply_profile(&mut param, profile.as_ptr());
             param.rc.b_qp_offsets = 1;
             param.analyse.b_mb_info = 1;
-            param.analyse.i_me_method = x264_sys::X264_ME_UMH as i32;
+            param.analyse.i_me_method = codec_sys::x264::X264_ME_UMH as i32;
             param.analyse.i_me_range = 64;
 
             param.i_threads = threads;
             param.b_repeat_headers = 1;
             param.b_annexb = 1;
-            param.i_log_level = x264_sys::X264_LOG_NONE;
+            param.i_log_level = codec_sys::x264::X264_LOG_NONE;
 
             let encoder = {
                 let _guard = X264_OPEN_CLOSE_LOCK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                x264_sys::x264_encoder_open(&mut param)
+                codec_sys::x264::x264_encoder_open(&mut param)
             };
             if encoder.is_null() {
                 None
             } else {
-                x264_sys::x264_encoder_parameters(encoder, &mut param);
+                codec_sys::x264::x264_encoder_parameters(encoder, &mut param);
                 Some(Self {
                     encoder,
                     width,
@@ -827,10 +832,10 @@ impl H264EncoderWrapper {
             return;
         }
         unsafe {
-            let mut param: x264_sys::x264_param_t = std::mem::zeroed();
-            x264_sys::x264_encoder_parameters(self.encoder, &mut param);
+            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
             param.rc.f_rf_constant = new_crf as f32;
-            if x264_sys::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
+            if codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
                 self.current_crf = new_crf;
                 self.rf_constant = new_crf as f64;
             }
@@ -885,14 +890,14 @@ impl H264EncoderWrapper {
             return;
         }
         unsafe {
-            let mut param: x264_sys::x264_param_t = std::mem::zeroed();
-            x264_sys::x264_encoder_parameters(self.encoder, &mut param);
+            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
             param.rc.i_bitrate = bk;
             if vbv_applies {
                 param.rc.i_vbv_max_bitrate = bk;
                 param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
             }
-            if x264_sys::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
+            if codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
                 self.current_bitrate = bk;
                 self.current_vbv = vbv_kbit;
             }
@@ -922,14 +927,14 @@ impl H264EncoderWrapper {
             return;
         }
         unsafe {
-            let mut param: x264_sys::x264_param_t = std::mem::zeroed();
-            x264_sys::x264_encoder_parameters(self.encoder, &mut param);
+            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
             param.rc.i_qp_min = if min_qp > 0 {
                 min_qp.min(51) + qp_offset(self.bit_depth)
             } else {
                 0
             };
-            if x264_sys::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
+            if codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
                 self.current_min_qp = min_qp;
             }
         }
@@ -952,8 +957,8 @@ impl H264EncoderWrapper {
     /// `restore_rate` is owed after the frame.
     fn open_for_held_key(&mut self) -> bool {
         let level = unsafe {
-            let mut param: x264_sys::x264_param_t = std::mem::zeroed();
-            x264_sys::x264_encoder_parameters(self.encoder, &mut param);
+            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
             param.i_level_idc
         };
         let budget = (self.current_bitrate as f64 * super::HELD_KEY_BUDGET_S).round() as i32;
@@ -999,7 +1004,7 @@ impl H264EncoderWrapper {
         self.mb_info.clear();
         self.mb_info.extend(unchanged.map(|c| {
             if c {
-                x264_sys::X264_MBINFO_CONSTANT as u8
+                codec_sys::x264::X264_MBINFO_CONSTANT as u8
             } else {
                 0
             }
@@ -1009,12 +1014,12 @@ impl H264EncoderWrapper {
     /// Put the session's own rate and VBV buffer back after a held key frame.
     fn restore_rate(&mut self) {
         unsafe {
-            let mut param: x264_sys::x264_param_t = std::mem::zeroed();
-            x264_sys::x264_encoder_parameters(self.encoder, &mut param);
+            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
             param.rc.i_bitrate = self.current_bitrate;
             param.rc.i_vbv_max_bitrate = self.current_bitrate;
             param.rc.i_vbv_buffer_size = self.current_vbv.max(1);
-            x264_sys::x264_encoder_reconfig(self.encoder, &mut param);
+            codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param);
         }
     }
 
@@ -1023,7 +1028,7 @@ impl H264EncoderWrapper {
     pub fn invalidate_reference(&mut self, frame_id: u16) -> bool {
         match self.references.invalidate(frame_id) {
             Invalidation::Forget(pts) => unsafe {
-                x264_sys::x264_encoder_invalidate_reference(self.encoder, pts as i64) == 0
+                codec_sys::x264::x264_encoder_invalidate_reference(self.encoder, pts as i64) == 0
             },
             Invalidation::KeyFrame | Invalidation::Ignored => true,
         }
@@ -1109,7 +1114,7 @@ impl H264EncoderWrapper {
 
     /// Stop x264 reading the picture it holds (`held_input`), so its buffers can change.
     pub fn release_input(&mut self) {
-        unsafe { x264_sys::x264_encoder_release_input(self.encoder) };
+        unsafe { codec_sys::x264::x264_encoder_release_input(self.encoder) };
         self.held_input = None;
     }
 
@@ -1140,18 +1145,18 @@ impl H264EncoderWrapper {
         output_buf: &mut Vec<u8>,
     ) -> bool {
         unsafe {
-            let mut pic_in: x264_sys::x264_picture_t = std::mem::zeroed();
-            x264_sys::x264_picture_init(&mut pic_in);
+            let mut pic_in: codec_sys::x264::x264_picture_t = std::mem::zeroed();
+            codec_sys::x264::x264_picture_init(&mut pic_in);
 
             self.held_input = None;
             match input {
                 Input::Planar { planes, strides } => {
                     pic_in.img.i_csp = (if self.is_i444 {
-                        x264_sys::X264_CSP_I444
+                        codec_sys::x264::X264_CSP_I444
                     } else {
-                        x264_sys::X264_CSP_I420
+                        codec_sys::x264::X264_CSP_I420
                     } | if self.bit_depth > 8 {
-                        x264_sys::X264_CSP_HIGH_DEPTH
+                        codec_sys::x264::X264_CSP_HIGH_DEPTH
                     } else {
                         0
                     }) as i32;
@@ -1163,11 +1168,11 @@ impl H264EncoderWrapper {
                 }
                 Input::Nv12(nv12) => {
                     let in_place = if nv12.in_place {
-                        x264_sys::X264_CSP_IN_PLACE
+                        codec_sys::x264::X264_CSP_IN_PLACE
                     } else {
                         0
                     };
-                    pic_in.img.i_csp = (x264_sys::X264_CSP_NV12 | in_place) as i32;
+                    pic_in.img.i_csp = (codec_sys::x264::X264_CSP_NV12 | in_place) as i32;
                     pic_in.img.i_plane = 2;
                     let (y, uv) = nv12.planes();
                     pic_in.img.plane[0] = y.as_ptr() as *mut u8;
@@ -1179,13 +1184,14 @@ impl H264EncoderWrapper {
             }
             pic_in.i_pts = self.references.next_pts() as i64;
             pic_in.i_type = if force_idr || !self.references.has_reference() {
-                x264_sys::X264_TYPE_IDR
+                codec_sys::x264::X264_TYPE_IDR
             } else {
-                x264_sys::X264_TYPE_AUTO
+                codec_sys::x264::X264_TYPE_AUTO
             } as i32;
             let held = self.held_qp.take();
             let offset = qp_offset(self.bit_depth);
-            pic_in.i_qpplus1 = held.map_or(x264_sys::X264_QP_AUTO as i32, |q| q + offset + 1);
+            pic_in.i_qpplus1 =
+                held.map_or(codec_sys::x264::X264_QP_AUTO as i32, |q| q + offset + 1);
             // x264 reads the offsets as the frame is submitted, within this call.
             if !self.quant_offsets.is_empty() {
                 pic_in.prop.quant_offsets = self.quant_offsets.as_mut_ptr();
@@ -1195,11 +1201,11 @@ impl H264EncoderWrapper {
                 pic_in.prop.mb_info = self.mb_info.as_mut_ptr();
             }
 
-            let mut pic_out: x264_sys::x264_picture_t = std::mem::zeroed();
-            let mut nals: *mut x264_sys::x264_nal_t = ptr::null_mut();
+            let mut pic_out: codec_sys::x264::x264_picture_t = std::mem::zeroed();
+            let mut nals: *mut codec_sys::x264::x264_nal_t = ptr::null_mut();
             let mut i_nals: i32 = 0;
 
-            let frame_size = x264_sys::x264_encoder_encode(
+            let frame_size = codec_sys::x264::x264_encoder_encode(
                 self.encoder,
                 &mut nals,
                 &mut i_nals,
@@ -1221,9 +1227,9 @@ impl H264EncoderWrapper {
                         (coded.round() as i32 - offset).clamp(0, 51) as u32
                     });
                 }
-                let frame_type = if pic_out.i_type == x264_sys::X264_TYPE_IDR as i32 {
+                let frame_type = if pic_out.i_type == codec_sys::x264::X264_TYPE_IDR as i32 {
                     FRAME_KEY
-                } else if pic_out.i_type == x264_sys::X264_TYPE_I as i32 {
+                } else if pic_out.i_type == codec_sys::x264::X264_TYPE_I as i32 {
                     FRAME_INTRA
                 } else {
                     FRAME_DELTA
@@ -1809,14 +1815,14 @@ struct InputLayout {
 #[cfg(feature = "gpl")]
 fn x264_input_layout(width: usize, height: usize) -> Option<InputLayout> {
     unsafe {
-        let mut param: x264_sys::x264_param_t = std::mem::zeroed();
-        x264_sys::x264_param_default(&mut param);
+        let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+        codec_sys::x264::x264_param_default(&mut param);
         param.i_width = width as i32;
         param.i_height = height as i32;
-        param.i_csp = x264_sys::X264_CSP_I420 as i32;
+        param.i_csp = codec_sys::x264::X264_CSP_I420 as i32;
         param.i_bitdepth = 8;
         let (mut stride, mut offset, mut size) = ([0i32; 2], [0i32; 2], [0i64; 2]);
-        if x264_sys::x264_param_input_layout(
+        if codec_sys::x264::x264_param_input_layout(
             &param,
             stride.as_mut_ptr(),
             offset.as_mut_ptr(),
@@ -3778,7 +3784,7 @@ mod tests {
             "the linked libx264 lays out a picture to encode in place"
         );
         let layout = super::x264_input_layout(w, h).expect("layout");
-        let align = x264_sys::X264_IN_PLACE_ALIGN as usize;
+        let align = codec_sys::x264::X264_IN_PLACE_ALIGN as usize;
         for p in &pictures {
             let (y, uv) = p.planes();
             assert!(
@@ -3996,8 +4002,8 @@ mod qp_bound_sweep {
             )
             .expect("x264 init");
             let param = unsafe {
-                let mut param: x264_sys::x264_param_t = std::mem::zeroed();
-                x264_sys::x264_encoder_parameters(enc.encoder, &mut param);
+                let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+                codec_sys::x264::x264_encoder_parameters(enc.encoder, &mut param);
                 param
             };
             assert_eq!((param.i_fps_num, param.i_fps_den), (num, den));

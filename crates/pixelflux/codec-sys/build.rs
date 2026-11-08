@@ -42,6 +42,13 @@ const LIBS: &[Lib] = &[
         ],
     },
     Lib {
+        feature: "x264",
+        pkg: "x264",
+        min: "0.165",
+        header: "x264w.h",
+        allow: &["x264_.*", "X264_.*"],
+    },
+    Lib {
         feature: "x265",
         pkg: "x265",
         min: "3.5",
@@ -135,6 +142,34 @@ fn main() {
         bindings
             .write_to_file(out.join(format!("{}.rs", lib.feature)))
             .unwrap_or_else(|e| panic!("{}: writing the bindings failed: {e}", lib.pkg));
+        if lib.feature == "x264" {
+            // x264.h names the encoder's constructor after the build through a macro, which
+            // bindgen does not expand, so the shim below names the one this header declares.
+            let generated = std::fs::read_to_string(out.join("x264.rs")).unwrap();
+            let open = generated
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .find(|word| {
+                    word.strip_prefix("x264_encoder_open_")
+                        .is_some_and(|build| {
+                            !build.is_empty() && build.bytes().all(|b| b.is_ascii_digit())
+                        })
+                })
+                .expect("x264.h declares no x264_encoder_open_<build>")
+                .to_string();
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(out.join("x264.rs"))
+                .unwrap()
+                .write_all(
+                    format!(
+                        "\n/// `x264_encoder_open`, by the build number the linked x264's header names.\n\
+                         pub unsafe fn x264_encoder_open(param: *mut x264_param_t) -> *mut x264_t {{\n    \
+                         unsafe {{ {open}(param) }}\n}}\n"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        }
         if lib.feature == "x265" {
             // The API table's entry point carries the build number in its name, so the shim
             // below names whichever one this header declares.

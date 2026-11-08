@@ -8,8 +8,7 @@
 #
 # resolves the workspace as committed, pixelflux with its `gpl` feature, which is
 # what every release links: every crate license must be in the permissive allow
-# list below, x264-sys's GPL clarification is accepted by its exception, the only
-# sources are crates.io and the git repositories `allow-git` names, and the
+# list below, the only sources are crates.io and the git repositories `allow-git` names, and the
 # RustSec advisories are gated by the [advisories] policy (that check fetches the
 # database, so it needs the network). The non-GPL build (pixelflux's `openh264` in
 # place of `gpl`) is not a Cargo feature of this workspace, so cargo-deny cannot
@@ -47,18 +46,9 @@ allow = [
     "MPL-2.0",
 ]
 confidence-threshold = 0.8
-# The one copyleft component of the shipped graph, through pixelflux's `gpl`
-# feature, which the workspace's Cargo.toml turns on.
-exceptions = [
-    { crate = "x264-sys", allow = ["GPL-2.0-or-later"] },
-]
-
-# x264-sys is an MIT binding, but the only library it can link is libx264,
-# which is GPL-2.0-or-later: a binary that contains it is GPL.
-[[licenses.clarify]]
-crate = "x264-sys"
-expression = "MIT AND GPL-2.0-or-later"
-license-files = []
+# libx264 and x265, the GPL libraries of pixelflux's `gpl` feature, are bound
+# by codec-sys, whose own license is permissive; scripts/check-licenses.py
+# accounts for them by the codec-sys features that link them.
 
 [licenses.private]
 ignore = false

@@ -323,11 +323,11 @@ RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt
     sh "$(dirname "${pixelflux}")/scripts/build-x265.sh" /usr/local; \
     sh "$(dirname "${pixelflux}")/scripts/build-libvpx.sh" /usr/local; \
     sh "$(dirname "${pixelflux}")/scripts/build-svtav1.sh" /usr/local; \
-    # x264-sys and codec-sys bind the installed headers without watching them, so
-    # the cached target would keep bindings and link lines from before a change
-    # to the patches or the libraries they build
-    cargo clean --release -p x264-sys -p codec-sys; \
-    SYSTEM_DEPS_X264_LINK=static X265_STATIC=1 VPX_STATIC=1 SVTAV1ENC_STATIC=1 \
+    # codec-sys binds the installed headers without watching them, so the cached
+    # target would keep bindings and link lines from before a change to the
+    # patches or the libraries they build
+    cargo clean --release -p codec-sys; \
+    X264_STATIC=1 X265_STATIC=1 VPX_STATIC=1 SVTAV1ENC_STATIC=1 \
         cargo build --release --locked -p selkies; \
     install -Dm755 target/release/selkies /out/selkies; \
     ldd /out/selkies | awk '/=>/ {print $3}' | xargs -r readlink -f | xargs -r dpkg -S | \

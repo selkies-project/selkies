@@ -6,15 +6,14 @@
 #     cargo deny check licenses bans sources
 #
 # audits exactly what a non-GPL build contains: every crate license must be in
-# the permissive allow list, and x264-sys (the MIT binding whose only purpose is
-# linking the GPL-2.0-or-later libx264) is banned from that graph. The default
-# build is `--features gpl` instead (x264-sys in place of the OpenH264 crates);
+# the permissive allow list. The default build is `--features gpl` instead;
 # audit it with
 #
 #     cargo deny --features gpl check licenses sources
 #
-# where the exception below accepts x264-sys's GPL clarification. The ban is the
-# non-GPL gate, so `--features gpl check bans` fails by design. The advisories
+# The GPL libraries of that build, libx264 and x265, are bound by codec-sys,
+# whose own license is permissive, under the `x264` and `x265` features `gpl`
+# turns on; scripts/check-licenses.py is the non-GPL gate on them. The advisories
 # check (`check advisories`) needs the network to fetch the RustSec database and
 # is gated by the [advisories] policy below. scripts/check-licenses.py covers
 # both build configurations offline, plus the native libraries crate metadata
@@ -50,20 +49,6 @@ allow = [
     "MPL-2.0",
 ]
 confidence-threshold = 0.8
-# The x264-sys exception is reported as unmatched on the non-GPL graph, which
-# is the intended state.
-# The only copyleft component, and only as the `gpl` feature: the bans section
-# keeps it out of the non-GPL graph.
-exceptions = [
-    { crate = "x264-sys", allow = ["GPL-2.0-or-later"] },
-]
-
-# x264-sys is an MIT binding, but the only library it can link is libx264,
-# which is GPL-2.0-or-later: a binary that contains it is GPL.
-[[licenses.clarify]]
-crate = "x264-sys"
-expression = "MIT AND GPL-2.0-or-later"
-license-files = []
 
 [licenses.private]
 ignore = false
@@ -84,9 +69,7 @@ ignore = [
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"
-deny = [
-    { crate = "x264-sys", reason = "links GPL-2.0-or-later libx264; only the `gpl` feature may pull it in" },
-]
+deny = []
 
 [sources]
 unknown-registry = "deny"

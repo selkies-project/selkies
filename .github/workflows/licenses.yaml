@@ -46,8 +46,8 @@ jobs:
         run: python3 scripts/check-licenses.py
 
       - name: cargo-deny, the shipped (GPL) graph
-        # deny.toml: the permissive allow list plus x264-sys's exception, and
-        # crates.io and the pinned Smithay repository as the only sources.
+        # deny.toml: the permissive allow list, and crates.io and the pinned
+        # Smithay repository as the only sources.
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check

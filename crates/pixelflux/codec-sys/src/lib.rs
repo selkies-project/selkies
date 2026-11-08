@@ -22,6 +22,12 @@ pub mod vpx {
     include!(concat!(env!("OUT_DIR"), "/vpx.rs"));
 }
 
+/// x264: the GPL H.264 encoder.
+#[cfg(feature = "x264")]
+pub mod x264 {
+    include!(concat!(env!("OUT_DIR"), "/x264.rs"));
+}
+
 /// x265: the GPL HEVC encoder, reached through its versioned API table.
 #[cfg(feature = "x265")]
 pub mod x265 {

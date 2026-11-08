@@ -158,10 +158,10 @@ if [ ! -f "${RECIPE}" ] || [ ! -f "${FLOORS}" ]; then
     exit 1
 fi
 
-# recipe name, pkg-config name, and the variable that links it statically:
-# pkg-config-rs reads <NAME>_STATIC, system-deps (x264-sys) its own spelling
+# recipe name, pkg-config name, and the variable that links it statically, which
+# pkg-config-rs reads as <NAME>_STATIC
 built=""
-for entry in x264:x264:SYSTEM_DEPS_X264_LINK=static x265:x265:X265_STATIC=1 \
+for entry in x264:x264:X264_STATIC=1 x265:x265:X265_STATIC=1 \
         libvpx:vpx:VPX_STATIC=1 svtav1:SvtAv1Enc:SVTAV1ENC_STATIC=1 \
         dav1d:dav1d:DAV1D_STATIC=1 libde265:libde265:LIBDE265_STATIC=1; do
     name="${entry%%:*}"

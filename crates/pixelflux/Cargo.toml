@@ -39,7 +39,6 @@ rayon = "1.10"
 # no runtime download; openh264-sys2 carries the raw calls (live bitrate, slice layout,
 # the decoder interface) the safe wrapper does not expose. Its decoder is the virtual
 # camera's H.264 decoder in every build.
-x264-sys = { version = "0.2.2", optional = true }
 openh264 = "0.9"
 openh264-sys2 = "0.9"
 # The software codec libraries, bound at build time from the headers of the copies that are
@@ -88,7 +87,7 @@ extension-module = ["python", "pyo3/extension-module"]
 abi3-extension-module = ["extension-module", "pyo3/abi3-py311"]
 ## GPL-licensed components: libx264 (GPL-2.0+) as the software H.264 encoder and x265
 ## (GPL-2.0+) as the software HEVC encoder. Wins over `openh264` whenever both are enabled.
-gpl = ["dep:x264-sys", "codec-sys/x265"]
+gpl = ["codec-sys/x264", "codec-sys/x265"]
 ## BSD-licensed Cisco OpenH264 as the software H.264 encoder and kvazaar as the software
 ## HEVC encoder of a build without `gpl`; the crate fails to compile with neither feature.
 openh264 = ["codec-sys/kvazaar"]

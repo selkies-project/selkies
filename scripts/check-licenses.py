@@ -9,7 +9,7 @@ Resolves the crate graph of each build configuration with ``cargo metadata`` (no
 dependencies only, the ones compiled into the executable, over the four Linux targets
 the releases build), ranks every crate's SPDX license expression, and overlays the native
 libraries the bindings link, load, or vendor, which crate metadata cannot see
-(``x264-sys`` is an MIT binding whose only library is the GPL-2.0-or-later libx264). The
+(``codec-sys`` is an MIT binding whose ``x264`` and ``x265`` features link the GPL-2.0-or-later libx264 and x265). The
 npm side reads the license each package of the web packages' lockfiles records, so it needs no
 ``npm ci``. It fails on a copyleft component in a configuration not allowed to carry it,
 on a crate or package without usable license metadata, on a native binding, a direct
@@ -75,7 +75,6 @@ CLARIFY: Dict[str, str] = {}
 # in every configuration, so a GPL dependency is added here and in docs/licensing.md on
 # purpose.
 ALLOWED_COPYLEFT: Dict[str, Tuple[str, ...]] = {
-    "x264-sys": ("gpl",),
     "codec-sys": ("gpl",),
 }
 
@@ -265,17 +264,15 @@ class Native(NamedTuple):
 # every entry has to be in a graph, so a new binding fails the check until it is
 # inventoried and a dropped one until it is taken off the page.
 NATIVE: Dict[str, Native] = {
-    "x264-sys": Native(
-        "libx264", "GPL-2.0-or-later", COPYLEFT,
-        "linked shared library, through pixelflux's `gpl` feature; software H.264"),
     "codec-sys": Native(
-        "libvpx, SVT-AV1, dav1d, and libde265 in every build; x265 in the GPL build, kvazaar in the non-GPL one",
+        "libvpx, SVT-AV1, dav1d, and libde265 in every build; libx264 and x265 in the GPL build, kvazaar in the "
+        "non-GPL one",
         "BSD-3-Clause (libvpx, kvazaar; SVT-AV1 with the Alliance for Open Media patent license), "
-        "BSD-2-Clause (dav1d), LGPL-3.0-or-later (libde265), GPL-2.0-or-later (x265)",
+        "BSD-2-Clause (dav1d), LGPL-3.0-or-later (libde265), GPL-2.0-or-later (libx264, x265)",
         WEAK,
-        "linked shared libraries, through pixelflux; the software HEVC, VP8, VP9, and AV1 encoders and the "
-        "virtual camera's decoders",
-        ("x265",)),
+        "linked shared libraries, through pixelflux; the software H.264 (GPL build), HEVC, VP8, VP9, and AV1 "
+        "encoders and the virtual camera's decoders",
+        ("x264", "x265")),
     "openh264-sys2": Native(
         "Cisco OpenH264, and libstdc++ for its C++", "BSD-2-Clause (OpenH264), GPL-3.0-or-later WITH "
         "GCC-exception-3.1 (libstdc++)", PERMISSIVE,

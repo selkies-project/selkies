@@ -8,8 +8,8 @@ Resolves the crate graph of a build configuration with ``cargo metadata``
 (normal dependencies only, the ones compiled into the extension), classifies
 every crate's SPDX license expression as permissive, weak copyleft, or
 copyleft, and overlays the native libraries the ``-sys`` crates link, load, or
-vendor, which crate metadata cannot see (``x264-sys`` is an MIT binding to the
-GPL-2.0-or-later libx264). It fails when a copyleft component appears in a
+vendor, which crate metadata cannot see (``codec-sys`` is an MIT binding to the
+GPL-2.0-or-later libx264 and x265 under its ``x264`` and ``x265`` features). It fails when a copyleft component appears in a
 build configuration that is not allowed to carry it, when a crate has no
 usable license metadata, or when a new native binding shows up that this file
 does not describe yet.
@@ -47,7 +47,6 @@ SETS: Dict[str, List[str]] = {
 # copyleft that is not listed here fails in every configuration, so adding a
 # GPL dependency means adding a line here and in LICENSES.md.
 ALLOWED_COPYLEFT: Dict[str, Tuple[str, ...]] = {
-    "x264-sys": ("gpl",),
     "codec-sys": ("gpl",),
 }
 
@@ -171,21 +170,17 @@ def classify_expression(expression: str) -> int:
 # extension. Every crate named like a native binding (-sys, _sys, -ffi) has to
 # be described here, so a new binding fails the check until it is inventoried.
 NATIVE: Dict[str, Dict[str, object]] = {
-    "x264-sys": dict(
-        library="libx264", license="GPL-2.0-or-later", rank=COPYLEFT,
-        how="linked shared library (bundled into the wheel by auditwheel)",
-        note="striped software H.264, default feature `gpl`"),
     "codec-sys": dict(
-        library="libvpx, SVT-AV1, dav1d, and libde265 on every wheel; x265 "
+        library="libvpx, SVT-AV1, dav1d, and libde265 on every wheel; libx264 and x265 "
                 "(GPL-2.0-or-later) on the GPL wheel, kvazaar on the non-GPL one",
         license="BSD-3-Clause (libvpx, kvazaar; SVT-AV1 with the Alliance for Open Media "
                 "patent license), BSD-2-Clause (dav1d), LGPL-3.0-or-later (libde265)",
-        rank=WEAK, copyleft_features=("x265",),
+        rank=WEAK, copyleft_features=("x264", "x265"),
         how="linked shared libraries, bound at build time from the headers of the copies "
             "that are linked (bundled into the wheels by auditwheel); crate itself MIT OR "
             "Apache-2.0, path dependency",
-        note="the software HEVC/VP8/VP9/AV1 encoders and the virtual camera's AV1 and HEVC "
-             "decoders"),
+        note="the software H.264 (GPL wheel), HEVC, VP8, VP9, and AV1 encoders and the "
+             "virtual camera's AV1 and HEVC decoders"),
     "va-sys": dict(
         library="libva (libva.so.2, libva-drm.so.2)", license="MIT", rank=PERMISSIVE,
         how="dlopen at run time, never linked or shipped; the bindings are generated from "
