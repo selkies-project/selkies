@@ -70,7 +70,7 @@ import { useElementSize, useViewport } from "@/panels/anchor";
 import { PANELS, usePanelContext } from "@/panels/catalog";
 import { StreamStats } from "@/panels/stats";
 import { FloatingToolPanels, SettingsPopup, SoftKeysPanel, ToolButton, ToolboxMenu } from "@/panels/toolbox";
-import { useGamingTool, useLayoutTool, useMainTools, useToolboxHasItems, useTouchTools, type ToolSpec } from "@/panels/tools";
+import { useGamingTool, useLayoutTool, useMainTools, useToolboxHasItems, useTouchTools, useTranslucencyTool, type ToolSpec } from "@/panels/tools";
 import { PROJECT_URL, useDashboard } from "@/state/dashboard";
 import { t } from "@/i18n";
 import { useActions, useBarPrefs, useBarState, type BarState } from "../actions";
@@ -88,7 +88,7 @@ const FAN_BUTTON = "edge-glass size-full rounded-full border border-border shado
 /** The main group's buttons the fan puts first, before and after the toolbox menu, and those it puts last, by key; the rest of the group, the panels that float, sit between. */
 const LEAD = ["settings"];
 const NEXT = ["stats-button", "fullscreen-button"];
-const CHROME = ["figures-strip", "translucency"];
+const CHROME = ["figures-strip"];
 
 /** What the floating button wears while it rests half hidden: the logo's pink and purple as a glow from within (`edge-halo` in `index.css`), which finds the button without lifting it. */
 const GLOW = "edge-halo";
@@ -134,6 +134,7 @@ function Fan({ dock, fabSize, anchorRef, bar, page, onPage, onClose }: FanProps)
   const main = useMainTools(bar);
   const gaming = useGamingTool();
   const layoutTool = useLayoutTool();
+  const translucencyTool = useTranslucencyTool();
   const touch = useTouchTools(bar);
   const hasMenu = useToolboxHasItems();
   const item = fanItemSize();
@@ -146,7 +147,8 @@ function Fan({ dock, fabSize, anchorRef, bar, page, onPage, onClose }: FanProps)
       onClose();
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || bar.menuOpen) return;
+      // A dialog the fan opened (files, apps) takes the Escape first, as it does over the toolbar.
+      if (event.key !== "Escape" || bar.menuOpen || document.querySelector('[data-slot="dialog-content"]')) return;
       event.preventDefault();
       event.stopPropagation();
       onClose();
@@ -173,7 +175,7 @@ function Fan({ dock, fabSize, anchorRef, bar, page, onPage, onClose }: FanProps)
   const floats = main.filter((spec) => ![...LEAD, ...NEXT, ...CHROME].includes(spec.key));
   // A null is the toolbox menu, which is not a spec: it is a menu with a button.
   const all: Array<ToolSpec | null> = [
-    ...named(LEAD), ...(hasMenu ? [null] : []), ...named(NEXT), ...addScreen, ...(gaming ? [gaming] : []), ...touch, ...floats, ...dialogs, ...named(CHROME), ...(layoutTool ? [layoutTool] : []),
+    ...named(LEAD), ...(hasMenu ? [null] : []), ...named(NEXT), ...addScreen, ...(gaming ? [gaming] : []), ...touch, ...floats, ...dialogs, ...named(CHROME), translucencyTool, ...(layoutTool ? [layoutTool] : []),
   ];
 
   // Two rows hold `capacity` buttons; with more than that, the page button takes one slot of each page.
@@ -194,7 +196,10 @@ function Fan({ dock, fabSize, anchorRef, bar, page, onPage, onClose }: FanProps)
         const spec = entries[index];
         const side = outwardSide(layout.angles[index]);
         return (
-          <div key={spec?.key ?? "menu"} data-edge-fan className="fixed z-[2020] animate-in fade-in zoom-in-50 duration-200"
+          // Above the floating panels, the figures strip, and the button itself, which
+          // the fan never overlaps, so an open fan is never covered; the portals'
+          // tooltips and menus stay above it.
+          <div key={spec?.key ?? "menu"} data-edge-fan className="fixed z-[2055] animate-in fade-in zoom-in-50 duration-200"
             style={{ left: point.x, top: point.y, width: item, height: item, animationDelay: `${index * FAN_STAGGER}ms`, animationFillMode: "backwards" }}>
             {spec
               ? <ToolButton spec={spec} side={side} className={FAN_BUTTON} passive />
@@ -243,7 +248,7 @@ function ProjectLink({ dock, fabSize, shown, bind }: ProjectLinkProps) {
       <Tooltip disableHoverablePopup>
         <TooltipTrigger render={
           <a href={PROJECT_URL} target="_blank" rel="noopener noreferrer" aria-label={d.uiTitle} tabIndex={shown ? 0 : -1} aria-hidden={!shown}
-            className="edge-glass flex size-full items-center justify-center rounded-full border bg-background text-foreground shadow-lg outline-none transition-colors hover:text-primary focus-visible:ring-[3px] focus-visible:ring-ring/50" />
+            className="edge-glass flex size-full items-center justify-center rounded-full border bg-background text-foreground shadow-lg outline-none transition-colors hover:text-primary focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-black/70" />
         }>
           <SelkiesLogo width={18} height={18} />
         </TooltipTrigger>
@@ -288,8 +293,13 @@ export default function EdgeLayout() {
   const glowing = !out && !bar.collapsed;
   const at = drag.free ?? dockPoint(dock, viewport, size);
   const showStats = !d.isSecondaryDisplay && d.renderable.stats;
-  // The settings button shuts the fan, so the card hangs where the fan was.
-  const fanBar: BarState = { ...bar, toggleSettings: () => { closeFan(); bar.toggleSettings(); } };
+  // The settings button and a floating panel's shut the fan, so what they open
+  // is not drawn over the fan, nor the fan over it.
+  const fanBar: BarState = {
+    ...bar,
+    toggleSettings: () => { closeFan(); bar.toggleSettings(); },
+    toggleFloating: (id: string) => { closeFan(); bar.toggleFloating(id); },
+  };
 
   const onTap = () => {
     if (drag.endsDrag()) return;
@@ -301,11 +311,18 @@ export default function EdgeLayout() {
 
   return (
     <>
+      {/* Where the button rests, sunk into its edge: a pointer there keeps it out
+          and a click there is the button's, so the button sliding out from under
+          a pointer pressed into a corner does not leave it and sink back. */}
+      {drag.free === null && !bar.collapsed && (
+        <div aria-hidden className="fixed z-[2049]" {...reveal.bind} onClick={onTap}
+          style={{ left: at.x, top: at.y, width: size.width, height: size.height, transform: fabShift(dock, false, false) }} />
+      )}
       <button ref={buttonRef} type="button" aria-label={t('topMenu.showToolbar')} title={t('topMenu.showToolbar')} aria-expanded={fanShown}
         {...drag.handlers}
         {...reveal.bind}
         onClick={onTap}
-        className={cn("edge-button edge-glass fixed z-[2050] flex size-[calc(var(--bar-button)*1.4)] touch-none items-center justify-center rounded-full border bg-background text-foreground outline-none select-none cursor-grab focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing",
+        className={cn("edge-button edge-glass fixed z-[2050] flex size-[calc(var(--bar-button)*1.4)] touch-none items-center justify-center rounded-full border bg-background text-foreground outline-none select-none cursor-grab focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-black/70 active:cursor-grabbing",
           drag.free ? "transition-none" : "transition-[left,top,transform,opacity,box-shadow,border-color] duration-200", out ? "opacity-100" : "opacity-70", glowing ? GLOW : "shadow-lg")}
         style={{ left: at.x, top: at.y, transform: fabShift(dock, out, bar.collapsed) }}>
         <CircleArrowOutUpRight className="size-5" style={{ transform: `rotate(${arrowAngle(dock)}deg)` }} />
@@ -320,7 +337,7 @@ export default function EdgeLayout() {
       {/* The strip's own spot whatever edge the button is docked on: top-center over
           the stream, on the dark ground the sidebar's strip takes. */}
       {showStats && barStrip && (
-        <div className={cn("dark fixed top-2 left-1/2 z-[2040] flex max-w-[calc(100vw-1rem)] -translate-x-1/2 items-center justify-center rounded-md px-2.5 py-1 shadow-lg chrome-panel",
+        <div className={cn("dark pointer-events-none fixed top-2 left-1/2 z-[2040] flex max-w-[calc(100vw-1rem)] -translate-x-1/2 items-center justify-center rounded-md px-2.5 py-1 shadow-lg chrome-panel",
           ["bg-black/70", "bg-black/55", "bg-black/45", "bg-black/35"][translucency])}>
           <StreamStats bar />
         </div>
