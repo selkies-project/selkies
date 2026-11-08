@@ -7,7 +7,9 @@ name: CodeQL
 # Advanced setup rather than the repository's default setup, which builds C and
 # C++ with `autobuild` and finds no build system at the root: the interposers
 # and the test tools each carry their own makefile. Every language here is
-# extracted without a build, so nothing is compiled and nothing is installed.
+# extracted without building the project and with nothing installed; for Rust,
+# the server and its crates, rust-analyzer runs the build scripts and expands
+# the macros from the workspace's Cargo.toml with the runner's toolchain.
 
 on:
   workflow_dispatch:
@@ -29,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [actions, c-cpp, javascript-typescript, python]
+        language: [actions, c-cpp, javascript-typescript, python, rust]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
