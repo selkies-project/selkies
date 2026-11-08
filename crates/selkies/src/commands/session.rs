@@ -782,7 +782,7 @@ fn install_stop_handlers() {
     for signal in [Signal::SIGTERM, Signal::SIGINT, Signal::SIGHUP] {
         let previous = unsafe { sigaction(signal, &action) };
         if let Ok(previous) = previous
-            && previous.handler() == SigHandler::SigIgn
+            && matches!(previous.handler(), SigHandler::SigIgn)
         {
             let _ = unsafe { sigaction(signal, &previous) };
         }

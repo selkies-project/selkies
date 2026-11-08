@@ -22,7 +22,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs::Metadata;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -202,8 +202,7 @@ impl FileRoot {
     /// created is inside the descriptor it came from, so it needs no verification.
     pub fn open_dir_fd(&self, parts: &[String], create: bool) -> Result<OwnedFd, WalkError> {
         let dir_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC;
-        let raw = open(&self.base, dir_flags, Mode::empty())?;
-        let mut fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let mut fd = open(&self.base, dir_flags, Mode::empty())?;
         for part in parts {
             if matches!(part.as_str(), "" | "." | "..") || part.contains('/') {
                 return Err(io::Error::new(
@@ -212,32 +211,17 @@ impl FileRoot {
                 )
                 .into());
             }
-            let opened = match openat(
-                Some(fd.as_raw_fd()),
-                part.as_str(),
-                dir_flags,
-                Mode::empty(),
-            ) {
-                Ok(raw) => raw,
+            let opened = match openat(fd.as_fd(), part.as_str(), dir_flags, Mode::empty()) {
+                Ok(opened) => opened,
                 Err(nix::errno::Errno::ENOENT) if create => {
-                    match mkdirat(
-                        Some(fd.as_raw_fd()),
-                        part.as_str(),
-                        Mode::from_bits_truncate(0o777),
-                    ) {
+                    match mkdirat(fd.as_fd(), part.as_str(), Mode::from_bits_truncate(0o777)) {
                         Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
                         Err(e) => return Err(e.into()),
                     }
-                    openat(
-                        Some(fd.as_raw_fd()),
-                        part.as_str(),
-                        dir_flags,
-                        Mode::empty(),
-                    )?
+                    openat(fd.as_fd(), part.as_str(), dir_flags, Mode::empty())?
                 }
                 Err(e) => return Err(e.into()),
             };
-            let opened = unsafe { OwnedFd::from_raw_fd(opened) };
             let resolved = fd_path(&opened).unwrap_or_default();
             if !self.within(&resolved) {
                 return Err(WalkError::Escape(part.clone()));
@@ -270,8 +254,7 @@ impl FileRoot {
             fd
         } else {
             let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC;
-            let raw = openat(Some(fd.as_raw_fd()), leaf.as_str(), flags, Mode::empty())?;
-            unsafe { OwnedFd::from_raw_fd(raw) }
+            openat(fd.as_fd(), leaf.as_str(), flags, Mode::empty())?
         };
         let Ok(resolved) = fd_path(&fd) else {
             return Ok(None);

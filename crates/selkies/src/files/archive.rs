@@ -29,7 +29,7 @@
 
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -104,7 +104,7 @@ fn walk(
     for entry in listing.flatten() {
         let name = entry.file_name();
         let Ok(st) = fstatat(
-            Some(dir_fd.as_raw_fd()),
+            dir_fd.as_fd(),
             name.as_os_str(),
             AtFlags::AT_SYMLINK_NOFOLLOW,
         ) else {
@@ -120,15 +120,9 @@ fn walk(
     }
     for name in subdirs {
         let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
-        let Ok(raw) = openat(
-            Some(dir_fd.as_raw_fd()),
-            name.as_os_str(),
-            flags,
-            Mode::empty(),
-        ) else {
+        let Ok(sub) = openat(dir_fd.as_fd(), name.as_os_str(), flags, Mode::empty()) else {
             continue;
         };
-        let sub = unsafe { OwnedFd::from_raw_fd(raw) };
         if !walk(&sub, &prefix.join(&name), visit) {
             return false;
         }
@@ -218,11 +212,10 @@ pub fn build_directory_archive(
         let mut failure: Option<ArchiveError> = None;
         walk(dir_fd, Path::new(""), &mut |dir, name, rel, _| {
             let flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC;
-            let Ok(raw) = openat(Some(dir.as_raw_fd()), name, flags, Mode::empty()) else {
+            let Ok(fd) = openat(dir.as_fd(), name, flags, Mode::empty()) else {
                 return true;
             };
-            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-            let Ok(st) = fstat(fd.as_raw_fd()) else {
+            let Ok(st) = fstat(&fd) else {
                 return true;
             };
             if kind(&st) != SFlag::S_IFREG {

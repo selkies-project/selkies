@@ -20,7 +20,7 @@
 //! Another site's page is refused a new folder too: a form posting `text/plain` needs no
 //! preflight, and the browser attaches a cached Basic login to it.
 
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -129,7 +129,7 @@ pub async fn handle_mkdir(State(state): State<Arc<FilesState>>, request: Request
         };
         let parent = root.open_dir_fd(dirs, true)?;
         mkdirat(
-            Some(parent.as_raw_fd()),
+            parent.as_fd(),
             leaf.as_str(),
             Mode::from_bits_truncate(0o777),
         )?;

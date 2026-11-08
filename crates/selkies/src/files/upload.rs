@@ -36,7 +36,7 @@
 //! view-only credentials. A chunked transfer is tracked by its destination, so a slice for a
 //! path whose staging file another slice is still writing is refused rather than interleaved.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -79,7 +79,7 @@ pub fn staging_leaf_name() -> String {
 /// another account planted under the name must not leave the upload writable by it, or a
 /// set-ID program of this user's that it can run.
 pub fn carry_destination_mode(dir_fd: &OwnedFd, staging: &str, dest: &str, euid: u32) {
-    let Ok(st) = fstatat(Some(dir_fd.as_raw_fd()), dest, AtFlags::AT_SYMLINK_NOFOLLOW) else {
+    let Ok(st) = fstatat(dir_fd.as_fd(), dest, AtFlags::AT_SYMLINK_NOFOLLOW) else {
         return;
     };
     if SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG || st.st_uid != euid
@@ -87,12 +87,7 @@ pub fn carry_destination_mode(dir_fd: &OwnedFd, staging: &str, dest: &str, euid:
         return;
     }
     let mode = Mode::from_bits_truncate(st.st_mode & 0o777);
-    if let Err(e) = fchmodat(
-        Some(dir_fd.as_raw_fd()),
-        staging,
-        mode,
-        FchmodatFlags::FollowSymlink,
-    ) {
+    if let Err(e) = fchmodat(dir_fd.as_fd(), staging, mode, FchmodatFlags::FollowSymlink) {
         log::debug!(target: "server", "Could not carry the mode of {dest} onto the staged upload: {e}");
     }
 }
@@ -102,18 +97,13 @@ pub fn carry_destination_mode(dir_fd: &OwnedFd, staging: &str, dest: &str, euid:
 /// object the confinement opened rather than re-walking a path that could have been swapped.
 pub fn finalize_upload(dir_fd: &OwnedFd, staging: &str, dest: &str) -> std::io::Result<()> {
     carry_destination_mode(dir_fd, staging, dest, nix::unistd::geteuid().as_raw());
-    renameat(
-        Some(dir_fd.as_raw_fd()),
-        staging,
-        Some(dir_fd.as_raw_fd()),
-        dest,
-    )?;
+    renameat(dir_fd.as_fd(), staging, dir_fd.as_fd(), dest)?;
     Ok(())
 }
 
 /// Remove `leaf` under `dir_fd`, ignoring a file that is already gone or cannot go.
 fn remove_quietly(dir_fd: &OwnedFd, leaf: &str) {
-    let _ = unlinkat(Some(dir_fd.as_raw_fd()), leaf, UnlinkatFlags::NoRemoveDir);
+    let _ = unlinkat(dir_fd.as_fd(), leaf, UnlinkatFlags::NoRemoveDir);
 }
 
 /// The leaf of a staging path.
@@ -484,7 +474,7 @@ async fn stream_upload_body(
     let (fd, leaf_name) = (dir_fd.clone(), leaf.to_string());
     let raw = tokio::task::spawn_blocking(move || {
         openat(
-            Some(fd.as_raw_fd()),
+            fd.as_fd(),
             leaf_name.as_str(),
             flags,
             Mode::from_bits_truncate(0o644),
@@ -493,7 +483,7 @@ async fn stream_upload_body(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    let std_file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+    let std_file = std::fs::File::from(raw);
     let mut file = tokio::fs::File::from_std(std_file);
     let mut written = 0u64;
     let mut stream = body.into_data_stream();

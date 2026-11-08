@@ -54,7 +54,7 @@ thiserror = "2"
 parking_lot = "0.12"
 async-trait = "0.1"
 libc = "0.2"
-nix = { version = "0.29", features = ["fs", "socket", "net", "hostname", "signal", "process", "user", "poll", "ioctl"] }
+nix = { version = "0.31", features = ["fs", "socket", "net", "hostname", "signal", "process", "user", "poll", "ioctl"] }
 x11rb = { version = "0.14", features = ["xtest", "xfixes", "randr", "xkb", "xinput", "render", "res"] }
 libpulse-binding = "2.30"
 sysinfo = "0.40"
