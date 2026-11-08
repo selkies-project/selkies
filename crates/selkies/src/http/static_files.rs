@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use axum::body::Body;
 use axum::extract::{OriginalUri, Request, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
@@ -85,7 +85,8 @@ fn no_cache(response: &mut Response) {
 
 /// The route for everything no API route took: `{prefix}/` is the entry page, after the
 /// IPv6-loopback check, and `{prefix}/<file>` a file of the client; anything outside the
-/// prefix, or with no web content found, is 404.
+/// prefix, or with no web content found, is 404. Under the prefix, a method other than `GET`
+/// and `HEAD` is 405, as the client's catch-all route answered it in 2.2.1.
 pub async fn fallback(
     State(state): State<AppState>,
     OriginalUri(original): OriginalUri,
@@ -100,6 +101,13 @@ pub async fn fallback(
         return StatusCode::NOT_FOUND.into_response();
     };
     let (parts, _body) = request.into_parts();
+    if parts.method != Method::GET && parts.method != Method::HEAD {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, HeaderValue::from_static("GET, HEAD"))],
+        )
+            .into_response();
+    }
     if rel.is_empty() {
         return index(&state, root, &parts).await;
     }

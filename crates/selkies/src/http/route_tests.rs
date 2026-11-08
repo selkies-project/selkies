@@ -1672,6 +1672,14 @@ async fn static_client() {
     );
     let r = app.call("HEAD", "/index.html", &[]).await;
     assert_eq!(r.status, 200, "HEAD answers");
+    for path in ["/", "/index.html", "/api/file-manager/rename"] {
+        let r = app.call("POST", path, &[]).await;
+        assert!(
+            r.status == 405 && r.header("allow") == Some("GET, HEAD"),
+            "a POST to {path} the client's catch-all takes is 405, not {}",
+            r.status
+        );
+    }
     app.stop().await;
 }
 
