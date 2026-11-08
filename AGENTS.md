@@ -7,10 +7,8 @@ features are only for standalone wheels. The web client is under `web/`: `selkie
 core), `selkies-dashboard` (the dashboard built on it), and `universal-touch-gamepad`; `addons/` holds what
 runs beside Selkies rather than in it: the interposers, `fake-udev`, the images, and the integrations.
 
-HTTP and WebSocket serving uses Axum and Tower because the existing `http::app` composes authentication, bounded
-request handling, operator and file routes, static content, and WebSocket upgrades in one router, with the same
-middleware exercised in `crates/selkies/src/http/route_tests.rs` and through the real-listener tests in `listen.rs`.
-Preserve that composition and its zero-copy streaming paths rather than introducing a second web framework.
+One crate serves each capability: where the tree already depends on a crate for something, a second one for the same
+thing is not added beside it.
 
 This file holds working conventions and the cross-cutting invariants no single module reveals. Mechanism and
 rationale live in the docblock of the module that implements them, never here.
