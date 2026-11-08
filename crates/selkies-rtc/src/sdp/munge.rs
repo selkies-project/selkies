@@ -308,16 +308,25 @@ fn rewrite_sps_pps(section: &str) -> String {
     out
 }
 
-const XGOOGLE: &str = "x-google-max-bitrate=300000;x-google-min-bitrate=0";
+/// The ceiling on a display's video section, in kbit/s: high enough never to bind.
+const DISPLAY_CEILING_KBPS: u32 = 300_000;
 
-/// Raise the bandwidth ceiling of every video section.
+/// The ceiling on the webcam's video section, in kbit/s: the 2.5 Mbit/s the WebSockets
+/// uplink encodes the same camera at (`webcam-capture.ts`).
+const WEBCAM_CEILING_KBPS: u32 = 2_500;
+
+/// Set the bandwidth ceiling of every video section.
 ///
-/// A generous `b=AS` keeps the browser's REMB from throttling a high-bitrate desktop stream
-/// (a cap hint, not a target), and `x-google-max-bitrate` mirrors it on the Chrome receive
-/// side. Both are scoped to each video section: the `b=AS` check looks only inside it, and
-/// the line goes after the section's own `c=`, or right after the `m=video` line when the
-/// section inherits the session-level `c=`. The x-google hints go on the fmtp of every
-/// video payload type except RTX; a codec without an fmtp gets one carrying just the hints.
+/// A generous `b=AS` on a display's section keeps the browser's REMB from throttling a
+/// high-bitrate desktop stream (a cap hint, not a target), and `x-google-max-bitrate`
+/// mirrors it on the Chrome receive side. The one section this side only receives is the
+/// client's webcam, where the same two lines bound what the browser sends: there they carry
+/// the rate the WebSockets uplink encodes the camera at, rather than letting the camera
+/// take as much of the client's upload as the browser's estimate allows. Both are scoped to
+/// each video section: the `b=AS` check looks only inside it, and the line goes after the
+/// section's own `c=`, or right after the `m=video` line when the section inherits the
+/// session-level `c=`. The x-google hints go on the fmtp of every video payload type except
+/// RTX; a codec without an fmtp gets one carrying just the hints.
 pub fn munge_video_bandwidth(sdp: &str) -> String {
     let lines: Vec<&str> = sdp.split("\r\n").collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len() + 8);
@@ -335,12 +344,18 @@ pub fn munge_video_bandwidth(sdp: &str) -> String {
             section.push(lines[i].to_owned());
             i += 1;
         }
+        let kbps = if section.iter().any(|s| s == "a=recvonly") {
+            WEBCAM_CEILING_KBPS
+        } else {
+            DISPLAY_CEILING_KBPS
+        };
+        let xgoogle = format!("x-google-max-bitrate={kbps};x-google-min-bitrate=0");
         if !section.iter().any(|s| s.starts_with("b=AS:")) {
             let insert_at = section
                 .iter()
                 .position(|s| s.starts_with("c="))
                 .map_or(1, |c| c + 1);
-            section.insert(insert_at.min(section.len()), "b=AS:300000".to_owned());
+            section.insert(insert_at.min(section.len()), format!("b=AS:{kbps}"));
         }
         let video_pts: Vec<String> = section
             .iter()
@@ -355,12 +370,12 @@ pub fn munge_video_bandwidth(sdp: &str) -> String {
             if let Some(index) = section.iter().position(|s| s.starts_with(&fmtp_prefix)) {
                 if !section[index].contains("x-google-max-bitrate") {
                     let rest = section[index][fmtp_prefix.len()..].to_owned();
-                    section[index] = format!("{fmtp_prefix}{XGOOGLE};{rest}");
+                    section[index] = format!("{fmtp_prefix}{xgoogle};{rest}");
                 }
             } else {
                 let rtpmap_prefix = format!("a=rtpmap:{pt} ");
                 if let Some(index) = section.iter().position(|s| s.starts_with(&rtpmap_prefix)) {
-                    section.insert(index + 1, format!("{fmtp_prefix}{XGOOGLE}"));
+                    section.insert(index + 1, format!("{fmtp_prefix}{xgoogle}"));
                 }
             }
         }
