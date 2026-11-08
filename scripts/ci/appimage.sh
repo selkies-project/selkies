@@ -4,7 +4,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Build selkies-<ver>-<arch>.AppImage on the runner for this architecture.
-# Builds the server inside a manylinux2014 container
+# Builds the server inside a manylinux container
 # (infra/appimage/build-server.sh), uses rattler-build to package it as a
 # conda package, then assembles the AppImage with linuxdeploy and the conda
 # plugin in infra/appimage. The web client has to be in dist/web already
@@ -16,10 +16,15 @@ set -eux
 
 # linuxdeploy names its artifacts after `uname -m`
 ARCH="${1:-$(uname -m)}"
-# The AppImage's glibc floor, manylinux2014's: the server is built there, every
-# conda environment is solved for it, and every file the AppImage carries is
-# checked against it
-export GLIBC_FLOOR=2.17
+# The image the server is built in, the wheels' own, and its glibc, the
+# AppImage's floor, which every conda environment is solved for and every file
+# the AppImage carries is checked against: manylinux2014 on x86_64, and on
+# aarch64 manylinux_2_28, whose compiler builds the codecs' SVE2 kernels
+case "${ARCH}" in
+  x86_64) BUILD_IMAGE="quay.io/pypa/manylinux2014_${ARCH}"; GLIBC_FLOOR=2.17 ;;
+  *) BUILD_IMAGE="quay.io/pypa/manylinux_2_28_${ARCH}"; GLIBC_FLOOR=2.28 ;;
+esac
+export GLIBC_FLOOR
 
 cd "$(readlink -f "$(dirname "$0")")/../.."
 WORK="${PWD}/build/appimage"
@@ -50,12 +55,12 @@ esac
 MAMBA="${WORK}/conda/micromamba"
 addons/base/fetch-verified release mamba-org/micromamba-releases latest "${MAMBA_ASSET}" "${MAMBA}"
 chmod +x "${MAMBA}"
-scripts/ci/retry.sh 5 60 docker pull "quay.io/pypa/manylinux2014_${ARCH}"
+scripts/ci/retry.sh 5 60 docker pull "${BUILD_IMAGE}"
 docker run --rm \
     -v "${PWD}:/repo:ro" \
     -v "${WORK}:/work" \
     -e SELKIES_VERSION -e GLIBC_FLOOR -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-    "quay.io/pypa/manylinux2014_${ARCH}" \
+    "${BUILD_IMAGE}" \
     sh /repo/infra/appimage/build-server.sh
 
 # 1) rattler-build: selkies conda package from that server

@@ -5,8 +5,10 @@ build-backend = "setuptools.build_meta"
 [tool.cibuildwheel]
 build = "cp311-*"
 archs = [ "x86_64", "aarch64" ]
+# glibc 2.17 on x86_64; on aarch64, manylinux_2_28, whose compiler builds the codecs' SVE2
+# kernels (CentOS 7's knows no Armv9).
 manylinux-x86_64-image = "manylinux2014"
-manylinux-aarch64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux_2_28"
 skip = "*t-*"
 
 [tool.cibuildwheel.environment]

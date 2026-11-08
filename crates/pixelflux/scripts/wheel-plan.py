@@ -37,7 +37,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNNERS = {"x86_64": "ubuntu-latest", "aarch64": "ubuntu-26.04-arm"}
-DEFAULT_IMAGES = {"manylinux": "manylinux2014", "musllinux": "musllinux_1_2"}
+DEFAULT_IMAGES = {"manylinux": "manylinux_2_28", "musllinux": "musllinux_1_2"}
 
 
 def config():

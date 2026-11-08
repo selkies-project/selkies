@@ -3,9 +3,10 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Build the selkies wheel for the platform of the manylinux2014 or
-# musllinux_1_2 image this runs in, the images pixelflux's and pcmflux's own
-# wheels are built in, and repair it so a plain `pip install` runs it there.
+# Build the selkies wheel for the platform of the manylinux2014 (x86_64),
+# manylinux_2_28 (aarch64), or musllinux_1_2 image this runs in, the images
+# pixelflux's and pcmflux's own wheels are built in, and repair it so a plain
+# `pip install` runs it there.
 #
 # The server is built by infra/packaging/server.sh --wheel, with every codec
 # library linked in from the source pixelflux's wheels build (codecs.sh) and

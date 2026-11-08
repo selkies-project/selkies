@@ -3,8 +3,8 @@ name: Packages
 # Native packages: .deb (Ubuntu/Debian), .rpm (Fedora/EL), .apk (Alpine),
 # .pkg.tar.zst (Arch), and .AppImage (x86_64 + aarch64, via rattler-build +
 # linuxdeploy-plugin-conda). Each builds the Rust server inside a container of
-# the target distribution (the AppImage's inside manylinux2014, its glibc
-# floor); a native package installs it at /usr/bin/selkies with the web client
+# the target distribution (the AppImage's inside the wheels' manylinux image,
+# its glibc floor); a native package installs it at /usr/bin/selkies with the web client
 # at /usr/share/selkies/web and declares the packages behind the libraries the
 # binary links and loads, as that distribution names them, and the AppImage
 # carries it in a conda environment of conda-forge's libraries. pixelflux and
@@ -233,13 +233,22 @@ jobs:
         run: ./scripts/ci/appimage.sh "${{ matrix.arch.name }}"
       - name: Check the AppImage on a pristine host at its glibc floor
         # The build checked it on this runner, whose own libraries stand in for
-        # any the AppImage forgets; here the host is CentOS 7, glibc 2.17, with
-        # libgbm alone (from the vault, CentOS 7 being past its end of life)
+        # any the AppImage forgets; here the host has the AppImage's glibc and
+        # libgbm alone: CentOS 7 on x86_64 (its packages from the vault, CentOS
+        # 7 being past its end of life), AlmaLinux 8 on aarch64
         run: |
-          scripts/ci/retry.sh 5 60 docker pull centos:7
+          case "${{ matrix.arch.name }}" in
+            x86_64)
+              host=centos:7
+              install='sed -i -e "s/^mirrorlist/#mirrorlist/" -e "s|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|" /etc/yum.repos.d/CentOS-*.repo && yum install -y -q mesa-libgbm' ;;
+            *)
+              host=almalinux:8
+              install='dnf install -y -q mesa-libgbm' ;;
+          esac
+          scripts/ci/retry.sh 5 60 docker pull "${host}"
           docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" \
             -v "${GITHUB_WORKSPACE}/scripts/ci/verify-appimage.sh:/verify.sh:ro" \
-            centos:7 sh -c 'sed -i -e "s/^mirrorlist/#mirrorlist/" -e "s|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|" /etc/yum.repos.d/CentOS-*.repo && yum install -y -q mesa-libgbm > /dev/null && sh /verify.sh /out/*.AppImage'
+            "${host}" sh -c "${install} > /dev/null && sh /verify.sh /out/*.AppImage"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: appimage-${{ matrix.arch.name }}

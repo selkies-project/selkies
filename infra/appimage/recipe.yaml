@@ -4,8 +4,9 @@
 #
 # rattler-build recipe producing the `selkies` conda package (used both for
 # the AppImage environment and as a portable conda distribution artifact): the
-# server scripts/ci/appimage.sh built inside manylinux2014, with its web
-# client, and the conda-forge libraries it links as its run dependencies.
+# server scripts/ci/appimage.sh built inside the wheels' manylinux image, with
+# its web client, and the conda-forge libraries it links as its run
+# dependencies.
 
 context:
   name: selkies
@@ -32,7 +33,7 @@ build:
     - mkdir -p "${PREFIX}/share/selkies"
     - cp -r usr/share/selkies/web "${PREFIX}/share/selkies/web"
   dynamic_linking:
-    # The C library the server was built against, glibc 2.17, and the
+    # The C library the server was built against, the AppImage's floor, and the
     # graphics stack are the host's: libgbm has to be the one beside the
     # host's GPU driver for the GPU to be reachable at all
     missing_dso_allowlist:

@@ -6,8 +6,9 @@
 # Build PulseAudio's client libraries alone (libpulse, libpulse-simple, and the
 # libpulsecommon they share), with libsndfile linked into libpulsecommon, for
 # the wheel images, whose own libpulse a wheel would carry with what it links:
-# CentOS 7's (manylinux2014) is 10.0 and takes D-Bus and the X11 client
-# libraries along, and Alpine's (musllinux) those and libsndfile's codecs. Each
+# CentOS 7's (manylinux2014) is 10.0 and AlmaLinux 8's (manylinux_2_28) 14.0,
+# both taking D-Bus and the X11 client libraries along, and Alpine's
+# (musllinux) those and libsndfile's codecs. Each
 # source is checked against the SHA-256 pinned here (PulseAudio's is the sum its
 # release publishes). meson and ninja come from the caller's PATH.
 #

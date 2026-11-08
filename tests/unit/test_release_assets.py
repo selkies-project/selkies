@@ -30,7 +30,7 @@ DELIVERED = (
     ("the sdist", "selkies-2.0.0rc0.tar.gz"),
     ("a pixelflux manylinux wheel", "pixelflux-2.0.0rc0-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"),
     ("a pixelflux musllinux wheel", "pixelflux-2.0.0rc0-cp311-abi3-musllinux_1_2_aarch64.whl"),
-    ("a pcmflux manylinux wheel", "pcmflux-2.0.0rc0-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl"),
+    ("a pcmflux manylinux wheel", "pcmflux-2.0.0rc0-cp311-abi3-manylinux_2_28_aarch64.whl"),
     ("a pcmflux musllinux wheel", "pcmflux-2.0.0rc0-cp311-abi3-musllinux_1_2_x86_64.whl"),
     ("the AppImage", "selkies-2.0.0rc0-x86_64.AppImage"),
     ("the deb", "selkies_2.0.0.rc0-1.ubuntu26.04_amd64.deb"),

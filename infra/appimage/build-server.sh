@@ -4,7 +4,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Build the server the AppImage's conda package carries (run inside the
-# manylinux2014 container scripts/ci/appimage.sh starts, with the checkout at
+# manylinux container scripts/ci/appimage.sh starts, with the checkout at
 # /repo and its work directory, holding micromamba, at /work), staging it with
 # its web client under /work/server.
 #

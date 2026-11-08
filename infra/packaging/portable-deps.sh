@@ -4,10 +4,10 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Install what infra/packaging/server.sh needs to build the server inside a
-# manylinux2014 or musllinux_1_2 image, the images pixelflux's and pcmflux's
-# own wheels are built in: the selkies wheel and the AppImage's server are
-# built there, glibc 2.17 being their floor. A manylinux_2_28 image (AlmaLinux
-# 8) is served as well.
+# manylinux2014 (x86_64), manylinux_2_28 (aarch64), or musllinux_1_2 image,
+# the images pixelflux's and pcmflux's own wheels are built in: the selkies
+# wheel and the AppImage's server are built there, the image's glibc being
+# their floor.
 #
 # The headers of every library the server links come from the image's own
 # distribution, as pixelflux's wheels take them: CentOS 7's base and updates,
@@ -41,7 +41,8 @@ retry_install() {
 if command -v dnf > /dev/null; then
     retry_install dnf install -y --disablerepo='epel*' git nasm bison clang clang-devel \
         pixman-devel libxcb-devel libdrm-devel libinput-devel mesa-libgbm-devel mesa-libEGL-devel \
-        wayland-devel systemd-devel pulseaudio-libs-devel
+        wayland-devel systemd-devel
+    pulse_libdir=lib64
 elif command -v yum > /dev/null; then
     # manylinux2014: CentOS 7, glibc 2.17. Its nasm is older than x264, dav1d,
     # and SVT-AV1 take, and its clang older than bindgen's, so nasm is built
@@ -73,16 +74,14 @@ else
 fi
 /opt/python/cp312-cp312/bin/pip install --retries 5 meson ninja "$@"
 if [ -n "${centos7:-}" ]; then
-    # bindgen finds libclang where clang-sys looks (build.sh hands it GCC's
+    # bindgen finds libclang where clang-sys looks (server.sh hands it GCC's
     # builtin headers, which this libclang carries none of).
     ln -sf "$(/opt/python/cp312-cp312/bin/python -c 'import clang, os; print(os.path.join(os.path.dirname(clang.__file__), "native", "libclang.so"))')" \
         /usr/lib64/libclang.so
 fi
-if [ -n "${pulse_libdir:-}" ]; then
-    # CentOS 7's libpulse is 10.0 and takes D-Bus and X11 along, and Alpine's
-    # those and libsndfile's codecs: pcmflux's script builds the current client
-    # libraries alone in their place.
-    PATH="/opt/python/cp312-cp312/bin:${PATH}" sh "${REPO}/crates/pcmflux/scripts/build-libpulse.sh" /usr "${pulse_libdir}"
-    # glibc's loader reads its cache; musl's searches /usr/lib as it is
-    if [ -n "${centos7:-}" ]; then ldconfig; fi
-fi
+# Each distribution's libpulse takes D-Bus and X11 along, and Alpine's
+# libsndfile's codecs as well: pcmflux's script builds the current client
+# libraries alone in their place.
+PATH="/opt/python/cp312-cp312/bin:${PATH}" sh "${REPO}/crates/pcmflux/scripts/build-libpulse.sh" /usr "${pulse_libdir}"
+# glibc's loader reads its cache; musl's searches /usr/lib as it is
+if [ "${pulse_libdir}" = lib64 ]; then ldconfig; fi

@@ -5,8 +5,10 @@ build-backend = "setuptools.build_meta"
 [tool.cibuildwheel]
 build = "cp311-*"
 archs = [ "x86_64", "aarch64" ]
+# glibc 2.17 on x86_64; on aarch64, manylinux_2_28, whose compiler builds the codecs' SVE2
+# kernels (CentOS 7's knows no Armv9).
 manylinux-x86_64-image = "manylinux2014"
-manylinux-aarch64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux_2_28"
 skip = "*t-*"
 
 [tool.cibuildwheel.environment]
@@ -31,26 +33,26 @@ before-all = """
     echo "${sum%% *}  /tmp/rustup-init" | sha256sum -c -
     chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal && rm -f /tmp/rustup-init
     # libpulse (libpulse-sys links it) + libopus (opusic-sys builds the copy it vendors with
-    # cmake and links it statically). gcc/cmake cover the -sys build steps. All four come from
-    # the image's own repositories, so no third-party one (EPEL, RPM Fusion) is added.
+    # cmake and links it statically). libpulse is built from its current release
+    # (scripts/build-libpulse.sh) in every image, since each distribution's takes D-Bus and the
+    # X11 client libraries along; gcc/cmake cover the -sys build steps, from the image's own
+    # repositories, so no third-party one (EPEL, RPM Fusion) is added.
     if command -v dnf; then
         dnf install -y \
-            pulseaudio-libs-devel \
             gcc \
             gcc-c++ \
             cmake && \
+        /opt/python/cp311-cp311/bin/pip install meson ninja && \
+        PATH="/opt/python/cp311-cp311/bin:$PATH" sh {package}/scripts/build-libpulse.sh /usr lib64 && \
         ldconfig
 
-    # manylinux2014 (CentOS 7): its devtoolset compilers and the image's cmake build libopus,
-    # and libpulse is built from its current release (scripts/build-libpulse.sh), since the
-    # image's is 10.0 and takes D-Bus and X11 along.
+    # manylinux2014 (CentOS 7): its devtoolset compilers and the image's cmake build libopus.
     elif command -v yum; then
         /opt/python/cp311-cp311/bin/pip install meson ninja && \
         PATH="/opt/python/cp311-cp311/bin:$PATH" sh {package}/scripts/build-libpulse.sh /usr lib64 && \
         ldconfig
 
-    # musllinux (Alpine): libpulse is built the same way, since Alpine's takes D-Bus, the X11
-    # client libraries, and libsndfile's codecs along.
+    # musllinux (Alpine), whose libpulse takes libsndfile's codecs along as well.
     elif command -v apk; then
         apk add --no-cache \
             build-base \

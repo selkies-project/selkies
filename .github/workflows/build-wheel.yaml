@@ -40,7 +40,7 @@ jobs:
             sdist: "1"
           - arch: aarch64
             runner: ubuntu-26.04-arm
-            platform: manylinux2014
+            platform: manylinux_2_28
           - arch: x86_64
             runner: ubuntu-latest
             platform: musllinux_1_2

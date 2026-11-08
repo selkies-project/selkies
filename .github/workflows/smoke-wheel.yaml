@@ -99,13 +99,17 @@ jobs:
           /tmp/selkies-venv/bin/selkies --help >/dev/null && echo "selkies --help OK"
           test -f /tmp/selkies-venv/share/selkies/web/index.html && echo "bundled web client OK"
           /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()['command'][0] == '/tmp/selkies-venv/bin/selkies'; print('Jupyter entry point OK')"
-      - name: Install smoke test (oldest Python and glibc, on manylinux2014)
+      - name: Install smoke test (oldest Python, at the wheel's glibc floor)
         # The same checks on the oldest interpreter CI keeps (the wheel itself
-        # names no floor) and on CentOS 7's glibc 2.17, the wheel's own floor:
-        # manylinux2014 carries both for both architectures, and GitHub builds
-        # no Python 3.9 for the Ubuntu 26.04 runners
+        # names no floor) and on the glibc the wheel is built for, in the image
+        # it is built in, which carries both (GitHub builds no Python 3.9 for
+        # the Ubuntu 26.04 runners): CentOS 7's 2.17 on x86_64, AlmaLinux 8's
+        # 2.28 on aarch64
         run: |
-          image="quay.io/pypa/manylinux2014_$(uname -m)"
+          case "$(uname -m)" in
+            x86_64) image="quay.io/pypa/manylinux2014_x86_64" ;;
+            *) image="quay.io/pypa/manylinux_2_28_$(uname -m)" ;;
+          esac
           scripts/ci/retry.sh 5 60 docker pull "${image}"
           docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/scripts/ci/retry.sh:/retry.sh:ro" "${image}" sh -euxc '
             /retry.sh 5 60 yum install -y -q mesa-libgbm pixman

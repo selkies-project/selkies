@@ -54,7 +54,7 @@ check("abi3 is refused on free-threaded CPython",
 check("abi3 is refused for another project", not selector.compatible(
     "pcmflux", ABI3, {Tag("cp311", "abi3", P)}))
 check("abi3 is refused for another platform", not selector.compatible(
-    "pixelflux", ABI3, {Tag("cp311", "abi3", "manylinux_2_17_aarch64")}))
+    "pixelflux", ABI3, {Tag("cp311", "abi3", "manylinux_2_28_aarch64")}))
 check("a malformed filename is not a wheel", not selector.compatible(
     "pixelflux", "pixelflux-2.3.0-abi3.tar.gz", {Tag("cp311", "abi3", P)}))
 check("an unrelated abi3 asset is not accepted as pcmflux", not selector.compatible(
