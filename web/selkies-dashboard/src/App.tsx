@@ -27,10 +27,17 @@ import PlayerGamepadButton from "@/panels/player-gamepad-button";
 import { ScreenPlacement } from "@/panels/screen-placement";
 import { SettingsProvider } from "@/state/settings-context";
 import { DashboardProvider, useDashboard } from "@/state/dashboard";
+import { useBarPrefs } from "@/layouts/actions";
 
 /** The layout and what sits beside it, read from the shared state. */
 function Chrome() {
   const d = useDashboard();
+  // Mirrored on the document so the surface tokens tint (`index.css` rules)
+  // ahead of whichever panel the layout draws next.
+  const { translucency } = useBarPrefs();
+  React.useEffect(() => {
+    document.documentElement.dataset.translucency = String(translucency);
+  }, [translucency]);
   const { component: Layout, stats: Stats } = d.layout;
   if (d.isViewer) return <PlayerGamepadButton touchOnly isActive={d.touchGamepad} onToggle={d.toggleTouchGamepad} />;
   if (!d.renderable.chrome) return null;

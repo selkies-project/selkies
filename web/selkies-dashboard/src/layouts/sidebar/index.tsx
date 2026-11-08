@@ -30,11 +30,10 @@ import { CardList } from "@/panels/catalog-bodies";
 import { SwitchRow } from "@/panels/controls";
 import { SoftKeys } from "@/panels/soft-keys";
 import { CiteLink } from "@/panels/shortcuts";
-import { StatsSection } from "@/panels/stats-section";
+import { StatsSection } from "@/panels/stats";
 import { PROJECT_URL, useDashboard } from "@/state/dashboard";
-import { useSettings } from "@/state/settings-context";
 import { t } from "@/i18n";
-import { useActions, useChromeEvents, type Action } from "./actions";
+import { useActions, useChromeEvents, type Action } from "../actions";
 import "./sidebar.css";
 
 /** Height of the handle in pixels, which its drag keeps inside the window. */
@@ -85,7 +84,6 @@ function Section({ id, title, open, onToggle, children }: SectionProps) {
 export default function SidebarLayout() {
   const d = useDashboard();
   const ctx = usePanelContext();
-  const settings = useSettings();
   const [open, setOpen] = React.useState(false);
   const [sections, setSections] = React.useState<Record<string, boolean>>({});
   // The handle's place down the left edge, kept as a fraction of the window's
@@ -126,7 +124,7 @@ export default function SidebarLayout() {
       return (
         <>
           <SwitchRow id="statsStripToggle" label={t("sections.stats.stripLabel")} checked={d.statsOpen} onToggle={() => d.setStatsOpen(!d.statsOpen)} />
-          <StatsSection active={shown && !!sections.stats} framerate={settings.framerate} />
+          <StatsSection active={shown && !!sections.stats} />
         </>
       );
     }

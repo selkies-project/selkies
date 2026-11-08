@@ -173,7 +173,7 @@ impl Default for HttpConfig {
             frame_ancestors: "'self'".into(),
             enable_dual_mode: false,
             ui_layout: "default".into(),
-            ui_layout_allowed: vec!["default".into(), "wish".into()],
+            ui_layout_allowed: vec!["default".into(), "wish".into(), "edge".into()],
             enable_metrics_http: false,
             enable_collab: true,
             web_root: String::new(),

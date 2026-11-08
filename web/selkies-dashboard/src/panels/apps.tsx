@@ -4,9 +4,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
-import { Clip } from "@/panels/controls";
+import { Clip, NativeSelect } from "@/panels/controls";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -58,8 +58,22 @@ interface App {
     description: string;
     /** Icon file name under the catalog's image directory. */
     icon: string;
+    /** The one category the catalog files it under (`Game`, `Office`, `AudioVideo`), absent from a catalog that names none. */
+    category?: string;
     /** Listed but not installable. */
     disabled?: boolean;
+}
+
+/**
+ * The name a category is shown by: the catalog's own value, with a space
+ * where a camel-cased word runs on (`AudioVideo` reads `Audio Video`). The
+ * names come from the catalog, as an app's name and description do, so a
+ * category it adds later lists without a change here.
+ * @param category A catalog `category` value.
+ * @returns The label for the filter.
+ */
+function categoryLabel(category: string): string {
+    return category.replace(/([a-z])([A-Z])/g, '$1 $2');
 }
 
 /**
@@ -108,8 +122,11 @@ function AppIcon({ app, src, className }: { app: App; src: string; className?: s
 }
 
 /**
- * Renders the catalog grid, its search box, and the per-app detail view
- * inside a dialog controlled by the parent.
+ * Renders the catalog grid, its search box and category filter, and the
+ * per-app detail view inside a dialog controlled by the parent. The filter
+ * lists the categories the catalog's entries carry (`category` in the
+ * proot-apps metadata) and narrows the grid together with the search; it is
+ * left out of a catalog that names fewer than two.
  *
  * The popup holds no fixed width: it spans the viewport on small screens and
  * tracks 90% of it up to 72rem on larger ones, and the grid reflows between
@@ -133,6 +150,8 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     const [error, setError] = useState<string | null>(null);
     const [fetchAttempt, setFetchAttempt] = useState(0);
     const [searchTerm, setSearchTerm] = useState('');
+    // The category the grid is narrowed to; empty lists every category.
+    const [category, setCategory] = useState('');
     const [selectedApp, setSelectedApp] = useState<App | null>(null);
     const [installedApps, setInstalledApps] = useState<string[]>(readInstalledApps);
     const [commandTick, setCommandTick] = useState(0);
@@ -267,9 +286,24 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         postAppCommand('launch', appName);
     };
 
+    // The categories the installable apps are filed under, sorted by their
+    // shown name. A catalog that names fewer than two has nothing to choose
+    // between.
+    const categories = useMemo(() => {
+        const names = new Set<string>();
+        for (const app of appData?.include ?? []) {
+            if (!app.disabled && app.category) names.add(app.category);
+        }
+        return [...names]
+            .map(name => ({ value: name, label: categoryLabel(name) }))
+            .sort((a, b) => a.label.localeCompare(b.label));
+    }, [appData]);
+    const categoryOptions = [{ value: '', label: t('appsModal.allCategories') }, ...categories];
+
     const needle = searchTerm.toLowerCase();
     const filteredApps = appData?.include?.filter(app =>
         !app.disabled &&
+        (!category || app.category === category) &&
         (app.full_name?.toLowerCase().includes(needle) ||
          app.name?.toLowerCase().includes(needle) ||
          app.description?.toLowerCase().includes(needle))
@@ -289,6 +323,16 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                         <DialogDescription>{t('apps.subtitle')}</DialogDescription>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
+                        {categories.length > 1 && (
+                            <NativeSelect
+                                aria-label={t('appsModal.categoryLabel')}
+                                title={t('appsModal.categoryLabel')}
+                                value={category}
+                                options={categoryOptions}
+                                onValueChange={setCategory}
+                                className="h-9 w-36 text-sm sm:w-44"
+                            />
+                        )}
                         <div className="relative">
                             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
                             <Input
