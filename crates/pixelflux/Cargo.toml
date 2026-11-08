@@ -31,7 +31,6 @@ wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 memmap2 = "0.9"
 crossbeam-channel = "0.5"
-calloop = "0.14"
 turbojpeg = "1.3" 
 rayon = "1.10"
 # Software H.264 is one of two encoders, chosen at build time by the features below:

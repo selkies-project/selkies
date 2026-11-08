@@ -44,16 +44,13 @@ rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "
 flate2 = "1"
 base64 = "0.22"
 rand = "0.9"
-uuid = { version = "1", features = ["v4"] }
 aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
-hex = "0.4"
 regex = "1"
 percent-encoding = "2"
 url = "2"
 mime_guess = "2"
 thiserror = "2"
 parking_lot = "0.12"
-dashmap = "6"
 async-trait = "0.1"
 libc = "0.2"
 nix = { version = "0.29", features = ["fs", "socket", "net", "hostname", "signal", "process", "user", "poll", "ioctl"] }

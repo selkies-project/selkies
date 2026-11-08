@@ -1230,7 +1230,6 @@ version = "2.2.3"
 dependencies = [
  "base64",
  "bitflags",
- "calloop",
  "cfg-if",
  "codec-sys",
  "crossbeam-channel",
