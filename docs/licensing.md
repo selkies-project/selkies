@@ -57,9 +57,9 @@ dependency of the workspace's crates, by what it does:
 | `rtc-crypto`, `rtc-dtls`, `rtc-ice`, `rtc-mdns`, `rtc-sctp`, `rtc-sdp`, `rtc-shared`, `rtc-srtp`, `rtc-stun`, `rtc-turn`, `sansio` | Apache-2.0 OR MIT | permissive | the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over | `rtc-sctp` vendored (below) |
 | `tokio`, `tokio-util`, `futures`, `async-trait`, `bytes` | MIT; Apache-2.0 OR MIT | permissive | async runtime |  |
 | `axum`, `hyper`, `hyper-util`, `tower`, `tower-http`, `http`, `http-body-util` | MIT; Apache-2.0 OR MIT | permissive | HTTP and WebSocket server |  |
-| `rustls`, `tokio-rustls`, `hyper-rustls`, `rustls-native-certs` | Apache-2.0 OR ISC OR MIT; Apache-2.0 OR MIT | permissive | HTTPS, TLS to TURN servers, and the outgoing requests of the TURN REST and Cloudflare sources | cryptography from `aws-lc-rs` and `ring` |
+| `rustls`, `tokio-rustls`, `hyper-rustls`, `rustls-native-certs` | Apache-2.0 OR ISC OR MIT; Apache-2.0 OR MIT | permissive | HTTPS, TLS to TURN servers, and the outgoing requests of the TURN REST and Cloudflare sources | cryptography from `aws-lc-rs` |
 | `rcgen` | Apache-2.0 OR MIT | permissive | self-signed certificates |  |
-| `sha2`, `hmac`, `subtle`, `rand`, `uuid` | Apache-2.0 OR MIT; BSD-3-Clause | permissive | hashes, HMAC credentials, constant-time comparison, random identifiers |  |
+| `aws-lc-rs`, `rand` | (Apache-2.0 OR ISC) AND ISC; Apache-2.0 OR MIT | permissive | hashes, HMAC credentials, constant-time comparison, random identifiers |  |
 | `x11rb` | Apache-2.0 OR MIT | permissive | X11 input injection (XTEST), the clipboard (XFixes), and the display's outputs (RandR) | speaks the X protocol itself, no libxcb |
 | `xkbcommon` | MIT | permissive | keymaps |  |
 | `libpulse-binding` | Apache-2.0 OR MIT | permissive | the sound-server control plane |  |
@@ -68,9 +68,9 @@ dependency of the workspace's crates, by what it does:
 | `prometheus-client` | Apache-2.0 OR MIT | permissive | metrics endpoint |  |
 | `image` | Apache-2.0 OR MIT | permissive | clipboard images and cursors |  |
 | `zip`, `flate2` | MIT; Apache-2.0 OR MIT | permissive | folder downloads, compressed messages |  |
-| `serde`, `serde_json`, `rmp-serde`, `base64`, `hex`, `percent-encoding`, `url` | Apache-2.0 OR MIT; MIT | permissive | JSON messages, MessagePack to the uinput mouse socket, encodings |  |
+| `serde`, `serde_json`, `rmp-serde`, `base64`, `percent-encoding`, `url` | Apache-2.0 OR MIT; MIT | permissive | JSON messages, MessagePack to the uinput mouse socket, encodings |  |
 | `libc`, `nix`, `socket2` | Apache-2.0 OR MIT; MIT | permissive | system calls: sockets, descriptors, signals, processes |  |
-| `log`, `thiserror`, `parking_lot`, `dashmap`, `regex`, `memchr`, `mime_guess`, `chrono`, `shlex`, `tempfile` | Apache-2.0 OR MIT; MIT; MIT OR Unlicense | permissive | logging, errors, locks, text, MIME types, time, and temporary files |  |
+| `log`, `thiserror`, `parking_lot`, `regex`, `memchr`, `mime_guess`, `chrono`, `shlex`, `tempfile` | Apache-2.0 OR MIT; MIT OR Unlicense; MIT | permissive | logging, errors, locks, text, MIME types, time, and temporary files |  |
 
 <!-- check-licenses:end rust-dependencies -->
 
