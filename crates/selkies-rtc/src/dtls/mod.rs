@@ -447,13 +447,20 @@ impl Dtls {
     }
 
     /// Advance the handshake's retransmission timer.
+    ///
+    /// The transport calls this whenever any of its timers is due, ICE's included, not only
+    /// when [`Dtls::poll_timeout`] named the instant. Until a server receives the client's first
+    /// flight, its endpoint holds no association, and rtc-dtls answers a timeout for an
+    /// association it does not hold with `InvalidRemoteAddress`; with no retransmission timer
+    /// pending there is nothing to advance, so the call returns rather than failing a handshake
+    /// that has not begun.
     pub fn handle_timeout(&mut self, now: Instant) {
+        if self.poll_timeout().is_none() {
+            return;
+        }
         let Some(endpoint) = self.endpoint.as_mut() else {
             return;
         };
-        if self.state != DtlsState::Connecting {
-            return;
-        }
         if let Err(e) = endpoint.handle_timeout(PEER_KEY, now) {
             self.fail(format!("timeout {e}"));
         }
@@ -476,6 +483,7 @@ impl Dtls {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn fingerprints_are_colon_hex_in_three_algorithms() {
@@ -638,5 +646,38 @@ mod tests {
             }
         }
         assert!(failed || server.state() == DtlsState::Failed);
+    }
+
+    /// A server whose transport wakes for another timer before the client's first flight
+    /// arrives keeps waiting for it, and the handshake then completes.
+    #[test]
+    fn a_timer_due_before_the_client_hello_leaves_the_server_waiting() {
+        let now = Instant::now();
+        let mut server = Dtls::new(Arc::new(Certificate::generate().unwrap()));
+        let mut client = Dtls::new(Arc::new(Certificate::generate().unwrap()));
+        server
+            .start(now, false, &client.local_parameters())
+            .unwrap();
+        server.handle_timeout(now + Duration::from_secs(1));
+        assert_eq!(server.state(), DtlsState::Connecting);
+        assert!(server.poll_event().is_none());
+
+        let later = now + Duration::from_secs(2);
+        client
+            .start(later, true, &server.local_parameters())
+            .unwrap();
+        for _ in 0..40 {
+            while let Some(d) = client.poll_transmit() {
+                server.handle_datagram(later, d);
+            }
+            while let Some(d) = server.poll_transmit() {
+                client.handle_datagram(later, d);
+            }
+            if server.state() == DtlsState::Connected && client.state() == DtlsState::Connected {
+                break;
+            }
+        }
+        assert_eq!(server.state(), DtlsState::Connected);
+        assert_eq!(client.state(), DtlsState::Connected);
     }
 }
