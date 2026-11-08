@@ -19,7 +19,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 
-use rand::Rng;
+use rand::RngExt;
 use rtc_crypto::RTCCryptoProvider;
 use rtc_ice::attributes::control::{AttrControlled, AttrControlling};
 use rtc_ice::attributes::priority::PriorityAttr;

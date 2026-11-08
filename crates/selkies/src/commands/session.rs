@@ -36,7 +36,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, kill, killpg, sigaction};
 use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid};
 use nix::unistd::{Pid, getpgid, setpgid};
-use rand::RngCore;
+use rand::Rng;
 use regex::Regex;
 use serde_json::{Value as Json, json};
 

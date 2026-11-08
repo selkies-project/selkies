@@ -26,7 +26,7 @@
 
 use std::collections::HashSet;
 
-use rand::RngCore;
+use rand::Rng;
 
 use super::codecs::{
     self, HeaderExtension, MediaKind, filter_preferred_codecs, find_common_codecs,

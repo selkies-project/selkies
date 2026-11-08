@@ -87,7 +87,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 
 use super::clock::ntp_from_monotonic_ns;
 use super::codecs::{Codec, Packetizer, h264, h264_skip};

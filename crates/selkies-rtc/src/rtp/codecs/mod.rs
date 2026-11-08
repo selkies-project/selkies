@@ -239,7 +239,7 @@ impl Packetizer {
 }
 
 fn random_picture_id() -> u16 {
-    use rand::RngCore;
+    use rand::Rng;
     (rand::rng().next_u32() & 0x7FFF) as u16
 }
 

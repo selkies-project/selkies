@@ -981,15 +981,20 @@ mod tests {
             "webrtc_bridge_dropped_frames",
             "webrtc_bridge_invalidated_frames",
         ];
+        // A labeled family renders nothing until it holds a sample.
+        let feed = |metrics: &Metrics| {
+            metrics.set_fps(58.0);
+            metrics.set_pacer_snapshot(
+                "",
+                &PacerSnapshot {
+                    pace_bps: 1e6,
+                    ..Default::default()
+                },
+            );
+            metrics.set_bridge_drops(&HashMap::from([("primary".to_string(), (1, 1))]));
+        };
         let first = Metrics::new(false);
-        first.set_fps(58.0);
-        first.set_pacer_snapshot(
-            "",
-            &PacerSnapshot {
-                pace_bps: 1e6,
-                ..Default::default()
-            },
-        );
+        feed(&first);
         let text = first.render();
         for name in names {
             assert!(
@@ -1008,6 +1013,7 @@ mod tests {
         first.shutdown();
         drop(first);
         let second = Metrics::new(false);
+        feed(&second);
         let text = second.render();
         assert!(
             names.iter().all(|n| text.contains(&format!("# HELP {n} "))),

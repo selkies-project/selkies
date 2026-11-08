@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use log::{debug, info};
-use rand::Rng;
+use rand::RngExt;
 use rtc_stun::attributes::ATTR_ICE_CONTROLLED;
 use rtc_stun::message::Message;
 

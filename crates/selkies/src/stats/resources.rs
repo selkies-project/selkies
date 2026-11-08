@@ -883,7 +883,8 @@ pub struct SystemUsage {
     cpu_dir: Option<PathBuf>,
     mem_dir: Option<PathBuf>,
     last: Option<(f64, f64)>,
-    system: sysinfo::System,
+    /// `None` where sysinfo cannot read the host, which then reads as nothing used of nothing.
+    system: Option<sysinfo::System>,
 }
 
 impl SystemUsage {
@@ -916,7 +917,7 @@ impl SystemUsage {
             cpu_dir: None,
             mem_dir: None,
             last: None,
-            system: sysinfo::System::new(),
+            system: sysinfo::System::new().ok(),
         };
         for line in read_trimmed(proc_cgroup).unwrap_or_default().lines() {
             let parts: Vec<&str> = line.splitn(3, ':').collect();
@@ -959,8 +960,10 @@ impl SystemUsage {
 
     /// The host's memory in bytes.
     fn host_total(&mut self) -> u64 {
-        self.system.refresh_memory();
-        self.system.total_memory()
+        self.system.as_mut().map_or(0, |system| {
+            system.refresh_memory();
+            system.total_memory()
+        })
     }
 
     /// Whether the cgroup caps CPU or memory below the host.
@@ -1055,10 +1058,10 @@ impl SystemUsage {
         let mem = self.memory();
         let now = (self.clock)();
         let percent = match cpu {
-            None => {
-                self.system.refresh_cpu_usage();
-                self.system.global_cpu_usage() as f64
-            }
+            None => self.system.as_mut().map_or(0.0, |system| {
+                system.refresh_cpu_usage();
+                system.global_cpu_usage() as f64
+            }),
             Some((used, cores)) => {
                 let mut percent = 0.0;
                 if let Some((last_used, last_at)) = self.last
@@ -1073,10 +1076,10 @@ impl SystemUsage {
         };
         let (total, used) = match mem {
             Some(mem) => mem,
-            None => {
-                self.system.refresh_memory();
-                (self.system.total_memory(), self.system.used_memory())
-            }
+            None => self.system.as_mut().map_or((0, 0), |system| {
+                system.refresh_memory();
+                (system.total_memory(), system.used_memory())
+            }),
         };
         ((percent * 10.0).round() / 10.0, total, used)
     }
@@ -1476,7 +1479,7 @@ mod tests {
     }
 
     fn host_total() -> u64 {
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().expect("sysinfo reads the host");
         system.refresh_memory();
         system.total_memory()
     }

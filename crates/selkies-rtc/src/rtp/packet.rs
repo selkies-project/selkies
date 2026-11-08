@@ -55,7 +55,7 @@
 //! frame's first packet the structure.
 
 use bytes::Bytes;
-use rand::RngCore;
+use rand::Rng;
 
 use super::params::{HeaderExtensionParameters, SendParameters};
 

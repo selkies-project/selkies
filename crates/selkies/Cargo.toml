@@ -32,7 +32,7 @@ futures = "0.3"
 bytes = "1"
 axum = { version = "0.8", features = ["ws", "http2", "macros", "multipart"] }
 tower = { version = "0.5", features = ["util", "timeout", "limit"] }
-tower-http = { version = "0.6", features = ["fs", "trace", "set-header", "compression-gzip"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "set-header", "compression-gzip"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http = "1"
@@ -40,10 +40,10 @@ http-body-util = "0.1"
 rustls = "0.23"
 tokio-rustls = "0.26"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "aws-lc-rs", "native-tokio"] }
-rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 flate2 = "1"
-base64 = "0.22"
-rand = "0.9"
+base64 = "0.23"
+rand = "0.10"
 aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 regex = "1"
 percent-encoding = "2"
@@ -56,13 +56,13 @@ libc = "0.2"
 nix = { version = "0.29", features = ["fs", "socket", "net", "hostname", "signal", "process", "user", "poll", "ioctl"] }
 x11rb = { version = "0.14", features = ["xtest", "xfixes", "randr", "xkb", "xinput", "render", "res"] }
 libpulse-binding = "2.30"
-sysinfo = "0.33"
-nvml-wrapper = "0.10"
-prometheus-client = "0.23"
+sysinfo = "0.40"
+nvml-wrapper = "0.13"
+prometheus-client = "0.25"
 rmp-serde = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 chrono = "0.4"
-shlex = "1"
+shlex = "2"
 tempfile = "3"
 xkbcommon = { version = "0.9", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
