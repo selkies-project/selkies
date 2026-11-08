@@ -161,7 +161,7 @@ jobs:
     with:
       package_version: ${{ needs.check.outputs.version }}
 
-  capture-wheels:
+  pixelflux-pcmflux-wheels:
     name: Build pixelflux and pcmflux wheels
     needs: check
     permissions:
@@ -211,7 +211,7 @@ jobs:
 
   draft-release:
     name: Assemble draft release
-    needs: [check, wheel, wheel-smoke, capture-wheels, images, packages, reference]
+    needs: [check, wheel, wheel-smoke, pixelflux-pcmflux-wheels, images, packages, reference]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -248,9 +248,30 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: release/*
-      # The run's latest and PyPI decisions ride ahead of the generated notes
-      # as the markers release-published.yaml reads, where they render as
-      # nothing
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: release-notes
+          path: source
+      # The release's notes are release-notes/<version>.md, one file for Selkies,
+      # pixelflux, and pcmflux (a pre-release takes its final release's), after
+      # the run's latest and PyPI decisions as the markers release-published.yaml
+      # reads, where they render as nothing; GitHub's generated notes follow
+      - name: Assemble the release notes
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          LATEST: ${{ needs.check.outputs.latest }}
+          PYPI: ${{ needs.check.outputs.pypi }}
+        run: |
+          set -eu
+          printf '<!-- selkies-release: latest=%s --><!-- selkies-release: pypi=%s -->\n' "${LATEST}" "${PYPI}" > release-body.md
+          notes="source/release-notes/${VERSION}.md"
+          [ -f "${notes}" ] || notes="source/release-notes/$(echo "${VERSION}" | sed -E 's/((a|b|rc)[0-9]+|\.post[0-9]+|\.dev[0-9]+)$//').md"
+          if [ -f "${notes}" ]; then
+            { echo; cat "${notes}"; } >> release-body.md
+          else
+            echo "::warning::no release-notes/${VERSION}.md; the draft carries GitHub's generated notes alone"
+          fi
       - name: Create draft release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
@@ -260,6 +281,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           draft: true
           prerelease: ${{ needs.check.outputs.prerelease == 'true' }}
-          body: "<!-- selkies-release: latest=${{ needs.check.outputs.latest }} --><!-- selkies-release: pypi=${{ needs.check.outputs.pypi }} -->"
+          body_path: release-body.md
           generate_release_notes: true
           files: release/*

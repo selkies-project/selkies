@@ -349,14 +349,14 @@ jobs:
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
-          path: capture-wheels/
+          path: pixelflux-pcmflux-wheels/
           merge-multiple: true
       - name: Download the pcmflux wheels (local crates)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
-          path: capture-wheels/
+          path: pixelflux-pcmflux-wheels/
           merge-multiple: true
       - name: Install selkies and the test dependencies
         run: |
@@ -369,12 +369,12 @@ jobs:
           echo "SELKIES_TEST_SERVER=${server}" >> "$GITHUB_ENV"
           python -m pip install -r tests/requirements.txt
           # Install the exact local native wheels downloaded above.
-          mkdir -p capture-wheels
+          mkdir -p pixelflux-pcmflux-wheels
           SELECTOR="${GITHUB_WORKSPACE}/.devcontainer/features/desktop-selkies/src/select-compatible-wheels.py"
           # Fatal rather than a note: a run that quietly took an index's copy
           # tests a pixelflux and pcmflux the server does not link, and reports it as a pass.
           for project in pixelflux pcmflux; do
-            mapfile -t found < <(find capture-wheels -maxdepth 1 -name "${project}-*.whl" -print \
+            mapfile -t found < <(find pixelflux-pcmflux-wheels -maxdepth 1 -name "${project}-*.whl" -print \
               | python "${SELECTOR}" "${project}")
             if [ "${#found[@]}" -ne 1 ]; then
               echo "::error::Expected one compatible local ${project} wheel, found ${#found[@]}"
