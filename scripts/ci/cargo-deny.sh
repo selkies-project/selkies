@@ -8,9 +8,10 @@
 # published beside it, or, where GitHub's release downloads stay down past the
 # retries, built from crates.io, whose checksums cargo checks. The crate index
 # and the advisory database are fetched under retries too, and the check then
-# runs without fetching.
+# runs without fetching. CARGO_DENY_ARGS carries cargo-deny's own arguments
+# (`--exclude-dev`, `--features gpl`) ahead of the check.
 #
-# Usage: cargo-deny.sh <check...>   (from the repository root)
+# Usage: [CARGO_DENY_ARGS=...] cargo-deny.sh <check...>   (from the manifest's directory)
 
 set -eu
 
@@ -42,4 +43,5 @@ fi
 "${work}/cargo-deny" --version
 
 "${HERE}/retry.sh" 5 60 "${work}/cargo-deny" fetch all
-"${work}/cargo-deny" --offline check "$@"
+# shellcheck disable=SC2086  # the arguments, word by word
+"${work}/cargo-deny" --offline ${CARGO_DENY_ARGS:-} check "$@"

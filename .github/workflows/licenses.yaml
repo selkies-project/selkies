@@ -61,3 +61,21 @@ jobs:
         # deny.toml, whose every ignore names its reason. A job of its own, so
         # an advisory published against an unchanged tree reads as one.
         run: scripts/ci/cargo-deny.sh advisories
+
+  crates:
+    name: pixelflux and pcmflux, as their wheels build them
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Each crate's own inventory and cargo-deny gates
+        # Outside the workspace, on each crate's own Cargo.lock and features:
+        # pixelflux's non-GPL build to permissive licenses, its GPL build's
+        # licenses and sources, pcmflux to permissive licenses, and the
+        # advisories of both, by the deny.toml beside each.
+        run: scripts/ci/crate-licenses.sh
