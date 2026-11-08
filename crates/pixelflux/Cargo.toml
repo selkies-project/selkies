@@ -62,7 +62,9 @@ xcursor = "0.3.1"
 # buffers as pixmaps, the cursor composited by the server), damage = the server's
 # report that the screen changed. Pure-Rust XCB; links the system libxcb.
 x11rb = { version = "0.14", features = ["shm", "xfixes", "xtest", "randr", "damage", "dri3", "render"] }
-image = "=0.25.10"
+# Every default format but AVIF, whose feature is an encoder (rav1e) nothing calls: the overlay opens
+# whatever image it is given.
+image = { version = "=0.25.10", default-features = false, features = ["rayon", "bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
