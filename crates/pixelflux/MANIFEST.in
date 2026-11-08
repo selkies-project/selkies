@@ -5,7 +5,8 @@ recursive-include protocols *
 recursive-include nvcodec-sys *
 recursive-include codec-sys *
 recursive-include va-sys *
-recursive-include patches/x264 *.patch
+recursive-include patches *.patch
+include scripts/build-x264.sh scripts/build-x265.sh scripts/build-libvpx.sh scripts/build-svtav1.sh scripts/build-kvazaar.sh
 recursive-exclude src *.so *.pyc
 prune target
 prune nvcodec-sys/target
