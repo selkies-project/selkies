@@ -24,12 +24,12 @@ retry() {
 printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' > /etc/apt/apt.conf.d/99-selkies-retries
 apt-get clean && apt-get update
 # The server's build: the toolchain bindgen and the vendored C sources need,
-# and the headers of every library it links. libpipewire-0.3-dev gives the V4L2
+# and the headers of every library it links but the codecs, which come built in
+# SELKIES_CODECS. libpipewire-0.3-dev gives the V4L2
 # interposer its PipeWire frame source (headers only; the library is loaded at
 # runtime when an application uses it)
 apt-get install --no-install-recommends -y \
     ca-certificates curl git build-essential pkg-config cmake nasm clang libclang-dev \
-    libdav1d-dev libde265-dev \
     libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev libwayland-dev libinput-dev \
     libudev-dev libxkbcommon-dev libpixman-1-dev libxcb1-dev libxcb-shm0-dev \
     libxcb-xfixes0-dev libpulse-dev libpipewire-0.3-dev \

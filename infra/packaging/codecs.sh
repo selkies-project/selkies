@@ -3,25 +3,30 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Build the software codec libraries this distribution does not carry at the
-# release pixelflux needs, as static archives the server links in, and write
-# the environment that points the build at them.
+# Build the software codec libraries pixelflux links, at the releases its
+# wheel recipe pins, as static archives the server links in, and write the
+# environment that points the build at them.
 #
 # pixelflux binds libx264, x265, libvpx, SVT-AV1, dav1d, and libde265 from the
-# copies it links. libx264, x265, libvpx, and SVT-AV1 are always built here,
-# with the patches pixelflux carries (its patches/x264, x265, libvpx, and
-# svtav1): pixelflux reads the API the x264, x265, and SVT-AV1 ones add, and
-# the libvpx ones copy only the blocks a frame's active map leaves active. Each
-# other one the distribution carries at the floor pixelflux's
-# codec-sys names (pkg-config answers for it) is linked from the distribution
-# and becomes a package dependency; each one it lacks (libde265 on Fedora, all
-# of them on EL and on the AppImage's glibc floor) is
-# built here from the source pixelflux's own wheels build, the commit read out
-# of the pixelflux checkout the server is built against so the two never drift,
-# and linked statically, since no package on the target system would provide
-# it. A static archive in a prefix of its own is what pkg-config-rs and
-# system-deps link statically when told to, which the written environment does
-# per library.
+# copies it links. libx264, x265, libvpx, and SVT-AV1 carry the patches
+# pixelflux keeps (its patches/x264, x265, libvpx, and svtav1): pixelflux reads
+# the API the x264, x265, and SVT-AV1 ones add, and the libvpx ones copy only
+# the blocks a frame's active map leaves active. Every one is built from the
+# commit read out of the pixelflux checkout the server is built against, so the
+# two never drift, and none is taken from a distribution: an archive from here
+# is the same whichever distribution links it. It runs where a binary's C
+# library floor is, the images the wheels are built in, once for each
+# architecture and C library (scripts/ci/build-codecs.sh), and each native
+# package links what that build left. A static archive in a prefix of its own
+# is what pkg-config-rs and system-deps link statically when told to, which the
+# written environment does per library.
+#
+# x264, x265, and libvpx compile with -ffast-math, under which a C library
+# before glibc 2.31 redirects log, exp, pow, and the rest to __*_finite
+# variants that 2.31 no longer lets a new link resolve: an archive from the
+# floor would link nowhere newer. Undefining the __FINITE_MATH_ONLY__ the
+# compiler predefines for it keeps the header from redirecting, whatever order
+# a build puts its own flags in, and leaves the fast-math code generation alone.
 #
 # Usage: codecs.sh <prefix> <pixelflux crate directory>
 #   Writes <prefix>/env.sh, to be sourced before `cargo build`.
@@ -29,8 +34,10 @@ set -eu
 PREFIX="${1:?usage: codecs.sh <prefix> <pixelflux crate directory>}"
 CRATE="${2:?usage: codecs.sh <prefix> <pixelflux crate directory>}"
 RECIPE="${CRATE}/pyproject.toml"
-FLOORS="${CRATE}/codec-sys/build.rs"
 JOBS="$(nproc 2>/dev/null || echo 4)"
+CFLAGS="${CFLAGS:+${CFLAGS} }-U__FINITE_MATH_ONLY__"
+CXXFLAGS="${CXXFLAGS:+${CXXFLAGS} }-U__FINITE_MATH_ONLY__"
+export CFLAGS CXXFLAGS
 mkdir -p "${PREFIX}/src"
 ENV_FILE="${PREFIX}/env.sh"
 : > "${ENV_FILE}"
@@ -41,14 +48,6 @@ recipe_source() {
         $1 == "clone_source" && $4 == name { pick = $2 " " $3; next }
         pick != "" { sub(/ *&&.*/, ""); sub(/^ +/, ""); print pick " " $0; exit }
     ' "${RECIPE}"
-}
-
-# The floor codec-sys holds the pkg-config name `pkg` to, empty where it names none.
-floor() {
-    awk -v pkg="$1" '
-        $1 == "pkg:" { gsub(/[",]/, "", $2); current = $2 }
-        $1 == "min:" && current == pkg { gsub(/[",]/, "", $2); print $2; exit }
-    ' "${FLOORS}"
 }
 
 # Fetch the pinned source of `name` into src/`name`, refusing a tag that moved.
@@ -153,37 +152,17 @@ build_libde265() {
     cmake --install "${PREFIX}/src/libde265/build"
 }
 
-if [ ! -f "${RECIPE}" ] || [ ! -f "${FLOORS}" ]; then
-    echo "codecs: ${CRATE} holds no pixelflux wheel recipe and codec-sys" >&2
+if [ ! -f "${RECIPE}" ]; then
+    echo "codecs: ${CRATE} holds no pixelflux wheel recipe" >&2
     exit 1
 fi
 
-# recipe name, pkg-config name, and the variable that links it statically, which
-# pkg-config-rs reads as <NAME>_STATIC
-built=""
-for entry in x264:x264:X264_STATIC=1 x265:x265:X265_STATIC=1 \
-        libvpx:vpx:VPX_STATIC=1 svtav1:SvtAv1Enc:SVTAV1ENC_STATIC=1 \
-        dav1d:dav1d:DAV1D_STATIC=1 libde265:libde265:LIBDE265_STATIC=1; do
-    name="${entry%%:*}"
-    rest="${entry#*:}"
-    pkg="${rest%%:*}"
-    static="${rest#*:}"
-    min="$(floor "${pkg}")"
-    case "${name}" in
-        x264|x265|libvpx|svtav1) patched=1 ;;
-        *) patched=0 ;;
-    esac
-    if [ "${patched}" = 0 ] && pkg-config --exists "${pkg}" \
-            && pkg-config --atleast-version="${min:-0}" "${pkg}"; then
-        echo "codecs: ${pkg} $(pkg-config --modversion "${pkg}") from the distribution"
-        continue
-    fi
-    echo "codecs: ${pkg} ${min:+${min} or newer }is not in the distribution; building it"
-    "build_${name}"
-    echo "export ${static}" >> "${ENV_FILE}"
-    built="${built} ${pkg}"
+# recipe name and the variable that links it statically, which pkg-config-rs
+# reads as <NAME>_STATIC
+for entry in x264:X264_STATIC=1 x265:X265_STATIC=1 libvpx:VPX_STATIC=1 \
+        svtav1:SVTAV1ENC_STATIC=1 dav1d:DAV1D_STATIC=1 libde265:LIBDE265_STATIC=1; do
+    echo "codecs: building ${entry%%:*}"
+    "build_${entry%%:*}"
+    echo "export ${entry#*:}" >> "${ENV_FILE}"
 done
-if [ -n "${built}" ]; then
-    echo "export PKG_CONFIG_PATH=\"${PREFIX}/lib/pkgconfig\${PKG_CONFIG_PATH:+:\${PKG_CONFIG_PATH}}\"" >> "${ENV_FILE}"
-    echo "codecs: linked statically:${built}"
-fi
+echo "export PKG_CONFIG_PATH=\"${PREFIX}/lib/pkgconfig\${PKG_CONFIG_PATH:+:\${PKG_CONFIG_PATH}}\"" >> "${ENV_FILE}"

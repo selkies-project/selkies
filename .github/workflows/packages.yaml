@@ -7,8 +7,11 @@ name: Packages
 # its glibc floor); a native package installs it at /usr/bin/selkies with the web client
 # at /usr/share/selkies/web and declares the packages behind the libraries the
 # binary links and loads, as that distribution names them, and the AppImage
-# carries it in a conda environment of conda-forge's libraries. pixelflux and
-# pcmflux come from the workspace's copied path dependencies. Only apt/apt-get, dnf,
+# carries it in a conda environment of conda-forge's libraries. The codecs are
+# not any distribution's: the codecs job builds pixelflux's pinned, patched
+# releases once for each architecture and C library, and every build links
+# those static archives. pixelflux and pcmflux come from the workspace's copied
+# path dependencies. Only apt/apt-get, dnf,
 # apk, pacman, or micromamba are ever invoked.
 
 # Triggered by ci.yaml on pushes to main and by release.yaml for releases; can
@@ -65,17 +68,48 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  codecs:
+    name: Codecs (${{ matrix.libc }}, ${{ matrix.arch.name }})
+    # pixelflux's pinned, patched codecs, built once for each architecture and
+    # C library at its oldest floor and linked by every package of that pair
+    # (scripts/ci/build-codecs.sh), rather than compiled again on each
+    # distribution
+    runs-on: ${{ matrix.arch.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - name: x86_64
+            runner: ubuntu-latest
+          - name: aarch64
+            runner: ubuntu-26.04-arm
+        libc: [glibc, musl]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the codec archives
+        run: scripts/ci/build-codecs.sh "${{ matrix.libc }}" "${{ matrix.arch.name }}" codecs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: codecs-${{ matrix.libc }}-${{ matrix.arch.name }}
+          path: codecs
+          if-no-files-found: error
+          retention-days: 1
+
   package:
     name: ${{ matrix.kind.name }} (${{ matrix.arch.name }})
-    needs: web
+    needs: [web, codecs]
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
       matrix:
         arch:
           - name: amd64
+            machine: x86_64
             runner: ubuntu-latest
           - name: arm64
+            machine: aarch64
             runner: ubuntu-26.04-arm
         kind:
           - name: deb-ubuntu24.04
@@ -114,6 +148,7 @@ jobs:
             install: dnf install -y -q /out/*.rpm
           - name: apk
             image: alpine:latest
+            libc: musl
             script: infra/packaging/apk.sh
             install: apk add --quiet --allow-untrusted /out/*.apk
           - name: arch
@@ -149,6 +184,11 @@ jobs:
           name: selkies-web-client
       - name: Unpack the web client into dist/web
         run: mkdir -p dist && tar -C dist -xf selkies-web-client.tar && rm selkies-web-client.tar
+      - name: Download the codecs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: codecs-${{ matrix.kind.libc || 'glibc' }}-${{ matrix.arch.machine }}
+          path: codecs
       - name: Build the package inside the target distro container
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
@@ -164,6 +204,8 @@ jobs:
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/repo:ro" \
             -v "${GITHUB_WORKSPACE}/out:/out" \
+            -v "${GITHUB_WORKSPACE}/codecs:/opt/selkies-codecs:ro" \
+            -e SELKIES_CODECS=/opt/selkies-codecs \
             -e SELKIES_VERSION \
             -e DISTRO_TAG \
             "${IMAGE}" \
@@ -195,7 +237,7 @@ jobs:
 
   appimage:
     name: AppImage (${{ matrix.arch.name }})
-    needs: web
+    needs: [web, codecs]
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -225,9 +267,15 @@ jobs:
           name: selkies-web-client
       - name: Unpack the web client into dist/web
         run: mkdir -p dist && tar -C dist -xf selkies-web-client.tar && rm selkies-web-client.tar
+      - name: Download the codecs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: codecs-glibc-${{ matrix.arch.name }}
+          path: codecs
       - name: Build the AppImage (rattler-build + linuxdeploy-plugin-conda)
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
+          SELKIES_CODECS_DIR: codecs
           # For the release lookups behind the downloads' checks
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci/appimage.sh "${{ matrix.arch.name }}"

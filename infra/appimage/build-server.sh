@@ -10,8 +10,8 @@
 #
 # This image's glibc, GLIBC_FLOOR, is the AppImage's floor, and the server
 # built here links nothing newer. It is built as every native package builds it
-# (infra/packaging/server.sh), its codecs linked in from the source
-# pixelflux's wheels build, and it runs against the conda-forge libraries the
+# (infra/packaging/server.sh), linking the codec archives built once for the
+# architecture, which appimage.sh mounts at SELKIES_CODECS, and it runs against the conda-forge libraries the
 # AppImage bundles. libxkbcommon is linked against conda-forge's own, solved
 # for the same floor, since this distribution's lacks the API the server reads
 # keysyms through. It links nothing but the C library, so it alone is put

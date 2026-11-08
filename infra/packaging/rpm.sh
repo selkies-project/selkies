@@ -18,27 +18,24 @@ retry() {
         i=$((i + 1)); sleep 5
     done
 }
-# EL keeps nasm, meson, and the input and Wayland headers in CRB, which only
-# the distribution's own repositories reach; no third-party repository (RPM
-# Fusion, EPEL) is added, so every codec library neither carries is built by
-# codecs.sh and linked in. Fedora has no CRB and needs none.
+# EL keeps nasm and the input and Wayland headers in CRB, which only the
+# distribution's own repositories reach; no third-party repository (RPM Fusion,
+# EPEL) is added. Fedora has no CRB and needs none.
 if [ -e /etc/redhat-release ] && ! grep -q Fedora /etc/redhat-release; then
     retry dnf install -y dnf-plugins-core
     dnf config-manager --set-enabled crb
 fi
 # The server's build: the toolchain bindgen and the vendored C sources need,
-# the headers of every library it links, and dav1d's headers where the
-# distribution carries them, tried on their own since a release may lack them
-# (codecs.sh builds whatever is missing or older than pixelflux needs). pipewire-devel
+# and the headers of every library it links but the codecs, which come built in
+# SELKIES_CODECS. pipewire-devel
 # gives the V4L2 interposer its PipeWire frame source (headers only; the
 # library is loaded at runtime when an application uses it)
 retry dnf install -y \
-    ca-certificates git gcc gcc-c++ make cmake nasm meson ninja-build clang clang-devel \
-    pkgconf-pkg-config diffutils libva-devel libdrm-devel mesa-libgbm-devel mesa-libEGL-devel \
+    ca-certificates git gcc gcc-c++ make cmake nasm clang clang-devel \
+    pkgconf-pkg-config libva-devel libdrm-devel mesa-libgbm-devel mesa-libEGL-devel \
     wayland-devel libinput-devel systemd-devel libxkbcommon-devel pixman-devel libxcb-devel \
     pulseaudio-libs-devel pipewire-devel \
     ruby rubygems ruby-devel rpm-build
-dnf install -y libdav1d-devel || echo "libdav1d-devel: not in this distribution"
 # The i686 glibc builds the interposer's 32-bit variant, which the Wine and
 # Steam catalog loads through `/usr/$LIB`
 if [ "$(uname -m)" = "x86_64" ]; then

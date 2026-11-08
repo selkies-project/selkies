@@ -17,11 +17,12 @@ retry() {
     done
 }
 # The server's build: the toolchain bindgen and the vendored C sources need and
-# every library it links, whose headers Arch ships in the library packages.
+# every library it links but the codecs, which come built in SELKIES_CODECS,
+# whose headers Arch ships in the library packages.
 # pipewire carries the headers the V4L2 interposer's PipeWire frame source is
 # built against (the library is loaded at runtime when an application uses it)
 retry pacman -Syu --noconfirm --needed base-devel sudo git cmake nasm clang \
-    dav1d libde265 libva libdrm mesa wayland libinput \
+    libva libdrm mesa wayland libinput \
     systemd-libs libxkbcommon pixman libxcb libpulse pipewire
 /repo/infra/packaging/server.sh /pkg-root
 /repo/infra/packaging/interposer.sh /pkg-root

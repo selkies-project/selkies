@@ -8,8 +8,12 @@
 # usr/share/selkies/web beside it, where the server looks for its client.
 #
 # The build runs where the package is installed from, so the binary links the
-# sonames this distribution ships, and the codec libraries it lacks are built
-# by codecs.sh and linked in. The toolchain is the pinned release the images
+# sonames this distribution ships. The codec libraries are not this
+# distribution's: they are the static archives built once for the architecture
+# and C library (scripts/ci/build-codecs.sh), whose prefix SELKIES_CODECS names,
+# and a package build refuses to start without them. The wheel, built in the
+# image those archives are built in, builds its own with codecs.sh unless
+# SELKIES_CODECS names them. The toolchain is the pinned release the images
 # build with, installed by rustup-init checked against the hash rustup
 # publishes beside it. pixelflux and pcmflux are copied with the workspace and
 # built through local path dependencies. The checkout stays read-only:
@@ -25,7 +29,8 @@
 # share/selkies/web; infra/wheel/build.sh repairs what it leaves in <out-dir>.
 # SELKIES_SDIST=1 writes the sdist of that copy beside it.
 #
-# Usage: server.sh <pkg-root>          (SELKIES_VERSION stamps the version)
+# Usage: SELKIES_CODECS=<prefix> server.sh <pkg-root>
+#                                      (SELKIES_VERSION stamps the version)
 #        server.sh --wheel <out-dir>
 set -eux
 WHEEL_OUT=""
@@ -33,6 +38,10 @@ if [ "${1:-}" = --wheel ]; then
     WHEEL_OUT="${2:?usage: server.sh --wheel <out-dir>}"
 else
     PKG_ROOT="${1:?usage: server.sh <pkg-root>}"
+    [ -f "${SELKIES_CODECS:-}/env.sh" ] || {
+        echo "no codec prefix in SELKIES_CODECS; build one with scripts/ci/build-codecs.sh" >&2
+        exit 1
+    }
 fi
 REPO="$(dirname "$(readlink -f "$0")")/../.."
 RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-1.99.1}"
@@ -89,13 +98,16 @@ for component in pixelflux pcmflux; do
 done
 cargo fetch --locked --manifest-path "${SRC}/Cargo.toml"
 
-# The local pixelflux source whose wheel recipe and codec floors codecs.sh reads
-PIXELFLUX="$(cargo metadata --locked --format-version 1 --manifest-path "${SRC}/Cargo.toml" \
-    | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"
-[ -n "${PIXELFLUX}" ] || { echo "cargo metadata names no pixelflux checkout" >&2; exit 1; }
-"${REPO}/infra/packaging/codecs.sh" "${BUILD}/codecs" "$(dirname "${PIXELFLUX}")"
-# shellcheck disable=SC1091  # written by codecs.sh just above
-. "${BUILD}/codecs/env.sh"
+if [ -z "${SELKIES_CODECS:-}" ]; then
+    # The local pixelflux source whose wheel recipe codecs.sh reads
+    PIXELFLUX="$(cargo metadata --locked --format-version 1 --manifest-path "${SRC}/Cargo.toml" \
+        | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"
+    [ -n "${PIXELFLUX}" ] || { echo "cargo metadata names no pixelflux checkout" >&2; exit 1; }
+    "${REPO}/infra/packaging/codecs.sh" "${BUILD}/codecs" "$(dirname "${PIXELFLUX}")"
+    SELKIES_CODECS="${BUILD}/codecs"
+fi
+# shellcheck disable=SC1091  # written by codecs.sh
+. "${SELKIES_CODECS}/env.sh"
 
 if [ -n "${WHEEL_OUT}" ]; then
     cp -r "${REPO}/pyproject.toml" "${REPO}/README.md" "${REPO}/LICENSE" "${SRC}/"

@@ -5,9 +5,9 @@
 # The distro's absolute paths are rebased under $SB and the tools that need root
 # or a network are replaced by stubs recording their argv. The server's build is
 # one of them: a stub cargo writes a stand-in binary that reports the version
-# its manifest was stamped with, and the codec and dependency resolution
-# (codecs.sh, runtime-deps.sh) are stubbed too, since what they read is the
-# distribution's. Everything else -- sed, cp, mkdir, find, the manifest
+# its manifest was stamped with, the codec prefix the workflow hands every
+# package build is an empty one, and the dependency resolution
+# (runtime-deps.sh) is stubbed too, since what it reads is the distribution's. Everything else -- sed, cp, mkdir, find, the manifest
 # stamping, the staging of the server, the web client, and the interposers --
 # runs for real, which is what the read-only-mount, staging-path, and version
 # bugs depend on. CI builds these packages in real containers; this is the
@@ -25,8 +25,7 @@ cp -r "$REPO/infra" "$REPO/crates" "$REPO/Cargo.toml" "$REPO/Cargo.lock" "$SB/re
 mkdir -p "$SB/repo/addons" "$SB/repo/dist/web"
 cp -r "$REPO/addons/input-interposer" "$REPO/addons/v4l2-interposer" "$SB/repo/addons/"
 echo '<!doctype html>' > "$SB/repo/dist/web/index.html"
-# shellcheck disable=SC2016  # the stub's own arguments, expanded when it runs
-printf '#!/bin/sh\nmkdir -p "$1"\n: > "$1/env.sh"\n' > "$SB/repo/infra/packaging/codecs.sh"
+mkdir -p "$SB/codecs"; : > "$SB/codecs/env.sh"
 printf '#!/bin/sh\necho libstub1\necho libstub2\n' > "$SB/repo/infra/packaging/runtime-deps.sh"
 
 # Rebase the container-absolute paths onto the sandbox, using a sentinel so an
@@ -124,6 +123,7 @@ for name in deb rpm apk arch; do
   : > "$SB/log/calls"; sleep 1; : > "$STAMP"
   # A sandbox HOME keeps the signing keys and caches out of the real one
   ( PATH="$SB/stubs:$PATH" HOME="$SB/home" SELKIES_VERSION=0.0.0.dev0 DISTRO_TAG=stub \
+    SELKIES_CODECS="$SB/codecs" \
     sh "$SB/repo/infra/packaging/$name.sh" ) > "$SB/log/$name.out" 2>&1
   rc=$?
   leaked="$(find "$SB/repo" -newer "$STAMP" 2>/dev/null | head -3)"

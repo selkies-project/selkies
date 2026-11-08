@@ -8,7 +8,9 @@
 # (infra/appimage/build-server.sh), uses rattler-build to package it as a
 # conda package, then assembles the AppImage with linuxdeploy and the conda
 # plugin in infra/appimage. The web client has to be in dist/web already
-# (scripts/ci/build-web.sh).
+# (scripts/ci/build-web.sh). The codecs are the glibc archives built once for
+# the architecture (scripts/ci/build-codecs.sh), taken from SELKIES_CODECS_DIR
+# where the caller built them already and built here otherwise.
 #
 # Usage: scripts/ci/appimage.sh [arch]   (any `uname -m` name; defaults to this host)
 
@@ -55,11 +57,18 @@ esac
 MAMBA="${WORK}/conda/micromamba"
 addons/base/fetch-verified release mamba-org/micromamba-releases latest "${MAMBA_ASSET}" "${MAMBA}"
 chmod +x "${MAMBA}"
+CODECS="${SELKIES_CODECS_DIR:-}"
+if [ -z "${CODECS}" ]; then
+  CODECS="${WORK}/codecs"
+  scripts/ci/build-codecs.sh glibc "${ARCH}" "${CODECS}"
+fi
 scripts/ci/retry.sh 5 60 docker pull "${BUILD_IMAGE}"
 docker run --rm \
     -v "${PWD}:/repo:ro" \
     -v "${WORK}:/work" \
+    -v "$(readlink -f "${CODECS}"):/opt/selkies-codecs:ro" \
     -e SELKIES_VERSION -e GLIBC_FLOOR -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    -e SELKIES_CODECS=/opt/selkies-codecs \
     "${BUILD_IMAGE}" \
     sh /repo/infra/appimage/build-server.sh
 

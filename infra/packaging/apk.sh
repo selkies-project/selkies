@@ -17,12 +17,11 @@ retry() {
     done
 }
 # The server's build against Alpine's own musl builds of every library it
-# links. pipewire-dev gives the V4L2 interposer its PipeWire frame source
+# links but the codecs, which come built in SELKIES_CODECS. pipewire-dev gives the V4L2 interposer its PipeWire frame source
 # (headers only; the library is loaded at runtime when an application uses it)
 retry apk add --no-cache \
     abuild build-base pkgconf linux-headers pipewire-dev ca-certificates curl git \
     cmake nasm clang \
-    dav1d-dev libde265-dev \
     libva-dev libdrm-dev mesa-dev wayland-dev libinput-dev eudev-dev libxkbcommon-dev \
     pixman-dev libxcb-dev pulseaudio-dev
 # bindgen opens libclang at run time, and Alpine names that package after the
