@@ -124,7 +124,7 @@ jobs:
           RECIPE: ${{ matrix.image.recipe }}
         run: |
           printf '%s\n' "${RECIPE}" > "${RUNNER_TEMP}/recipe.sh"
-          scripts/ci/retry.sh 4 30 docker pull "${BASE}"
+          scripts/ci/retry.sh 5 60 docker pull "${BASE}"
           # The sources and build trees the recipe leaves are no part of the image
           docker run --name deps --env PIXELFLUX_ENABLE_GPL --workdir /tmp \
             --volume "${RUNNER_TEMP}/recipe.sh:/recipe.sh:ro" \
@@ -200,6 +200,9 @@ jobs:
           output-dir: crates/${{ matrix.group.project }}/wheelhouse
         env:
           CIBW_BUILD: ${{ matrix.group.build }}
+      - name: Wait out a download outage
+        if: steps.wheels-first.outcome == 'failure'
+        run: sleep 120
       - name: Build the wheels, again
         if: steps.wheels-first.outcome == 'failure'
         uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e # v4.3.5
