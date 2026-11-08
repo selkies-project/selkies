@@ -31,9 +31,9 @@ def tags(interpreter: str, abi: str, platform: str = "manylinux_2_28_x86_64"):
 
 
 P = "manylinux_2_28_x86_64"
-ABI3 = "pixelflux-2.2.4-cp311-abi3-manylinux_2_28_x86_64.whl"
+ABI3 = "pixelflux-2.3.0-cp311-abi3-manylinux_2_28_x86_64.whl"
 PCM = "pcmflux-2.2.2-cp311-abi3-manylinux_2_28_x86_64.whl"
-ROOT = "selkies-2.2.4-py3-none-manylinux_2_28_x86_64.whl"
+ROOT = "selkies-2.3.0-py3-none-manylinux_2_28_x86_64.whl"
 OLD = "pixelflux-2.2.3-cp312-cp312-manylinux_2_28_x86_64.whl"
 
 for minor in range(11, 16):
@@ -55,7 +55,7 @@ check("abi3 is refused for another project", not selector.compatible(
 check("abi3 is refused for another platform", not selector.compatible(
     "pixelflux", ABI3, {Tag("cp311", "abi3", "manylinux_2_28_aarch64")}))
 check("a malformed filename is not a wheel", not selector.compatible(
-    "pixelflux", "pixelflux-2.2.4-abi3.tar.gz", {Tag("cp311", "abi3", P)}))
+    "pixelflux", "pixelflux-2.3.0-abi3.tar.gz", {Tag("cp311", "abi3", P)}))
 check("an unrelated abi3 asset is not accepted as pcmflux", not selector.compatible(
     "pcmflux", ABI3.replace("pixelflux", "some-other-project"), {Tag("cp311", "abi3", P)}))
 
