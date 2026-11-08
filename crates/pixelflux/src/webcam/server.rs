@@ -409,7 +409,7 @@ mod tests {
     fn handshake_fd_and_doorbells() {
         let dir = std::env::temp_dir().join(format!("pxwc-{}", std::process::id()));
         let path = dir.join("cam.sock");
-        let ring = unsafe { libc::memfd_create(c"t".as_ptr(), libc::MFD_CLOEXEC) };
+        let ring = crate::memfd_create(c"t", libc::MFD_CLOEXEC);
         assert!(ring >= 0);
         unsafe { libc::ftruncate(ring, 8192) };
         let mut config = [0u8; CONFIG_SIZE];

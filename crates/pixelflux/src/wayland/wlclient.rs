@@ -162,8 +162,7 @@ where
 
 /// Anonymous CLOEXEC memfd holding `data` (keymap uploads, shm-style payloads).
 pub(crate) fn memfd_with(data: &[u8]) -> Result<OwnedFd, String> {
-    let name = b"pixelflux-wl\0";
-    let fd = unsafe { libc::memfd_create(name.as_ptr() as *const libc::c_char, libc::MFD_CLOEXEC) };
+    let fd = crate::memfd_create(c"pixelflux-wl", libc::MFD_CLOEXEC);
     if fd < 0 {
         return Err(format!("memfd_create: {}", std::io::Error::last_os_error()));
     }

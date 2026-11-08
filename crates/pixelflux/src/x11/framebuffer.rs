@@ -734,7 +734,7 @@ mod tests {
         let anon = |len: usize| {
             // SAFETY: a memfd of this process, sized before it is mapped.
             let fd = unsafe {
-                let fd = libc::memfd_create(c"test".as_ptr(), 0);
+                let fd = crate::memfd_create(c"test", 0);
                 assert!(fd >= 0);
                 assert_eq!(libc::ftruncate(fd, len as i64), 0);
                 <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd)

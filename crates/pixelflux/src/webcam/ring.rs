@@ -139,9 +139,7 @@ impl Ring {
         let slot_size = page_align(format.sizeimage.max(1) as usize);
         let total = DATA_OFFSET as usize + n_slots as usize * slot_size;
         let name = c"selkies-webcam-staging";
-        let raw: RawFd = unsafe {
-            libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
-        };
+        let raw: RawFd = crate::memfd_create(name, libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING);
         if raw < 0 {
             return Err(io::Error::last_os_error());
         }

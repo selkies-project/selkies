@@ -825,6 +825,12 @@ pub enum ThreadCommand {
     },
 }
 
+/// `memfd_create(2)` through the raw system call: glibc wraps it only from 2.27, and the wheels
+/// hold to the glibc 2.17 manylinux floor. The descriptor, or -1 with `errno` set.
+pub(crate) fn memfd_create(name: &std::ffi::CStr, flags: libc::c_uint) -> libc::c_int {
+    unsafe { libc::syscall(libc::SYS_memfd_create, name.as_ptr(), flags) as libc::c_int }
+}
+
 /// Read the kernel driver bound to a render node for encoder routing.
 ///
 /// An `nvidia` driver name routes to NVENC; anything else routes to VA-API. The name is
