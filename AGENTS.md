@@ -65,6 +65,11 @@ rather than worked around, so editing them is the expected way to fix what they 
 well where upstream would take it. The translation tables and the build helpers (`copy-*.js`, `gendb.js`, the vite
 and eslint configs) are excluded too.
 
+A file that takes a substantial part of its code verbatim from a BSD-, Apache- or MIT-licensed project opens with
+the MPL-2.0 header, continued by "This file incorporates work covered by the following copyright and permission
+notice:" and that project's notice, indented (`crates/selkies-rtc/src/rtp/clock.rs`); code written anew from another
+project's ideas carries the MPL header alone.
+
 Update the translations whenever user-facing strings change, adding entries where necessary.
 
 ## Logging
