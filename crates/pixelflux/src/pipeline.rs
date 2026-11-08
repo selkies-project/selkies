@@ -5131,21 +5131,33 @@ mod tests {
             p
         };
         let mut p = session(true);
-        let mut held = None;
+        let (mut held, mut keys) = (None, Vec::new());
         for i in 0..300 {
             if held.is_none() && stripes_held_still(&p.stripes, &p.settings) {
                 held = Some(i);
             }
             let out = p.process(&noise(42), 640 * 4);
-            let keyed = out
+            if out
                 .iter()
-                .any(|e| parse_video_type(e.data[1]).is_some_and(|(_, k)| k == FRAME_KEY));
-            assert!(
-                !keyed,
-                "no key frame cleans up the still screen at frame {i}"
-            );
+                .any(|e| parse_video_type(e.data[1]).is_some_and(|(_, k)| k == FRAME_KEY))
+            {
+                keys.push(i);
+            }
         }
         let held = held.expect("a still stripe is cleaned up");
+        // OpenH264 moves its quantizer only by a rebuild, which opens on a key frame, so its
+        // refresh at the paint-over quality is the one key frame the still screen costs.
+        if cfg!(feature = "gpl") {
+            assert!(
+                keys.is_empty(),
+                "no key frame cleans up the still screen: {keys:?}"
+            );
+        } else {
+            assert!(
+                keys.len() == 1 && keys[0] >= held,
+                "only the rebuild at the refresh keys the still screen (held at {held}): {keys:?}"
+            );
+        }
         for at in [held, held + 15] {
             let jump = |turbo: bool| -> usize {
                 let mut p = session(turbo);
