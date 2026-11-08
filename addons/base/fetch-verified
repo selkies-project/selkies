@@ -63,16 +63,18 @@ def get(url, api=False):
             if e.code < 500 and e.code not in (403, 429) or attempt == TRIES:
                 raise SystemExit(f"fetch-verified: {url}: HTTP {e.code}") from None
             # GitHub's secondary rate limit is a 403 or 429 that may name its
-            # delay; a widening wait where it names none
+            # delay; a widening wait where it names none, long enough in all
+            # (five minutes) to outlast a GitHub outage of minutes
             wait = e.headers.get("Retry-After", "")
-            delay = int(wait) if wait.isdigit() else 15 * attempt if e.code in (403, 429) else 3 * attempt
+            delay = int(wait) if wait.isdigit() else (15 if e.code in (403, 429) else 30) * attempt
             print(f"fetch-verified: {url}: HTTP {e.code}, waiting {delay}s", file=sys.stderr)
             time.sleep(delay)
             continue
         except (urllib.error.URLError, OSError) as e:
             if attempt == TRIES:
                 raise SystemExit(f"fetch-verified: {url}: {e}") from None
-        time.sleep(3 * attempt)
+            print(f"fetch-verified: {url}: {e}, waiting {30 * attempt}s", file=sys.stderr)
+        time.sleep(30 * attempt)
 
 
 def write(out, body):
