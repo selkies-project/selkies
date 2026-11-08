@@ -33,7 +33,7 @@ from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "integration"))
-from test_gamepad_rumble import build_interposer  # noqa: E402
+from test_uinput_interposer import build_interposer  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_dashboards import wish_show_toolbar  # noqa: E402
