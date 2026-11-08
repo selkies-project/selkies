@@ -164,7 +164,7 @@ before-all = """
 
     build_dav1d() {
         (cd /tmp && \
-            clone_source 42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa 1.5.1 dav1d \
+            clone_source 54706fc6bc0cdecab7e9593974a4039cc038fca7 1.5.4 dav1d \
                 https://code.videolan.org/videolan/dav1d.git https://github.com/videolan/dav1d.git && \
             cd dav1d && \
             meson setup build --prefix=/usr/local --libdir=lib --buildtype=release \
