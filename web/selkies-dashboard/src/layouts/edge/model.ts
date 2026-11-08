@@ -366,6 +366,16 @@ function* outerRadii(space: FanSpace, rows: number): Generator<number> {
   }
 }
 
+/** The rows, as many as the window has room for, at the radius where they hold the most buttons. */
+function fullestRows(space: FanSpace): FanRow[] {
+  let best: FanRow[] = [];
+  for (const outer of outerRadii(space, space.mostRows)) {
+    const rows = fanRows(space, outer, space.mostRows);
+    if (rowsHold(rows) > rowsHold(best)) best = rows;
+  }
+  return best;
+}
+
 /**
  * How many buttons the fan holds in this window: the most that two rows
  * (one where the window has room for no more) hold at any radius the window
@@ -376,10 +386,7 @@ function* outerRadii(space: FanSpace, rows: number): Generator<number> {
  * @param item A fan button's size.
  */
 export function fanCapacity(dock: Dock, size: Size, viewport: Size, item: number): number {
-  const space = fanSpace(dock, size, viewport, item);
-  let most = 0;
-  for (const outer of outerRadii(space, space.mostRows)) most = Math.max(most, rowsHold(fanRows(space, outer, space.mostRows)));
-  return most;
+  return rowsHold(fullestRows(fanSpace(dock, size, viewport, item)));
 }
 
 /**
@@ -402,7 +409,8 @@ export function fanLayout(dock: Dock, size: Size, viewport: Size, item: number, 
   const space = fanSpace(dock, size, viewport, item);
   const { center, pitch } = space;
   let chosen: FanRow[] | null = null;
-  for (let rows = count <= FAN_ONE_ROW ? 1 : 2; rows <= space.mostRows && !chosen; rows++) {
+  // A window with room for one row tries that one row for any count.
+  for (let rows = Math.min(count <= FAN_ONE_ROW ? 1 : 2, space.mostRows); rows <= space.mostRows && !chosen; rows++) {
     for (const outer of outerRadii(space, rows)) {
       const candidate = fanRows(space, outer, rows);
       if (rowsHold(candidate) >= count) {
@@ -411,7 +419,8 @@ export function fanLayout(dock: Dock, size: Size, viewport: Size, item: number, 
       }
     }
   }
-  const rows = chosen ?? fanRows(space, space.high, space.mostRows);
+  // More than fit: the rows that hold the most, as `fanCapacity` counts them.
+  const rows = chosen ?? fullestRows(space);
 
   const placed = Math.min(count, rowsHold(rows));
   let remaining = placed;
