@@ -788,6 +788,7 @@ impl RtcEngine {
             controller: client_type == ClientType::Controller,
             conn,
         };
+        let pace_bps = host.pace_bps(display_id);
         let spec = PeerSpec {
             peer_id: peer_id.to_string(),
             ice,
@@ -797,7 +798,7 @@ impl RtcEngine {
             audio: graph.audio_relay.is_some(),
             microphone,
             webcam,
-            pace_bps: host.pace_bps(display_id),
+            pace_bps,
             munge: Box::new(move |sdp| munge_sdp(&sdp, &format)),
             video_enabled: !video_paused,
             audio_enabled: !audio_paused,
@@ -807,6 +808,9 @@ impl RtcEngine {
         let audio_feed = graph.audio_relay.as_ref().map(|r| r.subscribe());
         let (peer, offer) =
             Peer::spawn(spec, events, graph.video_relay.subscribe(), audio_feed).await?;
+        if let Some(bps) = pace_bps {
+            info!(target: "webrtc", "WebRTC pacer enabled for peer {peer_id} on display '{display_id}' (encoder ceiling {} kbps).", bps / 1000);
+        }
         if let Err(e) = host.send_sdp("offer", &offer, peer_id).await {
             peer.close();
             return Err(StartError::Signaling(e));
