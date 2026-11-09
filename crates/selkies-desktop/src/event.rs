@@ -195,6 +195,9 @@ pub enum Request {
     },
     /// Destroy one of the shell's windows.
     CloseWindow { id: u32 },
+    /// Where the bar shows each window, in the bar surface's logical
+    /// coordinates, so the window manager's minimize heads for the button.
+    TaskbarRects(Vec<(u64, crate::geom::Rect)>),
     /// Retitle one of the shell's windows.
     SetTitle { id: u32, title: String },
     /// Start dragging files from a window, with a ghost image of the selection

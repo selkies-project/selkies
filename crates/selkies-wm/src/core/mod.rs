@@ -355,6 +355,8 @@ pub struct Engine {
     pipes: Vec<PipeJob>,
     /// The quick-tile zone the move drag in progress would land in, on which output.
     tile_preview: Option<(Zone, OutputId)>,
+    /// The ghost of the dragged window gliding into that zone, or back out of it.
+    tile_ghost: Option<TileGhost>,
     /// How many virtual desktops there are, and which one is shown.
     desktop_count: u32,
     current_desktop: u32,
@@ -439,6 +441,7 @@ impl Engine {
             effects: Effects::default(),
             pipes: Vec::new(),
             tile_preview: None,
+            tile_ghost: None,
             desktop_count,
             current_desktop: 0,
             memory: WindowMemory::load(),
@@ -490,8 +493,12 @@ impl Engine {
     }
 
     /// Write the shortcuts in force where the desktop shell reads them for its Shortcuts page:
-    /// `selkies-wm/keybinds` under the runtime directory, a line a bind as the chord's label, a
-    /// tab, and what it does in the session's language. Written only when the text changed.
+    /// `selkies-wm/keybinds` under the runtime directory, a line a bind, tab-separated. A
+    /// configured bind is its chord's canonical spelling (empty where an override disabled it),
+    /// the spelling the configuration gave it, its label, and what it does in the session's
+    /// language; a bind the user added is `execute`, its spelling, its label, and the command.
+    /// The shell writes its overrides against the origin spellings. Written only when the text
+    /// changed.
     fn publish_keybinds(&self) {
         let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) else {
             return;
@@ -500,6 +507,13 @@ impl Engine {
         let path = dir.join("keybinds");
         let mut text = String::new();
         for bind in &self.config.keybinds {
+            let label = crate::config::chord_label(bind.modifiers, bind.keysym);
+            if bind.custom() {
+                if let Some(Action::Execute(command)) = bind.actions.first() {
+                    text.push_str(&format!("execute\t{}\t{label}\t{command}\n", bind.spec()));
+                }
+                continue;
+            }
             let description = bind
                 .actions
                 .iter()
@@ -509,10 +523,11 @@ impl Engine {
             if description.is_empty() {
                 continue;
             }
-            text.push_str(&crate::config::chord_label(bind.modifiers, bind.keysym));
-            text.push('\t');
-            text.push_str(&description);
-            text.push('\n');
+            text.push_str(&format!(
+                "{}\t{}\t{label}\t{description}\n",
+                bind.spec(),
+                bind.origin
+            ));
         }
         if std::fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
             return;
@@ -998,13 +1013,8 @@ impl Engine {
         }
         if first && !minimized {
             let rect = self.windows[&id].rect;
-            let shrunk = Rect::new(
-                rect.x + rect.w / 40,
-                rect.y + rect.h / 40,
-                rect.w - rect.w / 20,
-                rect.h - rect.h / 20,
-            );
-            self.effects.start(id, EffectKind::Map, shrunk, rect, self.now);
+            self.effects
+                .start(id, EffectKind::Map, effects::shrunk(rect), rect, self.now);
             self.out.push(Command::WakeAt(self.now));
         }
         self.configure(id);
@@ -1073,10 +1083,19 @@ impl Engine {
         let Some(win) = self.windows.get_mut(&id) else {
             return;
         };
+        let closing = win.shown().then_some(win.rect);
         win.mapped = false;
         win.frame_key = None;
         win.sent = None;
-        self.effects.cancel(id);
+        // The close fade started at the unmap runs on through the removal that follows it.
+        if self.effects.kind(id) != Some(EffectKind::Close) {
+            self.effects.cancel(id);
+        }
+        if let Some(rect) = closing {
+            self.effects
+                .start(id, EffectKind::Close, rect, effects::shrunk(rect), self.now);
+            self.out.push(Command::WakeAt(self.now));
+        }
         self.stack.retain(|w| *w != id);
         self.out.push(Command::Frame { id, frame: None });
         if self.focus == Some(id) {
@@ -1171,6 +1190,28 @@ impl Engine {
         self.set_rect(id, client);
     }
 
+    /// Glide a shown window from the client area it had to the one it was just configured to,
+    /// so a maximize, its undoing, or a quick tile moves rather than jumps. A window with an
+    /// effect other than a resize or its map running (a restore from the taskbar) keeps it.
+    fn glide(&mut self, id: WindowId, from: Rect) {
+        let Some(win) = self.win(id) else {
+            return;
+        };
+        if !win.shown() || win.shaded || win.rect == from {
+            return;
+        }
+        if self
+            .effects
+            .kind(id)
+            .is_some_and(|k| !matches!(k, EffectKind::Resize | EffectKind::Map))
+        {
+            return;
+        }
+        let to = win.rect;
+        self.effects.start(id, EffectKind::Resize, from, to, self.now);
+        self.out.push(Command::WakeAt(self.now));
+    }
+
     fn set_maximized(&mut self, id: WindowId, on: bool) {
         let Some(win) = self.windows.get_mut(&id) else {
             return;
@@ -1182,6 +1223,7 @@ impl Engine {
             win.maximized = on;
             return;
         }
+        let from = win.rect;
         if on {
             if win.tile.is_none() {
                 win.saved = Some(win.rect);
@@ -1198,6 +1240,7 @@ impl Engine {
             let frame = place::clamp(restored.grown(extents), area);
             self.set_rect(id, grab::client_of(frame, extents));
         }
+        self.glide(id, from);
         self.render_frame(id);
     }
 
@@ -1222,6 +1265,7 @@ impl Engine {
         if !win.mapped || win.fullscreen {
             return;
         }
+        let from = win.rect;
         match zone {
             Some(zone) => {
                 if win.tile.is_none() && !win.maximized {
@@ -1243,6 +1287,7 @@ impl Engine {
                 self.set_rect(id, grab::client_of(frame, extents));
             }
         }
+        self.glide(id, from);
         self.render_frame(id);
     }
 
@@ -1266,26 +1311,108 @@ impl Engine {
         }
     }
 
-    /// Show, move, or take down the overlay marking the zone a move drag would tile into.
+    /// Show, move, or take back the ghost marking the zone a move drag would tile into: a
+    /// translucent copy of the dragged window's frame that glides from where the window stands
+    /// into the zone, and back to the window when the pointer leaves the zone's edge, while the
+    /// window itself keeps following the pointer.
     fn set_tile_preview(&mut self, preview: Option<(Zone, OutputId)>) {
         if self.tile_preview == preview {
             return;
         }
         self.tile_preview = preview;
+        let Some(id) = self.grab.as_ref().map(|g| g.window) else {
+            self.clear_tile_ghost();
+            return;
+        };
+        let standing = self
+            .tile_ghost
+            .as_ref()
+            .map(|g| g.at(self.now).0)
+            .unwrap_or_else(|| self.frame_rect(id));
         match preview {
             Some((zone, output)) => {
-                let rect = grab::zone_rect(zone, self.workarea(output));
-                let scale = self.scale_of(output);
-                let look = self.theme.look;
-                if let Some(image) = tile_overlay(rect, scale, &look) {
-                    self.out.push(Command::Overlay {
-                        key: TILE_KEY,
-                        rect,
-                        image,
-                    });
-                }
+                let to = grab::zone_rect(zone, self.workarea(output));
+                self.tile_ghost = Some(TileGhost {
+                    window: id,
+                    output,
+                    from: standing,
+                    to,
+                    start: self.now,
+                    returning: false,
+                    settled: false,
+                });
             }
-            None => self.out.push(Command::ClearOverlay(TILE_KEY)),
+            None => {
+                let home = self.frame_rect(id);
+                let Some(ghost) = self.tile_ghost.as_mut() else {
+                    return;
+                };
+                ghost.from = standing;
+                ghost.to = home;
+                ghost.start = self.now;
+                ghost.returning = true;
+                ghost.settled = false;
+            }
+        }
+        self.draw_tile_ghost();
+        self.out.push(Command::WakeAt(self.now));
+    }
+
+    /// Take the tile ghost down at once, as a drag's end does.
+    fn clear_tile_ghost(&mut self) {
+        if self.tile_ghost.take().is_some() {
+            self.out.push(Command::ClearOverlay(TILE_KEY));
+        }
+    }
+
+    /// Draw the tile ghost where it stands now; a ghost that has returned to its window is
+    /// taken down.
+    fn draw_tile_ghost(&mut self) {
+        let Some(ghost) = self.tile_ghost.as_ref() else {
+            return;
+        };
+        let (rect, done) = ghost.at(self.now);
+        if done && ghost.returning {
+            self.clear_tile_ghost();
+            return;
+        }
+        let (window, output) = (ghost.window, ghost.output);
+        let scale = self.scale_of(output);
+        let look = self.theme.look;
+        let Some(win) = self.win(window) else {
+            self.clear_tile_ghost();
+            return;
+        };
+        let decorated = win.decorated;
+        let title = win.info.title.clone();
+        let app_id = win.info.app_id.clone();
+        let icon_name = apps::icon_for_app_id(&self.apps().entries, &app_id).unwrap_or(app_id);
+        let frame = decorated.then(|| {
+            let extents = frame::extents(&look.style, false, false);
+            let client = Size {
+                w: (rect.w - extents.left - extents.right).max(1),
+                h: (rect.h - extents.top - extents.bottom).max(1),
+            };
+            let appearance = Appearance {
+                title: &title,
+                icon: None,
+                app_id: &icon_name,
+                active: true,
+                maximized: false,
+                shaded: false,
+                hover: None,
+                pressed: None,
+                scale,
+                shadow: false,
+            };
+            self.renderer.render(&look, client, &appearance)
+        });
+        if let Some(image) = tile_ghost_image(rect, scale, &look, frame.as_ref()) {
+            self.out.push(Command::Overlay {
+                key: TILE_KEY,
+                rect,
+                image,
+            });
         }
     }
 
@@ -2044,8 +2171,8 @@ impl Engine {
     }
 
     fn end_grab(&mut self) {
-        let preview = self.tile_preview;
-        self.set_tile_preview(None);
+        let preview = self.tile_preview.take();
+        self.clear_tile_ghost();
         if let Some(grab) = self.grab.take() {
             let id = grab.window;
             if let GrabKind::Resize(edge) = grab.kind
@@ -2450,7 +2577,8 @@ impl Engine {
         }
         if self.grab.is_some() && event.keysym == keys::ESCAPE {
             let grab = self.grab.take();
-            self.set_tile_preview(None);
+            self.tile_preview = None;
+            self.clear_tile_ghost();
             if let Some(grab) = grab {
                 self.set_rect(grab.window, grab.start);
                 self.render_frame(grab.window);
@@ -2465,7 +2593,7 @@ impl Engine {
             .config
             .keybinds
             .iter()
-            .find(|b| b.keysym == keysym && b.modifiers == modifiers)
+            .find(|b| !b.disabled && b.keysym == keysym && b.modifiers == modifiers)
             .cloned();
         let Some(bind) = bind else {
             return Verdict::Pass;
@@ -3666,12 +3794,27 @@ impl Engine {
                 self.finish_minimize(id);
             }
         }
+        if let Some(ghost) = self.tile_ghost.as_ref()
+            && !ghost.settled
+        {
+            let arrived = ghost.at(now).1;
+            self.draw_tile_ghost();
+            if let Some(ghost) = self.tile_ghost.as_mut() {
+                ghost.settled = arrived;
+            }
+            if !arrived {
+                self.out.push(Command::WakeAt(now + pixelflux::wm::EFFECT_FRAME));
+            }
+        }
         if self.effects.any() {
             self.out.push(Command::WakeAt(now + pixelflux::wm::EFFECT_FRAME));
         }
         self.poll_pipes();
         if now >= self.theme_poll {
             self.theme_poll = now + Duration::from_secs(1);
+            if self.config.overrides_changed() {
+                self.reconfigure();
+            }
             if self.theme.poll(now) {
                 self.look_generation += 1;
                 crate::i18n::select(
@@ -3713,19 +3856,80 @@ fn remembers_place(info: &WindowInfo) -> bool {
         && !places_itself(info.window_type)
 }
 
-/// The overlay marking a quick-tile zone: the accent, translucent inside a rim, inset from the
-/// zone so two adjacent zones read apart. The rim is 4 px because the stream reaches the user at
-/// 4:2:0, where a thinner colored line arrives smeared across chroma rows. An X server shows the
-/// rim alone, since the manager shapes an overlay to its opaque pixels there.
-fn tile_overlay(rect: Rect, scale: i32, look: &crate::theme::Look) -> Option<pixelflux::wm::Image> {
+/// The ghost of a dragged window gliding into a quick-tile zone, or back to the window.
+struct TileGhost {
+    window: WindowId,
+    output: OutputId,
+    /// The frame rectangle the glide started from.
+    from: Rect,
+    /// The zone, or the window's own frame rectangle on the way back.
+    to: Rect,
+    start: Instant,
+    /// Whether the ghost is on its way back to the window, to be taken down on arrival.
+    returning: bool,
+    /// Whether the ghost has been drawn where it arrived, so no tick redraws it.
+    settled: bool,
+}
+
+/// How long the ghost takes to reach a zone.
+const TILE_GHOST: Duration = Duration::from_millis(180);
+
+impl TileGhost {
+    /// Where the ghost stands at `now`, and whether it has arrived.
+    fn at(&self, now: Instant) -> (Rect, bool) {
+        let t = now.saturating_duration_since(self.start).as_secs_f32() / TILE_GHOST.as_secs_f32();
+        (
+            effects::between(self.from, self.to, effects::ease_out(t)),
+            t >= 1.0,
+        )
+    }
+}
+
+/// The picture of a tile ghost at `rect`: the dragged window's frame rendered at that size
+/// around a client area filled with the translucent accent inside a rim, so the user sees the
+/// window it is about to become. The rim is 4 px because the stream reaches the user at 4:2:0,
+/// where a thinner colored line arrives smeared across chroma rows. An X server shows the frame
+/// and the rim alone, since the manager shapes an overlay to its opaque pixels there.
+fn tile_ghost_image(
+    rect: Rect,
+    scale: i32,
+    look: &crate::theme::Look,
+    frame: Option<&pixelflux::wm::Frame>,
+) -> Option<pixelflux::wm::Image> {
     let scale = scale.max(1);
     let mut pixmap = Pixmap::new((rect.w * scale).max(1) as u32, (rect.h * scale).max(1) as u32)?;
     {
         let mut canvas = Canvas::new(pixmap.as_mut(), scale);
-        let inner = DrawRect::new(4, 4, rect.w - 8, rect.h - 8);
-        let radius = look.style.corners as f32;
+        let extents = frame.map(|f| f.extents).unwrap_or_default();
+        let client = DrawRect::new(
+            extents.left,
+            extents.top,
+            rect.w - extents.left - extents.right,
+            rect.h - extents.top - extents.bottom,
+        );
+        let inner = DrawRect::new(client.x + 2, client.y + 2, client.w - 4, client.h - 4);
+        let radius = if frame.is_some() {
+            0.0
+        } else {
+            look.style.corners as f32
+        };
         canvas.fill_rounded(inner, radius, with_alpha(look.palette.accent, 0x40));
         canvas.stroke_rounded(inner, radius, 4.0, with_alpha(look.palette.accent, 0xe0));
+        if let Some(frame) = frame {
+            for part in &frame.parts {
+                if let Some(image) = frame::pixmap_of(&part.image) {
+                    canvas.draw_image_stretch(
+                        &image,
+                        DrawRect::new(
+                            extents.left + part.rect.x,
+                            extents.top + part.rect.y,
+                            part.rect.w,
+                            part.rect.h,
+                        ),
+                    );
+                }
+            }
+        }
     }
     Some(frame::image_of(pixmap, scale))
 }
@@ -4069,11 +4273,23 @@ mod tests {
         out.clear();
         engine.handle(motion(1279.0, 400.0), &mut out);
         let zone = Rect::new(640, 0, 640, 768);
-        assert!(
-            out.iter().any(
-                |c| matches!(c, Command::Overlay { key, rect, .. } if *key == TILE_KEY && *rect == zone)
-            )
+        let ghost_rect = |out: &[Command]| {
+            out.iter().rev().find_map(|c| match c {
+                Command::Overlay { key, rect, .. } if *key == TILE_KEY => Some(*rect),
+                _ => None,
+            })
+        };
+        let first = ghost_rect(&out).expect("the ghost appears as the pointer reaches the edge");
+        assert_ne!(
+            first, zone,
+            "the ghost starts at the window and glides into the zone"
         );
+        assert!(out.iter().any(|c| matches!(c, Command::WakeAt(_))));
+        out.clear();
+        engine.now += Duration::from_millis(500);
+        engine.tick(engine.now);
+        out.append(&mut engine.out);
+        assert_eq!(ghost_rect(&out), Some(zone));
         out.clear();
         engine.handle(press(1279.0, 400.0, false), &mut out);
         assert!(
@@ -4082,6 +4298,7 @@ mod tests {
         );
         assert_eq!(engine.windows[&1].tile, Some(Zone::Right));
         assert_eq!(engine.windows[&1].rect, grab::client_of(zone, e));
+        assert_eq!(engine.effects.kind(1), Some(EffectKind::Resize));
         assert_eq!(engine.windows[&1].saved.map(|r| (r.w, r.h)), Some((600, 400)));
     }
 
@@ -4178,6 +4395,79 @@ mod tests {
         engine.set_desktop_count(1);
         assert_eq!(engine.current_desktop, 0);
         assert!(engine.windows.values().all(|w| !w.hidden));
+    }
+
+    /// A maximize glides the window from its geometry to the work area and its undoing glides
+    /// it back; a window that goes away while shown fades out as a close effect on its id, and
+    /// the end of that effect clears it so the compositor drops the ghost.
+    #[test]
+    fn maximize_glides_and_a_close_fades() {
+        let (mut engine, _) = engine();
+        open(&mut engine, 1, 600, 400);
+        let mut out = Vec::new();
+        let small = engine.windows[&1].rect;
+        engine.handle(
+            Event::Request {
+                id: 1,
+                request: Request::Maximize,
+            },
+            &mut out,
+        );
+        assert!(engine.windows[&1].maximized);
+        assert_eq!(engine.effects.kind(1), Some(EffectKind::Resize));
+        out.clear();
+        engine.now += Duration::from_millis(16);
+        engine.tick(engine.now);
+        out.append(&mut engine.out);
+        let transform = out
+            .iter()
+            .find_map(|c| match c {
+                Command::Effect {
+                    id: 1,
+                    transform: Some(t),
+                } => Some(*t),
+                _ => None,
+            })
+            .expect("a resize frame is presented");
+        assert_eq!(transform.kind, EffectKind::Resize);
+        assert!(transform.rect.w > small.w && transform.rect.w < engine.windows[&1].rect.w);
+        assert_eq!(transform.alpha, 1.0);
+        engine.handle(
+            Event::Request {
+                id: 1,
+                request: Request::Unmaximize,
+            },
+            &mut out,
+        );
+        assert_eq!(engine.effects.kind(1), Some(EffectKind::Resize));
+        engine.now += Duration::from_secs(1);
+        engine.tick(engine.now);
+        assert!(!engine.effects.any());
+        out.clear();
+        engine.handle(Event::Removed { id: 1 }, &mut out);
+        assert!(!engine.windows.contains_key(&1));
+        assert_eq!(engine.effects.kind(1), Some(EffectKind::Close));
+        engine.now += Duration::from_millis(16);
+        engine.tick(engine.now);
+        out.append(&mut engine.out);
+        assert!(out.iter().any(|c| matches!(
+            c,
+            Command::Effect {
+                id: 1,
+                transform: Some(t)
+            } if t.kind == EffectKind::Close && t.alpha < 1.0
+        )));
+        engine.now += Duration::from_secs(1);
+        engine.tick(engine.now);
+        out.clear();
+        out.append(&mut engine.out);
+        assert!(out.iter().any(|c| matches!(
+            c,
+            Command::Effect {
+                id: 1,
+                transform: None
+            }
+        )));
     }
 
     /// A click inside a client focuses it and passes through; Alt-F4 is taken and closes the

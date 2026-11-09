@@ -622,6 +622,7 @@ impl XwmHandler for AppState {
             .find(|w| w.x11_surface() == Some(&surface))
             .cloned();
         if let Some(window) = found {
+            wm::snapshot(self, &window);
             self.space.unmap_elem(&window);
         }
         if let Some((id, window)) = window_of(self, &surface) {

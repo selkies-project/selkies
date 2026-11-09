@@ -23,15 +23,19 @@
 //! Window ids are the frontend's `WindowMeta` ids, the ones the window list reports, so the
 //! policy and the consumer name the same window the same way.
 
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
+use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
+use smithay::backend::renderer::element::texture::TextureRenderElement;
+use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::backend::renderer::{ImportMem, Renderer, Texture};
 use smithay::desktop::{Window, layer_map_for_output};
 use smithay::input::keyboard::ModifiersState;
@@ -40,6 +44,7 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::Sta
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Transform as OutputTransform};
 use smithay::wayland::compositor::with_states;
+use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::wlr_layer::Layer;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
@@ -55,6 +60,7 @@ use crate::wm::{
 };
 
 /// A frame's parts as render buffers, placed relative to the client area.
+#[derive(Clone)]
 pub struct FrameBuffers {
     pub extents: Extents,
     pub parts: Vec<(Rect, MemoryRenderBuffer)>,
@@ -66,12 +72,45 @@ pub struct Overlay {
     pub buffer: MemoryRenderBuffer,
 }
 
+/// The last picture of a window that is going away, kept so the policy's close effect has
+/// something to shrink and fade once the client's buffer is gone.
+pub struct Ghost {
+    pub texture: GhostTexture,
+    /// The element id the ghost is drawn under, one for its life so damage tracking follows it.
+    pub id: Id,
+    /// Where the window's main surface was drawn, in layout coordinates.
+    pub surface: Rect,
+    /// The client area the window stood at, in layout coordinates: what an effect's rectangle
+    /// scales from.
+    pub geometry: Rect,
+    /// The frame the window wore, drawn around the ghost at the same scale.
+    pub frame: Option<FrameBuffers>,
+    pub taken: Instant,
+}
+
+/// What a ghost is drawn from: the renderer's own texture of the surface where the renderer
+/// keeps one that outlives the client's buffer (a GL texture, uploaded or bound to the
+/// dmabuf), else a copy of the shared-memory buffer taken while it was still attached, since a
+/// pixman texture reads the client's memory and is unusable once the buffer is destroyed.
+pub enum GhostTexture {
+    Memory(MemoryRenderBuffer),
+    /// The renderer's texture, downcast at render time to the renderer's texture type.
+    Context(Box<dyn Any>),
+}
+
+/// How long a ghost is kept waiting for the policy's effect before it is dropped unseen.
+const GHOST_UNCLAIMED: Duration = Duration::from_millis(250);
+/// How long a ghost may live however the policy drives it.
+const GHOST_LIFETIME: Duration = Duration::from_secs(2);
+
 /// Everything the compositor keeps for an installed policy.
 pub struct WmState {
     policy: Option<Box<dyn WindowPolicy>>,
     pub frames: HashMap<WindowId, FrameBuffers>,
     pub overlays: BTreeMap<u32, Overlay>,
     pub effects: HashMap<WindowId, Transform>,
+    /// The last pictures of windows that went away, by the id the policy's close effect names.
+    pub ghosts: HashMap<WindowId, Ghost>,
     /// Windows the policy hid (minimized, or on another desktop): unmapped from the Space,
     /// kept here for their return.
     pub hidden: HashMap<WindowId, Window>,
@@ -111,6 +150,7 @@ impl WmState {
             frames: HashMap::new(),
             overlays: BTreeMap::new(),
             effects: HashMap::new(),
+            ghosts: HashMap::new(),
             hidden: HashMap::new(),
             rects: HashMap::new(),
             states: HashMap::new(),
@@ -465,7 +505,10 @@ pub fn window_removed(state: &mut AppState, id: WindowId) {
         .is_some_and(|wm| wm.known.contains_key(&id));
     if let Some(wm) = state.wm.as_mut() {
         wm.frames.remove(&id);
-        wm.effects.remove(&id);
+        // A ghost's effect outlives the window: the policy clears it when the fade ends.
+        if !wm.ghosts.contains_key(&id) {
+            wm.effects.remove(&id);
+        }
         wm.hidden.remove(&id);
         wm.rects.remove(&id);
         wm.states.remove(&id);
@@ -673,6 +716,33 @@ pub fn key(
     dispatch(state, Event::Key(event))
 }
 
+/// The surface of the window the policy gave the keyboard to, if it is on the layout.
+pub fn focused_surface(
+    state: &AppState,
+) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
+    let focus = state.wm.as_ref()?.focus?;
+    let window = state
+        .space
+        .elements()
+        .find(|w| window_id(w) == Some(focus))?;
+    match (window.toplevel(), window.x11_surface()) {
+        (Some(toplevel), _) => Some(toplevel.wl_surface().clone()),
+        (None, Some(x11)) => x11.wl_surface(),
+        (None, None) => None,
+    }
+}
+
+/// Whether the focused window holds an active shortcuts inhibitor, in which case every key is
+/// the client's and the policy's binds stand aside.
+fn shortcuts_inhibited(state: &AppState) -> bool {
+    focused_surface(state).is_some_and(|surface| {
+        state
+            .seat
+            .keyboard_shortcuts_inhibitor_for_surface(&surface)
+            .is_some_and(|inhibitor| inhibitor.is_active())
+    })
+}
+
 /// The keyboard filter the seat's `input` takes: the policy's verdict as an intercept, with the
 /// keysyms the seat's keymap resolved for the key.
 pub fn key_filter(
@@ -680,7 +750,7 @@ pub fn key_filter(
     handle: smithay::input::keyboard::KeysymHandle<'_>,
     pressed: bool,
 ) -> smithay::input::keyboard::FilterResult<()> {
-    if !active(state) {
+    if !active(state) || shortcuts_inhibited(state) {
         return smithay::input::keyboard::FilterResult::Forward;
     }
     let keysym = handle.modified_sym().raw();
@@ -715,7 +785,284 @@ pub fn tick(state: &mut AppState, now: Instant) -> bool {
         wm.wake_at = None;
     }
     dispatch(state, Event::Tick(now));
+    sweep_ghosts(state, now);
     take_dirty(state)
+}
+
+/// Drop the ghosts the policy never animated and the ones past their lifetime.
+fn sweep_ghosts(state: &mut AppState, now: Instant) {
+    let Some(wm) = state.wm.as_mut() else {
+        return;
+    };
+    let before = wm.ghosts.len();
+    wm.ghosts.retain(|id, ghost| {
+        let age = now.saturating_duration_since(ghost.taken);
+        age < GHOST_LIFETIME && (wm.effects.contains_key(id) || age < GHOST_UNCLAIMED)
+    });
+    if wm.ghosts.len() != before {
+        wm.dirty = true;
+    }
+}
+
+/// Keep the last picture of a mapped window about to lose its buffer, with the frame it
+/// wears, so the policy's close effect can shrink and fade it. Taken once per window: a client
+/// that attaches a null buffer and then destroys its toplevel is snapshotted on the first.
+pub fn snapshot(state: &mut AppState, window: &Window) {
+    let Some(id) = window_id(window) else {
+        crate::log::debug!("[Wayland] No ghost kept: the window has no id");
+        return;
+    };
+    let known = state
+        .wm
+        .as_ref()
+        .is_some_and(|wm| wm.known.contains_key(&id) && !wm.ghosts.contains_key(&id));
+    if !known || !active(state) {
+        crate::log::debug!(
+            "[Wayland] Window {id}: no ghost kept, not known to the policy or one kept already"
+        );
+        return;
+    }
+    let surface = match (window.toplevel(), window.x11_surface()) {
+        (Some(toplevel), _) => toplevel.wl_surface().clone(),
+        (None, Some(x11)) => match x11.wl_surface() {
+            Some(surface) => surface,
+            None => {
+                crate::log::debug!("[Wayland] Window {id}: no ghost kept, no surface");
+                return;
+            }
+        },
+        (None, None) => return,
+    };
+    let Some(location) = state.space.element_location(window) else {
+        return;
+    };
+    let geometry = window.geometry();
+    let Some((view, texture)) = with_renderer_surface_state(&surface, |s| {
+        let view = s.view()?;
+        let texture = if let Some(gles) = state.gles_renderer.as_ref() {
+            s.texture(gles.context_id())
+                .cloned()
+                .map(|t| GhostTexture::Context(Box::new(t)))
+        } else {
+            s.buffer()
+                .and_then(|buffer| copy_shm(buffer).map(GhostTexture::Memory))
+        }?;
+        Some((view, texture))
+    })
+    .flatten() else {
+        return;
+    };
+    let surface_loc = location - geometry.loc + view.offset;
+    let ghost = Ghost {
+        texture,
+        id: Id::new(),
+        surface: Rect::new(surface_loc.x, surface_loc.y, view.dst.w, view.dst.h),
+        geometry: Rect::new(location.x, location.y, geometry.size.w, geometry.size.h),
+        frame: state.wm.as_ref().and_then(|wm| wm.frames.get(&id).cloned()),
+        taken: Instant::now(),
+    };
+    if let Some(wm) = state.wm.as_mut() {
+        wm.ghosts.insert(id, ghost);
+    }
+    crate::log::debug!("[Wayland] Window {id}: ghost kept for its close effect");
+}
+
+/// A copy of a shared-memory buffer's pixels as a render buffer, `None` for a buffer that is
+/// not shared memory or whose format the renderers do not take.
+fn copy_shm(
+    buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+) -> Option<MemoryRenderBuffer> {
+    use smithay::wayland::shm::{shm_format_to_fourcc, with_buffer_contents};
+    with_buffer_contents(buffer, |ptr, len, data| {
+        let format = shm_format_to_fourcc(data.format)?;
+        let bpp = match format {
+            Fourcc::Argb8888 | Fourcc::Xrgb8888 | Fourcc::Abgr8888 | Fourcc::Xbgr8888 => 4,
+            _ => return None,
+        };
+        let (width, height, stride, offset) = (
+            data.width.max(0) as usize,
+            data.height.max(0) as usize,
+            data.stride.max(0) as usize,
+            data.offset.max(0) as usize,
+        );
+        if width == 0 || height == 0 || offset + stride * height > len || width * bpp > stride {
+            return None;
+        }
+        // SAFETY: the pool is mapped for `len` bytes and the rows read stay within it, as
+        // checked above; with_buffer_contents holds the pool for the duration.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr.add(offset), stride * height) };
+        let mut tight = Vec::with_capacity(width * bpp * height);
+        for row in bytes.chunks_exact(stride) {
+            tight.extend_from_slice(&row[..width * bpp]);
+        }
+        Some(MemoryRenderBuffer::from_slice(
+            &tight,
+            format,
+            (width as i32, height as i32),
+            1,
+            OutputTransform::Normal,
+            None,
+        ))
+    })
+    .ok()
+    .flatten()
+}
+
+/// A ghost's render elements: its picture as the renderer's texture or as the copied buffer,
+/// and its frame parts.
+pub struct GhostElements<R: Renderer> {
+    pub texture: Option<TextureRenderElement<R::TextureId>>,
+    pub memory: Option<MemoryRenderBufferRenderElement<R>>,
+    pub frame: Vec<MemoryRenderBufferRenderElement<R>>,
+}
+
+impl<R: Renderer> Default for GhostElements<R> {
+    fn default() -> Self {
+        GhostElements {
+            texture: None,
+            memory: None,
+            frame: Vec::new(),
+        }
+    }
+}
+
+/// The render elements of a ghost through its effect: the picture scaled from the client area
+/// it stood at into the effect's rectangle and blended at its alpha, with the frame parts
+/// around it at the same scale. Nothing for a ghost without an effect.
+pub fn ghost_elements<R>(
+    wm: Option<&WmState>,
+    renderer: &mut R,
+    id: WindowId,
+    origin: Point<i32, Logical>,
+    scale: f64,
+) -> GhostElements<R>
+where
+    R: Renderer + ImportMem,
+    R::TextureId: Texture + Clone + Send + 'static,
+{
+    let mut out = GhostElements::default();
+    let Some(wm) = wm else {
+        return out;
+    };
+    let (Some(ghost), Some(effect)) = (wm.ghosts.get(&id), wm.effects.get(&id)) else {
+        return out;
+    };
+    if effect.alpha <= 0.0 || effect.rect.w <= 0 || effect.rect.h <= 0 {
+        return out;
+    }
+    let sx = effect.rect.w as f64 / ghost.geometry.w.max(1) as f64;
+    let sy = effect.rect.h as f64 / ghost.geometry.h.max(1) as f64;
+    let place = |rect: Rect| -> (Point<f64, Physical>, smithay::utils::Size<i32, Logical>) {
+        let x = effect.rect.x as f64 + (rect.x - ghost.geometry.x) as f64 * sx - origin.x as f64;
+        let y = effect.rect.y as f64 + (rect.y - ghost.geometry.y) as f64 * sy - origin.y as f64;
+        (
+            Point::<f64, Logical>::from((x, y)).to_physical(Scale::from(scale)),
+            (
+                (rect.w as f64 * sx).round().max(1.0) as i32,
+                (rect.h as f64 * sy).round().max(1.0) as i32,
+            )
+                .into(),
+        )
+    };
+    let (location, size) = place(ghost.surface);
+    match &ghost.texture {
+        GhostTexture::Context(boxed) => {
+            if let Some(t) = boxed.downcast_ref::<R::TextureId>() {
+                out.texture = Some(TextureRenderElement::from_static_texture(
+                    ghost.id.clone(),
+                    renderer.context_id(),
+                    location,
+                    t.clone(),
+                    1,
+                    OutputTransform::Normal,
+                    Some(effect.alpha),
+                    None,
+                    Some(size),
+                    None,
+                    Kind::Unspecified,
+                ));
+            }
+        }
+        GhostTexture::Memory(buffer) => {
+            out.memory = MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                location,
+                buffer,
+                Some(effect.alpha),
+                None,
+                Some(size),
+                Kind::Unspecified,
+            )
+            .ok();
+        }
+    }
+    if let Some(frame) = ghost.frame.as_ref() {
+        for (rect, buffer) in &frame.parts {
+            let (location, size) = place(Rect::new(
+                ghost.geometry.x + rect.x,
+                ghost.geometry.y + rect.y,
+                rect.w,
+                rect.h,
+            ));
+            if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                location,
+                buffer,
+                Some(effect.alpha),
+                None,
+                Some(size),
+                Kind::Unspecified,
+            ) {
+                out.frame.push(element);
+            }
+        }
+    }
+    out
+}
+
+/// The frame parts of a window through its effect: each placed and sized as the effect's
+/// rectangle scales the client area, blended at its alpha.
+pub fn frame_elements_through<R>(
+    wm: Option<&WmState>,
+    renderer: &mut R,
+    id: WindowId,
+    client: Rect,
+    effect: &Transform,
+    origin: Point<i32, Logical>,
+    scale: f64,
+) -> Vec<MemoryRenderBufferRenderElement<R>>
+where
+    R: Renderer + ImportMem,
+    R::TextureId: Texture + Clone + Send + 'static,
+{
+    let mut elements = Vec::new();
+    let Some(frame) = wm.and_then(|wm| wm.frames.get(&id)) else {
+        return elements;
+    };
+    let sx = effect.rect.w as f64 / client.w.max(1) as f64;
+    let sy = effect.rect.h as f64 / client.h.max(1) as f64;
+    for (rect, buffer) in &frame.parts {
+        let x = effect.rect.x as f64 + rect.x as f64 * sx - origin.x as f64;
+        let y = effect.rect.y as f64 + rect.y as f64 * sy - origin.y as f64;
+        let location = Point::<f64, Logical>::from((x, y)).to_physical(Scale::from(scale));
+        let size: smithay::utils::Size<i32, Logical> = (
+            (rect.w as f64 * sx).round().max(1.0) as i32,
+            (rect.h as f64 * sy).round().max(1.0) as i32,
+        )
+            .into();
+        if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            location,
+            buffer,
+            Some(effect.alpha),
+            None,
+            Some(size),
+            Kind::Unspecified,
+        ) {
+            elements.push(element);
+        }
+    }
+    elements
 }
 
 /// Note that something the policy presents changed, so the captures render a frame.
@@ -837,6 +1184,7 @@ fn apply(state: &mut AppState, command: Command) {
                     }
                     None => {
                         wm.effects.remove(&id);
+                        wm.ghosts.remove(&id);
                     }
                 }
             }

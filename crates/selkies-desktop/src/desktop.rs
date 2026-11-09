@@ -239,6 +239,8 @@ pub struct Desktop {
     panel_pix: Option<Pixmap>,
     panel_visible: Vec<Rect>,
     panel_dirty: bool,
+    /// The task button rectangles last told to the backend.
+    published_tasks: Vec<(u64, Rect)>,
     /// Windows in order of appearance.
     pub toplevels: Vec<Toplevel>,
     /// The open popup.
@@ -358,6 +360,7 @@ impl Desktop {
             panel_pix: None,
             panel_visible: Vec::new(),
             panel_dirty: false,
+            published_tasks: Vec::new(),
             toplevels: Vec::new(),
             popup: Popup::None,
             hover: Hover::None,
@@ -1799,6 +1802,21 @@ impl Desktop {
         self.panel_dirty = true;
     }
 
+    /// Tells the backend where the bar shows each window when that changed, so a minimize
+    /// shrinks toward the window's own button.
+    fn publish_task_rects(&mut self) {
+        let layout = ui::panel::layout(self);
+        let rects: Vec<(u64, Rect)> = layout
+            .tasks
+            .iter()
+            .filter_map(|(index, rect)| self.toplevels.get(*index).map(|t| (t.id, *rect)))
+            .collect();
+        if rects != self.published_tasks {
+            self.published_tasks = rects.clone();
+            self.requests.push(Request::TaskbarRects(rects));
+        }
+    }
+
     /// Renders the panel when it changed.
     ///
     /// # Returns
@@ -1848,6 +1866,7 @@ impl Desktop {
         };
         self.panel_visible = visible.clone();
         self.panel_pix = Some(pix);
+        self.publish_task_rects();
         Some(Frame {
             pixmap: self.panel_pix.as_ref()?,
             scale: geometry.scale,

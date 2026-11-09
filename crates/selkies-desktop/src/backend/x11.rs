@@ -64,6 +64,7 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE_NORMAL,
         _NET_WM_STRUT,
         _NET_WM_STRUT_PARTIAL,
+        _NET_WM_ICON_GEOMETRY,
     }
 }
 
@@ -465,6 +466,38 @@ impl X11Backend {
             xproto::AtomEnum::CARDINAL,
             &partial,
         );
+    }
+
+    /// Sets `_NET_WM_ICON_GEOMETRY` on each listed window: where the bar shows it, in root
+    /// pixels, from the bar window's own position and scale.
+    fn publish_icon_geometry(&self, rects: &[(u64, Rect)]) {
+        let Some(geometry) = self
+            .conn
+            .get_geometry(self.panel.window)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+        else {
+            return;
+        };
+        let s = self.scale;
+        for (id, rect) in rects {
+            let Some(window) = self.toplevels.iter().find(|(_, v)| **v == *id).map(|(w, _)| *w) else {
+                continue;
+            };
+            let values = [
+                (i32::from(geometry.x) + rect.x * s).max(0) as u32,
+                (i32::from(geometry.y) + rect.y * s).max(0) as u32,
+                (rect.w * s).max(0) as u32,
+                (rect.h * s).max(0) as u32,
+            ];
+            let _ = self.conn.change_property32(
+                xproto::PropMode::REPLACE,
+                window,
+                self.atoms._NET_WM_ICON_GEOMETRY,
+                xproto::AtomEnum::CARDINAL,
+                &values,
+            );
+        }
     }
 
     /// Fetches a property of a window.
@@ -1893,6 +1926,10 @@ impl Backend for X11Backend {
             }
             Request::SetTitle { id, title } => {
                 self.set_title(*id, title);
+                let _ = self.conn.flush();
+            }
+            Request::TaskbarRects(rects) => {
+                self.publish_icon_geometry(rects);
                 let _ = self.conn.flush();
             }
             Request::StartDrag { window, .. } => {

@@ -198,6 +198,40 @@ pub struct KeyBind {
     /// Whether the actions run on the key's release rather than its press.
     pub on_release: bool,
     pub actions: Vec<Action>,
+    /// The chord as the configuration spelled it, canonically ([`chord_spec`]), before the
+    /// user's overrides moved it; the key an override names the bind by. Empty for a bind the
+    /// user added.
+    pub origin: String,
+    /// Whether an override took the bind out of service: it is listed, and matches nothing.
+    pub disabled: bool,
+}
+
+impl KeyBind {
+    /// A bind on a chord, its origin that chord.
+    pub fn new(modifiers: Modifiers, keysym: u32, on_release: bool, actions: Vec<Action>) -> KeyBind {
+        KeyBind {
+            modifiers,
+            keysym,
+            on_release,
+            actions,
+            origin: chord_spec(modifiers, keysym),
+            disabled: false,
+        }
+    }
+
+    /// The chord in force, canonically spelled; empty for a disabled bind.
+    pub fn spec(&self) -> String {
+        if self.disabled {
+            String::new()
+        } else {
+            chord_spec(self.modifiers, self.keysym)
+        }
+    }
+
+    /// Whether the bind is the user's own, added by an `execute` override.
+    pub fn custom(&self) -> bool {
+        self.origin.is_empty()
+    }
 }
 
 /// What a pointer did on a binding's context.
@@ -378,6 +412,9 @@ pub struct Config {
     pub sources: Vec<PathBuf>,
     /// The directories the configuration was searched in, in order, for the menu files.
     pub search_dirs: Vec<PathBuf>,
+    /// When the user's key bind overrides file was last modified as read, so a later change
+    /// to it is noticed.
+    pub overrides_seen: Option<std::time::SystemTime>,
 }
 
 impl Default for Config {
@@ -403,6 +440,7 @@ impl Default for Config {
             theme_name: None,
             sources: Vec::new(),
             search_dirs: Vec::new(),
+            overrides_seen: None,
         }
     }
 }
@@ -429,9 +467,20 @@ pub fn find_file(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     dirs.iter().map(|d| d.join(name)).find(|p| p.is_file())
 }
 
+/// The file the user's key bind overrides live in: `selkies-wm/keybinds` under the
+/// configuration home, which the desktop shell's shortcut editor writes.
+pub fn overrides_path() -> PathBuf {
+    selkies_draw::dirs::config_home().join("selkies-wm/keybinds")
+}
+
+/// When a file was last modified, `None` where it cannot be read.
+pub fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 impl Config {
     /// The configuration: the first `rc.xml` found along [`search_dirs`] over the defaults, or
-    /// the defaults alone.
+    /// the defaults alone, with the user's key bind overrides applied over either.
     pub fn load() -> Config {
         let dirs = search_dirs();
         let mut config = Config::default();
@@ -445,7 +494,89 @@ impl Config {
             }
         }
         config.search_dirs = dirs;
+        let overrides = overrides_path();
+        config.overrides_seen = modified(&overrides);
+        if let Ok(text) = std::fs::read_to_string(&overrides) {
+            let applied = config.apply_overrides(&text);
+            if applied > 0 {
+                config.sources.push(overrides);
+            }
+        }
         config
+    }
+
+    /// Whether the overrides file changed since the configuration was read.
+    pub fn overrides_changed(&self) -> bool {
+        modified(&overrides_path()) != self.overrides_seen
+    }
+
+    /// Fold the user's key bind overrides into the binds, one per line, tab-separated:
+    /// `rebind`, the origin chord, and the chord that replaces it (empty to disable the bind);
+    /// or `execute`, a chord, and the command a new bind runs. A `#` line or a blank one is
+    /// skipped, as is a line naming a chord that does not parse or an origin no bind has.
+    ///
+    /// # Returns
+    /// How many lines took effect.
+    pub fn apply_overrides(&mut self, text: &str) -> usize {
+        let mut applied = 0;
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r');
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields.as_slice() {
+                ["rebind", origin, to] => {
+                    let origin = match canonical_spec(origin) {
+                        Some(spec) => spec,
+                        None => continue,
+                    };
+                    let to = if to.trim().is_empty() {
+                        None
+                    } else {
+                        match parse_spec(to) {
+                            Some(chord) => Some(chord),
+                            None => {
+                                log::debug!(target: "wm", "keybind override {to:?}: unknown chord");
+                                continue;
+                            }
+                        }
+                    };
+                    let mut found = false;
+                    for bind in self.keybinds.iter_mut().filter(|b| b.origin == origin) {
+                        found = true;
+                        match to {
+                            Some((modifiers, keysym)) => {
+                                bind.modifiers = modifiers;
+                                bind.keysym = keysym;
+                                bind.disabled = false;
+                            }
+                            None => bind.disabled = true,
+                        }
+                    }
+                    if found {
+                        applied += 1;
+                    }
+                }
+                ["execute", spec, command] if !command.trim().is_empty() => {
+                    let Some((modifiers, keysym)) = parse_spec(spec) else {
+                        log::debug!(target: "wm", "keybind override {spec:?}: unknown chord");
+                        continue;
+                    };
+                    self.keybinds.push(KeyBind {
+                        modifiers,
+                        keysym,
+                        on_release: false,
+                        actions: vec![Action::Execute(command.trim().to_string())],
+                        origin: String::new(),
+                        disabled: false,
+                    });
+                    applied += 1;
+                }
+                _ => {}
+            }
+        }
+        applied
     }
 
     /// Fold an `rc.xml` document into the configuration.
@@ -617,6 +748,39 @@ fn parse_chord(spec: &str) -> Option<(Modifiers, &str)> {
     Some((modifiers, key))
 }
 
+/// The modifiers and keysym a chord's spelling names, or `None` for an unknown key.
+pub fn parse_spec(spec: &str) -> Option<(Modifiers, u32)> {
+    let (modifiers, name) = parse_chord(spec)?;
+    Some((modifiers, keysym_from_name(name)?))
+}
+
+/// A chord's spelling in canonical form, so two spellings of one chord compare equal.
+pub fn canonical_spec(spec: &str) -> Option<String> {
+    parse_spec(spec).map(|(modifiers, keysym)| chord_spec(modifiers, keysym))
+}
+
+/// The canonical spelling of a chord, as a configuration names it: the modifier prefixes `C-`,
+/// `A-`, `S-`, and `W-` in that order, then the keysym's name.
+pub fn chord_spec(modifiers: Modifiers, keysym: u32) -> String {
+    let mut spec = String::new();
+    if modifiers.ctrl {
+        spec.push_str("C-");
+    }
+    if modifiers.alt {
+        spec.push_str("A-");
+    }
+    if modifiers.shift {
+        spec.push_str("S-");
+    }
+    if modifiers.logo {
+        spec.push_str("W-");
+    }
+    spec.push_str(&xkbcommon::xkb::keysym_get_name(xkbcommon::xkb::Keysym::new(
+        keysym,
+    )));
+    spec
+}
+
 /// The keysym a bind names, the lowercase form for a letter so `t` and `T` are one key.
 pub fn keysym_from_name(name: &str) -> Option<u32> {
     let sym = xkbcommon::xkb::keysym_from_name(name, xkbcommon::xkb::KEYSYM_NO_FLAGS);
@@ -768,12 +932,12 @@ fn parse_keybind(node: &Node) -> Option<KeyBind> {
         }
     };
     let on_release = node.attr("onRelease").map(truthy).unwrap_or(false);
-    Some(KeyBind {
+    Some(KeyBind::new(
         modifiers,
         keysym,
         on_release,
-        actions: node.children_named("action").filter_map(parse_action).collect(),
-    })
+        node.children_named("action").filter_map(parse_action).collect(),
+    ))
 }
 
 /// The button number a bind's spelling names, openbox's `Left`, `Middle`, `Right`, `Up`, `Down`,
@@ -1097,13 +1261,8 @@ impl Menus {
 /// desktop, and Shift added as well taking the window along.
 pub fn default_keybinds() -> Vec<KeyBind> {
     let bind = |spec: &str, on_release: bool, actions: Vec<Action>| {
-        let (modifiers, name) = parse_chord(spec).expect("a default chord parses");
-        KeyBind {
-            modifiers,
-            keysym: keysym_from_name(name).expect("a default key is known"),
-            on_release,
-            actions,
-        }
+        let (modifiers, keysym) = parse_spec(spec).expect("a default chord parses");
+        KeyBind::new(modifiers, keysym, on_release, actions)
     };
     vec![
         bind("A-F4", false, vec![Action::Close]),
@@ -1295,6 +1454,37 @@ mod tests {
         assert_eq!(
             Action::GoToDesktop(DesktopTarget::Index(2)).description(),
             "Desktop 3"
+        );
+        assert_eq!(canonical_spec("Super-S-Left").as_deref(), Some("S-W-Left"));
+        assert_eq!(canonical_spec("C-A-T").as_deref(), Some("C-A-t"));
+    }
+
+    /// An override moves a bind to another chord by the chord the configuration gave it,
+    /// disables one with an empty replacement, adds a command bind, and skips what it cannot
+    /// read; the bind keeps its origin so a later override still finds it.
+    #[test]
+    fn overrides_rebind_disable_and_add_binds() {
+        let mut config = Config::default();
+        let applied = config.apply_overrides(
+            "# the user's\nrebind\tW-Left\tC-W-S-h\nrebind\tA-F4\t\nrebind\tW-nope\tW-x\n\
+             execute\tW-Return\tx-terminal-emulator\nexecute\tW-bogus_key\tfoo\nwhat\tever\n",
+        );
+        assert_eq!(applied, 3);
+        let left = config
+            .keybinds
+            .iter()
+            .find(|b| b.origin == "W-Left")
+            .expect("the tile bind keeps its origin");
+        assert_eq!(left.spec(), "C-S-W-h");
+        assert!(!left.disabled);
+        let close = config.keybinds.iter().find(|b| b.origin == "A-F4").unwrap();
+        assert!(close.disabled);
+        assert_eq!(close.spec(), "");
+        let custom = config.keybinds.iter().find(|b| b.custom()).unwrap();
+        assert_eq!(custom.spec(), "W-Return");
+        assert_eq!(
+            custom.actions,
+            vec![Action::Execute("x-terminal-emulator".to_string())]
         );
         assert_eq!(Action::Execute("xterm".into()).description(), "Run command xterm");
     }

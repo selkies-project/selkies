@@ -4,11 +4,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The effects clock: a window's minimize shrinks and fades toward where its taskbar shows it,
-//! a restore comes back the same way, and a window fades in as it maps. An effect is a
-//! per-frame [`Transform`] on the client area the backend presents the window through; the engine
-//! asks for a tick a frame while one runs and applies what follows (hiding a minimized window)
-//! when it ends.
+//! The effects clock: a window fades in as it maps, glides between geometries on a maximize or
+//! a quick tile, shrinks and fades toward where its taskbar shows it on a minimize and comes
+//! back the same way, and shrinks and fades where it stood when it closes. An effect is a
+//! per-frame [`Transform`] on the client area the backend presents the window through; the
+//! engine asks for a tick a frame while one runs and applies what follows (hiding a minimized
+//! window) when it ends. Every effect eases out with a cubic, so it moves fast first and
+//! settles, which reads as the window arriving rather than drifting.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -19,9 +21,40 @@ use pixelflux::wm::{Rect, Transform, WindowId};
 /// How long each effect takes.
 pub fn duration(kind: EffectKind) -> Duration {
     match kind {
-        EffectKind::Minimize | EffectKind::Restore => Duration::from_millis(180),
-        EffectKind::Map | EffectKind::Shade => Duration::from_millis(120),
+        EffectKind::Minimize | EffectKind::Restore => Duration::from_millis(200),
+        EffectKind::Resize => Duration::from_millis(220),
+        EffectKind::Map => Duration::from_millis(160),
+        EffectKind::Close => Duration::from_millis(150),
+        EffectKind::Shade => Duration::from_millis(120),
     }
+}
+
+/// The progress `t` in `0..=1` eased out with a cubic.
+pub fn ease_out(t: f32) -> f32 {
+    let u = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - u * u * u
+}
+
+/// The rectangle between `from` and `to` at eased progress `eased`.
+pub fn between(from: Rect, to: Rect, eased: f32) -> Rect {
+    let lerp = |a: i32, b: i32| a as f32 + (b - a) as f32 * eased;
+    Rect::new(
+        lerp(from.x, to.x).round() as i32,
+        lerp(from.y, to.y).round() as i32,
+        lerp(from.w, to.w).round().max(1.0) as i32,
+        lerp(from.h, to.h).round().max(1.0) as i32,
+    )
+}
+
+/// The rectangle a map grows from and a close shrinks to: the window's own, drawn in by a
+/// twentieth on each side.
+pub fn shrunk(rect: Rect) -> Rect {
+    Rect::new(
+        rect.x + rect.w / 40,
+        rect.y + rect.h / 40,
+        rect.w - rect.w / 20,
+        rect.h - rect.h / 20,
+    )
 }
 
 /// One running effect.
@@ -45,19 +78,12 @@ impl Effect {
         } else {
             (elapsed.as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0)
         };
-        let eased = 1.0 - (1.0 - t) * (1.0 - t);
-        let lerp = |a: i32, b: i32| a as f32 + (b - a) as f32 * eased;
-        let rect = Rect::new(
-            lerp(self.from.x, self.to.x).round() as i32,
-            lerp(self.from.y, self.to.y).round() as i32,
-            lerp(self.from.w, self.to.w).round().max(1.0) as i32,
-            lerp(self.from.h, self.to.h).round().max(1.0) as i32,
-        );
+        let eased = ease_out(t);
         let alpha = self.alpha_from + (self.alpha_to - self.alpha_from) * eased;
         (
             Transform {
                 kind: self.kind,
-                rect,
+                rect: between(self.from, self.to, eased),
                 alpha,
             },
             t >= 1.0,
@@ -76,12 +102,25 @@ pub struct Effects {
 }
 
 impl Effects {
-    /// Start an effect on a window, replacing one already running there.
+    /// Start an effect on a window, replacing one already running there. A resize that
+    /// replaces a running resize or map starts from where that one stands, so a maximize
+    /// undone mid-flight turns around rather than jumping.
     pub fn start(&mut self, id: WindowId, kind: EffectKind, from: Rect, to: Rect, now: Instant) {
+        let from = match self.running.get(&id) {
+            Some(running)
+                if kind == EffectKind::Resize
+                    && matches!(running.kind, EffectKind::Resize | EffectKind::Map) =>
+            {
+                running.at(now).0.rect
+            }
+            _ => from,
+        };
         let (alpha_from, alpha_to) = match kind {
             EffectKind::Minimize => (1.0, 0.15),
             EffectKind::Restore => (0.15, 1.0),
             EffectKind::Map => (0.0, 1.0),
+            EffectKind::Close => (1.0, 0.0),
+            EffectKind::Resize => (1.0, 1.0),
             EffectKind::Shade => (0.0, 0.0),
         };
         self.running.insert(
@@ -178,5 +217,30 @@ mod tests {
         assert!(frames.is_empty());
         assert_eq!(done, vec![(7, EffectKind::Minimize)]);
         assert!(!effects.any());
+    }
+
+    /// A resize that replaces a running resize continues from where that one stands, and a
+    /// close fades to nothing while a resize keeps the window opaque.
+    #[test]
+    fn a_resize_turns_around_and_a_close_fades() {
+        let start = Instant::now();
+        let mut effects = Effects::default();
+        let small = Rect::new(100, 100, 400, 300);
+        let large = Rect::new(0, 0, 1600, 900);
+        effects.start(1, EffectKind::Resize, small, large, start);
+        let midway = start + Duration::from_millis(110);
+        let (frames, _) = effects.tick(midway);
+        let standing = frames[0].1.rect;
+        assert!(standing.w > 400 && standing.w < 1600);
+        assert_eq!(frames[0].1.alpha, 1.0);
+        effects.start(1, EffectKind::Resize, large, small, midway);
+        let (frames, _) = effects.tick(midway);
+        assert_eq!(frames[0].1.rect, standing);
+        effects.start(2, EffectKind::Close, small, shrunk(small), start);
+        let (frames, done) = effects.tick(start + Duration::from_millis(149));
+        assert!(frames.iter().any(|(id, t)| *id == 2 && t.alpha < 0.1));
+        assert!(done.is_empty());
+        let (_, done) = effects.tick(start + Duration::from_millis(151));
+        assert!(done.contains(&(2, EffectKind::Close)));
     }
 }

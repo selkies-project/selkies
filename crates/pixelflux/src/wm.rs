@@ -525,18 +525,27 @@ pub struct Frame {
 }
 
 /// What an effect is for, so a backend that cannot scale a live window (an X server) still
-/// knows what to show: a minimize or a restore moves the empty frame, a map shows the window
-/// at once, a shade hides the client under its title bar.
+/// knows what to show: a minimize or a restore moves the empty frame, a map, a resize, or a
+/// close shows the window as it stands, a shade hides the client under its title bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectKind {
     Minimize,
     Restore,
     Map,
     Shade,
+    /// A maximize, a restore from it, or a quick tile: the window glides from the geometry it
+    /// had to the one it was configured to.
+    Resize,
+    /// The window is gone: its last picture, kept by the compositor as a ghost, shrinks and
+    /// fades where it stood.
+    Close,
 }
 
 /// A per-frame transform an effect applies to a window as it is presented: the client area is
-/// drawn at `rect` instead of its configured geometry, which scales it, blended at `alpha`.
+/// drawn at `rect` instead of its configured geometry, which scales it, blended at `alpha`, and
+/// its frame parts follow it at the same scale. A `Close` transform names a window the
+/// compositor no longer has: it applies to the ghost the compositor kept of it, and the ghost
+/// is dropped when the transform is cleared.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
     pub kind: EffectKind,

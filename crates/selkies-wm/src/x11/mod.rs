@@ -1207,6 +1207,7 @@ impl Manager {
         }
         log::debug!(target: "wm", "window {id} ({}) managed: {}x{} at {},{}", info.app_id, rect.w, rect.h, rect.x, rect.y);
         self.dispatch(Event::Added(info));
+        self.publish_icon_geometry(window, id);
         let rect = self.clients.get(&window).map(|c| c.rect).unwrap_or(rect);
         let minimized = self.clients.get(&window).is_some_and(|c| c.states.minimized);
         if minimized {
@@ -1728,7 +1729,13 @@ impl Manager {
             return;
         };
         match transform {
-            Some(t) if t.kind == pixelflux::wm::EffectKind::Map => {}
+            Some(t)
+                if matches!(
+                    t.kind,
+                    pixelflux::wm::EffectKind::Map
+                        | pixelflux::wm::EffectKind::Resize
+                        | pixelflux::wm::EffectKind::Close
+                ) => {}
             Some(t) if t.kind == pixelflux::wm::EffectKind::Shade => {
                 if shaded {
                     return;
@@ -2109,6 +2116,16 @@ impl Manager {
         }
     }
 
+    /// Tell the policy where a taskbar shows a window, from the window's
+    /// `_NET_WM_ICON_GEOMETRY`, in logical coordinates.
+    fn publish_icon_geometry(&mut self, window: Window, id: WindowId) {
+        let rect = self
+            .props()
+            .icon_geometry(window)
+            .map(|pixels| self.to_logical(pixels));
+        self.dispatch(Event::TaskbarRect { id, rect });
+    }
+
     fn property_notify(&mut self, e: xproto::PropertyNotifyEvent) {
         if e.window == self.root {
             if e.atom == u32::from(AtomEnum::RESOURCE_MANAGER) {
@@ -2127,6 +2144,10 @@ impl Manager {
                 client.strut = strut;
             }
             self.publish_outputs();
+            return;
+        }
+        if e.atom == a._NET_WM_ICON_GEOMETRY {
+            self.publish_icon_geometry(e.window, id);
             return;
         }
         if e.atom == a.WM_PROTOCOLS {

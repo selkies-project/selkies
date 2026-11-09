@@ -1300,6 +1300,17 @@ impl Backend for WaylandBackend {
                     layer.set_keyboard_interactivity(interactivity);
                 }
             }
+            Request::TaskbarRects(rects) => {
+                if let Some(panel) = self.state.panel.as_ref() {
+                    for (id, rect) in rects {
+                        if let Some(handle) = self.state.handles.values().find(|h| h.id == *id) {
+                            handle
+                                .handle
+                                .set_rectangle(&panel.wl, rect.x, rect.y, rect.w, rect.h);
+                        }
+                    }
+                }
+            }
             Request::Cursor { pointer } => {
                 if self.state.pointer_shape != *pointer {
                     self.state.pointer_shape = *pointer;

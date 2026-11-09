@@ -25,13 +25,19 @@
   `crates/pixelflux/src/computer_use.rs`, and untrusted Wayland buffers and local recording, webcam, and Ogg sockets.
 - Under `--wm` (`crates/selkies-wm`, installed in the compositor through `crates/pixelflux/src/wm.rs`): the
   openbox-format `rc.xml` and `menu.xml` the session user's configuration directory or `/etc/xdg` carries are
-  parsed (`selkies-wm/src/config`), a pipe menu runs the command the menu names and parses what it prints, the
+  parsed (`selkies-wm/src/config`), as is the user's key bind override file the desktop shell's shortcut editor
+  writes (`~/.config/selkies-wm/keybinds`: a bind moved to another chord, disabled, or a command added on one,
+  read again within a second of a change, `Config::apply_overrides`), a pipe menu runs the command the menu names and parses what it prints, the
   key and pointer bindings start the commands they name in the session user's environment, the Xwayland socket
   the compositor starts for its X11 clients (`crates/pixelflux/src/wayland/xwm.rs`) is one more local socket in
   `/tmp/.X11-unix`, and `zwlr_foreign_toplevel_manager_v1` lets any Wayland client of the capture socket list,
   activate, minimize, and close windows (`crates/pixelflux/src/wayland/foreign_toplevel.rs`), and
   `ext_workspace_manager_v1` lets any such client read the virtual desktops and ask the window policy for a switch
-  (`crates/pixelflux/src/wayland/workspace.rs`); both carry no bytes to parse beyond the protocol's typed arguments.
+  (`crates/pixelflux/src/wayland/workspace.rs`), and `zwp_keyboard_shortcuts_inhibit_manager_v1` lets the client
+  whose window holds the keyboard have the policy's binds stand aside while it reads keys (the desktop shell's
+  shortcut editor; an inhibitor on any other window is left inactive, `KeyboardShortcutsInhibitHandler` in
+  `crates/pixelflux/src/wayland/frontend.rs`); all three carry no bytes to parse beyond the protocol's typed
+  arguments.
   Everything there runs as the session user, who may already do each of these; the boundary it keeps is the
   stream's: a panic in the window manager is caught at the policy boundary and the compositor carries on without it.
 - Under `--desktop`, the `selkies-desktop` shell serves the desktop Settings portal

@@ -232,11 +232,13 @@ smithay::backend::renderer::element::render_elements! {
     Cursor=MemoryRenderBufferRenderElement<R>,
     Surface=WaylandSurfaceRenderElement<R>,
     Scaled=smithay::backend::renderer::element::utils::RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
+    Ghost=smithay::backend::renderer::element::texture::TextureRenderElement<<R as smithay::backend::renderer::RendererSuper>::TextureId>,
 }
 
 /// Push a window's elements for an output at `origin` and `scale`: through the window policy's
 /// effect where one runs on it (the surface tree scaled into the effect's rectangle and blended
-/// at its alpha, the frame left out), else as the window stands with its frame parts beside it.
+/// at its alpha, the frame parts scaled and blended with it), else as the window stands with its
+/// frame parts beside it.
 fn push_window_elements<R>(
     space: &smithay::desktop::Space<smithay::desktop::Window>,
     wm: Option<&wayland::wm::WmState>,
@@ -259,6 +261,27 @@ fn push_window_elements<R>(
             return;
         }
         let geometry = window.geometry();
+        if let Some(id) = id {
+            // The frame was drawn for the client area the policy configured, which the buffer
+            // on screen reaches only once the client commits it, so the parts scale from that
+            // area rather than from the buffer's size.
+            let client_loc = space.element_location(window).unwrap_or_default();
+            let client = wm
+                .and_then(|wm| wm.rects.get(&id).copied())
+                .unwrap_or(wm::Rect::new(
+                    client_loc.x,
+                    client_loc.y,
+                    geometry.size.w,
+                    geometry.size.h,
+                ));
+            elements.extend(
+                wayland::wm::frame_elements_through(
+                    wm, renderer, id, client, &effect, origin, scale,
+                )
+                .into_iter()
+                .map(CompositionElements::Cursor),
+            );
+        }
         let sx = effect.rect.w as f64 / geometry.size.w.max(1) as f64;
         let sy = effect.rect.h as f64 / geometry.size.h.max(1) as f64;
         let target: Point<i32, smithay::utils::Logical> =
@@ -307,6 +330,33 @@ fn push_window_elements<R>(
                 .into_iter()
                 .map(CompositionElements::Cursor),
         );
+    }
+}
+
+/// Push the ghosts of closing windows the policy animates, over the windows: each its last
+/// picture and frame scaled and blended through its effect.
+fn push_ghost_elements<R>(
+    renderer: &mut R,
+    elements: &mut Vec<CompositionElements<R, WaylandSurfaceRenderElement<R>>>,
+    wm: Option<&wayland::wm::WmState>,
+    origin: Point<i32, smithay::utils::Logical>,
+    scale: f64,
+) where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + Send + 'static,
+{
+    let Some(state) = wm else {
+        return;
+    };
+    for id in state.ghosts.keys().copied() {
+        let ghost = wayland::wm::ghost_elements(wm, renderer, id, origin, scale);
+        elements.extend(ghost.frame.into_iter().map(CompositionElements::Cursor));
+        if let Some(element) = ghost.texture {
+            elements.push(CompositionElements::Ghost(element));
+        }
+        if let Some(element) = ghost.memory {
+            elements.push(CompositionElements::Cursor(element));
+        }
     }
 }
 
@@ -2542,6 +2592,7 @@ where
             push_layer_elements(renderer, &mut elements, &layer_map, Layer::Top, scale);
         }
     }
+    push_ghost_elements(renderer, &mut elements, scene.wm, scene.origin, scale);
     for window in scene.space.elements_for_output(scene.output).rev() {
         push_window_elements(
             scene.space,
@@ -6768,6 +6819,10 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
     let shell_state = XdgShellState::new::<AppState>(&dh);
     let space = Space::default();
     let layer_shell_state = WlrLayerShellState::new::<AppState>(&dh);
+    let keyboard_shortcuts_inhibit_state =
+        smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState::new::<AppState>(
+            &dh,
+        );
     let data_device_state = DataDeviceState::new::<AppState>(&dh);
     let data_control_state = DataControlState::new::<AppState, _>(&dh, None, |_| true);
     let ext_data_control_state = ExtDataControlState::new::<AppState, _>(&dh, None, |_| true);
@@ -6825,6 +6880,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         output_nodes: Vec::new(),
         pending_windows: Vec::new(),
         foreign_toplevel_list,
+        keyboard_shortcuts_inhibit_state,
         xdg_decoration_state,
         xdg_activation_state,
         primary_selection_state,

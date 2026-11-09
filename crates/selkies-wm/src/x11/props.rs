@@ -106,6 +106,7 @@ x11rb::atom_manager! {
         _NET_WM_USER_TIME,
         _NET_WM_USER_TIME_WINDOW,
         _NET_WM_ICON,
+        _NET_WM_ICON_GEOMETRY,
     }
 }
 
@@ -184,6 +185,21 @@ impl Props<'_> {
         self.get(window, property, kind, 1024)
             .and_then(|r| r.value32().map(|v| v.collect()))
             .unwrap_or_default()
+    }
+
+    /// Where a taskbar shows the window, `_NET_WM_ICON_GEOMETRY` in root pixels, or `None`
+    /// where no taskbar set it.
+    pub fn icon_geometry(&self, window: Window) -> Option<Rect> {
+        let values = self.cardinals(window, self.atoms._NET_WM_ICON_GEOMETRY, AtomEnum::CARDINAL);
+        if values.len() < 4 || values[2] == 0 || values[3] == 0 {
+            return None;
+        }
+        Some(Rect::new(
+            values[0] as i32,
+            values[1] as i32,
+            values[2] as i32,
+            values[3] as i32,
+        ))
     }
 
     /// A text property, UTF-8 or Latin-1.

@@ -90,6 +90,9 @@ use smithay::wayland::xdg_activation::{
 use smithay::wayland::selection::primary_selection::{
     set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
 };
+use smithay::wayland::keyboard_shortcuts_inhibit::{
+    KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
+};
 
 use smithay::{
     delegate_dispatch2,
@@ -932,6 +935,10 @@ pub struct AppState {
     pub pending_windows: Vec<Window>,
 
     pub foreign_toplevel_list: ForeignToplevelListState,
+    /// The shortcuts-inhibit protocol: a client whose window has the keyboard may ask that the
+    /// window policy's binds stand aside while it reads a chord (the desktop shell's shortcut
+    /// editor); the policy's key filter honors an active inhibitor on the focused window.
+    pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     pub xdg_decoration_state: XdgDecorationState,
     pub xdg_activation_state: XdgActivationState,
     pub primary_selection_state: PrimarySelectionState,
@@ -1092,6 +1099,21 @@ impl ForeignToplevelListHandler for AppState {
 /// `token_created` accepts every token. `request_activation` honors a token only while it is fresh
 /// (issued less than 10 seconds ago) so a stale or replayed token cannot steal focus, then raises
 /// the window whose surface matches to the top of the space.
+impl KeyboardShortcutsInhibitHandler for AppState {
+    fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
+        &mut self.keyboard_shortcuts_inhibit_state
+    }
+
+    /// An inhibitor is granted only to the window that holds the keyboard, so a client cannot
+    /// take the session's shortcuts away from behind another window.
+    fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        let focused = crate::wayland::wm::focused_surface(self);
+        if focused.as_ref() == Some(inhibitor.wl_surface()) {
+            inhibitor.activate();
+        }
+    }
+}
+
 impl XdgActivationHandler for AppState {
     fn activation_state(&mut self) -> &mut XdgActivationState {
         &mut self.xdg_activation_state
@@ -3351,6 +3373,34 @@ impl XdgShellHandler for AppState {
                 parked: AtomicBool::new(false),
             });
         self.pending_windows.push(window);
+        // A null buffer about to be committed is the last chance to keep the window's picture
+        // for the policy's close effect; the hook reads the pending state before it applies.
+        smithay::wayland::compositor::add_pre_commit_hook::<AppState, _>(
+            surface.wl_surface(),
+            |state, _, surface| {
+                let removing = with_states(surface, |states| {
+                    matches!(
+                        states
+                            .cached_state
+                            .get::<smithay::wayland::compositor::SurfaceAttributes>()
+                            .pending()
+                            .buffer,
+                        Some(smithay::wayland::compositor::BufferAssignment::Removed)
+                    )
+                });
+                if !removing {
+                    return;
+                }
+                let window = state
+                    .space
+                    .elements()
+                    .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+                    .cloned();
+                if let Some(window) = window {
+                    crate::wayland::wm::snapshot(state, &window);
+                }
+            },
+        );
         let (title, app_id) = with_states(surface.wl_surface(), |states| {
             let attributes = states
                 .data_map
@@ -3613,6 +3663,7 @@ impl XdgShellHandler for AppState {
             .find(|w| w.toplevel().map(|t| *t == surface).unwrap_or(false))
             .cloned();
         if let Some(window) = mapped {
+            crate::wayland::wm::snapshot(self, &window);
             self.space.unmap_elem(&window);
             self.refocus_pointer();
         }
