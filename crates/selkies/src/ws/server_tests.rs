@@ -1821,6 +1821,79 @@ async fn a_crf_display_is_steered_by_its_peak() {
     );
 }
 
+/// A CRF display whose capture says its encoder reads no peak is left to its rate factor, as
+/// without congestion control: no steer, no rate told to its page, and its encoder back at the
+/// bitrate its client chose.
+#[tokio::test]
+async fn a_crf_display_whose_encoder_reads_no_peak_is_not_steered() {
+    let rig = Rig::new();
+    let mut owner = rig.controller().await;
+    owner
+        .say(r#"SETTINGS,{"initialClientWidth":1280,"initialClientHeight":720,"tabId":"a","encoder":"h264enc","rate_control_mode":"crf","video_bitrate":6000}"#)
+        .await;
+    settle().await;
+    if !crate::settings::settings().congestion_control().on {
+        return;
+    }
+    let watch = rig.service.reg.lock().watches.get(PRIMARY_DISPLAY).cloned();
+    let mut described = serde_json::Map::new();
+    described.insert("capped".into(), json!(false));
+    watch.expect("a watch").describe(described);
+    owner.clear().await;
+    let capture = rig.primary_capture();
+    let calls = capture.calls.lock().len();
+    let link = rig.service.link(PRIMARY_DISPLAY).unwrap();
+    let mut bytes = 0u64;
+    for tick in 0..30 {
+        let at = crate::ws::now() + tick as f64 * 0.5;
+        {
+            let mut l = link.lock();
+            l.acknowledged_frame_id = 1;
+            l.has_sent_any_frame = true;
+            l.last_sent_frame_id = 1;
+            for ack in 0..10 {
+                bytes += 25_000;
+                l.sent_bytes = bytes;
+                l.note_round_trip(20.0, bytes, at - 0.5 + ack as f64 * 0.05);
+            }
+        }
+        rig.service
+            .backpressure_check(PRIMARY_DISPLAY, &link, at, 0.0)
+            .await;
+    }
+    settle().await;
+    let rates: Vec<String> = capture.calls.lock()[calls..]
+        .iter()
+        .filter(|c| c.starts_with("bitrate "))
+        .cloned()
+        .collect();
+    assert_eq!(
+        rates,
+        ["bitrate 6000"],
+        "back at the client's bitrate, once"
+    );
+    assert!(
+        !owner
+            .texts()
+            .await
+            .iter()
+            .any(|t| t.starts_with("CC_RATE ")),
+        "no rate the stream never ran at is remembered"
+    );
+    // On to an encoder that takes the peak: the new session opens capped at the rate the stream
+    // ran at, not at the range's high end.
+    assert_eq!(link.lock().link_kbps, None);
+    owner
+        .say(r#"SETTINGS,{"tabId":"a","encoder":"vp9enc","rate_control_mode":"crf","video_bitrate":6000}"#)
+        .await;
+    settle().await;
+    assert_eq!(
+        rig.service.link(PRIMARY_DISPLAY).unwrap().lock().link_kbps,
+        Some(6000.0),
+        "the encoder's switch left the new capped session at the range's high end"
+    );
+}
+
 #[tokio::test]
 async fn the_clipboard_host_sends_to_one_client_and_waits_on_its_queue() {
     use crate::clipboard::outbound::ClipboardHost;

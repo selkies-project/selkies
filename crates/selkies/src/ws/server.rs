@@ -787,6 +787,34 @@ impl WsService {
             .unwrap_or(target)
     }
 
+    /// Whether congestion control steers a display: on, and for a CRF display unless its capture
+    /// says its encoder reads no peak (`stats::takes_peak`), which leaves it to its rate factor at
+    /// the bitrate its client chose, as without congestion control. Reads the capture's
+    /// description, so no state lock may be held.
+    pub(crate) fn steers(&self, display_id: &str, d: &DisplayState) -> bool {
+        settings().congestion_control().on
+            && (!d.capped(true)
+                || crate::stats::takes_peak(
+                    self.reg
+                        .lock()
+                        .watches
+                        .get(display_id)
+                        .and_then(|w| w.info())
+                        .as_ref(),
+                ) != Some(false))
+    }
+
+    /// The rate, in kbps, a display's encoder is held to: its ceiling held down to what its path
+    /// carries where congestion control steers it (`steers`), else the bitrate its client chose.
+    pub(crate) fn held_kbps(&self, display_id: &str, d: &DisplayState) -> f64 {
+        if self.steers(display_id, d) {
+            let hi = settings().video_bitrate().1.as_f64();
+            self.video_bitrate_kbps(display_id, d.rate_ceiling(true, hi))
+        } else {
+            d.video_bitrate
+        }
+    }
+
     /// `_arg_fps`: sanitize against the server range, store, and live-update the capture; a
     /// stopped display applies the new rate at its next `START_VIDEO`.
     pub async fn handle_opcode_fps(&self, fps: f64, display_id: &str) {
@@ -857,28 +885,26 @@ impl WsService {
         else {
             return;
         };
-        let steered = settings().congestion_control().on;
-        let (known, capped) = {
+        let known = {
             let mut st = self.st.lock();
             if display_id == PRIMARY_DISPLAY {
                 st.seeds.video_bitrate = sanitized;
             }
-            match st.displays.get_mut(display_id) {
-                Some(d) => {
-                    d.video_bitrate = sanitized;
-                    (true, d.capped(steered))
-                }
-                None => (false, false),
-            }
+            st.displays.get_mut(display_id).map(|d| {
+                d.video_bitrate = sanitized;
+                d.clone()
+            })
         };
-        if capped {
+        if let Some(d) = &known
+            && d.capped(true)
+            && self.steers(display_id, d)
+        {
             return;
         }
         if let Some(capture) = self.capture_of(display_id) {
-            let rate = if known {
-                self.video_bitrate_kbps(display_id, sanitized)
-            } else {
-                sanitized
+            let rate = match &known {
+                Some(d) => self.held_kbps(display_id, d),
+                None => sanitized,
             };
             let rate = kbps_i32(rate);
             match capture.update_video_bitrate(rate) {
@@ -905,19 +931,20 @@ impl WsService {
         self.deps.audio.set_bitrate(sanitized as i32);
     }
 
-    /// A display that turned to CRF under congestion control, where nothing has steered it yet,
-    /// is capped at the rate its CBR stream ran at rather than at the range's high end, which a
-    /// slower path would queue seconds of before the first steer tick.
-    fn seed_capped_rate(&self, display_id: &str) {
+    /// The rate a display that opens a new capped CRF session under congestion control, where
+    /// nothing has steered it yet, is capped at (`seed_capped_rate`): the rate its stream ran at
+    /// before, the client's bitrate, rather than the range's high end, which a slower path would
+    /// queue seconds of before the first steer tick.
+    fn capped_seed(d: &DisplayState) -> Option<f64> {
         let hi = settings().video_bitrate().1.as_f64();
-        let rate = self
-            .st
-            .lock()
-            .displays
-            .get(display_id)
-            .filter(|d| d.capped(settings().congestion_control().on))
-            .map(|d| d.video_bitrate.min(hi));
-        if let (Some(rate), Some(link)) = (rate, self.link(display_id)) {
+        d.capped(settings().congestion_control().on)
+            .then(|| d.video_bitrate.min(hi))
+    }
+
+    /// Cap a display's new CRF session at `seed` (`capped_seed`) where its link holds no steered
+    /// rate: a switch to CRF, or to an encoder that takes the peak from one that did not.
+    fn seed_capped_rate(&self, display_id: &str, seed: Option<f64>) {
+        if let (Some(rate), Some(link)) = (seed, self.link(display_id)) {
             link.lock().link_kbps.get_or_insert(rate);
         }
     }
@@ -948,16 +975,14 @@ impl WsService {
             }
             d.rate_control_mode = sanitized.clone();
             let active = d.video_active;
+            let seed = Self::capped_seed(d);
             if display_id == PRIMARY_DISPLAY {
                 st.seeds.rc_mode = sanitized.clone();
             }
+            let layout = st.layouts.get(display_id).copied();
             drop(st);
-            self.seed_capped_rate(display_id);
-            let st = self.st.lock();
-            if !active {
-                return;
-            }
-            let Some(layout) = st.layouts.get(display_id).copied() else {
+            self.seed_capped_rate(display_id, seed);
+            let (true, Some(layout)) = (active, layout) else {
                 return;
             };
             layout
@@ -2228,8 +2253,12 @@ impl WsService {
     ) -> bool {
         let mut restart =
             old.restart != new.restart || (Self::is_wayland() && old.scale != new.scale);
-        if old.restart.5 != new.restart.5 {
-            self.seed_capped_rate(did);
+        // A new session, in a new rate-control mode or on a new encoder: one that takes the
+        // peak after one that did not (whose display's link holds no rate) opens capped at the
+        // stream's rate.
+        if old.restart != new.restart {
+            let seed = self.st.lock().displays.get(did).and_then(Self::capped_seed);
+            self.seed_capped_rate(did, seed);
         }
         let capture = if self.reg.lock().running.contains(did) {
             self.capture_of(did)
@@ -2238,13 +2267,9 @@ impl WsService {
         };
         if !restart && let Some(capture) = &capture {
             info!(target: "ws", "Applying video settings for '{did}' live (no restart).");
-            let (layout, fps, target) = {
+            let (layout, fps, d) = {
                 let st = self.st.lock();
                 let d = st.displays.get(did);
-                let (steered, hi) = (
-                    settings().congestion_control().on,
-                    settings().video_bitrate().1.as_f64(),
-                );
                 (
                     st.layouts.get(did).copied().unwrap_or_else(|| {
                         Layout::new(
@@ -2255,10 +2280,10 @@ impl WsService {
                         )
                     }),
                     d.map(|d| d.capture_fps()).unwrap_or(60.0),
-                    d.map(|d| d.rate_ceiling(steered, hi)).unwrap_or(0.0),
+                    d.cloned(),
                 )
             };
-            let rate = kbps_i32(self.video_bitrate_kbps(did, target));
+            let rate = kbps_i32(d.map_or(0.0, |d| self.held_kbps(did, &d)));
             let applied = self
                 .capture_settings(did, layout)
                 .ok_or_else(|| "no display".to_string())
@@ -2404,11 +2429,7 @@ impl WsService {
                 });
             (d, st.capture_cursor, current)
         };
-        let ceiling = d.rate_ceiling(
-            settings().congestion_control().on,
-            settings().video_bitrate().1.as_f64(),
-        );
-        let bitrate = self.video_bitrate_kbps(display_id, ceiling);
+        let bitrate = self.held_kbps(display_id, &d);
         let mut cs = CaptureSettings {
             width: layout.w,
             height: layout.h,
@@ -3169,17 +3190,31 @@ impl WsService {
             let (lo, hi) = settings().video_bitrate();
             (lo.as_f64(), hi.as_f64())
         };
-        let steered = settings().congestion_control().on;
-        let (target, configured_fps, capped, video_active) = {
+        // A CRF display whose encoder reads no peak is left to its rate factor, as without
+        // congestion control.
+        let takes_peak = crate::stats::takes_peak(
+            self.reg
+                .lock()
+                .watches
+                .get(display_id)
+                .and_then(|w| w.info())
+                .as_ref(),
+        );
+        let cc = settings().congestion_control().on;
+        let (target, configured_fps, steered, capped, video_active, unread) = {
             let st = self.st.lock();
             let Some(d) = st.displays.get(display_id) else {
                 return;
             };
+            let unread = d.capped(cc) && takes_peak == Some(false);
+            let steered = cc && !unread;
             (
                 d.rate_ceiling(steered, hi),
                 d.capture_fps(),
+                steered,
                 d.capped(steered),
                 d.video_active,
+                unread.then_some(d.video_bitrate),
             )
         };
         let (capturing, capture, relay, client, paused) = {
@@ -3193,6 +3228,17 @@ impl WsService {
                 owner.is_some_and(|o| reg.video_paused.contains(&o)),
             )
         };
+        // A CRF display whose encoder turned out to read no peak goes back to the bitrate its
+        // client chose, which a device that runs at the bitrate whatever the mode codes at.
+        if let Some(kbps) = unread
+            && link.lock().link_kbps.take().is_some()
+            && let Some(capture) = &capture
+        {
+            let kbps = kbps_i32(kbps);
+            if capture.update_video_bitrate(kbps).is_ok() {
+                self.track_capture(display_id, |cs| cs.video_bitrate_kbps = kbps);
+            }
+        }
         // A capped CRF display is never padded (`PathProbe`).
         let pad = PadPermit {
             announced: !capped && client.as_ref().is_some_and(|c| c.pad()),
@@ -3336,8 +3382,10 @@ impl WsService {
                 continue;
             };
             let mut stats = host.clone();
+            let mut takes_peak = None;
             if let Some(watch) = self.reg.lock().watches.get(&display_id).cloned() {
                 stats.extend(watch.rates());
+                takes_peak = crate::stats::takes_peak(watch.info().as_ref());
             }
             if let Some(link) = self.link(&display_id) {
                 let link = link.lock();
@@ -3352,7 +3400,7 @@ impl WsService {
                 .lock()
                 .instances
                 .get(&display_id)
-                .filter(|i| i.settings.video_cbr_mode || i.settings.video_vbv_multiplier > 0.0)
+                .filter(|i| i.settings.video_cbr_mode || takes_peak == Some(true))
                 .map(|i| i.settings.video_bitrate_kbps);
             if let Some(target) = target.filter(|t| *t > 0) {
                 stats.insert(

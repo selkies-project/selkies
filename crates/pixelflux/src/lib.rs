@@ -1890,6 +1890,7 @@ pub(crate) fn log_stream_settings(
         tag, settings, n_stripes, backend, fixed_rate, holds, fullcolor, full_range,
     );
     report::bit_depth(encoders::session_bit_depth(video_encoder, settings));
+    report::capped(encoders::session_capped(video_encoder, settings));
 }
 
 /// The "Stream settings active" line for a backend named outright, `(name, hardware)`, where

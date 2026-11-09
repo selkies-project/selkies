@@ -1426,7 +1426,11 @@ impl WebRtcService {
                 if let Some(watch) = pipeline.stream_watch() {
                     stats.extend(watch.rates());
                 }
-                if (steered || pipeline.rc_mode() == "cbr") && pipeline.video_bitrate() > 0.0 {
+                let peak = steered
+                    && crate::stats::takes_peak(
+                        pipeline.stream_watch().and_then(|w| w.info()).as_ref(),
+                    ) == Some(true);
+                if (peak || pipeline.rc_mode() == "cbr") && pipeline.video_bitrate() > 0.0 {
                     stats.insert(
                         "target_mbps".into(),
                         json!((pipeline.video_bitrate() / 10.0).round() / 100.0),

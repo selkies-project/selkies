@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 use selkies_rtc::ice::IceTopology;
 use selkies_rtc::sctp::Message;
 use selkies_rtc::signaling::{ClientType, Inbound, Outbound, socket};
-use serde_json::{Value as Json, json};
+use serde_json::{Map, Value as Json, json};
 use tokio::sync::broadcast;
 
 use crate::audio::AudioPacket;
@@ -62,6 +62,7 @@ struct FakePipeline {
     audio: AtomicBool,
     bitrate: Mutex<f64>,
     rc_mode: Mutex<String>,
+    watch: Mutex<Option<Arc<StreamWatch>>>,
     fail_start: AtomicBool,
 }
 
@@ -84,6 +85,7 @@ impl FakePipeline {
             audio: AtomicBool::new(false),
             bitrate: Mutex::new(8000.0),
             rc_mode: Mutex::new("cbr".into()),
+            watch: Mutex::new(None),
             fail_start: AtomicBool::new(false),
         })
     }
@@ -245,7 +247,7 @@ impl MediaPipeline for FakePipeline {
     fn refresh_tunables(&self) {}
 
     fn stream_watch(&self) -> Option<Arc<StreamWatch>> {
-        None
+        self.watch.lock().clone()
     }
 
     async fn realized_geometry(&self, _output: u32) -> Option<(i32, i32, f64)> {
@@ -1292,6 +1294,40 @@ async fn a_crf_pipeline_opens_at_the_steers_start() {
     if crate::settings::settings().congestion_control().on {
         assert_eq!(opened("crf"), START_KBPS);
     }
+    rig.service.shutdown().await;
+}
+
+/// Congestion control steers a CBR display, and a CRF one unless its capture says its encoder
+/// reads no peak; a capture not described yet is taken to take one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crf_display_is_steered_unless_its_encoder_reads_no_peak() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    let pipeline = rig.factory.made.lock().get("primary").unwrap().clone();
+    assert!(rig.service.steers("primary", true));
+    assert!(!rig.service.steers("primary", false));
+    *pipeline.rc_mode.lock() = "crf".into();
+    assert!(rig.service.steers("primary", true));
+    let described = |capped: bool| {
+        let watch = StreamWatch::new(
+            "primary",
+            Arc::new(|_: String, _: Map<String, Json>| Box::pin(async {})),
+        );
+        let mut info = Map::new();
+        info.insert("capped".into(), json!(capped));
+        watch.describe(info);
+        watch
+    };
+    *pipeline.watch.lock() = Some(described(false));
+    assert!(!rig.service.steers("primary", true));
+    *pipeline.watch.lock() = Some(described(true));
+    assert!(rig.service.steers("primary", true));
+    *pipeline.rc_mode.lock() = "cbr".into();
+    *pipeline.watch.lock() = Some(described(false));
+    assert!(
+        rig.service.steers("primary", true),
+        "a constant rate is steered whatever it says of a peak"
+    );
     rig.service.shutdown().await;
 }
 

@@ -578,6 +578,39 @@ mod tests {
         }
     }
 
+    /// A session reports the peak it takes: the CPU path's H.264 where x264 carries it, libvpx
+    /// where asked, and x265 never; a constant rate is no capped quality.
+    #[test]
+    fn a_session_reports_whether_it_takes_its_peak() {
+        let capped = CaptureSettings {
+            codec: Codec::H264,
+            width: 64,
+            height: 48,
+            target_fps: 30.0,
+            video_crf: 25,
+            video_bitrate_kbps: 4000,
+            video_vbv_multiplier: CAPPED_VBV_FRAMES,
+            ..Default::default()
+        };
+        assert_eq!(session_capped(None, &capped), cfg!(feature = "gpl"));
+        let cbr = CaptureSettings {
+            video_cbr_mode: true,
+            ..capped.clone()
+        };
+        assert!(!session_capped(None, &cbr));
+        let vpx = |codec| CaptureSettings {
+            codec,
+            ..capped.clone()
+        };
+        for codec in [Codec::Vp8, Codec::Vp9] {
+            let enc = FrameEncoder::Vpx(vpx::VpxEncoder::new(&vpx(codec), codec, false).unwrap());
+            assert!(session_capped(Some(&enc), &vpx(codec)), "{codec:?}");
+        }
+        let hevc = vpx(Codec::H265);
+        let enc = FrameEncoder::Hevc(hevc::HevcEncoder::new(&hevc, false).unwrap());
+        assert!(!session_capped(Some(&enc), &hevc));
+    }
+
     /// Paint-over is named where the cleanup acts, Turbo or not: its CRF where the session codes
     /// the cleanup at it, at a constant quality below the stream's on any backend that takes a
     /// quality from the caller and at a constant rate where the session holds a quantizer; its
@@ -1414,6 +1447,20 @@ impl FrameEncoder {
             FrameEncoder::Vaapi(enc) => !enc.is_cbr(),
             FrameEncoder::Hevc(enc) => enc.holds_quantizer(),
             FrameEncoder::Av1(enc) => enc.holds_quantizer(),
+            #[cfg(target_arch = "aarch64")]
+            FrameEncoder::Tegra(_) => false,
+            FrameEncoder::V4l2m2m(_) => false,
+        }
+    }
+
+    /// Whether the session runs its constant quality under the peak it was asked for: NVENC and
+    /// libvpx where asked; x265, kvazaar, SVT-AV1, and VA-API never, and the V4L2 and Tegra
+    /// devices run at the rate whatever the mode (their module docblocks).
+    pub fn capped(&self) -> bool {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.capped(),
+            FrameEncoder::Vpx(enc) => enc.capped(),
+            FrameEncoder::Vaapi(_) | FrameEncoder::Hevc(_) | FrameEncoder::Av1(_) => false,
             #[cfg(target_arch = "aarch64")]
             FrameEncoder::Tegra(_) => false,
             FrameEncoder::V4l2m2m(_) => false,
@@ -2952,6 +2999,22 @@ mod software_tests {
     }
 }
 
+/// The fixture the capped-quality checks share: a `w` x `h` BGRA page of glyphs scrolled `t` steps
+/// of 4 rows, which costs its quantizer's bits every frame.
+#[cfg(test)]
+pub(crate) fn scrolled_text(w: usize, h: usize, t: usize) -> Vec<u8> {
+    let mut f = vec![18u8; w * h * 4];
+    for (i, px) in f.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i % w, i / w + t * 4);
+        let cell =
+            ((x / 8) as u32).wrapping_mul(2654435761) ^ ((y / 12) as u32).wrapping_mul(40503);
+        if x % 8 < 7 && y % 12 < 10 && (cell >> (((y % 12) * 3 + x % 8) % 29)) & 1 == 1 {
+            px.copy_from_slice(&[224, 224, 224, 255]);
+        }
+    }
+    f
+}
+
 /// The fixture the constant-block checks of every software encoder share: a screen of text
 /// with one box of it changing every frame, at a size that is no multiple of a block.
 #[cfg(test)]
@@ -3263,6 +3326,20 @@ pub fn session_bit_depth(encoder: Option<&FrameEncoder>, settings: &CaptureSetti
     match encoder {
         Some(enc) => enc.bit_depth(),
         None => software::h264_bit_depth(settings),
+    }
+}
+
+/// Whether a session runs its constant quality under the peak it was asked for
+/// (`RateSettings::capped`): a full-frame session's own answer, and for the CPU path (`None`)
+/// x264's, which caps, where the build carries it.
+pub fn session_capped(encoder: Option<&FrameEncoder>, settings: &CaptureSettings) -> bool {
+    match encoder {
+        Some(enc) => enc.capped(),
+        None => {
+            cfg!(feature = "gpl")
+                && settings.codec == Codec::H264
+                && session::RateSettings::new(settings).capped
+        }
     }
 }
 

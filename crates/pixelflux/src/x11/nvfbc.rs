@@ -941,6 +941,7 @@ fn open(settings: &CaptureSettings) -> Option<GpuCapture> {
         false,
     );
     crate::report::bit_depth(encoder.bit_depth());
+    crate::report::capped(encoder.capped());
     Some(GpuCapture {
         nvfbc,
         encoder,

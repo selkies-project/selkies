@@ -51,6 +51,10 @@ pub struct StreamInfo {
     pub gpu: String,
     pub driver: String,
     pub encode_node: i32,
+    /// Whether the session runs its constant quality under the peak the caller asked for
+    /// (`RateSettings::capped`); false for a constant rate, an uncapped constant quality, and a
+    /// session that has no capped mode, which leaves the peak unread.
+    pub capped: bool,
 }
 
 /// Cumulative counters of a capture since it started.
@@ -268,6 +272,12 @@ pub fn stream(
 /// The bits per sample the session's encoder runs at, where that is not the 8 `stream` records.
 pub fn bit_depth(depth: u32) {
     record(|info| info.bit_depth = depth);
+}
+
+/// Whether the session took the peak its constant quality was asked to run under
+/// (`StreamInfo::capped`).
+pub fn capped(capped: bool) {
+    record(|info| info.capped = capped);
 }
 
 /// How the Wayland compositor renders, which every capture of it shares: `gl` on a render

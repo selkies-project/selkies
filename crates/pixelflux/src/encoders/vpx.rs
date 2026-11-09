@@ -11,7 +11,15 @@
 //! time -- one frame in, one packet out, no lag, no alternate-reference lookahead -- with screen
 //! tuning on VP9, and its rate control is either constant-rate at the session's bitrate and VBV
 //! or a quantizer pinned between an equal minimum and maximum, which is how a quality change
-//! reaches a running session without a key frame. A VP9 session runs in libvpx's flexible mode,
+//! reaches a running session without a key frame. A capped constant quality
+//! (`RateSettings::capped`) runs the same rate control with the pinned quantizer as its floor,
+//! the quantizer free above it, and the peak as its target in a buffer of the constant rate's
+//! kind: under a peak the content does not fill, it codes at the pinned quantizer, and a new
+//! peak reaches it live as a new target does. Such a session opens with its quantizer pinned and
+//! frees it above the floor at once: libvpx seeds the running quantizer its one-pass constant
+//! rate plans each predicted frame from at the worst one the encoder is created with, and VP9
+//! opened free coded the frames after its first key frame up to 15 steps coarser for most of a
+//! second (320x240 text at quality 25). A VP9 session runs in libvpx's flexible mode,
 //! where the codec's eight buffers are addressed by slot, so a frame a client lost leaves the
 //! predictions the way a decoded picture buffer allows; a VP8 session steers its three buffers
 //! with the per-frame reference and refresh flags. What a lost frame would leave behind besides
@@ -263,6 +271,9 @@ impl VpxEncoder {
         };
         let q = me.quality.current;
         me.program_rate(rate, q);
+        if rate.capped {
+            me.cfg.rc_max_quantizer = me.cfg.rc_min_quantizer;
+        }
         let res = unsafe {
             vpx_codec_enc_init_ver(
                 &mut me.ctx,
@@ -307,6 +318,10 @@ impl VpxEncoder {
             me.control(VP9E_SET_SVC, 1)?;
             me.program_layer()?;
             me.program_refresh()?;
+        }
+        if rate.capped {
+            me.program_rate(rate, q);
+            me.reconfigure()?;
         }
         Ok(me)
     }
@@ -358,7 +373,8 @@ impl VpxEncoder {
 
     /// Write `rate` and the quantizer `q` (the codec's own domain) into the configuration:
     /// a constant rate holds the target and VBV with the quantizer bounds the settings name,
-    /// a pinned quantizer names a rate it never reaches with both bounds at the quantizer.
+    /// a pinned quantizer names a rate it never reaches with both bounds at the quantizer, and a
+    /// capped one targets its peak in the constant rate's buffer with the quantizer its floor.
     fn program_rate(&mut self, rate: RateSettings, q: u32) {
         let cfg = &mut self.cfg;
         cfg.g_timebase = vpx_rational {
@@ -366,9 +382,18 @@ impl VpxEncoder {
             den: rate.fps.num as i32,
         };
         cfg.rc_end_usage = VPX_CBR;
-        if rate.cbr {
+        if rate.cbr || rate.capped {
             let kbps = (rate.bps() / 1000).clamp(1, u32::MAX as u64) as u32;
+            let ms = (rate.vbv() as u64 * 1000 / rate.bps().max(1)) as u32;
             cfg.rc_target_bitrate = kbps;
+            cfg.rc_buf_sz = ms;
+            cfg.rc_buf_initial_sz = ms;
+            cfg.rc_buf_optimal_sz = ms * 5 / 6;
+        }
+        if rate.capped {
+            cfg.rc_min_quantizer = vpx_level(self.codec, q);
+            cfg.rc_max_quantizer = 63;
+        } else if rate.cbr {
             let (lo, hi) = (
                 self.codec.quantizer_bound(rate.min_qp),
                 self.codec.quantizer_bound(rate.max_qp),
@@ -385,10 +410,6 @@ impl VpxEncoder {
             } else {
                 63
             };
-            let ms = (rate.vbv() as u64 * 1000 / rate.bps().max(1)) as u32;
-            cfg.rc_buf_sz = ms;
-            cfg.rc_buf_initial_sz = ms;
-            cfg.rc_buf_optimal_sz = ms * 5 / 6;
         } else {
             cfg.rc_target_bitrate = RATE_CEILING_KBPS;
             cfg.rc_min_quantizer = vpx_level(self.codec, q);
@@ -456,6 +477,11 @@ impl VpxEncoder {
     /// The quality index the rate control last coded a frame at, held frames aside.
     pub fn last_quality(&self) -> Option<u32> {
         self.last_quality
+    }
+
+    /// Whether the constant quality runs under a peak (`RateSettings::capped`).
+    pub fn capped(&self) -> bool {
+        self.rate.capped
     }
 
     /// Whether a still screen's cleanup frame is coded at the rate its cap runs at (`cap`): VP9
@@ -1489,6 +1515,99 @@ mod tests {
             } else {
                 assert_eq!((raised, after), (500, 500), "{codec:?}");
             }
+        }
+    }
+
+    /// A capped constant quality under a peak its picture never reaches codes every frame at the
+    /// pinned quantizer, as the uncapped session does, a key frame asked for mid-stream and the
+    /// frames after it included.
+    #[test]
+    fn a_capped_quality_codes_as_pinned_under_a_peak_it_does_not_reach() {
+        for codec in [Codec::Vp8, Codec::Vp9] {
+            let pinned = settings(codec);
+            let capped = CaptureSettings {
+                video_bitrate_kbps: 100_000,
+                video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+                ..pinned.clone()
+            };
+            let mut a = VpxEncoder::new(&pinned, codec, false).expect("session");
+            let mut b = VpxEncoder::new(&capped, codec, false).expect("session");
+            assert!(b.rate.capped && !a.rate.capped);
+            for t in 0..30 {
+                let key = t == 0 || t == 15;
+                let plain = a
+                    .encode_host(
+                        &crate::encoders::scrolled_text(W, H, t),
+                        W * 4,
+                        false,
+                        t as u64,
+                        25,
+                        key,
+                    )
+                    .unwrap();
+                let held = b
+                    .encode_host(
+                        &crate::encoders::scrolled_text(W, H, t),
+                        W * 4,
+                        false,
+                        t as u64,
+                        25,
+                        key,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    (plain.len(), a.last_quality()),
+                    (held.len(), b.last_quality()),
+                    "{codec:?} frame {t}"
+                );
+            }
+        }
+    }
+
+    /// A capped constant quality takes each new peak live, as congestion control steers it: no
+    /// key frame, and a scroll after a cut to 60% of what it ran at under the high peak codes
+    /// within the lower one once the buffer it held has drained.
+    #[test]
+    fn a_capped_quality_moves_its_peak_without_a_key_frame() {
+        const CUT: usize = 20;
+        const AFTER: usize = 30;
+        for codec in [Codec::Vp8, Codec::Vp9] {
+            let mut s = CaptureSettings {
+                video_bitrate_kbps: 100_000,
+                video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+                ..settings(codec)
+            };
+            let mut enc = VpxEncoder::new(&s, codec, false).expect("session");
+            let kbps =
+                |f: &[usize]| f.iter().sum::<usize>() as f64 * 30.0 / f.len() as f64 / 1000.0;
+            let mut sizes = Vec::new();
+            for t in 0..CUT + AFTER {
+                if t == CUT {
+                    s.video_bitrate_kbps = (kbps(&sizes[1..]) * 0.6) as i32;
+                }
+                enc.reconfigure_rate(&s).expect("rate");
+                let out = enc
+                    .encode_host(
+                        &crate::encoders::scrolled_text(W, H, t),
+                        W * 4,
+                        false,
+                        t as u64,
+                        25,
+                        t == 0,
+                    )
+                    .unwrap();
+                assert!(
+                    t == 0 || parse_video_type(out[1]).map(|(_, k)| k) == Some(FRAME_DELTA),
+                    "{codec:?} frame {t} is a key frame"
+                );
+                sizes.push((out.len() - VIDEO_HEADER_LEN) * 8);
+            }
+            let after = kbps(&sizes[CUT + 10..]);
+            assert!(
+                after <= 1.1 * s.video_bitrate_kbps as f64,
+                "{codec:?}: the scroll ran at {after:.0} kbps under a {} kbps peak",
+                s.video_bitrate_kbps
+            );
         }
     }
 

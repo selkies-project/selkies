@@ -1769,6 +1769,7 @@ impl X11Pipeline {
             self.hw.as_ref(),
             &self.settings,
         ));
+        crate::report::capped(encoders::session_capped(self.hw.as_ref(), &self.settings));
     }
 
     /// React to a streak of hardware encode failures: rebuild the session once with the startup

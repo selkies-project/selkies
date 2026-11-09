@@ -10,6 +10,12 @@
 //! encoder with the next picture where the release takes one (`HAS_EVENTS`); a quality,
 //! frame-rate, or VBV change re-opens it, as a bitrate change does on an earlier release.
 //!
+//! The constant quantizer runs uncapped where a caller asks for a capped one
+//! (`RateSettings::capped`): the library's capped CRF (`max_bit_rate`) needs its temporal
+//! dependency model, which the low-delay structure a real-time session codes in leaves off, so
+//! the library drops the cap there (4.3.0: "Maximum bit rate only supported with tpl on"); its
+//! constant rate codes a picture of its own at the bitrate, not the quantizer's.
+//!
 //! A constant-rate session on such a release names its references: it predicts every frame
 //! from the one before in a flat structure and has the library store anchors on the schedule
 //! of `ReferenceSlots`, its GOLDEN and ALTREF, so a frame a client lost is predicted past from
@@ -176,7 +182,7 @@ impl SvtAv1Encoder {
             ),
             threads: encode_threads(settings),
             quality: Quality::new(Codec::Av1.quantizer(settings.video_crf)),
-            rate: RateSettings::new(settings),
+            rate: RateSettings::new(settings).uncapped(),
             omit_headers: settings.omit_stripe_headers,
             fresh: true,
             events: Events::default(),

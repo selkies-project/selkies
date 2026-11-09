@@ -757,7 +757,7 @@ impl WebRtcService {
                     .push((peer_id.clone(), handle.clone()));
             }
             if pacer_on {
-                let ceiling = self.rate_ceiling(&display, cc_on, lo, hi);
+                let ceiling = self.rate_ceiling(&display, self.steers(&display, cc_on), lo, hi);
                 handle.set_encoder_bps((ceiling * 1000.0) as u64);
             }
             let audio_bps = {
@@ -836,6 +836,21 @@ impl WebRtcService {
             let Some(pipeline) = self.pipeline(&did) else {
                 continue;
             };
+            if !self.steers(&did, cc_on) {
+                // A CRF display whose encoder reads no peak streams at the bitrate its client
+                // chose, which a device that runs at the bitrate whatever the mode codes at.
+                self.engine.set_video_budget(&did, None);
+                for peer in &bucket.peers {
+                    peer.set_steered_bps(None);
+                }
+                let chosen = self.st.lock().displays.get(&did).map(|d| d.video_bitrate);
+                if let Some(chosen) = chosen
+                    && pipeline.video_bitrate() != chosen
+                {
+                    pipeline.set_video_bitrate(chosen).await;
+                }
+                continue;
+            }
             let Some(goodput) = bucket.goodputs.iter().copied().reduce(f64::min) else {
                 continue;
             };
@@ -1027,6 +1042,20 @@ impl WebRtcService {
                 now + 2.0 * CONGESTION_TICK.as_secs_f64(),
             );
         }
+    }
+
+    /// Whether congestion control (`cc_on`) steers a display: a CBR one, and a CRF one unless its
+    /// capture says its encoder reads no peak (`stats::takes_peak`), which leaves it to its rate
+    /// factor at the bitrate its client chose, as without congestion control.
+    pub(crate) fn steers(&self, display: &str, cc_on: bool) -> bool {
+        let Some(pipeline) = self.pipeline(display) else {
+            return cc_on;
+        };
+        cc_on
+            && (pipeline.rc_mode() == "cbr"
+                || crate::stats::takes_peak(
+                    pipeline.stream_watch().and_then(|w| w.info()).as_ref(),
+                ) != Some(false))
     }
 
     /// A display's ceiling in kbps (`DisplayState::rate_ceiling`, where `steered`), within the
