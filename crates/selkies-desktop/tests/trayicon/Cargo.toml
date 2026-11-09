@@ -1,0 +1,15 @@
+[package]
+name = "selkies-desktop-trayicon"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Docks a colored square in the system tray, for the desktop's end to end checks."
+license = "MPL-2.0"
+
+[workspace]
+
+[dependencies]
+x11rb = "0.14"
+
+[profile.release]
+opt-level = 2

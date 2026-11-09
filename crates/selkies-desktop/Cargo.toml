@@ -1,0 +1,36 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "selkies-desktop"
+description = "The panel, start menu, taskbar, and desktop layer of Selkies containers, over the Selkies window manager, labwc, or openbox."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["wayland", "x11", "panel", "taskbar"]
+categories = ["gui"]
+
+[[bin]]
+name = "selkies-desktop"
+path = "src/main.rs"
+
+[dependencies]
+# Both display servers are spoken natively, so the binary links no system library:
+# the Wayland backend uses wayland-client's pure Rust transport and the X11 one
+# x11rb's, which makes one build serve every distribution the images ship.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-cursor = "0.31"
+x11rb = { version = "0.14", features = ["shape", "shm", "randr", "cursor", "resource_manager"] }
+# The rasterizer, shared with the window manager's frames and menus.
+selkies-draw = { path = "../selkies-draw" }
+tiny-skia = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Keysym names and the characters they produce, for the menu's search box.
+xkeysym = "0.2"
+libc = "0.2"
+memmap2 = "0.9"
