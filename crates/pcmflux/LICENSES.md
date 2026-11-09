@@ -44,7 +44,7 @@ covered by cargo-deny.
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | permissive |  |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 | permissive |  |
 | opusic-sys | 0.7.6 | BSD-3-Clause | permissive | libopus: BSD-3-Clause (permissive), built from the vendored source with cmake and linked statically |
-| pcmflux | 2.2.1 | MPL-2.0 | permissive (file-level copyleft) |  |
+| pcmflux | 0.0.0 | MPL-2.0 | permissive (file-level copyleft) |  |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | permissive |  |
 | pyo3 | 0.30.1 | MIT OR Apache-2.0 | permissive |  |
 | pyo3-ffi | 0.30.1 | MIT OR Apache-2.0 | permissive | libpython: PSF-2.0, symbols resolved from the interpreter, not linked |

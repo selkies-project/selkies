@@ -11,7 +11,7 @@ on:
   workflow_call:
     inputs:
       package_version:
-        description: Version to stamp into both native crates when building a release; empty builds the checkout unchanged
+        description: Version to stamp into both native crates (a release's, or 0.0.0.dev0 for a build of main, as the server's wheel takes); empty builds the checkout unchanged
         type: string
         default: ''
       checkout_repository:
@@ -174,7 +174,7 @@ jobs:
               echo "CIBW_${name}_IMAGE=${IMAGE}:${PLATFORM}"
             done
           } >> "$GITHUB_ENV"
-      - name: Version the native crates as the release
+      - name: Version the native crates
         if: inputs.package_version != ''
         env:
           RELEASE_TAG: ${{ inputs.package_version }}

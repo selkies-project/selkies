@@ -197,6 +197,8 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+    with:
+      package_version: 0.0.0.dev0
 
   # Three shards, each the third of the selected cases tests/conftest.py deals
   # it by budget, so a shard stays inside the job's two hours.

@@ -2422,7 +2422,7 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
 name = "pcmflux"
-version = "2.2.1"
+version = "0.0.0"
 dependencies = [
  "bytemuck",
  "libc",
@@ -2465,7 +2465,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pixelflux"
-version = "2.2.3"
+version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.2",

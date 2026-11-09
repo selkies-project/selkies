@@ -197,7 +197,7 @@ table below.
 | paste | 1.0.15 | MIT OR Apache-2.0 | permissive | both |  |
 | pastey | 0.1.1 | MIT OR Apache-2.0 | permissive | both |  |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | permissive | both |  |
-| pixelflux | 2.2.3 | MPL-2.0 | permissive (file-level copyleft) | both |  |
+| pixelflux | 0.0.0 | MPL-2.0 | permissive (file-level copyleft) | both |  |
 | pixman | 0.2.1 | MIT | permissive | both |  |
 | pixman-sys | 0.1.0 | MIT | permissive | both | libpixman-1 (MIT, permissive) |
 | png | 0.18.1 | MIT OR Apache-2.0 | permissive | both |  |

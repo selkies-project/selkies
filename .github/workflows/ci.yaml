@@ -268,10 +268,14 @@ jobs:
   pixelflux-pcmflux:
     name: pixelflux and pcmflux wheels
     # Both optional Python bridges build from the crates the server links.
-    # Their wheels land in this run's artifacts, where the suites read them.
+    # Their wheels land in this run's artifacts, where the suites read them,
+    # and in main's pre-release, at the development version the server's
+    # wheel carries.
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+    with:
+      package_version: 0.0.0.dev0
 
   images:
     name: Multi-arch images
