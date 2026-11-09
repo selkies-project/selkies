@@ -36,7 +36,10 @@
 //! The receive side of a browser's uplink tracks: microphone Opus or RED, and webcam video.
 //!
 //! Nothing received is decoded here. `RtpReceiver::handle_rtp` answers transport-cc, feeds
-//! the REMB estimator from abs-send-time, unwraps RTX, generates NACKs for what is missing,
+//! the REMB estimator from abs-send-time where transport-cc does not answer the packet (as
+//! libwebrtc's receive side does: a sender that numbers its packets transport-wide rates itself
+//! from that feedback, and a REMB beside it would cap it under its own estimate), unwraps RTX,
+//! generates NACKs for what is missing,
 //! depayloads, and reassembles frames in a `JitterBuffer`: the frame it returns is Annex-B
 //! H.264 or H.265, VP8 or VP9, or an AV1 temporal unit for pixelflux's decoder, or an Opus or
 //! RED payload with its RTP timestamp for pcmflux, which de-frames RED and recovers losses
@@ -519,7 +522,8 @@ impl RtpReceiver {
         }
         // A sender that negotiates transport-cc runs its bandwidth estimation on this
         // feedback alone and starves at its floor bitrate without it.
-        if let Some(seq) = packet.extensions.transport_sequence_number
+        let transport_wide = packet.extensions.transport_sequence_number;
+        if let Some(seq) = transport_wide
             && let Some(fci) = twcc.received(seq, arrival_ms as f64, now)
         {
             let ssrc = self.rtcp_ssrc.unwrap_or(1);
@@ -530,9 +534,11 @@ impl RtpReceiver {
         if !self.active.contains_key(&packet.ssrc) && self.active.len() >= SOURCES_MAX {
             return None;
         }
-        if let (Some(estimator), Some(abs_send_time)) =
-            (self.estimator.as_mut(), packet.extensions.abs_send_time)
-        {
+        if let (None, Some(estimator), Some(abs_send_time)) = (
+            transport_wide,
+            self.estimator.as_mut(),
+            packet.extensions.abs_send_time,
+        ) {
             let size = packet.payload.len() + packet.padding_size as usize;
             if let Some((bitrate, ssrcs)) =
                 estimator.add(arrival_ms, abs_send_time, size, packet.ssrc)
@@ -730,6 +736,39 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The REMBs a webcam receiver sends for 8 s of 1200-byte packets at 2 Mbit/s (the estimator
+    /// names a rate once it has measured 5 s of them), each carrying abs-send-time and, where
+    /// `transport_wide`, a transport-wide sequence number.
+    fn rembs_for(transport_wide: bool) -> usize {
+        let mut r = receiver("video/VP8", 96, 90000, "video");
+        let mut twcc = TwccReceiver::new();
+        let mut rembs = 0;
+        for i in 0..1700u32 {
+            let ms = i64::from(i) * 48 / 10;
+            let mut p = packet(96, i as u16, i * 432, Bytes::from(vec![0u8; 1200]));
+            p.extensions.abs_send_time =
+                Some(((ms as u64) << 18).div_ceil(1000) as u32 & 0xff_ffff);
+            if transport_wide {
+                p.extensions.transport_sequence_number = Some(i as u16);
+            }
+            r.handle_rtp(p, ms, ms as f64 / 1000.0, &mut twcc);
+            rembs += r
+                .take_rtcp()
+                .filter(|b| b.len() > 1 && b[1] == 206 && b[0] & 0x1f == RTCP_PSFB_APP)
+                .count();
+        }
+        rembs
+    }
+
+    #[test]
+    fn a_packet_transport_cc_answers_gets_no_remb_and_one_it_does_not_still_does() {
+        let (plain, wide) = (rembs_for(false), rembs_for(true));
+        assert!(
+            plain > 0 && wide == 0,
+            "REMBs: {plain} without, {wide} with transport-cc"
+        );
     }
 
     fn next_frame() -> Vec<Bytes> {
