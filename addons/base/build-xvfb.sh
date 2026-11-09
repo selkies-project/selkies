@@ -39,7 +39,7 @@ pkg-config --exists 'presentproto >= 1.4' || {
     DESTDIR='' ninja -C "${SRC}/xorgproto/build" install
 }
 
-curl -fsSL --retry 5 --connect-timeout 30 -o "${SRC}/xlibre.tar.gz" \
+curl -fsSL --retry 8 --retry-delay 30 --connect-timeout 30 -o "${SRC}/xlibre.tar.gz" \
     "https://github.com/X11Libre/xserver/archive/refs/tags/${XLIBRE_TAG}.tar.gz"
 echo "${XLIBRE_SHA256}  ${SRC}/xlibre.tar.gz" | sha256sum -c -
 tar -xf "${SRC}/xlibre.tar.gz" -C "${SRC}"

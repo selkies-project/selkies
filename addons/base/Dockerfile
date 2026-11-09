@@ -141,7 +141,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 RUN set -e; \
     cd /tmp; \
-    curl -fsSL --retry 5 --connect-timeout 30 -o egl-x11.tar.gz \
+    curl -fsSL --retry 8 --retry-delay 30 --connect-timeout 30 -o egl-x11.tar.gz \
         "https://github.com/NVIDIA/egl-x11/archive/refs/tags/${EGL_X11_TAG}.tar.gz"; \
     echo "${EGL_X11_SHA256}  egl-x11.tar.gz" | sha256sum -c -; \
     tar -xf egl-x11.tar.gz; \

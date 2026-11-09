@@ -97,6 +97,11 @@ test -f "${PKG}"
 #    alone.
 addons/base/fetch-verified release linuxdeploy/linuxdeploy continuous \
     "linuxdeploy-${ARCH}.AppImage" "${WORK}/linuxdeploy.AppImage"
+# appimagetool would download the AppImage runtime itself, once and unchecked:
+# the same release asset is taken here and handed to it (LDAI_RUNTIME_FILE).
+addons/base/fetch-verified release AppImage/type2-runtime continuous \
+    "runtime-${ARCH}" "${WORK}/runtime"
+export LDAI_RUNTIME_FILE="${WORK}/runtime"
 cp infra/appimage/linuxdeploy-plugin-conda.sh "${WORK}/linuxdeploy-plugin-conda.sh"
 # The plugin reads this from beside itself: micromamba comes from the same
 # rate-limited host as linuxdeploy, checked the same way.

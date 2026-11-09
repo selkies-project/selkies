@@ -187,20 +187,15 @@ RUN set -eu; \
 # draws the panel, start menu, taskbar, wallpaper, and file manager, and
 # generates the window manager's theme from its own settings. It is one static
 # binary per architecture that links no system library, taken at the release
-# SELKIES_DESKTOP_VERSION names and checked against the SHA-256 that release
-# publishes beside it.
+# SELKIES_DESKTOP_VERSION names and checked against the digest GitHub records
+# for it (`fetch-verified`, with the build's token where one is given).
 ARG SELKIES_DESKTOP_VERSION="1.0.0"
-RUN set -eu; \
+RUN --mount=type=secret,id=github_token,uid=1000 set -eu; \
     arch="$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/aarch64/')"; \
-    release="https://github.com/selkies-project/selkies-desktop/releases/download/${SELKIES_DESKTOP_VERSION}"; \
-    mkdir -p /tmp/selkies-desktop; \
-    cd /tmp/selkies-desktop; \
-    curl -fsSL --retry 5 -o "selkies-desktop-${arch}" "${release}/selkies-desktop-${arch}"; \
-    curl -fsSL --retry 5 -o "selkies-desktop-${arch}.sha256" "${release}/selkies-desktop-${arch}.sha256"; \
-    sha256sum -c "selkies-desktop-${arch}.sha256"; \
-    install -m 0755 "selkies-desktop-${arch}" /usr/bin/selkies-desktop; \
-    cd /; \
-    rm -rf /tmp/selkies-desktop
+    fetch-verified release selkies-project/selkies-desktop "${SELKIES_DESKTOP_VERSION}" \
+        "selkies-desktop-${arch}" /tmp/selkies-desktop > /dev/null; \
+    install -m 0755 /tmp/selkies-desktop /usr/bin/selkies-desktop; \
+    rm -f /tmp/selkies-desktop
 
 # What the desktop finds in place of settings of its own. Its start button and
 # default wallpaper are the Selkies logo it reads from a fixed path: the bare
