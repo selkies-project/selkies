@@ -433,7 +433,7 @@ impl OutputNode {
     }
 }
 
-static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
+pub(crate) static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Per-window bookkeeping carried in the window's user-data map: a stable numeric id the
 /// Python side addresses the window by, the display id of the output it is placed on, and
@@ -1034,6 +1034,19 @@ pub struct AppState {
     /// consumer inside Python); reaped like the deliver threads, with the
     /// unclaimed encoder dropped here on the event loop — its usual home.
     pub encode_reaper: Vec<std::thread::JoinHandle<Option<crate::FrameEncoder>>>,
+    /// The installed window policy and what the compositor keeps for it; `None` leaves every
+    /// window fullscreen on its output (`crate::wayland::wm`).
+    pub wm: Option<crate::wayland::wm::WmState>,
+    /// The window list taskbars read (`zwlr_foreign_toplevel_manager_v1`).
+    pub foreign_toplevel: crate::wayland::foreign_toplevel::ForeignToplevelState,
+    /// Xwayland and its window manager, started under a window policy.
+    pub xwm: crate::wayland::xwm::XwmState,
+    /// The compositor's event loop, for sources started after it is up (Xwayland).
+    pub loop_handle: smithay::reexports::calloop::LoopHandle<'static, AppState>,
+    /// The window holding the keyboard, as the seat last reported it: read where the seat's
+    /// own lock is held (`focus_changed` runs under it), where asking the keyboard would wait
+    /// on itself.
+    pub keyboard_focus: Option<u32>,
 }
 
 /// Pointer-constraints protocol. A lock is activated for the surface the pointer already holds,
@@ -1092,7 +1105,10 @@ impl XdgActivationHandler for AppState {
                 .find(|w| w.wl_surface().as_deref() == Some(&surface))
                 .cloned();
             if let Some(window) = window {
-                self.space.raise_element(&window, true);
+                let id = window_meta(&window).map(|m| m.id).unwrap_or(0);
+                if !crate::wayland::wm::request(self, id, crate::wm::Request::Activate) {
+                    self.space.raise_element(&window, true);
+                }
             }
         }
     }
@@ -1123,6 +1139,11 @@ impl XdgDecorationHandler for AppState {
             state.decoration_mode = Some(Mode::ServerSide);
         });
         toplevel.send_configure();
+        // A client that asks and states no preference leaves the choice to the policy; one
+        // that never asks draws its own frame.
+        if let Some(window) = self.window_of_toplevel(&toplevel) {
+            crate::wayland::wm::set_decoration(self, &window, crate::wm::Decoration::Unspecified);
+        }
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, mode: Mode) {
@@ -1130,6 +1151,13 @@ impl XdgDecorationHandler for AppState {
             state.decoration_mode = Some(mode);
         });
         toplevel.send_configure();
+        if let Some(window) = self.window_of_toplevel(&toplevel) {
+            let preference = match mode {
+                Mode::ClientSide => crate::wm::Decoration::Client,
+                _ => crate::wm::Decoration::Server,
+            };
+            crate::wayland::wm::set_decoration(self, &window, preference);
+        }
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
@@ -1137,6 +1165,9 @@ impl XdgDecorationHandler for AppState {
             state.decoration_mode = Some(Mode::ServerSide);
         });
         toplevel.send_configure();
+        if let Some(window) = self.window_of_toplevel(&toplevel) {
+            crate::wayland::wm::set_decoration(self, &window, crate::wm::Decoration::Unspecified);
+        }
     }
 }
 
@@ -1180,7 +1211,12 @@ impl WlrLayerShellHandler for AppState {
         }
     }
 
-    fn layer_destroyed(&mut self, _surface: WlrLayerSurface) {}
+    fn layer_destroyed(&mut self, _surface: WlrLayerSurface) {
+        for node in &self.output_nodes {
+            layer_map_for_output(&node.output).arrange();
+        }
+        crate::wayland::wm::outputs_changed(self);
+    }
 }
 
 /// Core `wl_compositor` protocol: per-surface commit handling plus the window
@@ -1190,6 +1226,9 @@ impl CompositorHandler for AppState {
         &mut self.compositor_state
     }
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        if let Some(data) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &data.compositor_state;
+        }
         &client.get_data::<ClientState>().unwrap().compositor_state
     }
 
@@ -1254,6 +1293,8 @@ impl CompositorHandler for AppState {
                 .any(|layer| layer.wl_surface() == surface);
             if found {
                 layer_map.arrange();
+                drop(layer_map);
+                crate::wayland::wm::outputs_changed(self);
                 break;
             }
         }
@@ -1266,6 +1307,7 @@ impl CompositorHandler for AppState {
             self.send_cursor_image(&status);
         }
 
+        let mut foreign_update = None;
         if let Some(handle) = with_states(surface, |states| {
             states.data_map.get::<ForeignToplevelHandle>().cloned()
         }) && let Some(window) = self
@@ -1287,6 +1329,10 @@ impl CompositorHandler for AppState {
             handle.send_title(&title.unwrap_or_default());
             handle.send_app_id(&app_id.unwrap_or_default());
             handle.send_done();
+            foreign_update = window_meta(window).map(|m| m.id);
+        }
+        if let Some(id) = foreign_update {
+            crate::wayland::foreign_toplevel::update(self, id);
         }
 
         let mapped = self
@@ -1310,10 +1356,23 @@ impl CompositorHandler for AppState {
                 .unwrap_or(false);
             if !has_buffer {
                 self.space.unmap_elem(&window);
+                if let Some(id) = window_meta(&window).map(|m| m.id) {
+                    crate::wayland::foreign_toplevel::remove(self, id);
+                }
+                crate::wayland::wm::window_unmapped(self, &window);
                 self.pending_windows.push(window);
                 self.refocus_pointer();
                 return;
             }
+            let size = window.geometry().size;
+            crate::wayland::wm::window_resized(
+                self,
+                &window,
+                crate::wm::Size {
+                    w: size.w,
+                    h: size.h,
+                },
+            );
         }
 
         if let Some(idx) = self.pending_windows.iter().position(|w| {
@@ -1332,7 +1391,19 @@ impl CompositorHandler for AppState {
                 .map(|meta| !meta.placed.swap(true, Ordering::Relaxed))
                 .unwrap_or(false);
 
-            if needs_placement {
+            if needs_placement && crate::wayland::wm::active(self) {
+                // Under a window policy the policy configures the window; the output under
+                // the pointer is where it opens unless the policy says otherwise.
+                let target_id = self.pointer_display();
+                if let Some(meta) = window_meta(&window) {
+                    meta.output.store(target_id, Ordering::Relaxed);
+                }
+                self.pending_windows.push(window.clone());
+                crate::wayland::wm::window_added(self, &window);
+                if !toplevel.is_initial_configure_sent() {
+                    toplevel.send_configure();
+                }
+            } else if needs_placement {
                 // A new toplevel opens fullscreened on the output the pointer is on
                 // (primary when indeterminate); the choice is pinned on the window's
                 // meta so the acked commit maps to the same output.
@@ -1398,10 +1469,48 @@ impl CompositorHandler for AppState {
                 // ack-only commit, or a remap after a null-buffer unmap — xdg
                 // initial_configure_sent stays true there): keep waiting; mapping now would
                 // list and hit-test a phantom window. Answer with the forced-fullscreen
-                // configure so the client draws its first buffer at the right geometry.
+                // configure so the client draws its first buffer at the right geometry;
+                // under a policy its configure stands.
                 let tl = toplevel.clone();
                 self.pending_windows.push(window);
-                self.send_forced_fullscreen_configure(&tl);
+                if !crate::wayland::wm::active(self) {
+                    self.send_forced_fullscreen_configure(&tl);
+                }
+            } else if crate::wayland::wm::active(self) {
+                let id = window_meta(&window).map(|m| m.id).unwrap_or(0);
+                let rect = crate::wayland::wm::rect_of(self, id);
+                let node_idx = self.node_idx_for_id(window_output_id(&window)).unwrap_or(0);
+                let (target_output, pos) = {
+                    let node = &self.output_nodes[node_idx];
+                    (node.output.clone(), node.pos)
+                };
+                let at = rect.map(|r| (r.x, r.y)).unwrap_or(pos);
+                self.space.map_element(window.clone(), at, false);
+                window.on_commit();
+                target_output.enter(surface);
+                let scale = target_output.current_scale().fractional_scale();
+                with_states(surface, |states| {
+                    smithay::wayland::compositor::send_surface_state(
+                        surface,
+                        states,
+                        scale.ceil() as i32,
+                        smithay::utils::Transform::Normal,
+                    );
+                    smithay::wayland::fractional_scale::with_fractional_scale(states, |fs| {
+                        fs.set_preferred_scale(scale);
+                    });
+                });
+                let size = window.geometry().size;
+                crate::wayland::wm::window_mapped(
+                    self,
+                    &window,
+                    crate::wm::Size {
+                        w: size.w,
+                        h: size.h,
+                    },
+                );
+                crate::wayland::foreign_toplevel::add(self, &window);
+                self.refocus_pointer();
             } else {
                 let target_id = window_output_id(&window);
                 let parked = window_meta(&window)
@@ -1456,6 +1565,7 @@ impl CompositorHandler for AppState {
                     if let Some(keyboard) = self.seat.get_keyboard() {
                         keyboard.set_focus(self, Some(target.clone()), serial);
                     }
+                    crate::wayland::foreign_toplevel::add(self, &window);
                     self.refocus_pointer();
                 } else {
                     // A client that drew before answering the parked size (a nested
@@ -1476,6 +1586,22 @@ impl CompositorHandler for AppState {
 }
 
 impl AppState {
+    /// The window (shown, pending, or hidden by the policy) a toplevel belongs to.
+    pub(crate) fn window_of_toplevel(&self, toplevel: &ToplevelSurface) -> Option<Window> {
+        self.space
+            .elements()
+            .chain(self.pending_windows.iter())
+            .chain(self.wm.iter().flat_map(|wm| wm.hidden.values()))
+            .find(|w| w.toplevel().is_some_and(|t| t == toplevel))
+            .cloned()
+    }
+
+    /// The policy's id of a toplevel's window.
+    pub(crate) fn id_of_toplevel(&self, toplevel: &ToplevelSurface) -> Option<u32> {
+        self.window_of_toplevel(toplevel)
+            .and_then(|w| window_meta(&w).map(|m| m.id))
+    }
+
     /// The primary (display id 0) output.
     pub(crate) fn primary_output(&self) -> Option<&Output> {
         self.output_nodes.first().map(|n| &n.output)
@@ -1587,12 +1713,16 @@ impl AppState {
                 }
                 let bbox = layer_map.layer_geometry(layer)?;
                 popup_under(layer.wl_surface(), bbox.loc + origin, p).or_else(|| {
-                    bbox.contains(local).then(|| {
-                        (
-                            FocusTarget::LayerSurface(layer.clone()),
-                            (bbox.loc + origin).to_f64(),
-                        )
-                    })
+                    // The surface's input region decides, so a wallpaper that takes input on
+                    // its icons alone leaves the rest of the screen to what lies under it.
+                    layer
+                        .surface_under((local - bbox.loc).to_f64(), WindowSurfaceType::ALL)
+                        .map(|_| {
+                            (
+                                FocusTarget::LayerSurface(layer.clone()),
+                                (bbox.loc + origin).to_f64(),
+                            )
+                        })
                 })
             })
         };
@@ -1615,7 +1745,7 @@ impl AppState {
     /// bound later, so a client yet to bind one is not entered here: the window no longer shown
     /// is left, and the client's first input after it binds enters it.
     pub(crate) fn refocus_pointer(&mut self) {
-        if self.host.is_some() {
+        if self.host.is_some() || self.wm.as_ref().is_some_and(|wm| wm.pointer_taken) {
             return;
         }
         let Some(pointer) = self.seat.get_pointer() else {
@@ -1898,13 +2028,28 @@ impl AppState {
             let Ok((reader, writer)) = std::io::pipe() else {
                 continue;
             };
-            if request_data_device_client_selection::<AppState>(
+            let writer: std::os::fd::OwnedFd = writer.into();
+            let served = match request_data_device_client_selection::<AppState>(
                 &self.seat,
                 mime.clone(),
-                writer.into(),
-            )
-            .is_ok()
-            {
+                writer,
+            ) {
+                Ok(()) => true,
+                Err(_) => match (std::io::pipe(), self.xwm.wm.as_mut()) {
+                    (Ok((again, writer)), Some(xwm)) => {
+                        drop(reader);
+                        if xwm
+                            .send_selection(SelectionTarget::Clipboard, mime.clone(), writer.into())
+                            .is_ok()
+                        {
+                            pipes.push((mime, again));
+                        }
+                        continue;
+                    }
+                    _ => false,
+                },
+            };
+            if served {
                 pipes.push((mime, reader));
             }
         }
@@ -2240,7 +2385,7 @@ const CLIPBOARD_SECRET_HINTS: &[&str] = &[
 /// The flavors of a client's copy the bridge reads, from the mimes its source offers: the
 /// picture, else the markup and the plain text, and a password manager's hint beside either.
 /// None for a copy offering nothing the bridge reads, which then reads like a cleared one.
-fn clipboard_flavors(offered: &[String]) -> Vec<String> {
+pub(crate) fn clipboard_flavors(offered: &[String]) -> Vec<String> {
     let has = |want: &str| offered.iter().any(|m| m == want);
     match CLIPBOARD_IMAGE_MIMES.iter().find(|m| has(m)) {
         Some(image) => vec![*image],
@@ -2361,6 +2506,14 @@ impl SelectionHandler for AppState {
         // The text aliases are all advertised for the first text entry, so a request for
         // any of them takes it; every other advertised mime is an entry of its own.
         let entries = user_data.clone();
+        if entries.is_empty()
+            && let Some(xwm) = self.xwm.wm.as_mut()
+        {
+            if let Err(e) = xwm.send_selection(ty, mime_type, fd) {
+                eprintln!("[Wayland] X11 selection not read: {e:?}");
+            }
+            return;
+        }
         let Some(index) = entries
             .iter()
             .position(|(mime, _)| *mime == mime_type)
@@ -3101,6 +3254,12 @@ impl SeatHandler for AppState {
             .and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
+        self.keyboard_focus = match focus {
+            Some(FocusTarget::Window(window)) => window_meta(window).map(|m| m.id),
+            _ => None,
+        };
+        crate::wayland::foreign_toplevel::update_all(self);
+        crate::wayland::xwm::publish_stacking(self);
     }
 }
 
@@ -3252,6 +3411,18 @@ impl XdgShellHandler for AppState {
         surface: ToplevelSurface,
         output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
     ) {
+        if crate::wayland::wm::active(self) {
+            let output_id = output.as_ref().and_then(|wlo| {
+                self.output_nodes
+                    .iter()
+                    .find(|n| n.output.owns(wlo))
+                    .map(|n| n.id)
+            });
+            if let Some(id) = self.id_of_toplevel(&surface) {
+                crate::wayland::wm::request(self, id, crate::wm::Request::Fullscreen(output_id));
+            }
+            return;
+        }
         if let Some(id) = output.as_ref().and_then(|wlo| {
             self.output_nodes
                 .iter()
@@ -3286,15 +3457,104 @@ impl XdgShellHandler for AppState {
     /// still receives an explicit configure at the current geometry (the Smithay default sends
     /// NOTHING here, leaving the app waiting on a toggle that never answers).
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(id) = self.id_of_toplevel(&surface)
+            && crate::wayland::wm::request(self, id, crate::wm::Request::Unfullscreen)
+        {
+            return;
+        }
         self.send_forced_fullscreen_configure(&surface);
     }
-    /// Maximize request: answered with the forced-fullscreen configure (same geometry).
+    /// Maximize request: the policy's where one is installed, else the forced-fullscreen
+    /// configure (same geometry).
     fn maximize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(id) = self.id_of_toplevel(&surface)
+            && crate::wayland::wm::request(self, id, crate::wm::Request::Maximize)
+        {
+            return;
+        }
         self.send_forced_fullscreen_configure(&surface);
     }
-    /// Unmaximize request: explicit current-geometry configure, policy unchanged.
+    /// Unmaximize request: the policy's, else an explicit current-geometry configure.
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(id) = self.id_of_toplevel(&surface)
+            && crate::wayland::wm::request(self, id, crate::wm::Request::Unmaximize)
+        {
+            return;
+        }
         self.send_forced_fullscreen_configure(&surface);
+    }
+    /// Minimize request: the policy's; without one every window stays as it is.
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(id) = self.id_of_toplevel(&surface) {
+            crate::wayland::wm::request(self, id, crate::wm::Request::Minimize);
+        }
+    }
+    /// An interactive move the client started from a button it holds: the policy's drag.
+    fn move_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        _serial: Serial,
+    ) {
+        if let Some(id) = self.id_of_toplevel(&surface) {
+            crate::wayland::wm::request(self, id, crate::wm::Request::Move);
+        }
+    }
+    /// An interactive resize the client started: the policy's drag on the named edge.
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        _serial: Serial,
+        edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+    ) {
+        if let Some(id) = self.id_of_toplevel(&surface) {
+            let edge = crate::wm::ResizeEdge::from_xdg(edges as u32);
+            crate::wayland::wm::request(self, id, crate::wm::Request::Resize(edge));
+        }
+    }
+    /// The client asks for its window menu: the policy's, at the point in the window.
+    fn show_window_menu(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        _serial: Serial,
+        location: Point<i32, Logical>,
+    ) {
+        if let Some(id) = self.id_of_toplevel(&surface) {
+            crate::wayland::wm::request(
+                self,
+                id,
+                crate::wm::Request::ShowMenu {
+                    x: location.x,
+                    y: location.y,
+                },
+            );
+        }
+    }
+    /// The title changed: the policy's frame and the taskbars follow.
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_of_toplevel(&surface) {
+            crate::wayland::wm::window_changed(self, &window);
+            if let Some(id) = window_meta(&window).map(|m| m.id) {
+                crate::wayland::foreign_toplevel::update(self, id);
+            }
+        }
+    }
+    /// The app id changed: the policy's frame icon and the taskbars follow.
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_of_toplevel(&surface) {
+            crate::wayland::wm::window_changed(self, &window);
+            if let Some(id) = window_meta(&window).map(|m| m.id) {
+                crate::wayland::foreign_toplevel::update(self, id);
+            }
+        }
+    }
+    /// The parent changed: the policy stacks and places the dialog over it.
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_of_toplevel(&surface) {
+            crate::wayland::wm::window_changed(self, &window);
+        }
     }
     /// A toplevel closed: drop it from the pending-window queue so a window that never
     /// finished mapping can't linger there, unmap it from the space at once so `list_windows`
@@ -3302,6 +3562,24 @@ impl XdgShellHandler for AppState {
     /// later), and remove its foreign-toplevel handle so taskbar-style clients stop listing a
     /// window that is gone.
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // The window's id is read before it leaves the space and the pending list, which is
+        // where it is found.
+        let id = self
+            .wm
+            .as_ref()
+            .and_then(|wm| {
+                wm.hidden
+                    .iter()
+                    .find(|(_, w)| w.toplevel().is_some_and(|t| *t == surface))
+                    .map(|(id, _)| *id)
+            })
+            .or_else(|| {
+                self.space
+                    .elements()
+                    .chain(self.pending_windows.iter())
+                    .find(|w| w.toplevel().is_some_and(|t| *t == surface))
+                    .and_then(|w| window_meta(w).map(|m| m.id))
+            });
         if let Some(idx) = self
             .pending_windows
             .iter()
@@ -3322,6 +3600,10 @@ impl XdgShellHandler for AppState {
             states.data_map.get::<ForeignToplevelHandle>().cloned()
         }) {
             self.foreign_toplevel_list.remove_toplevel(&handle);
+        }
+        if let Some(id) = id {
+            crate::wayland::foreign_toplevel::remove(self, id);
+            crate::wayland::wm::window_removed(self, id);
         }
     }
 }

@@ -100,7 +100,7 @@ use smithay::{
     desktop::{Space, space::SpaceRenderElements},
     input::{
         SeatState,
-        keyboard::{FilterResult, XkbConfig},
+        keyboard::XkbConfig,
         pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent, RelativeMotionEvent},
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale as OutputScale, Subpixel},
@@ -166,6 +166,8 @@ pub mod sink;
 pub mod uinput;
 /// Headless Wayland compositor and cursor rendering.
 pub mod wayland;
+/// The window policy interface a window manager implements for the compositor.
+pub mod wm;
 
 #[cfg(test)]
 mod cleanup_bench;
@@ -228,6 +230,83 @@ smithay::backend::renderer::element::render_elements! {
     Window=Wrap<E>,
     Cursor=MemoryRenderBufferRenderElement<R>,
     Surface=WaylandSurfaceRenderElement<R>,
+    Scaled=smithay::backend::renderer::element::utils::RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
+}
+
+/// Push a window's elements for an output at `origin` and `scale`: through the window policy's
+/// effect where one runs on it (the surface tree scaled into the effect's rectangle and blended
+/// at its alpha, the frame left out), else as the window stands with its frame parts beside it.
+fn push_window_elements<R>(
+    space: &smithay::desktop::Space<smithay::desktop::Window>,
+    wm: Option<&wayland::wm::WmState>,
+    renderer: &mut R,
+    elements: &mut Vec<CompositionElements<R, WaylandSurfaceRenderElement<R>>>,
+    window: &smithay::desktop::Window,
+    origin: Point<i32, smithay::utils::Logical>,
+    scale: f64,
+) where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + Send + 'static,
+{
+    use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
+    use smithay::backend::renderer::element::utils::RescaleRenderElement;
+    let window_loc = space.element_location(window).unwrap_or_default() - origin;
+    let id = wayland::frontend::window_meta(window).map(|m| m.id);
+    let effect = id.and_then(|id| wm.and_then(|wm| wm.effects.get(&id).copied()));
+    if let Some(effect) = effect {
+        if effect.alpha <= 0.0 || effect.rect.w <= 0 || effect.rect.h <= 0 {
+            return;
+        }
+        let geometry = window.geometry();
+        let sx = effect.rect.w as f64 / geometry.size.w.max(1) as f64;
+        let sy = effect.rect.h as f64 / geometry.size.h.max(1) as f64;
+        let target: Point<i32, smithay::utils::Logical> =
+            (effect.rect.x - origin.x, effect.rect.y - origin.y).into();
+        let origin_phys = target.to_physical_precise_round(scale);
+        let surface_loc = (target - geometry.loc).to_physical_precise_round(scale);
+        if let Some(surface) = window.wl_surface() {
+            let surface_elements: Vec<WaylandSurfaceRenderElement<R>> =
+                render_elements_from_surface_tree(
+                    renderer,
+                    &surface,
+                    surface_loc,
+                    Scale::from(scale),
+                    effect.alpha,
+                    smithay::backend::renderer::element::Kind::Unspecified,
+                );
+            elements.extend(surface_elements.into_iter().map(|element| {
+                CompositionElements::Scaled(RescaleRenderElement::from_element(
+                    element,
+                    origin_phys,
+                    Scale::from((sx, sy)),
+                ))
+            }));
+        }
+        return;
+    }
+    // The space places a window's geometry; the surface is drawn geometry offset to the left
+    // and up of it, where a client-side shadow lives, as the space's own render and its hit
+    // test agree.
+    let surface_loc = window_loc - window.geometry().loc;
+    elements.extend(
+        window
+            .render_elements(
+                renderer,
+                surface_loc.to_physical_precise_round(scale),
+                Scale::from(scale),
+                1.0,
+            )
+            .into_iter()
+            .map(CompositionElements::Space),
+    );
+    if let Some(id) = id {
+        let client_loc = space.element_location(window).unwrap_or_default();
+        elements.extend(
+            wayland::wm::frame_elements(wm, renderer, id, client_loc, origin, scale, 1.0)
+                .into_iter()
+                .map(CompositionElements::Cursor),
+        );
+    }
 }
 
 /// Push an output's wlr-layer surfaces on `target_layer` into `elements`, top-most first, the
@@ -670,6 +749,12 @@ pub enum ThreadCommand {
     },
     SetCursorCallback(Option<Arc<dyn crate::sink::CursorSink>>),
     SetClipboardCallback(Arc<dyn crate::sink::ClipboardSink>),
+    /// Install the window policy that manages the compositor's windows from here on.
+    InstallWindowPolicy(Box<dyn crate::wm::WindowPolicy>),
+    /// Start Xwayland for the compositor's X11 clients; `notify` is told its display number.
+    StartXwayland {
+        notify: Option<std::sync::mpsc::Sender<u32>>,
+    },
     /// Server-side clipboard offer: the compositor owns the selection and serves one payload
     /// per `(mime, data)` entry (plus text aliases), so a paste takes the flavor it asks for.
     SetClipboard {
@@ -4719,6 +4804,21 @@ fn render_node_tick(
                         if let Some(elem) = node.overlay_state.get_watermark_element(renderer) {
                             elements.push(CompositionElements::Cursor(elem));
                         }
+                        elements.extend(
+                            wayland::wm::overlay_elements(
+                                state.wm.as_ref(),
+                                renderer,
+                                origin,
+                                (
+                                    (width as f64 / output_scale_val).round() as i32,
+                                    (height as f64 / output_scale_val).round() as i32,
+                                )
+                                    .into(),
+                                output_scale_val,
+                            )
+                            .into_iter()
+                            .map(CompositionElements::Cursor),
+                        );
 
                         {
                             let layer_map = layer_map_for_output(&output);
@@ -4740,19 +4840,14 @@ fn render_node_tick(
                         }
 
                         for window in state.space.elements_for_output(&output).rev() {
-                            let window_loc =
-                                state.space.element_location(window).unwrap_or_default() - origin;
-
-                            elements.extend(
-                                window
-                                    .render_elements(
-                                        renderer,
-                                        window_loc.to_physical_precise_round(output_scale_val),
-                                        Scale::from(output_scale_val),
-                                        1.0,
-                                    )
-                                    .into_iter()
-                                    .map(CompositionElements::Space),
+                            push_window_elements(
+                                &state.space,
+                                state.wm.as_ref(),
+                                renderer,
+                                &mut elements,
+                                window,
+                                origin,
+                                output_scale_val,
                             );
                         }
 
@@ -5006,6 +5101,21 @@ fn render_node_tick(
                 if let Some(elem) = node.overlay_state.get_watermark_element(renderer) {
                     elements.push(CompositionElements::Cursor(elem));
                 }
+                elements.extend(
+                    wayland::wm::overlay_elements(
+                        state.wm.as_ref(),
+                        renderer,
+                        origin,
+                        (
+                            (width as f64 / output_scale_val).round() as i32,
+                            (height as f64 / output_scale_val).round() as i32,
+                        )
+                            .into(),
+                        output_scale_val,
+                    )
+                    .into_iter()
+                    .map(CompositionElements::Cursor),
+                );
 
                 {
                     let layer_map = layer_map_for_output(&output);
@@ -5027,18 +5137,14 @@ fn render_node_tick(
                 }
 
                 for window in state.space.elements_for_output(&output).rev() {
-                    let loc = state.space.element_location(window).unwrap_or_default() - origin;
-
-                    elements.extend(
-                        window
-                            .render_elements(
-                                renderer,
-                                loc.to_physical_precise_round(output_scale_val),
-                                Scale::from(output_scale_val),
-                                1.0,
-                            )
-                            .into_iter()
-                            .map(CompositionElements::Space),
+                    push_window_elements(
+                        &state.space,
+                        state.wm.as_ref(),
+                        renderer,
+                        &mut elements,
+                        window,
+                        origin,
+                        output_scale_val,
                     );
                 }
 
@@ -5480,7 +5586,9 @@ fn create_output_on(
                 counts.iter().any(|(o, c)| *o == oid && *c >= 2)
             })
         });
-    if let Some(window) = adopt {
+    if let Some(window) = adopt
+        && !wayland::wm::active(state)
+    {
         state.place_window_on_output(&window, id);
         crate::log::debug!(
             "[Wayland] Output {id}: adopted waiting window {}.",
@@ -5489,6 +5597,8 @@ fn create_output_on(
                 .unwrap_or(0)
         );
     }
+    wayland::wm::outputs_changed(state);
+    wayland::xwm::publish_workarea(state);
     true
 }
 
@@ -5600,14 +5710,18 @@ fn reposition_output_on(state: &mut AppState, id: u32, x: i32, y: i32) -> bool {
         .filter(|w| wayland::frontend::window_output_id(w) == id)
         .cloned()
         .collect();
-    for window in &windows {
-        state.space.map_element(window.clone(), (x, y), false);
+    if !wayland::wm::active(state) {
+        for window in &windows {
+            state.space.map_element(window.clone(), (x, y), false);
+        }
     }
     state.refocus_pointer();
     if let Some(cap) = state.output_nodes[idx].capture.as_mut() {
         cap.needs_full_render = true;
     }
     println!("[Wayland] Output {id} repositioned to ({x}, {y}).");
+    wayland::wm::outputs_changed(state);
+    wayland::xwm::publish_workarea(state);
     true
 }
 
@@ -5636,6 +5750,12 @@ fn destroy_output_on(state: &mut AppState, id: u32) -> bool {
         .cloned()
         .collect();
     for window in &windows {
+        if wayland::wm::active(state) {
+            if let Some(meta) = wayland::frontend::window_meta(window) {
+                meta.output.store(0, Ordering::Relaxed);
+            }
+            continue;
+        }
         // The primary keeps whichever screen it already shows: a nested session's
         // second screen parks again rather than covering the first, tagged with
         // the output it came from so recreating that output takes it back.
@@ -5675,6 +5795,8 @@ fn destroy_output_on(state: &mut AppState, id: u32) -> bool {
         "[Wayland] Output {id} destroyed; {} window(s) relocated to primary.",
         windows.len()
     );
+    wayland::wm::outputs_changed(state);
+    wayland::xwm::publish_workarea(state);
     true
 }
 /// Resize a screen's output, keeping its position, so the displays cut out of it can be
@@ -5686,30 +5808,43 @@ fn destroy_output_on(state: &mut AppState, id: u32) -> bool {
 /// Send every non-parked window on `display_id`'s output a fullscreen configure
 /// for the new mode, with the scale each surface should render at. Without this
 /// a live session keeps drawing at the old size under the resized screen.
-fn configure_windows_for_mode(
+/// The windows a mode change on an output reaches: under the window policy the ones the
+/// policy placed on it, else the ones tagged for the display. A parked screen's windows are
+/// left out either way: they are tagged for a display but composited on none, holding
+/// PARKED_LOGICAL_SIZE until `create_output` gives them a screen, and resizing them would
+/// double the session's coordinate space onto a screen nobody watches, which is where a window
+/// that centers itself then lands.
+fn windows_on_display(
     state: &AppState,
     display_id: u32,
     output: &Output,
-    width: i32,
-    height: i32,
-    scale: f64,
-) {
+) -> Vec<smithay::desktop::Window> {
+    let on_output: Vec<smithay::desktop::Window> = if wayland::wm::active(state) {
+        state.space.elements_for_output(output).cloned().collect()
+    } else {
+        state
+            .space
+            .elements()
+            .filter(|window| wayland::frontend::window_output_id(window) == display_id)
+            .cloned()
+            .collect()
+    };
+    on_output
+        .into_iter()
+        .filter(|window| {
+            !wayland::frontend::window_meta(window)
+                .is_some_and(|meta| meta.parked.load(Ordering::Relaxed))
+        })
+        .collect()
+}
+
+/// Tell every window on an output the output's scale: the surface's preferred buffer scale
+/// and fractional scale, so a client draws at the new density rather than being stretched to
+/// it. The size a client keeps is the policy's business where one runs, and the fullscreen
+/// configure's otherwise.
+fn announce_scale_to_windows(state: &AppState, display_id: u32, output: &Output, scale: f64) {
     let scale = scale.max(0.1);
-    let logical_width = (width as f64 / scale).round() as i32;
-    let logical_height = (height as f64 / scale).round() as i32;
-    for window in state.space.elements() {
-        if wayland::frontend::window_output_id(window) != display_id {
-            continue;
-        }
-        // A parked screen is tagged for this display but composited on none: it
-        // holds PARKED_LOGICAL_SIZE until `create_output` gives it one. Resizing it
-        // here would double the session's coordinate space onto a screen nobody
-        // watches, which is where a window that centers itself then lands.
-        if wayland::frontend::window_meta(window)
-            .is_some_and(|meta| meta.parked.load(Ordering::Relaxed))
-        {
-            continue;
-        }
+    for window in windows_on_display(state, display_id, output) {
         if let Some(surface) = window.wl_surface() {
             output.enter(&surface);
             with_states(&surface, |states| {
@@ -5724,6 +5859,22 @@ fn configure_windows_for_mode(
                 });
             });
         }
+    }
+}
+
+fn configure_windows_for_mode(
+    state: &AppState,
+    display_id: u32,
+    output: &Output,
+    width: i32,
+    height: i32,
+    scale: f64,
+) {
+    let scale = scale.max(0.1);
+    let logical_width = (width as f64 / scale).round() as i32;
+    let logical_height = (height as f64 / scale).round() as i32;
+    announce_scale_to_windows(state, display_id, output, scale);
+    for window in windows_on_display(state, display_id, output) {
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
                 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
@@ -5839,8 +5990,19 @@ fn resize_output_on(state: &mut AppState, id: u32, width: i32, height: i32, scal
             cap.needs_full_render = true;
         }
     }
-    configure_windows_for_mode(state, id, &output, width, height, scale);
+    if wayland::wm::active(state) {
+        announce_scale_to_windows(state, id, &output, scale);
+    } else {
+        configure_windows_for_mode(state, id, &output, width, height, scale);
+    }
+    // The layer surfaces (a desktop's wallpaper and panel) are laid out for the mode they were
+    // mapped on; the arrangement sends each its new size, and the frame that follows is
+    // rendered without waiting for a client to commit something.
+    layer_map_for_output(&output).arrange();
+    wayland::wm::mark_dirty(state);
     println!("[Wayland] Output {id} resized to {width}x{height} scale {scale:.2}.");
+    wayland::wm::outputs_changed(state);
+    wayland::xwm::publish_workarea(state);
     true
 }
 
@@ -6396,6 +6558,13 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         last_idle_service_at: None,
         deliver_reaper: Vec::new(),
         encode_reaper: Vec::new(),
+        wm: None,
+        foreign_toplevel: wayland::foreign_toplevel::ForeignToplevelState::new(&dh),
+        xwm: wayland::xwm::XwmState::new(
+            smithay::wayland::xwayland_shell::XWaylandShellState::new::<AppState>(&dh),
+        ),
+        loop_handle: event_loop.handle(),
+        keyboard_focus: None,
     };
     // Seed the keymap policy with the seat's initial keymap so overlay binds splice onto
     // the exact text clients received.
@@ -6698,6 +6867,13 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 }
                 let _ = reply.send(list);
             }
+            ThreadCommand::InstallWindowPolicy(policy) => {
+                wayland::wm::install(state, policy);
+            }
+            ThreadCommand::StartXwayland { notify } => {
+                let handle = state.loop_handle.clone();
+                wayland::xwm::start(state, handle, notify);
+            }
             ThreadCommand::SetClipboardCallback(cb) => {
                 state.clipboard_callback = Some(cb);
                 // Re-stage a read of the CURRENT selection so a copy made before this
@@ -6774,13 +6950,14 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     let serial = next_serial();
                     let time = wayland_time();
                     if let Some(keyboard) = state.seat.get_keyboard() {
+                        let pressed = key_state == KeyState::Pressed;
                         keyboard.input(
                             state,
                             Keycode::new(scancode),
                             key_state,
                             serial,
                             time,
-                            |_, _, _| FilterResult::<()>::Forward,
+                            |state, _, handle| wayland::wm::key_filter(state, handle, pressed),
                         );
                     }
                 }
@@ -6801,13 +6978,14 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 let serial = next_serial();
                 let time = wayland_time();
                 if let Some(keyboard) = state.seat.get_keyboard() {
+                    let pressed = key_state == KeyState::Pressed;
                     keyboard.input(
                         state,
                         Keycode::new(scancode),
                         key_state,
                         serial,
                         time,
-                        |_, _, _| FilterResult::<()>::Forward,
+                        |state, _, handle| wayland::wm::key_filter(state, handle, pressed),
                     );
                 }
             }
@@ -6926,6 +7104,15 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
 
                 if let Some(pointer) = state.seat.get_pointer() {
                     let under = state.pointer_target_under(p);
+                    if wayland::wm::pointer(
+                        state,
+                        crate::wm::PointerKind::Motion,
+                        p,
+                        wayland::wm::under_of(state, &under),
+                    ) == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
 
                     state.release_grab_across_screens(&pointer, &under, serial, time);
                     let entered = pointer.current_focus() != under.as_ref().map(|(t, _)| t.clone());
@@ -7003,6 +7190,15 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                         .space
                         .element_under(new_pos)
                         .map(|(window, loc)| (FocusTarget::Window(window.clone()), loc.to_f64()));
+                    if wayland::wm::pointer(
+                        state,
+                        crate::wm::PointerKind::Motion,
+                        new_pos,
+                        wayland::wm::under_of(state, &under),
+                    ) == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
 
                     state.release_grab_across_screens(&pointer, &under, serial, time);
                     let entered = pointer.current_focus() != under.as_ref().map(|(t, _)| t.clone());
@@ -7055,8 +7251,20 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
 
                 state.refocus_pointer();
                 if let Some(pointer) = state.seat.get_pointer() {
-                    if button_state == smithay::backend::input::ButtonState::Pressed {
-                        let pos = pointer.current_location();
+                    let pos = pointer.current_location();
+                    let under = state.pointer_target_under(pos);
+                    let kind = crate::wm::PointerKind::Button {
+                        button: btn,
+                        pressed: btn_state_val > 0,
+                    };
+                    if wayland::wm::pointer(state, kind, pos, wayland::wm::under_of(state, &under))
+                        == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
+                    if button_state == smithay::backend::input::ButtonState::Pressed
+                        && !wayland::wm::active(state)
+                    {
                         let target_window = state.space.element_under(pos).map(|(w, _)| w.clone());
 
                         if let Some(window) = target_window {
@@ -7091,6 +7299,17 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 let time = wayland_time();
                 state.refocus_pointer();
                 if let Some(pointer) = state.seat.get_pointer() {
+                    let pos = pointer.current_location();
+                    let under = state.pointer_target_under(pos);
+                    let kind = crate::wm::PointerKind::Axis {
+                        horizontal: x,
+                        vertical: y,
+                    };
+                    if wayland::wm::pointer(state, kind, pos, wayland::wm::under_of(state, &under))
+                        == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
                     let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
 
                     if x != 0.0 {
@@ -7121,6 +7340,17 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 if let Some(pointer) = state.seat.get_pointer()
                     && (dx != 0.0 || dy != 0.0)
                 {
+                    let pos = pointer.current_location();
+                    let under = state.pointer_target_under(pos);
+                    let kind = crate::wm::PointerKind::Axis {
+                        horizontal: dx,
+                        vertical: dy,
+                    };
+                    if wayland::wm::pointer(state, kind, pos, wayland::wm::under_of(state, &under))
+                        == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
                     let (_, _, scale) =
                         state.layout_logical_to_physical_scaled(pointer.current_location());
                     let mut frame = AxisFrame::new(time).source(AxisSource::Finger);
@@ -7331,6 +7561,9 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         .handle()
         .insert_source(wake_rx, |_, _, state| {
             let had_input = drain_thread_commands(state);
+            if wayland::wm::tick_due(state, Instant::now()) {
+                wayland::wm::tick(state, Instant::now());
+            }
             // Input landing while the frame timer sits on its long idle
             // deadline must not wait it out: service the frame callbacks now
             // (at most at frame pace) so the app's echo repaint starts with
@@ -7443,6 +7676,14 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             reap_dead_host(state);
             drain_thread_commands(state);
             reconcile_host_layouts(state);
+            {
+                let now = Instant::now();
+                let handle = state.loop_handle.clone();
+                wayland::xwm::maintain(state, &handle, now);
+                if wayland::wm::tick_due(state, now) {
+                    wayland::wm::tick(state, now);
+                }
+            }
             // Deliver and deferred encode threads of stopped captures are
             // joined only once they report finished (a plain atomic load), so
             // the tick never waits on one; whatever remains at shutdown, the
@@ -7528,6 +7769,10 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 } else {
                     IDLE_FRAME_INTERVAL
                 };
+                let idle = match wayland::wm::next_wake(state) {
+                    Some(at) => idle.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))),
+                    None => idle,
+                };
                 state.frame_idle_long = idle == IDLE_FRAME_INTERVAL;
                 return TimeoutAction::ToDuration(idle);
             }
@@ -7551,6 +7796,10 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 .map(|cap| cap.pace.next_wake(capture_period(cap), now, cap.change_pending))
                 .min()
                 .unwrap_or(loop_start_time + frame_period(state.settings.target_fps));
+            let next_due = match wayland::wm::next_wake(state) {
+                Some(at) => next_due.min(at),
+                None => next_due,
+            };
             let wait = next_due.saturating_duration_since(now);
             // A zero wait is a change no render could take yet (a busy encoder): retry shortly
             // rather than spin. Shorter waits stand, a boundary being a fraction of a millisecond
@@ -7578,7 +7827,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
     crate::computer_use::spawn_cu_from_env();
     crate::wayland::ficlient::arm(crate::computer_use::app_wayland_socket_path());
 
-    let _ = event_loop.run(None, &mut state, |state| {
+    let ran = event_loop.run(None, &mut state, |state| {
         serve_changes(state);
         state.process_pending_clipboard_read();
         state.flush_pending_cursor();
@@ -7597,6 +7846,9 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         }
         let _ = state.dh.flush_clients();
     });
+    if let Err(e) = ran {
+        eprintln!("[Wayland] compositor event loop ended: {e}");
+    }
 }
 
 /// The handle to the one long-lived compositor thread. Because calloop, EGL/GBM, and the
@@ -7631,6 +7883,26 @@ impl Compositor {
     ) -> Result<(), Error> {
         self.send(ThreadCommand::SetCursorCallback(sink))
             .map_err(|e| Error::Compositor(format!("Failed to set cursor callback: {e}")))
+    }
+
+    /// Install the window policy: from here on it decides placement, focus, stacking, frames,
+    /// and bindings for every window.
+    pub fn install_window_policy(
+        &self,
+        policy: Box<dyn crate::wm::WindowPolicy>,
+    ) -> Result<(), Error> {
+        self.send(ThreadCommand::InstallWindowPolicy(policy))
+            .map_err(|e| Error::Compositor(format!("Failed to install the window policy: {e}")))
+    }
+
+    /// Start Xwayland for X11 clients, managed with the Wayland ones; `notify` receives the
+    /// display number once the server is up.
+    pub fn start_xwayland(
+        &self,
+        notify: Option<std::sync::mpsc::Sender<u32>>,
+    ) -> Result<(), Error> {
+        self.send(ThreadCommand::StartXwayland { notify })
+            .map_err(|e| Error::Compositor(format!("Failed to start Xwayland: {e}")))
     }
 
     /// Register the consumer of what client applications copy to the clipboard.
@@ -8542,6 +8814,20 @@ pub fn ensure_compositor(
         *g = Some(be);
     }
     Ok(g.as_ref().unwrap().clone())
+}
+
+/// Install a window policy on the running compositor; an error where none runs.
+pub fn install_window_policy(policy: Box<dyn crate::wm::WindowPolicy>) -> Result<(), Error> {
+    running_compositor()
+        .ok_or_else(|| Error::Compositor("no compositor is running".to_string()))?
+        .install_window_policy(policy)
+}
+
+/// Start Xwayland on the running compositor; `notify` is told the display number.
+pub fn start_xwayland(notify: Option<std::sync::mpsc::Sender<u32>>) -> Result<(), Error> {
+    running_compositor()
+        .ok_or_else(|| Error::Compositor("no compositor is running".to_string()))?
+        .start_xwayland(notify)
 }
 
 /// The live Wayland backend, if any — never creates one. The pre-capture entry points
