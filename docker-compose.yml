@@ -78,8 +78,8 @@ services:
       # Use the headless Wayland backend instead of X11 (default: X11 Xvfb).
       SELKIES_WAYLAND: ${SELKIES_WAYLAND:-false}
       # Session compositor nested in the capture compositor without the desktop
-      # (SELKIES_DESKTOP=false): empty picks labwc where the image has it, "none"
-      # drops it; under the desktop the window manager is the server's
+      # (SELKIES_DESKTOP=false): the name of a compositor the image installs,
+      # else "none"; under the desktop the window manager is the server's
       SELKIES_WAYLAND_COMPOSITOR: ${SELKIES_WAYLAND_COMPOSITOR:-}
       # Render/encode GPU selection; empty means auto-detect
       SELKIES_RENDER_DRI: ${SELKIES_RENDER_DRI:-}

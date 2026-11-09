@@ -10,8 +10,8 @@
 # itself. This layer adds only the desktop: selkies-desktop, Selkies' own
 # panel, start menu, and desktop, which the server runs under its own window
 # manager on either backend (SELKIES_DESKTOP, set here), the browsers, and the
-# proot-apps runner behind the dashboards' apps panel. No Openbox and no labwc
-# run in this image: the window manager is the server's, on X11 and on Wayland.
+# proot-apps runner behind the dashboards' apps panel. No other window manager
+# runs in this image: the window manager is the server's, on X11 and on Wayland.
 #
 # BASE_IMAGE is a whole reference — tag or digest — so this layer follows
 # whichever base container it is pointed at: the published Ubuntu 26.04 one by
@@ -55,6 +55,13 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # lacks, and both bring hicolor, every icon theme's fallback
         breeze-icon-theme \
         adwaita-icon-theme \
+        # The GTK theme pair selkies-desktop switches applications between
+        # with its light and dark scheme, and the platform themes Qt 5 and
+        # Qt 6 draw through to follow GTK's theme and dark preference
+        # (QT_QPA_PLATFORMTHEME below)
+        breeze-gtk-theme \
+        qt5-gtk-platformtheme \
+        qt6-gtk-platformtheme \
         # The terminals: foot on Wayland, xfce4-terminal on X11, which
         # selkies-terminal picks between as the x-terminal-emulator below
         foot \
@@ -204,8 +211,8 @@ RUN set -eu; \
 
 # The desktop's defaults, each documented in its own file: the window
 # manager's settings and right-click menu in the openbox format it reads, under
-# the openbox name on X11 and the labwc name on Wayland, where the settings are
-# the same file; the autostart that prepares the home; the terminals' look,
+# /etc/xdg/openbox on both backends; the autostart that prepares the home; the
+# terminals' look,
 # shared between foot and xfce4-terminal; the applications files and links
 # open with; and the one Terminal entry in the start menu, which
 # selkies-terminal backs as the x-terminal-emulator on either backend, in place
@@ -214,8 +221,7 @@ RUN set -eu; \
 # completion, as the desktop's own session does.
 COPY --chown=1000:1000 addons/desktop/rootfs/ /
 COPY --chown=1000:1000 addons/desktop/selkies-terminal /usr/local/bin/
-RUN chmod -f 755 /usr/local/bin/selkies-terminal /etc/xdg/openbox/autostart /etc/xdg/labwc/autostart && \
-    cp /etc/xdg/openbox/rc.xml /etc/xdg/labwc/rc.xml && \
+RUN chmod -f 755 /usr/local/bin/selkies-terminal /etc/xdg/openbox/autostart && \
     update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/local/bin/selkies-terminal 50 && \
     [ "$(readlink -f /etc/alternatives/x-terminal-emulator)" = /usr/local/bin/selkies-terminal ] && \
     printf '%s\n' \
@@ -259,6 +265,9 @@ USER 1000
 # terminal, so the desktop image enables the channel; disable with
 # -e SELKIES_COMMAND_ENABLED=false.
 ENV SELKIES_COMMAND_ENABLED="true"
+# Qt applications take GTK's theme, which selkies-desktop sets from its colors,
+# so they follow the shell's scheme with the GTK ones
+ENV QT_QPA_PLATFORMTHEME="gtk3"
 # The desktop: the server manages the windows itself on either backend and
 # starts and keeps the selkies-desktop shell (set to false to run only the
 # display server)

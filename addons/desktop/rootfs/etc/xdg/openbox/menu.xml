@@ -4,11 +4,10 @@
   License, v. 2.0. If a copy of the MPL was not distributed with this
   file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-  The window manager's right-click menu on the desktop under the X11 backend,
-  installed as /etc/xdg/openbox/menu.xml, the file Openbox would read; a
-  user's ~/.config/openbox/menu.xml replaces it. It mirrors the Wayland
-  backend's (/etc/xdg/labwc/menu.xml), so the desktop offers the same menu on
-  either: the everyday applications, every installed one by category, the
+  The window manager's right-click menu on the desktop, installed as
+  /etc/xdg/openbox/menu.xml, the file Openbox would read, and read on both
+  backends; a user's ~/.config/openbox/menu.xml replaces it. It offers the
+  everyday applications, every installed one by category, the
   open windows, and the desktop's own commands. The selkies-applications menu
   is the window manager's own, filled from the installed desktop entries with
   their icons, and an item written without an icon gets the one of the

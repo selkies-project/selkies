@@ -18,8 +18,9 @@
 # and any other desktop can be built the same way.
 #
 #   - X11 display server (XLibre's Xvfb, with glamor and DRI3) and the headless Wayland backend
-#     with SELKIES_WAYLAND=true, whose nested labwc supplies window management,
-#     decorations, and XWayland
+#     with SELKIES_WAYLAND=true; the Selkies window manager manages either under
+#     SELKIES_WM, and a desktop built on the image may nest a session compositor
+#     of its own instead (SELKIES_WAYLAND_COMPOSITOR)
 #   - s6 service supervision, running as PID 1 or below a foreign init
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) and the
 #     V4L2 webcam interposer, all built in-tree and wired with LD_PRELOAD
@@ -57,8 +58,6 @@ ARG DISTRIB_RELEASE="26.04"
 # addons/base/patches/xvfb-zero-copy-shared-framebuffer.patch, which keeps a
 # system-memory screen in a memfd the capture reads in place, told where it
 # changed without a round trip.
-ARG WLROOTS_VERSION="0.19.3"
-ARG LABWC_VERSION="0.9.7"
 # Both come as the archives GitHub generates for their tags, with no tarball
 # of the project's own beside them, so each tag carries the checksum of the
 # archive the build has to receive.
@@ -198,77 +197,6 @@ RUN set -e; \
         ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so"; \
     fi
 
-# Session compositor for the Wayland backend, built from source so it carries
-# the Selkies patches: a control socket at `$XDG_RUNTIME_DIR/labwc.sock`, served
-# unconditionally, over which Selkies adds a screen when a second display
-# attaches and removes it when that display disconnects (window queries ride the
-# same socket), and a cursor path that carries a held drag across the screen
-# boundary instead of clamping it at the edge. wlroots is built first at the
-# version this labwc pins, with whichever of its dependencies the distribution
-# carries too old; everything built installs under /usr/lib unqualified, which
-# holds nothing else, so the copy into the runtime stage is the same on every
-# architecture and distribution.
-FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS labwc
-ARG DEBIAN_FRONTEND="noninteractive"
-ARG WLROOTS_VERSION
-ARG LABWC_VERSION
-RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
-        > /etc/apt/apt.conf.d/99-selkies-retries
-RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
-        bison \
-        build-essential \
-        ca-certificates \
-        gettext \
-        git \
-        glslang-tools \
-        hwdata \
-        libexpat1-dev \
-        libffi-dev \
-        meson \
-        ninja-build \
-        pkg-config \
-        libcairo2-dev \
-        libdisplay-info-dev \
-        libdrm-dev \
-        libgbm-dev \
-        libglib2.0-dev \
-        libglvnd-dev \
-        libinput-dev \
-        liblcms2-dev \
-        libliftoff-dev \
-        libpango1.0-dev \
-        libpixman-1-dev \
-        libpng-dev \
-        librsvg2-dev \
-        libseat-dev \
-        libsfdo-dev \
-        libudev-dev \
-        libvulkan-dev \
-        libwayland-dev \
-        libxcb1-dev \
-        libxcb-composite0-dev \
-        libxcb-dri3-dev \
-        libxcb-errors-dev \
-        libxcb-ewmh-dev \
-        libxcb-icccm4-dev \
-        libxcb-present-dev \
-        libxcb-randr0-dev \
-        libxcb-render0-dev \
-        libxcb-render-util0-dev \
-        libxcb-res0-dev \
-        libxcb-shape0-dev \
-        libxcb-shm0-dev \
-        libxcb-sync-dev \
-        libxcb-xfixes0-dev \
-        libxcb-xinput-dev \
-        libxkbcommon-dev \
-        wayland-protocols \
-        xwayland && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-screens.patch /build/patches/
-COPY addons/base/build-labwc.sh /build/
-RUN /build/build-labwc.sh && mkdir -p /build-out/lib && cp -a /usr/lib/*.so* /build-out/lib/
-
 # The web client, through scripts/ci/build-web.sh as every channel builds it, for
 # the server stage to compile in. The controller database's GitHub lookups use
 # the build secret github_token where one is given
@@ -283,17 +211,46 @@ COPY web/universal-touch-gamepad ./web/universal-touch-gamepad
 COPY docs/assets/logo ./docs/assets/logo
 RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
 
+# The software encoders pixelflux links statically, each built in a stage of its
+# own so the four build beside one another and beside the server stage's own
+# toolchain and dependency fetch: libx264, x265, libvpx, and SVT-AV1 from
+# pixelflux's scripts/build-x264.sh, build-x265.sh, build-libvpx.sh, and
+# build-svtav1.sh, with the patches it carries for them (pixelflux reads the API
+# those patches add, so none comes from a distribution). Each installs under its
+# stage's /usr/local, which the server stage lays over its own, so the
+# pkg-config files name the prefix the libraries are found at.
+FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS codec-tools
+ARG DEBIAN_FRONTEND="noninteractive"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates git build-essential pkg-config cmake nasm && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /build/pixelflux
+COPY crates/pixelflux/pyproject.toml ./
+COPY crates/pixelflux/patches ./patches
+COPY crates/pixelflux/scripts ./scripts
+
+FROM codec-tools AS codec-x264
+RUN sh scripts/build-x264.sh /usr/local
+
+FROM codec-tools AS codec-x265
+RUN sh scripts/build-x265.sh /usr/local
+
+FROM codec-tools AS codec-libvpx
+RUN sh scripts/build-libvpx.sh /usr/local
+
+FROM codec-tools AS codec-svtav1
+RUN sh scripts/build-svtav1.sh /usr/local
+
 # The server, built on the image's own distribution so it links the sonames the
 # final stage installs, with the toolchain pinned and its installer checked
 # against the hash rustup publishes beside it. The packages behind every
 # library the binary links are recorded for the final stage, so the image
 # declares what the server needs rather than inheriting it from whatever else
 # happens to pull those libraries in. pixelflux and pcmflux build from local
-# workspace path dependencies. libx264, x265, libvpx, and SVT-AV1 are built
-# from pixelflux's scripts/build-x264.sh, build-x265.sh, build-libvpx.sh, and
-# build-svtav1.sh, with the patches it carries for them, and linked statically.
-# The web client is compiled in from the web stage's dist/web, which
-# SELKIES_WEB_DIST names so a build that finds none fails.
+# workspace path dependencies; the encoders come from the stages above and are
+# linked statically. The dependency fetch runs before those stages are waited
+# for, so it overlaps their builds. The web client is compiled in from the web
+# stage's dist/web, which SELKIES_WEB_DIST names so a build that finds none fails.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS server
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG RUST_TOOLCHAIN="1.99.1"
@@ -316,24 +273,24 @@ RUN set -e; \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY --from=web /build/dist/web ./dist/web
-ENV SELKIES_WEB_DIST="/src/dist/web"
 COPY infra/packaging/version.sh infra/packaging/stamp-version.sh /tmp/packaging/
 # A release's build passes its version (images.yaml), which every public crate
 # then carries as the packages' builds stamp it; any other build keeps the
 # tree's 0.0.0
 ARG SELKIES_VERSION=""
 RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
-    --mount=type=cache,target=/src/target \
     set -e; \
     if [ -n "${SELKIES_VERSION}" ]; then sh /tmp/packaging/stamp-version.sh /src "${SELKIES_VERSION}"; fi; \
-    cargo fetch --locked; \
-    pixelflux="$(cargo metadata --locked --format-version 1 \
-        | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"; \
-    sh "$(dirname "${pixelflux}")/scripts/build-x264.sh" /usr/local; \
-    sh "$(dirname "${pixelflux}")/scripts/build-x265.sh" /usr/local; \
-    sh "$(dirname "${pixelflux}")/scripts/build-libvpx.sh" /usr/local; \
-    sh "$(dirname "${pixelflux}")/scripts/build-svtav1.sh" /usr/local; \
+    cargo fetch --locked
+COPY --from=codec-x264 /usr/local/ /usr/local/
+COPY --from=codec-x265 /usr/local/ /usr/local/
+COPY --from=codec-libvpx /usr/local/ /usr/local/
+COPY --from=codec-svtav1 /usr/local/ /usr/local/
+COPY --from=web /build/dist/web ./dist/web
+ENV SELKIES_WEB_DIST="/src/dist/web"
+RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
+    --mount=type=cache,target=/src/target \
+    set -e; \
     # codec-sys binds the installed headers without watching them, so the cached
     # target would keep bindings and link lines from before a change to the
     # patches or the libraries they build
@@ -353,7 +310,7 @@ FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 LABEL org.opencontainers.image.title="Selkies Base Container"
-LABEL org.opencontainers.image.description="Selkies session without a desktop environment: X11 (Xvfb) and the headless Wayland backend (labwc), PipeWire audio, GPU wiring, s6 service supervision, embedded coTURN"
+LABEL org.opencontainers.image.description="Selkies session without a desktop environment: X11 (Xvfb) and the headless Wayland backend, PipeWire audio, GPU wiring, s6 service supervision, embedded coTURN"
 LABEL org.opencontainers.image.source="https://github.com/selkies-project/selkies"
 LABEL org.opencontainers.image.licenses="MPL-2.0"
 
@@ -635,17 +592,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         # coTURN server (WebRTC mode)
         python3 \
         coturn \
-        ssl-cert \
-        # Session compositor for the Wayland backend: labwc, which draws
-        # server-side titlebars with the iconify/maximize/close buttons a desktop
-        # session is expected to have and performs the maximize and minimize
-        # requests a Wayland taskbar sends over wlr-foreign-toplevel. The
-        # distribution package supplies the runtime libraries; the binary itself
-        # is replaced below by the source build carrying the Selkies patches,
-        # whose control socket grows and shrinks the screen count as displays
-        # come and go. Not wayfire: it demands a DRM file descriptor the nested
-        # Wayland backend has none of without a GPU
-        labwc && \
+        ssl-cert && \
     # The Intel media stack and the 32-bit graphics runtime exist for amd64
     # alone. A 32-bit application -- a Wine or Steam game, an old binary --
     # loads its own copy of every graphics library, and finds none of the
@@ -733,20 +680,8 @@ COPY --from=xvfb --chown=1000:1000 /build-out/usr/bin/Xvfb /usr/bin/Xvfb
 COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/lib/ /usr/lib/
 COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/share/egl/ /usr/share/egl/
 
-# The patched labwc replaces the distribution binary, and the wlroots it was
-# built against comes along with any dependency built beside it, found through
-# the compositor's rpath; the distribution labwc package above keeps every
-# other runtime library in place
-COPY --from=labwc --chown=1000:1000 /usr/bin/labwc /usr/bin/labwc
-COPY --from=labwc --chown=1000:1000 /build-out/lib/ /usr/lib/
-
 # Install the joystick and webcam interposers and fake-udev (container-only)
 COPY --from=add-ons --chown=1000:1000 /opt/add-ons/lib/ /usr/lib/
-
-# Makes the session look like the Openbox one: floating windows with their usual
-# titlebar buttons, no bar of the compositor's own, and XWayland for the X11-only
-# applications
-COPY --chown=1000:1000 addons/base/labwc-rc.xml /etc/xdg/labwc/rc.xml
 
 # A PulseAudio client that leaves its buffer to pipewire-pulse gets 40 ms, not 2 s
 COPY --chown=1000:1000 addons/base/pipewire-pulse.conf.d/ /etc/pipewire/pipewire-pulse.conf.d/
@@ -807,10 +742,11 @@ ENV DBUS_SYSTEM_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/dbus-system-bus"
 # PIXELFLUX_WAYLAND spelling — for the headless Wayland backend. Deliberately
 # not baked as an ENV: in the resolution order every reader follows, a set
 # SELKIES_WAYLAND would shadow the legacy spelling for good.
-# Session compositor nested inside the Wayland capture compositor: empty picks
-# labwc, "none" leaves applications on the capture compositor with no window
-# management and no XWayland, and any other name runs that compositor as it is
-# installed
+# Session compositor nested inside the Wayland capture compositor, for a desktop
+# built on this image that installs one and runs without the Selkies window
+# manager: its command name, run as installed. Empty or "none" leaves
+# applications on the capture compositor, with no window management and no
+# XWayland unless SELKIES_WM supplies them
 ENV SELKIES_WAYLAND_COMPOSITOR=""
 # Run X11 instead when a GPU is present but the Wayland compositor cannot reach
 # it, so the session keeps hardware acceleration. Without a GPU both backends

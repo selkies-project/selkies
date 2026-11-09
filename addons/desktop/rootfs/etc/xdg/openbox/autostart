@@ -3,10 +3,9 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Run by the window manager once it is up, as Openbox and labwc run theirs,
-# installed as /etc/xdg/openbox/autostart for the X11 backend and
-# /etc/xdg/labwc/autostart for the Wayland one; a user's own file under
-# ~/.config replaces it. It readies the home for the desktop: the XDG user
+# Run by the window manager once it is up, as Openbox runs its own, installed
+# as /etc/xdg/openbox/autostart and read on both backends; a user's own file
+# under ~/.config/openbox replaces it. It readies the home for the desktop: the XDG user
 # directories the file manager and the desktop icons show, and proot-apps' links
 # in ~/.local/bin, which the shell's launches have on their PATH.
 xdg-user-dirs-update 2> /dev/null || true

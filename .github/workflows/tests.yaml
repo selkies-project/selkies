@@ -311,16 +311,14 @@ jobs:
             sudo chmod a+rw /dev/dri/*
             ls -l /dev/dri
           fi
-      # The compositor the Wayland suites drive is the one the images ship:
-      # the pinned wlroots and the patched labwc, built by the same script as
-      # the base image's labwc stage (the distribution's labwc has neither the
-      # control socket nor the seam patch, and the no-skip gate would trip on
-      # the suites that need them). The pins are read from the Dockerfile so
-      # this job can never drift from the image.
+      # The nested compositor the Wayland suites drive: the pinned wlroots and
+      # the patched labwc (the distribution's labwc has neither the control
+      # socket nor the seam patch, and the no-skip gate would trip on the
+      # suites that need them). The pins are the script's own.
       - name: Resolve the patched labwc pins
         id: labwc
         run: |
-          eval "$(grep -E '^ARG (WLROOTS|LABWC)_VERSION=' addons/base/Dockerfile | sed 's/^ARG //')"
+          eval "$(grep -E '^(WLROOTS|LABWC)_VERSION=' scripts/ci/build-labwc.sh)"
           {
             echo "wlroots=${WLROOTS_VERSION}"
             echo "labwc=${LABWC_VERSION}"
@@ -331,7 +329,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.local/labwc
-          key: labwc-${{ steps.labwc.outputs.image }}-${{ steps.labwc.outputs.wlroots }}-${{ steps.labwc.outputs.labwc }}-${{ hashFiles('addons/base/patches/labwc-*.patch', 'addons/base/build-labwc.sh', 'scripts/ci/runtime-packages.sh') }}
+          key: labwc-${{ steps.labwc.outputs.image }}-${{ steps.labwc.outputs.wlroots }}-${{ steps.labwc.outputs.labwc }}-${{ hashFiles('scripts/ci/patches/labwc-*.patch', 'scripts/ci/build-labwc.sh', 'scripts/ci/runtime-packages.sh') }}
       - name: Build the patched labwc
         if: steps.labwc-cache.outputs.cache-hit != 'true'
         run: |
@@ -348,7 +346,7 @@ jobs:
             wayland-protocols
           WLROOTS_VERSION="${{ steps.labwc.outputs.wlroots }}" \
             LABWC_VERSION="${{ steps.labwc.outputs.labwc }}" \
-            PREFIX="$HOME/.local/labwc" addons/base/build-labwc.sh
+            PREFIX="$HOME/.local/labwc" scripts/ci/build-labwc.sh
           scripts/ci/runtime-packages.sh record "$HOME/.local/labwc"
       # A cache hit skips the build step and with it the build's apt closure;
       # the build recorded the packages its libraries come from, which depend

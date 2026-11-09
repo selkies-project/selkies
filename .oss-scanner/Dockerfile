@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/opt/rustup \
     PATH=/opt/venv/bin:/opt/cargo/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates build-essential gcc-multilib git jq libkvazaar-dev libxkbcommon0 pkg-config python3 python3-dev python3-venv \
+      ca-certificates build-essential dbus gcc-multilib git jq libkvazaar-dev libxkbcommon0 pkg-config python3 python3-dev python3-venv \
       pulseaudio pulseaudio-utils shellcheck xkb-data xvfb \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m tester

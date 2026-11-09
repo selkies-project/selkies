@@ -207,25 +207,15 @@ if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ] \
   else
     echo 'GPU: the compositor cannot reach it; compositing in software'
     unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 __GLX_VENDOR_LIBRARY_NAME
-    # The session compositor too, as with no GPU at all: its own renderer would
-    # allocate on the node that refused and leave its output empty.
-    export SELKIES_WAYLAND_RENDERER="${SELKIES_WAYLAND_RENDERER:-pixman}" KWIN_COMPOSE="${KWIN_COMPOSE:-Q}"
+    # A nested session compositor too, as with no GPU at all: its own renderer
+    # would allocate on the node that refused and leave its output empty. A
+    # desktop image that nests one maps this onto its compositor's own switch.
+    export SELKIES_WAYLAND_RENDERER="${SELKIES_WAYLAND_RENDERER:-pixman}"
   fi
 fi
 
-# With no DRM render node, the NVIDIA EGL/GBM vendor library the container
-# runtime injects segfaults inside Xwayland's EGL init, and glamor would have
-# nothing to accelerate anyway. wlroots honors WLR_XWAYLAND, so XWayland is
-# started through a wrapper pinning EGL to Mesa and shared-memory buffers, and
-# loading no EGL external platform for a driver libEGL that comes before glvnd's.
-if [ "${SELKIES_WAYLAND}" = "true" ] && ! ls /dev/dri/renderD* > /dev/null 2>&1; then
-  printf '#!/bin/sh\nexport __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json\nexport __EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES=\nexec /usr/bin/Xwayland -shm "$@"\n' > /tmp/selkies-xwayland
-  chmod 755 /tmp/selkies-xwayland
-  export WLR_XWAYLAND="/tmp/selkies-xwayland"
-fi
-
 # The Selkies window manager: under SELKIES_WM the server manages the session's
-# windows itself on either backend (no nested labwc, no openbox), and under
+# windows itself on either backend (no nested compositor), and under
 # SELKIES_DESKTOP, which implies it, starts and keeps the selkies-desktop shell
 # running on top. Canonicalized to "true" or unset so one spelling serves the
 # services and the server's own settings alike.
@@ -245,10 +235,12 @@ fi
 # XWayland server owns it instead, and takes the first free number.
 if [ "${SELKIES_WAYLAND}" = "true" ]; then
   export DISPLAY="${DISPLAY:-:0}"
-  # Session compositor for the Wayland backend: it nests inside the capture
-  # compositor, which provides neither window management nor XWayland. "none"
-  # leaves applications on the capture compositor — Wayland clients only,
-  # unmanaged. Lowercased because every value, "none" included, is lower case.
+  # Session compositor for the Wayland backend, one a desktop built on this
+  # image installs: it nests inside the capture compositor, which without the
+  # Selkies window manager provides neither window management nor XWayland.
+  # "none", the base's own default, leaves applications on the capture
+  # compositor — Wayland clients only, unmanaged. Lowercased because every
+  # value, "none" included, is lower case.
   SELKIES_WAYLAND_COMPOSITOR="$(setting_value "${SELKIES_WAYLAND_COMPOSITOR-}")"
   SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"
   if [ "${SELKIES_WM:-}" = "true" ]; then
@@ -262,9 +254,8 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
     # A WAYLAND_DISPLAY set before this script ran names an operator's own
     # session (the capture display is exported later), so capture it rather
     # than nest in it; connect-probed, since a stale socket file outlives its
-    # compositor. Otherwise labwc, which decorates windows and honors the
-    # maximize and minimize a Wayland taskbar sends. An absolute
-    # WAYLAND_DISPLAY is legal, and prefixing it would build a bogus path.
+    # compositor. Otherwise nothing nests. An absolute WAYLAND_DISPLAY is
+    # legal, and prefixing it would build a bogus path.
     case "${WAYLAND_DISPLAY-}" in
       /*) _wl_sock="${WAYLAND_DISPLAY}" ;;
       *)  _wl_sock="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY-}" ;;
@@ -281,8 +272,6 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
       echo "Wayland compositor detected at ${_wl_sock}: capturing it directly"
       export SELKIES_WAYLAND_HOST_DISPLAY="${_wl_sock}"
       SELKIES_WAYLAND_COMPOSITOR=none
-    else
-      command -v labwc >/dev/null 2>&1 && SELKIES_WAYLAND_COMPOSITOR=labwc
     fi
     unset _wl_sock
   elif [ "${SELKIES_WAYLAND_COMPOSITOR}" != "none" ] && ! command -v "${SELKIES_WAYLAND_COMPOSITOR}" >/dev/null 2>&1; then

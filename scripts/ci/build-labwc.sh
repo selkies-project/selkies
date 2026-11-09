@@ -3,18 +3,20 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# Builds the pinned wlroots and the Selkies-patched labwc into PREFIX. One
-# recipe for the base image's labwc stage and the tests workflow, so the
-# compositor the suites drive is the one the images ship. The distribution
-# supplies the toolchain and libraries; the dependencies the pinned wlroots
-# may need newer than a distribution carries (wayland, wayland-protocols,
-# pixman, libliftoff, libdisplay-info) are built from source only where the
-# installed ones are too old, and the result finds them through its rpath.
+# Builds the pinned wlroots and the Selkies-patched labwc into PREFIX, the
+# nested session compositor the tests workflow's Wayland suites drive: a labwc
+# with the control socket the server's screen rung speaks and the seam cursor
+# patch, which no image ships. The distribution supplies the toolchain and
+# libraries; the dependencies the pinned wlroots may need newer than a
+# distribution carries (wayland, wayland-protocols, pixman, libliftoff,
+# libdisplay-info) are built from source only where the installed ones are too
+# old, and the result finds them through its rpath.
 #
-# Inputs: WLROOTS_VERSION and LABWC_VERSION (required); PREFIX (default
-# /usr); PATCH_DIR (default: patches/ beside this script).
+# Inputs: WLROOTS_VERSION and LABWC_VERSION (the pins below unless set); PREFIX
+# (default /usr); PATCH_DIR (default: patches/ beside this script).
 set -euo pipefail
-: "${WLROOTS_VERSION:?}" "${LABWC_VERSION:?}"
+WLROOTS_VERSION="${WLROOTS_VERSION:-0.19.3}"
+LABWC_VERSION="${LABWC_VERSION:-0.9.7}"
 PREFIX="${PREFIX:-/usr}"
 PATCH_DIR="${PATCH_DIR:-$(cd "$(dirname "$0")" && pwd)/patches}"
 SRC="$(mktemp -d)"
