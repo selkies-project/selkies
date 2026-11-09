@@ -779,8 +779,8 @@ impl WsService {
             .insert(display_id.to_string(), kbps);
     }
 
-    /// The CBR rate a display's encoder runs at: its target, held down to what its path
-    /// carries while congestion control steers it.
+    /// The rate a display's encoder is held to, a CBR target or a CRF peak: its ceiling
+    /// `target`, held down to what its path carries while congestion control steers it.
     pub(crate) fn video_bitrate_kbps(&self, display_id: &str, target: f64) -> f64 {
         self.link(display_id)
             .map(|l| l.lock().video_bitrate_kbps(target))
@@ -848,7 +848,8 @@ impl WsService {
     }
 
     /// `vb`: live video bitrate in kbps, sanitized exactly like the `SETTINGS` path so locked
-    /// server ranges cannot be bypassed.
+    /// server ranges cannot be bypassed. A steered CRF display stores it for CBR and leaves its
+    /// encoder's peak to the steer.
     pub async fn handle_opcode_video_bitrate(&self, kbps: f64, display_id: &str) {
         let Some(sanitized) = sanitize("video_bitrate", Some(&json!(kbps)))
             .as_ref()
@@ -856,7 +857,8 @@ impl WsService {
         else {
             return;
         };
-        let known = {
+        let steered = settings().congestion_control().on;
+        let (known, capped) = {
             let mut st = self.st.lock();
             if display_id == PRIMARY_DISPLAY {
                 st.seeds.video_bitrate = sanitized;
@@ -864,11 +866,14 @@ impl WsService {
             match st.displays.get_mut(display_id) {
                 Some(d) => {
                     d.video_bitrate = sanitized;
-                    true
+                    (true, d.capped(steered))
                 }
-                None => false,
+                None => (false, false),
             }
         };
+        if capped {
+            return;
+        }
         if let Some(capture) = self.capture_of(display_id) {
             let rate = if known {
                 self.video_bitrate_kbps(display_id, sanitized)
@@ -900,6 +905,23 @@ impl WsService {
         self.deps.audio.set_bitrate(sanitized as i32);
     }
 
+    /// A display that turned to CRF under congestion control, where nothing has steered it yet,
+    /// is capped at the rate its CBR stream ran at rather than at the range's high end, which a
+    /// slower path would queue seconds of before the first steer tick.
+    fn seed_capped_rate(&self, display_id: &str) {
+        let hi = settings().video_bitrate().1.as_f64();
+        let rate = self
+            .st
+            .lock()
+            .displays
+            .get(display_id)
+            .filter(|d| d.capped(settings().congestion_control().on))
+            .map(|d| d.video_bitrate.min(hi));
+        if let (Some(rate), Some(link)) = (rate, self.link(display_id)) {
+            link.lock().link_kbps.get_or_insert(rate);
+        }
+    }
+
     /// `_rc`: structural like the `SETTINGS` path (the encoder session must be rebuilt), honoring
     /// the server's `enable_rate_control` lock and a stopped display's start gating.
     pub async fn handle_opcode_rate_control(&self, mode: &str, display_id: &str) {
@@ -929,6 +951,9 @@ impl WsService {
             if display_id == PRIMARY_DISPLAY {
                 st.seeds.rc_mode = sanitized.clone();
             }
+            drop(st);
+            self.seed_capped_rate(display_id);
+            let st = self.st.lock();
             if !active {
                 return;
             }
@@ -2203,6 +2228,9 @@ impl WsService {
     ) -> bool {
         let mut restart =
             old.restart != new.restart || (Self::is_wayland() && old.scale != new.scale);
+        if old.restart.5 != new.restart.5 {
+            self.seed_capped_rate(did);
+        }
         let capture = if self.reg.lock().running.contains(did) {
             self.capture_of(did)
         } else {
@@ -2213,6 +2241,10 @@ impl WsService {
             let (layout, fps, target) = {
                 let st = self.st.lock();
                 let d = st.displays.get(did);
+                let (steered, hi) = (
+                    settings().congestion_control().on,
+                    settings().video_bitrate().1.as_f64(),
+                );
                 (
                     st.layouts.get(did).copied().unwrap_or_else(|| {
                         Layout::new(
@@ -2223,7 +2255,7 @@ impl WsService {
                         )
                     }),
                     d.map(|d| d.capture_fps()).unwrap_or(60.0),
-                    d.map(|d| d.video_bitrate).unwrap_or(0.0),
+                    d.map(|d| d.rate_ceiling(steered, hi)).unwrap_or(0.0),
                 )
             };
             let rate = kbps_i32(self.video_bitrate_kbps(did, target));
@@ -2372,7 +2404,11 @@ impl WsService {
                 });
             (d, st.capture_cursor, current)
         };
-        let bitrate = self.video_bitrate_kbps(display_id, d.video_bitrate);
+        let ceiling = d.rate_ceiling(
+            settings().congestion_control().on,
+            settings().video_bitrate().1.as_f64(),
+        );
+        let bitrate = self.video_bitrate_kbps(display_id, ceiling);
         let mut cs = CaptureSettings {
             width: layout.w,
             height: layout.h,
@@ -3093,7 +3129,7 @@ impl WsService {
     }
 
     /// The backpressure loop of one display: one check per period once a controller's settings
-    /// arrived, and the steer behind it where congestion control steers a CBR display.
+    /// arrived, and the steer behind it where congestion control is on.
     async fn run_backpressure(self: Arc<Self>, display_id: String) {
         let mut received = self.settings_received.subscribe();
         if received.wait_for(|r| *r).await.is_err() {
@@ -3129,13 +3165,22 @@ impl WsService {
         at: f64,
         late_ms: f64,
     ) {
-        let (target, configured_fps, steered, video_active) = {
+        let (lo, hi) = {
+            let (lo, hi) = settings().video_bitrate();
+            (lo.as_f64(), hi.as_f64())
+        };
+        let steered = settings().congestion_control().on;
+        let (target, configured_fps, capped, video_active) = {
             let st = self.st.lock();
             let Some(d) = st.displays.get(display_id) else {
                 return;
             };
-            let steered = settings().congestion_control().on && d.rate_control_mode == "cbr";
-            (d.video_bitrate, d.capture_fps(), steered, d.video_active)
+            (
+                d.rate_ceiling(steered, hi),
+                d.capture_fps(),
+                d.capped(steered),
+                d.video_active,
+            )
         };
         let (capturing, capture, relay, client, paused) = {
             let reg = self.reg.lock();
@@ -3148,8 +3193,9 @@ impl WsService {
                 owner.is_some_and(|o| reg.video_paused.contains(&o)),
             )
         };
+        // A capped CRF display is never padded (`PathProbe`).
         let pad = PadPermit {
-            announced: client.as_ref().is_some_and(|c| c.pad()),
+            announced: !capped && client.as_ref().is_some_and(|c| c.pad()),
             streaming: video_active && !paused,
         };
         let padded = relay.clone();
@@ -3160,10 +3206,6 @@ impl WsService {
             interval_s: self.timings.backpressure_check_s,
             allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
             primary: display_id == PRIMARY_DISPLAY,
-        };
-        let (lo, hi) = {
-            let (lo, hi) = settings().video_bitrate();
-            (lo.as_f64(), hi.as_f64())
         };
         let mut effects = CheckEffects {
             capture: capture.clone(),
@@ -3310,7 +3352,7 @@ impl WsService {
                 .lock()
                 .instances
                 .get(&display_id)
-                .filter(|i| i.settings.video_cbr_mode)
+                .filter(|i| i.settings.video_cbr_mode || i.settings.video_vbv_multiplier > 0.0)
                 .map(|i| i.settings.video_bitrate_kbps);
             if let Some(target) = target.filter(|t| *t > 0) {
                 stats.insert(

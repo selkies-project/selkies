@@ -61,6 +61,7 @@ struct FakePipeline {
     video: AtomicBool,
     audio: AtomicBool,
     bitrate: Mutex<f64>,
+    rc_mode: Mutex<String>,
     fail_start: AtomicBool,
 }
 
@@ -82,6 +83,7 @@ impl FakePipeline {
             video: AtomicBool::new(false),
             audio: AtomicBool::new(false),
             bitrate: Mutex::new(8000.0),
+            rc_mode: Mutex::new("cbr".into()),
             fail_start: AtomicBool::new(false),
         })
     }
@@ -198,7 +200,7 @@ impl MediaPipeline for FakePipeline {
     }
 
     fn rc_mode(&self) -> String {
-        "cbr".into()
+        self.rc_mode.lock().clone()
     }
 
     async fn apply_setting(&self, key: &str, value: &Json) {
@@ -410,6 +412,7 @@ impl PipelineFactory for FakeFactory {
             config.height,
             config.capture_region,
         );
+        *pipeline.rc_mode.lock() = config.rc_mode;
         self.made
             .lock()
             .insert(config.display_id.clone(), pipeline.clone());
@@ -1197,17 +1200,34 @@ fn start_rate_hold_and_remembered_rate() {
 }
 
 async fn seeded(remembered: Option<Json>, others: usize, ceiling: f64, cc: bool) -> Vec<String> {
+    seeded_in("cbr", 8000.0, remembered, others, ceiling, cc).await
+}
+
+/// The bitrate steps seeding a display in `mode` asks of its pipeline, which holds `current`.
+async fn seeded_in(
+    mode: &str,
+    current: f64,
+    remembered: Option<Json>,
+    others: usize,
+    ceiling: f64,
+    cc: bool,
+) -> Vec<String> {
     let rig = Rig::new((1920, 1080), quick());
     rig.service.begin().await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     rig.service.policy.lock().congestion_control = cc;
-    rig.service
-        .st
-        .lock()
-        .displays
-        .get_mut("primary")
-        .unwrap()
-        .video_bitrate = ceiling;
+    {
+        let mut st = rig.service.st.lock();
+        let d = st.displays.get_mut("primary").unwrap();
+        d.video_bitrate = ceiling;
+        d.rate_control_mode = mode.into();
+    }
+    {
+        let made = rig.factory.made.lock();
+        let pipeline = made.get("primary").unwrap();
+        *pipeline.rc_mode.lock() = mode.into();
+        *pipeline.bitrate.lock() = current;
+    }
     rig.peer("me", ClientType::Controller, "primary").await;
     for i in 0..others {
         rig.peer(&format!("other{i}"), ClientType::Controller, "primary")
@@ -1252,6 +1272,53 @@ async fn start_rate_seeds_the_only_controller() {
         seeded(None, 0, 8000.0, true).await,
         [format!("bitrate {START_KBPS:.0}")],
         "nothing remembered climbs from the start rate"
+    );
+}
+
+/// A CRF pipeline under congestion control opens capped at the steer's start, never at the range's
+/// high end; a CBR one at the bitrate its client chose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crf_pipeline_opens_at_the_steers_start() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    let opened = |mode: &str| {
+        let mut st = rig.service.st.lock();
+        let d = st.displays.get_mut("primary").unwrap();
+        d.rate_control_mode = mode.into();
+        d.video_bitrate = 12000.0;
+        WebRtcService::pipeline_config(&st, "primary", 1280, 720, None).video_bitrate
+    };
+    assert_eq!(opened("cbr"), 12000.0);
+    if crate::settings::settings().congestion_control().on {
+        assert_eq!(opened("crf"), START_KBPS);
+    }
+    rig.service.shutdown().await;
+}
+
+/// A capped CRF display takes the rate its page remembered either way from the start it opened
+/// at, under the range's high end rather than the CBR bitrate its dashboard hides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_rate_seeds_a_crf_peak_above_its_start() {
+    settings_installed();
+    let (_, hi) = crate::webrtc::service::bitrate_range();
+    assert_eq!(
+        seeded_in("crf", START_KBPS, Some(json!(20000)), 0, 8000.0, true).await,
+        ["bitrate 20000"],
+        "above the start, and above the CBR bitrate"
+    );
+    assert_eq!(
+        seeded_in("crf", 30000.0, Some(json!(2000)), 0, 8000.0, true).await,
+        ["bitrate 2000"]
+    );
+    assert!(
+        seeded_in("crf", START_KBPS, None, 0, 8000.0, true)
+            .await
+            .is_empty(),
+        "nothing remembered stays at the start"
+    );
+    assert_eq!(
+        seeded_in("crf", START_KBPS, Some(json!(hi * 2.0)), 0, 8000.0, true).await,
+        [format!("bitrate {hi:.0}")]
     );
 }
 

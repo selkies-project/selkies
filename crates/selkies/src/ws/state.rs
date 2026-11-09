@@ -246,6 +246,25 @@ impl DisplayState {
         }
     }
 
+    /// Whether congestion control, where it `steered`, gives the display's encoder a peak rather
+    /// than a target: a CRF display, whose rate factor picks the picture under that cap.
+    pub fn capped(&self, steered: bool) -> bool {
+        steered && self.rate_control_mode != "cbr"
+    }
+
+    /// The rate, in kbps, congestion control holds the display's encoder under: a CBR display's
+    /// `video_bitrate`, and a capped CRF display's (`capped`) the configured range's high end
+    /// `hi_kbps`. The bitrate a client chose is CBR's alone (the dashboard hides it in CRF), so
+    /// it bounds no CRF picture. A CRF display nothing steers keeps `video_bitrate`, which its
+    /// uncapped encoder never reads.
+    pub fn rate_ceiling(&self, steered: bool, hi_kbps: f64) -> f64 {
+        if self.capped(steered) {
+            hi_kbps
+        } else {
+            self.video_bitrate
+        }
+    }
+
     /// The rate the capture runs at: the rate the client chose, held to what its decoder
     /// keeps up with (`DECODE_PACE`).
     pub fn capture_fps(&self) -> f64 {
@@ -593,6 +612,27 @@ mod tests {
                 .as_deref(),
             Some("jpeg"),
             "an encoder whose fallback mark changed is a change"
+        );
+    }
+
+    /// A steered CRF display is held under the range's high end, never the CBR bitrate the
+    /// dashboard hides from it; CBR, and a CRF display nothing steers, keep the chosen bitrate.
+    #[test]
+    fn a_steered_crf_display_is_capped_under_the_ranges_high_end() {
+        settings_installed();
+        let mut d = DisplayState::new(&Seeds::from_settings(), None, true, None);
+        d.video_bitrate = 8000.0;
+        d.rate_control_mode = "cbr".into();
+        assert!(!d.capped(true));
+        assert_eq!(d.rate_ceiling(true, 1_000_000.0), 8000.0);
+        d.rate_control_mode = "crf".into();
+        assert!(d.capped(true));
+        assert_eq!(d.rate_ceiling(true, 1_000_000.0), 1_000_000.0);
+        assert!(!d.capped(false));
+        assert_eq!(
+            d.rate_ceiling(false, 1_000_000.0),
+            8000.0,
+            "an uncapped CRF encoder never reads its bitrate"
         );
     }
 

@@ -1740,6 +1740,87 @@ async fn a_steered_rate_held_is_told_to_its_page() {
     }
 }
 
+/// A CRF display opens capped at the steer's start, its peak climbs under the range's high end
+/// as a CBR target does, its page is told the rate it held, and a client's bitrate, CBR's
+/// alone, leaves the peak where the steer put it.
+#[tokio::test]
+async fn a_crf_display_is_steered_by_its_peak() {
+    use crate::ws::steer::START_KBPS;
+    let rig = Rig::new();
+    let mut owner = rig.controller().await;
+    owner
+        .say(r#"SETTINGS,{"initialClientWidth":1280,"initialClientHeight":720,"tabId":"a","encoder":"h264enc","rate_control_mode":"crf"}"#)
+        .await;
+    settle().await;
+    if !crate::settings::settings().congestion_control().on {
+        return;
+    }
+    let capture = rig.primary_capture();
+    let opened = capture.starts.lock().last().cloned().expect("a capture");
+    assert!(!opened.video_cbr_mode);
+    assert_eq!(
+        opened.video_vbv_multiplier,
+        pixelflux::encoders::CAPPED_VBV_FRAMES,
+        "capped from the first frame, so a cut never reopens the encoder"
+    );
+    assert_eq!(opened.video_bitrate_kbps, START_KBPS as i32);
+    owner.clear().await;
+    let link = rig.service.link(PRIMARY_DISPLAY).unwrap();
+    let hi = crate::settings::settings().video_bitrate().1.as_f64();
+    let mut bytes = 0u64;
+    for tick in 0..30 {
+        let at = crate::ws::now() + tick as f64 * 0.5;
+        {
+            let mut l = link.lock();
+            l.acknowledged_frame_id = 1;
+            l.has_sent_any_frame = true;
+            l.last_sent_frame_id = 1;
+            for ack in 0..10 {
+                bytes += 25_000;
+                l.sent_bytes = bytes;
+                l.note_round_trip(20.0, bytes, at - 0.5 + ack as f64 * 0.05);
+            }
+        }
+        rig.service
+            .backpressure_check(PRIMARY_DISPLAY, &link, at, 0.0)
+            .await;
+    }
+    settle().await;
+    let peaks: Vec<i64> = capture
+        .calls
+        .lock()
+        .iter()
+        .filter_map(|c| c.strip_prefix("bitrate ")?.parse().ok())
+        .collect();
+    assert!(
+        peaks.first().is_some_and(|p| *p > START_KBPS as i64),
+        "the peak climbs from the start: {peaks:?}"
+    );
+    assert!(peaks.iter().all(|p| *p as f64 <= hi), "{peaks:?}");
+    assert!(
+        owner
+            .texts()
+            .await
+            .iter()
+            .any(|t| t.starts_with("CC_RATE ")),
+        "{peaks:?}"
+    );
+    let calls = capture.calls.lock().len();
+    rig.service
+        .handle_opcode_video_bitrate(2000.0, PRIMARY_DISPLAY)
+        .await;
+    assert_eq!(
+        capture.calls.lock().len(),
+        calls,
+        "a client's bitrate moves no peak"
+    );
+    assert_eq!(
+        rig.service.st.lock().displays[PRIMARY_DISPLAY].video_bitrate,
+        2000.0,
+        "and is kept for CBR"
+    );
+}
+
 #[tokio::test]
 async fn the_clipboard_host_sends_to_one_client_and_waits_on_its_queue() {
     use crate::clipboard::outbound::ClipboardHost;

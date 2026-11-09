@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The rate controls both transports share: the steer of a CBR display's target over
+//! The rate controls both transports share: the steer of a display's rate over
 //! congestion ticks, the still-screen cleanup's link allowance, the rate a page is told to
 //! remember, and a page's connection verdict.
 
@@ -35,7 +35,8 @@ pub struct SteerTick {
     pub probed: bool,
 }
 
-/// The steer of one display's CBR target over congestion ticks.
+/// The steer of one display's rate over congestion ticks: a CBR display's target, and a CRF
+/// display's peak, the cap its rate factor spends up to (`DisplayState::rate_ceiling`).
 ///
 /// A tick carries two kinds of evidence: the queue standing on the path (over WebSockets
 /// measured from the display's frame round trip, over WebRTC from one-way delay) and the loss
@@ -317,7 +318,9 @@ impl CongestionSteer {
 /// the steer climbs or backs off as on a moving screen. A queue on a tick that followed padding
 /// ends the probe, the path found: the next one waits `QUIET_S`, doubling to `QUIET_MAX_S`
 /// while probes keep ending that way, and back to `QUIET_S` once a target reaches the ceiling.
-/// A tick that measured no delay pads nothing.
+/// A tick that measured no delay pads nothing. A CRF display is never padded: its cap is a
+/// peak, which a still screen's rate factor spends under whatever it is, so there is no picture
+/// a probed headroom would restore; its cap climbs back once motion fills it.
 #[derive(Clone, Debug)]
 pub struct PathProbe {
     /// Whether the last tick asked for padding.

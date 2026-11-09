@@ -430,6 +430,12 @@ pub(crate) fn held_key_start(crf: u32, last: Option<(usize, u32)>, cap: usize) -
 /// the fixed-QP encoders cannot disagree about how long a drop must persist.
 pub(crate) const QP_HYSTERESIS_LIMIT: u32 = 60;
 
+/// The buffer, in frames of its peak, a capped constant-quality session takes
+/// (`CaptureSettings::video_vbv_multiplier`): software H.264's constant-rate buffer, so a cap
+/// that binds codes a frame as the constant rate congestion control steers does, and a cap
+/// that does not leaves the rate factor its picture.
+pub const CAPPED_VBV_FRAMES: f64 = software::CBR_VBV_FRAMES;
+
 /// Size the CBR VBV/HRD buffer so rate control has enough slack to hold quality steady
 /// without letting end-to-end latency drift upward.
 ///

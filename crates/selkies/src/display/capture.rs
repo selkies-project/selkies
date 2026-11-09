@@ -16,7 +16,7 @@ use std::hash::Hash;
 use base64::Engine as _;
 use log::info;
 use pixelflux::CaptureSettings;
-use pixelflux::encoders::Codec;
+use pixelflux::encoders::{CAPPED_VBV_FRAMES, Codec};
 use pixelflux::sink::CursorImage;
 
 use super::wayland::wayland_output_id;
@@ -180,6 +180,11 @@ pub struct DisplayCapture {
 /// capture is bound to its compositor output (`display2` -> output 2), the id every
 /// per-display IDR/rate/tunable call routes through. The watermark is burned into the frame
 /// by pixelflux on every backend and stays server-side (never broadcast).
+///
+/// A CRF display under `congestion_control` is capped from its first frame: `bitrate_kbps` is
+/// the peak its rate factor spends up to, with a buffer of `CAPPED_VBV_FRAMES`, and the steer
+/// moves that peak live. An encoder opened uncapped would reopen, a key frame, to take a cap,
+/// so a CRF session is never left uncapped where congestion control may cap it later.
 pub fn populate_capture_settings(cs: &mut CaptureSettings, server: &Settings, p: &DisplayCapture) {
     cs.target_fps = p.framerate;
     cs.capture_cursor = p.capture_cursor;
@@ -197,6 +202,11 @@ pub fn populate_capture_settings(cs: &mut CaptureSettings, server: &Settings, p:
     cs.video_streaming_mode = p.streaming;
     cs.video_cbr_mode = p.cbr;
     cs.video_bitrate_kbps = p.bitrate_kbps.round() as i32;
+    cs.video_vbv_multiplier = if !p.cbr && server.congestion_control().on {
+        CAPPED_VBV_FRAMES
+    } else {
+        0.0
+    };
     // 0 = infinite GOP (on-demand keyframes only); 0 QP bounds = encoder default.
     cs.keyframe_interval_s = server.keyframe_interval();
     cs.video_min_qp = server.video_min_qp() as i32;
@@ -429,6 +439,57 @@ mod tests {
         assert_eq!(cs.use_wayland, Some(false));
         assert_eq!(cs.cursor_size_cap, 96);
         assert_eq!(cs.display_id, 0, "X11 keeps the default output");
+    }
+
+    /// A CRF display under congestion control opens capped, its bitrate the peak; CBR, and a CRF
+    /// display congestion control leaves alone, open with no CRF buffer.
+    #[test]
+    fn a_crf_display_opens_capped_only_under_congestion_control() {
+        let display = DisplayCapture {
+            display_id: "primary".into(),
+            is_wayland: false,
+            scale: 1.0,
+            framerate: 60.0,
+            encoder: "h264enc".into(),
+            use_cpu: true,
+            cbr: false,
+            bitrate_kbps: 4000.0,
+            crf: 25,
+            paintover_crf: 18,
+            paintover_burst: 5,
+            fullcolor: false,
+            ten_bit: false,
+            streaming: false,
+            use_paint_over_quality: true,
+            capture_cursor: true,
+            cursor_size_cap_hint: 0,
+            cpu_encode_threading: true,
+        };
+        let multiplier = |args: &[&str], cbr: bool| {
+            let server = Settings::parse(
+                &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                &|_| None,
+            );
+            let mut cs = CaptureSettings::default();
+            populate_capture_settings(
+                &mut cs,
+                &server,
+                &DisplayCapture {
+                    cbr,
+                    ..display.clone()
+                },
+            );
+            assert_eq!(cs.video_bitrate_kbps, 4000);
+            cs.video_vbv_multiplier
+        };
+        assert_eq!(multiplier(&[], false), CAPPED_VBV_FRAMES);
+        const { assert!(CAPPED_VBV_FRAMES > 0.0) };
+        assert_eq!(multiplier(&[], true), 0.0, "CBR keeps its own buffer");
+        assert_eq!(
+            multiplier(&["--congestion-control=false"], false),
+            0.0,
+            "nothing steers the peak, so the rate factor runs uncapped"
+        );
     }
 
     #[test]

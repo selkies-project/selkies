@@ -286,6 +286,26 @@ impl WebRtcService {
                 .switch_display_codec(display, value.as_str().unwrap_or("h264enc"))
                 .await;
         }
+        let steered = self.policy.lock().congestion_control;
+        let (capped, cbr_ceiling) = {
+            let st = self.st.lock();
+            st.displays.get(display).map_or((false, None), |d| {
+                (d.capped(steered), Some(d.video_bitrate))
+            })
+        };
+        // A capped display's peak is the steer's: the bitrate a client chose is CBR's, which a
+        // display turning to CBR starts no higher than.
+        if key == "video_bitrate" && capped {
+            return;
+        }
+        if key == "rate_control_mode"
+            && steered
+            && !capped
+            && let (Some(pipeline), Some(ceiling)) = (&pipeline, cbr_ceiling)
+            && pipeline.video_bitrate() > ceiling
+        {
+            pipeline.set_video_bitrate(ceiling).await;
+        }
         if let Some(pipeline) = &pipeline {
             pipeline.apply_setting(key, &value).await;
         }
@@ -650,16 +670,18 @@ impl WebRtcService {
     /// on two ticks of loss in a row, and hold there before recovering (`CongestionSteer`). One display's
     /// congested link never steers another's stream. The peers are the display's owner when it sent
     /// feedback, as over WebSockets the owner's acks steer: a viewer's or a controller's beside the
-    /// owner on a slower link do not pull the owner's stream down; all of them otherwise. Only CBR has a
-    /// target to steer. Each peer's own loss and queue set its sender's FlexFEC repairs (`Peer::tick`).
+    /// owner on a slower link do not pull the owner's stream down; all of them otherwise. A CBR
+    /// display's target and a CRF display's peak are steered alike, the CRF one never padded. Each
+    /// peer's own loss and queue set its sender's FlexFEC repairs (`Peer::tick`).
     ///
-    /// The user-selected bitrate is the ceiling: control only backs off below it and recovers up to
-    /// it. Damage-gated encoders are application-limited, so measured goodput may lift the target when
+    /// The ceiling is the user-selected bitrate in CBR and the configured range's high end in CRF
+    /// (`DisplayState::rate_ceiling`): control only backs off below it and recovers up to it.
+    /// Damage-gated encoders are application-limited, so measured goodput may lift the target when
     /// it shows real headroom but never drags it down. The pacer rides the same tick but is configured
     /// for every peer before the feedback gate, since it must run on links that never send transport-cc.
     pub(crate) async fn congestion_control_loop(self: Arc<Self>, pacer_on: bool) {
         let (lo, hi) = bitrate_range();
-        debug!(target: "webrtc", "Congestion control loop started (CBR only, range {lo}-{hi} kbps).");
+        debug!(target: "webrtc", "Congestion control loop started (range {lo}-{hi} kbps).");
         let mut interval = tokio::time::interval(CONGESTION_TICK);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -735,13 +757,7 @@ impl WebRtcService {
                     .push((peer_id.clone(), handle.clone()));
             }
             if pacer_on {
-                let ceiling = self
-                    .st
-                    .lock()
-                    .displays
-                    .get(&display)
-                    .map_or(hi, |d| d.video_bitrate)
-                    .clamp(lo, hi);
+                let ceiling = self.rate_ceiling(&display, cc_on, lo, hi);
                 handle.set_encoder_bps((ceiling * 1000.0) as u64);
             }
             let audio_bps = {
@@ -820,24 +836,12 @@ impl WebRtcService {
             let Some(pipeline) = self.pipeline(&did) else {
                 continue;
             };
-            if pipeline.rc_mode() != "cbr" {
-                self.engine.set_video_budget(&did, None);
-                for peer in &bucket.peers {
-                    peer.set_steered_bps(None);
-                }
-                continue;
-            }
             let Some(goodput) = bucket.goodputs.iter().copied().reduce(f64::min) else {
                 continue;
             };
             let current = pipeline.video_bitrate();
-            let ceiling = self
-                .st
-                .lock()
-                .displays
-                .get(&did)
-                .map_or(hi, |d| d.video_bitrate)
-                .clamp(lo, hi);
+            let ceiling = self.rate_ceiling(&did, cc_on, lo, hi);
+            let capped = pipeline.rc_mode() != "cbr";
             let queue_s = bucket.queue_ms.map(|q| {
                 if q > TWCC_QUEUE_MS {
                     q.max(bucket.depth_ms) / 1000.0
@@ -846,12 +850,13 @@ impl WebRtcService {
                 }
             });
             let now = clock::monotonic();
-            let probed = self
-                .st
-                .lock()
-                .path_probes
-                .get(&did)
-                .is_some_and(|p| p.padding);
+            let probed = !capped
+                && self
+                    .st
+                    .lock()
+                    .path_probes
+                    .get(&did)
+                    .is_some_and(|p| p.padding);
             let (target, restored, queued) = {
                 let mut st = self.st.lock();
                 let steer = st.congestion.entry(did.clone()).or_default();
@@ -957,11 +962,16 @@ impl WebRtcService {
             }
             // A cut target over a still screen pads its stream to test the path. A trickle's
             // window reads no queue (too few feedback packets): padding starts on it, and the queue
-            // the padded windows measure stops it.
+            // the padded windows measure stops it. A capped CRF display is never padded
+            // (`PathProbe`).
             // A display whose bridge dropped most of the tick's frames for the budget is not a
             // still screen, however little it sent.
             let content = (!crowded).then(|| (bucket.sent_bps - bucket.padding_bps).max(0.0));
-            let pad = self.probe_rate(&did, target, ceiling, content, queue_s.unwrap_or(0.0), now);
+            let pad = if capped {
+                0.0
+            } else {
+                self.probe_rate(&did, target, ceiling, content, queue_s.unwrap_or(0.0), now)
+            };
             self.pad_display(
                 &did,
                 padded.get(&did).map_or(&[][..], Vec::as_slice),
@@ -1007,13 +1017,7 @@ impl WebRtcService {
             let Some(pipeline) = self.pipeline(&did).filter(|p| p.rc_mode() == "cbr") else {
                 continue;
             };
-            let ceiling = self
-                .st
-                .lock()
-                .displays
-                .get(&did)
-                .map_or(hi, |d| d.video_bitrate)
-                .clamp(lo, hi);
+            let ceiling = self.rate_ceiling(&did, cc_on, lo, hi);
             let now = clock::monotonic();
             let pad = self.probe_rate(&did, pipeline.video_bitrate(), ceiling, Some(0.0), 0.0, now);
             self.pad_display(
@@ -1023,6 +1027,17 @@ impl WebRtcService {
                 now + 2.0 * CONGESTION_TICK.as_secs_f64(),
             );
         }
+    }
+
+    /// A display's ceiling in kbps (`DisplayState::rate_ceiling`, where `steered`), within the
+    /// configured range `lo`-`hi`; the range's high end for a display not yet known.
+    fn rate_ceiling(&self, display: &str, steered: bool, lo: f64, hi: f64) -> f64 {
+        self.st
+            .lock()
+            .displays
+            .get(display)
+            .map_or(hi, |d| d.rate_ceiling(steered, hi))
+            .clamp(lo, hi)
     }
 
     /// The padding a display's `PathProbe` asks for after a tick that set `target` under `ceiling`

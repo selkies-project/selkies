@@ -7,7 +7,8 @@
 //! What a display learns of its owner's link: the frames stamped as they go to the socket
 //! and acknowledged as the page gets them, the round trip and its floor, the backpressure
 //! gate that stops a lagging client's delta frames, and the congestion steer that holds a
-//! CBR display to the rate its path carries.
+//! display's encoder to the rate its path carries: a CBR display's target, a CRF display's
+//! peak.
 //!
 //! Every frame handed to a display's owner is stamped (`note_send`); the owner acks the
 //! newest frame it has every 50 ms and repeats an unchanged id every second as a heartbeat
@@ -441,8 +442,8 @@ impl DisplayLink {
         self.produced_at = now;
     }
 
-    /// The CBR rate the display's encoder runs at: its `target` kbps, held down to what its
-    /// path carries while congestion control steers it.
+    /// The rate the display's encoder is held to, a CBR target or a CRF peak: its ceiling
+    /// `target` kbps, held down to what its path carries while congestion control steers it.
     pub fn video_bitrate_kbps(&self, target: f64) -> f64 {
         match self.link_kbps {
             Some(link) if link > 0.0 => target.min(link),
@@ -630,9 +631,10 @@ pub struct PadPermit {
 }
 
 impl DisplayLink {
-    /// Hold a CBR display to the rate its path carries, once per backpressure check:
-    /// `target_kbps` is the display's `video_bitrate`, `(lo_kbps, hi_kbps)` the configured
-    /// range, `encoder` the capture's controls, `pad` whether its owner may be padded.
+    /// Hold a display's encoder to the rate its path carries, once per backpressure check:
+    /// `target_kbps` is the display's ceiling (`DisplayState::rate_ceiling`), `(lo_kbps,
+    /// hi_kbps)` the configured range, `encoder` the capture's controls, `pad` whether its owner
+    /// may be padded.
     pub fn steer_bitrate_to_link(
         &mut self,
         display_id: &str,
@@ -1045,7 +1047,7 @@ pub struct TickInput {
     pub capturing: bool,
     /// The rate the capture runs at.
     pub configured_fps: f64,
-    /// Whether congestion control steers the display (CBR + `congestion_control`).
+    /// Whether congestion control steers the display (`congestion_control`).
     pub steered: bool,
     pub interval_s: f64,
     pub allowed_desync_ms: f64,

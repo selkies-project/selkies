@@ -308,17 +308,26 @@ impl WebRtcService {
     ) -> PipelineConfig {
         let d = st.displays.get(display);
         let seeds = &st.seeds;
+        let rc_mode = d.map_or_else(|| seeds.rc_mode.clone(), |d| d.rate_control_mode.clone());
+        // A capped CRF stream opens at the steer's start, never at its ceiling, which a slower
+        // path would queue seconds of before the first tick.
+        let video_bitrate = if rc_mode != "cbr" && settings().congestion_control().on {
+            let (lo, hi) = bitrate_range();
+            start_kbps(None, lo, hi)
+        } else {
+            d.map_or(seeds.video_bitrate, |d| d.video_bitrate)
+        };
         PipelineConfig {
             display_id: display.to_string(),
             encoder: d.map_or_else(|| seeds.encoder.clone(), |d| d.encoder.clone()),
             framerate: d.map_or(seeds.framerate, |d| d.framerate),
-            video_bitrate: d.map_or(seeds.video_bitrate, |d| d.video_bitrate),
+            video_bitrate,
             audio_bitrate: seeds.audio_bitrate as i32,
             width,
             height,
             capture_region: region,
             video_crf: d.map_or(seeds.video_crf, |d| d.video_crf),
-            rc_mode: d.map_or_else(|| seeds.rc_mode.clone(), |d| d.rate_control_mode.clone()),
+            rc_mode,
             video_fullcolor: d.map_or(seeds.video_fullcolor, |d| d.video_fullcolor),
             video_10bit: d.map_or(seeds.video_10bit, |d| d.video_10bit),
             use_cpu: d.map_or(seeds.use_cpu, |d| d.use_cpu),
@@ -673,24 +682,24 @@ impl WebRtcService {
         info!(target: "webrtc", "Session started for peer {peer_id} ({}, display '{display_id}').", client_type.as_str());
     }
 
-    /// Start a steered display at the rate its page last held it at rather than at the configured
-    /// one, when this page is the display's only controller: another's stream carries a steer
-    /// fresher than any page's memory.
+    /// Start a steered display at the rate its page last held it at, else at `START_KBPS`, rather
+    /// than at its ceiling, when this page is the display's only controller: another's stream
+    /// carries a steer fresher than any page's memory. A CBR stream opens at its ceiling and is
+    /// only lowered; a capped CRF one opens at `START_KBPS` (`pipeline_config`) and takes the
+    /// remembered rate either way.
     pub(crate) async fn seed_start_rate(
         &self,
         peer_id: &str,
         display_id: &str,
         remembered: Option<Json>,
     ) {
-        if !self.policy.lock().congestion_control {
+        let steered = self.policy.lock().congestion_control;
+        if !steered {
             return;
         }
         let Some(pipeline) = self.pipeline(display_id) else {
             return;
         };
-        if pipeline.rc_mode() != "cbr" {
-            return;
-        }
         let others = self.engine.peers.lock().iter().any(|(id, p)| {
             id != peer_id && p.client_type == ClientType::Controller && p.display_id == display_id
         });
@@ -699,14 +708,16 @@ impl WebRtcService {
         if others {
             return;
         }
+        let capped = pipeline.rc_mode() != "cbr";
         let ceiling = self
             .st
             .lock()
             .displays
             .get(display_id)
-            .map_or(hi, |d| d.video_bitrate);
+            .map_or(hi, |d| d.rate_ceiling(steered, hi));
         let seeded = seeded.min(ceiling);
-        if seeded.round() < pipeline.video_bitrate().round() {
+        let current = pipeline.video_bitrate().round();
+        if seeded.round() < current || (capped && seeded.round() != current) {
             let from = if remembered_kbps(remembered.as_ref()).is_some() {
                 "from the rate its page last held"
             } else {
@@ -1402,8 +1413,10 @@ impl WebRtcService {
     }
 
     /// One `stream_stats` to the controllers with their stats open: the host's figures, their
-    /// display's encode and delivery, and its CBR target. The link is the page's own to measure.
+    /// display's encode and delivery, and its CBR target or capped CRF peak. The link is the page's
+    /// own to measure.
     pub fn send_stream_stats(&self) {
+        let steered = self.policy.lock().congestion_control;
         let host = self.deps.stats.host_stats();
         let displays = self.engine.stats_displays();
         let pipelines: HashMap<String, Arc<dyn MediaPipeline>> = self.st.lock().pipelines.clone();
@@ -1413,7 +1426,7 @@ impl WebRtcService {
                 if let Some(watch) = pipeline.stream_watch() {
                     stats.extend(watch.rates());
                 }
-                if pipeline.rc_mode() == "cbr" && pipeline.video_bitrate() > 0.0 {
+                if (steered || pipeline.rc_mode() == "cbr") && pipeline.video_bitrate() > 0.0 {
                     stats.insert(
                         "target_mbps".into(),
                         json!((pipeline.video_bitrate() / 10.0).round() / 100.0),

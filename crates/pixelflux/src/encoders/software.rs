@@ -2762,7 +2762,7 @@ fn cleanup_vbv_kbit(settings: &CaptureSettings, bitrate_kbps: i32) -> i32 {
 /// four frames, 3.52 at 34.6 dB in eight, 3.68 in fifteen, with no latency lost on a LAN (6.2 ms
 /// to draw and decode at 1.5 frames, 5.5 at 8). Eight frames hold a frame's worst case to 133 ms
 /// of the rate at 60 fps, where fifteen added queue on a slow link for 4% more of the target.
-const CBR_VBV_FRAMES: f64 = 8.0;
+pub const CBR_VBV_FRAMES: f64 = 8.0;
 
 /// The `(bitrate_kbps, vbv_kbit)` the software H.264 encoder is programmed with: the CBR
 /// target, with a buffer of `CBR_VBV_FRAMES` unless `video_vbv_multiplier` names one, or the
@@ -4356,6 +4356,76 @@ mod qp_bound_sweep {
         }
         let psnr = mean_psnr(std::slice::from_ref(&picture), std::slice::from_ref(&still));
         assert!(psnr > 35.0, "a still screen refined to {psnr:.1} dB");
+    }
+
+    /// A capped CRF session takes each new peak congestion control steers it to live: no key
+    /// frame, and a scroll after a cut codes within the lower peak, where before it the rate
+    /// factor's picture fit under the higher one.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_moves_its_peak_without_a_key_frame() {
+        use crate::encoders::codec::{FRAME_KEY, h264_frame_type};
+        const CUT: usize = 30;
+        const LOW_KBPS: i32 = 1000;
+        let vbv = |kbps: i32| {
+            (crate::encoders::vbv_bits(
+                kbps as u32 * 1000,
+                60.0,
+                0.0,
+                crate::encoders::CAPPED_VBV_FRAMES,
+            ) / 1000) as i32
+        };
+        let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+        let mut enc = H264EncoderWrapper::new(
+            W as i32,
+            H as i32,
+            25,
+            false,
+            60.0,
+            4,
+            false,
+            100_000,
+            vbv(100_000),
+            0,
+            0,
+        )
+        .expect("x264 init");
+        let mut sizes = Vec::new();
+        for i in 0..CUT + FRAMES {
+            if i == CUT {
+                enc.reconfigure_rate(LOW_KBPS, vbv(LOW_KBPS), 60.0);
+            }
+            let mut out = Vec::new();
+            assert!(enc.encode_with_headers(
+                &text_luma(i),
+                &u,
+                &v,
+                W as i32,
+                (W / 2) as i32,
+                (W / 2) as i32,
+                i as u16,
+                i == 0,
+                true,
+                &mut out
+            ));
+            assert!(
+                i == 0 || h264_frame_type(&out) != FRAME_KEY,
+                "frame {i} is a key frame"
+            );
+            sizes.push(out.len() * 8);
+        }
+        let kbps = |frames: &[usize]| {
+            frames.iter().sum::<usize>() as f64 * 60.0 / frames.len() as f64 / 1000.0
+        };
+        let (before, after) = (kbps(&sizes[1..CUT]), kbps(&sizes[CUT + 10..]));
+        assert!(
+            before > 2.0 * LOW_KBPS as f64,
+            "the scroll ran at {before:.0} kbps under the high peak"
+        );
+        assert!(
+            after <= 1.1 * LOW_KBPS as f64,
+            "the scroll ran at {after:.0} kbps under a {LOW_KBPS} kbps peak"
+        );
     }
 
     /// A CRF session capped or uncapped live codes its next key frame by the new setting.

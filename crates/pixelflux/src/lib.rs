@@ -405,8 +405,9 @@ pub struct CaptureSettings {
     /// VBV size as a multiple of one frame's bit budget (bitrate/framerate), so it rescales with
     /// live bitrate/fps changes. Under CBR, `<= 0` selects the policy default: 1.5 on an
     /// infinite GOP, 3 when scheduled keyframes are enabled. Under CRF, a positive value caps
-    /// the software x264 session at a peak of `video_bitrate_kbps` with this buffer, and `<= 0`
-    /// leaves it uncapped.
+    /// the session at a peak of `video_bitrate_kbps` with this buffer, which a live bitrate
+    /// change moves without a key frame (`encoders::CAPPED_VBV_FRAMES`), and `<= 0` leaves it
+    /// uncapped. Whether a session is capped is fixed when it opens.
     pub video_vbv_multiplier: f64,
     /// The rate the path a stream crosses carries, as its transport measures it, which a still
     /// screen's constant-rate cleanup may run at (`pipeline::cleanup_rate`); 0 where none was
