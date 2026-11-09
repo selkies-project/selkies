@@ -767,6 +767,24 @@ def server_log(log: str = LOG, tail: Optional[int] = None) -> str:
         return ""
 
 
+def log_since(pattern: "re.Pattern", text: str, mark: int) -> list:
+    """What `pattern` captured in the log `text` that held at offset `mark`: the
+    last match before it, then every match after it."""
+    found = [(m.start(), m.group(1)) for m in pattern.finditer(text)]
+    return [v for at, v in found if at < mark][-1:] + [v for at, v in found if at >= mark]
+
+
+# How many values an H.264 stream's frame_num takes before it wraps, as pixelflux
+# logs it with each key frame that changes it.
+FRAME_NUM_RANGE = re.compile(r"H\.264 frame_num range: (\d+) values")
+
+
+def frame_num_ranges(text: str, mark: int) -> list:
+    """The frame_num ranges the H.264 streams in the log `text` carried from
+    offset `mark` on: the one in force there, then each a key frame changed it to."""
+    return [int(v) for v in log_since(FRAME_NUM_RANGE, text, mark)]
+
+
 @contextlib.asynccontextmanager
 async def drained(ws):
     """Keep reading `ws` for the length of a phase.

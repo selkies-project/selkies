@@ -13,7 +13,7 @@
 
 use std::collections::VecDeque;
 
-use super::reference::Reference;
+use super::reference::{Reference, frame_num_range_line};
 
 /// Frames remembered since the key frame, to map `frame_num` back to frame ids: many marking
 /// periods, so a confirmed reference and a loss after it are both still found.
@@ -359,6 +359,10 @@ impl LongTermRefs {
         };
         if self.sps.len() <= sps.0 {
             self.sps.resize(sps.0 + 1, None);
+        }
+        let range = |s: Sps| 1u64.checked_shl(s.log2_max_frame_num).unwrap_or(0);
+        if let Some(line) = frame_num_range_line(self.sps[sps.0].map_or(0, range), range(sps.1)) {
+            println!("{line}");
         }
         self.sps[sps.0] = Some(sps.1);
     }

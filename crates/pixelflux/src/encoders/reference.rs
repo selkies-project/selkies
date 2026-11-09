@@ -488,8 +488,11 @@ impl ReferenceWindow {
     }
 
     /// How many values the stream's `frame_num` takes before it wraps; 0 for a codec without
-    /// that counter.
+    /// that counter. A range other than the one before is logged (`frame_num_range_line`).
     pub fn set_frame_num_range(&mut self, range: u32) {
+        if let Some(line) = frame_num_range_line(self.frame_num_range, range as u64) {
+            println!("{line}");
+        }
         self.frame_num_range = range as u64;
     }
 
@@ -1078,9 +1081,39 @@ impl ReferenceSlots {
     }
 }
 
+/// The line saying the `frame_num` range an H.264 key frame carries, where it differs from the
+/// one the stream carried `before` (0 for none yet); `None` where it is the same or unknown (0).
+///
+/// The range sets which losses cost a key frame (`ReferenceWindow`), and it is the encoder's
+/// own sequence parameter set that says it: a VA-API driver codes its own, so the same session
+/// can carry 65536 values where pixelflux writes the set and 128 where radeonsi does. Said once
+/// per change, so the log carries what each stream ran on.
+pub fn frame_num_range_line(before: u64, range: u64) -> Option<String> {
+    (range > 0 && range != before)
+        .then(|| format!("[pixelflux] H.264 frame_num range: {range} values."))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_frame_num_range_is_said_once_per_change() {
+        assert_eq!(
+            frame_num_range_line(0, 256).as_deref(),
+            Some("[pixelflux] H.264 frame_num range: 256 values.")
+        );
+        assert_eq!(frame_num_range_line(256, 256), None, "the same range again");
+        assert_eq!(
+            frame_num_range_line(256, 0),
+            None,
+            "a set nothing could be read from"
+        );
+        assert_eq!(
+            frame_num_range_line(65536, 128).as_deref(),
+            Some("[pixelflux] H.264 frame_num range: 128 values.")
+        );
+    }
 
     #[test]
     fn a_frame_predicts_from_the_newest_one_the_client_still_has() {

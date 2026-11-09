@@ -15,14 +15,16 @@ indications the receiver sent. Measured against the same load without the
 repair, which spends a keyframe for about every eight frames it drops: 456 and
 621 drops and 69 and 72 keyframes there, 173 to 264 drops and none here.
 
-What the repair itself may spend depends on the encoder that coded the load, read
-from the server log since a host whose NVENC sessions run out falls back to x264:
-a loss covering the frame where H.264's frame_num wraps is answered with a
-keyframe, every 256 frames on NVENC and every 4096 on x264, whose own sixteen
-values pixelflux carries a byte wider, and so is a burst that let go about as many
-frames as the encoder keeps references, since the frame it would predict past them
-from has left its window, so the ceiling is worked out from what each burst let
-go (`keyframe_ceiling`). On NVENC a repaired load cost 0 to 3 keyframes, and one
+What the repair itself may spend depends on the stream that carried the load. A
+loss covering the frame where H.264's frame_num wraps is answered with a
+keyframe, and how many values frame_num takes is the encoder's sequence
+parameter set's to say, which the server logs with each key frame that changes
+it: 65536 on NVENC and 4096 on x264, whose own 256 and sixteen values
+pixelflux carries a byte wider, and on VA-API 65536 where pixelflux writes the
+set and 128 where radeonsi does. So is a burst that let go about as many frames as the encoder
+keeps references, since the frame it would predict past them from has left its
+window, so the ceiling is worked out from what each burst let go
+(`keyframe_ceiling`). On NVENC a repaired load cost 0 to 3 keyframes, and one
 that asked a keyframe for every loss 46 to 64. On x264 it cost 0; x264's own
 sixteen values cost 0 and 3, and a keyframe for every loss 44 to 62. A GitHub
 runner slow enough that nine of 21 bursts ran past the window cost 12.
@@ -54,10 +56,7 @@ ENGINE = os.environ.get("E2E_ENGINE", "chromium")
 BURST_ON_S, BURST_OFF_S = 0.08, 0.42
 LOAD_S = 24.0
 TOLD = "the encoder predicts past it"
-# How many values frame_num takes before it wraps in each H.264 encoder's
-# stream, by the name the capture's settings line gives the encoder, and the
-# frames of references each keeps at this size.
-FRAME_NUM_RANGE = {"NVENC": 256, "CPU (x264)": 4096}
+# The frames of references each encoder keeps at this size.
 REFERENCES = 8
 SETTINGS = re.compile(r"Stream settings active -> .*?\| Encoder: ([^|]+?) \|")
 
@@ -87,8 +86,7 @@ def load_encoders(mark: int) -> list:
     ran on when the load began at offset `mark`, then each it restarted on. The
     capture of a fresh display may start on another encoder before the page sizes
     it, and one that finds no hardware session free falls back to x264."""
-    found = [(m.start(), m.group(1)) for m in SETTINGS.finditer(H.server_log())]
-    return [e for at, e in found if at < mark][-1:] + [e for at, e in found if at >= mark]
+    return H.log_since(SETTINGS, H.server_log(), mark)
 
 
 def sample_for(page: Any, seconds: float) -> list:
@@ -125,17 +123,19 @@ def keyframe_ceiling(bursts: list, frame_num_range: int) -> int:
 
 
 def report(res: H.Results, tag: str, samples: list, dropped: int, named: int, bursts: list,
-           encoders: list, keyframes: int, plis: Optional[int], frames: int) -> None:
+           encoders: list, ranges: list, keyframes: int, plis: Optional[int],
+           frames: int) -> None:
     """The checks both transports share: the drops happened, the encoder was told which
     frames to predict past, the recovery cost no keyframe beyond the frame_num wraps the
     losses covered, and every decoded picture was the frame it claimed to be. `bursts`
-    holds each burst's frames let go and frames named."""
+    holds each burst's frames let go and frames named, `ranges` the frame_num ranges the
+    load's key frames carried."""
     bad = [s for s in samples if D.corrupt(s)]
     detail = (f"dropped {dropped}, named {named}, keyframes +{keyframes}, "
               f"{'plis +%d, ' % plis if plis is not None else ''}frames +{frames}, "
               f"corrupt {len(bad)}/{len(samples)}")
     print(f"      [{tag}] {detail}, on {' then '.join(encoders) or 'no encoder logged'}, "
-          f"let go and named per burst {bursts}", flush=True)
+          f"frame_num ranges {ranges}, let go and named per burst {bursts}", flush=True)
     res.check(f"{tag}: the load really dropped frames", dropped > 0, detail)
     res.check(f"{tag}: the encoder was told which frames to predict past", named > 0, detail)
     # Beyond what the wraps and the deep bursts cost (keyframe_ceiling), one is the
@@ -143,14 +143,14 @@ def report(res: H.Results, tag: str, samples: list, dropped: int, named: int, bu
     # keyframe timer now and then -- and every capture restart opens with one. A
     # repair that spends a keyframe on every loss costs about one per burst, against
     # a ceiling of a handful.
-    ranges = [FRAME_NUM_RANGE.get(e) for e in encoders]
-    known = bool(ranges) and None not in ranges
-    res.check(f"{tag}: the load ran on an encoder whose frame_num range is known", known, encoders)
-    if known:
+    res.check(f"{tag}: the server logged the frame_num range the load ran on", bool(ranges),
+              f"{ranges} on {encoders}")
+    if ranges:
         ceiling = 1 + (len(encoders) - 1) + keyframe_ceiling([n for n, _ in bursts], min(ranges))
         res.check(f"{tag}: the drops cost at most one keyframe beyond the frame_num wraps",
                   keyframes <= ceiling,
-                  f"keyframes +{keyframes}, ceiling {ceiling} on {encoders[-1]} from {len(bursts)} bursts")
+                  f"keyframes +{keyframes}, ceiling {ceiling} on {encoders[-1]} "
+                  f"(frame_num range {min(ranges)}) from {len(bursts)} bursts")
     if plis is not None:
         res.check(f"{tag}: and the receiver asked for at most one", plis <= 1, detail)
     res.check(f"{tag}: the stream kept flowing", frames >= 20 * LOAD_S, detail)
@@ -229,8 +229,8 @@ def webrtc(res: H.Results) -> None:
             after = page.evaluate(D.STATS_JS)
             report(res, tag, samples, bridge_counter("dropped") - drops0,
                    bridge_counter("invalidated") - named0, bursts, load_encoders(mark),
-                   after["keyframes"] - before["keyframes"], after["plis"] - before["plis"],
-                   after["frames"] - before["frames"])
+                   H.frame_num_ranges(H.server_log(), mark), after["keyframes"] - before["keyframes"],
+                   after["plis"] - before["plis"], after["frames"] - before["frames"])
         finally:
             if load is not None:
                 load.stop()
