@@ -2208,12 +2208,18 @@ impl Engine {
 
     /// What lies under the pointer from the engine's side: a frame part of the topmost window
     /// whose frame holds the point, else the client the compositor named.
+    /// What lies under a point: the topmost window whose frame or client area holds it, walked
+    /// down the stack, so a window drawing its own frame (a browser) covers the framed windows
+    /// below it as it does on screen; past every window, what the compositor found there.
     fn hit(&self, x: f64, y: f64, under: &Under) -> (Context, Option<WindowId>) {
         for id in self.ordered_stack().into_iter().rev() {
             let Some(win) = self.win(id) else {
                 continue;
             };
             if !win.decorated || win.fullscreen {
+                if win.rect.contains_f64(x, y) {
+                    return (Context::Client, Some(id));
+                }
                 continue;
             }
             let frame = self.frame_rect(id);
@@ -4468,6 +4474,53 @@ mod tests {
                 transform: None
             }
         )));
+    }
+
+    /// A window drawing its own frame covers the framed window under it: a click inside the
+    /// overlap focuses and raises the one on top, and a click beside it reaches the framed one.
+    #[test]
+    fn a_client_decorated_window_covers_the_framed_window_below() {
+        let (mut engine, _) = engine();
+        open(&mut engine, 1, 800, 600);
+        let mut out = Vec::new();
+        let mut csd = info(2);
+        csd.decoration = pixelflux::wm::Decoration::Client;
+        engine.handle(Event::Added(csd), &mut out);
+        engine.handle(
+            Event::Mapped {
+                id: 2,
+                size: Size { w: 800, h: 600 },
+            },
+            &mut out,
+        );
+        assert!(!engine.windows[&2].decorated);
+        let framed = engine.windows[&1].rect;
+        let csd = engine.windows[&2].rect;
+        let overlap = framed.intersection(&csd);
+        assert!(!overlap.is_empty(), "the windows share a region on the work area");
+        let (x, y) = (
+            overlap.x as f64 + overlap.w as f64 / 2.0,
+            overlap.y as f64 + overlap.h as f64 / 2.0,
+        );
+        let under = Under {
+            window: Some(2),
+            top_layer: false,
+            desktop: false,
+        };
+        assert_eq!(engine.hit(x, y, &under), (Context::Client, Some(2)));
+        engine.handle(
+            Event::Request {
+                id: 1,
+                request: Request::Activate,
+            },
+            &mut out,
+        );
+        assert_eq!(engine.focus, Some(1));
+        assert_eq!(
+            engine.hit(x, y, &under),
+            (Context::Client, Some(1)),
+            "the framed window raised over the other one takes the point"
+        );
     }
 
     /// A click inside a client focuses it and passes through; Alt-F4 is taken and closes the
