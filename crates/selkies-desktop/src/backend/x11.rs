@@ -128,6 +128,8 @@ pub struct X11Backend {
     scale: i32,
     shm_works: bool,
     toplevels: HashMap<xproto::Window, u64>,
+    /// Where the bar shows each window, kept so the geometry is set again when the bar moves.
+    task_rects: Vec<(u64, Rect)>,
     next_id: u64,
     /// The virtual desktops the window manager publishes on the root, and
     /// the current one.
@@ -244,6 +246,7 @@ impl X11Backend {
             scale: 1,
             shm_works,
             toplevels: HashMap::new(),
+            task_rects: Vec::new(),
             next_id: 1,
             desktops: 1,
             current_desktop: 0,
@@ -423,6 +426,8 @@ impl X11Backend {
             self.screen_h,
         );
         self.update_struts(primary);
+        let task_rects = self.task_rects.clone();
+        self.publish_icon_geometry(&task_rects);
 
         self.panel.width = primary.w;
         self.panel.height = panel_h * s;
@@ -2087,6 +2092,7 @@ impl Backend for X11Backend {
                 let _ = self.conn.flush();
             }
             Request::TaskbarRects(rects) => {
+                self.task_rects = rects.clone();
                 self.publish_icon_geometry(rects);
                 let _ = self.conn.flush();
             }

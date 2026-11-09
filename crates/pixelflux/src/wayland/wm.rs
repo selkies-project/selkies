@@ -1116,6 +1116,18 @@ fn apply(state: &mut AppState, command: Command) {
                     state.space.raise_element(&window, false);
                 }
             }
+            // The override-redirect X11 windows (a menu, a browser's permission bubble, a
+            // tooltip) stay above the managed ones, in their own order, so they keep taking
+            // the clicks aimed at them.
+            let popups: Vec<Window> = state
+                .space
+                .elements()
+                .filter(|w| w.x11_surface().is_some_and(|s| s.is_override_redirect()))
+                .cloned()
+                .collect();
+            for window in popups {
+                state.space.raise_element(&window, false);
+            }
             state.refocus_pointer();
             mark_dirty(state);
         }

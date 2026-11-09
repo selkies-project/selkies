@@ -242,39 +242,54 @@ impl Icons {
             .and_then(|(_, stand_in)| self.locate(stand_in, size))
     }
 
-    /// Walks the theme chain for the best sized file.
+    /// Walks the theme chain for the best sized file: a directory holding the size itself (or a
+    /// scalable one covering it) in any theme of the chain wins over a nearer theme's other
+    /// sizes, as the icon theme specification looks icons up, and where no theme holds the size
+    /// the closest one across the chain is taken, a larger file ahead of a smaller one at the
+    /// same distance since shrinking keeps an icon's edges and enlarging smears them.
     fn find_in_chain(&self, name: &str, size: u32) -> Option<PathBuf> {
-        for theme in &self.chain {
-            let mut best: Option<(u32, u32, PathBuf)> = None;
+        let mut closest: Option<(u32, u32, u32, PathBuf)> = None;
+        for (depth, theme) in self.chain.iter().enumerate() {
+            let depth = depth as u32;
+            let mut exact: Option<(u32, PathBuf)> = None;
             for dir in &theme.dirs {
-                let distance = if dir.matches(size) { 0 } else { dir.distance(size) };
-                if let Some((best_distance, _, _)) = &best
-                    && distance > *best_distance
-                {
-                    continue;
-                }
+                let matches = dir.matches(size);
+                let distance = if matches {
+                    0
+                } else {
+                    let physical = dir.size * dir.scale;
+                    let distance = dir.distance(size);
+                    if physical < size { distance * 2 } else { distance }
+                };
                 for root in &theme.roots {
                     let folder = root.join(&dir.path);
                     for (rank, ext) in EXTENSIONS.iter().enumerate() {
                         let candidate = folder.join(format!("{name}.{ext}"));
-                        if candidate.is_file() {
-                            let rank = rank as u32;
-                            let better = match &best {
-                                None => true,
-                                Some((d, r, _)) => distance < *d || (distance == *d && rank < *r),
-                            };
-                            if better {
-                                best = Some((distance, rank, candidate));
+                        if !candidate.is_file() {
+                            continue;
+                        }
+                        let rank = rank as u32;
+                        if matches && exact.as_ref().is_none_or(|(r, _)| rank < *r) {
+                            exact = Some((rank, candidate.clone()));
+                        }
+                        let better = match &closest {
+                            None => true,
+                            Some((d, dp, r, _)) => {
+                                distance < *d
+                                    || (distance == *d && (depth < *dp || (depth == *dp && rank < *r)))
                             }
+                        };
+                        if better {
+                            closest = Some((distance, depth, rank, candidate));
                         }
                     }
                 }
             }
-            if let Some((_, _, path)) = best {
+            if let Some((_, path)) = exact {
                 return Some(path);
             }
         }
-        None
+        closest.map(|(_, _, _, path)| path)
     }
 
     /// Looks in the pixmaps directories, which carry no size information
@@ -505,6 +520,54 @@ mod tests {
     use super::*;
 
     const INDEX: &str = "[Icon Theme]\nName=Test\nInherits=hicolor,Adwaita\nDirectories=16x16/apps,scalable/apps,48x48@2/apps\n\n[16x16/apps]\nSize=16\nType=Fixed\n\n[scalable/apps]\nSize=128\nType=Scalable\nMinSize=8\nMaxSize=512\n\n[48x48@2/apps]\nSize=48\nScale=2\nType=Threshold\n";
+
+    /// A theme later in the chain that holds the size asked for wins over an earlier theme's
+    /// other sizes, and where no theme holds it the larger of two equally distant files is taken.
+    #[test]
+    fn the_chain_prefers_an_exact_size_anywhere_and_then_the_larger_file() {
+        let base = std::env::temp_dir().join(format!("selkies-icons-{}", std::process::id()));
+        let first = base.join("first/16x16/apps");
+        let second = base.join("second/32x32/apps");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("browser.png"), b"png").unwrap();
+        std::fs::write(second.join("browser.png"), b"png").unwrap();
+        let fixed = |size: u32, path: &str| SubDir {
+            path: path.to_string(),
+            size,
+            scale: 1,
+            kind: DirType::Fixed,
+        };
+        let icons = Icons {
+            search_roots: Vec::new(),
+            chain: vec![
+                Theme {
+                    roots: vec![base.join("first")],
+                    dirs: vec![fixed(16, "16x16/apps")],
+                },
+                Theme {
+                    roots: vec![base.join("second")],
+                    dirs: vec![fixed(32, "32x32/apps")],
+                },
+            ],
+            pixmap_dirs: Vec::new(),
+            cache: HashMap::new(),
+            other_themes: Some(Vec::new()),
+        };
+        assert_eq!(
+            icons.find_in_chain("browser", 32),
+            Some(second.join("browser.png"))
+        );
+        assert_eq!(
+            icons.find_in_chain("browser", 16),
+            Some(first.join("browser.png"))
+        );
+        assert_eq!(
+            icons.find_in_chain("browser", 24),
+            Some(second.join("browser.png"))
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn parses_index_theme() {

@@ -1634,7 +1634,19 @@ impl Manager {
         self.publish_states(window);
     }
 
+    /// Order the frames as the policy says, among themselves: the top of the order goes just
+    /// above the frame that is topmost now rather than to the top of the server's stack, so the
+    /// override-redirect windows the server put above the frames (a menu, a browser's permission
+    /// bubble, a tooltip) stay above them and keep taking their clicks.
     fn restack(&mut self, order: &[WindowId]) {
+        let frames: std::collections::HashSet<Window> =
+            self.clients.values().map(|c| c.frame.window).collect();
+        let top_now = self
+            .conn
+            .query_tree(self.root)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .and_then(|tree| tree.children.iter().rev().find(|w| frames.contains(w)).copied());
         let mut previous: Option<Window> = None;
         let mut stacking = Vec::new();
         for id in order.iter().rev() {
@@ -1645,13 +1657,23 @@ impl Manager {
                 continue;
             };
             let frame = client.frame.window;
-            let aux = match previous {
-                None => ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-                Some(above) => ConfigureWindowAux::new()
-                    .sibling(above)
-                    .stack_mode(StackMode::BELOW),
+            let aux = match (previous, top_now) {
+                (None, Some(top)) if top == frame => None,
+                (None, Some(top)) => Some(
+                    ConfigureWindowAux::new()
+                        .sibling(top)
+                        .stack_mode(StackMode::ABOVE),
+                ),
+                (None, None) => Some(ConfigureWindowAux::new().stack_mode(StackMode::ABOVE)),
+                (Some(above), _) => Some(
+                    ConfigureWindowAux::new()
+                        .sibling(above)
+                        .stack_mode(StackMode::BELOW),
+                ),
             };
-            let _ = self.conn.configure_window(frame, &aux);
+            if let Some(aux) = aux {
+                let _ = self.conn.configure_window(frame, &aux);
+            }
             previous = Some(frame);
             stacking.push(window);
         }

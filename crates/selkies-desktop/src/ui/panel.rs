@@ -220,8 +220,18 @@ pub fn layout(d: &mut Desktop) -> Layout {
     } else {
         None
     };
+    // The pager sits at the tray's left, where the eye finds the desktop beside the status
+    // items, and leaves the left group to the start button, the launchers, and the tasks.
+    let pager = if pager_count > 0 {
+        right -= pager_width - GAP;
+        let pills = pager_pills(right, bar, pager_count);
+        right -= GAP;
+        pills
+    } else {
+        Vec::new()
+    };
     let left_edge = bar.x + GAP;
-    let fixed_width = start_width + GAP + launchers_width + pager_width + GAP;
+    let fixed_width = start_width + GAP + launchers_width + GAP;
     let available = (right - GAP - (left_edge + fixed_width)).max(0);
     let count = listed.len() as i32;
     let task_width = if count > 0 {
@@ -247,8 +257,6 @@ pub fn layout(d: &mut Desktop) -> Layout {
         launchers.push((index, Rect::new(x, bar.y + 3, bar.h - 6, bar.h - 6)));
         x += bar.h - 6 + GAP;
     }
-    let pager = pager_pills(x, bar, pager_count);
-    x += pager_width;
     let mut tasks = Vec::new();
     x += GAP;
     for index in listed.into_iter().take(shown) {
@@ -593,9 +601,9 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
             color,
         );
     }
-    if let Some(last) = layout.pager.last() {
+    if let Some(first) = layout.pager.first() {
         canvas.fill_rect(
-            Rect::new(last.right() + GAP, last.y + 4, 1, last.h - 8),
+            Rect::new(first.x - GAP, first.y + 4, 1, first.h - 8),
             ui::separator(),
         );
     }
@@ -824,10 +832,10 @@ mod tests {
         let mut d = desktop();
         let layout = layout(&mut d);
         assert_eq!(layout.pager.len(), 3);
-        assert!(layout.pager[0].x > layout.start.right());
+        assert!(layout.pager[0].x > layout.tasks.last().unwrap().1.right());
         let indices: Vec<usize> = layout.tasks.iter().map(|(i, _)| *i).collect();
         assert_eq!(indices, vec![0, 2], "the window on another desktop has no button");
-        assert!(layout.tasks[0].1.x > layout.pager[2].right());
+        assert!(layout.clock.is_none_or(|c| c.x > layout.pager[2].right()));
         assert_eq!(layout.rect_of(Hover::Pager(1)), Some(layout.pager[1]));
         assert_eq!(layout.rect_of(Hover::Task(2)), Some(layout.tasks[1].1));
 
