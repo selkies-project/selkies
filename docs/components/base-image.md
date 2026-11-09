@@ -57,14 +57,14 @@ The services under `/etc/service` are, each a `run` script and a `finish` script
 | `/etc/container-entrypoint.sh`, `/etc/selkies-entrypoint.sh` | The two scripts above |
 | `/etc/service/<name>/` | One directory per s6 service, with its `run` and `finish` scripts |
 | `/tmp/runtime-ubuntu` (`XDG_RUNTIME_DIR`) | The session's sockets, the environment file, the print queue's socket, the logs the services write |
-| `selkies`, `selkies gpu-probe`, `selkies resize` | The server's executable, `/usr/local/bin/selkies` with its web client under `/usr/local/share/selkies/web`, and two of its commands: the server, the GPU report, and the resize helper for a session with `--enable-resize=false` |
+| `selkies`, `selkies gpu-probe`, `selkies resize` | The server's executable, `/usr/local/bin/selkies` with its web client compiled in, and two of its commands: the server, the GPU report, and the resize helper for a session with `--enable-resize=false` |
 | `/usr/local/bin/selkies-privileged-files` | The setuid bracket for package layers, and the `sudo-root ... run` path for in-session package management |
 | `/usr/$LIB/selkies_input_interposer.so`, `selkies_v4l2_interposer.so`, `libudev.so.1.0.0-fake` | The preloads the session's applications get, exported as `SELKIES_INTERPOSER`, `SELKIES_WEBCAM_INTERPOSER`, and `FAKE_UDEV_LIB` |
 | `/home/ubuntu` | The session user's home, uid 1000; mount a volume there to keep settings, downloads, and installed applications |
 
 ## Running a checkout inside it
 
-`SELKIES_DEV_SOURCE` names a checkout mounted into the container, and the Selkies service then runs the server built in that tree (`target/release/selkies`) instead of the one baked into the image, so a change takes effect on a rebuild of the server and a restart of the service rather than a rebuild of the image; a checkout holding no build is served by the image's own server. The web client is a build product and a fresh checkout has none, so the image's own bundle is served until `scripts/ci/build-web.sh` builds one into the tree's `dist/web`. It works on any image built on the base, a published one included:
+`SELKIES_DEV_SOURCE` names a checkout mounted into the container, and the Selkies service then runs the server built in that tree (`target/release/selkies`) instead of the one baked into the image, so a change takes effect on a rebuild of the server and a restart of the service rather than a rebuild of the image; a checkout holding no build is served by the image's own server. The web client is a build product and a fresh checkout has none: `scripts/ci/build-web.sh` builds it into the tree's `dist/web`, which a server built afterwards compiles in, and where `dist/web` exists the service serves it from there, so a rebuilt client takes effect on a reload. It works on any image built on the base, a published one included:
 
 ```bash
 docker run --rm -it --shm-size=2g -p 8080:8080 \

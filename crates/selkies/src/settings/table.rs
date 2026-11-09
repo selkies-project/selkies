@@ -76,7 +76,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "web_root",
         kind: Kind::Str,
         default: "",
-        help: "Path to directory containing web application files. Defaults to web files packaged with Selkies application",
+        help: "Directory holding a web client, with its index.html, to serve in place of the one compiled into Selkies",
         env_vars: &[],
         allowed: &[],
         value_range: None,

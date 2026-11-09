@@ -3,7 +3,7 @@ title: Components
 description: What Selkies is built from, the encoders and interfaces each part provides, and where each one is documented.
 ---
 
-At runtime Selkies is a **single executable**, `selkies`, whichever package, image, or wheel carries it. The HTML5 web client is installed beside it, and screen and audio capture and encoding come from the `pixelflux` and `pcmflux` libraries, linked into it. Everything else on this page is optional: container images that carry a whole desktop, libraries that give a container's applications gamepads and a webcam, and the TURN pieces the opt-in WebRTC transport may need.
+At runtime Selkies is a **single executable**, `selkies`, whichever package, image, or wheel carries it. The HTML5 web client is compiled into it, and screen and audio capture and encoding come from the `pixelflux` and `pcmflux` libraries, linked into it. Everything else on this page is optional: container images that carry a whole desktop, libraries that give a container's applications gamepads and a webcam, and the TURN pieces the opt-in WebRTC transport may need.
 
 **Refer to [Getting Started](../start.md) on how you can get on board.**
 

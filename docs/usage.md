@@ -147,7 +147,7 @@ A session starts with video, audio, and gamepad input on, and the microphone and
 
 ## Command-Line Options and Environment Variables
 
-Use `selkies --help` for all command-line options, and `selkies --version` to print the installed version.
+Use `selkies --help` for all command-line options, and `selkies --version` to print the installed version and the web client it carries.
 
 Every command-line option has a matching environment variable, formed by capitalizing the option and prepending `SELKIES_` (such as `SELKIES_VIDEO_BITRATE` for `--video-bitrate`). The [Settings Reference](settings.md) lists every setting with its flag, environment variables, type, and default; it is generated from [`src/selkies/settings.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/settings.py), where the settings are defined.
 

@@ -13,7 +13,7 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 
 ## Packages
 
-Installs the server at `/usr/bin/selkies` (with its commands `selkies session`, `selkies resize`, and `selkies gpu-probe`) and its web client at `/usr/share/selkies/web`, carries both interposers, and depends on the distribution's packages behind every library the server links or loads, so your package manager pulls them in. A software codec library the distribution does not carry at the release `pixelflux` needs (x264, x265, and libde265 on Fedora, all of them on Enterprise Linux) is built into the server instead. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
+Installs the server at `/usr/bin/selkies` (with its commands `selkies session`, `selkies resize`, and `selkies gpu-probe`, and its web client compiled in), carries both interposers, and depends on the distribution's packages behind every library the server links or loads, so your package manager pulls them in. A software codec library the distribution does not carry at the release `pixelflux` needs (x264, x265, and libde265 on Fedora, all of them on Enterprise Linux) is built into the server instead. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
 
 ```bash
 # Ubuntu and Debian. The suffix names the distribution the package was built in
@@ -132,7 +132,7 @@ Please read [**WebRTC and Firewall Issues**](firewall.md).
 
 Selkies has a modularized architecture, but at runtime it is a **single executable**, `selkies`, the one every package and image carries, that:
 
-- serves the HTML5 web client, which is installed beside it (at `share/selkies/web` next to the directory holding the executable) and served from the same single port;
+- serves the HTML5 web client, which is compiled into it, from the same single port;
 - captures and encodes the screen through the `pixelflux` library it links (hardware H.264 via NVENC or VA-API, software H.264 via `x264` — or OpenH264 in a GPL-free `pixelflux` build — or JPEG);
 - captures and encodes audio through the `pcmflux` library it links (Opus);
 - injects keyboard and mouse input through XTEST/XFixes on X11, and gamepad input through the Input Interposer's sockets or uinput;
