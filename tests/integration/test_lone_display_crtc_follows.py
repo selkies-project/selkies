@@ -15,9 +15,11 @@ screen (jupyter-server-proxy#620).
 Driven against a private X server started larger than the page, as a session
 is, with no spare outputs, as a stock Xvfb has (the images' Xvfb offers them,
 unplugged here), by a GDK client that re-reads the CRTCs as the panel does,
-through a page's first size and a later resize. Every read must find the CRTC
-where GDK's monitor is: a read that finds them apart is the panel laid out for
-a mode the screen no longer has.
+through a page's first size, a later resize, and one to a width off the 8-pixel
+CVT cell, which the framebuffer rounds up and the CRTC does not. Every read must
+find the CRTC where GDK's monitor is: a read that finds them apart is the panel
+laid out for a mode the screen no longer has, and a Qt desktop, which announces
+a monitor's new geometry only where it is exactly its CRTC, kept at the old one.
 
 Usage: python3 tests/integration/test_lone_display_crtc_follows.py
 """
@@ -36,6 +38,9 @@ import websockets  # noqa: E402
 ROOT = (4096, 2160)
 FIRST = (1280, 720)
 SECOND = (1024, 768)
+# A width off the 8-pixel CVT cell: the root takes it rounded up, the CRTC and the
+# monitor the width itself.
+ODD = (1366, 768)
 
 # Runs in whichever interpreter has the GTK3 bindings: mate-panel's re-read,
 # one idle read of the connected outputs' CRTCs after any screen or monitor
@@ -200,12 +205,14 @@ def run() -> "H.Results":
                 await asyncio.wait_for(ws.recv(), timeout=10)
                 await ws.send(settings_payload())
                 done = 0
-                for label, size in (("a page's first size", FIRST), ("a later resize", SECOND)):
+                for label, size in (("a page's first size", FIRST), ("a later resize", SECOND),
+                                    ("a width off the CVT cell", ODD)):
                     if size != FIRST:
                         await ws.send(f"r,{size[0]}x{size[1]},primary")
-                    got, seen = await settle(display_name, log, size)
+                    root = (-(-size[0] // 8) * 8, size[1])
+                    got, seen = await settle(display_name, log, root)
                     want = [[0, 0, size[0], size[1]]]
-                    res.check(f"{label} reaches the root", got == size, got)
+                    res.check(f"{label} reaches the root", got == root, got)
                     apart = [r for r in seen[done:] if r["crtcs"] != r["monitors"]]
                     res.check(f"{label}: every re-read found the CRTC where GDK's monitor is",
                               not apart, apart[:2])

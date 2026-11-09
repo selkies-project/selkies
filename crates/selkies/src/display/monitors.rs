@@ -434,13 +434,14 @@ async fn replace_selkies_monitors_at(
     w: i32,
     h: i32,
     refresh: Option<f64>,
+    output_size: Option<(i32, i32)>,
 ) -> bool {
     if layouts.is_empty() {
         return false;
     }
     let owned = layouts.clone();
     let done = on_x11(move |x| {
-        let set = x.prepare_mode_set(w, h, refresh, None)?;
+        let set = x.prepare_mode_set(w, h, refresh, output_size)?;
         replace_selkies_monitors_sync(x, &owned, Some(&set))?;
         x.mode_set_realized(&set)
     })
@@ -750,16 +751,25 @@ pub async fn apply_monitor_layout(
         Some(_) => {}
     }
     let mode_set = needs_mode_set(&info, total_w, total_h);
+    // A lone display is shown whole by the output, its CRTC exactly its monitor: Qt
+    // announces a monitor's new geometry only where the two agree, and the framebuffer is
+    // the width rounded up to the CVT cell.
+    let output_size = match (layouts.len(), layouts.get(PRIMARY_DISPLAY)) {
+        (1, Some(l)) => Some((l.w, l.h)),
+        _ => None,
+    };
     let together = mode_set
         && screen_name.is_some()
-        && replace_selkies_monitors_at(layouts, total_w, total_h, refresh).await;
+        && replace_selkies_monitors_at(layouts, total_w, total_h, refresh, output_size).await;
     if !together {
         if !replace_selkies_monitors(layouts, screen_name.as_deref()).await {
             clear_selkies_monitors().await;
             return false;
         }
         if mode_set
-            && resize_display(&total_mode, refresh, None).await.is_none()
+            && resize_display(&total_mode, refresh, output_size)
+                .await
+                .is_none()
             && !grow_framebuffer(total_w, total_h).await
         {
             error!(
