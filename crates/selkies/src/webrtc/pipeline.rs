@@ -885,7 +885,10 @@ impl MediaPipeline for Handle {
             _ => false,
         };
         if restart && p.live.lock().capturing {
-            info!(target: "webrtc", "{key} changed; restarting screen capture");
+            let shown = value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_string);
+            info!(target: "webrtc", "{key} -> {shown}; restarting screen capture");
             self.restart_screen().await;
         }
     }
