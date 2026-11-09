@@ -86,6 +86,8 @@ struct X11Surface {
     shm: Option<ShmSegment>,
     pixels: Vec<u8>,
     visible: Vec<Rect>,
+    /// The input rectangles last presented, in logical pixels, which a reparent re-applies.
+    input: Vec<Rect>,
 }
 
 /// How a window's visible rectangles become its bounding shape.
@@ -429,14 +431,19 @@ impl X11Backend {
         let task_rects = self.task_rects.clone();
         self.publish_icon_geometry(&task_rects);
 
-        self.panel.width = primary.w;
-        self.panel.height = panel_h * s;
-        self.desktop.width = self.screen_w;
-        self.desktop.height = self.screen_h;
-        for surface in [&mut self.panel, &mut self.desktop] {
-            surface.shm = None;
-            surface.pixels.clear();
-            surface.visible.clear();
+        // A surface keeping its size keeps its pixels: the shell presents only a size that
+        // changed, and an expose of a moved panel is drawn from them.
+        for (surface, width, height) in [
+            (&mut self.panel, primary.w, panel_h * s),
+            (&mut self.desktop, self.screen_w, self.screen_h),
+        ] {
+            if surface.width != width || surface.height != height {
+                surface.width = width;
+                surface.height = height;
+                surface.shm = None;
+                surface.pixels.clear();
+                surface.visible.clear();
+            }
         }
 
         self.events.push(Event::Configured {
@@ -1578,32 +1585,12 @@ impl X11Backend {
                 }
             }
             XEvent::MappingNotify(_) => self.load_keymap(),
-            XEvent::ReparentNotify(_) => {
-                let panel_input = self
-                    .panel
-                    .visible
-                    .iter()
-                    .map(|r| scale_down(*r, self.scale))
-                    .collect::<Vec<_>>();
-                let input = if self.popup_open {
-                    vec![Rect::new(
-                        0,
-                        0,
-                        self.panel.width / self.scale,
-                        self.panel.height / self.scale,
-                    )]
-                } else {
-                    panel_input
-                };
-                self.apply_shape(&self.panel, &input, self.scale, Shape::Panel);
-                let cells: Vec<Rect> = self
-                    .desktop
-                    .visible
-                    .iter()
-                    .skip(1)
-                    .map(|r| scale_down(*r, self.scale))
-                    .collect();
-                self.apply_shape(&self.desktop, &cells, self.scale, Shape::Square);
+            XEvent::ReparentNotify(e) => {
+                if e.window == self.panel.window {
+                    self.apply_shape(&self.panel, &self.panel.input, self.scale, Shape::Panel);
+                } else if e.window == self.desktop.window {
+                    self.apply_shape(&self.desktop, &self.desktop.input, self.scale, Shape::Square);
+                }
             }
             XEvent::ConfigureNotify(e) => {
                 if e.window == self.root
@@ -1781,6 +1768,7 @@ fn create_window(
         shm: None,
         pixels: Vec::new(),
         visible: Vec::new(),
+        input: Vec::new(),
     })
 }
 
@@ -1958,22 +1946,24 @@ impl Backend for X11Backend {
                 }
             }
             surface.visible = visible;
+            if !is_window {
+                surface.input = if id == SurfaceId::Panel && frame.grab {
+                    vec![Rect::new(0, 0, w / scale, h / scale)]
+                } else {
+                    frame.input.clone()
+                };
+            }
         }
         let Some(surface) = self.surface_ref(id) else {
             return;
         };
         if !is_window {
-            let input: Vec<Rect> = if id == SurfaceId::Panel && frame.grab {
-                vec![Rect::new(0, 0, w / scale, h / scale)]
-            } else {
-                frame.input.clone()
-            };
             let shape = match id {
                 SurfaceId::Panel => Shape::Panel,
                 SurfaceId::Notifications => Shape::Cards,
                 _ => Shape::Square,
             };
-            self.apply_shape(surface, &input, scale, shape);
+            self.apply_shape(surface, &surface.input, scale, shape);
         }
         // A window mapped later stacks above the stack, so it is raised again whenever its cards
         // change, though not for a countdown step.
