@@ -46,6 +46,18 @@
   user's bus may call it; it answers `ReadAll`, `ReadOne`, `Read`, and its `version` property from the shell's own
   theme decision, takes no writes, and runs nothing a caller names, so a caller learns only the scheme, accent, and
   theme names every window of the session is drawn with.
+- Under `--desktop` the shell is also the session's notification server (`crates/selkies-desktop/src/notify.rs`):
+  `org.freedesktop.Notifications` on the session bus, taken only while no other process owns that name. Any
+  process of the session user's bus may call `Notify`, `CloseNotification`, `GetCapabilities`, and
+  `GetServerInformation`, and every one hears the `NotificationClosed` and `ActionInvoked` signals. What a caller
+  sends is bounded on the server's own thread before the shell draws it: texts are cut to a length (application
+  name 64 characters, summary 256, body 2048 after its markup is stripped to text), actions to eight, the hints
+  are read as typed fields with every other key skipped, an `image-data` hint is dropped unless its sides are
+  1 to 1024, its samples 8 bits, its channels 3 or 4, and its rows fit the bytes sent, an `image-path` or icon
+  path is a file the session user can read of at most 16 MiB, decoded under the image crate's allocation limits,
+  a `desktop-entry` hint naming a path is ignored, every image is shrunk to 128 pixels, and the shell keeps at
+  most 64 notifications, closing the oldest. A caller can show text and an image on the user's screen and learn
+  when the user invoked one of its actions; nothing it sends is run, opened, or written.
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
   `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
   write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose

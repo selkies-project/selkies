@@ -1,7 +1,8 @@
 //! The Wayland backend: layer shell surfaces and xdg-shell windows drawn
-//! through shared memory, the window list from the foreign toplevel protocol,
-//! file drags through the data device, and the pointer and keyboard of the
-//! default seat.  The pointer image is a cursor theme surface
+//! through shared memory, the notification stack an Overlay layer surface
+//! that exists only while it has cards, the window list from the foreign
+//! toplevel protocol, file drags through the data device, and the pointer
+//! and keyboard of the default seat.  The pointer image is a cursor theme surface
 //! at the output's scale, as the compositor's own cursor is, rather than a
 //! cursor shape request: a nested compositor forwards a surface to its host
 //! with the buffer scale intact, which keeps the size the rest of the desktop
@@ -24,6 +25,9 @@ use wayland_client::{
 use wayland_cursor::CursorTheme;
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+};
+use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
+    zwp_keyboard_shortcuts_inhibit_manager_v1, zwp_keyboard_shortcuts_inhibitor_v1,
 };
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
@@ -257,6 +261,12 @@ struct State {
     wm_base: Option<xdg_wm_base::XdgWmBase>,
     decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     icon_manager: Option<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1>,
+    /// The compositor's shortcuts-inhibit manager, where it offers one, so a window teaching
+    /// the shortcut editor a chord receives it instead of the window manager.
+    shortcuts_inhibit:
+        Option<zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1>,
+    /// The inhibitor held while a window captures a chord.
+    inhibitor: Option<zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1>,
     data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     data_device: Option<wl_data_device::WlDataDevice>,
     cursor_theme: Option<(i32, CursorTheme)>,
@@ -264,6 +274,8 @@ struct State {
     conn: Connection,
     outputs: Vec<Output>,
     panel: Option<Surface>,
+    /// The notification stack's layer surface, while it has cards.
+    notifications: Option<Surface>,
     windows: Vec<Window>,
     pointer_surface: Option<SurfaceId>,
     pointer_pos: (f64, f64),
@@ -294,6 +306,9 @@ impl State {
     fn surface_id(&self, wl: &wl_surface::WlSurface) -> Option<SurfaceId> {
         if self.panel.as_ref().is_some_and(|s| s.wl == *wl) {
             return Some(SurfaceId::Panel);
+        }
+        if self.notifications.as_ref().is_some_and(|s| s.wl == *wl) {
+            return Some(SurfaceId::Notifications);
         }
         if let Some(window) = self.windows.iter().find(|w| w.surface.wl == *wl) {
             return Some(SurfaceId::Window(window.id));
@@ -418,10 +433,30 @@ impl State {
         surface.mapped = true;
     }
 
+    /// Holds the compositor's shortcuts inhibitor on one of the shell's windows while it
+    /// captures a chord, or lets it go: with it active, a chord the window manager binds reaches
+    /// the window instead of running. Nothing happens where the compositor offers no inhibitor.
+    fn inhibit_shortcuts(&mut self, qh: &QueueHandle<State>, id: u32, grab: bool) {
+        if let Some(inhibitor) = self.inhibitor.take() {
+            inhibitor.destroy();
+        }
+        if !grab {
+            return;
+        }
+        let (Some(manager), Some(seat)) = (self.shortcuts_inhibit.as_ref(), self.seat.as_ref()) else {
+            return;
+        };
+        let Some(surface) = self.windows.iter().find(|w| w.id == id).map(|w| &w.surface.wl) else {
+            return;
+        };
+        self.inhibitor = Some(manager.inhibit_shortcuts(surface, seat, qh, ()));
+    }
+
     /// Mutable access to a surface by identifier.
     fn surface_mut(&mut self, id: SurfaceId) -> Option<&mut Surface> {
         match id {
             SurfaceId::Panel => self.panel.as_mut(),
+            SurfaceId::Notifications => self.notifications.as_mut(),
             SurfaceId::Background(name) => self
                 .outputs
                 .iter_mut()
@@ -505,6 +540,67 @@ impl State {
                 mapped: false,
                 input: Vec::new(),
             },
+        });
+    }
+
+    /// Places the notification stack's layer surface: created on the
+    /// primary output on the Overlay layer, anchored to its top right corner
+    /// `top` pixels down, reserving nothing and taking no keyboard, resized
+    /// when it exists, and destroyed for a zero size.  It extends under the
+    /// bar's exclusive zone, since the desktop's offset already clears a bar
+    /// along the top.
+    fn place_notifications(&mut self, qh: &QueueHandle<State>, width: i32, height: i32, top: i32) {
+        if width <= 0 || height <= 0 {
+            if let Some(surface) = self.notifications.take() {
+                surface.destroy();
+            }
+            if self.pointer_surface == Some(SurfaceId::Notifications) {
+                self.pointer_surface = None;
+            }
+            return;
+        }
+        if let Some(Surface {
+            role: Role::Layer(layer),
+            wl,
+            ..
+        }) = &self.notifications
+        {
+            layer.set_size(width as u32, height as u32);
+            layer.set_margin(top, 0, 0, 0);
+            wl.commit();
+            return;
+        }
+        let (Some(compositor), Some(layer_shell)) = (self.compositor.clone(), self.layer_shell.clone())
+        else {
+            return;
+        };
+        let output = self.outputs.first();
+        let scale = output.map_or(1, |o| o.scale);
+        let wl = compositor.create_surface(qh, ());
+        let layer = layer_shell.get_layer_surface(
+            &wl,
+            output.map(|o| &o.output),
+            zwlr_layer_shell_v1::Layer::Overlay,
+            "notifications".to_string(),
+            qh,
+            SurfaceId::Notifications,
+        );
+        layer.set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Right);
+        layer.set_size(width as u32, height as u32);
+        layer.set_margin(top, 0, 0, 0);
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+        wl.commit();
+        self.notifications = Some(Surface {
+            wl,
+            role: Role::Layer(layer),
+            buffers: Vec::new(),
+            width: 0,
+            height: 0,
+            scale,
+            configured: false,
+            mapped: false,
+            input: Vec::new(),
         });
     }
 
@@ -652,6 +748,7 @@ impl State {
         let mut ids = vec![SurfaceId::Background(name)];
         if index == 0 {
             ids.push(SurfaceId::Panel);
+            ids.push(SurfaceId::Notifications);
         }
         for id in ids {
             if let Some(surface) = self.surface_mut(id)
@@ -778,6 +875,7 @@ impl State {
         };
         let scale = match self.pointer_surface {
             Some(SurfaceId::Panel) => self.panel.as_ref().map_or(1, |s| s.scale),
+            Some(SurfaceId::Notifications) => self.notifications.as_ref().map_or(1, |s| s.scale),
             Some(SurfaceId::Background(name)) => self
                 .outputs
                 .iter()
@@ -866,6 +964,8 @@ impl WaylandBackend {
             wm_base: None,
             decoration_manager: None,
             icon_manager: None,
+            shortcuts_inhibit: None,
+            inhibitor: None,
             data_device_manager: None,
             data_device: None,
             cursor_theme: None,
@@ -873,6 +973,7 @@ impl WaylandBackend {
             conn: conn.clone(),
             outputs: Vec::new(),
             panel: None,
+            notifications: None,
             windows: Vec::new(),
             pointer_surface: None,
             pointer_pos: (0.0, 0.0),
@@ -900,6 +1001,7 @@ impl WaylandBackend {
         let mut wm_base_version = 0;
         let mut decoration = false;
         let mut icon_manager = false;
+        let mut shortcuts_inhibit = false;
         let mut data_device_version = 0;
         let mut workspace_manager = false;
         globals.contents().with_list(|list| {
@@ -912,6 +1014,7 @@ impl WaylandBackend {
                     "xdg_wm_base" => wm_base_version = global.version.min(XDG_WM_BASE_MAX),
                     "zxdg_decoration_manager_v1" => decoration = true,
                     "xdg_toplevel_icon_manager_v1" => icon_manager = true,
+                    "zwp_keyboard_shortcuts_inhibit_manager_v1" => shortcuts_inhibit = true,
                     "wl_data_device_manager" => data_device_version = global.version.min(3),
                     "ext_workspace_manager_v1" => workspace_manager = true,
                     _ => {}
@@ -960,6 +1063,15 @@ impl WaylandBackend {
         if icon_manager {
             state.icon_manager = globals
                 .bind::<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, _, _>(&qh, 1..=1, ())
+                .ok();
+        }
+        if shortcuts_inhibit {
+            state.shortcuts_inhibit = globals
+                .bind::<zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1, _, _>(
+                    &qh,
+                    1..=1,
+                    (),
+                )
                 .ok();
         }
         if workspace_manager {
@@ -1397,7 +1509,18 @@ impl Backend for WaylandBackend {
                     manager.commit();
                 }
             }
-            Request::SetVolume(_) | Request::ToggleMute | Request::GrabKeyboard { .. } => {}
+            Request::Notifications { width, height, top } => {
+                let qh = self.queue.handle();
+                self.state.place_notifications(&qh, *width, *height, *top);
+            }
+            Request::GrabKeyboard { id, grab } => {
+                let qh = self.queue.handle();
+                self.state.inhibit_shortcuts(&qh, *id, *grab);
+            }
+            Request::SetVolume(_)
+            | Request::ToggleMute
+            | Request::NotificationClosed { .. }
+            | Request::ActionInvoked { .. } => {}
         }
     }
 }
@@ -1700,7 +1823,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, SurfaceId> for State {
         event: zwlr_layer_surface_v1::Event,
         id: &SurfaceId,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         match event {
             zwlr_layer_surface_v1::Event::Configure {
@@ -1720,6 +1843,16 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, SurfaceId> for State {
                     surface.configured = surface.width > 0 && surface.height > 0;
                 }
                 state.emit_configured(*id);
+            }
+            zwlr_layer_surface_v1::Event::Closed if *id == SurfaceId::Notifications => {
+                let scale = state.notifications.as_ref().map_or(1, |s| s.scale);
+                state.place_notifications(qh, 0, 0, 0);
+                state.events.push(Event::Configured {
+                    surface: SurfaceId::Notifications,
+                    width: 0,
+                    height: 0,
+                    scale,
+                });
             }
             zwlr_layer_surface_v1::Event::Closed => {
                 state.events.push(Event::Quit);
@@ -2171,6 +2304,8 @@ delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore wl_region::WlRegion);
 delegate_noop!(State: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
 delegate_noop!(State: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
+delegate_noop!(State: ignore zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1);
+delegate_noop!(State: ignore zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1);
 delegate_noop!(State: ignore xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1);
 delegate_noop!(State: ignore xdg_toplevel_icon_v1::XdgToplevelIconV1);
 delegate_noop!(State: ignore zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1);

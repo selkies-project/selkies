@@ -112,9 +112,9 @@ const MENU_SEPARATOR: i32 = 9;
 /// Space between controls flowed in a row.
 const GAP: i32 = 4;
 /// Width of a toggle switch.
-const SWITCH_WIDTH: i32 = 42;
+pub const SWITCH_WIDTH: i32 = 42;
 /// Height of a toggle switch.
-const SWITCH_HEIGHT: i32 = 22;
+pub const SWITCH_HEIGHT: i32 = 22;
 /// Width of a slider with its value.
 const SLIDER_WIDTH: i32 = 230;
 /// Width of the value shown beside a slider.
@@ -686,6 +686,10 @@ enum Action {
     ToggleMute,
     /// Take an application off the quick launch, from its button's menu.
     RemoveLauncher(String),
+    /// Turn Do not disturb on or off, from the bell's menu.
+    ToggleDnd,
+    /// Remove every notification, from the bell's menu.
+    ClearNotifications,
     /// Show a page.
     Page(Page),
     /// Open the application list for a list setting.
@@ -1055,6 +1059,10 @@ struct MenuFacts {
     muted: Option<bool>,
     /// The desktop file ID of the quick launch button clicked, if one was.
     launcher: Option<String>,
+    /// Whether Do not disturb is on.
+    dnd: bool,
+    /// Whether there are notifications to clear.
+    notifications: bool,
 }
 
 /// A menu entry that writes one key.
@@ -1148,6 +1156,21 @@ fn panel_menu_entries(target: PanelTarget, facts: &MenuFacts) -> Vec<MenuEntry> 
             set_entry(tr("Hide this button"), "show_desktop_button", "false"),
             settings(tr("Panel settings…"), Page::Panel),
         ],
+        PanelTarget::Notifications => vec![
+            MenuEntry::item(
+                if facts.dnd {
+                    tr("Allow notifications")
+                } else {
+                    tr("Do not disturb")
+                },
+                Action::ToggleDnd,
+            ),
+            MenuEntry::Item {
+                label: tr("Clear all"),
+                action: Action::ClearNotifications,
+                enabled: facts.notifications,
+            },
+        ],
     }
 }
 
@@ -1174,6 +1197,8 @@ fn panel_menu_items(d: &Desktop) -> Vec<MenuEntry> {
         desktops: d.desktops,
         muted: d.volume.map(|v| v.muted),
         launcher,
+        dnd: d.notifications.dnd,
+        notifications: !d.notifications.is_empty(),
     };
     panel_menu_entries(target, &facts)
 }
@@ -1287,6 +1312,8 @@ pub fn panel_menu_click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool
             Action::Set(changes) => d.write_config(&changes),
             Action::ToggleMute => d.toggle_mute(),
             Action::RemoveLauncher(id) => d.toggle_list_entry("launchers", &id),
+            Action::ToggleDnd => d.set_dnd(!d.notifications.dnd),
+            Action::ClearNotifications => d.clear_notifications(),
             _ => d.reload(),
         }
     }
@@ -2757,20 +2784,6 @@ fn check_path(rect: Rect) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
-/// A cross path centered in a box.
-fn cross_path(rect: Rect, reach: f32) -> Option<tiny_skia::Path> {
-    let mut pb = PathBuilder::new();
-    let (cx, cy) = (
-        rect.x as f32 + rect.w as f32 / 2.0,
-        rect.y as f32 + rect.h as f32 / 2.0,
-    );
-    pb.move_to(cx - reach, cy - reach);
-    pb.line_to(cx + reach, cy + reach);
-    pb.move_to(cx + reach, cy - reach);
-    pb.line_to(cx - reach, cy + reach);
-    pb.finish()
-}
-
 /// Draws a flat button: a tonal pill with its label, ringed with the accent
 /// while what it started runs.
 fn draw_button(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
@@ -2901,27 +2914,26 @@ fn draw_switch(canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
         SWITCH_WIDTH,
         SWITCH_HEIGHT,
     );
-    let radius = SWITCH_HEIGHT as f32 / 2.0;
-    let track = if control.active {
-        ui::accent()
-    } else {
-        ui::text_alpha(0x30)
-    };
+    draw_pill_switch(canvas, pill, control.active);
+}
+
+/// Draws a toggle switch: an accent pill with its knob at the right when on,
+/// a neutral one with its knob at the left when off.
+///
+/// # Arguments
+/// * `canvas` - The target.
+/// * `pill` - The switch, [`SWITCH_WIDTH`] by [`SWITCH_HEIGHT`].
+/// * `on` - Whether it is on.
+pub fn draw_pill_switch(canvas: &mut Canvas<'_>, pill: Rect, on: bool) {
+    let radius = pill.h as f32 / 2.0;
+    let track = if on { ui::accent() } else { ui::text_alpha(0x30) };
     canvas.fill_rounded(pill, radius, track);
-    let knob = SWITCH_HEIGHT - 6;
-    let knob_x = if control.active {
-        pill.right() - 3 - knob
-    } else {
-        pill.x + 3
-    };
+    let knob = pill.h - 6;
+    let knob_x = if on { pill.right() - 3 - knob } else { pill.x + 3 };
     canvas.fill_rounded(
         Rect::new(knob_x, pill.y + 3, knob, knob),
         knob as f32 / 2.0,
-        if control.active {
-            ui::on_accent()
-        } else {
-            ui::text()
-        },
+        if on { ui::on_accent() } else { ui::text() },
     );
 }
 
@@ -3181,7 +3193,7 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
             }
             if hovered {
                 canvas.fill_rounded(rect, 6.0, ui::text_alpha(0xa0));
-                if let Some(path) = cross_path(rect, 5.0) {
+                if let Some(path) = ui::cross_path(rect, 5.0) {
                     canvas.stroke_path(&path, 2.0, ui::popup_bg());
                 }
             }
@@ -3634,7 +3646,9 @@ fn click(d: &mut Desktop, x: f64, y: f64, button: Button) {
         | Action::EditFavorites
         | Action::Reload
         | Action::ToggleMute
-        | Action::RemoveLauncher(_) => {}
+        | Action::RemoveLauncher(_)
+        | Action::ToggleDnd
+        | Action::ClearNotifications => {}
         Action::OpenPicker(field) => {
             if open != Some(field) {
                 let hsv = color_to_hsv(field_color(d, field));
@@ -4421,6 +4435,8 @@ mod tests {
             desktops: 2,
             muted: Some(false),
             launcher: Some("foot".to_string()),
+            dnd: false,
+            notifications: true,
         };
         let bar = panel_menu_entries(PanelTarget::Bar, &facts);
         assert_eq!(
@@ -4526,6 +4542,24 @@ mod tests {
             labels(&panel_menu_entries(PanelTarget::ShowDesktop, &facts)),
             vec!["Hide this button", "Panel settings…"]
         );
+        let bell = panel_menu_entries(PanelTarget::Notifications, &facts);
+        assert_eq!(labels(&bell), vec!["Do not disturb", "Clear all"]);
+        assert!(matches!(
+            &bell[1],
+            MenuEntry::Item {
+                action: Action::ClearNotifications,
+                enabled: true,
+                ..
+            }
+        ));
+        let quiet = MenuFacts {
+            dnd: true,
+            notifications: false,
+            ..facts.clone()
+        };
+        let bell = panel_menu_entries(PanelTarget::Notifications, &quiet);
+        assert_eq!(labels(&bell), vec!["Allow notifications", "Clear all"]);
+        assert!(matches!(&bell[1], MenuEntry::Item { enabled: false, .. }));
     }
 
     #[test]

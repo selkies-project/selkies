@@ -3,6 +3,7 @@
 
 use tiny_skia::Pixmap;
 
+use crate::notify::CloseReason;
 use crate::xkb::Key;
 
 /// Identifies which desktop surface an event refers to.
@@ -15,6 +16,8 @@ pub enum SurfaceId {
     /// A window of the shell's own, a file manager window or the settings
     /// window, by the desktop's window number.
     Window(u32),
+    /// The stack of notification popups in the top right corner.
+    Notifications,
 }
 
 /// The modifier keys held during an input event.
@@ -223,4 +226,13 @@ pub enum Request {
         icon: Option<Box<Pixmap>>,
         scale: i32,
     },
+    /// Place the notification stack's surface at a logical size in the top
+    /// right corner of the primary output, `top` pixels below its top edge;
+    /// a zero size removes it.
+    Notifications { width: i32, height: i32, top: i32 },
+    /// Signal that a notification closed, for the notification server.
+    NotificationClosed { id: u32, reason: CloseReason },
+    /// Signal that the user invoked a notification's action, for the
+    /// notification server.
+    ActionInvoked { id: u32, key: String },
 }

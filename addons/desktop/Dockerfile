@@ -85,10 +85,6 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         iputils-ping \
         # pactl, which selkies-desktop's volume control drives the sink through
         pulseaudio-utils \
-        # The notification server applications call over the session bus,
-        # started on the first notification by D-Bus activation on either
-        # backend
-        dunst \
         # A file manager keeps whether a desktop entry may be launched in GIO
         # metadata: gvfs carries the client module that implements that
         # attribute namespace, gvfs-daemons the store behind it. Without both,

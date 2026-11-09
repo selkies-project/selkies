@@ -1,5 +1,6 @@
 //! The panel, start menu, taskbar, and desktop layer of Selkies containers, over the Selkies
-//! window manager, the labwc Wayland compositor, or the openbox X11 window manager.
+//! window manager, the labwc Wayland compositor, or the openbox X11 window manager, and the
+//! session's notification server.
 
 mod audio;
 mod backend;
@@ -12,6 +13,7 @@ mod files;
 mod i18n;
 mod ipc;
 mod keybinds;
+mod notify;
 mod portal;
 mod toolkits;
 mod tray;
@@ -110,6 +112,40 @@ fn main() {
     std::process::exit(run());
 }
 
+/// Carries out a request: the volume on the sound server, the notification
+/// signals on the notification server, and everything else on the display
+/// backend.
+fn route(
+    request: Request,
+    backend: &mut dyn backend::Backend,
+    audio: Option<&mut audio::Audio>,
+    notify: Option<&notify::Server>,
+) {
+    match request {
+        Request::SetVolume(percent) => {
+            if let Some(audio) = audio {
+                audio.set_volume(percent);
+            }
+        }
+        Request::ToggleMute => {
+            if let Some(audio) = audio {
+                audio.toggle_mute();
+            }
+        }
+        Request::NotificationClosed { id, reason } => {
+            if let Some(server) = notify {
+                server.closed(id, reason);
+            }
+        }
+        Request::ActionInvoked { id, key } => {
+            if let Some(server) = notify {
+                server.invoked(id, &key);
+            }
+        }
+        other => backend.perform(&other),
+    }
+}
+
 /// Runs the desktop until the display goes away or a quit command arrives.
 ///
 /// # Returns
@@ -145,6 +181,8 @@ fn run() -> i32 {
     if debug && tray.is_none() {
         eprintln!("selkies-desktop: no system tray host");
     }
+    let notify = notify::Server::start();
+    desktop.notifications_served = notify.is_some();
 
     loop {
         let now = Instant::now();
@@ -159,19 +197,7 @@ fn run() -> i32 {
         }
 
         for request in desktop.take_requests() {
-            match request {
-                Request::SetVolume(percent) => {
-                    if let Some(audio) = audio.as_mut() {
-                        audio.set_volume(percent);
-                    }
-                }
-                Request::ToggleMute => {
-                    if let Some(audio) = audio.as_mut() {
-                        audio.toggle_mute();
-                    }
-                }
-                other => backend.perform(&other),
-            }
+            route(request, backend.as_mut(), audio.as_mut(), notify.as_ref());
         }
         let layered = backend.layered_desktop();
         for id in desktop.background_ids() {
@@ -207,8 +233,11 @@ fn run() -> i32 {
                 backend.present(SurfaceId::Window(id), &frame);
             }
         }
+        if let Some(frame) = desktop.render_notifications() {
+            backend.present(SurfaceId::Notifications, &frame);
+        }
         for request in desktop.take_requests() {
-            backend.perform(&request);
+            route(request, backend.as_mut(), audio.as_mut(), notify.as_ref());
         }
 
         if let Err(error) = backend.prepare() {
@@ -264,6 +293,14 @@ fn run() -> i32 {
         let tray_index = tray.as_ref().map(|t| {
             fds.push(libc::pollfd {
                 fd: t.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+            fds.len() - 1
+        });
+        let notify_index = notify.as_ref().map(|n| {
+            fds.push(libc::pollfd {
+                fd: n.fd(),
                 events: libc::POLLIN,
                 revents: 0,
             });
@@ -350,6 +387,17 @@ fn run() -> i32 {
             && t.dispatch()
         {
             desktop.set_tray_icons(t.count());
+        }
+        if let Some(index) = notify_index
+            && fds[index].revents & libc::POLLIN != 0
+            && let Some(server) = notify.as_ref()
+        {
+            for incoming in server.drain() {
+                match incoming {
+                    notify::Incoming::Notify(note) => desktop.notify(*note),
+                    notify::Incoming::Close(id) => desktop.withdraw_notification(id),
+                }
+            }
         }
         if fds[files_start..].iter().any(|fd| fd.revents & libc::POLLIN != 0) {
             desktop.files.drain_worker();

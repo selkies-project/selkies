@@ -1,8 +1,9 @@
 //! The bar: start button, quick launch buttons, pager, taskbar, system tray
-//! slot, volume, clock and the show desktop button.  The start button, quick
-//! launch, pager and taskbar sit at the left, or in the middle of the bar
-//! when the layout is centered; the tray, volume, clock and show desktop
-//! button stay at the right.
+//! slot, notifications bell, volume, clock and the show desktop button.  The
+//! start button, quick launch, pager and taskbar sit at the left, or in the
+//! middle of the bar when the layout is centered; the tray, bell, volume,
+//! clock and show desktop button stay at the right.  The bell is there while
+//! the shell serves notifications.
 //!
 //! The pager is one pill per virtual desktop, shown when the window manager
 //! reports more than one; the taskbar lists the windows of the current
@@ -24,6 +25,8 @@ const TASK_MAX_WIDTH: i32 = 200;
 const TASK_MIN_WIDTH: i32 = 40;
 /// Width of the volume button.
 const VOLUME_WIDTH: i32 = 32;
+/// Width of the notifications bell.
+const BELL_WIDTH: i32 = 32;
 /// Width of one pager pill.
 const PAGER_PILL_WIDTH: i32 = 26;
 /// Space between pager pills.
@@ -70,6 +73,8 @@ pub struct Layout {
     pub tray: Option<Rect>,
     /// The volume button, when shown.
     pub volume: Option<Rect>,
+    /// The notifications bell, when the shell serves notifications.
+    pub notifications: Option<Rect>,
     /// The clock, when shown.
     pub clock: Option<Rect>,
     /// The show desktop button, when shown.
@@ -88,6 +93,7 @@ impl Layout {
             Hover::Pager(i) => self.pager.get(i).copied(),
             Hover::Task(i) => self.tasks.iter().find(|(t, _)| *t == i).map(|(_, r)| *r),
             Hover::Volume => self.volume,
+            Hover::Bell => self.notifications,
             Hover::Clock => self.clock,
             Hover::ShowDesktop => self.show_desktop,
             _ => None,
@@ -196,6 +202,14 @@ pub fn layout(d: &mut Desktop) -> Layout {
     } else {
         None
     };
+    let notifications = if d.notifications_served {
+        right -= BELL_WIDTH;
+        let r = Rect::new(right, bar.y + 3, BELL_WIDTH, bar.h - 6);
+        right -= GAP;
+        Some(r)
+    } else {
+        None
+    };
     let tray = if d.config.show_tray && d.tray_icons > 0 {
         let size = d.panel_icon_size() + 4;
         let width = d.tray_icons as i32 * (size + GAP) + GAP;
@@ -253,6 +267,7 @@ pub fn layout(d: &mut Desktop) -> Layout {
         tasks,
         tray,
         volume,
+        notifications,
         clock,
         show_desktop,
     }
@@ -289,6 +304,9 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Hover {
     }
     if layout.volume.is_some_and(|r| r.contains(x, y)) {
         return Hover::Volume;
+    }
+    if layout.notifications.is_some_and(|r| r.contains(x, y)) {
+        return Hover::Bell;
     }
     if layout.clock.is_some_and(|r| r.contains(x, y)) {
         return Hover::Clock;
@@ -337,6 +355,11 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button, _time: u32) {
             Button::Left => d.open_popup(Popup::Volume),
             Button::Middle => d.toggle_mute(),
             Button::Right => d.open_popup(Popup::PanelMenu(x as i32, PanelTarget::Volume)),
+        },
+        Hover::Bell => match button {
+            Button::Left => d.open_popup(Popup::Notifications),
+            Button::Right => d.open_popup(Popup::PanelMenu(x as i32, PanelTarget::Notifications)),
+            Button::Middle => {}
         },
         Hover::Clock => match button {
             Button::Left => d.open_popup(Popup::Calendar),
@@ -648,6 +671,10 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
         }
     }
 
+    if let Some(rect) = layout.notifications {
+        ui::notifications::draw_bell_button(d, canvas, rect);
+    }
+
     if let Some(rect) = layout.clock {
         if d.hover == Hover::Clock || d.popup == Popup::Calendar {
             canvas.fill_rounded(
@@ -738,6 +765,25 @@ mod tests {
         d.handle(Event::Desktops { count: 3, current: 1 });
         d.take_requests();
         d
+    }
+
+    #[test]
+    fn the_bell_sits_left_of_the_volume_control_while_notifications_are_served() {
+        let mut d = desktop();
+        d.config.show_volume = true;
+        d.volume = Some(crate::desktop::Volume {
+            percent: 50,
+            muted: false,
+        });
+        assert!(layout(&mut d).notifications.is_none());
+        d.notifications_served = true;
+        let layout = layout(&mut d);
+        let (bell, volume) = (layout.notifications.unwrap(), layout.volume.unwrap());
+        assert_eq!(bell.right() + GAP, volume.x);
+        let center = (bell.x as f64 + 4.0, bell.y as f64 + 4.0);
+        assert_eq!(hit(&mut d, center.0, center.1), Hover::Bell);
+        click(&mut d, center.0, center.1, Button::Left, 0);
+        assert_eq!(d.popup, Popup::Notifications);
     }
 
     #[test]

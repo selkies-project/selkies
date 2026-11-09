@@ -17,7 +17,9 @@ use crate::files;
 use crate::geom::Rect;
 use crate::i18n::{tr, trf};
 use crate::icons::Icons;
+use crate::notify::Notification;
 use crate::render::{Canvas, Fonts};
+use crate::ui::notifications::{self, CardPart, CenterPart, NotificationState};
 use crate::ui::settings::Page;
 use crate::ui::{self, background, launcher, menu, panel, popups, settings};
 use crate::xkb::Key;
@@ -146,6 +148,8 @@ pub enum PanelTarget {
     Tray,
     /// The show desktop button.
     ShowDesktop,
+    /// The notifications bell.
+    Notifications,
 }
 
 /// Which popup is open above the bar.
@@ -161,6 +165,8 @@ pub enum Popup {
     Volume,
     /// The month calendar.
     Calendar,
+    /// The notification center.
+    Notifications,
     /// The context menu of a taskbar button, by toplevel index.
     TaskMenu(usize),
     /// The bar's right-click menu, by the bar X it opened at and the item
@@ -207,6 +213,12 @@ pub enum Hover {
     LauncherRow(usize),
     /// Something in a file manager window.
     Files(u32, ui::files::Hit),
+    /// The notifications bell on the bar.
+    Bell,
+    /// A part of a notification card, by the notification's id.
+    Card(u32, CardPart),
+    /// A part of the notification center.
+    Center(CenterPart),
 }
 
 /// Current volume as the audio module reports it.
@@ -311,6 +323,13 @@ pub struct Desktop {
     pub current_desktop: u32,
     /// The name of the display backend the shell runs on, for the About page.
     pub backend: String,
+    /// The notifications, their popups, and Do not disturb.
+    pub notifications: NotificationState,
+    /// Whether the shell serves notifications, which puts the bell on the bar.
+    pub notifications_served: bool,
+    /// Geometry of the notification stack's surface.
+    notify_geometry: Geometry,
+    notify_pix: Option<Pixmap>,
 }
 
 impl Desktop {
@@ -395,6 +414,10 @@ impl Desktop {
             desktops: 1,
             current_desktop: 0,
             backend: String::new(),
+            notifications: NotificationState::default(),
+            notifications_served: false,
+            notify_geometry: Geometry::default(),
+            notify_pix: None,
         };
         desktop.requests.push(desktop.panel_request());
         desktop
@@ -564,6 +587,7 @@ impl Desktop {
         self.fonts.clear_cache();
         self.menu.invalidate();
         self.launcher.invalidate();
+        self.notifications.invalidate();
         self.redraw_backgrounds();
         for window in &mut self.files.windows {
             window.dirty = true;
@@ -839,9 +863,95 @@ impl Desktop {
         }
     }
 
-    /// Takes the requests the handled events produced.
+    /// Takes the requests the handled events produced, the notification
+    /// server's signals among them.
     pub fn take_requests(&mut self) -> Vec<Request> {
+        self.requests.extend(self.notifications.take_signals());
         std::mem::take(&mut self.requests)
+    }
+
+    /// Takes in a notification the server received.
+    ///
+    /// # Arguments
+    /// * `note` - The notification.
+    pub fn notify(&mut self, note: Notification) {
+        self.notifications.receive(note, Instant::now());
+        self.panel_dirty = true;
+    }
+
+    /// Closes a notification its sender withdrew.
+    ///
+    /// # Arguments
+    /// * `id` - The notification.
+    pub fn withdraw_notification(&mut self, id: u32) {
+        self.notifications
+            .close(id, crate::notify::CloseReason::Closed, Instant::now());
+    }
+
+    /// Turns Do not disturb on or off.
+    ///
+    /// # Arguments
+    /// * `on` - Whether popups are held back.
+    pub fn set_dnd(&mut self, on: bool) {
+        self.notifications.dnd = on;
+        self.panel_dirty = true;
+    }
+
+    /// Removes every notification, closing the open ones as dismissed.
+    pub fn clear_notifications(&mut self) {
+        self.notifications.clear(Instant::now());
+        self.set_hover(Hover::None);
+        self.panel_dirty = true;
+    }
+
+    /// Renders the notification stack when it changed, asking the backend
+    /// first for the surface size the stack needs, and for none when it is
+    /// empty.
+    ///
+    /// # Returns
+    /// The frame to present, or `None` when nothing changed or the surface
+    /// is not configured yet.
+    pub fn render_notifications(&mut self) -> Option<Frame<'_>> {
+        let (width, height) = self.notifications.surface_size();
+        let top = notifications::EDGE
+            + if self.panel_top() {
+                self.reserved_height()
+            } else {
+                0
+            };
+        let wanted = (width, height, if height > 0 { top } else { 0 });
+        if wanted != self.notifications.requested {
+            self.notifications.requested = wanted;
+            self.requests.push(Request::Notifications { width, height, top });
+            if height == 0 {
+                self.notify_geometry = Geometry::default();
+                self.notify_pix = None;
+            }
+        }
+        let geometry = self.notify_geometry;
+        if height == 0 || !geometry.configured {
+            return None;
+        }
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let mut pix = match self.notify_pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => pix,
+            _ => Pixmap::new(w, h)?,
+        };
+        let opaque = self.opaque_output;
+        let drawn = notifications::render(self, &mut pix, geometry.scale, Instant::now(), opaque);
+        self.notify_pix = Some(pix);
+        let (visible, input, damage) = drawn?;
+        Some(Frame {
+            pixmap: self.notify_pix.as_ref()?,
+            scale: geometry.scale,
+            damage,
+            input,
+            visible,
+            grab: false,
+        })
     }
 
     /// Whether the bar sits along the top edge.
@@ -1078,7 +1188,7 @@ impl Desktop {
                     ui::files::drop(self, id, copy);
                 }
                 SurfaceId::Background(_) => ui::files::drop_on_desktop(self, copy),
-                SurfaceId::Panel => {}
+                SurfaceId::Panel | SurfaceId::Notifications => {}
             },
             Event::DragEnd => {
                 self.files.drag = None;
@@ -1251,6 +1361,17 @@ impl Desktop {
                     window.dirty = true;
                 }
             }
+            SurfaceId::Notifications => {
+                if self.notify_geometry.scale != scale {
+                    self.notifications.invalidate();
+                }
+                if !geometry.configured {
+                    self.notifications.requested = (0, 0, 0);
+                }
+                self.notify_geometry = geometry;
+                self.notify_pix = None;
+                self.notifications.touch();
+            }
         }
     }
 
@@ -1293,6 +1414,17 @@ impl Desktop {
             self.panel_dirty = true;
         }
         self.files.tick(now);
+        let scale = if self.notify_geometry.configured {
+            self.notify_geometry.scale
+        } else {
+            self.panel.scale
+        };
+        let fonts = &mut self.fonts;
+        self.notifications
+            .advance(now, |record| notifications::measure(fonts, record, scale));
+        if self.popup == Popup::Notifications && self.notifications.center_due(now) {
+            self.panel_dirty = true;
+        }
         settings::tick(self, now);
     }
 
@@ -1320,6 +1452,9 @@ impl Desktop {
             let due = *due;
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
+        if let Some(due) = self.notifications.next_deadline(now) {
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
         if let Some(due) = self.settings.next_poll() {
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
@@ -1339,6 +1474,7 @@ impl Desktop {
             }),
             Hover::Clock => Some(crate::clock::format_now("%A, %B %-d, %Y")),
             Hover::ShowDesktop => Some(tr("Show desktop").to_string()),
+            Hover::Bell => Some(notifications::bell_tooltip(self)),
             Hover::Pager(i) => Some(trf("Desktop {n}", &[("n", &(i + 1).to_string())])),
             Hover::Start => Some(tr("Applications (Super: quick launcher)").to_string()),
             Hover::Launcher(i) => self
@@ -1376,12 +1512,15 @@ impl Desktop {
                 if let Hover::Control(_) = previous {
                     self.settings.dirty = true;
                 }
+                if let Hover::Card(..) = previous {
+                    self.notifications.touch();
+                }
             }
             let panel_changed = !matches!(
                 (self.hover, hover),
                 (
-                    Hover::Files(..) | Hover::Control(_) | Hover::None,
-                    Hover::Files(..) | Hover::Control(_) | Hover::None
+                    Hover::Files(..) | Hover::Control(_) | Hover::Card(..) | Hover::None,
+                    Hover::Files(..) | Hover::Control(_) | Hover::Card(..) | Hover::None
                 )
             );
             self.hover = hover;
@@ -1424,8 +1563,14 @@ impl Desktop {
             return;
         }
         let was_open = self.popup != Popup::None;
+        if self.popup == Popup::Notifications {
+            self.notifications.close_center();
+        }
         self.popup = popup;
         self.tooltip = None;
+        if popup == Popup::Notifications {
+            self.notifications.open_center(Instant::now());
+        }
         if popup == Popup::Menu {
             let mut menu = std::mem::take(&mut self.menu);
             menu.open(self);
@@ -1447,6 +1592,9 @@ impl Desktop {
     pub fn close_popup(&mut self) {
         if self.popup == Popup::None {
             return;
+        }
+        if self.popup == Popup::Notifications {
+            self.notifications.close_center();
         }
         self.popup = Popup::None;
         self.volume_drag = false;
@@ -1614,6 +1762,7 @@ impl Desktop {
                     Popup::Launcher => launcher::hit(self, x, y).unwrap_or(Hover::None),
                     Popup::TaskMenu(_) => popups::task_menu_hit(self, x, y).unwrap_or(Hover::None),
                     Popup::PanelMenu(..) => settings::panel_menu_hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::Notifications => notifications::center_hit(self, x, y).unwrap_or(Hover::None),
                     _ => Hover::None,
                 };
                 let hover = if hover == Hover::None {
@@ -1634,6 +1783,12 @@ impl Desktop {
             }
             SurfaceId::Window(id) if self.is_settings(id) => settings::pointer_motion(self, x, y),
             SurfaceId::Window(id) => ui::files::pointer_motion(self, id, x, y),
+            SurfaceId::Notifications => {
+                let hover = notifications::hit(self, x, y)
+                    .map(|(id, part)| Hover::Card(id, part))
+                    .unwrap_or(Hover::None);
+                self.set_hover(hover);
+            }
         }
     }
 
@@ -1665,6 +1820,14 @@ impl Desktop {
         }
         match surface {
             SurfaceId::Window(_) => {}
+            SurfaceId::Notifications => {
+                self.close_popup();
+                notifications::click(self, x, y, button);
+                let hover = notifications::hit(self, x, y)
+                    .map(|(id, part)| Hover::Card(id, part))
+                    .unwrap_or(Hover::None);
+                self.set_hover(hover);
+            }
             SurfaceId::Background(id) => self.background_click(id, x, y, button, time),
             SurfaceId::Panel => {
                 self.pointer = (x, y);
@@ -1676,6 +1839,7 @@ impl Desktop {
                         Popup::Calendar => popups::calendar_click(self, x, y, button),
                         Popup::TaskMenu(_) => popups::task_menu_click(self, x, y, button),
                         Popup::PanelMenu(..) => settings::panel_menu_click(self, x, y, button),
+                        Popup::Notifications => notifications::center_click(self, x, y, button),
                         Popup::None => false,
                     };
                     if inside_popup {
@@ -1699,6 +1863,12 @@ impl Desktop {
                     }
                     if let Hover::Clock = panel::hit(self, x, y)
                         && was == Popup::Calendar
+                        && button == Button::Left
+                    {
+                        return;
+                    }
+                    if let Hover::Bell = panel::hit(self, x, y)
+                        && was == Popup::Notifications
                         && button == Button::Left
                     {
                         return;
@@ -1765,6 +1935,7 @@ impl Desktop {
             Popup::Launcher => launcher::scroll(self, x, y, delta),
             Popup::Volume => popups::volume_scroll(self, x, y, delta),
             Popup::Calendar => popups::calendar_scroll(self, x, y, delta),
+            Popup::Notifications => notifications::center_scroll(self, x, y, delta),
             _ => false,
         };
         if !handled {
@@ -1794,6 +1965,11 @@ impl Desktop {
             }
             SurfaceId::Window(id) if self.is_settings(id) => settings::pointer_leave(self),
             SurfaceId::Window(id) => ui::files::pointer_leave(self, id),
+            SurfaceId::Notifications => {
+                if matches!(self.hover, Hover::Card(..)) {
+                    self.set_hover(Hover::None);
+                }
+            }
         }
     }
 

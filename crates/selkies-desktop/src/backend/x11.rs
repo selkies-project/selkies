@@ -1,6 +1,7 @@
 //! The X11 backend: a dock window for the bar and a desktop window for the
-//! wallpaper, shaped so only the drawn parts take input, ordinary windows for
-//! the file manager, and the window list read from the window manager's EWMH
+//! wallpaper, shaped so only the drawn parts take input, an override-redirect
+//! window above everything for the notification stack, mapped while it has
+//! cards, ordinary windows for the file manager, and the window list read from the window manager's EWMH
 //! properties.  A file drag rides the pointer grab of the press that started
 //! it, and its target is found from the stacking order the window manager
 //! publishes.
@@ -62,6 +63,7 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE_DOCK,
         _NET_WM_WINDOW_TYPE_DESKTOP,
         _NET_WM_WINDOW_TYPE_NORMAL,
+        _NET_WM_WINDOW_TYPE_NOTIFICATION,
         _NET_WM_STRUT,
         _NET_WM_STRUT_PARTIAL,
         _NET_WM_ICON_GEOMETRY,
@@ -84,6 +86,18 @@ struct X11Surface {
     shm: Option<ShmSegment>,
     pixels: Vec<u8>,
     visible: Vec<Rect>,
+}
+
+/// How a window's visible rectangles become its bounding shape.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// The bar first, rounded as the bar is, then its popups, rounded as
+    /// popups are.
+    Panel,
+    /// Every rectangle rounded as popups are: the notification cards.
+    Cards,
+    /// Every rectangle square.
+    Square,
 }
 
 /// A file manager window.
@@ -136,6 +150,10 @@ pub struct X11Backend {
     events: Vec<Event>,
     windows: Vec<X11Window>,
     drag: Option<X11Drag>,
+    /// The notification stack's window, once it was first needed.
+    notifications: Option<X11Surface>,
+    /// The stack's logical size and top offset while it is shown.
+    notify_place: Option<(i32, i32, i32)>,
 }
 
 impl X11Backend {
@@ -244,6 +262,8 @@ impl X11Backend {
             events: Vec::new(),
             windows: Vec::new(),
             drag: None,
+            notifications: None,
+            notify_place: None,
         };
         let _ = backend.conn.randr_select_input(
             root,
@@ -429,6 +449,79 @@ impl X11Backend {
             surface: SurfaceId::Panel,
             width: (primary.w + s - 1) / s,
             height: panel_h,
+            scale: s,
+        });
+        if let Some((width, height, top)) = self.notify_place {
+            self.place_notifications(width, height, top);
+        }
+    }
+
+    /// Places the notification stack's window at a logical size in the top
+    /// right corner of the primary monitor, `top` pixels down, above every
+    /// other window, creating it the first time; a zero size unmaps it.
+    fn place_notifications(&mut self, width: i32, height: i32, top: i32) {
+        if width <= 0 || height <= 0 {
+            self.notify_place = None;
+            if let Some(surface) = &self.notifications {
+                let _ = self.conn.unmap_window(surface.window);
+            }
+            return;
+        }
+        if self.notifications.is_none() {
+            let setup = self.conn.setup().clone();
+            let Ok(surface) = create_window(
+                &self.conn,
+                &self.atoms,
+                &setup.roots[self.screen],
+                "selkies-desktop notifications",
+                self.atoms._NET_WM_WINDOW_TYPE_NOTIFICATION,
+                xproto::EventMask::EXPOSURE
+                    | xproto::EventMask::BUTTON_PRESS
+                    | xproto::EventMask::BUTTON_RELEASE
+                    | xproto::EventMask::POINTER_MOTION
+                    | xproto::EventMask::LEAVE_WINDOW,
+            ) else {
+                return;
+            };
+            let _ = self.conn.change_window_attributes(
+                surface.window,
+                &xproto::ChangeWindowAttributesAux::new().override_redirect(1),
+            );
+            self.notifications = Some(surface);
+            self.apply_cursor();
+        }
+        self.notify_place = Some((width, height, top));
+        let s = self.scale;
+        let primary = self
+            .monitors
+            .first()
+            .copied()
+            .unwrap_or(Rect::new(0, 0, self.screen_w, self.screen_h));
+        let (w, h) = (width * s, height * s);
+        let Some(surface) = self.notifications.as_mut() else {
+            return;
+        };
+        let _ = self.conn.configure_window(
+            surface.window,
+            &xproto::ConfigureWindowAux::new()
+                .x(primary.right() - w)
+                .y(primary.y + top * s)
+                .width(w as u32)
+                .height(h as u32)
+                .stack_mode(xproto::StackMode::ABOVE),
+        );
+        if surface.width != w || surface.height != h {
+            surface.width = w;
+            surface.height = h;
+            surface.shm = None;
+            surface.pixels.clear();
+            surface.visible.clear();
+        }
+        let _ = self.conn.map_window(surface.window);
+        self.events.push(Event::Configured {
+            surface: SurfaceId::Notifications,
+            width,
+            height,
             scale: s,
         });
     }
@@ -787,16 +880,18 @@ impl X11Backend {
         }
     }
 
-    /// Sets the shape of a window to its visible rectangles, the popups with
-    /// rounded corners and a bar narrower than the window with its two
-    /// corners away from the screen edge rounded, and its input shape to the
-    /// input rectangles.
-    fn apply_shape(&self, surface: &X11Surface, input: &[Rect], scale: i32, round_popups: bool) {
+    /// Sets the shape of a window to its visible rectangles, the popups and
+    /// the notification cards with rounded corners and a bar narrower than
+    /// the window with its two corners away from the screen edge rounded,
+    /// and its input shape to the input rectangles.
+    fn apply_shape(&self, surface: &X11Surface, input: &[Rect], scale: i32, shape: Shape) {
         let mut bounding: Vec<xproto::Rectangle> = Vec::new();
+        let popup_radius = (ui::popup_radius() as i32) * scale;
         for (i, rect) in surface.visible.iter().enumerate() {
-            if i == 0 && round_popups && self.panel_margin > 0 {
+            let bar = i == 0 && shape == Shape::Panel;
+            if bar && self.panel_margin > 0 {
                 add_rounded_shape(&mut bounding, *rect, (ui::panel_radius() as i32) * scale);
-            } else if i == 0 && round_popups && rect.w < surface.width {
+            } else if bar && rect.w < surface.width {
                 let overflow = (ui::panel_radius() as i32) * scale;
                 let extended = if self.panel_top {
                     Rect::new(rect.x, rect.y - overflow, rect.w, rect.h + overflow)
@@ -804,10 +899,10 @@ impl X11Backend {
                     Rect::new(rect.x, rect.y, rect.w, rect.h + overflow)
                 };
                 add_rounded_shape(&mut bounding, extended, overflow);
-            } else if i == 0 || !round_popups {
+            } else if bar || shape == Shape::Square {
                 push_rect(&mut bounding, *rect);
             } else {
-                add_rounded_shape(&mut bounding, *rect, (ui::popup_radius() as i32) * scale);
+                add_rounded_shape(&mut bounding, *rect, popup_radius);
             }
         }
         let _ = self.conn.shape_rectangles(
@@ -903,6 +998,7 @@ impl X11Backend {
         let cursor = cursor.unwrap_or(x11rb::NONE);
         let windows = [self.panel.window, self.desktop.window]
             .into_iter()
+            .chain(self.notifications.as_ref().map(|s| s.window))
             .chain(self.windows.iter().map(|w| w.surface.window));
         for window in windows {
             let _ = self
@@ -916,6 +1012,7 @@ impl X11Backend {
         match id {
             SurfaceId::Background(_) => Some(&mut self.desktop),
             SurfaceId::Panel => Some(&mut self.panel),
+            SurfaceId::Notifications => self.notifications.as_mut(),
             SurfaceId::Window(w) => self
                 .windows
                 .iter_mut()
@@ -929,6 +1026,7 @@ impl X11Backend {
         match id {
             SurfaceId::Background(_) => Some(&self.desktop),
             SurfaceId::Panel => Some(&self.panel),
+            SurfaceId::Notifications => self.notifications.as_ref(),
             SurfaceId::Window(w) => self.windows.iter().find(|x| x.id == w).map(|x| &x.surface),
         }
     }
@@ -1357,6 +1455,8 @@ impl X11Backend {
     fn surface_of(&self, window: xproto::Window) -> SurfaceId {
         if window == self.desktop.window {
             SurfaceId::Background(0)
+        } else if self.notifications.as_ref().is_some_and(|s| s.window == window) {
+            SurfaceId::Notifications
         } else if let Some(ours) = self.windows.iter().find(|w| w.surface.window == window) {
             SurfaceId::Window(ours.id)
         } else {
@@ -1490,7 +1590,7 @@ impl X11Backend {
                 } else {
                     panel_input
                 };
-                self.apply_shape(&self.panel, &input, self.scale, true);
+                self.apply_shape(&self.panel, &input, self.scale, Shape::Panel);
                 let cells: Vec<Rect> = self
                     .desktop
                     .visible
@@ -1498,7 +1598,7 @@ impl X11Backend {
                     .skip(1)
                     .map(|r| scale_down(*r, self.scale))
                     .collect();
-                self.apply_shape(&self.desktop, &cells, self.scale, false);
+                self.apply_shape(&self.desktop, &cells, self.scale, Shape::Square);
             }
             XEvent::ConfigureNotify(e) => {
                 if e.window == self.root
@@ -1809,6 +1909,7 @@ impl Backend for X11Backend {
         }
         let stride = w as usize * 4;
         let visible: Vec<Rect> = frame.visible.iter().map(|r| r.scaled(scale)).collect();
+        let moved = self.surface_ref(id).is_some_and(|s| s.visible != visible);
         let damage: Vec<Rect> = frame.damage.iter().map(|r| r.scaled(scale)).collect();
         {
             let Some(surface) = self.surface_mut(id) else {
@@ -1862,7 +1963,20 @@ impl Backend for X11Backend {
             } else {
                 frame.input.clone()
             };
-            self.apply_shape(surface, &input, scale, id == SurfaceId::Panel);
+            let shape = match id {
+                SurfaceId::Panel => Shape::Panel,
+                SurfaceId::Notifications => Shape::Cards,
+                _ => Shape::Square,
+            };
+            self.apply_shape(surface, &input, scale, shape);
+        }
+        // A window mapped later stacks above the stack, so it is raised again whenever its cards
+        // change, though not for a countdown step.
+        if id == SurfaceId::Notifications && moved {
+            let _ = self.conn.configure_window(
+                surface.window,
+                &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
+            );
         }
         if id == SurfaceId::Panel {
             self.popup_open = frame.grab;
@@ -1988,7 +2102,14 @@ impl Backend for X11Backend {
                 self.send_wm_message(self.root, self.atoms._NET_CURRENT_DESKTOP, [*index, 0, 0, 0, 0]);
                 let _ = self.conn.flush();
             }
-            Request::SetVolume(_) | Request::ToggleMute => {}
+            Request::Notifications { width, height, top } => {
+                self.place_notifications(*width, *height, *top);
+                let _ = self.conn.flush();
+            }
+            Request::SetVolume(_)
+            | Request::ToggleMute
+            | Request::NotificationClosed { .. }
+            | Request::ActionInvoked { .. } => {}
         }
     }
 }

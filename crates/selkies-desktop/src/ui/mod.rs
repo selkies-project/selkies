@@ -5,6 +5,7 @@ pub mod background;
 pub mod files;
 pub mod launcher;
 pub mod menu;
+pub mod notifications;
 pub mod panel;
 pub mod popups;
 pub mod preview;
@@ -473,6 +474,24 @@ pub fn speaker_path(rect: Rect, level: u8, muted: bool) -> (Path, Option<Path>) 
         }
     }
     (body, waves.finish())
+}
+
+/// A cross centered in a box, for close buttons.
+///
+/// # Arguments
+/// * `rect` - The box.
+/// * `reach` - How far each stroke reaches from the center.
+pub fn cross_path(rect: Rect, reach: f32) -> Option<Path> {
+    let mut pb = PathBuilder::new();
+    let (cx, cy) = (
+        rect.x as f32 + rect.w as f32 / 2.0,
+        rect.y as f32 + rect.h as f32 / 2.0,
+    );
+    pb.move_to(cx - reach, cy - reach);
+    pb.line_to(cx + reach, cy + reach);
+    pb.move_to(cx + reach, cy - reach);
+    pb.line_to(cx - reach, cy + reach);
+    pb.finish()
 }
 
 /// A chevron pointing right, for category rows.
