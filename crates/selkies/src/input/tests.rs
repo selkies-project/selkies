@@ -434,6 +434,42 @@ async fn shift_navigation_wayland() {
     h.disconnect().await;
 }
 
+/// A Latin-1 character the seat's layout lacks goes down on an overlay key and comes back up
+/// there, with the handler answering after it. Run on a thread of its own, so a release that
+/// wedges the handler fails the test instead of hanging it.
+#[test]
+fn a_latin1_key_the_layout_lacks_is_released_on_its_overlay_key() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let us = keymap_text("us");
+            assert!(!us.is_empty(), "the xkb data files are in the sandbox");
+            let seat = Arc::new(FakeSeat::new(&us));
+            let (h, _rec) = wayland(seat.clone(), false);
+            assert!(h.ensure_wayland_keymap_owner().await);
+            h.start_tasks();
+            send(&h, &["kd,228", "ku,228"], None).await;
+            let overlay = h
+                .state
+                .lock()
+                .wl_keymap_owner
+                .as_ref()
+                .and_then(|o| o.overlay_keycode(0xE4));
+            let _ = tx.send((overlay, seat.injected()));
+            h.disconnect().await;
+        });
+    });
+    let (overlay, injected) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the handler answers after the release");
+    let kc = overlay.expect("ä is bound on an overlay key");
+    assert_eq!(injected, vec![(kc, 1), (kc, 0)]);
+}
+
 /// Held keys survive a Wayland base-layout change.
 #[tokio::test]
 async fn held_keys_survive_a_base_layout_change() {

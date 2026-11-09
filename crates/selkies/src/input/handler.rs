@@ -768,13 +768,15 @@ impl Dispatcher {
             KeyItem::Ku(keysym) => {
                 let unicode_fallback =
                     (0xA0..=0xFF).contains(&keysym) || keysym == 0x20AC || is_unicode_plane(keysym);
+                // Read before the state lock, which it takes itself.
+                let native = self.native_inject();
                 let release = {
                     let mut st = self.state.lock();
                     if let Some(i) = st.wl_text_routed.iter().position(|k| *k == keysym) {
                         // Its kd became text, whatever the topology is by now.
                         st.wl_text_routed.remove(i);
                         false
-                    } else if unicode_fallback && !self.native_inject() {
+                    } else if unicode_fallback && !native {
                         // Buffered text was typed atomically; no held key.
                         false
                     } else {
