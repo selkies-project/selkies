@@ -246,8 +246,8 @@ impl MediaPipeline for FakePipeline {
         None
     }
 
-    async fn realized_geometry(&self, _output: u32) -> Option<(i32, i32)> {
-        Some((*self.width.lock(), *self.height.lock()))
+    async fn realized_geometry(&self, _output: u32) -> Option<(i32, i32, f64)> {
+        Some((*self.width.lock(), *self.height.lock(), 1.0))
     }
 
     async fn capture_state(&self, _output: u32) -> (String, Option<String>) {

@@ -136,8 +136,8 @@ pub trait MediaPipeline: Send + Sync {
     fn refresh_tunables(&self);
     /// Stream statistics, read by the stats tick.
     fn stream_watch(&self) -> Option<Arc<StreamWatch>>;
-    /// Wayland: the realized size of this capture's output.
-    async fn realized_geometry(&self, output: u32) -> Option<(i32, i32)>;
+    /// Wayland: the realized size and scale of this capture's output.
+    async fn realized_geometry(&self, output: u32) -> Option<(i32, i32, f64)>;
     /// Wayland: this capture's state and the reason it failed or degraded.
     async fn capture_state(&self, output: u32) -> (String, Option<String>);
 }
@@ -999,10 +999,10 @@ impl MediaPipeline for Handle {
         Some(self.0.watch.clone())
     }
 
-    async fn realized_geometry(&self, output: u32) -> Option<(i32, i32)> {
+    async fn realized_geometry(&self, output: u32) -> Option<(i32, i32, f64)> {
         let capture = self.0.capture.clone();
         match tokio::task::spawn_blocking(move || capture.realized_geometry(output)).await {
-            Ok(Ok(Some((w, h, _)))) if w > 0 && h > 0 => Some((w, h)),
+            Ok(Ok(Some((w, h, scale)))) if w > 0 && h > 0 => Some((w, h, scale)),
             _ => None,
         }
     }
