@@ -299,6 +299,26 @@ impl MjpegEncoder {
     }
 }
 
+/// A black frame in `dev`'s format, at most `capacity` bytes; `None` for an MJPEG device without
+/// its encoder.
+fn black_frame(
+    dev: &DeviceFormat,
+    normalizer: &mut Normalizer,
+    jpeg_out: Option<&mut MjpegEncoder>,
+    capacity: u32,
+) -> Option<Vec<u8>> {
+    let mut black = convert::I420Buffer::new(dev.width, dev.height);
+    black.fill_black(false);
+    let mut frame = vec![0u8; (capacity as usize).max(dev.frame_bytes())];
+    let n = match jpeg_out {
+        Some(enc) => enc.write_frame(normalizer, &black.view(false), dev, &mut frame),
+        None if dev.fourcc == ring::V4L2_PIX_FMT_MJPEG => 0,
+        None => normalizer.write_frame(&black.view(false), dev, &mut frame),
+    };
+    frame.truncate(n);
+    (n > 0).then_some(frame)
+}
+
 /// After a publish: wake the socket clients and mirror the frame into the kernel device and the
 /// PipeWire node where those sinks are up, retiring a sink that failed.
 fn fan_out(
@@ -383,6 +403,14 @@ fn worker(cfg: WorkerConfig) {
     } else {
         None
     };
+    // A loopback device created with `exclusive_caps` announces capture only once its producer
+    // has written a frame: until then no application finds it, and a camera started on demand
+    // waits for an application to open it.
+    if let Some(out) = v4l2out.as_mut()
+        && let Some(frame) = black_frame(&dev, &mut normalizer, jpeg_out.as_mut(), fmt.sizeimage)
+    {
+        out.write_frame(&frame);
+    }
 
     while let Some(job) = queue.pop() {
         if mjpeg_device && job.codec == Codec::Jpeg && job.orientation.is_upright() {
@@ -852,6 +880,33 @@ impl Drop for VirtualCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frame a loopback device is primed with is black in each format the ring serves.
+    #[test]
+    fn the_priming_frame_is_black_in_the_devices_format() {
+        let mut normalizer = Normalizer::new();
+        let (w, h) = (64usize, 48usize);
+        let luma = w * h;
+        let dev = |fourcc| DeviceFormat {
+            width: w,
+            height: h,
+            fourcc,
+        };
+        let i420 = black_frame(&dev(ring::V4L2_PIX_FMT_YUV420), &mut normalizer, None, 0).unwrap();
+        assert_eq!(i420.len(), luma * 3 / 2);
+        assert!(i420[..luma].iter().all(|&b| b == 16));
+        assert!(i420[luma..].iter().all(|&b| b == 128));
+        let nv12 = black_frame(&dev(ring::V4L2_PIX_FMT_NV12), &mut normalizer, None, 0).unwrap();
+        assert_eq!(nv12, i420);
+        let yuyv = black_frame(&dev(ring::V4L2_PIX_FMT_YUYV), &mut normalizer, None, 0).unwrap();
+        assert_eq!(yuyv.len(), luma * 2);
+        assert!(yuyv.chunks(2).all(|p| p == [16, 128]));
+        let mjpeg = dev(ring::V4L2_PIX_FMT_MJPEG);
+        assert!(black_frame(&mjpeg, &mut normalizer, None, 0).is_none());
+        let mut enc = MjpegEncoder::new().unwrap();
+        let jpeg = black_frame(&mjpeg, &mut normalizer, Some(&mut enc), 65536).unwrap();
+        assert_eq!(&jpeg[..2], [0xff, 0xd8]);
+    }
 
     #[test]
     fn queue_drops_oldest() {
