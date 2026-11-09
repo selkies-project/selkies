@@ -43,12 +43,13 @@ use std::time::{Duration, Instant};
 use log::{debug, error, info, warn};
 use x11rb::protocol::randr::MonitorInfo;
 
+use super::modes::{mode_timings, target_refresh};
 use super::resize::{
     ResolutionInfo, ensure_mode, get_new_res, grow_framebuffer, has_pluggable_outputs,
     read_realized_root, resize_display,
 };
 use super::x11::{self, WindowRect, X11, applied_dpi, on_x11, with_x11};
-use super::xrandr::{generate_xrandr_gtf_modeline, list_monitors_xrandr, parse_wh, run_xrandr};
+use super::xrandr::{list_monitors_xrandr, parse_wh, run_xrandr};
 use super::{DisplayError, Layout, Layouts, Rect};
 use crate::core::PRIMARY_DISPLAY;
 
@@ -682,19 +683,13 @@ pub async fn apply_monitor_layout(
         }
         Some(screen) if !info.modes.contains(&total_mode) => {
             if !ensure_mode(&total_mode, refresh).await {
-                match generate_xrandr_gtf_modeline(&total_mode, 60.0).await {
-                    Ok((_, modeline)) => {
-                        let mut args = vec!["--newmode", total_mode.as_str()];
-                        let params: Vec<&str> = modeline.split_whitespace().collect();
-                        args.extend(params);
-                        run_xrandr(&args, "create mode").await;
-                        run_xrandr(&["--addmode", screen, &total_mode], "add mode").await;
-                    }
-                    Err(e) => {
-                        error!(target: "display", "Could not create extended mode {total_mode}: {e}");
-                        return false;
-                    }
-                }
+                let modeline =
+                    mode_timings(total_w as u32, total_h as u32, target_refresh(refresh))
+                        .modeline();
+                let mut args = vec!["--newmode", total_mode.as_str()];
+                args.extend(modeline.split_whitespace());
+                run_xrandr(&args, "create mode").await;
+                run_xrandr(&["--addmode", screen, &total_mode], "add mode").await;
             }
         }
         Some(_) => {}

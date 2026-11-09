@@ -514,12 +514,10 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         wmctrl \
         dbus-x11 \
         # Forked by Selkies where the in-process paths cannot serve: xdotool for
-        # key injection a layout cannot express, xclip for the X11 clipboard
-        # fallback, and cvt (xcvt) for the modeline a resize needs when the
-        # requested mode is not already on the output
+        # key injection a layout cannot express, and xclip for the X11 clipboard
+        # fallback
         xdotool \
         xclip \
-        xcvt \
         # X11 client libraries required by pixelflux (XShm capture) and input injection
         libx11-xcb1 \
         libxcb1 \

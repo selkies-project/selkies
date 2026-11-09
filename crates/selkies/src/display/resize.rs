@@ -121,7 +121,7 @@ pub async fn refresh_output_mode(refresh: Option<f64>) {
 ///
 /// Native RandR first (`X11::resize_on_display`: the mode chosen by geometry and refresh,
 /// `refresh` being the stream's frame rate, and made from CVT-RB timings when absent), with
-/// the xrandr/cvt subprocess chain as fallback. `output_size` is the rectangle the output
+/// the xrandr subprocess chain as fallback. `output_size` is the rectangle the output
 /// shows when it is narrower than the screen, which only the logical-monitor layout asks
 /// for. A server with no connected output has no mode to set, but its framebuffer is still
 /// sized.

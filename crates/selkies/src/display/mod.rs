@@ -13,8 +13,7 @@
 //! helpers.
 //!
 //! Every RandR operation runs natively on a retained `x11rb` connection (`x11`); the
-//! xrandr/cvt/gtf subprocess each one degrades to when the native call fails lives in
-//! `xrandr`. Blocking X work runs on `tokio::task::spawn_blocking` under one lock so the
+//! `xrandr` subprocess each one degrades to when the native call fails lives in `xrandr`. Blocking X work runs on `tokio::task::spawn_blocking` under one lock so the
 //! runtime's workers never wait on the X server. A helper drops the cached connection on
 //! any failure other than an X protocol error: a protocol error leaves the connection
 //! healthy, while a broken connection also frees this session's RandR modes. Every
@@ -92,7 +91,6 @@ pub use resize::{
     resize_display, retire_displays,
 };
 pub use wayland::{WAYLAND_SCREEN_OUTPUT_ID, WaylandOutputs, wayland_output_id};
-pub use xrandr::generate_xrandr_gtf_modeline;
 
 /// A display's rectangle, `(x, y, w, h)` in root coordinates.
 pub type Rect = (i32, i32, i32, i32);

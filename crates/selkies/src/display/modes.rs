@@ -54,6 +54,34 @@ impl ModeTimings {
     pub fn refresh(&self) -> f64 {
         self.dot_clock as f64 / (self.h_total as f64 * self.v_total as f64)
     }
+
+    /// The timings as `xrandr --newmode` takes them after the mode's name: the clock in MHz,
+    /// the horizontal and the vertical display, sync start, sync end, and total, then the sync
+    /// polarities.
+    pub fn modeline(&self) -> String {
+        format!(
+            "{:.2} {} {} {} {} {} {} {} {} {}hsync {}vsync",
+            self.dot_clock as f64 / 1e6,
+            self.width,
+            self.h_sync_start,
+            self.h_sync_end,
+            self.h_total,
+            self.height,
+            self.v_sync_start,
+            self.v_sync_end,
+            self.v_total,
+            if self.flags & HSYNC_POSITIVE != 0 {
+                '+'
+            } else {
+                '-'
+            },
+            if self.flags & VSYNC_NEGATIVE != 0 {
+                '-'
+            } else {
+                '+'
+            },
+        )
+    }
 }
 
 /// VESA CVT 1.2 reduced-blanking timings for `width` by `height` at `refresh`, as `cvt -r`
@@ -94,6 +122,20 @@ pub fn cvt_rb_mode_info(width: u32, height: u32, refresh: f64) -> ModeTimings {
         v_total,
         flags: HSYNC_POSITIVE | VSYNC_NEGATIVE,
     }
+}
+
+/// The timings a mode is made from: CVT-RB (`cvt_rb_mode_info`) with the clock set to the next
+/// 10 kHz up from what `refresh` needs.
+///
+/// CVT rounds the clock down to its quarter-megahertz step, which leaves the mode slower than
+/// asked, and a quarter megahertz up runs a small mode fast (60.21 Hz at 1280x720), so vsynced
+/// frames beat against the stream's rate; 10 kHz is an EDID timing's step, which keeps the mode
+/// neither slower than asked nor faster by more than 0.01 Hz.
+pub fn mode_timings(width: u32, height: u32, refresh: f64) -> ModeTimings {
+    let mut info = cvt_rb_mode_info(width, height, refresh);
+    let exact = (info.h_total as f64 * info.v_total as f64 * refresh) as u64;
+    info.dot_clock = exact.div_ceil(10_000) * 10_000;
+    info
 }
 
 /// A RandR mode as the selection reads it: its id, geometry, and the timings its refresh
@@ -201,15 +243,11 @@ impl ModePool {
 ///
 /// Interlaced and doublescan modes never serve; one without timings, a framebuffer
 /// server's, serves any refresh. A mode on the output is preferred, and one elsewhere
-/// serves only under a name this made for the purpose. A missing mode is made from CVT-RB
-/// timings at `refresh`, exactly `w` wide, and named `name` unless a mode holds that name
-/// already, then with its rate appended, since RandR refuses a user mode under a name that
-/// exists. CVT rounds the clock down to its quarter-megahertz step, which leaves the mode
-/// slower than asked, and a quarter megahertz up runs a small mode fast (60.21 Hz at
-/// 1280x720), so vsynced frames beat against the stream's rate; the clock is set to the
-/// next 10 kHz up, an EDID timing's step, which keeps it neither slower than asked nor
-/// faster by more than 0.01 Hz. Modes are owned by the creating connection, so this must
-/// run on the retained connection for the mode to outlive the call.
+/// serves only under a name this made for the purpose. A missing mode is made from
+/// `mode_timings` at `refresh`, exactly `w` wide, and named `name` unless a mode holds that
+/// name already, then with its rate appended, since RandR refuses a user mode under a name
+/// that exists. Modes are owned by the creating connection, so this must run on the retained
+/// connection for the mode to outlive the call.
 ///
 /// Returns the mode's id, attached to the output, and its refresh.
 pub fn mode_at(
@@ -266,9 +304,7 @@ pub fn mode_at(
             "no free name for a {w}x{h} mode at {refresh:.2} Hz"
         )));
     };
-    let mut info = cvt_rb_mode_info(w, h, refresh);
-    let exact = (info.h_total as f64 * info.v_total as f64 * refresh) as u64;
-    info.dot_clock = exact.div_ceil(10_000) * 10_000;
+    let mut info = mode_timings(w, h, refresh);
     info.width = w;
     let mode_id = server.create_mode(&info, mode_name)?;
     pool.names.push((mode_id, mode_name.clone()));
@@ -482,6 +518,25 @@ mod tests {
             "another output's exact mode is not taken for the framebuffer's"
         );
         assert_eq!(srv.created.last().expect("created").0, "1280x720");
+    }
+
+    #[test]
+    fn a_modeline_carries_the_cvt_timings_at_the_clock_the_refresh_needs() {
+        // `cvt -r 1920 1080 60` prints 138.50 1920 1968 2000 2080 1080 1083 1088 1111.
+        let t = mode_timings(1920, 1080, 60.0);
+        assert_eq!(
+            t.modeline(),
+            "138.66 1920 1968 2000 2080 1080 1083 1088 1111 +hsync -vsync"
+        );
+        assert!((60.0..=60.01).contains(&t.refresh()), "{}", t.refresh());
+        // `cvt -r 1366 768 60` prints 72.25 1368 1416 1448 1528 768 771 781 790.
+        let t = mode_timings(1366, 768, 60.0);
+        assert_eq!(
+            t.modeline(),
+            "72.43 1368 1416 1448 1528 768 771 781 790 +hsync -vsync"
+        );
+        let t = mode_timings(2304, 768, 120.0);
+        assert!((120.0..=120.01).contains(&t.refresh()), "{}", t.refresh());
     }
 
     #[test]

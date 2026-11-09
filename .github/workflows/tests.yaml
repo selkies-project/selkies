@@ -270,7 +270,7 @@ jobs:
           libxml2=libxml2
           if apt-cache show libxml2-16 > /dev/null 2>&1; then libxml2="libxml2-16"; fi
           sudo apt-get install --no-install-recommends -y \
-            xvfb x11-xserver-utils x11-utils xauth xcvt wmctrl \
+            xvfb x11-xserver-utils x11-utils xauth wmctrl \
             wl-clipboard libsdl2-2.0-0 openbox kwin-x11 kwin-wayland kwin-common \
             pulseaudio pulseaudio-utils \
             dbus pipewire pipewire-pulse wireplumber xdg-desktop-portal xdg-desktop-portal-kde qtwayland5 qt6-wayland \

@@ -4,17 +4,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The `xrandr`/`cvt`/`gtf` subprocess fallbacks behind the native RandR calls, taken only
-//! when the native call fails: the resolution listing parsed from `xrandr`'s output, a
-//! resize through `--newmode`/`--addmode`/`--output`, the modeline `cvt` or `gtf`
-//! computes, and the one-shot `xrandr` commands the logical-monitor path degrades to.
+//! The `xrandr` subprocess fallbacks behind the native RandR calls, taken only when the native
+//! call fails: the resolution listing parsed from `xrandr`'s output, a resize through
+//! `--newmode`/`--addmode`/`--output` with the timings the native path makes its modes from
+//! (`modes::mode_timings`), and the one-shot `xrandr` commands the logical-monitor path
+//! degrades to.
 //!
 //! Every tool runs bounded (`run_tool`): on expiry the process is killed and its failure
 //! reported, so a wedged X server never hangs a reconfiguration.
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use log::{debug, error, info, warn};
@@ -22,7 +22,7 @@ use regex::Regex;
 use tokio::process::Command;
 
 use super::geometry::fit_res;
-use super::modes::{REFRESH_SLACK, target_refresh};
+use super::modes::{REFRESH_SLACK, mode_timings, target_refresh};
 use super::resize::ResolutionInfo;
 
 /// How long a display tool may run before it is killed.
@@ -269,12 +269,11 @@ pub async fn xrandr_output_rates() -> (Option<String>, BTreeMap<String, Vec<f64>
 ///
 /// The mode follows the native path's rule (`modes::mode_at`): one of the requested
 /// geometry at the refresh `target_refresh` makes of `refresh`, chosen by name and rate
-/// since a driver lists several modes under one name. A missing one is made with cvt at
-/// that refresh, its clock rounded up to the next 10 kHz so it never runs slower than asked
-/// nor fast enough to beat against it, and named for the geometry the modeline really
-/// carries (cvt snaps width up to the 8-pixel CVT cell, so it can be wider than requested),
-/// with the rate appended where that name is taken; a mode so named is found again by that
-/// name, so the next resize to the size and rate reuses it rather than making another. The
+/// since a driver lists several modes under one name. A missing one is made from
+/// `modes::mode_timings` at that refresh and named for the geometry those timings carry (CVT
+/// snaps the width up to its 8-pixel cell, so it can be wider than requested), with the rate
+/// appended where that name is taken; a mode so named is found again by that name, so the
+/// next resize to the size and rate reuses it rather than making another. The
 /// mode is set together with `--fb` sized from that realized geometry: without it a larger
 /// root left over from a prior extended layout keeps the screen oversized, so the new mode
 /// lands top-left and whole-root capture shows black bars, and a framebuffer narrower than
@@ -310,26 +309,9 @@ pub async fn resize_display_xrandr(res_str: &str, refresh: Option<f64>) -> Optio
     let mut rate: Option<f64> = None;
     if found.is_none() {
         debug!(target: "display", "No {res_str} mode at {target:.2} Hz in the xrandr list. Attempting to add for screen '{screen_name}'.");
-        let (_, modeline) = match generate_xrandr_gtf_modeline(res_str, target).await {
-            Ok(m) => m,
-            Err(e) => {
-                error!(target: "display", "Failed to generate modeline for {res_str}: {e}");
-                return None;
-            }
-        };
-        // Modeline fields: clock hdisp hss hse htot vdisp vss vse vtot flags...
-        let mut params: Vec<String> = modeline.split_whitespace().map(str::to_string).collect();
-        if let (Some(hd), Some(ht), Some(vd), Some(vt)) = (
-            params.get(1).and_then(|p| p.parse::<i32>().ok()),
-            params.get(4).and_then(|p| p.parse::<i64>().ok()),
-            params.get(5).and_then(|p| p.parse::<i32>().ok()),
-            params.get(8).and_then(|p| p.parse::<i64>().ok()),
-        ) {
-            (realized_w, realized_h) = (hd, vd);
-            let exact = (ht as f64 * vt as f64 * target).ceil().max(0.0) as u64;
-            let clock_steps = exact.div_ceil(10_000);
-            params[0] = format!("{:.2}", clock_steps as f64 / 100.0);
-        }
+        let timings = mode_timings(w_req as u32, h_req as u32, target);
+        let modeline = timings.modeline();
+        (realized_w, realized_h) = (timings.width as i32, timings.height as i32);
         let geometry = format!("{realized_w}x{realized_h}");
         mode_to_set = geometry.clone();
         found = fitting(&geometry);
@@ -345,7 +327,7 @@ pub async fn resize_display_xrandr(res_str: &str, refresh: Option<f64>) -> Optio
                 .cloned()
                 .unwrap_or_else(|| format!("{geometry}_{target:.3}"));
             let mut new_args: Vec<&str> = vec!["--newmode", &mode_to_set];
-            new_args.extend(params.iter().map(String::as_str));
+            new_args.extend(modeline.split_whitespace());
             let out = run_tool("xrandr", &new_args, None, None).await;
             if !out.success {
                 error!(target: "display", "Failed to create new xrandr mode with 'xrandr {}': {}", new_args.join(" "), out.stderr.trim());
@@ -419,66 +401,6 @@ pub async fn resize_display_xrandr(res_str: &str, refresh: Option<f64>) -> Optio
         rate.unwrap_or(target)
     );
     Some((realized_w, realized_h))
-}
-
-/// Modelines by `(resolution, refresh in millihertz)`: the timings change with the rate.
-static MODELINE_CACHE: Mutex<BTreeMap<(String, u64), (String, String)>> =
-    Mutex::new(BTreeMap::new());
-
-/// Generate an xrandr modeline using cvt, falling back to gtf.
-///
-/// `refresh_hz` is part of the cache key so a mode generated at another rate gets its own
-/// timings rather than a stale 60 Hz modeline for the same size. Successful results are
-/// memoized so a size/refresh computed once never re-spawns the cvt/gtf subprocess,
-/// including when the X mode was later dropped and has to be re-created on a subsequent
-/// reconfigure.
-///
-/// Returns the mode name and timing parameters as parsed from the tool output; an error
-/// where neither tool can produce a parseable modeline.
-pub async fn generate_xrandr_gtf_modeline(
-    res_wh_str: &str,
-    refresh_hz: f64,
-) -> Result<(String, String), String> {
-    let key = (res_wh_str.to_string(), (refresh_hz * 1000.0).round() as u64);
-    if let Some(cached) = MODELINE_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&key)
-    {
-        return Ok(cached.clone());
-    }
-    let (w, h) = res_wh_str.split_once('x').ok_or_else(|| {
-        format!("Invalid resolution format for modeline generation: {res_wh_str}")
-    })?;
-    let refresh = format!("{refresh_hz}");
-    let mut tool = "cvt";
-    let out = run_tool("cvt", &[w, h, &refresh], None, None).await;
-    let text = if out.success {
-        out.stdout
-    } else {
-        warn!(target: "display", "cvt command failed or not found, trying gtf.");
-        tool = "gtf";
-        let out = run_tool("gtf", &[w, h, &refresh], None, None).await;
-        if !out.success {
-            return Err(format!(
-                "Failed to generate modeline using gtf for {res_wh_str}: gtf failed: {}",
-                out.stderr.trim()
-            ));
-        }
-        out.stdout
-    };
-    let pat = Regex::new(r#"Modeline\s+"([^"]+)"\s+(.*)"#).expect("regex");
-    let Some(m) = pat.captures(&text) else {
-        return Err(format!(
-            "Could not parse modeline from {tool} output: {text}"
-        ));
-    };
-    let result = (m[1].trim().to_string(), m[2].to_string());
-    MODELINE_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(key, result.clone());
-    Ok(result)
 }
 
 /// Names of all RandR logical monitors as `xrandr --listmonitors` lists them.
