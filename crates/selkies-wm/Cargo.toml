@@ -1,0 +1,25 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "selkies-wm"
+description = "The Selkies window manager: one window model, focus, placement, frames, menus, and binds, as pixelflux's window policy on Wayland and an x11rb manager on X11."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The window policy interface the Wayland backend implements and the geometry types both
+# backends share.
+pixelflux.workspace = true
+selkies-draw = { path = "../selkies-draw" }
+log = { version = "0.4", features = ["std"] }
+# The X11 backend's connection, and the keysym names binds are written in.
+x11rb = { version = "0.14", features = ["randr", "shape", "xfixes", "xkb", "cursor", "render", "xtest"] }
+xkbcommon = { version = "0.9", default-features = false }
+# rc.xml and menu.xml.
+quick-xml = "0.41"
+libc = "0.2"
