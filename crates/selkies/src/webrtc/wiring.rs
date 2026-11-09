@@ -438,18 +438,28 @@ pub fn rtc_config_settings() -> RtcConfigSettings {
     }
 }
 
+/// The addresses a `webrtc_public_ip` value lists, separated by commas, whitespace, or both. An
+/// entry that is not an IP address is left out, and logged.
+pub fn public_ips(listed: &str) -> Vec<std::net::IpAddr> {
+    listed
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| match entry.parse() {
+            Ok(ip) => Some(ip),
+            Err(_) => {
+                log::warn!(target: "webrtc", "webrtc_public_ip: '{entry}' is not an IP address; no host candidate advertises it.");
+                None
+            }
+        })
+        .collect()
+}
+
 /// The ICE topology the settings decide, once.
 pub fn ice_topology(
     servers: Vec<selkies_rtc::ice::IceServer>,
 ) -> Result<selkies_rtc::ice::IceTopology, String> {
     let s = settings();
-    let public_ips = s
-        .webrtc_public_ip()
-        .split(',')
-        .map(str::trim)
-        .filter(|ip| !ip.is_empty())
-        .filter_map(|ip| ip.parse().ok())
-        .collect();
+    let public_ips = public_ips(s.webrtc_public_ip());
     Ok(selkies_rtc::ice::IceTopology {
         udp_mux_port: s.webrtc_udp_mux_port().clamp(0, 65535) as u16,
         tcp_mux_port: s.webrtc_tcp_mux_port().clamp(0, 65535) as u16,
@@ -762,5 +772,30 @@ impl crate::files::SessionDirectory for RtcSessions {
         if let Some(service) = self.service.get() {
             service.announce_print_document(name, size_bytes);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::public_ips;
+
+    #[test]
+    fn public_addresses_are_separated_by_commas_whitespace_or_both() {
+        let listed = |text: &str| -> Vec<String> {
+            public_ips(text).iter().map(ToString::to_string).collect()
+        };
+        for text in [
+            "203.0.113.5,2001:db8::5",
+            "203.0.113.5 2001:db8::5",
+            " 203.0.113.5 ,\t2001:db8::5 ",
+        ] {
+            assert_eq!(listed(text), ["203.0.113.5", "2001:db8::5"], "{text:?}");
+        }
+        assert_eq!(
+            listed("203.0.113.5, desktop.example.test"),
+            ["203.0.113.5"],
+            "an entry that is not an address is left out"
+        );
+        assert!(listed("").is_empty());
     }
 }
