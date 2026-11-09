@@ -1560,6 +1560,34 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "wm",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Manage the session's windows in the selkies process, on whichever backend runs: on Wayland the capture compositor places, frames, focuses, and stacks its clients itself and runs Xwayland for the X11 ones, so no labwc nests inside it; on X11 selkies claims the screen's window manager selection, so no openbox runs. The openbox-format rc.xml and menu.xml the images configure are read as they stand.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "desktop",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Run the selkies-desktop shell (the panel, start menu, taskbar, wallpaper, and file manager) over the Selkies window manager, started and kept running by the server; implies --wm.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "app_wayland_display",
         kind: Kind::Str,
         default: "",
@@ -2813,6 +2841,14 @@ impl Settings {
 
     pub fn wayland(&self) -> BoolSetting {
         self.bool_setting("wayland")
+    }
+
+    pub fn wm(&self) -> BoolSetting {
+        self.bool_setting("wm")
+    }
+
+    pub fn desktop(&self) -> BoolSetting {
+        self.bool_setting("desktop")
     }
 
     pub fn app_wayland_display(&self) -> &str {

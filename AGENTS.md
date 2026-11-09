@@ -1,9 +1,12 @@
 # Working on this repository
 
 Selkies' Rust workspace lives under `crates/`: `crates/selkies` is the executable, `crates/selkies-rtc` its WebRTC
-stack, `crates/pixelflux` its screen-capture and video-encode library, and `crates/pcmflux` its audio-capture and
-encode library. The server links both native libraries directly as Rust crates, without Python. Their optional PyO3
-features are only for standalone wheels. The web client is under `web/`: `selkies-web-core` (the streaming
+stack, `crates/pixelflux` its screen-capture and video-encode library, `crates/pcmflux` its audio-capture and
+encode library, `crates/selkies-wm` the window manager the server runs under `--wm` (the window policy of
+pixelflux's compositor on Wayland, an x11rb manager on X11), `crates/selkies-draw` the one rasterizer the window
+manager's frames and menus and the desktop shell draw with, and `crates/selkies-desktop` that shell, its own
+binary the server starts under `--desktop`. The server links both native libraries directly as Rust crates,
+without Python. Their optional PyO3 features are only for standalone wheels. The web client is under `web/`: `selkies-web-core` (the streaming
 core), `selkies-dashboard` (the dashboard built on it), and `universal-touch-gamepad`; `addons/` holds what
 runs beside Selkies rather than in it: the interposers, `fake-udev`, the images, and the integrations.
 
@@ -329,6 +332,15 @@ Each is documented in full where named; read that before changing the subsystem.
   short of what it asked for, never for a choice and never for a host built without the faster path: a server
   exposed no GPU (`gpu_present`), or a display server that offers the encoder no zero-copy path
   (pixelflux's `zero_copy_available`), each an ordinary deployment.
+- Window management is a policy the compositor asks, never state it keeps: pixelflux's frontend decides nothing
+  about placement, focus, stacking, or frames, and with no policy installed every window is fullscreen on its
+  output as before; under `--wm` the engine in `crates/selkies-wm/src/core` answers every decision point for
+  both backends through one event and command interface (`crates/pixelflux/src/wm.rs`), the Wayland frontend
+  and the X11 manager (`crates/selkies-wm/src/x11`) only carrying its commands out. A panic in the policy is
+  caught at that boundary and the stream goes on without it (`crates/pixelflux/src/wayland/wm.rs`). The
+  frames follow the desktop shell's theme read from its own configuration (`crates/selkies-wm/src/theme.rs`),
+  never a theme file engine; the images' openbox-format `rc.xml` and `menu.xml` are read as they stand
+  (`crates/selkies-wm/src/config`).
 - The WebRTC ICE topology is decided once, at startup: the WebRTC engine's `open_ice_muxes` binds the shared UDP
   and TCP ports the settings name (failing the service on a port in use), and every peer's gatherer reads the
   muxes and the ICE-lite choice from its ICE configuration (`IceConfig`), never from the settings directly;

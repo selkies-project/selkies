@@ -202,6 +202,10 @@ pub async fn run() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    tokio::task::spawn_blocking(move || crate::wm::start(is_wayland))
+        .await
+        .map_err(|e| e.to_string())?;
+
     let cfg = HttpConfig::from_settings(&settings());
     http::audit::install(http::audit::AuditConfig {
         url: settings().audit_webhook_url().to_string(),

@@ -23,6 +23,15 @@
   points include browser webcam bitstreams and H.264 SPS input in `crates/pixelflux/src/{webcam,encoders/sps.rs}`,
   microphone Opus and RED in `crates/pcmflux/src/red.rs`, the token-gated Computer-Use HTTP server in
   `crates/pixelflux/src/computer_use.rs`, and untrusted Wayland buffers and local recording, webcam, and Ogg sockets.
+- Under `--wm` (`crates/selkies-wm`, installed in the compositor through `crates/pixelflux/src/wm.rs`): the
+  openbox-format `rc.xml` and `menu.xml` the session user's configuration directory or `/etc/xdg` carries are
+  parsed (`selkies-wm/src/config`), a pipe menu runs the command the menu names and parses what it prints, the
+  key and pointer bindings start the commands they name in the session user's environment, the Xwayland socket
+  the compositor starts for its X11 clients (`crates/pixelflux/src/wayland/xwm.rs`) is one more local socket in
+  `/tmp/.X11-unix`, and `zwlr_foreign_toplevel_manager_v1` lets any Wayland client of the capture socket list,
+  activate, minimize, and close windows (`crates/pixelflux/src/wayland/foreign_toplevel.rs`). Everything there
+  runs as the session user, who may already do each of these; the boundary it keeps is the stream's: a panic in
+  the window manager is caught at the policy boundary and the compositor carries on without it.
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
   `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
   write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose
@@ -36,11 +45,12 @@
   peer-controlled sizes in pixelflux and pcmflux; the interposers' C code; file upload and download confinement.
 - In scope but lower: the web client (origin checks on `postMessage`, token handling), CI workflows and release
   scripts, and what the images download at build time outside a signed apt repository: the desktop image takes the
-  `selkies-desktop` binary at the release tag `SELKIES_DESKTOP_VERSION` pins, checked against the `.sha256` that
-  release publishes beside it, and proot-apps checked against the digest GitHub records for it.
-- Out of scope: `website/`, `docs/`, `infra/`, the prebuilt third-party wheels and patches in `addons/base`, and the
-  `selkies-desktop` program itself, a separate project, whose control socket sits in the session's
-  `$XDG_RUNTIME_DIR`.
+  proot-apps release checked against the digest GitHub records for it.
+- In scope but lower, too: the `selkies-desktop` shell (`crates/selkies-desktop`), its own process the server
+  starts under `--desktop`, whose control socket sits in the session's `$XDG_RUNTIME_DIR` and whose file manager
+  decodes images and scans directories under the session user's home; it is kept out of the stream's process for
+  that reason.
+- Out of scope: `website/`, `docs/`, `infra/`, and the prebuilt third-party wheels and patches in `addons/base`.
 
 ## How to exercise it
 - `cargo test --workspace` runs the server's own tests in process, and they show how to drive the token table

@@ -61,7 +61,7 @@ SECTIONS = [
         "use_browser_cursors", "raw_pointer_motion", "watermark_path", "watermark_location", "debug_cursors",
     ]),
     ("Backends", "The X11 or Wayland capture backend and the GPU it renders on.", [
-        "wayland", "render_dri", "auto_gpu", "app_wayland_display", "wayland_host_display",
+        "wayland", "wm", "desktop", "render_dri", "auto_gpu", "app_wayland_display", "wayland_host_display",
         "wayland_socket_index", "computer_use_bind", "computer_use_token",
     ]),
     ("Session start", "What a session starts with, and hooks around its first and last client.", [
