@@ -303,6 +303,76 @@ impl RateSettings {
     }
 }
 
+/// A leaky bucket of a capped constant quality's peak (`RateSettings::capped`), its buffer the
+/// session's VBV, for an encoder whose constant quality takes no cap of its own: the session
+/// codes as an uncapped one while the bucket holds what it codes, binds to the peak through its
+/// constant rate, never finer than its quality, from the frame that overflows the bucket, and
+/// lets go once `RELEASE_FRAMES` frames in a row come out at that quality with the bucket back
+/// within its buffer, which says the content fits under the peak again: a rate control that
+/// takes the peak with its buffer full codes at the quality for a while whatever the content.
+/// The frame that overflows has already gone out: the cap holds the frames after it.
+#[derive(Clone, Copy, Debug)]
+pub struct PeakBucket {
+    pub bps: u32,
+    pub vbv: u32,
+    fps: f64,
+    /// The bits the bucket holds.
+    fill: f64,
+    pub binding: bool,
+    /// Frames in a row the constant rate coded at the quality while binding.
+    at_floor: u32,
+}
+
+impl PeakBucket {
+    pub const RELEASE_FRAMES: u32 = 30;
+
+    pub fn new(bps: u32, vbv: u32, fps: f64) -> Self {
+        Self {
+            bps,
+            vbv,
+            fps: fps.max(1.0),
+            fill: 0.0,
+            binding: false,
+            at_floor: 0,
+        }
+    }
+
+    /// Frames in a row the constant rate has coded at the quality while binding.
+    #[cfg(test)]
+    pub fn floor_run(&self) -> u32 {
+        self.at_floor
+    }
+
+    /// Take a live peak, buffer, and frame rate.
+    pub fn follow(&mut self, bps: u32, vbv: u32, fps: f64) {
+        self.bps = bps;
+        self.vbv = vbv;
+        self.fps = fps.max(1.0);
+    }
+
+    /// Fold in a frame of `bits`, `at_floor` saying whether the rate control coded it at the
+    /// session's quality (`None` for a held frame, whose quantizer is not the rate control's):
+    /// `Some(true)` to bind the session to the peak, `Some(false)` to release it.
+    pub fn note(&mut self, bits: f64, at_floor: Option<bool>) -> Option<bool> {
+        self.fill = (self.fill - self.bps as f64 / self.fps).max(0.0) + bits;
+        if !self.binding {
+            self.binding = self.fill > self.vbv as f64;
+            self.at_floor = 0;
+            return self.binding.then_some(true);
+        }
+        match at_floor {
+            Some(true) => self.at_floor += 1,
+            Some(false) => self.at_floor = 0,
+            None => {}
+        }
+        if self.at_floor < Self::RELEASE_FRAMES || self.fill > self.vbv as f64 {
+            return None;
+        }
+        self.binding = false;
+        Some(false)
+    }
+}
+
 /// The frames handed to an encoder and not yet answered, by the timestamp each was submitted
 /// with, so a packet names the frame it encodes rather than the one submitted alongside it.
 /// An encoder that pipelines answers a frame several later, and one that drops a frame never

@@ -44,7 +44,7 @@ use super::codec::{
 use super::dmabuf_identity::DmaBufIdentity;
 use super::frame_rate::FrameRate;
 use super::reference::{ANCHORS, Invalidation, Reference, ReferenceReport, ReferenceWindow};
-use super::session::RateSettings;
+use super::session::{PeakBucket, RateSettings};
 use super::sps::{WideFrameNum, h264_frame_num_range};
 use crate::CaptureSettings;
 use nvcodec_sys::cuda::*;
@@ -842,76 +842,21 @@ fn set_cbr_rate(rc: &mut NV_ENC_RC_PARAMS, bps: u32, vbv: u32) {
     rc.vbvInitialDelay = vbv;
 }
 
-/// The peak a capped constant quantizer runs under (`RateSettings::capped`), and whether it binds.
+/// The peak a capped constant quantizer runs under (`RateSettings::capped`), as NVENC's
+/// constant rate takes it: the target held to the codec's ceiling, and its buffer.
 ///
 /// NVENC's constant quantizer takes no cap, and its quality-targeting VBR codes a picture of its
-/// own rather than the constant quantizer's, so the session switches: it codes at its constant
-/// quantizer while a leaky bucket of the peak's rate, its buffer the session's VBV, holds what it
-/// codes, and from the frame that overflows the bucket at the peak through the constant rate,
-/// never finer than that quantizer (its `minQP`), until `RELEASE_FRAMES` frames in a row come out
-/// at that quantizer, which says the content fits under the peak again. The rate-control mode is
-/// one of the parameters `nvEncReconfigureEncoder` takes without a reset (`hold_rate`), so neither
-/// switch costs a key frame, and under a peak the content does not fill the session codes as an
-/// uncapped one does. The frame that overflows has already gone out: the cap holds the frames
-/// after it. A peak past the rate the level the session declared carries leaves it at its constant
-/// quantizer, since a raised level is a key frame.
-#[derive(Clone, Copy, Debug)]
-struct PeakCap {
-    bps: u32,
-    vbv: u32,
-    fps: f64,
-    /// The bits the bucket holds.
-    fill: f64,
-    binding: bool,
-    /// Frames in a row the constant rate coded at the quantizer while binding.
-    at_floor: u32,
-}
-
-impl PeakCap {
-    const RELEASE_FRAMES: u32 = 30;
-
-    /// The peak of a capped constant-quality session, `None` for any other.
-    fn of(settings: &CaptureSettings) -> Option<Self> {
-        let capped = RateSettings::new(settings).capped;
+/// own rather than the constant quantizer's, so the session switches (`PeakBucket`): it codes at
+/// its constant quantizer until its output overflows the peak, then through the constant rate at
+/// the peak with the quantizer as its `minQP`, and back. The rate-control mode is one of the
+/// parameters `nvEncReconfigureEncoder` takes without a reset (`hold_rate`), so neither switch
+/// costs a key frame. A peak past the rate the level the session declared carries leaves it at
+/// its constant quantizer, since a raised level is a key frame.
+fn peak_of(settings: &CaptureSettings) -> Option<PeakBucket> {
+    RateSettings::new(settings).capped.then(|| {
         let bps = cbr_bps(settings);
-        capped.then(|| PeakCap {
-            bps,
-            vbv: cbr_vbv(settings, bps),
-            fps: settings.target_fps.max(1.0),
-            fill: 0.0,
-            binding: false,
-            at_floor: 0,
-        })
-    }
-
-    /// Take the live peak, buffer, and frame rate of `settings`.
-    fn follow(&mut self, settings: &CaptureSettings) {
-        self.bps = cbr_bps(settings);
-        self.vbv = cbr_vbv(settings, self.bps);
-        self.fps = settings.target_fps.max(1.0);
-    }
-
-    /// Fold in a frame of `bits` the session coded at `qp` (`None` for a held frame, whose
-    /// quantizer is not the rate control's) under a constant quantizer of `floor`: `Some(true)`
-    /// to bind the session to the peak, `Some(false)` to release it.
-    fn note(&mut self, bits: f64, qp: Option<u32>, floor: u32) -> Option<bool> {
-        self.fill = (self.fill - self.bps as f64 / self.fps).max(0.0) + bits;
-        if !self.binding {
-            self.binding = self.fill > self.vbv as f64;
-            self.at_floor = 0;
-            return self.binding.then_some(true);
-        }
-        match qp {
-            Some(q) if q <= floor => self.at_floor += 1,
-            Some(_) => self.at_floor = 0,
-            None => {}
-        }
-        if self.at_floor < Self::RELEASE_FRAMES {
-            return None;
-        }
-        self.binding = false;
-        Some(false)
-    }
+        PeakBucket::new(bps, cbr_vbv(settings, bps), settings.target_fps)
+    })
 }
 
 /// Quality index steps finer than the paint-over one a refined block is coded at
@@ -1786,9 +1731,9 @@ pub struct NvencEncoder {
     width: u32,
     height: u32,
     current_qp: u32,
-    /// A capped constant quantizer's peak (`PeakCap`), and the rate control it opened with,
+    /// A capped constant quantizer's peak (`peak_of`), and the rate control it opened with,
     /// which a release restores.
-    peak: Option<PeakCap>,
+    peak: Option<PeakBucket>,
     open_rc: NV_ENC_RC_PARAMS,
     /// The mean quantizer, in the device's own domain, the last frame was coded at; 0 unknown.
     last_avg_qp: u32,
@@ -2897,7 +2842,7 @@ impl NvencEncoder {
                 width,
                 height,
                 current_qp: codec.hardware_quantizer(Hardware::Nvenc, settings.video_crf),
-                peak: PeakCap::of(settings),
+                peak: peak_of(settings),
                 open_rc: config.rcParams,
                 last_avg_qp: 0,
                 held_qp: None,
@@ -3628,7 +3573,7 @@ impl NvencEncoder {
     /// happened.
     ///
     /// A no-op in CBR mode (bitrate-controlled, so QP-based paint-over does not apply), save a
-    /// capped constant quantizer bound to its peak, whose floor follows (`PeakCap`), and when the
+    /// capped constant quantizer bound to its peak, whose floor follows (`peak_of`), and when the
     /// QP is unchanged. When it does apply, the three `constQP` fields are updated and the session is
     /// reconfigured **without** a forced IDR: a lower-QP P-frame refines the static image against the
     /// existing reference chain (paint-over) with no intra-frame bitrate spike, so the GOP continues
@@ -3665,7 +3610,7 @@ impl NvencEncoder {
         false
     }
 
-    /// Whether the constant quantizer runs under a peak (`PeakCap`).
+    /// Whether the constant quantizer runs under a peak (`peak_of`).
     pub fn capped(&self) -> bool {
         self.peak.is_some()
     }
@@ -3888,7 +3833,8 @@ impl NvencEncoder {
     /// refuses leaves the session encoding at its previous rate, logged with the driver's reason.
     pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> bool {
         if let Some(peak) = self.peak.as_mut() {
-            peak.follow(settings);
+            let bps = cbr_bps(settings);
+            peak.follow(bps, cbr_vbv(settings, bps), settings.target_fps);
             if peak.binding {
                 let rc = &mut self.encode_config.rcParams;
                 let at = rc.maxBitRate;
@@ -4254,21 +4200,25 @@ impl NvencEncoder {
     }
 
     /// Fold the frame just coded, `bytes` long, into a capped constant quantizer's peak
-    /// (`PeakCap`), and bind the session to the peak or release it where the frame says to; `own`
-    /// is false for a held frame.
+    /// (`peak_of`), and bind the session to the peak or release it where the frame says to; `own`
+    /// is false for a held frame. A frame refining blocks through the QP map counts as the rate
+    /// control's: bound to a peak its content overflows, NVENC's constant rate holds such a
+    /// frame's mean quantizer over the floor (none of 140 refining every block 25 steps finer
+    /// came out at it, on an L4), and a session refining on every bound frame would otherwise
+    /// never count one toward its release.
     unsafe fn follow_peak(&mut self, bytes: usize, own: bool) {
         let floor = self.current_qp;
         let qp = Some(self.last_avg_qp).filter(|q| own && *q > 0);
         let Some(peak) = self.peak.as_mut() else {
             return;
         };
-        if let Some(bind) = peak.note(bytes as f64 * 8.0, qp, floor) {
+        if let Some(bind) = peak.note(bytes as f64 * 8.0, qp.map(|q| q <= floor)) {
             self.switch_peak(bind);
         }
     }
 
     /// Bind a capped constant quantizer to its peak, or release it to its constant quantizer
-    /// (`PeakCap`); a switch the driver refuses leaves the session as it was. A peak past the
+    /// (`peak_of`); a switch the driver refuses leaves the session as it was. A peak past the
     /// level the session declared releases it rather than raise the level, a key frame.
     unsafe fn switch_peak(&mut self, bind: bool) {
         let Some(peak) = self.peak else {
@@ -7597,7 +7547,7 @@ pub(crate) mod gpu_tests {
         );
         s.video_bitrate_kbps = 200_000;
         enc.reconfigure_rate(&s);
-        for i in 150..150 + PeakCap::RELEASE_FRAMES as u64 + 10 {
+        for i in 150..150 + PeakBucket::RELEASE_FRAMES as u64 + 10 {
             code(&mut enc, i, 25);
         }
         assert_eq!(
@@ -7619,6 +7569,68 @@ pub(crate) mod gpu_tests {
             code(&mut enc, i, 25);
         }
         assert_eq!(enc.last_avg_qp, floor);
+    }
+
+    /// A capped constant quantizer bound to its peak stays bound while frames refining every
+    /// block through the QP map 25 steps finer are coded: the constant rate holds their mean
+    /// quantizer over the floor, so none counts toward the release. Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_a_bound_session_refining_blocks_is_not_released_by_their_deltas() {
+        let (w, h) = (640usize, 360usize);
+        let mut s = CaptureSettings {
+            video_bitrate_kbps: 200_000,
+            video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+            ..settings(w as i32, h as i32, 60.0)
+        };
+        let mut enc = host_session(&s).expect("NVENC init");
+        let mut ledger = crate::ledger::BlockLedger::new(w as i32, h as i32);
+        ledger.frame([]);
+        let plan = ledger.plan(0, usize::MAX, usize::MAX).expect("every block");
+        let mut sizes = Vec::new();
+        let code = |enc: &mut NvencEncoder, i: u64, refine: bool| {
+            if refine {
+                enc.refine_blocks(&crate::ledger::Refinement {
+                    plan: plan.clone(),
+                    target: 0,
+                    from: 25,
+                    reach: u32::MAX,
+                });
+            }
+            let out = enc
+                .encode_cpu_argb(
+                    &crate::encoders::scrolled_text(w, h, i as usize),
+                    w * 4,
+                    i,
+                    25,
+                    i == 0,
+                )
+                .expect("encode");
+            out.len() * 8
+        };
+        for i in 0..30 {
+            sizes.push(code(&mut enc, i, false));
+        }
+        let free = sizes[1..].iter().sum::<usize>() as f64 * 60.0 / 29.0 / 1000.0;
+        s.video_bitrate_kbps = (free / 3.0) as i32;
+        enc.reconfigure_rate(&s);
+        let (mut released, mut counted) = (0, 0);
+        for i in 30..200 {
+            code(&mut enc, i, i >= 60);
+            if i >= 60 {
+                released += usize::from(!enc.peak_bound());
+                counted = counted.max(enc.peak.map_or(0, |p| p.floor_run()));
+            }
+        }
+        println!(
+            "{released} of 140 refining frames coded released, {counted} counted at the floor in a \
+             row, free {free:.0} kbps"
+        );
+        assert_eq!(
+            released, 0,
+            "the session let go of a peak its content overflows"
+        );
+        assert_eq!(counted, 0, "a refining frame counted toward the release");
     }
 
     #[test]
