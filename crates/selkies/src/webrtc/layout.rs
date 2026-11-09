@@ -381,6 +381,26 @@ impl WebRtcService {
             layouts.insert(did.clone(), rect);
         }
         if wayland {
+            // The compositor refuses an output that overlaps the primary's screen, and the screen
+            // gives room up only once the primary's capture carries the smaller rectangle: a
+            // primary that narrows or shortens where it stands takes its rectangle, and has its
+            // screen fitted, before the secondary is placed in the room it frees. A screen the
+            // rectangle outgrows in the other dimension is grown ahead of the capture, which it
+            // must hold.
+            let previous = self.st.lock().layouts.get("primary").copied();
+            if let Some(p) = layouts.get("primary").copied() {
+                let (w, h, _) = primary_pipeline.geometry();
+                let origin = previous.map_or((0, 0), |l| (l.x, l.y));
+                if origin == (p.x, p.y) && (p.w < w || p.h < h) {
+                    if p.w > w || p.h > h {
+                        self.size_wayland_screen(p.w, p.h, true).await;
+                    }
+                    primary_pipeline
+                        .update_capture_region(p.x, p.y, p.w, p.h)
+                        .await;
+                    self.settle_wayland_primary().await;
+                }
+            }
             if let Some(refusal) = self.apply_wayland_extension(&did, &mut layouts).await {
                 self.drop_secondary(&did, &refusal).await;
                 return;
