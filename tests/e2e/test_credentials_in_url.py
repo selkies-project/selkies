@@ -71,7 +71,7 @@ def visit(p, engine: str, page_name: str, in_url: bool = True) -> None:
         page.wait_for_timeout(2000)
         with open(H.LOG, errors="replace") as f:
             f.seek(log_from)
-            sockets = len(re.findall(r"Client \(.*\) connected", f.read()))
+            sockets = len(re.findall(r"Client \S+ connected \(", f.read()))
         check(f"{tag}: one core connected", sockets == 1, f"{sockets} stream sockets")
         status = page.evaluate("fetch('manifest.json').then(r => r.status, e => String(e))")
         check(f"{tag}: a relative fetch answers", status in (200, 404), status)
