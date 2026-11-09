@@ -1913,7 +1913,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "webrtc_public_ip",
         kind: Kind::Str,
         default: "",
-        help: "Public IP address(es) to advertise in WebRTC host ICE candidates (Pion-style NAT1TO1), for a host behind static 1:1 NAT such as a cloud instance whose private address maps to a fixed public/elastic IP with the WebRTC UDP ports forwarded. Accepts one IPv4 and/or one IPv6 address (comma- or space-separated); each replaces the private address of host candidates in its own family, while server-reflexive (STUN) and relay (TURN) candidates are left untouched so hole-punching and TURN fallback still work. Empty (default) keeps the gathered addresses unchanged.",
+        help: "Public IP address(es) to advertise in WebRTC host ICE candidates (Pion-style NAT1TO1), for a host behind static 1:1 NAT such as a cloud instance whose private address maps to a fixed public/elastic IP with the WebRTC UDP ports forwarded. Accepts one or more addresses (comma- or space-separated): the first of each family replaces the private address of host candidates in that family, while server-reflexive (STUN) and relay (TURN) candidates are left untouched so hole-punching and TURN fallback still work. A host published at more than one public address lists each: a page whose signaling request named another listed address in its Host header is told that one instead, so its media enters where the page did; every entry must forward the same ICE ports. Empty (default) keeps the gathered addresses unchanged.",
         env_vars: &[],
         allowed: &[],
         value_range: None,

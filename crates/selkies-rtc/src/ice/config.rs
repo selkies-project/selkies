@@ -434,6 +434,18 @@ impl IceConfig {
         }
         Ok(())
     }
+
+    /// Advertise `entry` in this peer's host candidates in place of the first public address of
+    /// its family, where `public_ips` lists it: a host published at more than one public address
+    /// tells each peer the one it was reached at. False, with nothing changed, where it is not
+    /// listed.
+    pub fn prefer_public_ip(&mut self, entry: IpAddr) -> bool {
+        let Some(at) = self.public_ips.iter().position(|ip| *ip == entry) else {
+            return false;
+        };
+        self.public_ips[..=at].rotate_right(1);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -531,5 +543,28 @@ mod tests {
             ..IceConfig::default()
         };
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn a_listed_entry_moves_ahead_of_its_family() {
+        let [first, second, v6]: [IpAddr; 3] =
+            ["203.0.113.5", "198.51.100.7", "2001:db8::5"].map(|ip| ip.parse().unwrap());
+        let mut config = IceTopology {
+            public_ips: vec![first, v6, second],
+            ..IceTopology::default()
+        }
+        .peer_config(&IceMuxes::default());
+        assert!(config.prefer_public_ip(second));
+        assert_eq!(
+            config.public_ips,
+            [second, first, v6],
+            "the entry leads; the rest keep their order"
+        );
+        assert!(!config.prefer_public_ip("192.0.2.1".parse().unwrap()));
+        assert_eq!(
+            config.public_ips,
+            [second, first, v6],
+            "an unlisted address changes nothing"
+        );
     }
 }

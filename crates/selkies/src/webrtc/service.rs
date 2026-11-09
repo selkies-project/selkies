@@ -604,6 +604,10 @@ impl WebRtcService {
         let client_token = info.as_ref().map_or(token, |i| i.client_token.clone());
         let client_slot = info.as_ref().and_then(|i| i.client_slot);
         let tab = info.as_ref().and_then(|i| i.tab_id.clone());
+        let entry = info
+            .as_ref()
+            .and_then(|i| i.host.as_deref())
+            .and_then(crate::webrtc::routes::entry_address);
         self.st
             .lock()
             .peer_tabs
@@ -667,6 +671,7 @@ impl WebRtcService {
                 client_slot,
                 fullcolor_codecs,
                 tenbit_codecs,
+                entry,
             })
             .await;
         if client_type == ClientType::Controller {

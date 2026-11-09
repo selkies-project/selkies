@@ -42,6 +42,7 @@
 //! neither is held while taking the other's writers.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -190,6 +191,10 @@ pub struct PeerRequest {
     pub client_slot: Option<i64>,
     pub fullcolor_codecs: Option<Vec<String>>,
     pub tenbit_codecs: Option<Vec<String>>,
+    /// The address the page reached this server at, where its signaling request's `Host` names
+    /// one (`routes::entry_address`). A public address listed for the host candidates is
+    /// advertised to this peer in place of the first of its family (`IceConfig::prefer_public_ip`).
+    pub entry: Option<IpAddr>,
 }
 
 impl PeerRequest {
@@ -203,6 +208,7 @@ impl PeerRequest {
             client_slot: None,
             fullcolor_codecs: None,
             tenbit_codecs: None,
+            entry: None,
         }
     }
 }
@@ -745,6 +751,7 @@ impl RtcEngine {
             client_slot,
             fullcolor_codecs,
             tenbit_codecs,
+            entry,
         } = request;
         let (peer_id, display_id) = (peer_id.as_str(), display_id.as_str());
         let graph = self.graph_for(client_type, display_id)?;
@@ -817,6 +824,11 @@ impl RtcEngine {
             let topology = self.topology.read();
             topology.peer_config(&self.muxes.read())
         };
+        if let Some(entry) = entry
+            && ice.prefer_public_ip(entry)
+        {
+            debug!(target: "webrtc", "Peer {peer_id} reached this server at {entry}, which its host candidates advertise.");
+        }
         ice.label = Some(peer_id.to_string());
         let conn = self
             .next_conn
