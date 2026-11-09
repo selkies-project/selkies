@@ -7,6 +7,7 @@ mod backend;
 mod clock;
 mod config;
 mod desktop;
+mod desktop_folder;
 mod entries;
 mod event;
 mod files;
@@ -42,6 +43,7 @@ session.  With a command, talks to the running panel instead:
                    windows, wallpaper, panel, desktops, shortcuts, files,
                    language or about
   --show-desktop   minimize every window, or restore them
+  --new-folder     ask for a name and make a folder on the desktop
   --reload         read the applications and settings again
   --quit           exit the running panel
   --lookup-icon N  print the file an icon name resolves to and exit
@@ -371,6 +373,7 @@ fn run() -> i32 {
                     ipc::Command::Settings(page) => {
                         desktop.open_settings(page.as_deref().and_then(ui::settings::Page::from_id));
                     }
+                    ipc::Command::NewFolder => desktop.new_desktop_folder(),
                     ipc::Command::Quit => return 0,
                 }
             }

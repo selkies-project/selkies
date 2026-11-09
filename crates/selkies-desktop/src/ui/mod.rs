@@ -2,6 +2,7 @@
 //! and the small widgets drawn more than once.
 
 pub mod background;
+pub mod dialog;
 pub mod files;
 pub mod launcher;
 pub mod menu;

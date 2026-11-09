@@ -8,6 +8,7 @@ use tiny_skia::Pixmap;
 
 use crate::config::{BackgroundStyle, Wallpaper, WallpaperMode};
 use crate::desktop::{Desktop, Hover};
+use crate::desktop_folder::{self, Cell};
 use crate::geom::Rect;
 use crate::render::{Align, Canvas, Fonts, Text, rgba};
 use crate::ui;
@@ -27,41 +28,63 @@ fn icon_area(d: &Desktop) -> Rect {
     }
 }
 
-/// Rows of launcher cells that fit in the icon area.
+/// Rows of icon cells that fit in the icon area.
 fn rows(area: Rect) -> i32 {
     ((area.h - MARGIN) / ui::DESKTOP_CELL_HEIGHT).max(1)
 }
 
-/// The cell of a launcher, in the primary background's coordinates.  Cells
-/// fill columns top to bottom and wrap to the next column above the bar.
-///
-/// # Arguments
-/// * `d` - The desktop.
-/// * `index` - Index into the desktop launcher list.
-pub fn cell_rect(d: &Desktop, index: usize) -> Rect {
-    let area = icon_area(d);
-    let rows = rows(area);
-    let index = index as i32;
+/// Columns of icon cells that fit in the icon area.
+fn columns(area: Rect) -> i32 {
+    ((area.w - MARGIN) / ui::DESKTOP_CELL_WIDTH).max(1)
+}
+
+/// The rectangle of a grid cell, in the primary background's coordinates.
+fn cell_rect_in(area: Rect, (column, row): Cell) -> Rect {
     Rect::new(
-        area.x + (index / rows) * ui::DESKTOP_CELL_WIDTH + MARGIN,
-        area.y + (index % rows) * ui::DESKTOP_CELL_HEIGHT + MARGIN,
+        area.x + column * ui::DESKTOP_CELL_WIDTH + MARGIN,
+        area.y + row * ui::DESKTOP_CELL_HEIGHT + MARGIN,
         ui::DESKTOP_CELL_WIDTH,
         ui::DESKTOP_CELL_HEIGHT,
     )
 }
 
-/// Every launcher cell, the part of the launchers' surface that is drawn on.  The primary
-/// background takes input over its whole area, so a click on an empty spot reaches the shell,
-/// which drops the selection, and the window manager, which opens the desktop's menu there.
+/// The grid cell each Desktop item stands on, as [`desktop_folder::place`] lays them out on
+/// the grid that fits the screen now.
+///
+/// # Arguments
+/// * `d` - The desktop.
+pub fn item_cells(d: &Desktop) -> Vec<Cell> {
+    let area = icon_area(d);
+    desktop_folder::place(&d.desktop_items, &d.desktop_layout, columns(area), rows(area))
+}
+
+/// The grid cell under a point, `None` off the grid.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `x` - Pointer X.
+/// * `y` - Pointer Y.
+pub fn cell_at(d: &Desktop, x: f64, y: f64) -> Option<Cell> {
+    let area = icon_area(d);
+    let column = ((x - (area.x + MARGIN) as f64) / ui::DESKTOP_CELL_WIDTH as f64).floor() as i32;
+    let row = ((y - (area.y + MARGIN) as f64) / ui::DESKTOP_CELL_HEIGHT as f64).floor() as i32;
+    ((0..columns(area)).contains(&column) && (0..rows(area)).contains(&row)).then_some((column, row))
+}
+
+/// The rectangle of each Desktop item's cell, in the primary background's coordinates.
 ///
 /// # Arguments
 /// * `d` - The desktop.
 pub fn cells(d: &Desktop) -> Vec<Rect> {
-    (0..d.apps.desktop.len()).map(|i| cell_rect(d, i)).collect()
+    let area = icon_area(d);
+    item_cells(d)
+        .into_iter()
+        .map(|cell| cell_rect_in(area, cell))
+        .collect()
 }
 
-/// The launcher under a point of a background surface; only the primary one
-/// carries launchers.
+/// The Desktop item under a point of a background surface; only the primary one carries
+/// them.
 ///
 /// # Arguments
 /// * `d` - The desktop.
@@ -72,7 +95,7 @@ pub fn hit(d: &Desktop, id: u32, x: f64, y: f64) -> Option<usize> {
     if !d.background(id).is_some_and(|b| b.primary) {
         return None;
     }
-    (0..d.apps.desktop.len()).find(|i| cell_rect(d, *i).contains(x, y))
+    cells(d).iter().position(|rect| rect.contains(x, y))
 }
 
 /// Draws a background surface: the wallpaper of each of its monitors, then
@@ -147,11 +170,28 @@ pub fn draw_launchers(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
     let scale = canvas.scale() as f32;
     let font_px = ui::FONT_SMALL * scale;
     let line_h = 16;
-    for index in 0..d.apps.desktop.len() {
-        let cell = cell_rect(d, index);
+    let rects = cells(d);
+    let dragging = d.desktop_press.filter(|press| press.dragging);
+    if let Some(press) = dragging
+        && let Some(target) = cell_at(d, press.at.0, press.at.1)
+    {
+        let target = cell_rect_in(icon_area(d), target);
+        canvas.fill_rounded(target, 8.0, rgba(0xff, 0xff, 0xff, 0x18));
+        canvas.stroke_rounded(target, 8.0, 3.0, ui::accent_alpha(0xc0));
+    }
+    for (index, &home) in rects.iter().enumerate() {
+        let cell = match dragging {
+            Some(press) if press.index == index => Rect::new(
+                home.x + (press.at.0 - press.start.0) as i32,
+                home.y + (press.at.1 - press.start.1) as i32,
+                home.w,
+                home.h,
+            ),
+            _ => home,
+        };
         let selected = d.desktop_selection == Some(index);
         let hovered = d.hover == Hover::DesktopIcon(index);
-        let name = d.apps.desktop[index].name.clone();
+        let name = d.desktop_items[index].name.clone();
         let max_width = (cell.w - 6) as f32 * scale;
         let (line1, line2) = ui::wrap_two_lines(&mut d.fonts, &name, font_px, max_width);
         let icon_rect = Rect::new(
@@ -315,6 +355,26 @@ mod tests {
         }
     }
 
+    fn item(name: &str) -> desktop_folder::DesktopItem {
+        let entry = launcher(name);
+        desktop_folder::DesktopItem {
+            file: format!("{name}.desktop"),
+            name: name.to_string(),
+            item: crate::files::Item {
+                name: format!("{name}.desktop"),
+                path: entry.path.clone(),
+                is_dir: false,
+                is_symlink: false,
+                size: 0,
+                modified: 0,
+                mime: "application/x-desktop".to_string(),
+                hidden: false,
+                executable: false,
+            },
+            launcher: Some(entry),
+        }
+    }
+
     fn configure(d: &mut Desktop, id: u32, primary: bool) {
         d.handle(Event::Configured {
             surface: SurfaceId::Background(id),
@@ -336,7 +396,8 @@ mod tests {
     #[test]
     fn layers_split_the_wallpaper_from_the_launchers() {
         let mut d = Desktop::load(false);
-        d.apps.desktop = vec![launcher("one")];
+        d.desktop_items = vec![item("one")];
+        d.desktop_layout.clear();
         configure(&mut d, 7, true);
         let (wallpaper, launchers) = d
             .render_background_layers(7)
@@ -369,7 +430,8 @@ mod tests {
     #[test]
     fn a_secondary_background_has_an_empty_launcher_layer_and_no_redraw_without_change() {
         let mut d = Desktop::load(false);
-        d.apps.desktop = vec![launcher("one")];
+        d.desktop_items = vec![item("one")];
+        d.desktop_layout.clear();
         configure(&mut d, 1, true);
         configure(&mut d, 2, false);
         {

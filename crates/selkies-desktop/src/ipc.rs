@@ -23,6 +23,8 @@ pub enum Command {
     Files(Option<PathBuf>),
     /// Open the settings window, on a page by id when one is given.
     Settings(Option<String>),
+    /// Ask for a name and make a folder on the desktop, on the cell last pointed at.
+    NewFolder,
     /// Exit the desktop.
     Quit,
 }
@@ -47,6 +49,7 @@ impl Command {
             "show-desktop" => Some(Command::ShowDesktop),
             "files" => Some(Command::Files((!rest.is_empty()).then(|| PathBuf::from(rest)))),
             "settings" => Some(Command::Settings((!rest.is_empty()).then(|| rest.to_string()))),
+            "new-folder" => Some(Command::NewFolder),
             "quit" | "exit" => Some(Command::Quit),
             _ => None,
         }
@@ -63,6 +66,7 @@ impl Command {
             Command::Files(Some(path)) => format!("files {}", path.display()),
             Command::Settings(None) => "settings".to_string(),
             Command::Settings(Some(page)) => format!("settings {page}"),
+            Command::NewFolder => "new-folder".to_string(),
             Command::Quit => "quit".to_string(),
         }
     }

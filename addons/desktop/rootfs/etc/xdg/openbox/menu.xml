@@ -23,6 +23,9 @@
     <item label="Files" icon="system-file-manager">
       <action name="Execute"><command>selkies-desktop --files</command></action>
     </item>
+    <item label="New Folder" icon="folder-new">
+      <action name="Execute"><command>selkies-desktop --new-folder</command></action>
+    </item>
     <item label="Change Wallpaper" icon="preferences-desktop-wallpaper">
       <action name="Execute"><command>selkies-desktop --settings wallpaper</command></action>
     </item>

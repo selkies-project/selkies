@@ -33,7 +33,9 @@ people reach for in a multi-application container:
   sink that Selkies streams, and a **show desktop** button.
 * **Wallpaper** layer: an image of the user's choosing over a solid color or
   a dithered gradient, the Selkies logo centered on black by default, and
-  launchers mapped from `~/Desktop`.
+  the `~/Desktop` folder's launchers, folders, and files, which open on a
+  double click as the file manager opens them and stay where they are
+  dragged on the icon grid.
 * **Quick launch** buttons beside the start button and a **system tray**
   beside the clock that hosts the XEmbed icons applications such as Steam
   dock, under openbox and under labwc through XWayland.
@@ -203,6 +205,7 @@ A second invocation sends a command over the control socket in
 selkies-desktop --toggle-menu     # open or close the start menu
 selkies-desktop --launcher        # open or close the quick launcher
 selkies-desktop --show-desktop    # minimize every window, or restore them
+selkies-desktop --new-folder      # ask for a name and make a folder on the desktop
 selkies-desktop --files [DIR]     # open the file manager, on a folder when given
 selkies-desktop --settings        # open the settings window
 selkies-desktop --settings PAGE   # on a page: theme, colors, windows, wallpaper, panel,

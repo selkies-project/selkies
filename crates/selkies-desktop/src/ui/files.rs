@@ -895,11 +895,19 @@ fn open_item(d: &mut Desktop, id: u32, index: usize) {
 
 /// Launches the default application of a type on files, or `xdg-open`.
 fn open_with_default(d: &mut Desktop, id: u32, paths: &[PathBuf], mime: &str) {
+    if let Err(message) = launch_default(d, paths, mime) {
+        status(d, id, message);
+    }
+}
+
+/// Launches the default application of a type on files, or `xdg-open`, the way the file
+/// manager opens them; what to tell the user when nothing can.
+pub fn launch_default(d: &mut Desktop, paths: &[PathBuf], mime: &str) -> Result<(), String> {
     let handlers = d.files.mime.handlers(mime);
     for handler in handlers {
         if let Some(entry) = entries::load_entry(&handler) {
             entries::launch_with(&entry, &d.config, paths);
-            return;
+            return Ok(());
         }
     }
     if entries::resolve_program("xdg-open").is_some() {
@@ -909,10 +917,10 @@ fn open_with_default(d: &mut Desktop, id: u32, paths: &[PathBuf], mime: &str) {
                 None,
             );
         }
-        return;
+        return Ok(());
     }
     let kind = d.files.mime.comment(mime).unwrap_or_else(|| mime.to_string());
-    status(d, id, trf("No application opens {kind}", &[("kind", &kind)]));
+    Err(trf("No application opens {kind}", &[("kind", &kind)]))
 }
 
 /// Shows a message in a window's status bar.
@@ -1601,8 +1609,12 @@ pub fn drop_into(d: &mut Desktop, window: u32, paths: Vec<PathBuf>, dest: PathBu
 /// The themed icon of an item at a logical size: the folder icon of its
 /// kind, or the first icon its type names that the theme has.
 fn item_icon(d: &mut Desktop, item: &Item, size: i32) -> Option<Arc<Pixmap>> {
-    let scale = d.panel.scale.max(1);
-    let px = (size * scale) as u32;
+    let px = (size * d.panel.scale.max(1)) as u32;
+    item_icon_px(d, item, px)
+}
+
+/// The themed icon of an item at a size in pixels, as [`item_icon`] chooses it.
+pub fn item_icon_px(d: &mut Desktop, item: &Item, px: u32) -> Option<Arc<Pixmap>> {
     if item.is_dir {
         let name = files::folder_icon(&d.files.places, &item.path);
         return d
