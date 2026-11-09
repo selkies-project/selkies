@@ -378,7 +378,12 @@ pub fn build(cfg: &TlsConfig) -> Result<Option<Tls>, TlsError> {
         return Ok(None);
     }
     let (cert, key) = resolve_pair(cfg)?;
-    log::debug!(target: "server", "Creating TLS context with certificate={} key={:?}", cert.display(), key);
+    log::debug!(
+        target: "server",
+        "Creating TLS context with certificate={} ({})",
+        cert.display(),
+        if key.is_some() { "its key in a separate file" } else { "its key in the same file" }
+    );
     let certified = load_certified_key(&cert, key.as_deref()).inspect_err(|_| {
         log::error!(target: "server",
             "Certificate or private key file not found or incorrect. To use a self-signed certificate, install the \
@@ -767,7 +772,7 @@ mod tests {
         if bound_by_mode {
             assert!(
                 fallback_cert.starts_with(&state),
-                "an unwritable one falls back to the state directory: {fallback_cert:?}"
+                "an unwritable one falls back to the state directory"
             );
         } else {
             eprintln!(
