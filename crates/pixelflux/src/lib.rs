@@ -1617,6 +1617,9 @@ fn wayland_encode_loop<B: WlPayload>(
                 requested_idr,
                 crate::pipeline::EncoderQuality::of(encoder),
             );
+            // Whether a rate binds the frame, read once before it is coded: the encode may bind
+            // or release the session, and the frame was coded as it stood before.
+            let bound = encoder.rate_bound(settings.video_cbr_mode);
             crate::pipeline::plan_refinement(
                 &mut hw_state,
                 &settings,
@@ -1625,8 +1628,11 @@ fn wayland_encode_loop<B: WlPayload>(
                 Some(&f.damage),
                 encoder.refines(),
                 encoder.last_quality(),
-                encoder.rate_bound(settings.video_cbr_mode),
+                bound,
             );
+            if !decision.send && !encoder.holds_frame() {
+                encoder.idle();
+            }
             if decision.send || encoder.holds_frame() {
                 let force_idr = decision.force_idr;
                 decision.prepare(encoder);
@@ -1650,7 +1656,8 @@ fn wayland_encode_loop<B: WlPayload>(
                     &decision,
                     crate::pipeline::EncoderQuality::of(encoder),
                     outcome.as_ref().map_or(0, Vec::len),
-                    encoder.rate_bound(settings.video_cbr_mode),
+                    bound,
+                    encoder.coded_capped(),
                 );
                 match outcome {
                     Ok(data) => {

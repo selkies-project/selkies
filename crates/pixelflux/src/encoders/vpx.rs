@@ -148,8 +148,10 @@ pub struct VpxEncoder {
     last_refresh: SlotRefresh,
     /// The quality index the rate control last coded a frame at, held frames aside.
     last_quality: Option<u32>,
-    /// A capped constant quality's peak (`PeakBucket`).
+    /// A capped constant quality's peak (`PeakBucket`), and whether the last frame was coded
+    /// bound to it (`coded_capped`).
     peak: Option<PeakBucket>,
+    last_capped: bool,
     /// The buffer the session opened with, `(size, initial, optimal)` in ms, which a pinned
     /// quantizer keeps.
     open_buf: (u32, u32, u32),
@@ -277,6 +279,7 @@ impl VpxEncoder {
                 .capped
                 .then(|| PeakBucket::new(peak_bps(rate), rate.vbv(), rate.fps.fps())),
             open_buf: (cfg.rc_buf_sz, cfg.rc_buf_initial_sz, cfg.rc_buf_optimal_sz),
+            last_capped: false,
             last_bytes: None,
             cap: None,
             raised: false,
@@ -494,6 +497,21 @@ impl VpxEncoder {
     /// Whether that peak binds the session, its quantizer free above the pinned one.
     pub fn peak_bound(&self) -> bool {
         self.peak.is_some_and(|p| p.binding)
+    }
+
+    /// Whether the last frame was coded bound to the peak.
+    pub fn coded_capped(&self) -> bool {
+        self.last_capped
+    }
+
+    /// A tick that codes no frame (`FrameEncoder::idle`): the peak's bucket drains, and a session
+    /// bound to it counts the tick at its floor, nothing being coded coarser.
+    pub fn idle(&mut self) {
+        let switch = self.peak.as_mut().and_then(|p| p.note(0.0, Some(true)));
+        if switch.is_some() {
+            self.program_rate(self.programmed(), self.quality.current);
+            let _ = self.reconfigure();
+        }
     }
 
     /// The rate settings the session runs: a capped constant quality's as an uncapped one's
@@ -795,6 +813,7 @@ impl VpxEncoder {
         } else if let Ok(coded) = &result {
             self.last_bytes = Some(coded.len());
         }
+        self.last_capped = self.peak_bound();
         let at_floor = held
             .is_none()
             .then(|| self.last_quality.is_some_and(|q| q <= crf));

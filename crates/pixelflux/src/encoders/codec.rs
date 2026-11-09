@@ -204,6 +204,24 @@ impl Codec {
         }
     }
 
+    /// The quality index a capped constant quality's refresh codes a block at
+    /// (`ledger::BlockLedger::refresh`), the session's being `quality`: `ledger::REFRESH_FINER`
+    /// steps finer, and VP8's no coarser than its quantizer `VP8_REFRESH_QUANTIZER` where
+    /// `quality` is at or under `VP8_FINEST_MATCHED`.
+    pub fn refresh_index(self, quality: i32) -> i32 {
+        let finer = quality - crate::ledger::REFRESH_FINER as i32;
+        if self != Codec::Vp8
+            || quality > VP8_FINEST_MATCHED
+            || self.quantizer(finer) <= VP8_REFRESH_QUANTIZER
+        {
+            return finer;
+        }
+        (0..finer)
+            .rev()
+            .find(|&i| self.quantizer(i) <= VP8_REFRESH_QUANTIZER)
+            .unwrap_or(0)
+    }
+
     /// The quantizer a CBR QP clamp (`video_min_qp` / `video_max_qp`, on the H.26x scale)
     /// becomes in this codec's domain; zero stays zero, meaning "the encoder's default".
     pub fn quantizer_bound(self, qp: i32) -> u32 {
@@ -284,6 +302,19 @@ const VP8_QINDEX: [(u32, u32); 10] = [
     (50, 127),
     (51, 127),
 ];
+/// The finest session quality index `VP8_QINDEX` matches against x264, under which a step of the
+/// index moves VP8's quantizer by one or none.
+const VP8_FINEST_MATCHED: i32 = 25;
+/// The VP8 quantizer a capped CRF's refresh codes a block at, at the coarsest, where the session's
+/// quality index is at or under `VP8_FINEST_MATCHED` (`Codec::refresh_index`), where three index
+/// steps move VP8's quantizer by one or two. Refreshed three steps finer, a 320x240 page of text a
+/// capped session coded bound came out 0.5 dB under the uncapped session at indices 22 to 24, and
+/// a 1280x720 page of text and UI 0.11 under at 22 and 23; at quantizer 2 they came within 0.06 dB
+/// at 22 and 23 and level or past at 24 and 25, at 4% fewer to 8% more bytes. Quantizer 3 came out
+/// under 4 (43.95 dB against 44.40 at 25), and 1 under 2 (44.68 against 44.79, at 4% more bytes);
+/// nine index steps at every index took those past 26 to quantizers 1 to 9, 4 to 17 dB past the
+/// session's quality at up to twice the bytes.
+const VP8_REFRESH_QUANTIZER: u32 = 2;
 /// Session quality index → VP9 `base_q_idx` (0..=255) breakpoints.
 const VP9_QINDEX: [(u32, u32); 12] = [
     (0, 0),
@@ -905,6 +936,33 @@ fn h264_slice_is_intra(payload: &[u8]) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A capped CRF's refresh codes VP8 no coarser than its quantizer 2 where the session's index
+    /// is at or under the finest its table matches, at the coarsest index that reaches it, and a
+    /// refresh's steps finer elsewhere and on every other codec.
+    #[test]
+    fn a_vp8_refresh_comes_to_its_quantizer_two_at_the_finest_indices() {
+        for quality in 0..=51 {
+            let finer = quality - crate::ledger::REFRESH_FINER as i32;
+            for codec in [Codec::H264, Codec::H265, Codec::Vp9, Codec::Av1] {
+                assert_eq!(
+                    codec.refresh_index(quality),
+                    finer,
+                    "{codec:?} at {quality}"
+                );
+            }
+            let vp8 = Codec::Vp8.refresh_index(quality);
+            if quality > VP8_FINEST_MATCHED {
+                assert_eq!(vp8, finer, "VP8 at {quality}");
+            } else {
+                assert!(vp8 <= finer, "VP8 at {quality}: {vp8}");
+                assert!(Codec::Vp8.quantizer(vp8) <= VP8_REFRESH_QUANTIZER);
+                assert!(vp8 == finer || Codec::Vp8.quantizer(vp8 + 1) > VP8_REFRESH_QUANTIZER);
+            }
+        }
+        assert_eq!(Codec::Vp8.refresh_index(25), 18);
+        assert_eq!(Codec::Vp8.refresh_index(26), 23);
+    }
 
     /// High tier exists from level 4.0 up and is declared there; the ladder never answers below
     /// 4.1, so every level it names carries one.

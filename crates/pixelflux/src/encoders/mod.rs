@@ -1486,6 +1486,38 @@ impl FrameEncoder {
         }
     }
 
+    /// Whether the frame just coded was coded under a capped constant quality's binding peak,
+    /// coarser than the rate factor would have chosen (`ledger::BlockLedger::coded`): NVENC
+    /// through its constant rate, libvpx above its pinned quantizer.
+    pub fn coded_capped(&self) -> bool {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.coded_capped(),
+            FrameEncoder::Vpx(enc) => enc.coded_capped(),
+            _ => false,
+        }
+    }
+
+    /// A tick that codes no frame: a capped constant quality's peak drains for it as for an
+    /// empty frame, so a still screen lets the peak go and its refresh starts
+    /// (`ledger::BlockLedger::refresh`).
+    pub fn idle(&mut self) {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.idle(),
+            FrameEncoder::Vpx(enc) => enc.idle(),
+            _ => {}
+        }
+    }
+
+    /// Hold the blocks `plan` names as skips in the next frame: the coarse blocks a capped
+    /// constant quality's refresh leaves for later frames (`ledger::BlockLedger::refresh`).
+    /// NVENC, which takes no skips, holds them at its coarsest quantizer through its QP delta
+    /// map; an encoder that takes skips (`constant_blocks`) has them among those.
+    pub fn defer_blocks(&mut self, plan: Option<&crate::ledger::BlockPlan>) {
+        if let FrameEncoder::Nvenc(enc) = self {
+            enc.defer_blocks(plan);
+        }
+    }
+
     /// Whether a change of the session's constant quality re-opens it, so the frame it applies
     /// to is a key frame: x265, kvazaar, and SVT-AV1 take no new quality while they run. The
     /// cleanup of a constant-quality session counts such a refresh as its key frame.

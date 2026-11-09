@@ -1737,6 +1737,10 @@ pub struct NvencEncoder {
     open_rc: NV_ENC_RC_PARAMS,
     /// The mean quantizer, in the device's own domain, the last frame was coded at; 0 unknown.
     last_avg_qp: u32,
+    /// Whether the last frame was coded bound to the peak (`coded_capped`), and the blocks the
+    /// next frame holds at the coarsest quantizer (`defer_blocks`).
+    last_capped: bool,
+    deferred: Option<crate::ledger::BlockPlan>,
     /// The quality index the next frame is held at whatever the rate control
     /// (`hold_quantizer`), the band of it that quantizer covers, and whether the driver has
     /// refused one, said once.
@@ -2845,6 +2849,8 @@ impl NvencEncoder {
                 peak: peak_of(settings),
                 open_rc: config.rcParams,
                 last_avg_qp: 0,
+                last_capped: false,
+                deferred: None,
                 held_qp: None,
                 held_band: None,
                 slice_layout: tuning.slices.map_or((0, 0), |n| (SLICE_MODE_COUNT, n)),
@@ -3620,6 +3626,29 @@ impl NvencEncoder {
         self.peak.is_some_and(|p| p.binding)
     }
 
+    /// Whether the last frame was coded bound to the peak.
+    pub fn coded_capped(&self) -> bool {
+        self.last_capped
+    }
+
+    /// A tick that codes no frame (`FrameEncoder::idle`): the peak's bucket drains, and a session
+    /// bound to it counts the tick at its quantizer, nothing being coded coarser.
+    pub fn idle(&mut self) {
+        let Some(peak) = self.peak.as_mut() else {
+            return;
+        };
+        if let Some(bind) = peak.note(0.0, Some(true)) {
+            unsafe { self.switch_peak(bind) };
+        }
+    }
+
+    /// Hold the blocks `plan` names at the coarsest quantizer in the next frame of the rate
+    /// control's, through the QP delta map (`FrameEncoder::defer_blocks`): a block whose
+    /// reference already holds it codes as a skip there.
+    pub fn defer_blocks(&mut self, plan: Option<&crate::ledger::BlockPlan>) {
+        self.deferred = plan.filter(|_| self.refines()).cloned();
+    }
+
     /// The quality index the rate control last coded a frame at, where the driver reports its
     /// quantizer; a held frame (`hold_quantizer`) is not the rate control's and leaves it.
     pub fn last_quality(&self) -> Option<u32> {
@@ -3664,44 +3693,66 @@ impl NvencEncoder {
         self.refinement = self.refines().then(|| refinement.clone());
     }
 
-    /// Fill `qp_map` for `refinement` (`refine_blocks`), returning whether the session codes
-    /// through it, which a refused reconfigure ends for good.
-    unsafe fn refine_map(&mut self, refinement: &crate::ledger::Refinement) -> bool {
-        if !self.delta_mapped {
-            let saved = self.encode_config.rcParams;
-            self.encode_config.rcParams.qpMapMode = NV_ENC_QP_MAP_MODE::NV_ENC_QP_MAP_DELTA;
-            let status = self.reconfigure(false, false);
-            if status != NVENCSTATUS::NV_ENC_SUCCESS {
-                self.encode_config.rcParams = saved;
-                self.refine_refused = true;
-                eprintln!(
-                    "[NVENC] Refining blocks through a QP delta map refused ({status:?}): {}",
-                    last_error(&self.nvenc_funcs, self.encoder_session)
-                );
-                return false;
-            }
-            self.delta_mapped = true;
+    /// Fill `qp_map` for the blocks the next frame refines (`refine_blocks`), each map unit
+    /// holding one at the delta from the quantizer the rate control last coded at to the target,
+    /// and for the blocks a refresh leaves for later frames (`defer_blocks`), each at the delta to
+    /// the codec's coarsest quantizer from the session's; the rest 0. Returns whether the session
+    /// codes through it, which a refused reconfigure ends for good.
+    unsafe fn block_map(
+        &mut self,
+        refinement: Option<&crate::ledger::Refinement>,
+        deferred: Option<&crate::ledger::BlockPlan>,
+    ) -> bool {
+        if !self.delta_map_mode() {
+            return false;
         }
         let hw = |index: i32| self.codec.hardware_quantizer(Hardware::Nvenc, index) as i32;
-        let delta = (hw(refinement.target) - hw(refinement.from)).clamp(i8::MIN as i32, 0) as i8;
+        let refine = refinement.map(|r| {
+            let delta = (hw(r.target) - hw(r.from)).clamp(i8::MIN as i32, 0) as i8;
+            (&r.plan, delta)
+        });
+        let defer = (self.codec.quantizer_max() as i32 - self.current_qp as i32)
+            .clamp(0, i8::MAX as i32) as i8;
         let unit = match self.codec {
             Codec::H264 => 16,
             Codec::H265 => 32,
             _ => 64,
         };
         let (cols, rows) = (self.width.div_ceil(unit), self.height.div_ceil(unit));
-        let plan = &refinement.plan;
         self.qp_map.clear();
         self.qp_map.extend((0..rows).flat_map(|row| {
             (0..cols).map(move |col| {
                 let (x, y, u) = ((col * unit) as i32, (row * unit) as i32, unit as i32);
-                if plan.refines_area(x, y, u, u) {
-                    delta
-                } else {
-                    0
+                match refine {
+                    Some((plan, delta)) if plan.refines_area(x, y, u, u) => delta,
+                    _ if deferred.is_some_and(|d| d.refines_area(x, y, u, u)) => defer,
+                    _ => 0,
                 }
             })
         }));
+        true
+    }
+
+    /// Put the rate control on the QP delta map mode, by the reconfigure that takes the
+    /// rate-control mode without a reset, the first time; false where the driver refused, which
+    /// ends refining for good.
+    unsafe fn delta_map_mode(&mut self) -> bool {
+        if self.delta_mapped {
+            return true;
+        }
+        let saved = self.encode_config.rcParams;
+        self.encode_config.rcParams.qpMapMode = NV_ENC_QP_MAP_MODE::NV_ENC_QP_MAP_DELTA;
+        let status = self.reconfigure(false, false);
+        if status != NVENCSTATUS::NV_ENC_SUCCESS {
+            self.encode_config.rcParams = saved;
+            self.refine_refused = true;
+            eprintln!(
+                "[NVENC] Refining blocks through a QP delta map refused ({status:?}): {}",
+                last_error(&self.nvenc_funcs, self.encoder_session)
+            );
+            return false;
+        }
+        self.delta_mapped = true;
         true
     }
 
@@ -4079,9 +4130,13 @@ impl NvencEncoder {
             .refinement
             .take()
             .filter(|_| held_qp.is_none() && !force_idr);
-        if let Some(refinement) = refinement
-            && self.refine_map(&refinement)
-        {
+        let deferred = self
+            .deferred
+            .take()
+            .filter(|_| held_qp.is_none() && !force_idr);
+        let mapped = (refinement.is_some() || deferred.is_some())
+            && self.block_map(refinement.as_ref(), deferred.as_ref());
+        if mapped {
             point_at_qp_map(&mut pic_params, &mut self.qp_map, nvenc_cur_ver());
         }
         let mut result = self.encode_picture(
@@ -4193,6 +4248,7 @@ impl NvencEncoder {
                 );
             }
         }
+        self.last_capped = self.peak.is_some_and(|p| p.binding);
         if let Ok(coded) = &result {
             self.follow_peak(coded.len(), held_qp.is_none());
         }

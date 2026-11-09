@@ -1985,6 +1985,145 @@ pub(crate) mod gpu_test_support {
         }
         [acc[0] / n, acc[1] / n, acc[2] / n]
     }
+
+    /// A GPU capture path (`dri3::run_capture`, `nvfbc::run_capture`).
+    pub(crate) type Capture = fn(
+        CaptureSettings,
+        std::sync::Arc<super::Controls>,
+        std::sync::mpsc::Sender<std::thread::ThreadId>,
+        &mut dyn FnMut(Vec<crate::encoders::software::EncodedStripe>),
+    ) -> Option<Result<(), String>>;
+
+    /// A page scrolled on `$DISPLAY` and then held still, captured through `capture` at CRF 25,
+    /// the paint-over at 18 armed or not (`paint_over`): uncapped, and capped at a peak of 300 kbit/s
+    /// the scroll overflows and then raised to 100 Mbit/s for the still page. For each, the
+    /// PSNR-Y of the last picture shown against the page, the frames sent while still and their
+    /// bytes, and the key frames after the first; `None` where the path declines the host.
+    pub(crate) fn capped_crf_codes_again_what_it_coded_bound(
+        capture: Capture,
+        paint_over: bool,
+    ) -> Option<[(f64, usize, usize, usize); 2]> {
+        use crate::encoders::codec::{FRAME_KEY, VIDEO_HEADER_LEN, parse_video_type};
+        use std::sync::atomic::Ordering;
+        use std::time::Instant;
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{ConnectionExt as _, CreateGCAux, ImageFormat};
+        const W: usize = 640;
+        const H: usize = 360;
+        const SCROLL: usize = 120;
+        if !paint_root((0x12, 0x12, 0x12)) {
+            println!("no X root this host can paint (xsetroot, $DISPLAY); nothing to capture");
+            return None;
+        }
+        let (conn, screen) = x11rb::connect(None).expect("connect");
+        let root = conn.setup().roots[screen].root;
+        let gc = conn.generate_id().expect("id");
+        conn.create_gc(gc, root, &CreateGCAux::new()).expect("gc");
+        let paint = |t: usize| {
+            let page = crate::encoders::scrolled_text(W, H, t);
+            for (band, rows) in page.chunks(W * 4 * 64).enumerate() {
+                conn.put_image(
+                    ImageFormat::Z_PIXMAP,
+                    root,
+                    gc,
+                    W as u16,
+                    (rows.len() / (W * 4)) as u16,
+                    0,
+                    (band * 64) as i16,
+                    0,
+                    24,
+                    rows,
+                )
+                .expect("put")
+                .check()
+                .expect("put done");
+            }
+        };
+        let run = |capped: bool| -> Option<(f64, usize, usize, usize)> {
+            paint(0);
+            let mut s = settings(Codec::H264);
+            s.width = W as i32;
+            s.height = H as i32;
+            s.video_streaming_mode = false;
+            s.use_paint_over_quality = paint_over;
+            s.video_paintover_crf = 18;
+            s.video_bitrate_kbps = if capped { 300 } else { 8000 };
+            s.video_vbv_multiplier = if capped {
+                crate::encoders::CAPPED_VBV_FRAMES
+            } else {
+                0.0
+            };
+            let vbv = s.video_vbv_multiplier;
+            let controls = std::sync::Arc::new(super::Controls::new(&s));
+            let (tx, rx) = std::sync::mpsc::channel::<(Instant, Vec<u8>)>();
+            let thread = {
+                let controls = controls.clone();
+                std::thread::spawn(move || {
+                    let (tid, _rx) = std::sync::mpsc::channel();
+                    capture(s, controls, tid, &mut |stripes| {
+                        for st in stripes {
+                            let _ = tx.send((Instant::now(), st.data.to_vec()));
+                        }
+                    })
+                })
+            };
+            // A session can take over a second to open; the path declining ends the thread.
+            let mut frames = Vec::new();
+            let end = Instant::now() + Duration::from_secs(15);
+            while frames.is_empty() && !thread.is_finished() && Instant::now() < end {
+                paint(0);
+                std::thread::sleep(Duration::from_millis(50));
+                frames.extend(rx.try_iter());
+            }
+            if thread.is_finished() {
+                return None;
+            }
+            for t in 1..=SCROLL {
+                paint(t);
+                std::thread::sleep(Duration::from_millis(16));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            let still = Instant::now();
+            if capped {
+                controls.bitrate_kbps.store(100_000, Ordering::Relaxed);
+                controls
+                    .vbv_mult_milli
+                    .store((vbv * 1000.0).round() as i32, Ordering::Relaxed);
+                controls.rate_dirty.store(true, Ordering::Release);
+            }
+            std::thread::sleep(Duration::from_secs(3));
+            controls.stop.store(true, Ordering::Relaxed);
+            let ended = thread.join().expect("capture thread");
+            assert!(matches!(ended, Some(Ok(()))), "{ended:?}");
+            frames.extend(rx.try_iter());
+            let mut dec = VideoDecoder::new(crate::webcam::decode::Codec::H264).expect("decoder");
+            let (mut sent, mut bytes, mut keys) = (0, 0, 0);
+            for (i, (at, data)) in frames.iter().enumerate() {
+                if *at > still {
+                    sent += 1;
+                    bytes += data.len();
+                }
+                keys += usize::from(
+                    i > 0 && parse_video_type(data[1]).map(|(_, k)| k) == Some(FRAME_KEY),
+                );
+                dec.decode(&data[VIDEO_HEADER_LEN..]).expect("decode");
+            }
+            let shown = dec.frame().expect("picture");
+            let page = crate::encoders::scrolled_text(W, H, SCROLL);
+            let mut mse = 0.0;
+            for y in 0..H {
+                for x in 0..W {
+                    let want = 16.0 + page[(y * W + x) * 4] as f64 * 219.0 / 255.0;
+                    let d = shown.y[y * shown.y_stride + x] as f64 - want;
+                    mse += d * d;
+                }
+            }
+            let psnr = 10.0 * (255.0f64 * 255.0 / (mse / (W * H) as f64)).log10();
+            Some((psnr, sent, bytes, keys))
+        };
+        let plain = run(false)?;
+        Some([plain, run(true).expect("the capped capture")])
+    }
 }
 
 #[cfg(test)]
