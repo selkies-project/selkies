@@ -144,9 +144,14 @@ def block_clipboard(r: "H.Results") -> None:
 
 
 def block_pacer(r: "H.Results") -> None:
-    """The WebRTC pacer must attach and keep draining, not wedge the stream."""
+    """The WebRTC pacer must attach and keep draining, not wedge the stream.
+
+    A moving scene keeps frames due the whole block: a still screen sends none once its
+    paint-over ends, which would read as a wedged pacer."""
     from playwright.sync_api import sync_playwright
     H.server_start(mode="webrtc", extra_env={"SELKIES_WEBRTC_PACER": "true"})
+    painter = H.spawn([sys.executable, os.path.join(H.TOOLS, "motion_scene.py"),
+                       H.TEST_DISPLAY, "1280", "720", "60"])
     try:
         with sync_playwright() as pw:
             browser, page, errs, nf = C.launch_chrome(pw, mode="webrtc")
@@ -164,6 +169,7 @@ def block_pacer(r: "H.Results") -> None:
             finally:
                 browser.close()
     finally:
+        painter.kill()
         H.server_stop()
 
 
