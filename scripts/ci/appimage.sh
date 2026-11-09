@@ -7,8 +7,8 @@
 # Builds the server inside a manylinux container
 # (infra/appimage/build-server.sh), uses rattler-build to package it as a
 # conda package, then assembles the AppImage with linuxdeploy and the conda
-# plugin in infra/appimage. The web client has to be in dist/web already
-# (scripts/ci/build-web.sh). The codecs are the glibc archives built once for
+# plugin in infra/appimage. The web client the server embeds has to be in
+# dist/web already (scripts/ci/build-web.sh). The codecs are the glibc archives built once for
 # the architecture (scripts/ci/build-codecs.sh), taken from SELKIES_CODECS_DIR
 # where the caller built them already and built here otherwise.
 #

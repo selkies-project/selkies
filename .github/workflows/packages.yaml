@@ -5,7 +5,7 @@ name: Packages
 # linuxdeploy-plugin-conda). Each builds the Rust server inside a container of
 # the target distribution (the AppImage's inside the wheels' manylinux image,
 # its glibc floor); a native package installs it at /usr/bin/selkies with the web client
-# at /usr/share/selkies/web and declares the packages behind the libraries the
+# compiled in and declares the packages behind the libraries the
 # binary links and loads, as that distribution names them, and the AppImage
 # carries it in a conda environment of conda-forge's libraries. The codecs are
 # not any distribution's: the codecs job builds pixelflux's pinned, patched

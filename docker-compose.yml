@@ -89,9 +89,6 @@ services:
     volumes:
       # The checkout runs instead of the package baked into the image, so a
       # server-side edit takes effect on a restart rather than a rebuild.
-      # Writable because a checkout with no built web client is given the
-      # image's own, as a link at the (gitignored) path the client is served
-      # from.
       - type: bind
         source: ./
         target: /opt/selkies-src

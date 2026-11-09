@@ -1,7 +1,7 @@
 name: Smoke test the wheel
 
 # Installs the built wheels into clean virtualenvs and proves they run: the
-# executable answers, the web client is installed beside it, and the Jupyter
+# executable answers with the web client compiled into it, and the Jupyter
 # entry point reads the executable's configuration. Split from the build so a
 # caller can gate this alone on it.
 
@@ -97,7 +97,7 @@ jobs:
           /tmp/selkies-venv/bin/pip install --no-index --find-links "$PWD/dist" --only-binary=:all: selkies
           /tmp/selkies-venv/bin/selkies --version
           /tmp/selkies-venv/bin/selkies --help >/dev/null && echo "selkies --help OK"
-          test -f /tmp/selkies-venv/share/selkies/web/index.html && echo "bundled web client OK"
+          /tmp/selkies-venv/bin/selkies --version | grep -F "web client: embedded (" && echo "embedded web client OK"
           /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()['command'][0] == '/tmp/selkies-venv/bin/selkies'; print('Jupyter entry point OK')"
       - name: Install smoke test (oldest Python, at the wheel's glibc floor)
         # The same checks on the oldest interpreter CI keeps (the wheel itself
@@ -117,7 +117,7 @@ jobs:
             /tmp/selkies-venv/bin/pip install --no-index --find-links /dist --only-binary=:all: selkies
             /tmp/selkies-venv/bin/selkies --version
             /tmp/selkies-venv/bin/selkies --help > /dev/null && echo "selkies --help OK"
-            test -f /tmp/selkies-venv/share/selkies/web/index.html && echo "bundled web client OK"
+            /tmp/selkies-venv/bin/selkies --version | grep -F "web client: embedded (" && echo "embedded web client OK"
             /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()[\"command\"][0] == \"/tmp/selkies-venv/bin/selkies\"; print(\"Jupyter entry point OK\")"'
       - name: Install smoke test (musllinux, on Alpine)
         run: |
@@ -127,4 +127,4 @@ jobs:
             python3 -m venv /tmp/selkies-venv
             /tmp/selkies-venv/bin/pip install --no-index --find-links /dist --only-binary=:all: selkies
             /tmp/selkies-venv/bin/selkies --version
-            test -f /tmp/selkies-venv/share/selkies/web/index.html'
+            /tmp/selkies-venv/bin/selkies --version | grep -F "web client: embedded ("'

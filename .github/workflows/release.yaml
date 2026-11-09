@@ -235,7 +235,7 @@ jobs:
           find release-artifacts -type f -regextype posix-extended -regex '.*/[0-9a-f]{64}' -delete
           # Artifacts of the run rather than of the release: the build record
           # docker/build-push-action uploads per image, the record of what
-          # each image was built from, the web client the packages carry, and
+          # each image was built from, the web client the packages embed, and
           # the conda package the AppImage is assembled from
           find release-artifacts -type f \( -name '*.dockerbuild' -o -name 'selkies-*-images-*.txt' \
             -o -name 'selkies-web-client.tar' -o -name '*.conda' \) -delete

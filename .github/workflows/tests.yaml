@@ -161,7 +161,7 @@ jobs:
           cache-dependency-path: |
             web/selkies-web-core/package-lock.json
             web/selkies-dashboard/package-lock.json
-      # The HTTP tests serve the bundle from dist/web
+      # The server's build embeds the bundle in dist/web, which its tests check
       - name: Build the web client
         env:
           # For the controller database's lookups (gendb.js)

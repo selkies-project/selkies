@@ -23,8 +23,8 @@
 # puts scripts is relative to platlib. Here the libraries move instead, to
 # the wheel's data at lib/selkies, which pip installs under the same prefix as
 # the script: the executable keeps its place on PATH and runs without an
-# interpreter, finds them at $ORIGIN/../lib/selkies, and finds its web client
-# at share/selkies/web beside them.
+# interpreter and finds them at $ORIGIN/../lib/selkies. The web client is
+# compiled into it from dist/web.
 #
 # Usage: build.sh <out-dir>   (run from a checkout with dist/web built;
 #                              SELKIES_VERSION stamps the version,

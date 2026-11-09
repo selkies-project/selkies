@@ -10,8 +10,8 @@ url="https://github.com/selkies-project/selkies"
 license=("MPL-2.0")
 # Filled in by infra/packaging/arch.sh from the build (runtime-deps.sh).
 depends=()
-# The payload (the server, its web client, and the interposers staged by
-# infra/packaging/arch.sh) is packed here.
+# The payload (the server, its web client compiled in, and the interposers
+# staged by infra/packaging/arch.sh) is packed here.
 source=()
 sha256sums=()
 options=(!strip !debug)

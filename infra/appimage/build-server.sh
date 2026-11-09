@@ -5,8 +5,8 @@
 #
 # Build the server the AppImage's conda package carries (run inside the
 # manylinux container scripts/ci/appimage.sh starts, with the checkout at
-# /repo and its work directory, holding micromamba, at /work), staging it with
-# its web client under /work/server.
+# /repo and its work directory, holding micromamba, at /work), staging it, its
+# web client compiled in, under /work/server.
 #
 # This image's glibc, GLIBC_FLOOR, is the AppImage's floor, and the server
 # built here links nothing newer. It is built as every native package builds it

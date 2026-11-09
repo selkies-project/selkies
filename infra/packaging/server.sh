@@ -3,9 +3,8 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Build the Selkies server on this distribution and stage it, with the web
-# client, under a package root: the binary at usr/bin/selkies and the bundle at
-# usr/share/selkies/web beside it, where the server looks for its client.
+# Build the Selkies server on this distribution and stage it under a package
+# root at usr/bin/selkies, with the web client compiled into it.
 #
 # The build runs where the package is installed from, so the binary links the
 # sonames this distribution ships. The codec libraries are not this
@@ -21,16 +20,16 @@
 # them, and everything Cargo writes goes under /build.
 #
 # The web client is built once per run by scripts/ci/build-web.sh into
-# dist/web, which every channel installs as it is, and copied beside the
-# crates, where the server's build script embeds it (crates/selkies/build.rs).
+# dist/web and copied beside the crates, where the server's build script
+# embeds it (crates/selkies/build.rs), so every channel carries it as it is.
 # SELKIES_WEB_DIST names the copy, which makes a build that finds no client
-# fail.
+# fail, and a package's server that does not report it embedded fails too.
 #
 # With --wheel, maturin builds the selkies wheel from the same copy instead
 # (pyproject.toml, `bindings = "bin"`), with the release version as it is
-# spelled in the wheel's metadata and the web client staged as its data at
-# share/selkies/web; infra/wheel/build.sh repairs what it leaves in <out-dir>.
-# SELKIES_SDIST=1 writes the sdist of that copy beside it.
+# spelled in the wheel's metadata; infra/wheel/build.sh repairs what it leaves
+# in <out-dir>. SELKIES_SDIST=1 writes the sdist of that copy beside it, the
+# web client among its sources.
 #
 # Usage: SELKIES_CODECS=<prefix> server.sh <pkg-root>
 #                                      (SELKIES_VERSION stamps the version)
@@ -117,9 +116,8 @@ fi
 
 if [ -n "${WHEEL_OUT}" ]; then
     cp -r "${REPO}/pyproject.toml" "${REPO}/README.md" "${REPO}/LICENSE" "${SRC}/"
-    mkdir -p "${SRC}/infra" "${SRC}/build/wheel/data/data/share/selkies"
+    mkdir -p "${SRC}/infra"
     cp -r "${REPO}/infra/wheel" "${SRC}/infra/wheel"
-    cp -r "${REPO}/dist/web" "${SRC}/build/wheel/data/data/share/selkies/web"
     sed -i "s|^version =.*|version = \"${SELKIES_VERSION:-0.0.0.dev0}\"|" "${SRC}/pyproject.toml"
     # The tag the repair checks the wheel against, not a promise made here:
     # the glibc the image carries, 2.17 in manylinux2014
@@ -137,10 +135,8 @@ CARGO_TARGET_DIR="${BUILD}/target" cargo build --release --locked -p selkies \
     --manifest-path "${SRC}/Cargo.toml"
 
 install -Dm755 "${BUILD}/target/release/selkies" "${PKG_ROOT}/usr/bin/selkies"
-mkdir -p "${PKG_ROOT}/usr/share/selkies"
-rm -rf "${PKG_ROOT}/usr/share/selkies/web"
-cp -r "${REPO}/dist/web" "${PKG_ROOT}/usr/share/selkies/web"
-# Fails the package build rather than shipping a server that cannot start, or
-# one reporting a version other than the package's
+# Fails the package build rather than shipping a server that cannot start, one
+# reporting a version other than the package's, or one without its client
 "${PKG_ROOT}/usr/bin/selkies" --version | grep -F "selkies ${CRATE_VERSION} "
+"${PKG_ROOT}/usr/bin/selkies" --version | grep -F "web client: embedded ("
 "${PKG_ROOT}/usr/bin/selkies" --help > /dev/null

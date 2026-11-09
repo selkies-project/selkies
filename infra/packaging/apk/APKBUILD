@@ -11,8 +11,8 @@ arch="all"
 license="MPL-2.0"
 # Filled in by infra/packaging/apk.sh from the build (runtime-deps.sh).
 depends=""
-# The payload (the server, its web client, and the interposers staged by
-# infra/packaging/apk.sh) is packed here.
+# The payload (the server, its web client compiled in, and the interposers
+# staged by infra/packaging/apk.sh) is packed here.
 source=""
 options="!check"
 package() {

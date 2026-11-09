@@ -5,13 +5,16 @@
 # The distro's absolute paths are rebased under $SB and the tools that need root
 # or a network are replaced by stubs recording their argv. The server's build is
 # one of them: a stub cargo writes a stand-in binary that reports the version
-# its manifest was stamped with, the codec prefix the workflow hands every
-# package build is an empty one, and the dependency resolution
-# (runtime-deps.sh) is stubbed too, since what it reads is the distribution's. Everything else -- sed, cp, mkdir, find, the manifest
-# stamping, the staging of the server, the web client, and the interposers --
-# runs for real, which is what the read-only-mount, staging-path, and version
-# bugs depend on. CI builds these packages in real containers; this is the
-# check that runs anywhere and catches the same class of defect in seconds.
+# its manifest was stamped with and, as the build script embeds the client
+# SELKIES_WEB_DIST names, whether that holds one; the codec prefix the workflow
+# hands every package build is an empty one, and the dependency resolution
+# (runtime-deps.sh) is stubbed too, since what it reads is the distribution's.
+# Everything else -- sed, cp, mkdir, find, the manifest stamping, the copy of
+# the web client beside the crates, the staging of the server and the
+# interposers -- runs for real, which is what the read-only-mount,
+# staging-path, and version bugs depend on. CI builds these packages in real
+# containers; this is the check that runs anywhere and catches the same class
+# of defect in seconds.
 #
 # Usage: tests/packaging/simulate.sh
 set -u
@@ -77,7 +80,8 @@ fi
 
 # The stand-in Cargo: `fetch` fetches nothing, `metadata` names a pixelflux
 # checkout, and `build` leaves a server in the target directory reporting the
-# workspace version the manifest it was handed carries.
+# workspace version the manifest it was handed carries and the web client it
+# would embed.
 cat > "$SB/stubs/cargo" <<EOF
 #!/bin/sh
 echo "cargo \$*" >> "$SB/log/calls"
@@ -88,8 +92,11 @@ esac
 manifest=""
 while [ \$# -gt 0 ]; do [ "\$1" = --manifest-path ] && manifest="\$2"; shift; done
 version="\$(sed -n 's/^version = "\\(.*\\)"/\\1/p' "\${manifest}" | head -1)"
+client="none embedded"
+[ -f "\${SELKIES_WEB_DIST:-}/index.html" ] && client="embedded (\$(find "\${SELKIES_WEB_DIST}" -type f | wc -l) files)"
 mkdir -p "\${CARGO_TARGET_DIR}/release"
-printf '#!/bin/sh\\necho "selkies %s (stub)"\\n' "\${version}" > "\${CARGO_TARGET_DIR}/release/selkies"
+printf '#!/bin/sh\\necho "selkies %s (stub)"\\necho "web client: %s"\\n' "\${version}" "\${client}" \\
+  > "\${CARGO_TARGET_DIR}/release/selkies"
 chmod +x "\${CARGO_TARGET_DIR}/release/selkies"
 EOF
 chmod +x "$SB/stubs/cargo"
@@ -127,11 +134,12 @@ for name in deb rpm apk arch; do
     sh "$SB/repo/infra/packaging/$name.sh" ) > "$SB/log/$name.out" 2>&1
   rc=$?
   leaked="$(find "$SB/repo" -newer "$STAMP" 2>/dev/null | head -3)"
-  # The server and its web client where the server looks for one, and the
+  # The server, its web client compiled in and none staged beside it, and the
   # dependencies the build resolved, which fpm takes as flags and abuild and
   # makepkg from the recipe the script stages
   staged=""
-  [ -x "$SB/pkg-root/usr/bin/selkies" ] && [ -f "$SB/pkg-root/usr/share/selkies/web/index.html" ] && staged=1
+  [ -x "$SB/pkg-root/usr/bin/selkies" ] && [ ! -e "$SB/pkg-root/usr/share/selkies" ] \
+    && "$SB/pkg-root/usr/bin/selkies" | grep -q "^web client: embedded (" && staged=1
   case "$name" in
     deb|rpm) got="$(sed -n 's/.*--version \([^ ]*\).*/\1/p' "$SB/log/calls" | head -1)"
              deps="$(grep -c -- '--depends libstub1 --depends libstub2' "$SB/log/calls")" ;;

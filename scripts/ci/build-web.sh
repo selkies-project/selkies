@@ -3,9 +3,9 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Bundle the web client into dist/web, the directory the server reads it from
-# in a checkout and the images and the AppImage install at share/selkies/web
-# beside the binary. Run from the repository root; requires npm.
+# Bundle the web client into dist/web, the directory every build of the server
+# compiles it in from (crates/selkies/build.rs). Run from the repository root;
+# requires npm.
 #
 # Every image and package builds the bundle through this script, so the browser
 # payload is identical in every distribution channel.

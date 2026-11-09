@@ -691,26 +691,24 @@ ENV __GL_SYNC_TO_VBLANK="0"
 # Keep the log dir present for in-session apt runs.
 RUN install -d /var/log/apt
 
-# The Selkies server and the web client from the stages above: the binary at
-# /usr/local/bin/selkies and the bundle at /usr/local/share/selkies/web, beside
-# it, where the server looks for it. The packages behind every library the
-# binary links go in first, recorded where it was built.
+# The Selkies server from the stage above, at /usr/local/bin/selkies with the
+# web client compiled in. The packages behind every library the binary links
+# go in first, recorded where it was built.
 COPY --from=server /out/runtime-packages /tmp/selkies-runtime-packages
 RUN apt-get update && \
     apt-get install --no-install-recommends -y $(cat /tmp/selkies-runtime-packages) && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/selkies-runtime-packages
 COPY --from=server --chown=1000:1000 /out/selkies /usr/local/bin/selkies
-COPY --from=web --chown=1000:1000 /build/dist/web /usr/local/share/selkies/web
 
 # Fails the image build rather than publishing one whose payload cannot start:
-# every library the server links resolves, and the ones pixelflux and pcmflux open
-# by name at run time, which no ELF dependency names and only the apt lines
-# above put here, are present.
+# the server carries its web client, every library it links resolves, and the
+# ones pixelflux and pcmflux open by name at run time, which no ELF dependency
+# names and only the apt lines above put here, are present.
 RUN set -e; \
     selkies --version; \
     selkies --help > /dev/null; \
+    selkies --version | grep -F "web client: embedded ("; \
     ! ldd /usr/local/bin/selkies | grep 'not found'; \
-    test -f /usr/local/share/selkies/web/index.html; \
     for name in libwayland-server.so.0 libEGL.so.1 libgbm.so.1 libpulse.so.0 libva.so.2 \
             libva-drm.so.2 libdrm.so.2 libxkbcommon.so.0 libpixman-1.so.0; do \
         ldconfig -p | awk '{print $1}' | grep -qxF "${name}" || { echo "missing ${name}"; exit 1; }; \

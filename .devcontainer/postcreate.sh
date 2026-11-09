@@ -11,7 +11,7 @@ set -e
 cd "${WORKSPACE_FOLDER:-/workspaces/selkies}"
 
 # The same script every channel builds the bundle with, so the bundle in
-# dist/web, which a server built from this checkout serves, is the one every
+# dist/web, which a server built from this checkout embeds, is the one every
 # channel ships
 ./scripts/ci/build-web.sh
 
@@ -40,4 +40,4 @@ if python3 -m playwright install --with-deps chromium firefox webkit &&
 else
   echo "warning: the suites' browsers or tools did not install; the integration and e2e tiers need them" >&2
 fi
-echo "Selkies is built from the checkout at target/release/selkies, and serves the web client in dist/web."
+echo "Selkies is built from the checkout at target/release/selkies, with the web client in dist/web compiled in."

@@ -46,8 +46,9 @@ wayland="${wayland,,}"
 
 # Dev mode: run the server built in a checkout mounted into the container instead
 # of the one baked into the image, so a change can be tried without rebuilding
-# the image. The checkout's own web client (dist/web) is served where it has
-# one, else the image's.
+# the image. The checkout's own web client (dist/web) is served from disk where
+# it has one, so a rebuilt client takes effect on a reload; else the server
+# serves the client compiled into it.
 selkies="selkies"
 if [ -n "${SELKIES_DEV_SOURCE:-}" ]; then
   built="${SELKIES_DEV_SOURCE}/target/release/selkies"
@@ -55,8 +56,6 @@ if [ -n "${SELKIES_DEV_SOURCE:-}" ]; then
     selkies="${built}"
     if [ -f "${SELKIES_DEV_SOURCE}/dist/web/index.html" ]; then
       export SELKIES_WEB_BUNDLE="${SELKIES_DEV_SOURCE}/dist/web"
-    else
-      export SELKIES_WEB_BUNDLE="/usr/local/share/selkies/web"
     fi
     echo "Dev mode: serving ${built}"
   else

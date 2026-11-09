@@ -4,8 +4,8 @@
 #
 # rattler-build recipe producing the `selkies` conda package (used both for
 # the AppImage environment and as a portable conda distribution artifact): the
-# server scripts/ci/appimage.sh built inside the wheels' manylinux image, with
-# its web client, and the conda-forge libraries it links as its run
+# server scripts/ci/appimage.sh built inside the wheels' manylinux image, its
+# web client compiled in, and the conda-forge libraries it links as its run
 # dependencies.
 
 context:
@@ -19,9 +19,8 @@ package:
   version: ${{ version }}
 
 source:
-  # The server and its web client as infra/packaging/server.sh stages them
-  # (usr/bin/selkies, usr/share/selkies/web), which the repository's
-  # .gitignore would otherwise keep out
+  # The server as infra/packaging/server.sh stages it (usr/bin/selkies),
+  # which the repository's .gitignore would otherwise keep out
   - path: ../../build/appimage/server
     use_gitignore: false
   - path: ../../LICENSE
@@ -30,8 +29,6 @@ build:
   number: 0
   script:
     - install -Dm755 usr/bin/selkies "${PREFIX}/bin/selkies"
-    - mkdir -p "${PREFIX}/share/selkies"
-    - cp -r usr/share/selkies/web "${PREFIX}/share/selkies/web"
   dynamic_linking:
     # The C library the server was built against, the AppImage's floor, and the
     # graphics stack are the host's: libgbm has to be the one beside the
@@ -66,10 +63,10 @@ requirements:
 tests:
   - script:
       # The server answers from the prefix conda installed it into, its
-      # libraries found there, and the web client travels inside the package
+      # libraries found there, with the web client compiled into it
       - selkies --version
       - selkies --help > /dev/null
-      - test -f "${PREFIX}/share/selkies/web/index.html"
+      - selkies --version | grep -F "web client: embedded ("
 
 about:
   summary: Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)

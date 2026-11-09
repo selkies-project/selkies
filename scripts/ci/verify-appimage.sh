@@ -74,9 +74,8 @@ if [ -e "${PREFIX}/pkgs" ]; then
 fi
 echo "the prefix carries no conda package cache"
 
-# The server reads its web client from beside the directory it is installed in
-test -f "${PREFIX}/share/selkies/web/index.html"
-echo "the web client sits beside the server"
+"${PREFIX}/bin/selkies" --version | grep -F "web client: embedded ("
+echo "the server carries its web client"
 if find "${APP}" -name 'python*' -type f | grep -q .; then
     echo "::error::the AppImage carries a Python interpreter:"
     find "${APP}" -name 'python*' -type f
@@ -91,16 +90,18 @@ echo "the AppImage carries libva"
 # module directory exits with "startup without any loaded modules", taking
 # audio out of the AppImage while everything else still streams. The Wayland
 # backend is selected so no X server is started, and its compositor is checked
-# too. Its own runtime directory, never a live session's, and no login, which
-# the server otherwise refuses to start without a password for.
+# too, and so is the web client the server serves from memory. Its own runtime
+# directory, never a live session's, and no login, which the server otherwise
+# refuses to start without a password for.
 RUNTIME="${WORK}/runtime"
 mkdir -p "${RUNTIME}"
 chmod 700 "${RUNTIME}"
 # AppRun names this log, so an earlier run's copy would answer for this one
 PULSE_LOG="/tmp/pulseaudio_selkies.log"
 rm -f "${PULSE_LOG}"
+PORT=18080
 env XDG_RUNTIME_DIR="${RUNTIME}" PULSE_SERVER="unix:${RUNTIME}/pulse/native" \
-    PULSE_RUNTIME_PATH="${RUNTIME}/pulse" SELKIES_WAYLAND="true" \
+    PULSE_RUNTIME_PATH="${RUNTIME}/pulse" SELKIES_WAYLAND="true" SELKIES_PORT="${PORT}" \
     setsid "${APP}/AppRun" --enable-basic-auth=false > "${WORK}/apprun.log" 2>&1 &
 session="$!"
 sinks=""
@@ -118,6 +119,19 @@ while ! grep -q "Wayland compositor socket" "${WORK}/apprun.log" && [ "${i}" -lt
     i=$((i + 1))
     sleep 1
 done
+# The entry page, and a content-hashed script it loads, gzip-encoded with its
+# entity tag for a client that takes gzip; both hosts this runs on carry curl
+asset=""
+i=0
+while [ -z "${asset}" ] && [ "${i}" -lt 30 ]; do
+    asset="$(curl -fsS "http://127.0.0.1:${PORT}/" 2>/dev/null | grep -o 'assets/[^"]*\.js' | head -n 1 || true)"
+    [ -n "${asset}" ] || sleep 1
+    i=$((i + 1))
+done
+served=""
+if [ -n "${asset}" ]; then
+    served="$(curl -fsS -D - -o /dev/null -H "Accept-Encoding: gzip" "http://127.0.0.1:${PORT}/${asset}" | tr -d '\r')"
+fi
 kill -- "-${session}" 2>/dev/null || kill "${session}" 2>/dev/null || true
 wait "${session}" 2>/dev/null || true
 # The daemon outlives what AppRun exec'd and unlinks its socket on the way out
@@ -161,6 +175,14 @@ if ! grep -q "Wayland compositor socket: " "${WORK}/apprun.log"; then
     exit 1
 fi
 echo "AppRun's Wayland compositor comes up"
+if ! printf '%s\n' "${served}" | grep -qi '^content-encoding: gzip$' \
+        || ! printf '%s\n' "${served}" | grep -qi '^etag: "'; then
+    echo "::error::the server did not serve its entry page and ${asset:-a script it loads} gzip-encoded:"
+    printf '%s\n' "${served}"
+    tail -n 20 "${WORK}/apprun.log"
+    exit 1
+fi
+echo "the server serves its entry page and ${asset}, gzip-encoded, from the client it embeds"
 
 # The mount a user's own run takes: the runtime mounts the image read-only and
 # only extracts itself where FUSE is missing, so the checks above never see it.

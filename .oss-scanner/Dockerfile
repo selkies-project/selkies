@@ -24,7 +24,7 @@ RUN python3 -m venv /opt/venv && pip install --no-cache-dir pytest
 RUN for dir in addons/input-interposer addons/v4l2-interposer addons/fake-udev tests/tools; do \
       make -C "$dir" CFLAGS="-O1 -g -fno-omit-frame-pointer" || exit 1; \
     done
-# The npm dependencies of both packages, and the bundle the server's HTTP tests serve from dist/web
+# The npm dependencies of both packages, and the bundle in dist/web the server's build embeds and its tests check
 RUN scripts/ci/build-web.sh
 RUN runuser -u tester -- cargo test --offline --locked --workspace --no-run \
     && runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --features python --no-run \

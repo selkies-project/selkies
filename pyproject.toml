@@ -3,11 +3,10 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # The selkies wheel: the Rust server as the `selkies` executable, built by
-# maturin, with the web client installed at <prefix>/share/selkies/web beside
-# it. Nothing in it is Python but the Jupyter entry point below, which only a
-# Jupyter server imports, so one py3-none wheel per platform installs on any
-# Python 3 and names no floor of its own. infra/wheel/build.sh builds and
-# repairs it.
+# maturin, with the web client compiled into it. Nothing in it is Python but
+# the Jupyter entry point below, which only a Jupyter server imports, so one
+# py3-none wheel per platform installs on any Python 3 and names no floor of
+# its own. infra/wheel/build.sh builds and repairs it.
 [build-system]
 requires = ["maturin>=1.9,<2"]
 build-backend = "maturin"
@@ -44,12 +43,10 @@ bindings = "bin"
 manifest-path = "crates/selkies/Cargo.toml"
 # The entry point's module
 python-source = "infra/wheel"
-# infra/wheel/build.sh stages the web client here, as data/share/selkies/web
-data = "build/wheel/data"
 # A wheel built from the sdist needs the complete workspace's native sources,
 # generated bindings and protocols, codec recipes and patches, vendored crates,
-# and the staged web client.
+# and the web client the server's build embeds from dist/web.
 include = [
     { path = "crates/**/*", format = "sdist" },
-    { path = "build/wheel/data/**/*", format = "sdist" },
+    { path = "dist/web/**/*", format = "sdist" },
 ]
