@@ -1416,7 +1416,9 @@ mod tests {
             eprintln!("no private X server could be started; skipping");
             return;
         };
-        // The readers open the display the environment names; never the desktop's.
+        // The readers open the display the environment names; never the desktop's. The
+        // DISPLAY the process had comes back at the end, for the live tests run after this.
+        let previous = std::env::var_os("DISPLAY");
         // SAFETY: the test binary is single-threaded for this ignored test, run alone.
         unsafe { std::env::set_var("DISPLAY", &display) };
         x11::drop_connection();
@@ -1496,6 +1498,13 @@ mod tests {
         let _ = xvfb.wait();
         let _ = std::fs::remove_file(&marker);
         let _ = std::fs::remove_file(&script);
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("DISPLAY", value),
+                None => std::env::remove_var("DISPLAY"),
+            }
+        }
         if let Err(e) = outcome {
             std::panic::resume_unwind(e);
         }
