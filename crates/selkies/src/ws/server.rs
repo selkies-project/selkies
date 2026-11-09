@@ -49,6 +49,7 @@ use crate::display::{
     populate_capture_settings, reconcile_realized_layout, structurally_same, wayland_output_id,
 };
 use crate::files::pacing::TransferPacer;
+use crate::http::audit::rfc3339;
 use crate::settings::{
     CODEC_LABELS, STREAM_SETTINGS, WS_MESSAGE_SIZE_HARD_CAP, codec_for_encoder, effective_use_cpu,
     encoder_for_codec, settings, settings_mut,
@@ -1722,8 +1723,9 @@ impl WsService {
             .map(|c| {
                 let perms = c.perms();
                 let display = owners.iter().find(|(_, o)| **o == c.id).map(|(d, _)| d.as_str()).unwrap_or(PRIMARY_DISPLAY);
+                let connected_at = (perms.connected_at > 0.0).then(|| rfc3339(perms.connected_at));
                 json!({"id": perms.id, "transport": "websockets", "role": perms.role, "slot": perms.slot,
-                       "display": display, "connected_at": rfc3339(perms.connected_at), "rtt_ms": c.rtt_ms()})
+                       "display": display, "connected_at": connected_at, "rtt_ms": c.rtt_ms()})
             })
             .collect()
     }
@@ -4226,14 +4228,6 @@ fn opt(value: Option<i64>) -> String {
     value
         .map(|v| v.to_string())
         .unwrap_or_else(|| "None".into())
-}
-
-/// Unix seconds as the audit log's timestamp.
-fn rfc3339(unix: f64) -> Json {
-    match chrono::DateTime::from_timestamp(unix as i64, 0) {
-        Some(at) if unix > 0.0 => json!(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        _ => Json::Null,
-    }
 }
 
 /// Store the sanitized per-display tunables for the keys the payload carries: sanitizing an

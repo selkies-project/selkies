@@ -1798,6 +1798,9 @@ async fn sessions_list_the_pages_and_one_can_be_disconnected() {
     let rig = Rig::new();
     let owner = rig.owner("a").await;
     settle().await;
+    let mut perms = owner.client().perms();
+    perms.connected_at = 1_000_000.5;
+    owner.client().set_perms(perms);
     let sessions = {
         let service = rig.service.clone();
         let task = tokio::spawn(async move { service.sessions().await });
@@ -1821,6 +1824,11 @@ async fn sessions_list_the_pages_and_one_can_be_disconnected() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["transport"], json!("websockets"));
     assert_eq!(sessions[0]["display"], json!("primary"));
+    // The form the audit trail and the WebRTC listing carry: UTC to the millisecond.
+    assert_eq!(
+        sessions[0]["connected_at"],
+        json!("1970-01-12T13:46:40.500Z")
+    );
     let id = sessions[0]["id"].as_str().unwrap().to_string();
     assert!(rig.service.disconnect_session(&id).await);
     assert_eq!(owner.client().close_code(), Some(1001));
