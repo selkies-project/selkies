@@ -157,8 +157,13 @@ impl Seeds {
 pub struct DisplayState {
     pub tab_id: Option<String>,
     pub decode_pace: Option<f64>,
+    /// The size the page asked for, until a realized-geometry read folds in what the
+    /// compositor made of it.
     pub width: i32,
     pub height: i32,
+    /// The size the last layout pass laid out, as the compositor realized it: a realized read
+    /// leaves a request that came after the pass to the pass that lays it out.
+    pub laid_out: Option<(i32, i32)>,
     pub position: String,
     pub video_active: bool,
     pub encoder: String,
@@ -210,6 +215,7 @@ impl DisplayState {
             decode_pace: None,
             width: 0,
             height: 0,
+            laid_out: None,
             position: "right".into(),
             video_active,
             encoder: seeds.encoder.clone(),

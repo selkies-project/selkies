@@ -1947,3 +1947,68 @@ fn a_lone_wayland_resize_carries_the_session_screen() {
         &[],
     );
 }
+
+/// A realized-geometry read folds in what the compositor made of the size a pass laid out, and
+/// leaves a size the page asked for during the pass to the pass that lays it out.
+#[tokio::test]
+#[ignore = "run by a_request_during_a_pass_outlives_its_realized_read, in a process of its own"]
+async fn a_request_during_a_pass_in_its_process() {
+    if !crate::session_screens::testing::isolated() {
+        return;
+    }
+    crate::settings::install(crate::settings::Settings::parse(
+        &["--wayland=true".to_string()],
+        &|_| None,
+    ));
+    let rig = Rig::new();
+    let mut page = rig.controller().await;
+    page.say(r#"SETTINGS,{"initialClientWidth":1280,"initialClientHeight":720,"tabId":"a"}"#)
+        .await;
+    let capture = rig.primary_capture();
+    let size = |rig: &Rig| {
+        let st = rig.service.st.lock();
+        let d = &st.displays[PRIMARY_DISPLAY];
+        (d.width, d.height)
+    };
+
+    // The pass laid 1920x1080 out, and the page asked for 1600x838 while it ran.
+    {
+        let mut st = rig.service.st.lock();
+        let d = st.displays.get_mut(PRIMARY_DISPLAY).expect("the primary");
+        d.laid_out = Some((1920, 1080));
+        (d.width, d.height) = (1600, 838);
+    }
+    *capture.geometry.lock() = Ok(Some((1920, 1080, 1.0)));
+    rig.service
+        .sync_wayland_realized_geometry(PRIMARY_DISPLAY, false)
+        .await;
+    assert_eq!(size(&rig), (1600, 838), "the request outlives the read");
+    let layout = rig.layout(PRIMARY_DISPLAY).expect("the primary's layout");
+    assert_eq!(
+        (layout.w, layout.h),
+        (1920, 1080),
+        "the layout holds what was realized"
+    );
+
+    // Laid out in turn, the request takes what the compositor made of it.
+    rig.service
+        .st
+        .lock()
+        .displays
+        .get_mut(PRIMARY_DISPLAY)
+        .expect("the primary")
+        .laid_out = Some((1600, 838));
+    *capture.geometry.lock() = Ok(Some((1600, 832, 1.0)));
+    rig.service
+        .sync_wayland_realized_geometry(PRIMARY_DISPLAY, false)
+        .await;
+    assert_eq!(size(&rig), (1600, 832));
+}
+
+#[test]
+fn a_request_during_a_pass_outlives_its_realized_read() {
+    crate::session_screens::testing::run_isolated(
+        "ws::server_tests::a_request_during_a_pass_in_its_process",
+        &[],
+    );
+}

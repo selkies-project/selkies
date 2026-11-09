@@ -1285,7 +1285,13 @@ impl WsService {
                 l.w = w;
                 l.h = h;
             }
-            st.displays.get(display_id).map(|d| d.scale).unwrap_or(1.0)
+            match st.displays.get_mut(display_id) {
+                Some(d) => {
+                    d.laid_out = Some((w, h));
+                    d.scale
+                }
+                None => 1.0,
+            }
         };
         self.deps
             .display
@@ -1330,8 +1336,9 @@ impl WsService {
 
     /// Reconcile a display's state with the compositor's realized geometry (it may even-mask
     /// dimensions or keep the old mode), the Wayland counterpart of X11's realized clamp. The
-    /// read is a barrier too: answered only after any queued capture start finished.
-    async fn sync_wayland_realized_geometry(&self, display_id: &str, broadcast: bool) {
+    /// read is a barrier too: answered only after any queued capture start finished. A size the
+    /// page asked for after the pass laid its display out stays the display's request.
+    pub(crate) async fn sync_wayland_realized_geometry(&self, display_id: &str, broadcast: bool) {
         if !Self::is_wayland() || !self.reg.lock().running.contains(display_id) {
             return;
         }
@@ -1361,8 +1368,11 @@ impl WsService {
         {
             let mut st = self.st.lock();
             if let Some(d) = st.displays.get_mut(display_id) {
-                d.width = w;
-                d.height = h;
+                if d.laid_out.is_none_or(|laid| laid == (d.width, d.height)) {
+                    d.width = w;
+                    d.height = h;
+                    d.laid_out = Some((w, h));
+                }
                 if scale > 0.0 {
                     d.scale = scale;
                 }
@@ -3747,8 +3757,9 @@ impl WsService {
 
     /// The union layout from all display clients, and the fastest stream: a real display's
     /// refresh caps what a vsynced application shows, so its modes never run slower than that.
+    /// Each display's size is marked laid out (`DisplayState::laid_out`).
     fn compute_layouts(&self) -> Option<(Layouts, i32, i32, f64)> {
-        let st = self.st.lock();
+        let mut st = self.st.lock();
         let primary = st.displays.get(PRIMARY_DISPLAY);
         let secondary = st
             .displays
@@ -3799,6 +3810,9 @@ impl WsService {
                     .unwrap_or(st.seeds.framerate)
             })
             .fold(0.0, f64::max);
+        for d in st.displays.values_mut() {
+            d.laid_out = Some((d.width, d.height));
+        }
         Some((layouts, total_w, total_h, fps))
     }
 
