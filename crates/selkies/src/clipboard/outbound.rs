@@ -106,11 +106,7 @@ impl Clipboard {
             && payload.mime != FLAVORS_MIME
             && !self.policy().binary
         {
-            warn!(
-                target: "ws",
-                "Attempted to send binary clipboard data ({}) but feature is disabled on server.",
-                payload.mime
-            );
+            warn!(target: "ws", "Attempted to send binary clipboard data but feature is disabled on server.");
             return;
         }
         let total = payload.bytes.len();
@@ -146,12 +142,7 @@ impl Clipboard {
         };
         let small = total < CHUNK_SIZE;
         if !small {
-            let size = if payload.secret {
-                "a secret".to_string()
-            } else {
-                format!("{total} bytes")
-            };
-            debug!(target: "ws", "Sending large clipboard data ({}, {size}) via multipart.", payload.mime);
+            debug!(target: "ws", "Sending large clipboard data via multipart.");
         }
         let payload = Arc::new(payload);
         let deliveries = locks.into_iter().map(|(id, lock)| {
