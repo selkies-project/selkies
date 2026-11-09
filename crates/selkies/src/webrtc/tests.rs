@@ -2223,6 +2223,68 @@ async fn owner_a_page_beside_it_is_held_back_until_it_owns_the_display() {
     rig.service.shutdown().await;
 }
 
+/// The owner's reload keeps the display while its new connection gathers against a TURN server
+/// that never answers, which outlasts the reconnect grace: its session has started, its peer
+/// connection is not in the engine yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_a_reload_still_gathering_keeps_the_display() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rig.peer("a", ClientType::Controller, "primary").await;
+    rig.peer("b", ClientType::Controller, "primary").await;
+    {
+        let mut st = rig.service.st.lock();
+        st.peer_tabs.insert("a".into(), Some("tab-a".into()));
+        st.peer_tabs.insert("b".into(), Some("tab-b".into()));
+        st.owner_tabs.insert("primary".into(), "tab-a".into());
+    }
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = silent.local_addr().unwrap();
+    let turn = selkies_rtc::ice::IceServer {
+        urls: vec![format!("turn:{addr}?transport=udp")],
+        username: Some("user".into()),
+        credential: Some("secret".into()),
+    };
+    rig.service.engine.update_ice_servers(vec![turn]);
+    rig.service
+        .engine
+        .stop_rtc_connection("a", "controller")
+        .await;
+    let registry = rig.service.peer_registry().expect("running");
+    let (peer_socket, _outbox) = socket();
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { registry.serve(peer_socket, rx, "test", None).await });
+    let hello = json!({"client_type": "controller", "client_slot": 1, "display_id": "primary",
+                       "client_tab_id": "tab-a"});
+    tx.send(Inbound::Text(format!("HELLO client {hello}")))
+        .await
+        .unwrap();
+    tx.send(Inbound::Text("SESSION server".into()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let reloaded = rig
+        .service
+        .st
+        .lock()
+        .peer_tabs
+        .iter()
+        .any(|(pid, tab)| pid != "a" && tab.as_deref() == Some("tab-a"));
+    assert!(reloaded, "the reloaded page's session started");
+    assert_eq!(
+        rig.service.engine.peers.lock().len(),
+        1,
+        "and it is still gathering"
+    );
+    assert_eq!(
+        rig.service.st.lock().owner_tabs.get("primary").unwrap(),
+        "tab-a",
+        "past the grace, the reloading tab still owns the display"
+    );
+    drop(silent);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owner_reconciliation_closes_a_revoked_peer_and_keeps_the_rest() {
     let rig = Rig::new((1920, 1080), quick());
