@@ -630,9 +630,8 @@ impl TcpPoint {
         if owner.is_none() {
             info!(
                 target: "ice",
-                "{} closing {peer}: no connection for username fragment {:?}",
-                self.local,
-                ufrag.unwrap_or_default()
+                "{} closing {peer}: its first frame is no check for an attached connection",
+                self.local
             );
         }
         owner

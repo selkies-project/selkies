@@ -377,6 +377,9 @@ pub struct IceConfig {
     pub local_password: Option<String>,
     /// What resolves a remote candidate's `.local` name.
     pub mdns_lookup: MdnsLookup,
+    /// What the connection's log lines name it by, such as the peer it serves; a number counted
+    /// per process where unset.
+    pub label: Option<String>,
 }
 
 impl Default for IceConfig {
@@ -395,6 +398,7 @@ impl Default for IceConfig {
             local_username: None,
             local_password: None,
             mdns_lookup: default_lookup(),
+            label: None,
         }
     }
 }

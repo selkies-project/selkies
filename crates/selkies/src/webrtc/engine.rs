@@ -773,10 +773,11 @@ impl RtcEngine {
                 .parse()
                 .unwrap_or(10.0),
         };
-        let ice = {
+        let mut ice = {
             let topology = self.topology.read();
             topology.peer_config(&self.muxes.read())
         };
+        ice.label = Some(peer_id.to_string());
         let conn = self
             .next_conn
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

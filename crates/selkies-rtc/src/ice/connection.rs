@@ -34,6 +34,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -71,6 +72,8 @@ const TRANSACTION_MEMORY: Duration = Duration::from_secs(40);
 /// How a UDP socket of the connection's own reads, as the mux sockets do.
 const UDP_CHUNK: usize = 128 * 1024;
 const UDP_MAX_DATAGRAM: usize = 65_536;
+/// The number the next connection without a label logs under.
+static NEXT_UNLABELED: AtomicU64 = AtomicU64::new(1);
 
 /// The ICE parameters one side signals.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,7 +209,13 @@ impl IceConnection {
             .local_password
             .clone()
             .unwrap_or_else(|| stun::random_string(LOCAL_PWD_LENGTH));
-        let name = format!("Connection({local_username})");
+        let name = match &config.label {
+            Some(label) => format!("Connection({label})"),
+            None => format!(
+                "Connection({})",
+                NEXT_UNLABELED.fetch_add(1, Ordering::Relaxed)
+            ),
+        };
         let agent = IceAgent::new(
             Instant::now(),
             &name,
