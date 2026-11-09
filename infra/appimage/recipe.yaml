@@ -66,7 +66,7 @@ tests:
       # libraries found there, with the web client compiled into it
       - selkies --version
       - selkies --help > /dev/null
-      - selkies --version | grep -F "web client: embedded ("
+      - 'selkies --version | grep -F "web client: embedded ("'
 
 about:
   summary: Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)
