@@ -9,20 +9,66 @@ picture, 30 predictions and SATDs a block over the whole picture, on one thread,
 frame reaches the encoder. A block the picture's constant map marks, whose neighbours the
 estimate reads samples from (left, above-left, above, above-right, below-left) are marked as
 well, has the lowres samples the frame before had, so the estimate would come out the same:
-it keeps the frame before's cost, mode, and lowres cost, the frame before being the
-lookahead's last non-B frame, alive as the reference. Every stream comes out bit for bit the
-same. A still 1920x1080 frame, every block marked, took 3.1 ms on eight threads where it took
-4.5, and 6.5 on one where it took 8.4; at 2560x1600 5.5 against 8.8 on eight.
----
- source/encoder/slicetype.cpp | 45 ++++++++++++++++++++++++++++++++----
- source/encoder/slicetype.h   |  2 +-
- 2 files changed, 41 insertions(+), 6 deletions(-)
+it keeps the frame before's estimate and mode, the frame before being the lookahead's last
+non-B frame, alive as the reference. The estimate is kept in a Lowres array of its own
+(intraEstimate): a VBV rate control weights intraCost, and an I frame's intra lowres costs,
+in place by each block's quantizer offset as the frame is coded, so a block taken from there
+would carry the weight of adaptive quantization or of a caller's offset into the next frame's
+estimate and compound it every frame it stays constant.
 
+With no lookahead and no B-frames, where the lookahead's last non-B frame is the frame before,
+every stream comes out bit for bit as without the patch, at 1920x1080 on one thread with a
+still screen marked beside a moving window: at a constant quantizer, a constant rate factor,
+and a constant rate, with adaptive quantization at strength 1 and, through qp-offsets, with
+offsets on constant blocks, on blocks refined before they turn constant, on key frames, and
+with none. A constant rate on several threads differs from run to run in x265 itself; there
+every frame's estimates come out the same. A still 1920x1080 frame, every block marked, took
+3.0 ms on eight threads where it took 4.5, and 7.2 on one where it took 9.6; at 2560x1600 6.1
+against 8.8 on eight.
+---
+ source/common/lowres.cpp     |  2 ++
+ source/common/lowres.h       |  1 +
+ source/encoder/slicetype.cpp | 46 ++++++++++++++++++++++++++++++++----
+ source/encoder/slicetype.h   |  2 +-
+ 4 files changed, 45 insertions(+), 6 deletions(-)
+
+diff --git a/source/common/lowres.cpp b/source/common/lowres.cpp
+index 52953a8..d453517 100644
+--- a/source/common/lowres.cpp
++++ b/source/common/lowres.cpp
+@@ -183,6 +183,7 @@ bool Lowres::create(x265_param* param, PicYuv *origPic, uint32_t qgSize)
+     }
+ 
+     CHECKED_MALLOC(intraCost, int32_t, cuCount);
++    CHECKED_MALLOC(intraEstimate, int32_t, cuCount);
+     CHECKED_MALLOC(intraMode, uint8_t, cuCount);
+ 
+     for (int i = 0; i < bframes + 2; i++)
+@@ -261,6 +262,7 @@ void Lowres::destroy(x265_param* param)
+     if(bEnableHME || param->bEnableTemporalFilter)
+         X265_FREE(lowerResBuffer[0]);
+     X265_FREE(intraCost);
++    X265_FREE(intraEstimate);
+     X265_FREE(intraMode);
+ 
+     for (int i = 0; i < bframes + 2; i++)
+diff --git a/source/common/lowres.h b/source/common/lowres.h
+index 2bf39c3..7c1522f 100644
+--- a/source/common/lowres.h
++++ b/source/common/lowres.h
+@@ -185,6 +185,7 @@ struct Lowres : public ReferencePlanes
+     int32_t*  rowSatds[X265_BFRAME_MAX + 2][X265_BFRAME_MAX + 2];
+     int       intraMbs[X265_BFRAME_MAX + 2];
+     int32_t*  intraCost;
++    int32_t*  intraEstimate;  // intraCost as lowresIntraEstimate gave it, unweighted by the rate control
+     uint8_t*  intraMode;
+     int64_t   satdCost;
+     uint16_t* lowresCostForRc;
 diff --git a/source/encoder/slicetype.cpp b/source/encoder/slicetype.cpp
-index 3ecc641..99495c8 100644
+index 3ecc641..a73ca41 100644
 --- a/source/encoder/slicetype.cpp
 +++ b/source/encoder/slicetype.cpp
-@@ -701,7 +701,28 @@ void LookaheadTLD::calcAdaptiveQuantFrame(Frame *curFrame, x265_param* param)
+@@ -701,7 +701,29 @@ void LookaheadTLD::calcAdaptiveQuantFrame(Frame *curFrame, x265_param* param)
      }
  }
  
@@ -46,13 +92,14 @@ index 3ecc641..99495c8 100644
 +
 +/* prev and constant, where given, name the frame before and the blocks the caller marked
 + * unchanged since it: a block whose samples, and the neighbours' it predicts from, are the
-+ * frame before's keeps that frame's intra cost and mode, which the estimate would compute
-+ * again to the same value */
++ * frame before's keeps that frame's intra estimate and mode, which the estimate would compute
++ * again to the same value. The estimate is kept in intraEstimate, since a VBV rate control
++ * weights intraCost in place by the block's quantizer offset as the frame is coded */
 +void LookaheadTLD::lowresIntraEstimate(Lowres& fenc, uint32_t qgSize, const Lowres* prev, const uint8_t* constant)
  {
      ALIGN_VAR_32(pixel, prediction[X265_LOWRES_CU_SIZE * X265_LOWRES_CU_SIZE]);
      pixel fencIntra[X265_LOWRES_CU_SIZE * X265_LOWRES_CU_SIZE];
-@@ -731,6 +752,16 @@ void LookaheadTLD::lowresIntraEstimate(Lowres& fenc, uint32_t qgSize)
+@@ -731,6 +753,15 @@ void LookaheadTLD::lowresIntraEstimate(Lowres& fenc, uint32_t qgSize)
              const intptr_t pelOffset = cuSize * cuX + cuSize * cuY * fenc.lumaStride;
              pixel *pixCur = fenc.lowresPlane[0] + pelOffset;
  
@@ -60,9 +107,8 @@ index 3ecc641..99495c8 100644
 +            uint32_t ilowmode = 0;
 +            if (prev && constant && intraEstimateConstant(constant, cuX, cuY, widthInCU, heightInCU))
 +            {
-+                icost = prev->intraCost[cuXY];
++                icost = prev->intraEstimate[cuXY];
 +                ilowmode = prev->intraMode[cuXY];
-+                fenc.lowresCosts[0][0][cuXY] = prev->lowresCosts[0][0][cuXY];
 +            }
 +            else
 +            {
@@ -79,15 +125,19 @@ index 3ecc641..99495c8 100644
              /* DC and planar */
              primitives.cu[sizeIdx].intra_pred[DC_IDX](prediction, cuSize, samples, 0, cuSize <= 16);
              cost = satd(fencIntra, cuSize, prediction, cuSize);
-@@ -786,6 +814,7 @@ void LookaheadTLD::lowresIntraEstimate(Lowres& fenc, uint32_t qgSize)
+@@ -784,9 +812,11 @@ void LookaheadTLD::lowresIntraEstimate(Lowres& fenc, uint32_t qgSize)
+             COPY2_IF_LT(icost, acost, ilowmode, alowmode);
+ 
              icost += intraPenalty + lowresPenalty; /* estimate intra signal cost */
++            }
  
              fenc.lowresCosts[0][0][cuXY] = (uint16_t)(X265_MIN(icost, LOWRES_COST_MASK) | (0 << LOWRES_COST_SHIFT));
-+            }
              fenc.intraCost[cuXY] = icost;
++            fenc.intraEstimate[cuXY] = icost;
              fenc.intraMode[cuXY] = (uint8_t)ilowmode;
              /* do not include edge blocks in the 
-@@ -1755,7 +1784,13 @@ void PreLookaheadGroup::processTasks(int workerThreadID)
+             frame cost estimates, they are not very accurate */
+@@ -1755,7 +1785,13 @@ void PreLookaheadGroup::processTasks(int workerThreadID)
          if (m_lookahead.m_param->bHistBasedSceneCut)
              tld.collectPictureStatistics(preFrame);
  
@@ -96,7 +146,7 @@ index 3ecc641..99495c8 100644
 +         * reference; its blocks the picture marks constant keep their estimates */
 +        const Lowres* prev = m_lookahead.m_lastNonB;
 +        const uint8_t* constant = preFrame->m_constantBlocks;
-+        if (prev == &preFrame->m_lowres || !prev || !prev->intraCost)
++        if (prev == &preFrame->m_lowres || !prev || !prev->intraEstimate)
 +            constant = NULL;
 +        tld.lowresIntraEstimate(preFrame->m_lowres, m_lookahead.m_param->rc.qgSize, prev, constant);
          preFrame->m_lowresInit = true;
