@@ -444,6 +444,13 @@ fn x264_frame_rate(fps: f64) -> FrameRate {
     FrameRate::of(if fps < 1.0 { 30.0 } else { fps })
 }
 
+/// Quantizer steps a halving of a capped CRF's key frame is taken to need where it is aimed into
+/// the bucket's room (`H264EncoderWrapper::aim_key`, `fit_key`), an encode at most aimed: text
+/// keeps 17 steps a halving between quantizers 12 and 35 (10.1 to 4.1 Mbit at 1280x720) where
+/// the quantizer's own scale says 6, so an aim of 6 lands a second attempt past the room.
+#[cfg(feature = "gpl")]
+const KEY_STEPS: f64 = 10.0;
+
 /// Quantizer steps finer than the paint-over one a capped CRF codes a block owed its paint-over
 /// at (`ledger::BlockLedger::refresh_owed`): a refinement's, and two more, the predicted frame
 /// over a coarser picture landing short of it: a 720p page under a 4 Mbit/s peak came to
@@ -460,8 +467,10 @@ const OWED_FINER: u32 = crate::ledger::REFINE_FINER + 2;
 /// the VBV's, takes each frame: from a frame that overflows it the rate factor stands `offset`
 /// above the session's, aimed after each frame at bringing the bucket back to half full in
 /// `DRAIN_FRAMES` frames (a size halving every six steps) and lowered at most `RELEASE_STEP` a
-/// frame. A key frame past the bucket's room is coded again nearer half of it
-/// (`H264EncoderWrapper::fit_key`), as x264's VBV holds a frame to half its buffer's fill.
+/// frame. A key frame is aimed at half the bucket's room, as x264's VBV holds a frame to half
+/// its buffer's fill: from the start where the last key frame says it would not fit
+/// (`H264EncoderWrapper::aim_key`), else by one encode more where its first comes out past the
+/// room (`H264EncoderWrapper::fit_key`).
 #[cfg(feature = "gpl")]
 #[derive(Clone, Copy, Debug)]
 struct X264Peak {
@@ -571,6 +580,11 @@ pub struct H264EncoderWrapper {
     /// rate factor for the peak (`coded_capped`).
     coded: Option<Coded>,
     last_capped: bool,
+    /// The last key frame's first attempt (`aim_key`).
+    last_key: Option<LastKey>,
+    /// The pictures x264 has been handed, attempts again included.
+    #[cfg(test)]
+    encodes: usize,
     /// The quantizer offset of each macroblock of the next frame, empty where it has none
     /// (`refine_blocks`).
     quant_offsets: Vec<f32>,
@@ -579,6 +593,17 @@ pub struct H264EncoderWrapper {
     mb_info: Vec<u8>,
     /// The picture x264 still reads after its last encode (`held_input`).
     held_input: Option<*const u8>,
+}
+
+/// A key frame's first attempt (`H264EncoderWrapper::aim_key`): its bits, the quantizer it was
+/// planned or held at, the rate factor it was coded under, and whether it was held there.
+#[cfg(feature = "gpl")]
+#[derive(Clone, Copy, Debug)]
+struct LastKey {
+    bits: f64,
+    qp: f64,
+    rf: f64,
+    held: bool,
 }
 
 /// A frame x264 coded: its bits, the quantizer it was planned or held at, whether it was a key
@@ -914,6 +939,9 @@ impl H264EncoderWrapper {
                     open_qp_max: param.rc.i_qp_max,
                     coded: None,
                     last_capped: false,
+                    last_key: None,
+                    #[cfg(test)]
+                    encodes: 0,
                     quant_offsets: Vec::new(),
                     mb_info: Vec::new(),
                     held_input: None,
@@ -1359,57 +1387,35 @@ impl H264EncoderWrapper {
         let key_budget =
             self.is_cbr && force_idr && self.held_qp.is_some() && self.open_for_held_key();
         self.last_capped = self.peak_bound();
+        let key = force_idr || !self.references.has_reference();
+        let aimed = (key && self.held_qp.is_none())
+            .then(|| self.aim_key())
+            .flatten();
+        if let Some(q) = aimed {
+            self.held_qp = Some(q as i32);
+        }
+        let rf = self.rf_constant;
         let mut coded = self.encode_picture(input, frame_id, force_idr, omit_headers, output_buf);
         if key_budget {
             self.restore_rate();
         }
-        if coded {
-            coded = self.fit_key(input, frame_id, omit_headers, output_buf);
+        // The key frame's first attempt, as the rate factor coded it or as it was aimed.
+        if let Some(frame) = self.coded.filter(|c| c.key) {
+            self.last_key = Some(LastKey {
+                bits: frame.bits,
+                qp: frame.qp,
+                rf,
+                held: aimed.is_some(),
+            });
         }
-        if let Some(frame) = self.coded.take() {
-            self.fold_frame(frame);
-        }
-        coded
-    }
-
-    /// Code a capped CRF's key frame that overflows the room its peak has left again, held at a
-    /// quantizer aimed at half that room, up to `KEY_ATTEMPTS` times, each aimed by the sizes
-    /// before it (`X264Peak`); the last attempt is the one that goes out, and the rate factor
-    /// stands at its quantizer from there, so the frames after it refine the picture as the peak
-    /// lets them rather than code it again at the session's own. False where an attempt coded
-    /// nothing.
-    fn fit_key(
-        &mut self,
-        input: Input<'_>,
-        frame_id: u16,
-        omit_headers: bool,
-        output_buf: &mut Vec<u8>,
-    ) -> bool {
-        const KEY_ATTEMPTS: usize = 3;
-        let Some(room) = self.peak.map(|p| p.room()) else {
-            return true;
-        };
-        // Quantizer steps a halving of the frame takes, from the attempts so far.
-        let mut steps = 6.0;
-        let mut held = None;
-        for _ in 0..KEY_ATTEMPTS {
-            let Some(last) = self.coded.filter(|c| c.key && c.bits > room && c.qp < 51.0) else {
-                break;
-            };
-            let q = (last.qp + steps * (2.0 * last.bits / room).log2())
-                .ceil()
-                .min(51.0);
-            self.held_qp = Some(q as i32);
-            if !self.encode_picture(input, frame_id, true, omit_headers, output_buf) {
-                return false;
-            }
-            held = Some(q);
-            self.last_capped = true;
-            if let Some(next) = self.coded.filter(|c| c.bits < last.bits) {
-                steps = ((next.qp - last.qp) / (last.bits / next.bits).log2()).clamp(3.0, 24.0);
-            }
+        let mut held = aimed;
+        if coded && aimed.is_none() {
+            (coded, held) = self.fit_key(input, frame_id, omit_headers, output_buf);
         }
         if let (Some(q), Some(peak)) = (held, self.peak.as_mut()) {
+            // The rate factor stands at the key frame's quantizer from here, so the frames after
+            // it refine the picture as the peak lets them rather than code it again whole.
+            self.last_capped = true;
             let crf = self.current_crf as f64;
             let offset = (q - crf).clamp(peak.offset, (51.0 - crf).max(0.0));
             if offset != peak.offset {
@@ -1417,7 +1423,55 @@ impl H264EncoderWrapper {
                 self.set_rate_factor(self.current_crf, offset);
             }
         }
-        true
+        if let Some(frame) = self.coded.take() {
+            self.fold_frame(frame);
+        }
+        coded
+    }
+
+    /// The quantizer a capped CRF's key frame is held at from the start, where the last key
+    /// frame's first attempt (`LastKey`) says one at the rate factor now would overflow the room
+    /// the bucket has left: aimed at half that room, at `KEY_STEPS` quantizer steps a halving
+    /// (`X264Peak`), one encode. `None` where it would fit, or where no key frame came before,
+    /// whose first attempt `fit_key` measures instead.
+    fn aim_key(&self) -> Option<f64> {
+        let room = self.peak?.room().max(1.0);
+        let last = self.last_key?;
+        // What the last key frame would have come to at the rate factor now: from the rate factor
+        // it was coded under, or from the quantizer it was held at.
+        let from = if last.held { last.qp } else { last.rf };
+        let expected = last.bits * 2f64.powf((from - self.rf_constant) / KEY_STEPS);
+        (expected > room).then(|| {
+            (last.qp + KEY_STEPS * (2.0 * last.bits / room).log2())
+                .ceil()
+                .min(51.0)
+        })
+    }
+
+    /// Code a capped CRF's key frame that overflows the room its peak has left once more, held at
+    /// a quantizer aimed at half that room from the first attempt's size, at `KEY_STEPS`
+    /// quantizer steps a halving (`X264Peak`); the second attempt is the one that goes out,
+    /// overflowing or not, so a key frame costs at most two encodes. Returns whether the frame
+    /// coded, and the quantizer it was held at where it was coded again.
+    fn fit_key(
+        &mut self,
+        input: Input<'_>,
+        frame_id: u16,
+        omit_headers: bool,
+        output_buf: &mut Vec<u8>,
+    ) -> (bool, Option<f64>) {
+        let Some(room) = self.peak.map(|p| p.room().max(1.0)) else {
+            return (true, None);
+        };
+        let Some(first) = self.coded.filter(|c| c.key && c.bits > room && c.qp < 51.0) else {
+            return (true, None);
+        };
+        let q = (first.qp + KEY_STEPS * (2.0 * first.bits / room).log2())
+            .ceil()
+            .min(51.0);
+        self.held_qp = Some(q as i32);
+        let coded = self.encode_picture(input, frame_id, true, omit_headers, output_buf);
+        (coded, Some(q))
     }
 
     /// `encode_input` past the choice of session.
@@ -1429,6 +1483,10 @@ impl H264EncoderWrapper {
         omit_headers: bool,
         output_buf: &mut Vec<u8>,
     ) -> bool {
+        #[cfg(test)]
+        {
+            self.encodes += 1;
+        }
         unsafe {
             let mut pic_in: codec_sys::x264::x264_picture_t = std::mem::zeroed();
             codec_sys::x264::x264_picture_init(&mut pic_in);
@@ -4570,6 +4628,51 @@ mod qp_bound_sweep {
             ));
             assert_no_reorder(&out, &format!("x264 fullcolor {fullcolor} cbr {cbr}"));
         }
+    }
+
+    /// A capped CRF's key frame costs at most two encodes, the first of a session measuring
+    /// itself and coding once more aimed into the bucket, and one after a key frame before it,
+    /// aimed from the start: each within the buffer.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_codes_a_key_frame_in_at_most_two_encodes() {
+        const VBV_KBIT: i32 = 1500;
+        let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+        let mut enc = H264EncoderWrapper::new(
+            W as i32, H as i32, 12, false, 60.0, 4, false, 8000, VBV_KBIT, 0, 0,
+        )
+        .expect("x264 init");
+        let key = |enc: &mut H264EncoderWrapper, i: usize| {
+            let before = enc.encodes;
+            let mut out = Vec::new();
+            assert!(enc.encode_with_headers(
+                &text_luma(i),
+                &u,
+                &v,
+                W as i32,
+                (W / 2) as i32,
+                (W / 2) as i32,
+                i as u16,
+                true,
+                true,
+                &mut out
+            ));
+            (enc.encodes - before, out.len() * 8)
+        };
+        let (first, first_bits) = key(&mut enc, 0);
+        for _ in 0..120 {
+            enc.idle(&CaptureSettings {
+                video_bitrate_kbps: 8000,
+                video_vbv_multiplier: VBV_KBIT as f64 * 1000.0 / (8_000_000.0 / 60.0),
+                target_fps: 60.0,
+                ..Default::default()
+            });
+        }
+        let (later, later_bits) = key(&mut enc, 1);
+        println!("first key: {first} encodes, {first_bits} bits; later: {later}, {later_bits}");
+        assert!(first <= 2, "the first key frame took {first} encodes");
+        assert_eq!(later, 1, "a later key frame took {later} encodes");
+        assert!(first_bits <= VBV_KBIT as usize * 1000 && later_bits <= VBV_KBIT as usize * 1000);
     }
 
     /// A CRF session given a VBV codes its key frame within the buffer, where the same session
