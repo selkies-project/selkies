@@ -146,7 +146,7 @@ def transport_block(mode: str) -> "H.Results":
                               C.wait_log("Configured audio device 'output.monitor' is valid.", timeout=15), "")
                 else:
                     res.check("ws: mic control connected at the handshake",
-                              C.wait_log("Sound server control ready for the microphone (pulsectl)", timeout=10), "")
+                              C.wait_log("Sound server control ready for the microphone (libpulse)", timeout=10), "")
                 toggle(page, True)
                 res.check("client reports the microphone active", wait_status(page, True),
                           str(page.evaluate("window.__micStatus")))
