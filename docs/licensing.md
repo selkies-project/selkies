@@ -142,7 +142,7 @@ Selkies and keep their own licenses.
 
 | Crate | Version | Where | License | Category | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `rtc-dtls` | 0.21.1 | `crates/selkies-rtc/vendor/rtc-dtls` | Apache-2.0 OR MIT | permissive | the workspace patches the published crate with it; `rtc-dtls-selkies.patch` beside it is the diff, the fix and test of webrtc-rs/rtc#288 under the crate's own license |
+| `rtc-dtls` | 0.21.1 | `crates/selkies-rtc/vendor/rtc-dtls` | Apache-2.0 OR MIT | permissive | the workspace patches the published crate with it; `rtc-dtls-selkies.patch` beside it is the diff, the fix and test of webrtc-rs/rtc#288 under the crate's own license and the Selkies code-scanning fixes, which are MPL-2.0 |
 | `rtc-sctp` | 0.21.1 | `crates/selkies-rtc/vendor/rtc-sctp` | Apache-2.0 OR MIT | permissive | the workspace patches the published crate with it; `rtc-sctp-selkies.patch` beside it is the diff, whose changes are MPL-2.0 |
 | `rtc-srtp` | 0.21.1 | `crates/selkies-rtc/vendor/rtc-srtp` | Apache-2.0 OR MIT | permissive | the workspace patches the published crate with it; `rtc-srtp-selkies.patch` beside it is the diff, whose changes are MPL-2.0 |
 

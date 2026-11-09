@@ -1,8 +1,8 @@
 # rtc-dtls 0.21.1 (https://github.com/webrtc-rs/rtc, MIT/Apache-2.0), vendored with the
-# retransmission fix and test of webrtc-rs/rtc#288 applied on top; the workspace's
-# `[patch.crates-io]` points the `rtc-dtls` dependency here. `rtc-dtls-selkies.patch` beside
-# it is the diff against the published crate. The examples and benchmarks, and the
-# dev-dependencies only they use, are left out.
+# retransmission fix and test of webrtc-rs/rtc#288 and the Selkies code-scanning fixes applied on
+# top; the workspace's `[patch.crates-io]` points the `rtc-dtls` dependency here.
+# `rtc-dtls-selkies.patch` beside it is the diff against the published crate. The examples and
+# benchmarks, and the dev-dependencies only they use, are left out.
 
 [package]
 name = "rtc-dtls"

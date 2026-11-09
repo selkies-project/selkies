@@ -107,8 +107,8 @@ impl Flight for Flight4 {
 
             state.peer_certificates.clone_from(&h.certificate);
             trace!(
-                "[handshake] PeerCertificates4 {}",
-                state.peer_certificates.len()
+                "[handshake] PeerCertificates4 present: {}",
+                !state.peer_certificates.is_empty()
             );
         }
 
@@ -468,9 +468,9 @@ impl Flight for Flight4 {
         match cfg.client_auth {
             ClientAuthType::RequireAnyClientCert => {
                 trace!(
-                    "{} peer_certificates.len() {}",
+                    "{} peer_certificates present: {}",
                     srv_cli_str(state.is_client),
-                    state.peer_certificates.len(),
+                    !state.peer_certificates.is_empty(),
                 );
                 if state.peer_certificates.is_empty() {
                     return Err((

@@ -15,8 +15,8 @@ const CRYPTO_CHACHA20_NONCE_LENGTH: usize = 12;
 pub struct CryptoChaCha20 {
     local_cc: Box<dyn AeadCipher>,
     remote_cc: Box<dyn AeadCipher>,
-    local_write_iv: Vec<u8>,
-    remote_write_iv: Vec<u8>,
+    local_write_iv: [u8; CRYPTO_CHACHA20_NONCE_LENGTH],
+    remote_write_iv: [u8; CRYPTO_CHACHA20_NONCE_LENGTH],
 }
 
 fn noncegen(nonce: &mut [u8], epoch: u16, seqnum: u64) {
@@ -29,6 +29,10 @@ fn noncegen(nonce: &mut [u8], epoch: u16, seqnum: u64) {
 
 impl CryptoChaCha20 {
     /// Builds the cipher from the local and remote keys and salts.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a write IV is not the nonce's length or the provider rejects a key.
     pub fn new(
         provider: Arc<dyn RTCCryptoProvider>,
         local_key: &[u8],
@@ -36,6 +40,12 @@ impl CryptoChaCha20 {
         remote_key: &[u8],
         remote_write_iv: &[u8],
     ) -> Result<Self> {
+        let local_write_iv = local_write_iv
+            .try_into()
+            .map_err(|_| Error::ErrLengthMismatch)?;
+        let remote_write_iv = remote_write_iv
+            .try_into()
+            .map_err(|_| Error::ErrLengthMismatch)?;
         let local_cc = provider
             .crypto()
             .new_aead(AeadAlgorithm::ChaCha20Poly1305, local_key)
@@ -46,9 +56,9 @@ impl CryptoChaCha20 {
             .map_err(crypto_error)?;
         Ok(CryptoChaCha20 {
             local_cc,
-            local_write_iv: local_write_iv.to_vec(),
+            local_write_iv,
             remote_cc,
-            remote_write_iv: remote_write_iv.to_vec(),
+            remote_write_iv,
         })
     }
 
@@ -61,10 +71,7 @@ impl CryptoChaCha20 {
         let payload = &raw[RECORD_LAYER_HEADER_SIZE..];
         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
 
-        let mut nonce = [0u8; CRYPTO_CHACHA20_NONCE_LENGTH];
-        nonce[..CRYPTO_CHACHA20_NONCE_LENGTH]
-            .copy_from_slice(&self.local_write_iv[..CRYPTO_CHACHA20_NONCE_LENGTH]);
-
+        let mut nonce = self.local_write_iv;
         noncegen(&mut nonce[..], pkt_rlh.epoch, pkt_rlh.sequence_number);
         let additional_data = generate_aead_additional_data(pkt_rlh, payload.len());
 
@@ -102,9 +109,7 @@ impl CryptoChaCha20 {
             return Ok(r.to_vec());
         }
 
-        let mut nonce = [0; CRYPTO_CHACHA20_NONCE_LENGTH];
-        nonce.copy_from_slice(&self.remote_write_iv[..]);
-
+        let mut nonce = self.remote_write_iv;
         noncegen(&mut nonce[..], h.epoch, h.sequence_number);
         let out = &r[RECORD_LAYER_HEADER_SIZE..];
         if out.len() < CRYPTO_CHACHA20_TAG_LENGTH {

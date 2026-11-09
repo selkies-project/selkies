@@ -75,10 +75,7 @@ fn test_master_secret() -> Result<()> {
         CipherSuiteHash::Sha256,
     )?;
 
-    assert_eq!(
-        expected_master_secret, master_secret,
-        "master_secret exp: {expected_master_secret:?} actual: {master_secret:?}"
-    );
+    assert!(expected_master_secret == master_secret, "master_secret");
 
     Ok(())
 }

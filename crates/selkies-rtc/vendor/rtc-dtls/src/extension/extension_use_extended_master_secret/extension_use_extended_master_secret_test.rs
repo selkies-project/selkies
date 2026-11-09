@@ -14,18 +14,18 @@ fn test_extension_use_extended_master_secret() -> Result<()> {
         parsed_extension_use_extended_master_secret.marshal(&mut writer)?;
     }
 
-    assert_eq!(
-        raw, raw_extension_use_extended_master_secret,
-        "extension_use_extended_master_secret marshal: got {raw:?}, want {raw_extension_use_extended_master_secret:?}"
+    assert!(
+        raw == raw_extension_use_extended_master_secret,
+        "extension_use_extended_master_secret marshal"
     );
 
     let mut reader = BufReader::new(raw.as_slice());
     let new_extension_use_extended_master_secret =
         ExtensionUseExtendedMasterSecret::unmarshal(&mut reader)?;
 
-    assert_eq!(
-        new_extension_use_extended_master_secret, parsed_extension_use_extended_master_secret,
-        "extension_use_extended_master_secret unmarshal: got {new_extension_use_extended_master_secret:?}, want {parsed_extension_use_extended_master_secret:?}"
+    assert!(
+        new_extension_use_extended_master_secret == parsed_extension_use_extended_master_secret,
+        "extension_use_extended_master_secret unmarshal"
     );
 
     Ok(())

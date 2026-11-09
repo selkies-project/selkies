@@ -141,3 +141,33 @@ index 80f4c39..d5b1fd7 100644
      /// EncryptRTP marshals and encrypts an RTP packet, writing to the dst buffer provided.
      /// If the dst buffer does not have the capacity to hold `len(plaintext) + 10` bytes, a new one will be allocated and returned.
      pub fn encrypt_rtp(&mut self, plaintext: &[u8]) -> Result<BytesMut> {
+diff --git a/src/key_derivation.rs b/src/key_derivation.rs
+index ac01257..2cf43a9 100644
+--- a/src/key_derivation.rs
++++ b/src/key_derivation.rs
+@@ -184,9 +184,9 @@ mod test {
+             0,
+             master_key.len(),
+         )?;
+-        assert_eq!(
+-            session_key, expected_session_key,
+-            "Session Key:\n{session_key:?} \ndoes not match expected:\n{expected_session_key:?}\nMaster Key:\n{master_key:?}\nMaster Salt:\n{master_salt:?}\n",
++        assert!(
++            session_key == expected_session_key,
++            "Session Key does not match expected"
+         );
+ 
+         let session_salt = aes_cm_key_derivation(
+@@ -272,9 +272,9 @@ mod test {
+             0,
+             master_key.len(),
+         )?;
+-        assert_eq!(
+-            session_key, expected_session_key,
+-            "Session Key:\n{session_key:?} \ndoes not match expected:\n{expected_session_key:?}\nMaster Key:\n{master_key:?}\nMaster Salt:\n{master_salt:?}\n",
++        assert!(
++            session_key == expected_session_key,
++            "Session Key does not match expected"
+         );
+ 
+         let session_salt = aes_256_cm_key_derivation(

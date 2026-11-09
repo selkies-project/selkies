@@ -1,3 +1,223 @@
+diff --git a/src/crypto/crypto_chacha20.rs b/src/crypto/crypto_chacha20.rs
+index f00f455..4e5bd1e 100644
+--- a/src/crypto/crypto_chacha20.rs
++++ b/src/crypto/crypto_chacha20.rs
+@@ -15,8 +15,8 @@ const CRYPTO_CHACHA20_NONCE_LENGTH: usize = 12;
+ pub struct CryptoChaCha20 {
+     local_cc: Box<dyn AeadCipher>,
+     remote_cc: Box<dyn AeadCipher>,
+-    local_write_iv: Vec<u8>,
+-    remote_write_iv: Vec<u8>,
++    local_write_iv: [u8; CRYPTO_CHACHA20_NONCE_LENGTH],
++    remote_write_iv: [u8; CRYPTO_CHACHA20_NONCE_LENGTH],
+ }
+ 
+ fn noncegen(nonce: &mut [u8], epoch: u16, seqnum: u64) {
+@@ -29,6 +29,10 @@ fn noncegen(nonce: &mut [u8], epoch: u16, seqnum: u64) {
+ 
+ impl CryptoChaCha20 {
+     /// Builds the cipher from the local and remote keys and salts.
++    ///
++    /// # Errors
++    ///
++    /// Fails if a write IV is not the nonce's length or the provider rejects a key.
+     pub fn new(
+         provider: Arc<dyn RTCCryptoProvider>,
+         local_key: &[u8],
+@@ -36,6 +40,12 @@ impl CryptoChaCha20 {
+         remote_key: &[u8],
+         remote_write_iv: &[u8],
+     ) -> Result<Self> {
++        let local_write_iv = local_write_iv
++            .try_into()
++            .map_err(|_| Error::ErrLengthMismatch)?;
++        let remote_write_iv = remote_write_iv
++            .try_into()
++            .map_err(|_| Error::ErrLengthMismatch)?;
+         let local_cc = provider
+             .crypto()
+             .new_aead(AeadAlgorithm::ChaCha20Poly1305, local_key)
+@@ -46,9 +56,9 @@ impl CryptoChaCha20 {
+             .map_err(crypto_error)?;
+         Ok(CryptoChaCha20 {
+             local_cc,
+-            local_write_iv: local_write_iv.to_vec(),
++            local_write_iv,
+             remote_cc,
+-            remote_write_iv: remote_write_iv.to_vec(),
++            remote_write_iv,
+         })
+     }
+ 
+@@ -61,10 +71,7 @@ impl CryptoChaCha20 {
+         let payload = &raw[RECORD_LAYER_HEADER_SIZE..];
+         let raw = &raw[..RECORD_LAYER_HEADER_SIZE];
+ 
+-        let mut nonce = [0u8; CRYPTO_CHACHA20_NONCE_LENGTH];
+-        nonce[..CRYPTO_CHACHA20_NONCE_LENGTH]
+-            .copy_from_slice(&self.local_write_iv[..CRYPTO_CHACHA20_NONCE_LENGTH]);
+-
++        let mut nonce = self.local_write_iv;
+         noncegen(&mut nonce[..], pkt_rlh.epoch, pkt_rlh.sequence_number);
+         let additional_data = generate_aead_additional_data(pkt_rlh, payload.len());
+ 
+@@ -102,9 +109,7 @@ impl CryptoChaCha20 {
+             return Ok(r.to_vec());
+         }
+ 
+-        let mut nonce = [0; CRYPTO_CHACHA20_NONCE_LENGTH];
+-        nonce.copy_from_slice(&self.remote_write_iv[..]);
+-
++        let mut nonce = self.remote_write_iv;
+         noncegen(&mut nonce[..], h.epoch, h.sequence_number);
+         let out = &r[RECORD_LAYER_HEADER_SIZE..];
+         if out.len() < CRYPTO_CHACHA20_TAG_LENGTH {
+diff --git a/src/extension/extension_use_extended_master_secret/extension_use_extended_master_secret_test.rs b/src/extension/extension_use_extended_master_secret/extension_use_extended_master_secret_test.rs
+index 8ea2379..a59f536 100644
+--- a/src/extension/extension_use_extended_master_secret/extension_use_extended_master_secret_test.rs
++++ b/src/extension/extension_use_extended_master_secret/extension_use_extended_master_secret_test.rs
+@@ -14,18 +14,18 @@ fn test_extension_use_extended_master_secret() -> Result<()> {
+         parsed_extension_use_extended_master_secret.marshal(&mut writer)?;
+     }
+ 
+-    assert_eq!(
+-        raw, raw_extension_use_extended_master_secret,
+-        "extension_use_extended_master_secret marshal: got {raw:?}, want {raw_extension_use_extended_master_secret:?}"
++    assert!(
++        raw == raw_extension_use_extended_master_secret,
++        "extension_use_extended_master_secret marshal"
+     );
+ 
+     let mut reader = BufReader::new(raw.as_slice());
+     let new_extension_use_extended_master_secret =
+         ExtensionUseExtendedMasterSecret::unmarshal(&mut reader)?;
+ 
+-    assert_eq!(
+-        new_extension_use_extended_master_secret, parsed_extension_use_extended_master_secret,
+-        "extension_use_extended_master_secret unmarshal: got {new_extension_use_extended_master_secret:?}, want {parsed_extension_use_extended_master_secret:?}"
++    assert!(
++        new_extension_use_extended_master_secret == parsed_extension_use_extended_master_secret,
++        "extension_use_extended_master_secret unmarshal"
+     );
+ 
+     Ok(())
+diff --git a/src/flight/flight4.rs b/src/flight/flight4.rs
+index 781d826..8464d07 100644
+--- a/src/flight/flight4.rs
++++ b/src/flight/flight4.rs
+@@ -107,8 +107,8 @@ impl Flight for Flight4 {
+ 
+             state.peer_certificates.clone_from(&h.certificate);
+             trace!(
+-                "[handshake] PeerCertificates4 {}",
+-                state.peer_certificates.len()
++                "[handshake] PeerCertificates4 present: {}",
++                !state.peer_certificates.is_empty()
+             );
+         }
+ 
+@@ -468,9 +468,9 @@ impl Flight for Flight4 {
+         match cfg.client_auth {
+             ClientAuthType::RequireAnyClientCert => {
+                 trace!(
+-                    "{} peer_certificates.len() {}",
++                    "{} peer_certificates present: {}",
+                     srv_cli_str(state.is_client),
+-                    state.peer_certificates.len(),
++                    !state.peer_certificates.is_empty(),
+                 );
+                 if state.peer_certificates.is_empty() {
+                     return Err((
+diff --git a/src/handshake/handshake_message_certificate/handshake_message_certificate_test.rs b/src/handshake/handshake_message_certificate/handshake_message_certificate_test.rs
+index 94edfc4..d94ea69 100644
+--- a/src/handshake/handshake_message_certificate/handshake_message_certificate_test.rs
++++ b/src/handshake/handshake_message_certificate/handshake_message_certificate_test.rs
+@@ -51,9 +51,9 @@ fn test_handshake_message_certificate() -> Result<()> {
+         let mut writer = BufWriter::<&mut Vec<u8>>::new(raw.as_mut());
+         c.marshal(&mut writer)?;
+     }
+-    assert_eq!(
+-        raw, raw_certificate,
+-        "handshakeMessageCertificate marshal: got {raw:?}, want {raw_certificate:?}"
++    assert!(
++        raw == raw_certificate,
++        "handshakeMessageCertificate marshal"
+     );
+ 
+     Ok(())
+@@ -70,9 +70,9 @@ fn test_empty_handshake_message_certificate() -> Result<()> {
+     let mut reader = BufReader::new(raw_certificate.as_slice());
+     let c = HandshakeMessageCertificate::unmarshal(&mut reader)?;
+ 
+-    assert_eq!(
+-        c, expected_certificate,
+-        "handshakeMessageCertificate unmarshal: got {c:?}, want {expected_certificate:?}",
++    assert!(
++        c == expected_certificate,
++        "handshakeMessageCertificate unmarshal"
+     );
+ 
+     Ok(())
+diff --git a/src/handshake/handshake_message_certificate_request/handshake_message_certificate_request_test.rs b/src/handshake/handshake_message_certificate_request/handshake_message_certificate_request_test.rs
+index f636e48..9b4a640 100644
+--- a/src/handshake/handshake_message_certificate_request/handshake_message_certificate_request_test.rs
++++ b/src/handshake/handshake_message_certificate_request/handshake_message_certificate_request_test.rs
+@@ -45,9 +45,9 @@ fn test_handshake_message_certificate_request() -> Result<()> {
+ 
+     let mut reader = BufReader::new(raw_certificate_request.as_slice());
+     let c = HandshakeMessageCertificateRequest::unmarshal(&mut reader)?;
+-    assert_eq!(
+-        c, parsed_certificate_request,
+-        "parsedCertificateRequest unmarshal: got {c:?}, want {parsed_certificate_request:?}"
++    assert!(
++        c == parsed_certificate_request,
++        "parsedCertificateRequest unmarshal"
+     );
+ 
+     let mut raw = vec![];
+@@ -55,9 +55,9 @@ fn test_handshake_message_certificate_request() -> Result<()> {
+         let mut writer = BufWriter::<&mut Vec<u8>>::new(raw.as_mut());
+         c.marshal(&mut writer)?;
+     }
+-    assert_eq!(
+-        raw, raw_certificate_request,
+-        "parsedCertificateRequest marshal: got {raw:?}, want {raw_certificate_request:?}"
++    assert!(
++        raw == raw_certificate_request,
++        "parsedCertificateRequest marshal"
+     );
+ 
+     Ok(())
+diff --git a/src/handshake/handshake_message_certificate_verify/handshake_message_certificate_verify_test.rs b/src/handshake/handshake_message_certificate_verify/handshake_message_certificate_verify_test.rs
+index 6fd67aa..1a8d17f 100644
+--- a/src/handshake/handshake_message_certificate_verify/handshake_message_certificate_verify_test.rs
++++ b/src/handshake/handshake_message_certificate_verify/handshake_message_certificate_verify_test.rs
+@@ -21,9 +21,9 @@ fn test_handshake_message_certificate_request() -> Result<()> {
+ 
+     let mut reader = BufReader::new(raw_certificate_verify.as_slice());
+     let c = HandshakeMessageCertificateVerify::unmarshal(&mut reader)?;
+-    assert_eq!(
+-        c, parsed_certificate_verify,
+-        "handshakeMessageCertificate unmarshal: got {c:?}, want {parsed_certificate_verify:?}"
++    assert!(
++        c == parsed_certificate_verify,
++        "handshakeMessageCertificate unmarshal"
+     );
+ 
+     let mut raw = vec![];
+@@ -31,9 +31,9 @@ fn test_handshake_message_certificate_request() -> Result<()> {
+         let mut writer = BufWriter::<&mut Vec<u8>>::new(raw.as_mut());
+         c.marshal(&mut writer)?;
+     }
+-    assert_eq!(
+-        raw, raw_certificate_verify,
+-        "handshakeMessageCertificateVerify marshal: got {raw:?}, want {raw_certificate_verify:?}"
++    assert!(
++        raw == raw_certificate_verify,
++        "handshakeMessageCertificateVerify marshal"
+     );
+ 
+     Ok(())
 diff --git a/src/handshaker.rs b/src/handshaker.rs
 index 26ffe9e..dd2d44b 100644
 --- a/src/handshaker.rs
@@ -25,6 +245,22 @@ index 26ffe9e..dd2d44b 100644
                      debug!(
                          "[handshake:{}] {} -> {}",
                          srv_cli_str(self.state.is_client),
+diff --git a/src/prf/prf_test.rs b/src/prf/prf_test.rs
+index 7b479a0..f404e1d 100644
+--- a/src/prf/prf_test.rs
++++ b/src/prf/prf_test.rs
+@@ -75,10 +75,7 @@ fn test_master_secret() -> Result<()> {
+         CipherSuiteHash::Sha256,
+     )?;
+ 
+-    assert_eq!(
+-        expected_master_secret, master_secret,
+-        "master_secret exp: {expected_master_secret:?} actual: {master_secret:?}"
+-    );
++    assert!(expected_master_secret == master_secret, "master_secret");
+ 
+     Ok(())
+ }
 diff --git a/tests/retransmission_timer.rs b/tests/retransmission_timer.rs
 new file mode 100644
 index 0000000..6c91a97

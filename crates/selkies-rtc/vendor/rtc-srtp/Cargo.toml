@@ -1,7 +1,7 @@
 # rtc-srtp 0.21.1 (https://github.com/webrtc-rs/rtc, MIT/Apache-2.0), vendored with the
-# Selkies change applied on top; the workspace's `[patch.crates-io]` points the `rtc-srtp`
+# Selkies changes applied on top; the workspace's `[patch.crates-io]` points the `rtc-srtp`
 # dependency here. `rtc-srtp-selkies.patch` beside it is the diff against the published
-# crate, the shape the change takes upstream.
+# crate, the shape the changes take upstream.
 
 [package]
 name = "rtc-srtp"

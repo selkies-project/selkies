@@ -21,9 +21,9 @@ fn test_handshake_message_certificate_request() -> Result<()> {
 
     let mut reader = BufReader::new(raw_certificate_verify.as_slice());
     let c = HandshakeMessageCertificateVerify::unmarshal(&mut reader)?;
-    assert_eq!(
-        c, parsed_certificate_verify,
-        "handshakeMessageCertificate unmarshal: got {c:?}, want {parsed_certificate_verify:?}"
+    assert!(
+        c == parsed_certificate_verify,
+        "handshakeMessageCertificate unmarshal"
     );
 
     let mut raw = vec![];
@@ -31,9 +31,9 @@ fn test_handshake_message_certificate_request() -> Result<()> {
         let mut writer = BufWriter::<&mut Vec<u8>>::new(raw.as_mut());
         c.marshal(&mut writer)?;
     }
-    assert_eq!(
-        raw, raw_certificate_verify,
-        "handshakeMessageCertificateVerify marshal: got {raw:?}, want {raw_certificate_verify:?}"
+    assert!(
+        raw == raw_certificate_verify,
+        "handshakeMessageCertificateVerify marshal"
     );
 
     Ok(())

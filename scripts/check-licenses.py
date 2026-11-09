@@ -386,7 +386,8 @@ ROLES: Tuple[Role, ...] = (
 # Crates vendored under crates/*/vendor and what Selkies does with each.
 VENDORED: Dict[str, str] = {
     "rtc-dtls": "the workspace patches the published crate with it; `rtc-dtls-selkies.patch` beside it is the "
-                "diff, the fix and test of webrtc-rs/rtc#288 under the crate's own license",
+                "diff, the fix and test of webrtc-rs/rtc#288 under the crate's own license and the Selkies "
+                "code-scanning fixes, which are MPL-2.0",
     "rtc-sctp": "the workspace patches the published crate with it; `rtc-sctp-selkies.patch` beside it is the "
                 "diff, whose changes are MPL-2.0",
     "rtc-srtp": "the workspace patches the published crate with it; `rtc-srtp-selkies.patch` beside it is the "

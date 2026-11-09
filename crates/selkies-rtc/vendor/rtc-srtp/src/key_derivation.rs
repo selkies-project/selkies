@@ -184,9 +184,9 @@ mod test {
             0,
             master_key.len(),
         )?;
-        assert_eq!(
-            session_key, expected_session_key,
-            "Session Key:\n{session_key:?} \ndoes not match expected:\n{expected_session_key:?}\nMaster Key:\n{master_key:?}\nMaster Salt:\n{master_salt:?}\n",
+        assert!(
+            session_key == expected_session_key,
+            "Session Key does not match expected"
         );
 
         let session_salt = aes_cm_key_derivation(
@@ -272,9 +272,9 @@ mod test {
             0,
             master_key.len(),
         )?;
-        assert_eq!(
-            session_key, expected_session_key,
-            "Session Key:\n{session_key:?} \ndoes not match expected:\n{expected_session_key:?}\nMaster Key:\n{master_key:?}\nMaster Salt:\n{master_salt:?}\n",
+        assert!(
+            session_key == expected_session_key,
+            "Session Key does not match expected"
         );
 
         let session_salt = aes_256_cm_key_derivation(
