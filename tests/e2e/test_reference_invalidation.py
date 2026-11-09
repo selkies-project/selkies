@@ -5,9 +5,10 @@ A WebRTC sender that falls behind its encoder for a moment drops frames before
 they are packetized. Told which frame went, the encoder predicts past it and the
 receiver decodes on; told nothing, the stream can only resume at a keyframe,
 which costs the link an intra picture and the viewer a frozen one. The load
-here is that moment, repeated: the server's event loop shares one CPU with
-busy processes in short bursts, each long enough to drop frames and too short
-for the receiver to ask for a keyframe on its own. The scene is tests/tools/motion_scene.py, whose every frame spells its own
+here is that moment, repeated: the server's runtime shares one CPU with busy
+processes in short bursts (test_video_drop_recovery's `Load`), each long enough
+to drop frames and too short for the receiver to ask for a keyframe on its own.
+The scene is tests/tools/motion_scene.py, whose every frame spells its own
 index, so a decoded picture can be compared with the frame it claims to be.
 Counted throughout: the frames the server dropped, those of them the encoder
 was told to predict past, the keyframes decoded, and the picture-loss
@@ -129,15 +130,22 @@ def report(res: H.Results, tag: str, samples: list, dropped: int, named: int, bu
     frames to predict past, the recovery cost no keyframe beyond the frame_num wraps the
     losses covered, and every decoded picture was the frame it claimed to be. `bursts`
     holds each burst's frames let go and frames named, `ranges` the frame_num ranges the
-    load's key frames carried."""
+    load's key frames carried. A load that let nothing go fails as a load: there was no
+    loss to repair, so the repair's own checks are not run."""
     bad = [s for s in samples if D.corrupt(s)]
     detail = (f"dropped {dropped}, named {named}, keyframes +{keyframes}, "
               f"{'plis +%d, ' % plis if plis is not None else ''}frames +{frames}, "
               f"corrupt {len(bad)}/{len(samples)}")
     print(f"      [{tag}] {detail}, on {' then '.join(encoders) or 'no encoder logged'}, "
           f"frame_num ranges {ranges}, let go and named per burst {bursts}", flush=True)
-    res.check(f"{tag}: the load really dropped frames", dropped > 0, detail)
-    res.check(f"{tag}: the encoder was told which frames to predict past", named > 0, detail)
+    res.check(f"{tag}: the load really dropped frames", dropped > 0,
+              detail if dropped else f"the load let no frame go on this host: {detail}")
+    if not dropped:
+        res.skip(f"{tag}: the encoder was told which frames to predict past", "no drops to repair")
+        res.skip(f"{tag}: the drops cost at most one keyframe beyond the frame_num wraps",
+                 "no drops to repair")
+    else:
+        res.check(f"{tag}: the encoder was told which frames to predict past", named > 0, detail)
     # Beyond what the wraps and the deep bursts cost (keyframe_ceiling), one is the
     # measured allowance -- a burst that lands badly still trips the receiver's own
     # keyframe timer now and then -- and every capture restart opens with one. A
@@ -145,7 +153,7 @@ def report(res: H.Results, tag: str, samples: list, dropped: int, named: int, bu
     # a ceiling of a handful.
     res.check(f"{tag}: the server logged the frame_num range the load ran on", bool(ranges),
               f"{ranges} on {encoders}")
-    if ranges:
+    if ranges and dropped:
         ceiling = 1 + (len(encoders) - 1) + keyframe_ceiling([n for n, _ in bursts], min(ranges))
         res.check(f"{tag}: the drops cost at most one keyframe beyond the frame_num wraps",
                   keyframes <= ceiling,
@@ -160,9 +168,9 @@ def report(res: H.Results, tag: str, samples: list, dropped: int, named: int, bu
 def webrtc(res: H.Results) -> None:
     tag = f"webrtc-{ENGINE}"
     H.server_start(mode="webrtc", wayland=False, extra_env=D.server_env("default"))
+    threads = D.runtime_threads(next(iter(H.server_pids(H.PORT))))
     painter = H.spawn([sys.executable, D.PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"],
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    pid = next(iter(H.server_pids(H.PORT)))
     load = None
     with sync_playwright() as pw:
         if ENGINE == "firefox":
@@ -203,7 +211,7 @@ def webrtc(res: H.Results) -> None:
             mark = len(H.server_log())
             # Slowed, not stopped: a stall longer than the encoder's references
             # costs a keyframe however it is repaired.
-            load = D.Load(pid, stall=False)
+            load = D.Load(threads, stall=False)
             load.start()
             samples = []
             dropped, named, bursts = drops0, named0, []

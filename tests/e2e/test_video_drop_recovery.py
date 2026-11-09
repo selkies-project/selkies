@@ -12,8 +12,8 @@ never let a later delta frame evict that keyframe.
 The scene is tests/tools/motion_scene.py, whose every frame spells its own
 index, so a decoded picture can be compared with the frame it claims to be,
 and whose noise band keeps a constant-bitrate stream at its configured rate. The
-sender is made to fall behind by pinning the server's event loop to one CPU
-and sharing that CPU with busy processes in bursts. The browser's decoded
+sender is made to fall behind by pinning the server's runtime to one CPU and
+sharing that CPU with busy processes in bursts (`Load`). The browser's decoded
 pictures, its inbound-rtp counters, and the server's bridge-drop counter are
 read throughout.
 
@@ -40,8 +40,8 @@ WIDTH, HEIGHT = 1280, 720
 ENGINE = os.environ.get("E2E_ENGINE", "chromium")
 PAINTER = os.path.join(H.TOOLS, "motion_scene.py")
 GEOMETRY = motion_scene.geometry()
-# Busy processes sharing the loop's CPU, and their on/off cadence.
-HOGS = 3
+# Busy processes sharing the runtime's CPU, and their on/off cadence.
+HOGS = 16
 BURST_ON_S, BURST_OFF_S = 0.4, 0.6
 LOAD_S = 20.0
 SETTLE_S = 5.0
@@ -172,37 +172,63 @@ def server_env(cell: str) -> dict:
     return env
 
 
-def loop_thread(pid: int) -> int:
-    """The server's event loop runs on its main thread."""
-    return pid
+def runtime_threads(pid: int) -> set:
+    """The threads the server runs before a page connects: its async runtime's
+    workers, which send the frames, and the helpers started with them. A
+    capture and its encoder start on threads of their own once a page asks for
+    video, so a load on these slows what sends the frames and not what makes
+    them. The runtime's workers carry no name a capture's threads lack (a thread
+    takes its creator's), so they are told apart by having come first."""
+    return {int(tid) for tid in os.listdir(f"/proc/{pid}/task")}
 
 
 class Load:
-    """Busy processes that share one CPU with the server's event loop.
+    """Busy processes that share one CPU with the server's runtime.
 
-    The loop thread is pinned beside them while they run and goes back to
-    every CPU it had between bursts. At its own priority it gets their
-    share of the one CPU while they run, which is short of what it needs,
-    so a burst slows it and frames drop; `stall` also sets it to the lowest
-    priority, where a burst stops it outright. Raising a thread's niceness
-    needs no privilege and lowering it back does, so a stalled loop keeps
-    that priority to the end, and on a busy host it then starves behind
-    whatever else runs beside it between bursts as well.
+    The runtime's threads (`runtime_threads`) are pinned beside them while they
+    run and go back to every CPU they had between bursts. Each busy process
+    runs in a session of its own: the kernel shares a CPU between sessions
+    before it shares it between their threads (autogroup), so busy processes in
+    one session leave the server half of it however many there are, and a
+    sender mostly keeps up on half a CPU. Sixteen leave the runtime about a
+    seventeenth: test_reference_invalidation's 80 ms bursts let frames go in
+    about half of them, against one in eight with three busy processes in one
+    session and one in four with eight in sessions of their own. `stall` also
+    sets the threads to the lowest priority, which counts where the kernel
+    groups no sessions. Raising a thread's niceness needs no privilege and
+    lowering it back does, so stalled threads keep that priority to the end.
     """
 
-    def __init__(self, pid: int, stall: bool = True) -> None:
-        self.tid = loop_thread(pid)
-        self.original = os.sched_getaffinity(self.tid)
-        self.cpu = max(self.original)
+    def __init__(self, threads: set, stall: bool = True) -> None:
+        self.original = {}
+        for tid in threads:
+            try:
+                self.original[tid] = os.sched_getaffinity(tid)
+            except OSError:
+                pass
+        self.cpu = max(set().union(*self.original.values()))
         self.stall = stall
         self.hogs: list = []
 
+    def _pin(self, cpus: Optional[set]) -> None:
+        """Every runtime thread still alive to `cpus`, or back to its own."""
+        for tid, original in self.original.items():
+            try:
+                os.sched_setaffinity(tid, cpus or original)
+            except OSError:
+                pass
+
     def start(self) -> None:
         if self.stall:
-            os.setpriority(os.PRIO_PROCESS, self.tid, 19)
+            for tid in self.original:
+                try:
+                    os.setpriority(os.PRIO_PROCESS, tid, 19)
+                except OSError:
+                    pass
         for _ in range(HOGS):
             hog = H.spawn([sys.executable, "-c", "while True: pass"],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          start_new_session=True)
             os.sched_setaffinity(hog.pid, {self.cpu})
             self.hogs.append(hog)
         self.pause()
@@ -210,10 +236,10 @@ class Load:
     def pause(self) -> None:
         for hog in self.hogs:
             hog.send_signal(signal.SIGSTOP)
-        os.sched_setaffinity(self.tid, self.original)
+        self._pin(None)
 
     def resume(self) -> None:
-        os.sched_setaffinity(self.tid, {self.cpu})
+        self._pin({self.cpu})
         for hog in self.hogs:
             hog.send_signal(signal.SIGCONT)
 
@@ -224,10 +250,7 @@ class Load:
         for hog in self.hogs:
             hog.wait(timeout=5)
         self.hogs = []
-        try:
-            os.sched_setaffinity(self.tid, self.original)
-        except OSError:
-            pass
+        self._pin(None)
 
 
 def sample(page: Any) -> Optional[dict]:
@@ -256,9 +279,9 @@ def wait_clean(page: Any, timeout: float) -> Optional[dict]:
 def drive(res: H.Results, cell: str) -> None:
     tag = f"{ENGINE}-{cell}"
     H.server_start(mode="webrtc", wayland=False, extra_env=server_env(cell))
+    threads = runtime_threads(next(iter(H.server_pids(H.PORT))))
     painter = H.spawn([sys.executable, PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"],
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    pid = next(iter(H.server_pids(H.PORT)))
     load = None
     with sync_playwright() as pw:
         if ENGINE == "firefox":
@@ -286,7 +309,7 @@ def drive(res: H.Results, cell: str) -> None:
             drops0 = bridge_drops()
             res.check(f"{tag}: the bridge-drop counter is published", drops0 is not None, drops0)
 
-            load = Load(pid)
+            load = Load(threads)
             load.start()
             samples: list = []
             end = time.time() + LOAD_S
