@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/opt/rustup \
     PATH=/opt/venv/bin:/opt/cargo/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates build-essential dbus gcc-multilib git jq libkvazaar-dev libxkbcommon0 pkg-config python3 python3-dev python3-venv \
+      ca-certificates build-essential dbus gcc-multilib git jq libxkbcommon0 pkg-config python3 python3-dev python3-venv \
       pulseaudio pulseaudio-utils shellcheck xkb-data xvfb \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m tester
@@ -17,8 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --chown=tester:tester . /src
 WORKDIR /src
 
-# Owned by that user in the layer that writes them, since cargo locks its home even offline
-RUN scripts/ci/server-build-deps.sh && rm -rf /var/lib/apt/lists/* && cargo fetch --locked \
+# Owned by that user in the layer that writes them, since cargo locks its home even offline. Kvazaar, the
+# non-GPL HEVC encoder's library, is built at the release the wheel recipe pins, as CI does: the codec bindings
+# need its 2.3.2 rate-control ABI and Debian's package is older.
+RUN scripts/ci/server-build-deps.sh && sh crates/pixelflux/scripts/build-kvazaar.sh /usr/local && ldconfig \
+    && rm -rf /var/lib/apt/lists/* && cargo fetch --locked \
     && chown -R tester:tester /opt/cargo /opt/rustup
 RUN python3 -m venv /opt/venv && pip install --no-cache-dir pytest
 RUN for dir in addons/input-interposer addons/v4l2-interposer addons/fake-udev tests/tools; do \
