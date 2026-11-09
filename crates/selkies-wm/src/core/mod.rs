@@ -357,6 +357,8 @@ pub struct Engine {
     tile_preview: Option<(Zone, OutputId)>,
     /// The ghost of the dragged window gliding into that zone, or back out of it.
     tile_ghost: Option<TileGhost>,
+    /// The zone the pointer of a move drag rests in before it is shown, see [`TileDwell`].
+    tile_dwell: Option<TileDwell>,
     /// How many virtual desktops there are, and which one is shown.
     desktop_count: u32,
     current_desktop: u32,
@@ -441,6 +443,7 @@ impl Engine {
             effects: Effects::default(),
             pipes: Vec::new(),
             tile_preview: None,
+            tile_dwell: None,
             tile_ghost: None,
             desktop_count,
             current_desktop: 0,
@@ -1358,6 +1361,62 @@ impl Engine {
         self.out.push(Command::WakeAt(self.now));
     }
 
+    /// Follow the zone under the pointer of a move drag: the zone shown stays while the pointer
+    /// is in it, leaving it takes the ghost back at once, and a new zone is shown only after
+    /// the pointer has rested in it for [`TILE_DWELL`] within [`TILE_SETTLE`] of one spot.
+    ///
+    /// Without the wait a drag across the edge two monitors share, or one passing through a
+    /// corner, would glide a ghost into each zone it crosses; the tick arms the zone, since a
+    /// pointer at rest sends no motion.
+    ///
+    /// # Arguments
+    /// * `zone` - The zone under the pointer and its output, if any.
+    /// * `at` - The pointer position.
+    fn dwell_on_zone(&mut self, zone: Option<(Zone, OutputId)>, at: (f64, f64)) {
+        if zone.is_some() && zone == self.tile_preview {
+            self.tile_dwell = None;
+            return;
+        }
+        if self.tile_preview.is_some() {
+            self.set_tile_preview(None);
+        }
+        let Some(zone) = zone else {
+            self.tile_dwell = None;
+            return;
+        };
+        let settled = self
+            .tile_dwell
+            .as_ref()
+            .is_some_and(|d| d.zone == zone && (d.at.0 - at.0).hypot(d.at.1 - at.1) <= TILE_SETTLE);
+        if !settled {
+            self.tile_dwell = Some(TileDwell {
+                zone,
+                at,
+                since: self.now,
+            });
+            self.out.push(Command::WakeAt(self.now + TILE_DWELL));
+        }
+    }
+
+    /// Show the zone the pointer has rested in long enough, from the tick.
+    fn arm_tile_dwell(&mut self, now: Instant) {
+        let Some(dwell) = self.tile_dwell.as_ref() else {
+            return;
+        };
+        if self.grab.is_none() {
+            self.tile_dwell = None;
+            return;
+        }
+        let due = dwell.since + TILE_DWELL;
+        if now < due {
+            self.out.push(Command::WakeAt(due));
+            return;
+        }
+        let zone = dwell.zone;
+        self.tile_dwell = None;
+        self.set_tile_preview(Some(zone));
+    }
+
     /// Take the tile ghost down at once, as a drag's end does.
     fn clear_tile_ghost(&mut self) {
         if self.tile_ghost.take().is_some() {
@@ -2155,10 +2214,10 @@ impl Engine {
                 } else {
                     frame
                 };
-                let preview = self
+                let zone = self
                     .output_at(x, y)
                     .and_then(|o| grab::zone_at(o.rect, x, y).map(|zone| (zone, o.id)));
-                self.set_tile_preview(preview);
+                self.dwell_on_zone(zone, (x, y));
                 grab::client_of(frame, extents)
             }
             GrabKind::Resize(edge) => grab::constrain(wanted, &hints, edge),
@@ -2180,6 +2239,7 @@ impl Engine {
     }
 
     fn end_grab(&mut self) {
+        self.tile_dwell = None;
         let preview = self.tile_preview.take();
         self.clear_tile_ghost();
         if let Some(grab) = self.grab.take() {
@@ -2613,6 +2673,7 @@ impl Engine {
         if self.grab.is_some() && event.keysym == keys::ESCAPE {
             let grab = self.grab.take();
             self.tile_preview = None;
+            self.tile_dwell = None;
             self.clear_tile_ghost();
             if let Some(grab) = grab {
                 self.set_rect(grab.window, grab.start);
@@ -3813,6 +3874,7 @@ impl Engine {
 
     fn tick(&mut self, now: Instant) {
         self.now = now;
+        self.arm_tile_dwell(now);
         let (frames, done) = self.effects.tick(now);
         for (id, transform) in frames {
             self.out.push(Command::Effect {
@@ -3908,6 +3970,21 @@ struct TileGhost {
 
 /// How long the ghost takes to reach a zone.
 const TILE_GHOST: Duration = Duration::from_millis(180);
+
+/// How long the pointer of a move drag rests in a zone before the zone is shown.
+const TILE_DWELL: Duration = Duration::from_millis(500);
+
+/// How far, in logical pixels, the pointer may wander from where it entered a zone and still
+/// count as resting there.
+const TILE_SETTLE: f64 = 24.0;
+
+/// The zone a move drag's pointer has entered and not yet rested in long enough to show.
+struct TileDwell {
+    zone: (Zone, OutputId),
+    /// Where the pointer was when the rest began.
+    at: (f64, f64),
+    since: Instant,
+}
 
 impl TileGhost {
     /// Where the ghost stands at `now`, and whether it has arrived.
@@ -4236,7 +4313,8 @@ mod tests {
     }
 
     /// Super and an arrow quick-tile the focused window to a half, then a quarter, and back; a
-    /// title bar drag to the screen's edge shows the zone and tiles the window there on release.
+    /// title bar drag passing the screen's edge shows nothing, and one resting there shows the
+    /// zone and tiles the window there on release.
     #[test]
     fn quick_tiles_by_key_and_by_drag() {
         let (mut engine, _) = engine();
@@ -4304,9 +4382,6 @@ mod tests {
                 Under::default(),
             )
         };
-        engine.handle(press(title.0, title.1, true), &mut out);
-        out.clear();
-        engine.handle(motion(1279.0, 400.0), &mut out);
         let zone = Rect::new(640, 0, 640, 768);
         let ghost_rect = |out: &[Command]| {
             out.iter().rev().find_map(|c| match c {
@@ -4314,7 +4389,26 @@ mod tests {
                 _ => None,
             })
         };
-        let first = ghost_rect(&out).expect("the ghost appears as the pointer reaches the edge");
+        engine.handle(press(title.0, title.1, true), &mut out);
+        engine.handle(motion(1279.0, 400.0), &mut out);
+        engine.handle(motion(title.0, title.1), &mut out);
+        engine.now += TILE_DWELL;
+        engine.tick(engine.now);
+        out.append(&mut engine.out);
+        engine.handle(press(title.0, title.1, false), &mut out);
+        assert_eq!(ghost_rect(&out), None, "a drag passing the edge shows no zone");
+        assert_eq!(engine.windows[&1].tile, None);
+        assert_eq!(engine.windows[&1].rect, before);
+        engine.handle(press(title.0, title.1, true), &mut out);
+        out.clear();
+        engine.handle(motion(1279.0, 400.0), &mut out);
+        assert_eq!(ghost_rect(&out), None, "the zone waits for the pointer to rest");
+        assert!(out.iter().any(|c| matches!(c, Command::WakeAt(_))));
+        engine.handle(motion(1275.0, 410.0), &mut out);
+        engine.now += TILE_DWELL;
+        engine.tick(engine.now);
+        out.append(&mut engine.out);
+        let first = ghost_rect(&out).expect("the ghost appears once the pointer has rested at the edge");
         assert_ne!(
             first, zone,
             "the ghost starts at the window and glides into the zone"
