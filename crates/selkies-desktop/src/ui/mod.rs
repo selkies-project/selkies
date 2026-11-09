@@ -16,7 +16,7 @@ use tiny_skia::{Color, Path, PathBuilder};
 
 use crate::config::{Surface, WindowStyle};
 use crate::geom::Rect;
-use crate::render::{Align, Canvas, Fonts, rgb, rgba};
+use crate::render::{Align, Canvas, Fonts, rgb};
 pub use selkies_draw::style::{blend, gloss, luminance, shifted, surface_shade_in, with_alpha};
 
 /// Default height of the bar; the `panel_height` setting overrides it.
@@ -195,20 +195,6 @@ pub fn separator() -> Color {
 /// * `alpha` - Opacity from 0 to 255.
 pub fn text_alpha(alpha: u8) -> Color {
     with_alpha(theme().text, alpha)
-}
-/// Whether the theme's text is light, so what contrasts with it is dark.
-pub fn light_text() -> bool {
-    luminance(theme().text) > 0.5
-}
-
-/// A shadow under text drawn over the wallpaper: dark under light text,
-/// light under dark text, so the text reads either way.
-pub fn text_shadow() -> Color {
-    if light_text() {
-        rgba(0, 0, 0, 0xa0)
-    } else {
-        rgba(0xff, 0xff, 0xff, 0xa0)
-    }
 }
 
 /// Text drawn over the accent: black on a light accent, white on a dark one.
@@ -524,6 +510,7 @@ pub fn search_path(cx: i32, cy: i32) -> Option<Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::rgba;
 
     #[test]
     fn scrollbar_tracks_the_content() {
@@ -582,13 +569,9 @@ mod tests {
             text: rgb(0x10, 0x10, 0x10),
             ..Theme::default()
         });
-        assert!(!light_text());
         assert_eq!(on_accent().to_color_u8(), rgb(0x10, 0x10, 0x10).to_color_u8());
-        assert!(luminance(text_shadow()) > 0.5);
         set_theme(Theme::default());
-        assert!(light_text());
         assert_eq!(on_accent().to_color_u8(), Color::WHITE.to_color_u8());
-        assert!(luminance(text_shadow()) < 0.5);
     }
 
     #[test]

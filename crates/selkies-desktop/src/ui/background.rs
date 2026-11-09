@@ -224,7 +224,10 @@ pub fn draw_launchers(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
     }
 }
 
-/// Draws a label with a contrasting shadow so it reads on any wallpaper.
+/// Draws a label white over a dark shadow so it reads on any wallpaper.
+///
+/// The colors are the wallpaper's rather than the scheme's: a light scheme's dark text would
+/// vanish into a dark wallpaper, and the shadow keeps white legible on a light one.
 fn draw_shadowed(canvas: &mut Canvas<'_>, fonts: &mut Fonts, text: &Arc<Text>, cell: Rect, center_y: i32) {
     canvas.draw_text(
         fonts,
@@ -233,9 +236,17 @@ fn draw_shadowed(canvas: &mut Canvas<'_>, fonts: &mut Fonts, text: &Arc<Text>, c
         center_y + 1,
         cell.w,
         Align::Center,
-        ui::text_shadow(),
+        rgba(0, 0, 0, 0xc0),
     );
-    canvas.draw_text(fonts, text, cell.x, center_y, cell.w, Align::Center, ui::text());
+    canvas.draw_text(
+        fonts,
+        text,
+        cell.x,
+        center_y,
+        cell.w,
+        Align::Center,
+        rgba(0xff, 0xff, 0xff, 0xff),
+    );
 }
 
 /// A wallpaper image ready to paint.
