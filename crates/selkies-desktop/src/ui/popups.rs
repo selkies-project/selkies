@@ -7,7 +7,7 @@ use crate::event::{Button, WindowAction};
 use crate::geom::Rect;
 use crate::i18n::tr;
 use crate::render::{Align, Canvas, rgba};
-use crate::ui::{self, menu, panel, settings};
+use crate::ui::{self, launcher, menu, panel, settings};
 use crate::xkb::Key;
 
 /// Volume popup size.
@@ -54,6 +54,7 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Vec<Rect> {
     match d.popup {
         Popup::None => {}
         Popup::Menu => rects.push(menu::draw(d, canvas)),
+        Popup::Launcher => rects.push(launcher::draw(d, canvas)),
         Popup::Volume => rects.extend(draw_volume(d, canvas)),
         Popup::Calendar => rects.extend(draw_calendar(d, canvas)),
         Popup::TaskMenu(index) => rects.extend(draw_task_menu(d, canvas, index)),

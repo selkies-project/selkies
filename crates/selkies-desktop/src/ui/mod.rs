@@ -3,6 +3,7 @@
 
 pub mod background;
 pub mod files;
+pub mod launcher;
 pub mod menu;
 pub mod panel;
 pub mod popups;

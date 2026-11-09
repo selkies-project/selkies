@@ -855,8 +855,8 @@ mod tests {
         let flat = themerc(theme, WindowStyle::default());
         assert!(flat.starts_with(MARKER));
         assert!(flat.contains("window.active.title.bg: flat solid\n"));
-        assert!(flat.contains("window.active.title.bg.color: #0a0e17\n"));
-        assert!(flat.contains("menu.items.active.bg.color: #7967c5\n"));
+        assert!(flat.contains("window.active.title.bg.color: #31363b\n"));
+        assert!(flat.contains("menu.items.active.bg.color: #3daee9\n"));
         assert!(flat.contains("window.label.text.justify: center\n"));
         assert!(!flat.contains("button.close.unpressed"));
         let fruit = themerc(

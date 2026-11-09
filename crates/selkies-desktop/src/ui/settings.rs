@@ -99,7 +99,7 @@ const SWATCH: i32 = 22;
 
 /// The sliders of the Panel and Theme pages: key, lowest, highest, step
 /// and unit.
-const SLIDERS: [(&str, i32, i32, i32, &str); 5] = [
+const SLIDERS: [(&str, i32, i32, i32, &str); 6] = [
     (
         "panel_height",
         config::MIN_PANEL_HEIGHT,
@@ -111,13 +111,17 @@ const SLIDERS: [(&str, i32, i32, i32, &str); 5] = [
     ("panel_opacity", 0, 100, 5, "%"),
     ("panel_margin", 0, config::MAX_PANEL_MARGIN, 2, "px"),
     ("window_corners", 0, config::MAX_CORNERS, 1, "px"),
+    ("desktops", 1, config::MAX_DESKTOPS as i32, 1, ""),
 ];
 
 /// The color schemes: the four colors of each, as accent, bar, menus and
-/// text.
-const SCHEMES: [(&str, [&str; 4]); 2] = [
-    ("Dark", ["#7967c5", "#0a0e17", "#121826", "#eef2f8"]),
-    ("Light", ["#6b5bd6", "#e4e7ee", "#f5f6f9", "#1b2030"]),
+/// text.  Dark, the default, and Light share the sky-blue accent; the
+/// Selkies pair is the brand's violet on deep indigo.
+const SCHEMES: [(&str, [&str; 4]); 4] = [
+    ("Dark", ["#3daee9", "#31363b", "#2a2e32", "#fcfcfc"]),
+    ("Light", ["#3daee9", "#eff0f1", "#fcfcfc", "#232629"]),
+    ("Selkies Dark", ["#7967c5", "#0a0e17", "#121826", "#eef2f8"]),
+    ("Selkies Light", ["#6b5bd6", "#e4e7ee", "#f5f6f9", "#1b2030"]),
 ];
 
 /// A style: a name and the frame, bar and menu settings it bundles.
@@ -215,19 +219,19 @@ const SWATCHES: [&str; 12] = [
 ];
 /// Preset accent colors, the default first.
 const ACCENTS: [&str; 12] = [
-    "#7967c5", "#9d8cf0", "#3d7dd6", "#2f9e6e", "#d5499a", "#e0803a", "#d64545", "#8a8f99", "#1fa8b8",
-    "#c9a227", "#6c8ebf", "#b56576",
+    "#3daee9", "#7967c5", "#3d7dd6", "#2f9e6e", "#d5499a", "#e0803a", "#d64545", "#8a8f99", "#1fa8b8",
+    "#c9a227", "#9d8cf0", "#b56576",
 ];
 /// Preset surface colors for the bar and the menus, the defaults first and
 /// the light ones last.
 const SURFACES: [&str; 12] = [
-    "#0a0e17", "#121826", "#000000", "#1d222b", "#2b2b2b", "#1e2a3a", "#3b2d4a", "#2e3440", "#e4e7ee",
-    "#f5f6f9", "#f2f3f5", "#fdf6e3",
+    "#31363b", "#2a2e32", "#0a0e17", "#121826", "#000000", "#1d222b", "#2e3440", "#3b2d4a", "#eff0f1",
+    "#fcfcfc", "#e4e7ee", "#fdf6e3",
 ];
 /// Preset text colors, the default first and the dark ones last.
 const TEXTS: [&str; 12] = [
-    "#eef2f8", "#ffffff", "#d0d4da", "#b6c0d2", "#f5e6c8", "#c8e6ff", "#ffd166", "#93a1a1", "#586e75",
-    "#333333", "#1b2030", "#111111",
+    "#fcfcfc", "#eef2f8", "#ffffff", "#d0d4da", "#b6c0d2", "#f5e6c8", "#c8e6ff", "#93a1a1", "#586e75",
+    "#333333", "#232629", "#111111",
 ];
 
 /// The pages of the window.
@@ -847,6 +851,8 @@ fn preset_name(name: &str) -> &'static str {
     match name {
         "Dark" => tr("Dark"),
         "Light" => tr("Light"),
+        "Selkies Dark" => tr("Selkies Dark"),
+        "Selkies Light" => tr("Selkies Light"),
         "Linux" => tr("Linux"),
         "Fruit" => tr("Fruit"),
         _ => tr("Redmond"),
@@ -1369,6 +1375,14 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
             groups.switch(tr("Volume"), "show_volume", d.config.show_volume);
             groups.switch(tr("Tray"), "show_tray", d.config.show_tray);
             groups.switch(tr("Desktop"), "show_desktop_button", d.config.show_desktop_button);
+            groups.group(tr("Virtual desktops"));
+            groups.slider(tr("Desktops"), "desktops", slider_value(d, "desktops"), "");
+            groups.switch(tr("Show the pager"), "show_pager", d.config.show_pager);
+            groups.switch(
+                tr("Show windows of all desktops"),
+                "tasks_all_desktops",
+                d.config.tasks_all_desktops,
+            );
             groups.group(tr("Quick launch"));
             let launchers = d.config.launchers.clone();
             groups.chips(tr("Applications"), "launchers", &launchers, d);
@@ -1666,6 +1680,7 @@ fn slider_value(d: &Desktop, key: &str) -> i32 {
         "panel_width" => d.config.panel_width,
         "panel_margin" => d.config.panel_margin,
         "window_corners" => d.config.window.corners,
+        "desktops" => d.config.desktops as i32,
         _ => d.config.panel_opacity,
     }
 }

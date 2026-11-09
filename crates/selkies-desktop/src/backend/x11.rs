@@ -32,6 +32,8 @@ const FILES_APP_ID: &str = super::wayland::FILES_APP_ID;
 const MAX_ICON_LENGTH: u32 = 1 << 20;
 /// Pixels one wheel click scrolls.
 const WHEEL_STEP: f64 = 15.0;
+/// The `_NET_WM_DESKTOP` value of a window on every desktop.
+const ALL_DESKTOPS: u32 = 0xFFFF_FFFF;
 
 x11rb::atom_manager! {
     pub Atoms: AtomsCookie {
@@ -47,6 +49,8 @@ x11rb::atom_manager! {
         _NET_WM_PID,
         _NET_WM_ICON,
         _NET_WM_DESKTOP,
+        _NET_NUMBER_OF_DESKTOPS,
+        _NET_CURRENT_DESKTOP,
         _NET_WM_STATE,
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_STICKY,
@@ -111,6 +115,10 @@ pub struct X11Backend {
     shm_works: bool,
     toplevels: HashMap<xproto::Window, u64>,
     next_id: u64,
+    /// The virtual desktops the window manager publishes on the root, and
+    /// the current one.
+    desktops: u32,
+    current_desktop: u32,
     last_time: xproto::Timestamp,
     grabbed: bool,
     popup_open: bool,
@@ -219,6 +227,8 @@ impl X11Backend {
             shm_works,
             toplevels: HashMap::new(),
             next_id: 1,
+            desktops: 1,
+            current_desktop: 0,
             last_time: x11rb::CURRENT_TIME,
             grabbed: false,
             popup_open: false,
@@ -253,9 +263,40 @@ impl X11Backend {
             .conn
             .map_window(backend.panel.window)
             .map_err(|e| format!("{e}"))?;
+        backend.sync_desktops();
         backend.sync_clients();
         backend.conn.flush().map_err(|e| format!("{e}"))?;
         Ok(backend)
+    }
+
+    /// Reads a cardinal property's first value.
+    fn read_cardinal(&self, window: xproto::Window, property: xproto::Atom) -> Option<u32> {
+        self.property(window, property, xproto::AtomEnum::CARDINAL.into(), 1)
+            .and_then(|r| r.value32().and_then(|mut v| v.next()))
+    }
+
+    /// Reads the desktop count and the current desktop from the root and
+    /// reports them when they changed; a changed current desktop also
+    /// refreshes every window's hidden flag, which is relative to it.
+    fn sync_desktops(&mut self) {
+        let count = self
+            .read_cardinal(self.root, self.atoms._NET_NUMBER_OF_DESKTOPS)
+            .unwrap_or(1)
+            .max(1);
+        let current = self
+            .read_cardinal(self.root, self.atoms._NET_CURRENT_DESKTOP)
+            .unwrap_or(0)
+            .min(count - 1);
+        if (count, current) == (self.desktops, self.current_desktop) {
+            return;
+        }
+        let moved = current != self.current_desktop;
+        self.desktops = count;
+        self.current_desktop = current;
+        self.events.push(Event::Desktops { count, current });
+        if moved {
+            self.sync_active();
+        }
     }
 
     /// Derives the integer UI scale from the `Xft.dpi` resource, the value
@@ -529,7 +570,9 @@ impl X11Backend {
         Some(pix)
     }
 
-    /// Reads a window's state flags.
+    /// Reads a window's state flags.  A window is hidden when its
+    /// `_NET_WM_DESKTOP` names another desktop than the current one; a
+    /// window on all desktops (`0xFFFFFFFF`) or without the property never is.
     fn read_state(&self, window: xproto::Window) -> ToplevelState {
         let atoms: Vec<xproto::Atom> = self
             .property(
@@ -549,12 +592,16 @@ impl X11Backend {
             )
             .and_then(|r| r.value32().and_then(|mut v| v.next()))
             .unwrap_or(0);
+        let hidden = self
+            .read_cardinal(window, self.atoms._NET_WM_DESKTOP)
+            .is_some_and(|desktop| desktop != ALL_DESKTOPS && desktop != self.current_desktop);
         ToplevelState {
             minimized: atoms.contains(&self.atoms._NET_WM_STATE_HIDDEN),
             active: active == window,
             maximized: atoms.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_VERT)
                 || atoms.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_HORZ),
             fullscreen: atoms.contains(&self.atoms._NET_WM_STATE_FULLSCREEN),
+            hidden,
         }
     }
 
@@ -1176,6 +1223,10 @@ impl X11Backend {
                 self.sync_clients();
             } else if event.atom == self.atoms._NET_ACTIVE_WINDOW {
                 self.sync_active();
+            } else if event.atom == self.atoms._NET_NUMBER_OF_DESKTOPS
+                || event.atom == self.atoms._NET_CURRENT_DESKTOP
+            {
+                self.sync_desktops();
             } else if event.atom == u32::from(xproto::AtomEnum::RESOURCE_MANAGER) {
                 let (arrow, hand, drag) = load_cursors(&self.conn, self.screen);
                 self.cursor_arrow = arrow;
@@ -1207,6 +1258,11 @@ impl X11Backend {
                     state: self.read_state(event.window),
                 });
             }
+        } else if event.atom == self.atoms._NET_WM_DESKTOP {
+            self.events.push(Event::ToplevelState {
+                id,
+                state: self.read_state(event.window),
+            });
         } else if event.atom == self.atoms._NET_WM_NAME || event.atom == u32::from(xproto::AtomEnum::WM_NAME)
         {
             self.events.push(Event::ToplevelTitle {
@@ -1839,6 +1895,10 @@ impl Backend for X11Backend {
             }
             Request::StartDrag { window, .. } => {
                 self.start_drag(*window);
+                let _ = self.conn.flush();
+            }
+            Request::SwitchDesktop(index) => {
+                self.send_wm_message(self.root, self.atoms._NET_CURRENT_DESKTOP, [*index, 0, 0, 0, 0]);
                 let _ = self.conn.flush();
             }
             Request::SetVolume(_) | Request::ToggleMute => {}

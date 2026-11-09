@@ -162,6 +162,14 @@ pub struct Config {
     pub track_recent: bool,
     /// Whether the built-in file manager is offered.
     pub files_manager: bool,
+    /// How many virtual desktops the window manager runs, which reads this
+    /// key from the same file.
+    pub desktops: u32,
+    /// Whether the bar shows the pager when there is more than one desktop.
+    pub show_pager: bool,
+    /// Whether the taskbar lists the windows of every desktop rather than
+    /// the current one's.
+    pub tasks_all_desktops: bool,
 }
 
 impl Default for Config {
@@ -196,6 +204,9 @@ impl Default for Config {
             terminal: None,
             track_recent: true,
             files_manager: true,
+            desktops: DEFAULT_DESKTOPS,
+            show_pager: true,
+            tasks_all_desktops: false,
         }
     }
 }
@@ -216,6 +227,10 @@ pub const MIN_PANEL_HEIGHT: i32 = 24;
 pub const MAX_PANEL_HEIGHT: i32 = 64;
 /// Widest margin around the bar the settings accept.
 pub const MAX_PANEL_MARGIN: i32 = 16;
+/// Most virtual desktops the settings accept.
+pub const MAX_DESKTOPS: u32 = 9;
+/// Virtual desktops when the setting is absent.
+pub const DEFAULT_DESKTOPS: u32 = 2;
 
 /// The desktop file ID of the built-in file manager, the default favorite.
 pub const FILES_ENTRY: &str = "selkies-desktop-files.desktop";
@@ -394,6 +409,11 @@ impl Config {
         }
         config.track_recent = truthy("track_recent", config.track_recent);
         config.files_manager = truthy("files_manager", config.files_manager);
+        if let Some(count) = values.get("desktops").and_then(|v| v.trim().parse::<u32>().ok()) {
+            config.desktops = count.clamp(1, MAX_DESKTOPS);
+        }
+        config.show_pager = truthy("show_pager", config.show_pager);
+        config.tasks_all_desktops = truthy("tasks_all_desktops", config.tasks_all_desktops);
         config
     }
 
@@ -426,7 +446,7 @@ impl Config {
 pub const WALLPAPER_KEYS: [&str; 4] = ["background_style", "background", "wallpaper", "wallpaper_mode"];
 
 /// The keys of the bar's and the start menu's settings, which share a page.
-pub const PANEL_KEYS: [&str; 18] = [
+pub const PANEL_KEYS: [&str; 21] = [
     "panel_position",
     "panel_height",
     "panel_width",
@@ -445,6 +465,9 @@ pub const PANEL_KEYS: [&str; 18] = [
     "launchers",
     "favorites",
     "track_recent",
+    "desktops",
+    "show_pager",
+    "tasks_all_desktops",
 ];
 
 /// The keys of the interface colors.
@@ -694,5 +717,22 @@ mod tests {
         assert!(config.panel_centered);
         assert_eq!(config.menu_layout, MenuLayout::Tiles);
         assert_eq!(config.start_label.as_deref(), Some("Start"));
+    }
+
+    #[test]
+    fn reads_desktop_keys_and_clamps_the_count() {
+        let config = Config::from_values(&HashMap::new());
+        assert_eq!(config.desktops, DEFAULT_DESKTOPS);
+        assert!(config.show_pager);
+        assert!(!config.tasks_all_desktops);
+        let values = parse("desktops = 14\nshow_pager = no\ntasks_all_desktops = yes\n");
+        let config = Config::from_values(&values);
+        assert_eq!(config.desktops, MAX_DESKTOPS);
+        assert!(!config.show_pager);
+        assert!(config.tasks_all_desktops);
+        let config = Config::from_values(&parse("desktops = 0\n"));
+        assert_eq!(config.desktops, 1);
+        let config = Config::from_values(&parse("desktops = four\n"));
+        assert_eq!(config.desktops, DEFAULT_DESKTOPS);
     }
 }

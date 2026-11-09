@@ -49,6 +49,8 @@ pub struct ToplevelState {
     pub maximized: bool,
     /// The window is fullscreen.
     pub fullscreen: bool,
+    /// The window is on another virtual desktop.
+    pub hidden: bool,
 }
 
 /// An input or window event from the display server, in logical coordinates.
@@ -129,6 +131,9 @@ pub enum Event {
     ToplevelState { id: u64, state: ToplevelState },
     /// A toplevel closed.
     ToplevelClosed { id: u64 },
+    /// The window manager's virtual desktops: how many, and the index of
+    /// the current one.
+    Desktops { count: u32, current: u32 },
     /// The display server went away.
     Quit,
 }
@@ -161,7 +166,8 @@ pub enum Request {
     Cursor { pointer: bool },
     /// Place the bar: along the top edge or the bottom, reserving a height
     /// that includes the margin that floats it off the edge, and whether it
-    /// hides, in which case it reserves no space and stays above windows.
+    /// hides, in which case it reserves no space. The bar lies above windows either way, a
+    /// fullscreen window alone covering it.
     Panel {
         top: bool,
         height: i32,
@@ -172,6 +178,8 @@ pub enum Request {
     SetVolume(u8),
     /// Toggle the default sink's mute.
     ToggleMute,
+    /// Switch to the virtual desktop at an index.
+    SwitchDesktop(u32),
     /// Open a file manager window of a size, titled, with the icon a window
     /// manager may show for it.
     OpenWindow {

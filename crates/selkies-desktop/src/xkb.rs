@@ -43,7 +43,8 @@ pub enum Key {
     Home,
     /// End.
     End,
-    /// The Super key, which toggles the menu.
+    /// The Super key, which the window manager owns: it runs the quick
+    /// launcher on the release, so the desktop ignores a press of its own.
     Super,
     /// A function key, by number.
     Function(u8),

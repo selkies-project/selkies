@@ -13,6 +13,8 @@ use std::time::Duration;
 pub enum Command {
     /// Open or close the start menu.
     ToggleMenu,
+    /// Open or close the quick launcher.
+    Launcher,
     /// Read the applications and settings again.
     Reload,
     /// Minimize every window, or restore them.
@@ -39,6 +41,7 @@ impl Command {
         };
         match word.trim_start_matches('-') {
             "toggle-menu" | "menu" => Some(Command::ToggleMenu),
+            "launcher" => Some(Command::Launcher),
             "reload" => Some(Command::Reload),
             "show-desktop" => Some(Command::ShowDesktop),
             "files" => Some(Command::Files((!rest.is_empty()).then(|| PathBuf::from(rest)))),
@@ -52,6 +55,7 @@ impl Command {
     pub fn line(&self) -> String {
         match self {
             Command::ToggleMenu => "toggle-menu".to_string(),
+            Command::Launcher => "launcher".to_string(),
             Command::Reload => "reload".to_string(),
             Command::ShowDesktop => "show-desktop".to_string(),
             Command::Files(None) => "files".to_string(),
@@ -163,6 +167,8 @@ mod tests {
     fn parses_commands() {
         assert_eq!(Command::parse("--toggle-menu"), Some(Command::ToggleMenu));
         assert_eq!(Command::parse("reload\n"), Some(Command::Reload));
+        assert_eq!(Command::parse("--launcher"), Some(Command::Launcher));
+        assert_eq!(Command::Launcher.line(), "launcher");
         assert_eq!(Command::parse("show-desktop"), Some(Command::ShowDesktop));
         assert_eq!(Command::parse("files"), Some(Command::Files(None)));
         assert_eq!(Command::parse("--settings"), Some(Command::Settings));

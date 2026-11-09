@@ -11,6 +11,8 @@ mod event;
 mod files;
 mod i18n;
 mod ipc;
+mod portal;
+mod toolkits;
 mod tray;
 mod ui;
 mod watch;
@@ -31,6 +33,7 @@ Runs the Selkies desktop panel on the Wayland compositor or X display of the
 session.  With a command, talks to the running panel instead:
 
   --toggle-menu    open or close the start menu
+  --launcher       open or close the quick launcher
   --files [DIR]    open the file manager, on a folder when given
   --settings       open the settings window
   --show-desktop   minimize every window, or restore them
@@ -314,6 +317,7 @@ fn run() -> i32 {
             for command in server.drain() {
                 match command {
                     ipc::Command::ToggleMenu => desktop.toggle_menu(),
+                    ipc::Command::Launcher => desktop.toggle_launcher(),
                     ipc::Command::Reload => desktop.reload(),
                     ipc::Command::ShowDesktop => desktop.show_desktop(),
                     ipc::Command::Files(dir) => {

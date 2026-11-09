@@ -34,3 +34,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 xkeysym = "0.2"
 libc = "0.2"
 memmap2 = "0.9"
+# The desktop Settings portal the shell serves on the session bus, on the
+# D-Bus crate pixelflux already speaks to the portal through.
+zbus = { version = "6", default-features = false, features = ["default-rt", "service"] }

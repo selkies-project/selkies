@@ -22,6 +22,9 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
 };
 use wayland_cursor::CursorTheme;
+use wayland_protocols::ext::workspace::v1::client::{
+    ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+};
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
 };
@@ -183,6 +186,63 @@ struct Drag {
 struct Handle {
     id: u64,
     handle: zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+    /// The flags of the last `state` event.
+    state: ToplevelState,
+    /// The outputs the window is shown on.
+    outputs: Vec<ObjectId>,
+    /// Whether the window has ever entered an output: one that never has is
+    /// still mapping, not hidden on another desktop.
+    entered: bool,
+}
+
+impl Handle {
+    /// The state to report: the flags, with `hidden` set for a window that
+    /// left every output it was on, which is how the window manager shows a
+    /// window on another virtual desktop.
+    fn reported_state(&self) -> ToplevelState {
+        ToplevelState {
+            hidden: self.entered && self.outputs.is_empty(),
+            ..self.state
+        }
+    }
+}
+
+/// A virtual desktop the compositor reports through `ext_workspace_handle_v1`.
+struct Workspace {
+    handle: ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+    /// The index the `coordinates` event carried.
+    index: Option<u32>,
+    /// Whether the `state` event set the active bit.
+    active: bool,
+}
+
+/// The virtual desktops as the compositor reports them.
+#[derive(Default)]
+struct Workspaces {
+    manager: Option<ext_workspace_manager_v1::ExtWorkspaceManagerV1>,
+    handles: HashMap<ObjectId, Workspace>,
+    /// The count and current index last reported to the desktop.
+    reported: Option<(u32, u32)>,
+}
+
+impl Workspaces {
+    /// The desktop count and current index from the handles: the count is
+    /// how many there are, the current one the active handle's index.
+    fn summary(&self) -> (u32, u32) {
+        let count = self.handles.len() as u32;
+        let current = self
+            .handles
+            .values()
+            .find(|w| w.active)
+            .and_then(|w| w.index)
+            .unwrap_or(0);
+        (count, current)
+    }
+
+    /// The handle whose index is a desktop.
+    fn at(&self, index: u32) -> Option<&Workspace> {
+        self.handles.values().find(|w| w.index == Some(index))
+    }
 }
 
 /// The dispatch state behind the event queue.
@@ -217,6 +277,7 @@ struct State {
     caps_lock: bool,
     handles: HashMap<ObjectId, Handle>,
     next_toplevel_id: u64,
+    workspaces: Workspaces,
     events: Vec<Event>,
     popup_open: bool,
     panel_height: i32,
@@ -822,6 +883,7 @@ impl WaylandBackend {
             caps_lock: false,
             handles: HashMap::new(),
             next_toplevel_id: 1,
+            workspaces: Workspaces::default(),
             events: Vec::new(),
             popup_open: false,
             panel_height: ui::PANEL_HEIGHT,
@@ -837,6 +899,7 @@ impl WaylandBackend {
         let mut decoration = false;
         let mut icon_manager = false;
         let mut data_device_version = 0;
+        let mut workspace_manager = false;
         globals.contents().with_list(|list| {
             for global in list {
                 match global.interface.as_str() {
@@ -848,6 +911,7 @@ impl WaylandBackend {
                     "zxdg_decoration_manager_v1" => decoration = true,
                     "xdg_toplevel_icon_manager_v1" => icon_manager = true,
                     "wl_data_device_manager" => data_device_version = global.version.min(3),
+                    "ext_workspace_manager_v1" => workspace_manager = true,
                     _ => {}
                 }
             }
@@ -896,6 +960,11 @@ impl WaylandBackend {
                 .bind::<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, _, _>(&qh, 1..=1, ())
                 .ok();
         }
+        if workspace_manager {
+            state.workspaces.manager = globals
+                .bind::<ext_workspace_manager_v1::ExtWorkspaceManagerV1, _, _>(&qh, 1..=1, ())
+                .ok();
+        }
         if data_device_version > 0 {
             state.data_device_manager = globals
                 .bind::<wl_data_device_manager::WlDataDeviceManager, _, _>(&qh, 1..=data_device_version, ())
@@ -929,7 +998,7 @@ impl WaylandBackend {
         let panel_layer = layer_shell.get_layer_surface(
             &panel_wl,
             primary.as_ref(),
-            zwlr_layer_shell_v1::Layer::Bottom,
+            zwlr_layer_shell_v1::Layer::Top,
             "panel".to_string(),
             &qh,
             SurfaceId::Panel,
@@ -1216,19 +1285,11 @@ impl Backend for WaylandBackend {
             }
             Request::MenuOpen(open) => {
                 self.state.popup_open = *open;
-                let version = self.state.layer_shell_version;
                 if let Some(Surface {
                     role: Role::Layer(layer),
                     ..
                 }) = &self.state.panel
                 {
-                    if version >= 2 {
-                        layer.set_layer(if *open || self.state.panel_autohide {
-                            zwlr_layer_shell_v1::Layer::Top
-                        } else {
-                            zwlr_layer_shell_v1::Layer::Bottom
-                        });
-                    }
                     let interactivity = if *open {
                         zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive
                     } else {
@@ -1264,13 +1325,6 @@ impl Backend for WaylandBackend {
                     anchor_panel(layer, self.state.layer_shell_version, *top, *height);
                     if *autohide {
                         layer.set_exclusive_zone(0);
-                    }
-                    if self.state.layer_shell_version >= 2 {
-                        layer.set_layer(if *autohide || self.state.popup_open {
-                            zwlr_layer_shell_v1::Layer::Top
-                        } else {
-                            zwlr_layer_shell_v1::Layer::Bottom
-                        });
                     }
                     if *mapped {
                         wl.commit();
@@ -1311,6 +1365,14 @@ impl Backend for WaylandBackend {
                 let qh = self.queue.handle();
                 self.state
                     .start_drag(&qh, *window, uris.clone(), icon.as_deref(), *scale);
+            }
+            Request::SwitchDesktop(index) => {
+                if let Some(manager) = &self.state.workspaces.manager
+                    && let Some(workspace) = self.state.workspaces.at(*index)
+                {
+                    workspace.handle.activate();
+                    manager.commit();
+                }
             }
             Request::SetVolume(_) | Request::ToggleMute => {}
         }
@@ -1908,9 +1970,16 @@ impl Dispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, ()
         if let zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } = event {
             let id = state.next_toplevel_id;
             state.next_toplevel_id += 1;
-            state
-                .handles
-                .insert(toplevel.id(), Handle { id, handle: toplevel });
+            state.handles.insert(
+                toplevel.id(),
+                Handle {
+                    id,
+                    handle: toplevel,
+                    state: ToplevelState::default(),
+                    outputs: Vec::new(),
+                    entered: false,
+                },
+            );
             state.events.push(Event::ToplevelAdded { id });
         }
     }
@@ -1929,9 +1998,10 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> 
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        let Some(id) = state.handles.get(&handle.id()).map(|h| h.id) else {
+        let Some(entry) = state.handles.get_mut(&handle.id()) else {
             return;
         };
+        let id = entry.id;
         match event {
             zwlr_foreign_toplevel_handle_v1::Event::Title { title } => {
                 state.events.push(Event::ToplevelTitle { id, title });
@@ -1951,9 +2021,21 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> 
                         _ => {}
                     }
                 }
+                entry.state = toplevel_state;
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::OutputEnter { output } => {
+                entry.entered = true;
+                if !entry.outputs.contains(&output.id()) {
+                    entry.outputs.push(output.id());
+                }
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::OutputLeave { output } => {
+                entry.outputs.retain(|o| *o != output.id());
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Done => {
                 state.events.push(Event::ToplevelState {
                     id,
-                    state: toplevel_state,
+                    state: entry.reported_state(),
                 });
             }
             zwlr_foreign_toplevel_handle_v1::Event::Closed => {
@@ -1967,6 +2049,87 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> 
     }
 }
 
+impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+        event: ext_workspace_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_workspace_manager_v1::Event::Workspace { workspace } => {
+                state.workspaces.handles.insert(
+                    workspace.id(),
+                    Workspace {
+                        handle: workspace,
+                        index: None,
+                        active: false,
+                    },
+                );
+            }
+            ext_workspace_manager_v1::Event::Done => {
+                let summary = state.workspaces.summary();
+                if summary.0 > 0 && state.workspaces.reported != Some(summary) {
+                    state.workspaces.reported = Some(summary);
+                    state.events.push(Event::Desktops {
+                        count: summary.0,
+                        current: summary.1,
+                    });
+                }
+            }
+            ext_workspace_manager_v1::Event::Finished => {
+                state.workspaces.manager = None;
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(State, ext_workspace_manager_v1::ExtWorkspaceManagerV1, [
+        ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE => (ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()),
+        ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE => (ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        handle: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+        event: ext_workspace_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(workspace) = state.workspaces.handles.get_mut(&handle.id()) else {
+            return;
+        };
+        match event {
+            ext_workspace_handle_v1::Event::Coordinates { coordinates } => {
+                // The window manager publishes one coordinate: the desktop's index.
+                workspace.index = coordinates
+                    .as_chunks::<4>()
+                    .0
+                    .first()
+                    .map(|chunk| u32::from_ne_bytes(*chunk));
+            }
+            ext_workspace_handle_v1::Event::State { state: flags } => {
+                workspace.active = match flags {
+                    WEnum::Value(flags) => flags.contains(ext_workspace_handle_v1::State::Active),
+                    WEnum::Unknown(_) => false,
+                };
+            }
+            ext_workspace_handle_v1::Event::Removed => {
+                if let Some(workspace) = state.workspaces.handles.remove(&handle.id()) {
+                    workspace.handle.destroy();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(State: ignore ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1);
 delegate_noop!(State: ignore wl_compositor::WlCompositor);
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);

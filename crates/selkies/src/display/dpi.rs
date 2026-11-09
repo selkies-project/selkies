@@ -305,8 +305,9 @@ async fn run_lxqt_font(dpi: i32) -> bool {
 ///
 /// Writes `Xft.dpi` into `~/.Xresources` and merges it into the running resource database --
 /// merged, never loaded wholesale, so the database keeps every resource the file does not
-/// define -- then rewrites `~/.xsettingsd` with the matching `Xft/DPI` value (in 1024ths)
-/// and SIGHUPs every xsettingsd serving this display: the one serving it is not necessarily
+/// define -- then merges the matching `Xft/DPI` value (in 1024ths) and the font rendering keys
+/// into `~/.xsettingsd`, keeping every other setting the file holds (the theme names the desktop
+/// shell writes there), and SIGHUPs every xsettingsd serving this display: the one serving it is not necessarily
 /// the oldest, and one serving another display from the same home would re-read this file
 /// and hand that display this density. Returns whether the xrdb merge succeeded.
 async fn run_xrdb(dpi: i32) -> bool {
@@ -341,13 +342,12 @@ async fn run_xrdb(dpi: i32) -> bool {
         warn!(target: "display", "Failed to load {} using xrdb. Error: {}", xresources.display(), out.stderr.trim());
     }
     let xsettingsd = home().join(".xsettingsd");
-    let content = format!(
-        "Xft/Antialias 1\nXft/Hinting 1\nXft/HintStyle \"hintfull\"\nXft/RGBA \"rgb\"\nXft/DPI {}\n",
-        dpi * 1024
-    );
     let written = tokio::task::spawn_blocking({
         let path = xsettingsd.clone();
-        move || atomic_write_text(&path, &content)
+        move || {
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            atomic_write_text(&path, &merge_xsettings_font(&existing, dpi))
+        }
     })
     .await;
     if let Err(e) = written
@@ -540,6 +540,40 @@ fn last_dpi(pattern: &Regex, text: &str) -> Option<i32> {
         .filter_map(|c| c[1].parse::<i32>().ok())
         .last()
         .filter(|v| *v > 0)
+}
+
+/// The font rendering keys and `Xft/DPI` the server owns in `~/.xsettingsd`, placed over the
+/// file's other lines: an `Xft/` line already there is replaced in place, the rest appended, and
+/// every other setting is kept as it stands.
+fn merge_xsettings_font(existing: &str, dpi: i32) -> String {
+    let owned: [(&str, String); 5] = [
+        ("Xft/Antialias", "1".to_string()),
+        ("Xft/Hinting", "1".to_string()),
+        ("Xft/HintStyle", "\"hintfull\"".to_string()),
+        ("Xft/RGBA", "\"rgb\"".to_string()),
+        ("Xft/DPI", (dpi * 1024).to_string()),
+    ];
+    let mut lines: Vec<String> = Vec::new();
+    let mut seen = [false; 5];
+    for line in existing.lines() {
+        let key = line.split_whitespace().next().unwrap_or("");
+        match owned.iter().position(|(k, _)| *k == key) {
+            Some(i) if seen[i] => {}
+            Some(i) => {
+                seen[i] = true;
+                lines.push(format!("{} {}", owned[i].0, owned[i].1));
+            }
+            None => lines.push(line.to_string()),
+        }
+    }
+    for (i, (key, value)) in owned.iter().enumerate() {
+        if !seen[i] {
+            lines.push(format!("{key} {value}"));
+        }
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
 }
 
 /// The density the home persists for the X11 desktop, read as `desktop_dpi` reads it but
@@ -833,6 +867,20 @@ mod tests {
             rewrite_lxqt_font(&path, 144, 96),
             None,
             "a font outside [Qt] is not the session font"
+        );
+    }
+
+    #[test]
+    fn xsettings_font_keys_merge_over_the_rest() {
+        let merged =
+            merge_xsettings_font("Net/ThemeName \"Dark\"\nXft/DPI 98304\nXft/DPI 1\n", 144);
+        assert_eq!(
+            merged,
+            "Net/ThemeName \"Dark\"\nXft/DPI 147456\nXft/Antialias 1\nXft/Hinting 1\nXft/HintStyle \"hintfull\"\nXft/RGBA \"rgb\"\n"
+        );
+        assert_eq!(
+            merge_xsettings_font("", 96),
+            "Xft/Antialias 1\nXft/Hinting 1\nXft/HintStyle \"hintfull\"\nXft/RGBA \"rgb\"\nXft/DPI 98304\n"
         );
     }
 

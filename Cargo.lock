@@ -3745,6 +3745,7 @@ dependencies = [
  "wayland-protocols-wlr",
  "x11rb 0.14.0",
  "xkeysym",
+ "zbus",
 ]
 
 [[package]]

@@ -18,7 +18,7 @@ use crate::geom::Rect;
 use crate::i18n::{tr, trf};
 use crate::icons::Icons;
 use crate::render::{Canvas, Fonts};
-use crate::ui::{self, background, menu, panel, popups, settings};
+use crate::ui::{self, background, launcher, menu, panel, popups, settings};
 use crate::xkb::Key;
 
 /// Height of the strip that brings an auto-hidden bar back.
@@ -133,6 +133,8 @@ pub enum Popup {
     None,
     /// The start menu.
     Menu,
+    /// The quick launcher.
+    Launcher,
     /// The volume slider.
     Volume,
     /// The month calendar.
@@ -176,8 +178,12 @@ pub enum Hover {
     DesktopIcon(usize),
     /// A quick launch button, by position.
     Launcher(usize),
+    /// A pill of the pager, by desktop index.
+    Pager(usize),
     /// An item of the start menu's right-click menu.
     MenuContextItem(usize),
+    /// A result row of the quick launcher.
+    LauncherRow(usize),
     /// Something in a file manager window.
     Files(u32, ui::files::Hit),
 }
@@ -225,6 +231,8 @@ pub struct Desktop {
     pub pointer: (f64, f64),
     /// Start menu state.
     pub menu: menu::MenuState,
+    /// Quick launcher state.
+    pub launcher: launcher::LauncherState,
     /// Settings window state.
     pub settings: settings::SettingsState,
     /// Selected desktop icon.
@@ -272,6 +280,12 @@ pub struct Desktop {
     pub tray_slot: Option<Rect>,
     /// Whether the tray strip moved since the tray was last placed.
     pub tray_moved: bool,
+    /// The desktop Settings portal the shell serves, when it holds the name.
+    pub portal: Option<crate::portal::Portal>,
+    /// How many virtual desktops the window manager reports.
+    pub desktops: u32,
+    /// The index of the current virtual desktop.
+    pub current_desktop: u32,
 }
 
 impl Desktop {
@@ -292,9 +306,12 @@ impl Desktop {
         let config = Config::load();
         ui::set_theme(config.theme);
         ui::set_style(config.window);
+        let mut portal = None;
         if session {
             crate::i18n::select(config.language.as_deref());
             crate::wmtheme::apply(&config);
+            let decision = crate::toolkits::apply(&config);
+            portal = crate::portal::Portal::start(&decision);
         }
         let fonts = Fonts::new();
         let icons = Icons::new(config.icon_theme.as_deref());
@@ -322,6 +339,7 @@ impl Desktop {
             tooltip: None,
             pointer: (-1.0, -1.0),
             menu: menu::MenuState::default(),
+            launcher: launcher::LauncherState::default(),
             settings: settings::SettingsState::default(),
             desktop_selection: None,
             last_click: None,
@@ -344,6 +362,9 @@ impl Desktop {
             tray_icons: 0,
             tray_slot: None,
             tray_moved: false,
+            portal,
+            desktops: 1,
+            current_desktop: 0,
         };
         desktop.requests.push(desktop.panel_request());
         desktop
@@ -512,6 +533,7 @@ impl Desktop {
         ui::set_style(self.config.window);
         self.fonts.clear_cache();
         self.menu.invalidate();
+        self.launcher.invalidate();
         self.redraw_backgrounds();
         for window in &mut self.files.windows {
             window.dirty = true;
@@ -616,6 +638,10 @@ impl Desktop {
         self.config = Config::load();
         self.sync_panel(was_top, was_height, was_autohide);
         crate::wmtheme::apply(&self.config);
+        let decision = crate::toolkits::apply(&self.config);
+        if let Some(portal) = self.portal.as_mut() {
+            portal.update(&decision);
+        }
         self.icons = Icons::new(self.config.icon_theme.as_deref());
         self.apps = Apps::load(entries::find_terminal(&self.config).is_some());
         self.wallpapers.clear();
@@ -624,6 +650,7 @@ impl Desktop {
             toplevel.icon = None;
         }
         self.menu.invalidate();
+        self.launcher.invalidate();
         self.desktop_selection = None;
         self.panel_dirty = true;
         self.repaint_wallpapers();
@@ -640,6 +667,10 @@ impl Desktop {
         self.config = Config::load();
         self.sync_panel(was_top, was_height, was_autohide);
         crate::wmtheme::apply(&self.config);
+        let decision = crate::toolkits::apply(&self.config);
+        if let Some(portal) = self.portal.as_mut() {
+            portal.update(&decision);
+        }
         self.wallpapers.retain(|_, image| image.is_some());
         self.repaint_wallpapers();
         self.panel_dirty = true;
@@ -861,6 +892,7 @@ impl Desktop {
         };
         self.write_config(&[(key, value)]);
         self.menu.invalidate();
+        self.launcher.invalidate();
     }
 
     /// Handles one event from the backend.
@@ -920,7 +952,7 @@ impl Desktop {
                 _ => self.key(key),
             },
             Event::KeyboardLeave { surface } => {
-                if surface == SurfaceId::Panel && self.popup == Popup::Menu {
+                if surface == SurfaceId::Panel && matches!(self.popup, Popup::Menu | Popup::Launcher) {
                     self.close_popup();
                 }
             }
@@ -1004,6 +1036,18 @@ impl Desktop {
                     if let Hover::Task(t) = self.hover
                         && t >= i
                     {
+                        self.set_hover(Hover::None);
+                    }
+                    self.panel_dirty = true;
+                }
+            }
+            Event::Desktops { count, current } => {
+                let count = count.max(1);
+                let current = current.min(count - 1);
+                if (self.desktops, self.current_desktop) != (count, current) {
+                    self.desktops = count;
+                    self.current_desktop = current;
+                    if let Hover::Pager(_) = self.hover {
                         self.set_hover(Hover::None);
                     }
                     self.panel_dirty = true;
@@ -1172,6 +1216,7 @@ impl Desktop {
             }),
             Hover::Clock => Some(crate::clock::format_now("%A, %B %-d, %Y")),
             Hover::ShowDesktop => Some(tr("Show desktop").to_string()),
+            Hover::Pager(i) => Some(trf("Desktop {n}", &[("n", &(i + 1).to_string())])),
             Hover::Start => Some(tr("Applications").to_string()),
             Hover::Launcher(i) => self
                 .config
@@ -1257,6 +1302,9 @@ impl Desktop {
             menu.open(self);
             self.menu = menu;
         }
+        if popup == Popup::Launcher {
+            self.launcher.open();
+        }
         if popup == Popup::Calendar {
             self.calendar_offset = 0;
         }
@@ -1277,6 +1325,7 @@ impl Desktop {
         self.popup = Popup::None;
         self.volume_drag = false;
         self.menu.close();
+        self.launcher.close();
         self.settings.close();
         self.requests.push(Request::MenuOpen(false));
         self.set_hover(Hover::None);
@@ -1286,12 +1335,22 @@ impl Desktop {
         }
     }
 
-    /// Toggles the start menu, from a click or the Super key.
+    /// Toggles the start menu, from a click on the start button.
     pub fn toggle_menu(&mut self) {
         if self.popup == Popup::Menu {
             self.close_popup();
         } else {
             self.open_popup(Popup::Menu);
+        }
+    }
+
+    /// Toggles the quick launcher, from the `--launcher` command the window
+    /// manager sends on a release of the Super key.
+    pub fn toggle_launcher(&mut self) {
+        if self.popup == Popup::Launcher {
+            self.close_popup();
+        } else {
+            self.open_popup(Popup::Launcher);
         }
     }
 
@@ -1340,7 +1399,28 @@ impl Desktop {
         self.shown_desktop.clear();
     }
 
-    /// Minimizes every window, or restores the ones the previous press hid.
+    /// Asks the window manager for a virtual desktop.
+    ///
+    /// # Arguments
+    /// * `index` - The desktop, from 0; the current one or one past the
+    ///   last is ignored.
+    pub fn switch_desktop(&mut self, index: u32) {
+        if index < self.desktops && index != self.current_desktop {
+            self.requests.push(Request::SwitchDesktop(index));
+        }
+    }
+
+    /// Whether a window is listed on the taskbar: one on the current desktop,
+    /// or any when the taskbar shows every desktop.
+    ///
+    /// # Arguments
+    /// * `index` - Index into the window list.
+    pub fn task_listed(&self, index: usize) -> bool {
+        self.config.tasks_all_desktops || !self.toplevels[index].state.hidden
+    }
+
+    /// Minimizes every window of the current desktop, or restores the ones
+    /// the previous press hid.
     pub fn show_desktop(&mut self) {
         if !self.shown_desktop.is_empty() {
             let ids = std::mem::take(&mut self.shown_desktop);
@@ -1355,7 +1435,7 @@ impl Desktop {
             .toplevels
             .iter()
             .enumerate()
-            .filter(|(_, t)| !t.state.minimized)
+            .filter(|(_, t)| !t.state.minimized && !t.state.hidden)
             .map(|(i, _)| i)
             .collect();
         for i in visible {
@@ -1410,6 +1490,7 @@ impl Desktop {
                 }
                 let hover = match self.popup {
                     Popup::Menu => menu::hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::Launcher => launcher::hit(self, x, y).unwrap_or(Hover::None),
                     Popup::TaskMenu(_) => popups::task_menu_hit(self, x, y).unwrap_or(Hover::None),
                     Popup::PanelMenu(_) => settings::panel_menu_hit(self, x, y).unwrap_or(Hover::None),
                     Popup::Settings => settings::hit(self, x, y).unwrap_or(Hover::None),
@@ -1468,6 +1549,7 @@ impl Desktop {
                 if self.popup != Popup::None {
                     let inside_popup = match self.popup {
                         Popup::Menu => menu::click(self, x, y, button),
+                        Popup::Launcher => launcher::click(self, x, y, button),
                         Popup::Volume => popups::volume_click(self, x, y, button),
                         Popup::Calendar => popups::calendar_click(self, x, y, button),
                         Popup::TaskMenu(_) => popups::task_menu_click(self, x, y, button),
@@ -1555,6 +1637,7 @@ impl Desktop {
         self.pointer = (x, y);
         let handled = match self.popup {
             Popup::Menu => menu::scroll(self, x, y, delta),
+            Popup::Launcher => launcher::scroll(self, x, y, delta),
             Popup::Volume => popups::volume_scroll(self, x, y, delta),
             Popup::Calendar => popups::calendar_scroll(self, x, y, delta),
             Popup::Settings => settings::scroll(self, x, y, delta),
@@ -1589,10 +1672,12 @@ impl Desktop {
         }
     }
 
-    /// Routes a key press to the open popup.
+    /// Routes a key press to the open popup.  The Super key is the window
+    /// manager's: it runs `selkies-desktop --launcher` on the release, so a
+    /// press that reaches the panel does nothing here.
     fn key(&mut self, key: Key) {
         match key {
-            Key::Super => self.toggle_menu(),
+            Key::Super => {}
             Key::Escape => {
                 if self.popup != Popup::Settings || !settings::escape(self) {
                     self.close_popup();
@@ -1600,6 +1685,7 @@ impl Desktop {
             }
             _ => match self.popup {
                 Popup::Menu => menu::key(self, key),
+                Popup::Launcher => launcher::key(self, key),
                 Popup::Calendar => popups::calendar_key(self, key),
                 Popup::Volume => popups::volume_key(self, key),
                 Popup::Settings => settings::key(self, key),

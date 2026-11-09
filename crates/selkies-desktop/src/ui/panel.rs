@@ -1,8 +1,14 @@
-//! The bar: start button, quick launch buttons, taskbar, system tray slot,
-//! volume, clock and the show desktop button.  The start button, quick
-//! launch and taskbar sit at the left, or in the middle of the bar when
-//! the layout is centered; the tray, volume, clock and show desktop button
-//! stay at the right.
+//! The bar: start button, quick launch buttons, pager, taskbar, system tray
+//! slot, volume, clock and the show desktop button.  The start button, quick
+//! launch, pager and taskbar sit at the left, or in the middle of the bar
+//! when the layout is centered; the tray, volume, clock and show desktop
+//! button stay at the right.
+//!
+//! The pager is one pill per virtual desktop, shown when the window manager
+//! reports more than one; the taskbar lists the windows of the current
+//! desktop, every window when `tasks_all_desktops` is set.  A taskbar button
+//! always carries its window's index into the desktop's window list, so
+//! filtering changes which buttons exist, never what an index means.
 
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::event::{Button, WindowAction};
@@ -18,6 +24,10 @@ const TASK_MAX_WIDTH: i32 = 200;
 const TASK_MIN_WIDTH: i32 = 40;
 /// Width of the volume button.
 const VOLUME_WIDTH: i32 = 32;
+/// Width of one pager pill.
+const PAGER_PILL_WIDTH: i32 = 26;
+/// Space between pager pills.
+const PAGER_PILL_GAP: i32 = 2;
 /// Width of the window outline on the show desktop button for a button
 /// height: two fifths of it, within the range that reads well.
 fn show_desktop_glyph_width(height: i32) -> i32 {
@@ -52,6 +62,8 @@ pub struct Layout {
     pub start: Rect,
     /// Each quick launch button with its application index.
     pub launchers: Vec<(usize, Rect)>,
+    /// The pager's pills, one per virtual desktop; empty when it is not shown.
+    pub pager: Vec<Rect>,
     /// Each taskbar button with its window index.
     pub tasks: Vec<(usize, Rect)>,
     /// The strip the system tray icons occupy, when any are docked.
@@ -73,6 +85,7 @@ impl Layout {
         match hover {
             Hover::Start => Some(self.start),
             Hover::Launcher(i) => self.launchers.get(i).map(|(_, r)| *r),
+            Hover::Pager(i) => self.pager.get(i).copied(),
             Hover::Task(i) => self.tasks.iter().find(|(t, _)| *t == i).map(|(_, r)| *r),
             Hover::Volume => self.volume,
             Hover::Clock => self.clock,
@@ -80,6 +93,62 @@ impl Layout {
             _ => None,
         }
     }
+}
+
+/// How many pills the pager shows: one per desktop, none when there is
+/// only one or the setting hides it.
+///
+/// # Arguments
+/// * `desktops` - The desktops the window manager reports.
+/// * `show_pager` - The `show_pager` setting.
+pub fn pager_count(desktops: u32, show_pager: bool) -> usize {
+    if show_pager && desktops > 1 {
+        desktops as usize
+    } else {
+        0
+    }
+}
+
+/// Width the pager takes on the bar, its trailing gap included; zero
+/// without pills.
+fn pager_width(count: usize) -> i32 {
+    if count == 0 {
+        return 0;
+    }
+    count as i32 * (PAGER_PILL_WIDTH + PAGER_PILL_GAP) - PAGER_PILL_GAP + GAP
+}
+
+/// The pager's pills from a left edge, each the bar's item height.
+///
+/// # Arguments
+/// * `x` - Left edge of the first pill.
+/// * `bar` - The bar.
+/// * `count` - Number of pills.
+pub fn pager_pills(x: i32, bar: Rect, count: usize) -> Vec<Rect> {
+    (0..count as i32)
+        .map(|i| {
+            Rect::new(
+                x + i * (PAGER_PILL_WIDTH + PAGER_PILL_GAP),
+                bar.y + 3,
+                PAGER_PILL_WIDTH,
+                bar.h - 6,
+            )
+        })
+        .collect()
+}
+
+/// The indices of the windows the taskbar lists, in window list order.
+///
+/// # Arguments
+/// * `hidden` - For each window, whether it is on another desktop.
+/// * `all_desktops` - The `tasks_all_desktops` setting.
+pub fn listed_tasks(hidden: &[bool], all_desktops: bool) -> Vec<usize> {
+    hidden
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| all_desktops || !**h)
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Computes the bar layout for the current state.
@@ -96,6 +165,10 @@ pub fn layout(d: &mut Desktop) -> Layout {
         .filter_map(|id| d.apps.find(id))
         .collect();
     let launchers_width = launcher_ids.len() as i32 * (bar.h - 6 + GAP);
+    let pager_count = pager_count(d.desktops, d.config.show_pager);
+    let pager_width = pager_width(pager_count);
+    let hidden: Vec<bool> = d.toplevels.iter().map(|t| t.state.hidden).collect();
+    let listed = listed_tasks(&hidden, d.config.tasks_all_desktops);
     let mut right = bar.right() - GAP;
     let show_desktop = if d.config.show_desktop_button {
         let width = show_desktop_glyph_width(bar.h - 6) + 8;
@@ -134,19 +207,20 @@ pub fn layout(d: &mut Desktop) -> Layout {
         None
     };
     let left_edge = bar.x + GAP;
-    let available = (right - GAP - (left_edge + start_width + GAP + launchers_width + GAP)).max(0);
-    let count = d.toplevels.len() as i32;
+    let fixed_width = start_width + GAP + launchers_width + pager_width + GAP;
+    let available = (right - GAP - (left_edge + fixed_width)).max(0);
+    let count = listed.len() as i32;
     let task_width = if count > 0 {
         ((available - (count - 1) * GAP) / count).clamp(TASK_MIN_WIDTH, TASK_MAX_WIDTH)
     } else {
         0
     };
     let shown = if count > 0 {
-        (((available + GAP) / (task_width + GAP)).max(0) as usize).min(d.toplevels.len())
+        (((available + GAP) / (task_width + GAP)).max(0) as usize).min(listed.len())
     } else {
         0
     };
-    let group_width = start_width + GAP + launchers_width + GAP + shown as i32 * (task_width + GAP);
+    let group_width = fixed_width + shown as i32 * (task_width + GAP);
     let x0 = if d.config.panel_centered {
         (bar.x + (bar.w - group_width) / 2).clamp(left_edge, (right - GAP - group_width).max(left_edge))
     } else {
@@ -159,9 +233,11 @@ pub fn layout(d: &mut Desktop) -> Layout {
         launchers.push((index, Rect::new(x, bar.y + 3, bar.h - 6, bar.h - 6)));
         x += bar.h - 6 + GAP;
     }
+    let pager = pager_pills(x, bar, pager_count);
+    x += pager_width;
     let mut tasks = Vec::new();
     x += GAP;
-    for index in 0..shown {
+    for index in listed.into_iter().take(shown) {
         tasks.push((index, Rect::new(x, bar.y + 3, task_width, bar.h - 6)));
         x += task_width + GAP;
     }
@@ -173,6 +249,7 @@ pub fn layout(d: &mut Desktop) -> Layout {
         bar,
         start,
         launchers,
+        pager,
         tasks,
         tray,
         volume,
@@ -198,6 +275,11 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Hover {
     for (position, (_, rect)) in layout.launchers.iter().enumerate() {
         if rect.contains(x, y) {
             return Hover::Launcher(position);
+        }
+    }
+    for (index, rect) in layout.pager.iter().enumerate() {
+        if rect.contains(x, y) {
+            return Hover::Pager(index);
         }
     }
     for (index, rect) in &layout.tasks {
@@ -241,6 +323,11 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button, _time: u32) {
             Button::Right => d.open_popup(Popup::PanelMenu(x as i32)),
             Button::Middle => {}
         },
+        Hover::Pager(index) => match button {
+            Button::Left => d.switch_desktop(index as u32),
+            Button::Right => d.open_popup(Popup::PanelMenu(x as i32)),
+            Button::Middle => {}
+        },
         Hover::Task(index) => match button {
             Button::Left => d.task_click(index),
             Button::Middle => d.window_action(index, WindowAction::Close),
@@ -270,8 +357,9 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button, _time: u32) {
     d.redraw_panel();
 }
 
-/// Handles wheel scrolling on the bar: the volume over its button, and
-/// cycling through the windows over the taskbar.
+/// Handles wheel scrolling on the bar: the volume over its button, the
+/// desktops over the pager, and cycling through the windows over the
+/// taskbar.
 ///
 /// # Arguments
 /// * `d` - The desktop.
@@ -281,9 +369,18 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button, _time: u32) {
 pub fn scroll(d: &mut Desktop, x: f64, y: f64, delta: f64) {
     match hit(d, x, y) {
         Hover::Volume => d.adjust_volume(if delta < 0.0 { 5 } else { -5 }),
+        Hover::Pager(_) => cycle_desktops(d, delta > 0.0),
         Hover::Task(_) => cycle_windows(d, delta > 0.0),
         _ => {
             let layout = layout(d);
+            let pager_area = match (layout.pager.first(), layout.pager.last()) {
+                (Some(first), Some(last)) => Some(first.union(last)),
+                _ => None,
+            };
+            if pager_area.is_some_and(|area| area.contains(x, y)) {
+                cycle_desktops(d, delta > 0.0);
+                return;
+            }
             let tasks_area = match (layout.tasks.first(), layout.tasks.last()) {
                 (Some((_, first)), Some((_, last))) => first.union(last),
                 _ => return,
@@ -295,18 +392,40 @@ pub fn scroll(d: &mut Desktop, x: f64, y: f64, delta: f64) {
     }
 }
 
-/// Activates the window after or before the active one.
+/// The desktop after or before an index, wrapping around.
+///
+/// # Arguments
+/// * `current` - The current desktop.
+/// * `count` - How many there are.
+/// * `forward` - Whether to step to the next one.
+pub fn next_desktop(current: u32, count: u32, forward: bool) -> u32 {
+    let count = count.max(1);
+    if forward {
+        (current + 1) % count
+    } else {
+        (current + count - 1) % count
+    }
+}
+
+/// Switches to the desktop after or before the current one.
+fn cycle_desktops(d: &mut Desktop, forward: bool) {
+    let next = next_desktop(d.current_desktop, d.desktops, forward);
+    d.switch_desktop(next);
+}
+
+/// Activates the listed window after or before the active one.
 fn cycle_windows(d: &mut Desktop, forward: bool) {
-    let count = d.toplevels.len();
+    let listed: Vec<usize> = (0..d.toplevels.len()).filter(|i| d.task_listed(*i)).collect();
+    let count = listed.len();
     if count == 0 {
         return;
     }
-    let current = d.toplevels.iter().position(|t| t.state.active);
-    let next = match current {
+    let current = listed.iter().position(|i| d.toplevels[*i].state.active);
+    let next = listed[match current {
         Some(i) if forward => (i + 1) % count,
         Some(i) => (i + count - 1) % count,
         None => 0,
-    };
+    }];
     if d.toplevels[next].state.minimized {
         d.window_action(next, WindowAction::Unminimize);
     }
@@ -420,6 +539,35 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
     if let Some(rect) = layout.tray {
         canvas.fill_rect(
             Rect::new(rect.right() + GAP / 2, rect.y + 4, 1, rect.h - 8),
+            ui::separator(),
+        );
+    }
+
+    for (index, rect) in layout.pager.iter().copied().enumerate() {
+        let current = index as u32 == d.current_desktop;
+        let bg = if current {
+            ui::accent()
+        } else if d.hover == Hover::Pager(index) {
+            ui::hover_bg()
+        } else {
+            ui::field_bg()
+        };
+        canvas.fill_rounded(rect, 5.0, bg);
+        let color = if current { ui::on_accent() } else { ui::text_dim() };
+        ui::label(
+            canvas,
+            &mut d.fonts,
+            &(index + 1).to_string(),
+            rect,
+            ui::FONT_SMALL,
+            current,
+            Align::Center,
+            color,
+        );
+    }
+    if let Some(last) = layout.pager.last() {
+        canvas.fill_rect(
+            Rect::new(last.right() + GAP, last.y + 4, 1, last.h - 8),
             ui::separator(),
         );
     }
@@ -551,4 +699,128 @@ fn draw_window_glyph(canvas: &mut Canvas<'_>, rect: Rect) {
     let inner = rect.inflate(-2);
     canvas.stroke_rounded(inner, 2.0, 1.2, ui::text_dim());
     canvas.fill_rect(Rect::new(inner.x, inner.y, inner.w, 4), ui::text_dim());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{Event, Request, SurfaceId, ToplevelState};
+
+    /// A desktop with a configured bar, three windows of which the second is
+    /// on another desktop, and three desktops with the second current.
+    fn desktop() -> Desktop {
+        let mut d = Desktop::load(false);
+        d.config.launchers.clear();
+        d.config.panel_centered = false;
+        d.config.show_pager = true;
+        d.config.tasks_all_desktops = false;
+        d.handle(Event::Configured {
+            surface: SurfaceId::Panel,
+            width: 1280,
+            height: 40,
+            scale: 1,
+        });
+        for id in 1..=3 {
+            d.handle(Event::ToplevelAdded { id });
+        }
+        d.handle(Event::ToplevelState {
+            id: 2,
+            state: ToplevelState {
+                hidden: true,
+                ..ToplevelState::default()
+            },
+        });
+        d.handle(Event::Desktops { count: 3, current: 1 });
+        d.take_requests();
+        d
+    }
+
+    #[test]
+    fn pills_sit_side_by_side_at_the_bar_height() {
+        let bar = Rect::new(0, 0, 800, 32);
+        let pills = pager_pills(100, bar, 3);
+        assert_eq!(pills.len(), 3);
+        assert_eq!(pills[0], Rect::new(100, 3, PAGER_PILL_WIDTH, 26));
+        assert_eq!(pills[1].x, pills[0].right() + PAGER_PILL_GAP);
+        assert_eq!(pills[2].right(), 100 + 3 * PAGER_PILL_WIDTH + 2 * PAGER_PILL_GAP);
+        assert!(pager_pills(100, bar, 0).is_empty());
+    }
+
+    #[test]
+    fn the_pager_needs_more_than_one_desktop_and_the_setting() {
+        assert_eq!(pager_count(1, true), 0);
+        assert_eq!(pager_count(4, true), 4);
+        assert_eq!(pager_count(4, false), 0);
+    }
+
+    #[test]
+    fn hidden_windows_leave_the_task_list_but_keep_their_indices() {
+        let hidden = [false, true, false, true];
+        assert_eq!(listed_tasks(&hidden, false), vec![0, 2]);
+        assert_eq!(listed_tasks(&hidden, true), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn cycling_desktops_wraps_both_ways() {
+        assert_eq!(next_desktop(0, 3, true), 1);
+        assert_eq!(next_desktop(2, 3, true), 0);
+        assert_eq!(next_desktop(0, 3, false), 2);
+        assert_eq!(next_desktop(0, 1, true), 0);
+    }
+
+    #[test]
+    fn the_bar_places_the_pager_before_the_current_desktops_tasks() {
+        let mut d = desktop();
+        let layout = layout(&mut d);
+        assert_eq!(layout.pager.len(), 3);
+        assert!(layout.pager[0].x > layout.start.right());
+        let indices: Vec<usize> = layout.tasks.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, vec![0, 2], "the window on another desktop has no button");
+        assert!(layout.tasks[0].1.x > layout.pager[2].right());
+        assert_eq!(layout.rect_of(Hover::Pager(1)), Some(layout.pager[1]));
+        assert_eq!(layout.rect_of(Hover::Task(2)), Some(layout.tasks[1].1));
+
+        d.config.tasks_all_desktops = true;
+        let indices: Vec<usize> = super::layout(&mut d).tasks.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, vec![0, 1, 2]);
+
+        d.config.show_pager = false;
+        assert!(super::layout(&mut d).pager.is_empty());
+        d.config.show_pager = true;
+        d.handle(Event::Desktops { count: 1, current: 0 });
+        assert!(
+            super::layout(&mut d).pager.is_empty(),
+            "one desktop needs no pager"
+        );
+    }
+
+    #[test]
+    fn clicking_and_scrolling_the_pager_switch_desktops() {
+        let mut d = desktop();
+        let pills = layout(&mut d).pager.clone();
+        let center = |r: Rect| (r.x as f64 + r.w as f64 / 2.0, r.y as f64 + r.h as f64 / 2.0);
+        let (x, y) = center(pills[2]);
+        assert_eq!(hit(&mut d, x, y), Hover::Pager(2));
+        click(&mut d, x, y, Button::Left, 0);
+        assert!(matches!(
+            d.take_requests().as_slice(),
+            [Request::SwitchDesktop(2)]
+        ));
+        let (x, y) = center(pills[1]);
+        click(&mut d, x, y, Button::Left, 0);
+        assert!(
+            d.take_requests().is_empty(),
+            "the current desktop is not requested again"
+        );
+        scroll(&mut d, x, y, 1.0);
+        assert!(matches!(
+            d.take_requests().as_slice(),
+            [Request::SwitchDesktop(2)]
+        ));
+        scroll(&mut d, x, y, -1.0);
+        assert!(matches!(
+            d.take_requests().as_slice(),
+            [Request::SwitchDesktop(0)]
+        ));
+    }
 }

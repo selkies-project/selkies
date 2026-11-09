@@ -22,6 +22,10 @@ people reach for in a multi-application container:
   categories, read from the standard `.desktop` files.  Applications that
   appear or disappear, such as a [proot-apps](https://github.com/linuxserver/proot-apps)
   install, show up without a restart.
+* **Quick launcher** on the Super key, which the window manager forwards as
+  `selkies-desktop --launcher`: one search field over the recent or favorite
+  applications, the matches as you type, and a row that runs the line as a
+  shell command when its first word is a program or nothing matched.
 * **Taskbar** with window icons, hover tooltips, a minimize on click of the
   active window, middle click to close, a right-click menu with minimize,
   maximize and close, and wheel scrolling to cycle windows.
@@ -62,6 +66,32 @@ people reach for in a multi-application container:
   the default, so browsers, Steam and other applications that negotiate
   their own frames keep them instead of getting a second one; the image's
   per-application rules and its `NO_DECOR` rule are left as they are.
+* **Applications** follow the theme too.  The scheme is dark when the
+  popup color is, and it picks Breeze or Breeze-Dark where the Breeze GTK
+  theme is installed, else Adwaita or Adwaita-dark, with the breeze or
+  breeze-dark icons (the `icon_theme` setting when set) and the Breeze
+  cursors where installed.  Those names and the dark preference are set in
+  the `[Settings]` group of `~/.config/gtk-3.0/settings.ini` and
+  `~/.config/gtk-4.0/settings.ini`, every other line left as it is; in the
+  configuration of a running `xsettingsd`, which is told to reload, so
+  GTK windows already open on X11 change at once; and through `gsettings`
+  in `org.gnome.desktop.interface`, which GTK reads on Wayland and
+  libadwaita everywhere, only when they changed.  The accent goes to
+  `~/.config/selkies-desktop/gtk3.css` and `gtk4.css` as GTK's selection
+  and accent colors and libadwaita's accent variables, which each
+  `gtk.css` imports from its first line.  Qt follows GTK through its gtk3
+  platform theme (`QT_QPA_PLATFORMTHEME=gtk3`), and Chromium and Electron
+  through the GTK theme they load.
+* **The Settings portal** carries the same scheme and accent to the
+  applications that ask the desktop for them: the shell serves
+  `org.freedesktop.portal.Settings` on the session bus under the name
+  `org.freedesktop.portal.Desktop`, with `org.freedesktop.appearance`'s
+  `color-scheme`, `accent-color` and `contrast` and the
+  `org.gnome.desktop.interface` scheme and theme names, and signals each
+  change, so libadwaita, Qt 6, Chromium and Electron windows already open
+  flip between light and dark and take the accent at once.  No
+  xdg-desktop-portal is needed; an image that runs one keeps it, since the
+  shell takes the name only while nothing else holds it.
 * **Files**, a small file manager in the start menu, opened by `xdg-open` for
   folders and by the wallpaper picker: a sidebar with the home, Desktop,
   Documents, Downloads, Pictures, Music and Videos folders that exist, icon
@@ -105,10 +135,10 @@ so an edit applies within a moment.
 | `panel_margin` | `0` | Space between the bar and the screen edges in pixels, 0 to 16, which floats it with every corner rounded |
 | `start_label` | | Text shown on the start button beside its icon |
 | `menu_layout` | `columns` | How the start menu lists applications: `columns` (categories and rows), `grid` (categories and a grid of icons) or `tiles` (every application in a list with the favorites as tiles beside it) |
-| `color_accent` | `#7967c5` | Color of markers, selections, switches and the chosen option |
-| `color_panel` | `#0a0e17` | Color of the bar |
-| `color_popup` | `#121826` | Color of menus, popups and windows |
-| `color_text` | `#eef2f8` | Color of text; hover, separator and field shades derive from it |
+| `color_accent` | `#3daee9` | Color of markers, selections, switches and the chosen option |
+| `color_panel` | `#31363b` | Color of the bar |
+| `color_popup` | `#2a2e32` | Color of menus, popups and windows |
+| `color_text` | `#fcfcfc` | Color of text; hover, separator and field shades derive from it |
 | `theme_windows` | `true` | Generate the window manager's theme from the colors and the frame settings, and reload it; `false` removes the generated theme |
 | `window_surface` | `flat` | Shading of title bars, the bar and the popups: `flat`, `gradient` or `glossy` |
 | `window_buttons` | `right` | Side of a title bar the buttons sit on: `right` or `left` |
@@ -128,6 +158,9 @@ so an edit applies within a moment.
 | `background_style_2`, `background_2`, `wallpaper_2`, `wallpaper_mode_2` | | The same four keys with a `_N` suffix override them for monitor N, numbered from 1 with the primary first |
 | `launchers` | | Comma separated desktop file IDs shown as quick launch buttons beside the start button |
 | `show_tray` | `true` | Host the system tray beside the clock for the applications that dock an icon |
+| `desktops` | `2` | Number of virtual desktops, 1 to 9; the window manager reads this key from the same file |
+| `show_pager` | `true` | Show the pager, one numbered pill per desktop, between the quick launch buttons and the taskbar when there is more than one desktop |
+| `tasks_all_desktops` | `false` | List the windows of every desktop on the taskbar rather than the current one's |
 | `files_view` | `icons` | `icons` or `list`, how new file manager windows start |
 | `files_sort` | `name` | `name`, `size`, `modified` or `type` |
 | `files_hidden` | `false` | Whether new file manager windows show hidden files |
@@ -143,6 +176,7 @@ A second invocation sends a command over the control socket in
 
 ```bash
 selkies-desktop --toggle-menu     # open or close the start menu
+selkies-desktop --launcher        # open or close the quick launcher
 selkies-desktop --show-desktop    # minimize every window, or restore them
 selkies-desktop --files [DIR]     # open the file manager, on a folder when given
 selkies-desktop --settings        # open the settings window
@@ -154,7 +188,7 @@ selkies-desktop --lookup-icon firefox   # print the file an icon name resolves t
 For labwc, in `rc.xml`:
 
 ```xml
-<keybind key="Super_L"><action name="Execute" command="selkies-desktop --toggle-menu" /></keybind>
+<keybind key="Super_L"><action name="Execute" command="selkies-desktop --launcher" /></keybind>
 ```
 
 Touching `~/.config/panel-reload`, the trigger earlier versions used, still
