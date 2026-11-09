@@ -3,13 +3,12 @@
 //! The window is a toplevel of the shell's own, opened through the same
 //! machinery as a file manager window and placed and decorated by the window
 //! manager, so it floats, moves and closes like any other.  Inside it a
-//! sidebar carries a search field and the pages, grouped under captions:
+//! sidebar carries the pages, grouped under captions:
 //! Appearance (Theme, Colors, Windows, Wallpaper), Workspace (Panel,
 //! Desktops, Shortcuts), Applications (Files, Language) and System (About).
 //! A caption is set small, upper case and dim under a hairline, so it reads
-//! as a heading rather than a page; the page shown is a filled accent pill.
-//! The search field filters the sidebar to the pages whose name or row
-//! titles contain the text, and Enter opens the first match.  The page fills
+//! as a heading rather than a page; the page shown is a filled accent pill,
+//! inset from the sidebar's edge on both sides.  The page fills
 //! the rest of the window with captioned cards of rows, each row a name on
 //! the left and its control on the right, and scrolls when it is taller than
 //! the window.  Every change is written to the config file at once, which
@@ -87,10 +86,8 @@ const CAPTION: i32 = 28;
 const GROUP_GAP: i32 = 12;
 /// Width of the name column of a row.
 const TITLE_WIDTH: i32 = 150;
-/// Width of the sidebar, search field and pages.
+/// Width of the sidebar, its pages inset from both of its edges.
 const SIDEBAR: i32 = 220;
-/// Height of the sidebar's search field.
-const SEARCH_HEIGHT: i32 = 32;
 /// Height of a page row in the sidebar.
 const NAV_ROW: i32 = 32;
 /// Height of a group caption in the sidebar.
@@ -477,74 +474,6 @@ impl Page {
             Page::About => Group::System,
         }
     }
-
-    /// The titles of the page's rows, which the search matches beside the
-    /// page's name.
-    fn keywords(self) -> Vec<&'static str> {
-        match self {
-            Page::Theme => vec![tr("Scheme"), tr("Style"), tr("Preview")],
-            Page::Colors => vec![tr("Accent"), tr("Bar"), tr("Menus"), tr("Text")],
-            Page::Windows => vec![
-                tr("Decorate windows"),
-                tr("Surface"),
-                tr("Buttons"),
-                tr("Glyphs"),
-                tr("Corners"),
-            ],
-            Page::Wallpaper => vec![
-                tr("Monitor"),
-                tr("Background"),
-                tr("Color"),
-                tr("Image"),
-                tr("Fit"),
-            ],
-            Page::Panel => vec![
-                tr("Edge"),
-                tr("Auto-hide"),
-                tr("Height"),
-                tr("Width"),
-                tr("Opacity"),
-                tr("Icon"),
-                tr("Label"),
-                tr("Layout"),
-                tr("Margin"),
-                tr("Clock"),
-                tr("Format"),
-                tr("Volume"),
-                tr("Tray"),
-                tr("Quick launch"),
-                tr("Start menu"),
-                tr("Favorites"),
-                tr("Recent"),
-            ],
-            Page::Desktops => vec![tr("Show the pager"), tr("Show windows of all desktops")],
-            Page::Shortcuts => vec![tr("Window manager"), tr("Desktop"), tr("Quick launcher")],
-            Page::Files => vec![tr("View"), tr("Sort"), tr("Hidden files")],
-            Page::Language => vec![],
-            Page::About => vec![tr("Version"), tr("Backend"), tr("Config file")],
-        }
-    }
-}
-
-/// The pages a search matches: every page for an empty query, else the
-/// pages whose name or any row title contains the text, case ignored, in
-/// sidebar order.
-///
-/// # Arguments
-/// * `query` - The search text.
-pub fn search_pages(query: &str) -> Vec<Page> {
-    let query = query.trim().to_lowercase();
-    Page::ALL
-        .into_iter()
-        .filter(|page| {
-            query.is_empty()
-                || page.name().to_lowercase().contains(&query)
-                || page
-                    .keywords()
-                    .iter()
-                    .any(|title| title.to_lowercase().contains(&query))
-        })
-        .collect()
 }
 
 /// The shell's own fixed shortcuts: the chord and what it does.
@@ -623,8 +552,6 @@ impl ThemeColor {
 /// A text field of the settings window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
-    /// The sidebar's search field.
-    Search,
     /// The clock's strftime pattern.
     ClockFormat,
     /// The start button's icon name or image path.
@@ -861,8 +788,6 @@ pub struct SettingsState {
     pub pointer: (f64, f64),
     /// The page shown.
     pub page: Page,
-    /// The sidebar's search text.
-    pub search: String,
     /// The list setting whose application list is open, if any.
     pub picking: Option<&'static str>,
     /// The monitor whose wallpaper is shown, or `None` for the shared one.
@@ -924,7 +849,6 @@ impl Default for SettingsState {
             dirty: false,
             pointer: (-1.0, -1.0),
             page: Page::Theme,
-            search: String::new(),
             picking: None,
             monitor: None,
             focus: None,
@@ -951,7 +875,6 @@ impl SettingsState {
         if let Some(page) = page {
             self.page = page;
         }
-        self.search.clear();
         self.picking = None;
         self.monitor = None;
         self.focus = None;
@@ -1349,9 +1272,10 @@ fn frame(d: &Desktop) -> Rect {
     Rect::new(0, 0, d.settings.geometry.width, d.settings.geometry.height)
 }
 
-/// The sidebar's search field, for a frame.
-fn search_rect_in(frame: Rect) -> Rect {
-    Rect::new(frame.x + PAD, frame.y + PAD, SIDEBAR - PAD, SEARCH_HEIGHT)
+/// The sidebar's column of pages, for a frame: inset by the same margin from the window's edge
+/// on the left and from the sidebar's divider on the right.
+fn sidebar_rect_in(frame: Rect) -> Rect {
+    Rect::new(frame.x + PAD, frame.y + PAD, SIDEBAR - 2 * PAD, frame.h - 2 * PAD)
 }
 
 /// The page area to the right of the sidebar, for a frame: above the
@@ -1399,14 +1323,10 @@ fn hex(color: Color) -> String {
 /// The text a field shows: what is being typed when it has focus, the
 /// setting otherwise.
 fn field_text(d: &Desktop, field: Field) -> String {
-    if field == Field::Search {
-        return d.settings.search.clone();
-    }
     if d.settings.focus == Some(field) {
         return d.settings.editing.clone();
     }
     match field {
-        Field::Search => String::new(),
         Field::Command => d.settings.command.clone(),
         Field::ClockFormat => d.config.clock_format.clone(),
         Field::StartIcon => d.config.start_icon.clone().unwrap_or_default(),
@@ -1425,12 +1345,9 @@ fn field_color(d: &Desktop, field: Field) -> Color {
     match field {
         Field::Color => shown_wallpaper(d).color,
         Field::Theme(color) => color.current(d.config.theme),
-        Field::Search
-        | Field::ClockFormat
-        | Field::StartIcon
-        | Field::StartLabel
-        | Field::Image
-        | Field::Command => Color::BLACK,
+        Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image | Field::Command => {
+            Color::BLACK
+        }
     }
 }
 
@@ -2152,8 +2069,7 @@ fn scrollbar(d: &Desktop) -> Option<ui::Scrollbar> {
     ui::Scrollbar::new(gutter, content, d.settings.scroll)
 }
 
-/// Lays the sidebar out: the search field, then the pages the search
-/// leaves, each group under its caption.
+/// Lays the sidebar out: the pages, each group under its caption.
 fn build_sidebar(d: &Desktop, frame: Rect, out: &mut Layout) {
     let fixed = |rect: Rect, action: Action, label: &str, active: bool, kind: Kind| Control {
         rect,
@@ -2166,37 +2082,29 @@ fn build_sidebar(d: &Desktop, frame: Rect, out: &mut Layout) {
         look: None,
         clip: None,
     };
-    let search = search_rect_in(frame);
-    out.controls.push(fixed(
-        search,
-        Action::Focus(Field::Search),
-        &d.settings.search,
-        d.settings.focus == Some(Field::Search),
-        Kind::Text,
-    ));
-    let pages = search_pages(&d.settings.search);
-    let mut y = search.bottom() + PAD - 4;
+    let column = sidebar_rect_in(frame);
+    let mut y = column.y;
     let mut first = true;
     for group in Group::ALL {
-        let members: Vec<Page> = pages.iter().copied().filter(|p| p.group() == group).collect();
+        let members: Vec<Page> = Page::ALL.into_iter().filter(|p| p.group() == group).collect();
         if members.is_empty() {
             continue;
         }
         if !first {
             out.nav_lines
-                .push(Rect::new(search.x + 6, y + NAV_GROUP_GAP / 2, search.w - 12, 1));
+                .push(Rect::new(column.x + 6, y + NAV_GROUP_GAP / 2, column.w - 12, 1));
             y += NAV_GROUP_GAP;
         }
         first = false;
         out.nav_texts.push(Text {
-            rect: Rect::new(search.x + 12, y, search.w - 24, NAV_CAPTION),
+            rect: Rect::new(column.x + 12, y, column.w - 24, NAV_CAPTION),
             text: group.name().to_uppercase(),
             tone: Tone::Caption,
         });
         y += NAV_CAPTION;
         for page in members {
             out.controls.push(fixed(
-                Rect::new(search.x, y, search.w, NAV_ROW),
+                Rect::new(column.x, y, column.w, NAV_ROW),
                 Action::Page(page),
                 page.name(),
                 d.settings.page == page,
@@ -2805,7 +2713,7 @@ fn draw_button(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
 }
 
 /// Draws a text field with its caret when focused.  An empty field shows
-/// what it is for: the search field its prompt, the command of a shortcut
+/// what it is for: the command of a shortcut
 /// being added that it takes one, the others `none`.
 fn draw_field(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
     let rect = control.rect;
@@ -2821,7 +2729,6 @@ fn draw_field(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hover
     let empty = control.label.is_empty();
     let shown = if empty && !control.active {
         match control.action {
-            Action::Focus(Field::Search) => tr("Search settings").to_string(),
             Action::Focus(Field::Command) => tr("Command").to_string(),
             _ => "none".to_string(),
         }
@@ -3933,12 +3840,7 @@ fn preview_color(d: &mut Desktop, field: Field, color: Color) {
             }
             d.repaint_wallpapers();
         }
-        Field::Search
-        | Field::ClockFormat
-        | Field::StartIcon
-        | Field::StartLabel
-        | Field::Image
-        | Field::Command => {}
+        Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image | Field::Command => {}
     }
 }
 
@@ -3947,12 +3849,7 @@ fn color_key(d: &Desktop, field: Field) -> Option<&'static str> {
     match field {
         Field::Color => Some(wallpaper_key(d, "background")),
         Field::Theme(color) => Some(color.key()),
-        Field::Search
-        | Field::ClockFormat
-        | Field::StartIcon
-        | Field::StartLabel
-        | Field::Image
-        | Field::Command => None,
+        Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image | Field::Command => None,
     }
 }
 
@@ -4022,8 +3919,7 @@ fn release(d: &mut Desktop) {
     }
 }
 
-/// Writes the focused field's text and drops the focus.  The search field
-/// writes nothing, its text being the filter itself, and the command of a
+/// Writes the focused field's text and drops the focus.  The command of a
 /// shortcut being added is kept for its capture.
 fn commit_field(d: &mut Desktop) {
     let Some(field) = d.settings.focus.take() else {
@@ -4031,7 +3927,6 @@ fn commit_field(d: &mut Desktop) {
     };
     let text = std::mem::take(&mut d.settings.editing);
     let (key, value) = match field {
-        Field::Search => return,
         Field::Command => {
             d.settings.command = text.trim().to_string();
             return;
@@ -4062,7 +3957,7 @@ fn commit_field(d: &mut Desktop) {
 }
 
 /// Handles Escape: drops the focus of a field being typed into, keeping the
-/// setting as it was, else closes the color picker, else clears a search.
+/// setting as it was, else closes the color picker.
 ///
 /// # Arguments
 /// * `d` - The desktop.
@@ -4073,8 +3968,6 @@ fn escape(d: &mut Desktop) -> bool {
     if d.settings.focus.take().is_some() {
         d.settings.editing.clear();
     } else if d.settings.picker.take().is_some() {
-    } else if !d.settings.search.is_empty() {
-        d.settings.search.clear();
     } else {
         return false;
     }
@@ -4109,8 +4002,7 @@ pub fn pointer_axis(d: &mut Desktop, x: f64, y: f64, delta: f64) {
 
 /// Handles a key press in the window: Escape closes what is open in it
 /// and then the window itself; typing goes to the focused field, Enter
-/// writes it; with no field focused, typing searches the pages and Enter
-/// opens the first match.
+/// writes it.
 ///
 /// # Arguments
 /// * `d` - The desktop.
@@ -4125,25 +4017,8 @@ pub fn key(d: &mut Desktop, key: Key) {
         }
         return;
     }
-    let focus = d.settings.focus;
-    if focus.is_none() && matches!(key, Key::Char(_) | Key::Backspace) {
-        d.settings.focus = Some(Field::Search);
-    }
     match d.settings.focus {
         None => return,
-        Some(Field::Search) => match key {
-            Key::Char(c) => d.settings.search.push(c),
-            Key::Backspace => {
-                d.settings.search.pop();
-            }
-            Key::Enter => {
-                if let Some(page) = search_pages(&d.settings.search).first().copied() {
-                    show_page(d, page);
-                }
-            }
-            Key::Tab => d.settings.focus = None,
-            _ => return,
-        },
         Some(_) => match key {
             Key::Char(c) => d.settings.editing.push(c),
             Key::Backspace => {
@@ -4254,23 +4129,6 @@ mod tests {
         assert_eq!(Page::from_id(" wallpaper "), Some(Page::Wallpaper));
         assert_eq!(Page::from_id("sound"), None);
         assert_eq!(Page::from_id(""), None);
-    }
-
-    #[test]
-    fn the_search_matches_page_names_and_row_titles() {
-        assert_eq!(search_pages("").len(), Page::ALL.len());
-        assert_eq!(search_pages("   "), Page::ALL.to_vec());
-        assert_eq!(search_pages("wallp"), vec![Page::Wallpaper]);
-        assert_eq!(search_pages("CORNERS"), vec![Page::Windows]);
-        assert!(search_pages("clock").contains(&Page::Panel));
-        assert_eq!(search_pages("pager"), vec![Page::Desktops]);
-        assert!(search_pages("xyzzy").is_empty());
-        let order = search_pages("e");
-        let positions: Vec<usize> = order
-            .iter()
-            .map(|page| Page::ALL.iter().position(|p| p == page).unwrap())
-            .collect();
-        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

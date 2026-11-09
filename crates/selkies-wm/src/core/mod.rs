@@ -1654,14 +1654,21 @@ impl Engine {
             }
             return;
         }
+        // An X server composites nothing, so the window would only be swapped for an empty
+        // frame sliding to the bar; there it is hidden and shown at once.
+        let animate = self.backend == Backend::Wayland;
         if on {
             let rect = win.rect;
             let target = Effects::minimize_target(win.taskbar, self.output_rect(win.output));
-            self.effects
-                .start(id, EffectKind::Minimize, rect, target, self.now);
-            self.out.push(Command::WakeAt(self.now));
             if self.focus == Some(id) {
                 self.focus_fallback_excluding(id);
+            }
+            if animate {
+                self.effects
+                    .start(id, EffectKind::Minimize, rect, target, self.now);
+                self.out.push(Command::WakeAt(self.now));
+            } else {
+                self.finish_minimize(id);
             }
         } else {
             if let Some(win) = self.windows.get_mut(&id) {
@@ -1675,8 +1682,10 @@ impl Engine {
             let win = &self.windows[&id];
             let rect = win.rect;
             let from = Effects::minimize_target(win.taskbar, self.output_rect(win.output));
-            self.effects.start(id, EffectKind::Restore, from, rect, self.now);
-            self.out.push(Command::WakeAt(self.now));
+            if animate {
+                self.effects.start(id, EffectKind::Restore, from, rect, self.now);
+                self.out.push(Command::WakeAt(self.now));
+            }
             self.render_frame(id);
             self.emit_stack();
         }
@@ -2209,15 +2218,21 @@ impl Engine {
     /// What lies under the pointer from the engine's side: a frame part of the topmost window
     /// whose frame holds the point, else the client the compositor named.
     /// What lies under a point: the topmost window whose frame or client area holds it, walked
-    /// down the stack, so a window drawing its own frame (a browser) covers the framed windows
-    /// below it as it does on screen; past every window, what the compositor found there.
+    /// down the stack. A window drawing its own frame (a browser) holds the point where the
+    /// compositor or the server found it under the pointer, which follows the window's input
+    /// region, so it covers the framed windows below it as it does on screen while a desktop
+    /// window taking input on its icons alone leaves the rest of the screen to the root. Past
+    /// every window, what the compositor found there.
     fn hit(&self, x: f64, y: f64, under: &Under) -> (Context, Option<WindowId>) {
         for id in self.ordered_stack().into_iter().rev() {
             let Some(win) = self.win(id) else {
                 continue;
             };
             if !win.decorated || win.fullscreen {
-                if win.rect.contains_f64(x, y) {
+                if under.window == Some(id)
+                    && win.info.window_type != WindowType::Desktop
+                    && win.rect.contains_f64(x, y)
+                {
                     return (Context::Client, Some(id));
                 }
                 continue;
@@ -2349,9 +2364,12 @@ impl Engine {
                     win.pressed = Some(context);
                 }
                 let ran = self.run_mousebinds(context, number, event.modifiers, MouseEvent::Press, window);
+                // A press that opened a menu is the menu's: the client under it would otherwise
+                // hold an implicit grab whose release the menu takes, and keep every later click.
                 let consumed = match context {
                     Context::Client | Context::Desktop => {
-                        bind_modifiers(event.modifiers) != Modifiers::default() && ran
+                        (bind_modifiers(event.modifiers) != Modifiers::default() && ran)
+                            || self.menu.is_some()
                     }
                     Context::Root => ran,
                     _ => true,
@@ -2387,7 +2405,13 @@ impl Engine {
                     win.pressed = None;
                 }
                 let (context, window) = self.hit(event.x, event.y, &under);
-                let same = context == press.context && window == press.window;
+                // A frame button pressed completes on its release wherever the pointer ends up:
+                // a click a few pixels off a small button through a stream still counts.
+                let button = matches!(
+                    press.context,
+                    Context::Iconify | Context::Maximize | Context::Close | Context::Shade
+                );
+                let same = button || (context == press.context && window == press.window);
                 self.run_mousebinds(
                     press.context,
                     number,
@@ -2395,7 +2419,7 @@ impl Engine {
                     MouseEvent::Release,
                     press.window,
                 );
-                if !press.dragged && same {
+                if (!press.dragged || button) && same {
                     self.run_mousebinds(
                         press.context,
                         number,
@@ -2523,20 +2547,25 @@ impl Engine {
             | Context::AllDesktops => {
                 vec![context, Context::Frame]
             }
+            // The desktop stands in for the root it covers: a click on the shell's wallpaper
+            // runs the root's bindings (the desktop menu) after any of its own, so the menu
+            // opens wherever the desktop is clicked while the shell still sees the click.
+            Context::Desktop => vec![Context::Desktop, Context::Root],
             other => vec![other],
         };
         let mut matched = Vec::new();
         for ctx in contexts {
+            let target = if ctx == Context::Root { None } else { window };
             for bind in &self.config.mousebinds {
                 if bind.context == ctx
                     && bind.button == button
                     && bind.modifiers == modifiers
                     && bind.event == event
                 {
-                    matched.push(bind.actions.clone());
+                    matched.push((bind.actions.clone(), target));
                 }
             }
-            if !matched.is_empty() && ctx != Context::Frame {
+            if !matched.is_empty() && !matches!(ctx, Context::Frame | Context::Desktop) {
                 break;
             }
         }
@@ -2544,8 +2573,8 @@ impl Engine {
             return false;
         }
         let at = self.pointer;
-        for actions in matched {
-            self.run_actions(&actions, window, at);
+        for (actions, target) in matched {
+            self.run_actions(&actions, target, at);
         }
         true
     }
@@ -4521,6 +4550,91 @@ mod tests {
             (Context::Client, Some(1)),
             "the framed window raised over the other one takes the point"
         );
+    }
+
+    /// A right click on the desktop runs the root's binding as well as the desktop's own and
+    /// passes on to the shell, and a full-screen desktop window taking the click is not taken
+    /// for a client covering the root.
+    #[test]
+    fn a_desktop_click_runs_the_root_bindings_and_reaches_the_shell() {
+        let (mut engine, spawned) = engine();
+        engine
+            .config
+            .apply_rc(
+                r#"<openbox_config><mouse><context name="Desktop"><mousebind button="Right" action="Press"><action name="Focus"/></mousebind></context><context name="Root"><mousebind button="Right" action="Press"><action name="Execute"><command>root-menu</command></action></mousebind></context></mouse></openbox_config>"#,
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        let mut desktop = info(9);
+        desktop.window_type = WindowType::Desktop;
+        engine.handle(Event::Added(desktop), &mut out);
+        engine.handle(
+            Event::Mapped {
+                id: 9,
+                size: Size { w: 1280, h: 800 },
+            },
+            &mut out,
+        );
+        let under = Under {
+            window: Some(9),
+            top_layer: false,
+            desktop: false,
+        };
+        assert_eq!(engine.hit(600.0, 400.0, &under), (Context::Desktop, Some(9)));
+        let verdict = engine.handle(
+            Event::Pointer(
+                PointerEvent {
+                    x: 600.0,
+                    y: 400.0,
+                    kind: PointerKind::Button {
+                        button: 0x111,
+                        pressed: true,
+                    },
+                    modifiers: Modifiers::default(),
+                    time: 1,
+                },
+                under,
+            ),
+            &mut out,
+        );
+        assert_eq!(verdict, Verdict::Pass, "the shell sees the click too");
+        assert_eq!(spawned.lock().unwrap().as_slice(), ["root-menu"]);
+    }
+
+    /// A desktop press that opens the root menu is the menu's, so the shell under it never
+    /// starts a pointer grab whose release the menu would take.
+    #[test]
+    fn a_desktop_press_opening_a_menu_is_consumed() {
+        let (mut engine, _) = engine();
+        engine
+            .config
+            .apply_rc(
+                r#"<openbox_config><mouse><context name="Root"><mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind></context></mouse></openbox_config>"#,
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        let verdict = engine.handle(
+            Event::Pointer(
+                PointerEvent {
+                    x: 600.0,
+                    y: 400.0,
+                    kind: PointerKind::Button {
+                        button: 0x111,
+                        pressed: true,
+                    },
+                    modifiers: Modifiers::default(),
+                    time: 1,
+                },
+                Under {
+                    window: None,
+                    top_layer: false,
+                    desktop: true,
+                },
+            ),
+            &mut out,
+        );
+        assert!(engine.menu.is_some());
+        assert_eq!(verdict, Verdict::Consumed);
     }
 
     /// A click inside a client focuses it and passes through; Alt-F4 is taken and closes the

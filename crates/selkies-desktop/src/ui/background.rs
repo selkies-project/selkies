@@ -50,7 +50,9 @@ pub fn cell_rect(d: &Desktop, index: usize) -> Rect {
     )
 }
 
-/// Every launcher cell, which is the primary background's input region.
+/// Every launcher cell, the part of the launchers' surface that is drawn on.  The primary
+/// background takes input over its whole area, so a click on an empty spot reaches the shell,
+/// which drops the selection, and the window manager, which opens the desktop's menu there.
 ///
 /// # Arguments
 /// * `d` - The desktop.
@@ -144,33 +146,37 @@ pub fn draw_launchers(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
 
     let scale = canvas.scale() as f32;
     let font_px = ui::FONT_SMALL * scale;
+    let line_h = 16;
     for index in 0..d.apps.desktop.len() {
         let cell = cell_rect(d, index);
         let selected = d.desktop_selection == Some(index);
         let hovered = d.hover == Hover::DesktopIcon(index);
-        if selected {
-            canvas.fill_rounded(cell, 8.0, ui::accent_alpha(0x55));
-            canvas.stroke_rounded(cell, 8.0, 1.0, ui::accent_alpha(0x90));
-        } else if hovered {
-            canvas.fill_rounded(cell, 8.0, rgba(0xff, 0xff, 0xff, 0x22));
-        }
+        let name = d.apps.desktop[index].name.clone();
+        let max_width = (cell.w - 6) as f32 * scale;
+        let (line1, line2) = ui::wrap_two_lines(&mut d.fonts, &name, font_px, max_width);
         let icon_rect = Rect::new(
             cell.x + (cell.w - ui::DESKTOP_ICON_SIZE) / 2,
             cell.y + 6,
             ui::DESKTOP_ICON_SIZE,
             ui::DESKTOP_ICON_SIZE,
         );
+        let text_top = icon_rect.bottom() + 4;
+        let lines = if line2.is_some() { 2 } else { 1 };
+        // The highlight hugs the icon and its label; the rest of the cell is the gap between
+        // launchers.
+        let highlight = Rect::new(cell.x, cell.y, cell.w, text_top + lines * line_h + 6 - cell.y);
+        if selected {
+            canvas.fill_rounded(highlight, 8.0, ui::accent_alpha(0x55));
+            canvas.stroke_rounded(highlight, 8.0, 1.0, ui::accent_alpha(0x90));
+        } else if hovered {
+            canvas.fill_rounded(highlight, 8.0, rgba(0xff, 0xff, 0xff, 0x22));
+        }
         match d.desktop_icon(index) {
             Some(icon) => canvas.draw_image_fit(&icon, icon_rect),
             None => {
                 canvas.fill_rounded(icon_rect.inflate(-6), 6.0, rgba(0xff, 0xff, 0xff, 0x30));
             }
         }
-        let name = d.apps.desktop[index].name.clone();
-        let max_width = (cell.w - 6) as f32 * scale;
-        let (line1, line2) = ui::wrap_two_lines(&mut d.fonts, &name, font_px, max_width);
-        let text_top = icon_rect.bottom() + 4;
-        let line_h = 16;
         draw_shadowed(canvas, &mut d.fonts, &line1, cell, text_top + line_h / 2);
         if let Some(line2) = line2 {
             draw_shadowed(canvas, &mut d.fonts, &line2, cell, text_top + line_h + line_h / 2);
@@ -337,11 +343,12 @@ mod tests {
             .expect("a configured background renders");
         assert!(wallpaper.input.is_empty(), "the wallpaper takes no input");
         assert_eq!(
-            launchers.input.len(),
-            1,
-            "the launcher layer takes input on its cell"
+            launchers.input,
+            vec![Rect::new(0, 0, 320, 240)],
+            "the launcher layer takes input over the whole desktop, so a click on an empty spot reaches the shell"
         );
-        let cell = launchers.input[0];
+        assert_eq!(launchers.visible.len(), 1, "the launcher layer draws its cell");
+        let cell = launchers.visible[0];
         let outside = (cell.right() + 20, cell.bottom() + 20);
         assert_eq!(
             alpha(launchers.pixmap, outside.0, outside.1),

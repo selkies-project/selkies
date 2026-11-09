@@ -1247,6 +1247,7 @@ impl WlrLayerShellHandler for AppState {
             layer_map_for_output(&node.output).arrange();
         }
         crate::wayland::wm::outputs_changed(self);
+        crate::wayland::wm::sync_layer_keyboard(self);
     }
 }
 
@@ -1326,6 +1327,7 @@ impl CompositorHandler for AppState {
                 layer_map.arrange();
                 drop(layer_map);
                 crate::wayland::wm::outputs_changed(self);
+                crate::wayland::wm::sync_layer_keyboard(self);
                 break;
             }
         }

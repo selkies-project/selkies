@@ -2144,7 +2144,7 @@ impl Desktop {
         }
         let whole = Rect::new(0, 0, geometry.width, geometry.height);
         let input = if self.backgrounds[index].primary {
-            background::cells(self)
+            vec![whole]
         } else {
             Vec::new()
         };
@@ -2198,10 +2198,10 @@ impl Desktop {
             background::draw_launchers(self, id, &mut canvas);
         }
         let whole = Rect::new(0, 0, geometry.width, geometry.height);
-        let cells = if self.backgrounds[index].primary {
-            background::cells(self)
+        let (input, cells) = if self.backgrounds[index].primary {
+            (vec![whole], background::cells(self))
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         self.backgrounds[index].pix = Some(pix);
         self.backgrounds[index].launchers_pix = Some(launchers);
@@ -2219,7 +2219,7 @@ impl Desktop {
                 pixmap: surface.launchers_pix.as_ref()?,
                 scale: geometry.scale,
                 damage: vec![whole],
-                input: cells.clone(),
+                input,
                 visible: cells,
                 grab: false,
             },

@@ -1,8 +1,10 @@
 //! The start menu: a search box, the categories with favorites and recent
 //! launches, and the applications of the chosen category, in one of three
-//! layouts.  Columns lists the applications in rows beside the categories,
-//! Grid shows them as a grid of icons, and Tiles drops the categories for a
-//! list of every application with the favorites as tiles beside it.
+//! layouts.  Columns lists the applications beside the categories, each a
+//! row with a 32 px icon over its name and description, and the favorites as
+//! a grid of large icons; Grid shows every list as a grid of icons; and Tiles
+//! drops the categories for a list of every application with the favorites
+//! as tiles beside it.  Each category row carries its theme icon.
 
 use crate::config::MenuLayout;
 use crate::desktop::{Desktop, Hover, Popup};
@@ -15,23 +17,35 @@ use crate::ui;
 use crate::xkb::Key;
 
 /// Menu width.
-const WIDTH: i32 = 500;
+const WIDTH: i32 = 640;
 /// Height of the menu.
-const HEIGHT: i32 = 440;
+const HEIGHT: i32 = 500;
 /// Shortest the menu shrinks on a small screen.
 const MIN_HEIGHT: i32 = 200;
 /// Width of the category column.
-const CATEGORY_WIDTH: i32 = 180;
+const CATEGORY_WIDTH: i32 = 210;
+/// Height of a category row.
+const CATEGORY_ROW: i32 = 34;
+/// Icon size on a category row.
+const CATEGORY_ICON: i32 = 20;
 /// Width of the application list in the tiles layout.
 const LIST_WIDTH: i32 = 210;
-/// Height of a list row.
-const ROW: i32 = 30;
+/// Height of an application row: the icon beside the name over the description.
+const ROW: i32 = 44;
+/// Icon size on an application row.
+const ROW_ICON: i32 = 32;
 /// Width of a cell of the application grid.
 const CELL_W: i32 = 72;
 /// Height of a cell of the application grid.
 const CELL_H: i32 = 70;
 /// Icon size in the application grid.
 const CELL_ICON: i32 = 32;
+/// Width of a cell of the favorites' grid.
+const FAVORITE_W: i32 = 104;
+/// Height of a cell of the favorites' grid, room for a two-line name.
+const FAVORITE_H: i32 = 108;
+/// Icon size in the favorites' grid.
+const FAVORITE_ICON: i32 = 52;
 /// Side of a favorite's tile.
 const TILE: i32 = 80;
 /// Space between tiles.
@@ -212,9 +226,56 @@ struct Layout {
     footer: Rect,
 }
 
-/// Whether the application area is a grid of icons.
-fn is_grid(d: &Desktop) -> bool {
-    d.config.menu_layout == MenuLayout::Grid
+/// How the application area lays its items out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arrangement {
+    /// One row an application.
+    Rows,
+    /// A grid of icons with their names beneath, cells of a size.
+    Grid { w: i32, h: i32, icon: i32 },
+}
+
+/// The arrangement of the application area: a grid in the grid layout, the
+/// favorites as a grid of large icons in the columns layout while nothing is
+/// searched, rows otherwise.
+fn arrangement(d: &Desktop) -> Arrangement {
+    let searching = !d.menu.query.trim().is_empty();
+    match d.config.menu_layout {
+        MenuLayout::Grid => Arrangement::Grid {
+            w: CELL_W,
+            h: CELL_H,
+            icon: CELL_ICON,
+        },
+        MenuLayout::Columns if d.menu.section == Section::Favorites && !searching => Arrangement::Grid {
+            w: FAVORITE_W,
+            h: FAVORITE_H,
+            icon: FAVORITE_ICON,
+        },
+        _ => Arrangement::Rows,
+    }
+}
+
+/// The theme icon a section's row carries.
+fn section_icon(d: &Desktop, section: Section) -> &'static str {
+    match section {
+        Section::Favorites => "bookmarks",
+        Section::Recent => "document-open-recent",
+        Section::All => "applications-all",
+        Section::Category(i) => match d.apps.categories.get(i).map(|c| c.name.as_str()) {
+            Some("Multimedia") => "applications-multimedia",
+            Some("Development") => "applications-development",
+            Some("Education") => "applications-education",
+            Some("Games") => "applications-games",
+            Some("Graphics") => "applications-graphics",
+            Some("Internet") => "applications-internet",
+            Some("Office") => "applications-office",
+            Some("Science") => "applications-science",
+            Some("Settings") => "preferences-system",
+            Some("System") => "applications-system",
+            Some("Utilities") => "applications-utilities",
+            _ => "applications-other",
+        },
+    }
 }
 
 /// Computes the menu rectangles for the current panel size.  The menu has a
@@ -374,9 +435,9 @@ fn ensure_items(d: &mut Desktop) {
     }
 }
 
-/// Columns of the application grid in an area.
-fn grid_columns(apps: Rect) -> usize {
-    (apps.w / CELL_W).max(1) as usize
+/// Columns of a grid of cells this wide in an area.
+fn grid_columns(apps: Rect, cell_w: i32) -> usize {
+    (apps.w / cell_w).max(1) as usize
 }
 
 /// The cell of an item in the application grid, scrolled.
@@ -385,14 +446,16 @@ fn grid_columns(apps: Rect) -> usize {
 /// * `d` - The desktop.
 /// * `apps` - The application area.
 /// * `row` - The item's position in the list.
-fn grid_cell(d: &Desktop, apps: Rect, row: usize) -> Rect {
-    let columns = grid_columns(apps);
+/// * `w` - The cell width.
+/// * `h` - The cell height.
+fn grid_cell(d: &Desktop, apps: Rect, row: usize, w: i32, h: i32) -> Rect {
+    let columns = grid_columns(apps, w);
     let (r, c) = (row / columns, row % columns);
     Rect::new(
-        apps.x + c as i32 * CELL_W,
-        apps.y + r as i32 * CELL_H - d.menu.app_scroll as i32,
-        CELL_W,
-        CELL_H,
+        apps.x + c as i32 * w,
+        apps.y + r as i32 * h - d.menu.app_scroll as i32,
+        w,
+        h,
     )
 }
 
@@ -414,11 +477,12 @@ fn tile_rect(tiles: Rect, index: usize) -> Rect {
 
 /// Height of the application area's content, for scrolling.
 fn apps_content_height(d: &Desktop, apps: Rect) -> f64 {
-    if is_grid(d) {
-        let rows = d.menu.items.len().div_ceil(grid_columns(apps));
-        rows as f64 * CELL_H as f64
-    } else {
-        d.menu.items.len() as f64 * ROW as f64
+    match arrangement(d) {
+        Arrangement::Grid { w, h, .. } => {
+            let rows = d.menu.items.len().div_ceil(grid_columns(apps, w));
+            rows as f64 * h as f64
+        }
+        Arrangement::Rows => d.menu.items.len() as f64 * ROW as f64,
     }
 }
 
@@ -494,7 +558,7 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         return None;
     }
     if layout.categories.w > 0 && layout.categories.contains(x, y) {
-        let row = ((y - layout.categories.y as f64 + d.menu.category_scroll) / ROW as f64).floor();
+        let row = ((y - layout.categories.y as f64 + d.menu.category_scroll) / CATEGORY_ROW as f64).floor();
         if row >= 0.0 {
             let rows = category_rows(d);
             if let Some(CategoryRow::Section(section)) = rows.get(row as usize) {
@@ -511,20 +575,23 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         return Some(Hover::None);
     }
     if layout.apps.contains(x, y) {
-        let row = if is_grid(d) {
-            let columns = grid_columns(layout.apps);
-            let column = ((x - layout.apps.x as f64) / CELL_W as f64).floor();
-            let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / CELL_H as f64).floor();
-            if column < 0.0 || column as usize >= columns || line < 0.0 {
-                return Some(Hover::None);
+        let row = match arrangement(d) {
+            Arrangement::Grid { w, h, .. } => {
+                let columns = grid_columns(layout.apps, w);
+                let column = ((x - layout.apps.x as f64) / w as f64).floor();
+                let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / h as f64).floor();
+                if column < 0.0 || column as usize >= columns || line < 0.0 {
+                    return Some(Hover::None);
+                }
+                line as usize * columns + column as usize
             }
-            line as usize * columns + column as usize
-        } else {
-            let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / ROW as f64).floor();
-            if line < 0.0 {
-                return Some(Hover::None);
+            Arrangement::Rows => {
+                let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / ROW as f64).floor();
+                if line < 0.0 {
+                    return Some(Hover::None);
+                }
+                line as usize
             }
-            line as usize
         };
         if row < d.menu.items.len() {
             return Some(Hover::MenuApp(row));
@@ -614,7 +681,7 @@ pub fn scroll(d: &mut Desktop, x: f64, y: f64, delta: f64) -> bool {
     }
     let step = delta.signum() * ui::SCROLL_STEP;
     if layout.categories.w > 0 && layout.categories.contains(x, y) {
-        let content = category_rows(d).len() as f64 * ROW as f64;
+        let content = category_rows(d).len() as f64 * CATEGORY_ROW as f64;
         let max = (content - layout.categories.h as f64).max(0.0);
         d.menu.category_scroll = (d.menu.category_scroll + step).clamp(0.0, max);
         d.redraw_panel();
@@ -640,10 +707,9 @@ pub fn scroll(d: &mut Desktop, x: f64, y: f64, delta: f64) -> bool {
 pub fn key(d: &mut Desktop, key: Key) {
     ensure_items(d);
     let count = d.menu.items.len();
-    let columns = if is_grid(d) {
-        grid_columns(layout(d).apps) as i32
-    } else {
-        1
+    let columns = match arrangement(d) {
+        Arrangement::Grid { w, .. } => grid_columns(layout(d).apps, w) as i32,
+        Arrangement::Rows => 1,
     };
     match key {
         Key::Char(c) => {
@@ -720,11 +786,13 @@ pub fn key(d: &mut Desktop, key: Key) {
                         .position(|r| *r == CategoryRow::Section(sections[next]))
                         .unwrap_or(0);
                     let layout = layout(d);
-                    let row_top = row_index as f64 * ROW as f64;
+                    let row_top = row_index as f64 * CATEGORY_ROW as f64;
                     if row_top < d.menu.category_scroll {
                         d.menu.category_scroll = row_top;
-                    } else if row_top + ROW as f64 > d.menu.category_scroll + layout.categories.h as f64 {
-                        d.menu.category_scroll = row_top + ROW as f64 - layout.categories.h as f64;
+                    } else if row_top + CATEGORY_ROW as f64
+                        > d.menu.category_scroll + layout.categories.h as f64
+                    {
+                        d.menu.category_scroll = row_top + CATEGORY_ROW as f64 - layout.categories.h as f64;
                     }
                 }
             }
@@ -753,11 +821,12 @@ fn scroll_to_selection(d: &mut Desktop) {
         return;
     };
     let layout = layout(d);
-    let (top, height) = if is_grid(d) {
-        let row = selected / grid_columns(layout.apps);
-        (row as f64 * CELL_H as f64, CELL_H as f64)
-    } else {
-        (selected as f64 * ROW as f64, ROW as f64)
+    let (top, height) = match arrangement(d) {
+        Arrangement::Grid { w, h, .. } => {
+            let row = selected / grid_columns(layout.apps, w);
+            (row as f64 * h as f64, h as f64)
+        }
+        Arrangement::Rows => (selected as f64 * ROW as f64, ROW as f64),
     };
     if top < d.menu.app_scroll {
         d.menu.app_scroll = top;
@@ -842,10 +911,9 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
             ui::text_dim(),
         );
     }
-    if is_grid(d) {
-        draw_grid(d, canvas, &layout);
-    } else {
-        draw_rows(d, canvas, &layout);
+    match arrangement(d) {
+        Arrangement::Grid { w, h, icon } => draw_grid(d, canvas, &layout, w, h, icon),
+        Arrangement::Rows => draw_rows(d, canvas, &layout),
     }
     canvas.reset_clip();
     if layout.tiles.w > 0 {
@@ -930,19 +998,24 @@ fn draw_categories(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
     canvas.clip(layout.categories);
     let rows = category_rows(d);
     for (row, item) in rows.iter().enumerate() {
-        let y = layout.categories.y + row as i32 * ROW - d.menu.category_scroll as i32;
-        if y + ROW < layout.categories.y || y > layout.categories.bottom() {
+        let y = layout.categories.y + row as i32 * CATEGORY_ROW - d.menu.category_scroll as i32;
+        if y + CATEGORY_ROW < layout.categories.y || y > layout.categories.bottom() {
             continue;
         }
         match item {
             CategoryRow::Separator => {
                 canvas.fill_rect(
-                    Rect::new(layout.categories.x + 8, y + ROW / 2, layout.categories.w - 16, 1),
+                    Rect::new(
+                        layout.categories.x + 8,
+                        y + CATEGORY_ROW / 2,
+                        layout.categories.w - 16,
+                        1,
+                    ),
                     ui::separator(),
                 );
             }
             CategoryRow::Section(section) => {
-                let rect = Rect::new(layout.categories.x, y, layout.categories.w, ROW);
+                let rect = Rect::new(layout.categories.x, y, layout.categories.w, CATEGORY_ROW);
                 let current = d.menu.section == *section;
                 let hovered = d.hover == Hover::MenuCategory(row);
                 if current {
@@ -950,8 +1023,26 @@ fn draw_categories(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
                 } else if hovered {
                     canvas.fill_rounded(rect, 5.0, ui::hover_bg());
                 }
+                let icon_rect = Rect::new(
+                    rect.x + 8,
+                    rect.y + (CATEGORY_ROW - CATEGORY_ICON) / 2,
+                    CATEGORY_ICON,
+                    CATEGORY_ICON,
+                );
+                let scale = d.panel.scale.max(1);
+                if let Some(icon) = d
+                    .icons
+                    .get(section_icon(d, *section), (CATEGORY_ICON * scale) as u32)
+                {
+                    canvas.draw_image_fit(&icon, icon_rect);
+                }
                 let name = section_name(d, *section);
-                let label_rect = Rect::new(rect.x + 10, rect.y, rect.w - 26, rect.h);
+                let label_rect = Rect::new(
+                    icon_rect.right() + 10,
+                    rect.y,
+                    rect.right() - icon_rect.right() - 16,
+                    rect.h,
+                );
                 ui::label(
                     canvas,
                     &mut d.fonts,
@@ -962,9 +1053,6 @@ fn draw_categories(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
                     Align::Left,
                     ui::text(),
                 );
-                if let Some(chevron) = ui::chevron_path(rect.right() - 12, rect.y + rect.h / 2) {
-                    canvas.stroke_path(&chevron, 1.5, if current { ui::text() } else { ui::text_dim() });
-                }
             }
         }
     }
@@ -987,43 +1075,62 @@ fn draw_rows(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
         } else if hovered {
             canvas.fill_rounded(rect, 5.0, ui::hover_bg());
         }
-        let icon_rect = Rect::new(
-            rect.x + 8,
-            rect.y + (ROW - ui::ICON_SIZE) / 2,
-            ui::ICON_SIZE,
-            ui::ICON_SIZE,
-        );
-        if let Some(icon) = d.app_icon(*index) {
+        let icon_rect = Rect::new(rect.x + 8, rect.y + (ROW - ROW_ICON) / 2, ROW_ICON, ROW_ICON);
+        if let Some(icon) = d.app_icon_sized(*index, ROW_ICON) {
             canvas.draw_image_fit(&icon, icon_rect);
         } else {
-            canvas.fill_rounded(icon_rect.inflate(-3), 3.0, ui::field_bg());
+            canvas.fill_rounded(icon_rect.inflate(-4), 4.0, ui::field_bg());
         }
-        let name = d.apps.entries[*index].name.clone();
-        let label_rect = Rect::new(
-            icon_rect.right() + 10,
-            rect.y,
-            rect.right() - icon_rect.right() - 18,
-            rect.h,
-        );
+        let entry = &d.apps.entries[*index];
+        let name = entry.name.clone();
+        let description = entry
+            .comment
+            .clone()
+            .or_else(|| entry.generic_name.clone())
+            .filter(|text| !text.trim().is_empty() && *text != name);
+        let text_x = icon_rect.right() + 10;
+        let text_w = rect.right() - text_x - 8;
+        let name_rect = match description {
+            Some(_) => Rect::new(text_x, rect.y + 4, text_w, 20),
+            None => Rect::new(text_x, rect.y, text_w, rect.h),
+        };
         ui::label(
             canvas,
             &mut d.fonts,
             &name,
-            label_rect,
+            name_rect,
             ui::FONT_SIZE,
             false,
             Align::Left,
             ui::text(),
         );
+        if let Some(description) = description {
+            ui::label(
+                canvas,
+                &mut d.fonts,
+                &description,
+                Rect::new(text_x, rect.y + 22, text_w, 18),
+                ui::FONT_SMALL,
+                false,
+                Align::Left,
+                ui::text_dim(),
+            );
+        }
     }
 }
 
 /// Draws the applications as a grid of icons with their names beneath,
-/// the canvas clipped to their area.
-fn draw_grid(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
+/// up to two lines, the canvas clipped to their area.
+///
+/// # Arguments
+/// * `w` - The cell width.
+/// * `h` - The cell height.
+/// * `icon_size` - The icon size.
+fn draw_grid(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout, w: i32, h: i32, icon_size: i32) {
     let items = d.menu.items.clone();
+    let scale = canvas.scale() as f32;
     for (row, index) in items.iter().enumerate() {
-        let cell = grid_cell(d, layout.apps, row);
+        let cell = grid_cell(d, layout.apps, row, w, h);
         if cell.bottom() < layout.apps.y || cell.y > layout.apps.bottom() {
             continue;
         }
@@ -1035,32 +1142,46 @@ fn draw_grid(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
             canvas.fill_rounded(cell.inflate(-2), 6.0, ui::hover_bg());
         }
         let icon_rect = Rect::new(
-            cell.x + (cell.w - CELL_ICON) / 2,
+            cell.x + (cell.w - icon_size) / 2,
             cell.y + 8,
-            CELL_ICON,
-            CELL_ICON,
+            icon_size,
+            icon_size,
         );
-        if let Some(icon) = d.app_icon_sized(*index, CELL_ICON) {
+        if let Some(icon) = d.app_icon_sized(*index, icon_size) {
             canvas.draw_image_fit(&icon, icon_rect);
         } else {
             canvas.fill_rounded(icon_rect.inflate(-4), 4.0, ui::field_bg());
         }
         let name = d.apps.entries[*index].name.clone();
-        ui::label(
-            canvas,
+        let font = if icon_size >= FAVORITE_ICON {
+            ui::FONT_SIZE
+        } else {
+            ui::FONT_SMALL
+        };
+        let (line1, line2) =
+            ui::wrap_two_lines(&mut d.fonts, &name, font * scale, (cell.w - 8) as f32 * scale);
+        let line_h = (font + 4.0) as i32;
+        let top = icon_rect.bottom() + 4;
+        canvas.draw_text(
             &mut d.fonts,
-            &name,
-            Rect::new(
-                cell.x + 3,
-                icon_rect.bottom() + 2,
-                cell.w - 6,
-                cell.bottom() - icon_rect.bottom() - 6,
-            ),
-            ui::FONT_SMALL,
-            false,
+            &line1,
+            cell.x,
+            top + line_h / 2,
+            cell.w,
             Align::Center,
             ui::text(),
         );
+        if let Some(line2) = line2 {
+            canvas.draw_text(
+                &mut d.fonts,
+                &line2,
+                cell.x,
+                top + line_h + line_h / 2,
+                cell.w,
+                Align::Center,
+                ui::text(),
+            );
+        }
     }
 }
 
@@ -1111,8 +1232,9 @@ mod tests {
     #[test]
     fn grid_and_tiles_place_cells_by_width() {
         let apps = Rect::new(10, 20, 290, 300);
-        assert_eq!(grid_columns(apps), 4);
-        assert_eq!(grid_columns(Rect::new(0, 0, 10, 10)), 1);
+        assert_eq!(grid_columns(apps, CELL_W), 4);
+        assert_eq!(grid_columns(Rect::new(0, 0, 10, 10), CELL_W), 1);
+        assert_eq!(grid_columns(Rect::new(0, 0, 400, 300), FAVORITE_W), 3);
         let tiles = Rect::new(230, 20, 260, 300);
         assert_eq!(tile_rect(tiles, 0), Rect::new(230, 20, TILE, TILE));
         assert_eq!(tile_rect(tiles, 2).x, 230 + 2 * (TILE + TILE_GAP));

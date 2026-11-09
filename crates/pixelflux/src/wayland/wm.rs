@@ -272,6 +272,53 @@ pub fn find_window(state: &AppState, id: WindowId) -> Option<Window> {
         .or_else(|| state.xwm.windows.get(&id).cloned())
 }
 
+/// The layer surface on the top or overlay layer that asks for the keyboard exclusively (a shell's
+/// open menu or launcher), if one does.
+fn exclusive_layer(state: &AppState) -> Option<smithay::desktop::LayerSurface> {
+    use smithay::utils::IsAlive;
+    use smithay::wayland::shell::wlr_layer::KeyboardInteractivity;
+    state.output_nodes.iter().find_map(|node| {
+        layer_map_for_output(&node.output)
+            .layers()
+            .find(|layer| {
+                layer.alive()
+                    && matches!(layer.layer(), Layer::Top | Layer::Overlay)
+                    && layer.cached_state().keyboard_interactivity
+                        == KeyboardInteractivity::Exclusive
+            })
+            .cloned()
+    })
+}
+
+/// Give the keyboard to a layer surface that asks for it exclusively, or, once none does and a
+/// layer surface still holds it, back to the window the policy focused (the topmost window
+/// without a policy). Run when a layer surface commits or goes away, since that is when its
+/// keyboard interactivity changes; without it a shell's menu or launcher on Wayland would never
+/// see a key.
+pub fn sync_layer_keyboard(state: &mut AppState) {
+    let Some(keyboard) = state.seat.get_keyboard() else {
+        return;
+    };
+    let current = keyboard.current_focus();
+    match exclusive_layer(state) {
+        Some(layer) => {
+            let target = FocusTarget::LayerSurface(layer);
+            if current.as_ref() != Some(&target) {
+                keyboard.set_focus(state, Some(target), next_serial());
+            }
+        }
+        None => {
+            if matches!(current, Some(FocusTarget::LayerSurface(_))) {
+                let window = match state.wm.as_ref() {
+                    Some(wm) => wm.focus.and_then(|id| find_window(state, id)),
+                    None => state.space.elements().last().cloned(),
+                };
+                keyboard.set_focus(state, window.map(FocusTarget::Window), next_serial());
+            }
+        }
+    }
+}
+
 fn window_id(window: &Window) -> Option<WindowId> {
     window_meta(window).map(|m| m.id)
 }
@@ -1136,7 +1183,11 @@ fn apply(state: &mut AppState, command: Command) {
             if let Some(wm) = state.wm.as_mut() {
                 wm.focus = id;
             }
-            if let Some(keyboard) = state.seat.get_keyboard() {
+            // A shell surface holding the keyboard exclusively keeps it; the window the policy
+            // focused takes the keyboard back when that surface lets it go.
+            if exclusive_layer(state).is_none()
+                && let Some(keyboard) = state.seat.get_keyboard()
+            {
                 let serial = next_serial();
                 keyboard.set_focus(state, target.map(FocusTarget::Window), serial);
             }
