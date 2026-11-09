@@ -130,11 +130,15 @@ pub struct XrandrListing {
     pub output: Option<String>,
     /// The `WxH` mode names of that output, sorted and unique.
     pub resolutions: Vec<String>,
+    /// The size that output shows, from its `WxH+X+Y` geometry; `None` where it shows none.
+    pub shown: Option<String>,
 }
 
-/// Parse an `xrandr` listing for the root's size, the first connected output, and its modes.
+/// Parse an `xrandr` listing for the root's size, the first connected output, its modes, and
+/// the size it shows.
 pub fn parse_xrandr_listing(text: &str) -> XrandrListing {
     let screen_pat = Regex::new(r"(\S+) connected").expect("regex");
+    let shown_pat = Regex::new(r"connected (?:primary )?(\d+x\d+)[+-]\d+[+-]\d+").expect("regex");
     let current_pat = Regex::new(r".*current (\d+\s*x\s*\d+).*").expect("regex");
     let res_pat = Regex::new(r"^(\d+x\d+)\s+\d+\.\d+.*").expect("regex");
     let mut listing = XrandrListing::default();
@@ -147,6 +151,7 @@ pub fn parse_xrandr_listing(text: &str) -> XrandrListing {
             let name = m[1].to_string();
             if listing.output.is_none() {
                 listing.output = Some(name.clone());
+                listing.shown = shown_pat.captures(line).map(|s| s[1].to_string());
             }
             in_output = listing.output.as_deref() == Some(name.as_str());
         }
@@ -172,6 +177,7 @@ async fn get_new_res_from(res_str: &str, program: &str) -> ResolutionInfo {
         modes: Vec::new(),
         max: res_str.to_string(),
         output: None,
+        shown: None,
     };
     let out = run_tool(program, &[], None, None).await;
     if !out.success && out.stdout.is_empty() {
@@ -188,6 +194,7 @@ async fn get_new_res_from(res_str: &str, program: &str) -> ResolutionInfo {
         return info;
     };
     info.output = Some(output);
+    info.shown = listing.shown;
     info.max = format!("{MAX_WIDTH}x{MAX_HEIGHT}");
     match parse_wh(res_str) {
         Some((w, h)) => {
@@ -532,6 +539,7 @@ mod tests {
         assert_eq!(listing.current.as_deref(), Some("1920x1080"));
         assert_eq!(listing.output, None);
         assert!(listing.resolutions.is_empty());
+        assert_eq!(listing.shown, None);
     }
 
     #[test]
@@ -540,6 +548,7 @@ mod tests {
         assert_eq!(listing.current.as_deref(), Some("1280x720"));
         assert_eq!(listing.output.as_deref(), Some("screen"));
         assert_eq!(listing.resolutions, ["1280x720", "8192x4096"]);
+        assert_eq!(listing.shown.as_deref(), Some("1280x720"));
         let (fw, fh) = fit_res(2560, 1440, MAX_WIDTH, MAX_HEIGHT);
         assert_eq!(format!("{fw}x{fh}"), "2560x1440");
     }
@@ -604,6 +613,7 @@ mod tests {
             ("1280x720", Some("screen"))
         );
         assert_eq!(info.modes, ["1280x720", "8192x4096"]);
+        assert_eq!(info.shown.as_deref(), Some("1280x720"));
         assert_eq!(info.fitted, "2560x1440");
         let _ = std::fs::remove_dir_all(script.parent().expect("dir"));
     }

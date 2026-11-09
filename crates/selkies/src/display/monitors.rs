@@ -44,11 +44,11 @@ use log::{debug, error, info, warn};
 use x11rb::protocol::randr::MonitorInfo;
 
 use super::resize::{
-    ensure_mode, get_new_res, grow_framebuffer, has_pluggable_outputs, read_realized_root,
-    resize_display,
+    ResolutionInfo, ensure_mode, get_new_res, grow_framebuffer, has_pluggable_outputs,
+    read_realized_root, resize_display,
 };
 use super::x11::{self, WindowRect, X11, applied_dpi, on_x11, with_x11};
-use super::xrandr::{generate_xrandr_gtf_modeline, list_monitors_xrandr, run_xrandr};
+use super::xrandr::{generate_xrandr_gtf_modeline, list_monitors_xrandr, parse_wh, run_xrandr};
 use super::{DisplayError, Layout, Layouts, Rect};
 use crate::core::PRIMARY_DISPLAY;
 
@@ -624,6 +624,22 @@ pub async fn clear_selkies_monitors() {
     }
 }
 
+/// Whether the extended layout needs a mode-set: the root is not `total_w` by `total_h`, or it
+/// is but the output's CRTC shows less of it. A framebuffer grown ahead of live captures
+/// (`grow_framebuffer`) already has the layout's size while the output keeps its old mode, and
+/// the X server keeps the pointer inside what the outputs show, so a display beyond that mode
+/// could be captured but not pointed at. A CRTC wider than asked, as CVT alignment can leave
+/// it, needs nothing.
+fn needs_mode_set(info: &ResolutionInfo, total_w: i32, total_h: i32) -> bool {
+    let root = info.current.to_lowercase().replace(' ', "");
+    root != format!("{total_w}x{total_h}")
+        || info
+            .shown
+            .as_deref()
+            .and_then(parse_wh)
+            .is_some_and(|(w, h)| w < total_w || h < total_h)
+}
+
 /// Drive the server into an extended-desktop framebuffer covering `layouts`.
 ///
 /// Ensures the total mode exists at `refresh`, the stream's frame rate (`resize_display`),
@@ -687,7 +703,7 @@ pub async fn apply_monitor_layout(
         clear_selkies_monitors().await;
         return false;
     }
-    if info.current.to_lowercase().replace(' ', "") != total_mode
+    if needs_mode_set(&info, total_w, total_h)
         && resize_display(&total_mode, refresh, None).await.is_none()
         && !grow_framebuffer(total_w, total_h).await
     {
@@ -996,6 +1012,37 @@ pub async fn current_wm_pid() -> i32 {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// A root grown ahead of the mode-set already has the layout's size while the output shows
+    /// the primary alone, which still needs the mode-set; a CRTC covering the layout does not,
+    /// even one that CVT alignment left wider, and a root of another size does as before.
+    #[test]
+    fn the_mode_set_follows_what_the_output_shows() {
+        let info = |current: &str, shown: Option<&str>| ResolutionInfo {
+            current: current.into(),
+            fitted: current.into(),
+            modes: Vec::new(),
+            max: "8192x4096".into(),
+            output: Some("screen".into()),
+            shown: shown.map(str::to_string),
+        };
+        // The root, what the output shows, and whether a 4944x1612 layout needs a mode-set.
+        let cases = [
+            ("4944x1612", Some("3024x1612"), true),
+            ("4944x1612", Some("4944x1612"), false),
+            ("4944x1612", Some("4952x1612"), false),
+            ("4944x1612", None, false),
+            ("3024x1612", Some("3024x1612"), true),
+            ("6864x1872", Some("6864x1872"), true),
+        ];
+        for (root, shown, want) in cases {
+            assert_eq!(
+                needs_mode_set(&info(root, shown), 4944, 1612),
+                want,
+                "{root} {shown:?}"
+            );
+        }
+    }
 
     /// A manager advertising `name` from command line `cmdline`, recording what is started.
     struct Fake {

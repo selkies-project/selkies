@@ -38,6 +38,9 @@ pub struct ResolutionInfo {
     /// The output's name, `None` when the server has no connected output, in which case
     /// `current` is still the root's size.
     pub output: Option<String>,
+    /// The size the output's CRTC shows as `WxH`, which can be smaller than the root after a
+    /// framebuffer grow; `None` where the output drives no CRTC or there is no output.
+    pub shown: Option<String>,
 }
 
 /// Current/fitted resolution info for the first connected output: native RandR query
@@ -58,6 +61,7 @@ pub async fn get_new_res(res_str: &str) -> ResolutionInfo {
             modes: Vec::new(),
             max: res_str.to_string(),
             output: None,
+            shown: None,
         };
     };
     let fitted = match parse_wh(res_str) {
@@ -76,6 +80,7 @@ pub async fn get_new_res(res_str: &str) -> ResolutionInfo {
         modes: query.resolutions,
         max: format!("{MAX_WIDTH}x{MAX_HEIGHT}"),
         output: Some(output),
+        shown: query.shown.map(|(w, h)| format!("{w}x{h}")),
     }
 }
 

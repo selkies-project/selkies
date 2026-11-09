@@ -199,13 +199,15 @@ pub struct OutputState {
     pub pool: ModePool,
 }
 
-/// What `query_randr` answers: the root's size, the output's `WxH` mode names sorted, and
-/// the output's name (`None` on a server with no connected output).
+/// What `query_randr` answers: the root's size, the output's `WxH` mode names sorted, the
+/// output's name (`None` on a server with no connected output), and the size its CRTC shows
+/// (`None` where it drives none).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RandrQuery {
     pub current: (i32, i32),
     pub resolutions: Vec<String>,
     pub output_name: Option<String>,
+    pub shown: Option<(i32, i32)>,
 }
 
 type Result<T> = std::result::Result<T, DisplayError>;
@@ -497,8 +499,8 @@ impl X11 {
     }
 
     /// Blocking RandR query: the root's size, the first connected output's `WxH` mode names
-    /// sorted, and its name; a server with no connected output (a GPU without a display
-    /// engine, a driver told to use none) answers the root alone.
+    /// sorted, its name, and the size its CRTC shows; a server with no connected output (a GPU
+    /// without a display engine, a driver told to use none) answers the root alone.
     pub fn query_randr(&self) -> Result<RandrQuery> {
         let current = self.root_size()?;
         let state = match self.connected_output_state() {
@@ -508,6 +510,7 @@ impl X11 {
                     current,
                     resolutions: Vec::new(),
                     output_name: None,
+                    shown: None,
                 });
             }
             Err(e) => return Err(e),
@@ -530,10 +533,18 @@ impl X11 {
             .into_iter()
             .collect();
         resolutions.sort();
+        let shown = if state.oi.crtc == 0 {
+            None
+        } else {
+            self.crtc_info(state.oi.crtc, state.res.config_timestamp)
+                .ok()
+                .map(|ci| (i32::from(ci.width), i32::from(ci.height)))
+        };
         Ok(RandrQuery {
             current,
             resolutions,
             output_name: Some(String::from_utf8_lossy(&state.oi.name).into_owned()),
+            shown,
         })
     }
 
