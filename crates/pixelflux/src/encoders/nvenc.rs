@@ -4292,8 +4292,12 @@ impl NvencEncoder {
             rc.maxBitRate = open.maxBitRate;
             rc.vbvBufferSize = open.vbvBufferSize;
             rc.vbvInitialDelay = open.vbvInitialDelay;
-            rc.set_enableMinQP(open.enableMinQP());
-            rc.minQP = open.minQP;
+            // The driver keeps coding at the floor it last took once `enableMinQP` is cleared
+            // (an L4), so a release lowers the floor to the lowest quantizer instead.
+            rc.set_enableMinQP(1);
+            rc.minQP.qpInterP = 0;
+            rc.minQP.qpInterB = 0;
+            rc.minQP.qpIntra = 0;
         }
         if bind && self.level_for_peak() > self.declared_level() {
             self.encode_config.rcParams = saved;
@@ -7543,13 +7547,13 @@ pub(crate) mod gpu_tests {
         let mut enc = host_session(&s).expect("NVENC init");
         let floor = enc.current_qp;
         let mut sizes = Vec::new();
-        let code = |enc: &mut NvencEncoder, i: u64| {
+        let code = |enc: &mut NvencEncoder, i: u64, crf: u32| {
             let out = enc
                 .encode_cpu_argb(
                     &crate::encoders::scrolled_text(w, h, i as usize),
                     w * 4,
                     i,
-                    25,
+                    crf,
                     i == 0,
                 )
                 .expect("encode");
@@ -7560,7 +7564,7 @@ pub(crate) mod gpu_tests {
             (out.len() - VIDEO_HEADER_LEN) * 8
         };
         for i in 0..30 {
-            sizes.push(code(&mut enc, i));
+            sizes.push(code(&mut enc, i, 25));
         }
         let kbps = |f: &[usize]| f.iter().sum::<usize>() as f64 * 60.0 / f.len() as f64 / 1000.0;
         let free = kbps(&sizes[1..]);
@@ -7568,7 +7572,7 @@ pub(crate) mod gpu_tests {
         enc.reconfigure_rate(&s);
         let mut bound = Vec::new();
         for i in 30..150 {
-            bound.push(code(&mut enc, i));
+            bound.push(code(&mut enc, i, 25));
             if i >= 40 {
                 assert!(
                     enc.last_avg_qp >= floor,
@@ -7594,13 +7598,26 @@ pub(crate) mod gpu_tests {
         s.video_bitrate_kbps = 200_000;
         enc.reconfigure_rate(&s);
         for i in 150..150 + PeakCap::RELEASE_FRAMES as u64 + 10 {
-            code(&mut enc, i);
+            code(&mut enc, i, 25);
         }
         assert_eq!(
             enc.encode_config.rcParams.rateControlMode,
             NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CONSTQP,
             "a peak above what the content takes releases it"
         );
+        assert_eq!(enc.last_avg_qp, floor);
+        // Released, it codes at the quantizer the session asks for, as an uncapped one does.
+        let paint = enc.codec.hardware_quantizer(Hardware::Nvenc, 18);
+        for i in 190..200 {
+            code(&mut enc, i, 18);
+        }
+        assert_eq!(
+            enc.last_avg_qp, paint,
+            "a released session codes at its paint-over quantizer"
+        );
+        for i in 200..210 {
+            code(&mut enc, i, 25);
+        }
         assert_eq!(enc.last_avg_qp, floor);
     }
 
