@@ -4,12 +4,14 @@
   License, v. 2.0. If a copy of the MPL was not distributed with this
   file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-  labwc's right-click menu on the desktop, installed as /etc/xdg/labwc/menu.xml;
-  a user's ~/.config/labwc/menu.xml replaces it. It mirrors Openbox's
-  (/etc/xdg/openbox/menu.xml), so the desktop offers the same menu on either
-  backend, with the icons labwc resolves from the icon theme by name. There is
-  no Exit: the compositor is a service of the container, and leaving it only
-  has it started again.
+  The window manager's right-click menu on the desktop under the Wayland
+  backend, installed as /etc/xdg/labwc/menu.xml, the file labwc would read; a
+  user's ~/.config/labwc/menu.xml replaces it. It mirrors the X11 backend's
+  (/etc/xdg/openbox/menu.xml), so the desktop offers the same menu on either,
+  with the icons resolved from the icon theme by name; the
+  selkies-applications menu is the window manager's own, filled from the
+  installed desktop entries. There is no Exit: the window manager is the
+  server's, and leaving it only has it started again.
 -->
 <openbox_menu>
   <menu id="root-menu">
@@ -18,6 +20,9 @@
     </item>
     <item label="Files" icon="system-file-manager">
       <action name="Execute"><command>selkies-desktop --files</command></action>
+    </item>
+    <item label="Desktop Settings" icon="preferences-desktop">
+      <action name="Execute"><command>selkies-desktop --settings</command></action>
     </item>
     <item label="Firefox" icon="firefox">
       <action name="Execute"><command>firefox</command></action>
@@ -29,7 +34,7 @@
       <action name="Execute"><command>mousepad</command></action>
     </item>
     <separator />
-    <menu id="selkies-applications" label="Applications" icon="applications-all" execute="selkies-wm-menu --icons" />
+    <menu id="selkies-applications" label="Applications" icon="applications-all" />
     <menu id="client-list-combined-menu" icon="preferences-system-windows" />
     <separator />
     <item label="Show Desktop" icon="user-desktop">

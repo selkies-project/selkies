@@ -4,17 +4,19 @@
   License, v. 2.0. If a copy of the MPL was not distributed with this
   file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-  Openbox's settings under selkies-desktop on X11, installed as
-  /etc/xdg/openbox/rc.xml. selkies-desktop copies this file to
-  ~/.config/openbox/rc.xml with its own titlebar layout and theme name, and
-  Openbox reads that copy; a user's own file there is left alone.
+  The window manager's settings under selkies-desktop, in Openbox's format,
+  installed as /etc/xdg/openbox/rc.xml for the X11 backend and copied to
+  /etc/xdg/labwc/rc.xml for the Wayland one; a user's own file under
+  ~/.config replaces it. The theme name is read and ignored: the frames follow
+  the desktop's theme.
 
-  Openbox here manages the windows of a desktop it does not draw, so it keeps
-  to that: one workspace, since the taskbar shows no other and a wheel turned
-  over the desktop would otherwise hide every window on an unseen one; Super
-  alone for the start menu, with the terminal on Control+Alt+T rather than a
-  Super chord, which would open the menu on its way; and its right-click menu
-  on the wallpaper, which the desktop shapes to leave to the window manager.
+  The window manager manages the windows of a desktop it does not draw, so it
+  keeps to that: one workspace, since the taskbar shows no other and a wheel
+  turned over the desktop would otherwise hide every window on an unseen one;
+  Super alone for the start menu, with the terminal on Control+Alt+T rather
+  than a Super chord, which would open the menu on its way; and its
+  right-click menu on the wallpaper, which the desktop shapes to leave to the
+  window manager.
 -->
 <openbox_config xmlns="http://openbox.org/3.4/rc"
                 xmlns:xi="http://www.w3.org/2001/XInclude">

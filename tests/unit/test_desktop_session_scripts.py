@@ -160,8 +160,8 @@ check("the DPI ladder's XSETTINGS manager is a service",
       "xsettingsd" not in ladder or os.path.isfile(xsettingsd_service),
       os.path.relpath(xsettingsd_service, REPO))
 # The entrypoint holds services down by name, and a name no service carries is
-# a toggle that silently does nothing: the desktop keeps starting under
-# START_DESKTOP=false, or the X11 window manager under Wayland.
+# a toggle that silently does nothing: the framebuffer would keep starting
+# under Wayland, or the nested compositor on X11.
 services = {os.path.basename(os.path.dirname(p))
             for root in (BASE, DESKTOP)
             for p in glob.glob(os.path.join(root, "services", "*", "run"))}

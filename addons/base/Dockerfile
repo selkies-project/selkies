@@ -339,8 +339,9 @@ RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt
     # patches or the libraries they build
     cargo clean --release -p codec-sys; \
     X264_STATIC=1 X265_STATIC=1 VPX_STATIC=1 SVTAV1ENC_STATIC=1 \
-        cargo build --release --locked -p selkies; \
+        cargo build --release --locked -p selkies -p selkies-desktop; \
     install -Dm755 target/release/selkies /out/selkies; \
+    install -Dm755 target/release/selkies-desktop /out/selkies-desktop; \
     version="$(. /tmp/packaging/version.sh && crate_version "${SELKIES_VERSION:-0.0.0}")"; \
     /out/selkies --version | grep -F "selkies ${version} (pixelflux ${version} ("; \
     /out/selkies --version | grep -F ", pcmflux ${version})"; \
@@ -706,6 +707,8 @@ RUN apt-get update && \
     apt-get install --no-install-recommends -y $(cat /tmp/selkies-runtime-packages) && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/selkies-runtime-packages
 COPY --from=server --chown=1000:1000 /out/selkies /usr/local/bin/selkies
+# The desktop shell the server starts under SELKIES_DESKTOP, built from the same tree.
+COPY --from=server --chown=1000:1000 /out/selkies-desktop /usr/local/bin/selkies-desktop
 
 # Fails the image build rather than publishing one whose payload cannot start:
 # the server carries its web client, every library it links resolves, and the

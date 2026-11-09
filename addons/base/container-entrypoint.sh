@@ -224,6 +224,23 @@ if [ "${SELKIES_WAYLAND}" = "true" ] && ! ls /dev/dri/renderD* > /dev/null 2>&1;
   export WLR_XWAYLAND="/tmp/selkies-xwayland"
 fi
 
+# The Selkies window manager: under SELKIES_WM the server manages the session's
+# windows itself on either backend (no nested labwc, no openbox), and under
+# SELKIES_DESKTOP, which implies it, starts and keeps the selkies-desktop shell
+# running on top. Canonicalized to "true" or unset so one spelling serves the
+# services and the server's own settings alike.
+if is_true "${SELKIES_DESKTOP-}"; then
+  export SELKIES_DESKTOP=true
+  export SELKIES_WM=true
+else
+  unset SELKIES_DESKTOP
+fi
+if is_true "${SELKIES_WM-}"; then
+  export SELKIES_WM=true
+else
+  unset SELKIES_WM
+fi
+
 # Default display for the X11 backend. In Wayland mode the session compositor's
 # XWayland server owns it instead, and takes the first free number.
 if [ "${SELKIES_WAYLAND}" = "true" ]; then
@@ -234,7 +251,14 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   # unmanaged. Lowercased because every value, "none" included, is lower case.
   SELKIES_WAYLAND_COMPOSITOR="$(setting_value "${SELKIES_WAYLAND_COMPOSITOR-}")"
   SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"
-  if [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
+  if [ "${SELKIES_WM:-}" = "true" ]; then
+    # The capture compositor manages its own windows and runs Xwayland, so no
+    # compositor nests inside it; a compositor named beside the mode is set aside.
+    if [ -n "${SELKIES_WAYLAND_COMPOSITOR}" ] && [ "${SELKIES_WAYLAND_COMPOSITOR}" != "none" ]; then
+      echo "SELKIES_WM=true: the Selkies window manager manages the windows; SELKIES_WAYLAND_COMPOSITOR=${SELKIES_WAYLAND_COMPOSITOR} is set aside"
+    fi
+    SELKIES_WAYLAND_COMPOSITOR=none
+  elif [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
     # A WAYLAND_DISPLAY set before this script ran names an operator's own
     # session (the capture display is exported later), so capture it rather
     # than nest in it; connect-probed, since a stale socket file outlives its
@@ -372,20 +396,20 @@ for service in /etc/service/*/; do
   rm -f "${service}down" 2>/dev/null || sudo-root rm -f "${service}down" 2>/dev/null || true
 done
 
-# A desktop layered on this image supplies its shell as the `desktop` service
-# and, where X11 needs one, its window manager as `openbox`; on Wayland the
-# nested compositor manages the windows.
+# A desktop layered on this image runs under the server's window manager
+# (SELKIES_DESKTOP); without it, the nested compositor manages the windows on
+# Wayland and nothing does on X11.
 if [ "${SELKIES_WAYLAND}" = "true" ]; then
   drop_service xvfb
-  drop_service openbox
   if [ "${SELKIES_WAYLAND_COMPOSITOR}" = "none" ]; then
     # No nested session compositor either way: host capture leaves window
     # management (and any XWayland) to the operator's own compositor, while
     # a bare none leaves applications on the capture compositor with neither.
     drop_service wayland
-    drop_service desktop
     if [ -n "${SELKIES_WAYLAND_HOST_DISPLAY-}" ]; then
       echo "Wayland backend: capturing the operator's compositor at ${SELKIES_WAYLAND_HOST_DISPLAY}; it keeps its own window management"
+    elif [ "${SELKIES_WM:-}" = "true" ]; then
+      echo "Wayland backend: the Selkies window manager manages the capture compositor's windows and runs Xwayland${SELKIES_DESKTOP:+; it starts the desktop}"
     else
       echo 'Wayland backend: applications connect to the capture compositor directly; no XWayland'
     fi
@@ -394,11 +418,9 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   fi
 else
   drop_service wayland
-fi
-START_DESKTOP="$(setting_value "${START_DESKTOP-}")"
-if ! is_true "${START_DESKTOP:-true}"; then
-  drop_service desktop
-  drop_service openbox
+  if [ "${SELKIES_WM:-}" = "true" ]; then
+    echo "X11 backend: the Selkies window manager manages the windows${SELKIES_DESKTOP:+ and starts the desktop}"
+  fi
 fi
 if ! is_true "${SELKIES_ENABLE_INTERNAL_TURN}"; then
   drop_service coturn

@@ -72,12 +72,14 @@ services:
       SELKIES_DEBUG_CURSORS: ${SELKIES_DEBUG_CURSORS:-false}
       # Login password of the unprivileged user
       PASSWD: ${PASSWD:-mypasswd}
-      # Start the desktop (selkies-desktop, over Openbox on X11), vs just the display server.
-      START_DESKTOP: ${START_DESKTOP:-true}
+      # Start the desktop (selkies-desktop under the Selkies window manager), vs
+      # just the display server.
+      SELKIES_DESKTOP: ${SELKIES_DESKTOP:-true}
       # Use the headless Wayland backend instead of X11 (default: X11 Xvfb).
       SELKIES_WAYLAND: ${SELKIES_WAYLAND:-false}
-      # Session compositor nested in the capture compositor, supplying window
-      # management, decorations, and XWayland; empty picks labwc, "none" drops it
+      # Session compositor nested in the capture compositor without the desktop
+      # (SELKIES_DESKTOP=false): empty picks labwc where the image has it, "none"
+      # drops it; under the desktop the window manager is the server's
       SELKIES_WAYLAND_COMPOSITOR: ${SELKIES_WAYLAND_COMPOSITOR:-}
       # Render/encode GPU selection; empty means auto-detect
       SELKIES_RENDER_DRI: ${SELKIES_RENDER_DRI:-}
