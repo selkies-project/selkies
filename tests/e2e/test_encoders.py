@@ -21,12 +21,16 @@ runs in Chromium; over WebRTC each block runs in Chromium, Firefox and WebKit,
 whose own RTP receivers decode and paint the stream, and the <video> must keep
 presenting frames while the screen changes. The cpu and switch servers run
 Turbo, so the H.264 frames read off the wire keep coming while the painted
-picture holds still.
+picture holds still. JPEG sends a still screen once and its paint-over once,
+then nothing, so the jpeg block paints a picture that keeps changing away from
+the sampled points on every transport: the stripes it reads off the wire and
+the frames the video worker presents are the ones that change brings.
 
     python3 tests/e2e/test_encoders.py ws-x11|wr-x11|ws-wl|wr-wl
 """
 import os
 import sys
+import threading
 import time
 from typing import Any, Optional
 
@@ -134,10 +138,10 @@ PRESENTED_JS = """() => {
   }
   return v.__presented;
 }"""
-# The changing screen they are counted on for LIVE_SECS, LIVE_MIN_FRAMES at
-# least: on X11 a small window clear of the sampled points flips between two
-# grays every LIVE_FLIP_S; the Wayland surface blinks as often to a second fill
-# within the picture's tolerance.
+# A live picture changes on its own every LIVE_FLIP_S: on X11 a small window
+# clear of the sampled points flips between two grays, and the Wayland surface
+# blinks to a second fill within the picture's tolerance. The <video> is counted
+# on it for LIVE_SECS, LIVE_MIN_FRAMES at least.
 LIVE_SECS = 2.0
 LIVE_FLIP_S = 0.05
 LIVE_MIN_FRAMES = 10
@@ -164,15 +168,40 @@ def paint_x11() -> Any:
     return d
 
 
+def flicker_x11(stop: threading.Event) -> None:
+    """Flip a small window clear of the sampled points between two grays every
+    LIVE_FLIP_S until `stop` is set, on a display connection of its own, since
+    an Xlib connection serves one thread."""
+    from Xlib import display as xdisp, X
+    d = xdisp.Display(H.require_display())
+    try:
+        scr = d.screen()
+        win = scr.root.create_window(*FLICKER, 0, scr.root_depth, window_class=X.InputOutput,
+                                     background_pixel=FLICKER_GRAYS[0], override_redirect=True)
+        win.map()
+        d.sync()
+        flips = 0
+        while not stop.wait(LIVE_FLIP_S):
+            flips += 1
+            win.change_attributes(background_pixel=FLICKER_GRAYS[flips % 2])
+            win.clear_area()
+            d.sync()
+    finally:
+        d.close()
+
+
 class Picture:
     """The painted picture as the page decodes it: the X11 blocks sit in a
     black frame, the Wayland observer surface covers the frame in the first
-    color and carries the saturated block."""
+    color and carries the saturated block. A `live` picture also changes on its
+    own away from the sampled points (LIVE_FLIP_S)."""
 
     def __init__(self, wayland: bool, live: bool = False) -> None:
         self.wayland = wayland
         self.live = live
         self.handle = None
+        self.flicker: Optional[threading.Thread] = None
+        self.stop_flicker = threading.Event()
 
     def paint(self) -> None:
         if self.wayland:
@@ -181,36 +210,20 @@ class Picture:
             blink = {"WLOBS_FILL2": PAINT2_ARGB, "WLOBS_BLINK_MS": str(int(LIVE_FLIP_S * 1000))}
             self.handle = H.WlObs(WL_SOCKET, **(blink if self.live else {}))
             self.handle.ready(20)
-        else:
-            self.handle = paint_x11()
+            return
+        self.handle = paint_x11()
+        if self.live:
+            self.stop_flicker.clear()
+            self.flicker = threading.Thread(target=flicker_x11, args=(self.stop_flicker,), daemon=True)
+            self.flicker.start()
 
     def presenting(self, page: Any) -> dict:
-        """The frames the page presents while the screen changes for LIVE_SECS
-        (a `live` picture on Wayland blinks on its own)."""
+        """The frames the page presents over LIVE_SECS of a live picture."""
         start = page.evaluate(PRESENTED_JS)
-        flips = 0
-        if self.wayland:
-            time.sleep(LIVE_SECS)
-            flips = round(LIVE_SECS / LIVE_FLIP_S)
-        else:
-            from Xlib import X
-            d = self.handle
-            scr = d.screen()
-            win = scr.root.create_window(*FLICKER, 0, scr.root_depth, window_class=X.InputOutput,
-                                         background_pixel=FLICKER_GRAYS[0], override_redirect=True)
-            win.map()
-            d.sync()
-            end = time.time() + LIVE_SECS
-            while time.time() < end:
-                flips += 1
-                win.change_attributes(background_pixel=FLICKER_GRAYS[flips % 2])
-                win.clear_area()
-                d.sync()
-                time.sleep(LIVE_FLIP_S)
-            win.destroy()
-            d.sync()
+        time.sleep(LIVE_SECS)
         frames = page.evaluate(PRESENTED_JS)
-        return {"frames": None if frames is None else frames - (start or 0), "secs": LIVE_SECS, "flips": flips}
+        return {"frames": None if frames is None else frames - (start or 0), "secs": LIVE_SECS,
+                "flips": round(LIVE_SECS / LIVE_FLIP_S)}
 
     def keeps_presenting(self, res: "H.Results", tag: str, page: Any, waived: str = "") -> None:
         name = f"{tag}: frames keep presenting on a changing screen"
@@ -221,6 +234,10 @@ class Picture:
         res.check(name, (live["frames"] or 0) >= LIVE_MIN_FRAMES, live)
 
     def clear(self) -> None:
+        if self.flicker is not None:
+            self.stop_flicker.set()
+            self.flicker.join(timeout=5)
+            self.flicker = None
         if self.handle is None:
             return
         if self.wayland:
@@ -368,7 +385,7 @@ def cpu_encoder(line: str) -> bool:
 def block_jpeg(mode: str, wayland: bool, res: "H.Results", engine: str = "chromium") -> None:
     tag = "jpeg" if engine == "chromium" else "jpeg " + engine
     H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_ENCODER": "jpeg"})
-    picture = Picture(wayland, live=mode == "webrtc")
+    picture = Picture(wayland, live=True)
     try:
         picture.paint()
         with sync_playwright() as p:
