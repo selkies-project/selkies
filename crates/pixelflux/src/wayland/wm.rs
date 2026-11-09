@@ -103,6 +103,43 @@ const GHOST_UNCLAIMED: Duration = Duration::from_millis(250);
 /// How long a ghost may live however the policy drives it.
 const GHOST_LIFETIME: Duration = Duration::from_secs(2);
 
+/// A move held until the toplevel commits a size, see [`WmState::pending_moves`].
+///
+/// A configure holding an edge places every commit against that edge until the client reaches
+/// the size asked for: a client answering a drag commits sizes it was asked for a few
+/// configures back, and each lands with the held edge where the pointer put it rather than
+/// where the newest size would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingMove {
+    /// The rectangle configured.
+    pub rect: Rect,
+    pub holds_right: bool,
+    pub holds_bottom: bool,
+}
+
+impl PendingMove {
+    /// Where the window's corner goes for a committed size.
+    fn location(&self, size: Size) -> (i32, i32) {
+        (
+            if self.holds_right {
+                self.rect.x + self.rect.w - size.w
+            } else {
+                self.rect.x
+            },
+            if self.holds_bottom {
+                self.rect.y + self.rect.h - size.h
+            } else {
+                self.rect.y
+            },
+        )
+    }
+
+    /// Whether the move waits for the size asked for, rather than for the first commit.
+    fn holds_edge(&self) -> bool {
+        self.holds_right || self.holds_bottom
+    }
+}
+
 /// Everything the compositor keeps for an installed policy.
 pub struct WmState {
     policy: Option<Box<dyn WindowPolicy>>,
@@ -125,7 +162,7 @@ pub struct WmState {
     /// Where a toplevel goes once it commits the size it was configured with along with the
     /// move: a resize from a window's top or left edge, or a maximize, changes both, and moving
     /// the old buffer first would show its far edge jump and come back.
-    pub pending_moves: HashMap<WindowId, (i32, i32)>,
+    pub pending_moves: HashMap<WindowId, PendingMove>,
     /// The size of the configure each toplevel last acknowledged, as of its last commit, so a
     /// commit that answers a configure is told from one that was already on its way.
     pub acked: HashMap<WindowId, Option<Size>>,
@@ -507,11 +544,15 @@ pub fn window_resized(state: &mut AppState, window: &Window, size: Size) {
     let requested = wm.rects.get(&id).map(|r| Size { w: r.w, h: r.h });
     let answered = acked_now && requested.is_some_and(|r| r != size);
     let pending = if changed || acked_now {
-        wm.pending_moves.remove(&id)
+        match wm.pending_moves.get(&id).copied() {
+            Some(held) if held.holds_edge() && requested != Some(size) => Some(held),
+            _ => wm.pending_moves.remove(&id),
+        }
     } else {
         None
     };
-    if let Some(location) = pending {
+    if let Some(pending) = pending {
+        let location = pending.location(size);
         state.space.map_element(window.clone(), location, false);
         let rect = Rect::new(location.0, location.1, size.w, size.h);
         move_to_output_under(state, window, rect);
@@ -1384,9 +1425,10 @@ fn configure(state: &mut AppState, id: WindowId, rect: Rect, states: States) {
         }
     } else if in_space || hidden {
         let location = (rect.x, rect.y);
+        let holds_edge = states.holds_right || states.holds_bottom;
         let awaits_size = in_space
             && window.toplevel().is_some()
-            && state.space.element_location(&window) != Some(location.into())
+            && (holds_edge || state.space.element_location(&window) != Some(location.into()))
             && state
                 .wm
                 .as_ref()
@@ -1397,7 +1439,14 @@ fn configure(state: &mut AppState, id: WindowId, rect: Rect, states: States) {
         if let Some(wm) = state.wm.as_mut() {
             wm.hidden.remove(&id);
             if awaits_size {
-                wm.pending_moves.insert(id, location);
+                wm.pending_moves.insert(
+                    id,
+                    PendingMove {
+                        rect,
+                        holds_right: states.holds_right,
+                        holds_bottom: states.holds_bottom,
+                    },
+                );
             } else {
                 wm.pending_moves.remove(&id);
             }

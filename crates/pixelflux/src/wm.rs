@@ -489,6 +489,12 @@ pub struct States {
     /// On another virtual desktop: kept and composited like a minimized window, but told to
     /// taskbars as a window on no output rather than a minimized one.
     pub hidden: bool,
+    /// The window's right edge stays where the rectangle puts it whatever width the client
+    /// commits, as a resize from the left edge holds it.
+    pub holds_right: bool,
+    /// The window's bottom edge stays where the rectangle puts it whatever height the client
+    /// commits, as a resize from the top edge holds it.
+    pub holds_bottom: bool,
 }
 
 /// A raster the policy drew: premultiplied RGBA, `width * 4` bytes a row, in physical pixels
