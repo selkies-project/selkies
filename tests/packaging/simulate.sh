@@ -79,8 +79,9 @@ EOF
 fi
 
 # The stand-in Cargo: `fetch` fetches nothing, `metadata` names a pixelflux
-# checkout, and `build` leaves a server in the target directory reporting the
-# workspace version the manifest it was handed carries and the web client it
+# checkout, and `build` leaves a server in the target directory reporting, as
+# `selkies --version` does, the versions the workspace manifest it was handed and
+# the pixelflux and pcmflux manifests beside it carry, and the web client it
 # would embed.
 cat > "$SB/stubs/cargo" <<EOF
 #!/bin/sh
@@ -91,11 +92,15 @@ case "\$1" in
 esac
 manifest=""
 while [ \$# -gt 0 ]; do [ "\$1" = --manifest-path ] && manifest="\$2"; shift; done
-version="\$(sed -n 's/^version = "\\(.*\\)"/\\1/p' "\${manifest}" | head -1)"
+crate_version() { sed -n 's/^version = "\\(.*\\)"/\\1/p' "\$1" | head -1; }
+version="\$(crate_version "\${manifest}")"
+pixelflux="\$(crate_version "\$(dirname "\${manifest}")/crates/pixelflux/Cargo.toml")"
+pcmflux="\$(crate_version "\$(dirname "\${manifest}")/crates/pcmflux/Cargo.toml")"
 client="none embedded"
 [ -f "\${SELKIES_WEB_DIST:-}/index.html" ] && client="embedded (\$(find "\${SELKIES_WEB_DIST}" -type f | wc -l) files)"
 mkdir -p "\${CARGO_TARGET_DIR}/release"
-printf '#!/bin/sh\\necho "selkies %s (stub)"\\necho "web client: %s"\\n' "\${version}" "\${client}" \\
+printf '#!/bin/sh\\necho "selkies %s (pixelflux %s (software stub), pcmflux %s)"\\necho "web client: %s"\\n' \\
+  "\${version}" "\${pixelflux}" "\${pcmflux}" "\${client}" \\
   > "\${CARGO_TARGET_DIR}/release/selkies"
 chmod +x "\${CARGO_TARGET_DIR}/release/selkies"
 EOF
