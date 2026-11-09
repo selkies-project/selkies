@@ -1741,6 +1741,8 @@ pub struct NvencEncoder {
     /// next frame holds at the coarsest quantizer (`defer_blocks`).
     last_capped: bool,
     deferred: Option<crate::ledger::BlockPlan>,
+    /// The peak's rate, in bit/s, a bind to it was last refused at (`bind_refused`).
+    refused_bind: Option<u32>,
     /// The quality index the next frame is held at whatever the rate control
     /// (`hold_quantizer`), the band of it that quantizer covers, and whether the driver has
     /// refused one, said once.
@@ -2851,6 +2853,7 @@ impl NvencEncoder {
                 last_avg_qp: 0,
                 last_capped: false,
                 deferred: None,
+                refused_bind: None,
                 held_qp: None,
                 held_band: None,
                 slice_layout: tuning.slices.map_or((0, 0), |n| (SLICE_MODE_COUNT, n)),
@@ -4273,13 +4276,26 @@ impl NvencEncoder {
         }
     }
 
+    /// Whether a bind to the peak was refused at the peak's rate as it stands (`switch_peak`),
+    /// which is not asked for again until the peak moves.
+    fn bind_refused(&self) -> bool {
+        self.peak.is_some_and(|p| self.refused_bind == Some(p.bps))
+    }
+
     /// Bind a capped constant quantizer to its peak, or release it to its constant quantizer
     /// (`peak_of`); a switch the driver refuses leaves the session as it was. A peak past the
-    /// level the session declared releases it rather than raise the level, a key frame.
+    /// level the session declared releases it rather than raise the level, a key frame. A bind
+    /// refused either way is not tried again at that peak (`bind_refused`).
     unsafe fn switch_peak(&mut self, bind: bool) {
         let Some(peak) = self.peak else {
             return;
         };
+        if bind && self.bind_refused() {
+            if let Some(peak) = self.peak.as_mut() {
+                peak.binding = false;
+            }
+            return;
+        }
         let floor = self.current_qp;
         let (bps, vbv) = (peak.bps, peak.vbv);
         let saved = self.encode_config.rcParams;
@@ -4307,6 +4323,7 @@ impl NvencEncoder {
         }
         if bind && self.level_for_peak() > self.declared_level() {
             self.encode_config.rcParams = saved;
+            self.refused_bind = Some(bps);
             if let Some(peak) = self.peak.as_mut() {
                 peak.binding = false;
             }
@@ -4315,6 +4332,9 @@ impl NvencEncoder {
         let status = self.reconfigure(false, false);
         if status != NVENCSTATUS::NV_ENC_SUCCESS {
             self.encode_config.rcParams = saved;
+            if bind {
+                self.refused_bind = Some(bps);
+            }
             if let Some(peak) = self.peak.as_mut() {
                 peak.binding = !bind;
             }

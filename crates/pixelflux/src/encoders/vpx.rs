@@ -152,6 +152,8 @@ pub struct VpxEncoder {
     /// bound to it (`coded_capped`).
     peak: Option<PeakBucket>,
     last_capped: bool,
+    /// Whether libvpx has refused a peak's switch (`switch_peak`), said once.
+    switch_refused: bool,
     /// The buffer the session opened with, `(size, initial, optimal)` in ms, which a pinned
     /// quantizer keeps.
     open_buf: (u32, u32, u32),
@@ -280,6 +282,7 @@ impl VpxEncoder {
                 .then(|| PeakBucket::new(peak_bps(rate), rate.vbv(), rate.fps.fps())),
             open_buf: (cfg.rc_buf_sz, cfg.rc_buf_initial_sz, cfg.rc_buf_optimal_sz),
             last_capped: false,
+            switch_refused: false,
             last_bytes: None,
             cap: None,
             raised: false,
@@ -507,10 +510,13 @@ impl VpxEncoder {
     /// A tick that codes no frame (`FrameEncoder::idle`): the peak's bucket drains, and a session
     /// bound to it counts the tick at its floor, nothing being coded coarser.
     pub fn idle(&mut self) {
-        let switch = self.peak.as_mut().and_then(|p| p.note(0.0, Some(true)));
-        if switch.is_some() {
-            self.program_rate(self.programmed(), self.quality.current);
-            let _ = self.reconfigure();
+        if self
+            .peak
+            .as_mut()
+            .and_then(|p| p.note(0.0, Some(true)))
+            .is_some()
+        {
+            self.switch_peak();
         }
     }
 
@@ -822,10 +828,27 @@ impl VpxEncoder {
             _ => None,
         };
         if switch.is_some() {
-            self.program_rate(self.programmed(), self.quality.current);
-            self.reconfigure()?;
+            self.switch_peak();
         }
         result
+    }
+
+    /// Program the rate control the peak's new state asks for (`programmed`): the constant rate
+    /// at the peak once it binds, the pinned quantizer once it lets go. A configuration libvpx
+    /// refuses leaves the session as it ran, the peak's state put back with it, said once; the
+    /// frame that asked for the switch is kept either way.
+    fn switch_peak(&mut self) {
+        self.program_rate(self.programmed(), self.quality.current);
+        let Err(e) = self.reconfigure() else {
+            return;
+        };
+        if let Some(peak) = self.peak.as_mut() {
+            peak.binding = !peak.binding;
+        }
+        self.program_rate(self.programmed(), self.quality.current);
+        if !std::mem::replace(&mut self.switch_refused, true) {
+            eprintln!("[libvpx] Switching the peak of a capped constant quality refused: {e}");
+        }
     }
 
     /// Mark the macroblocks of the next frame that held still and are clean (`constant`, in
@@ -1622,6 +1645,57 @@ mod tests {
                     "{codec:?} frame {t}"
                 );
             }
+        }
+    }
+
+    /// A switch to the peak libvpx refuses keeps the frame that asked for it and leaves the
+    /// session as it ran, the peak's state with it.
+    #[test]
+    fn a_refused_switch_to_the_peak_keeps_the_frame_and_the_state() {
+        for codec in [Codec::Vp8, Codec::Vp9] {
+            let mut s = CaptureSettings {
+                video_bitrate_kbps: 100_000,
+                video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+                ..settings(codec)
+            };
+            let mut enc = VpxEncoder::new(&s, codec, false).expect("session");
+            for t in 0..5 {
+                enc.encode_host(
+                    &crate::encoders::scrolled_text(W, H, t),
+                    W * 4,
+                    false,
+                    t as u64,
+                    25,
+                    t == 0,
+                )
+                .unwrap();
+            }
+            s.video_bitrate_kbps = 10;
+            enc.reconfigure_rate(&s).expect("rate");
+            // libvpx refuses a configuration that raises the frames it lags by.
+            enc.cfg.g_lag_in_frames = 25;
+            for t in 5..20 {
+                let out = enc.encode_host(
+                    &crate::encoders::scrolled_text(W, H, t),
+                    W * 4,
+                    false,
+                    t as u64,
+                    25,
+                    false,
+                );
+                assert!(
+                    out.is_ok_and(|f| !f.is_empty()),
+                    "{codec:?} frame {t} was dropped"
+                );
+            }
+            assert!(
+                enc.switch_refused,
+                "{codec:?}: the switch was never refused"
+            );
+            assert!(
+                !enc.peak_bound(),
+                "{codec:?}: bound to a peak libvpx never took"
+            );
         }
     }
 
