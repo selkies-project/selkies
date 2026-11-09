@@ -1625,6 +1625,7 @@ fn wayland_encode_loop<B: WlPayload>(
                 Some(&f.damage),
                 encoder.refines(),
                 encoder.last_quality(),
+                encoder.rate_bound(settings.video_cbr_mode),
             );
             if decision.send || encoder.holds_frame() {
                 let force_idr = decision.force_idr;
@@ -1649,6 +1650,7 @@ fn wayland_encode_loop<B: WlPayload>(
                     &decision,
                     crate::pipeline::EncoderQuality::of(encoder),
                     outcome.as_ref().map_or(0, Vec::len),
+                    encoder.rate_bound(settings.video_cbr_mode),
                 );
                 match outcome {
                     Ok(data) => {

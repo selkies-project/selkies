@@ -659,7 +659,10 @@ impl HwFrameDecision {
 /// `damage` says something changed; and where the frame goes at the session's own quality while the region moves, on a
 /// session that refines (`refines`, how: `ledger::Refiner`) with the cleanup armed, name the
 /// blocks it refines, the offset taken from the quality index the rate control last coded at
-/// (`last`) or, at a constant quality, the session's.
+/// (`last`) where a rate binds the session (`bound`, `FrameEncoder::rate_bound`), paced against
+/// the frame budget (`ledger::RefinePace`), or from the session's own at a constant quality no
+/// peak binds.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_refinement(
     st: &mut StripeState,
     settings: &CaptureSettings,
@@ -668,6 +671,7 @@ pub fn plan_refinement(
     changed: Option<&[Rectangle<i32, Physical>]>,
     refines: Option<crate::ledger::Refiner>,
     last: Option<u32>,
+    bound: bool,
 ) {
     st.ledger.fit(settings.width, settings.height);
     match changed {
@@ -696,12 +700,12 @@ pub fn plan_refinement(
         return;
     }
     let blocks = st.ledger.blocks();
-    let most = st.refine.most(blocks, settings.video_cbr_mode);
+    let most = st.refine.most(blocks, bound);
     if let Some(plan) = st
         .ledger
         .plan(settings.paint_over_trigger(), most, refiner.runs)
     {
-        let from = match (settings.video_cbr_mode, last) {
+        let from = match (bound, last) {
             (true, Some(q)) => q as i32,
             _ => normal as i32,
         };
@@ -716,7 +720,8 @@ pub fn plan_refinement(
 
 /// What a full-frame frame decided as `d` left in `st`'s ledger once coded in `bytes`, the
 /// encoder now reporting `quality`: its refined blocks are clean where the rate control's quality index put
-/// them at the target (`BlockLedger::refinement_coded`) and the pace follows the rate control
+/// them at the target (`BlockLedger::refinement_coded`) and, where a rate binds the session
+/// (`bound`, as `plan_refinement` takes it), the pace follows the rate control
 /// (`RefinePace`); a frame held whole at the paint-over quality, or the region's cleanup having
 /// run its course, cleans the region, and a key frame at the rate control's own leaves it
 /// unclean.
@@ -726,17 +731,18 @@ pub fn refinement_coded(
     d: &HwFrameDecision,
     quality: EncoderQuality,
     bytes: usize,
+    bound: bool,
 ) {
     let normal = settings.video_crf as u32;
     if let Some(refinement) = &d.refine {
-        let coded = if settings.video_cbr_mode {
+        let coded = if bound {
             quality.last.map_or(i32::MAX, |q| q as i32)
         } else {
             normal as i32
         };
         st.ledger.refinement_coded(refinement, coded);
     }
-    if settings.video_cbr_mode
+    if bound
         && d.send
         && d.hold_qp.is_none()
         && !d.force_idr
@@ -2193,6 +2199,7 @@ impl X11Pipeline {
                     Some(changed),
                     enc.refines(),
                     enc.last_quality(),
+                    enc.rate_bound(self.settings.video_cbr_mode),
                 );
             }
             let fc = self.frame_counter as u64;
@@ -2254,6 +2261,7 @@ impl X11Pipeline {
                     &d,
                     EncoderQuality::of(enc),
                     bytes,
+                    enc.rate_bound(self.settings.video_cbr_mode),
                 );
                 match res {
                     Ok(data) if !data.is_empty() => {

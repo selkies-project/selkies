@@ -1310,6 +1310,7 @@ where
                 frame_changed.as_deref(),
                 None,
                 None,
+                gpu.settings.video_cbr_mode,
             );
         }
         // A tick that publishes nothing is no frame: counted as one, it would hold a change
@@ -1342,6 +1343,8 @@ where
                 last_cursor = gpu.cursor_drawn;
             }
             let (refines, last) = (gpu.enc().refines(), gpu.enc().last_quality());
+            let cbr = gpu.settings.video_cbr_mode;
+            let bound = gpu.enc().rate_bound(cbr);
             plan_refinement(
                 &mut state,
                 &gpu.settings,
@@ -1350,6 +1353,7 @@ where
                 frame_changed.as_deref(),
                 refines,
                 last,
+                bound,
             );
             decision.prepare(gpu.enc());
             let encode_start_ns = crate::wayland::host::now_ns();
@@ -1370,7 +1374,7 @@ where
             };
             let coded = EncoderQuality::of(gpu.enc());
             let bytes = result.as_ref().map_or(0, Vec::len);
-            refinement_coded(&mut state, &gpu.settings, &decision, coded, bytes);
+            refinement_coded(&mut state, &gpu.settings, &decision, coded, bytes, bound);
             match result {
                 Ok(data) if !data.is_empty() => {
                     encode_errors = 0;

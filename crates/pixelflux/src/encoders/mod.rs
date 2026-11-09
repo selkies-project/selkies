@@ -1467,6 +1467,19 @@ impl FrameEncoder {
         }
     }
 
+    /// Whether a rate binds the session: a constant rate, or a constant quality whose peak bound
+    /// its last frame (NVENC through its constant rate, libvpx above its pinned quantizer), each
+    /// of which codes a frame coarser than its quality, so its refinement and block ledger follow
+    /// what its rate control coded (`pipeline::plan_refinement`). Under a peak that does not bind,
+    /// a capped session refines as its uncapped quality does.
+    pub fn rate_bound(&self, cbr: bool) -> bool {
+        cbr || match self {
+            FrameEncoder::Nvenc(enc) => enc.peak_bound(),
+            FrameEncoder::Vpx(enc) => enc.peak_bound(),
+            _ => false,
+        }
+    }
+
     /// Whether a change of the session's constant quality re-opens it, so the frame it applies
     /// to is a key frame: x265, kvazaar, and SVT-AV1 take no new quality while they run. The
     /// cleanup of a constant-quality session counts such a refresh as its key frame.

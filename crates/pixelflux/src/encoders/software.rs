@@ -491,6 +491,9 @@ pub struct H264EncoderWrapper {
     last_qp: Option<u32>,
     /// The live rate factor, which x264 reports a frame's mean quantizer against (`last_qp`).
     rf_constant: f64,
+    /// Whether a capped CRF session's VBV coded the last frame coarser than its rate factor
+    /// (`peak_bound`).
+    peak_bound: bool,
     /// The quantizer offset of each macroblock of the next frame, empty where it has none
     /// (`refine_blocks`).
     quant_offsets: Vec<f32>,
@@ -821,6 +824,7 @@ impl H264EncoderWrapper {
                     held_qp: None,
                     last_qp: None,
                     rf_constant: param.rc.f_rf_constant as f64,
+                    peak_bound: false,
                     quant_offsets: Vec::new(),
                     mb_info: Vec::new(),
                     held_input: None,
@@ -923,6 +927,13 @@ impl H264EncoderWrapper {
     /// The mean quantizer the rate control last coded a frame's rows at, held frames aside.
     pub fn last_qp(&self) -> Option<u32> {
         self.last_qp
+    }
+
+    /// Whether the peak of a capped CRF session bound its last frame, held frames aside: its VBV
+    /// coded the frame's rows coarser than the rate factor, which `f_crf_avg` says by standing
+    /// above it.
+    pub fn peak_bound(&self) -> bool {
+        self.peak_bound
     }
 
     /// Move the floor of a constant-rate session's quantizer live, `min_qp` on the H.264 scale
@@ -1240,6 +1251,9 @@ impl H264EncoderWrapper {
                 // `f_crf_avg` is the rate factor plus the rows' mean less the pre-VBV quantizer,
                 // which the plan stands in for (never under it, so the mean never reads finer).
                 if held.is_none() {
+                    self.peak_bound = !self.is_cbr
+                        && self.current_vbv > 0
+                        && pic_out.prop.f_crf_avg > self.rf_constant + 0.5;
                     self.last_qp = (pic_out.i_qpplus1 > 0).then(|| {
                         let planned = (pic_out.i_qpplus1 - 1) as f64;
                         let coded = planned + pic_out.prop.f_crf_avg - self.rf_constant;
@@ -2341,13 +2355,21 @@ pub fn encode_cpu_from(
 
                 // A stripe moving at the session's quality refines the blocks of it that held
                 // still and are not clean, at the paint-over quality: a quantizer offset from
-                // the rate control's last, or from the session's rate factor.
+                // the rate control's last, or from the session's rate factor. A capped CRF
+                // refines nothing while its peak binds: x264 applies the offsets past its VBV,
+                // which a constant rate's average absorbs and a peak does not (a 720p page half
+                // scrolling under a 1.5 Mbit/s peak ran at 1.69 Mbit/s refining, 1.54 not).
+                let peak_bound = stripe_state
+                    .h264_encoder
+                    .as_ref()
+                    .is_some_and(H264EncoderWrapper::peak_bound);
                 let refines = video
                     && armed
                     && is_dirty
                     && cleanup == Cleanup::None
                     && hold.is_none()
-                    && !force_idr;
+                    && !force_idr
+                    && !peak_bound;
                 let plan = refines
                     .then(|| {
                         let blocks = stripe_state.ledger.blocks();
@@ -4356,6 +4378,60 @@ mod qp_bound_sweep {
         }
         let psnr = mean_psnr(std::slice::from_ref(&picture), std::slice::from_ref(&still));
         assert!(psnr > 35.0, "a still screen refined to {psnr:.1} dB");
+    }
+
+    /// A capped CRF stripe whose peak binds refines nothing of its still half, so the moving half
+    /// stays within the peak, paint-over armed or not.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_refines_nothing_while_its_peak_binds() {
+        use crate::CaptureSettings;
+        const KBPS: i32 = 1500;
+        let (w, h) = (W as i32, H as i32);
+        let settings = CaptureSettings {
+            width: w,
+            height: h,
+            codec: Codec::H264,
+            target_fps: 60.0,
+            video_crf: 25,
+            video_paintover_crf: 18,
+            use_paint_over_quality: true,
+            video_bitrate_kbps: KBPS,
+            video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+            ..Default::default()
+        };
+        let still = crate::encoders::scrolled_text(W, H, 0);
+        let moving = [smithay::utils::Rectangle::new(
+            (0, 0).into(),
+            (w, h / 2).into(),
+        )];
+        let mut stripes = Vec::new();
+        let mut bits = 0usize;
+        for t in 0..300u16 {
+            let mut frame = still.clone();
+            let scrolled = crate::encoders::scrolled_text(W, H, t as usize + 1);
+            frame[..W * H * 2].copy_from_slice(&scrolled[..W * H * 2]);
+            let out = super::encode_cpu(
+                &mut stripes,
+                &frame,
+                w,
+                h,
+                if t == 0 { &[] } else { &moving },
+                &settings,
+                t,
+                false,
+                false,
+                t == 0,
+            );
+            if t >= 120 {
+                bits += out.iter().map(|s| s.data.len() * 8).sum::<usize>();
+            }
+        }
+        let kbps = bits as f64 * 60.0 / 180.0 / 1000.0;
+        assert!(
+            kbps <= 1.05 * KBPS as f64,
+            "{kbps:.0} kbps under a {KBPS} kbps peak"
+        );
     }
 
     /// A capped CRF session takes each new peak congestion control steers it to live: no key

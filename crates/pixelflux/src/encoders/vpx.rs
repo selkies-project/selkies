@@ -149,6 +149,9 @@ pub struct VpxEncoder {
     last_refresh: SlotRefresh,
     /// The quality index the rate control last coded a frame at, held frames aside.
     last_quality: Option<u32>,
+    /// Whether a capped constant quality's peak bound the last frame of its rate control's: the
+    /// frame came out coarser than the pinned quality (`peak_bound`).
+    peak_bound: bool,
     /// The bytes of the last frame the rate control coded, held frames aside.
     last_bytes: Option<usize>,
     /// The size and quality index of the last held key frame of a constant-rate session
@@ -264,6 +267,7 @@ impl VpxEncoder {
             map_armed: false,
             last_refresh: SlotRefresh(0),
             last_quality: None,
+            peak_bound: false,
             last_bytes: None,
             cap: None,
             raised: false,
@@ -482,6 +486,11 @@ impl VpxEncoder {
     /// Whether the constant quality runs under a peak (`RateSettings::capped`).
     pub fn capped(&self) -> bool {
         self.rate.capped
+    }
+
+    /// Whether that peak bound the last frame of the rate control's.
+    pub fn peak_bound(&self) -> bool {
+        self.peak_bound
     }
 
     /// Whether a still screen's cleanup frame is coded at the rate its cap runs at (`cap`): VP9
@@ -765,6 +774,7 @@ impl VpxEncoder {
             self.reconfigure()?;
         } else if let Ok(coded) = &result {
             self.last_bytes = Some(coded.len());
+            self.peak_bound = self.rate.capped && self.last_quality.is_some_and(|q| q > crf);
         }
         result
     }

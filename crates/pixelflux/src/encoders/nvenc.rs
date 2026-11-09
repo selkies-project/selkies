@@ -3670,6 +3670,11 @@ impl NvencEncoder {
         self.peak.is_some()
     }
 
+    /// Whether the session is bound to that peak, coding through its constant rate.
+    pub fn peak_bound(&self) -> bool {
+        self.peak.is_some_and(|p| p.binding)
+    }
+
     /// The quality index the rate control last coded a frame at, where the driver reports its
     /// quantizer; a held frame (`hold_quantizer`) is not the rate control's and leaves it.
     pub fn last_quality(&self) -> Option<u32> {
