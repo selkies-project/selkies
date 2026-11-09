@@ -769,7 +769,8 @@ pub struct RtcConfigSettings {
     pub turn_tls: bool,
     pub turn_shared_secret: String,
     pub turn_username: String,
-    pub turn_password: String,
+    /// The long-term TURN password, none where unset; an empty one counts as unset.
+    pub turn_password: Option<String>,
     pub stun_host: String,
     pub stun_port: u16,
 }
@@ -916,13 +917,12 @@ pub async fn get_rtc_configuration(
         }
     }
     let has_server = !settings.turn_host.is_empty() && settings.turn_port != 0;
-    if has_server && !settings.turn_username.is_empty() && !settings.turn_password.is_empty() {
+    if has_server
+        && !settings.turn_username.is_empty()
+        && let Some(password) = settings.turn_password.as_deref().filter(|p| !p.is_empty())
+    {
         info!(target: "webrtc", "Using long-term username/password for TURN credentials.");
-        let text = long_term_rtc_config(
-            &settings.turn_entry(),
-            &settings.turn_username,
-            &settings.turn_password,
-        );
+        let text = long_term_rtc_config(&settings.turn_entry(), &settings.turn_username, password);
         if let Ok(config) = parse_rtc_config(text.as_bytes()) {
             return (config, RtcConfigSource::LongTerm);
         }
@@ -1357,7 +1357,7 @@ mod tests {
             turn_host: "h.test".into(),
             turn_port: 3478,
             turn_username: "u".into(),
-            turn_password: "p".into(),
+            turn_password: Some(format!("{:032x}", rand::random::<u128>())),
             turn_shared_secret: "s".into(),
             ..RtcConfigSettings::default()
         };
@@ -1382,7 +1382,7 @@ mod tests {
             "an untrusted file is refused; REST failed too"
         );
 
-        settings.turn_password.clear();
+        settings.turn_password = None;
         let (config, source) = get_rtc_configuration(&settings, refused.as_ref()).await;
         assert_eq!(source, RtcConfigSource::Hmac);
         assert_eq!(config.turn_uris.len(), 1);

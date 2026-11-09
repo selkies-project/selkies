@@ -432,7 +432,7 @@ pub fn rtc_config_settings() -> RtcConfigSettings {
         turn_tls: s.turn_tls().on,
         turn_shared_secret: s.turn_shared_secret().to_string(),
         turn_username: s.turn_username().to_string(),
-        turn_password: s.turn_password().to_string(),
+        turn_password: s.turn_password().map(str::to_owned),
         stun_host: s.stun_host().to_string(),
         stun_port: s.stun_port().clamp(0, 65535) as u16,
     }

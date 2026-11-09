@@ -12,7 +12,7 @@
 //! text an operator would type, its bounds and menu, the environment variables it also reads,
 //! and whether it is a secret or kept from the client payload.
 
-use super::{BoolSetting, Kind, Num, SettingDef, Settings};
+use super::{BoolSetting, Kind, Num, SettingDef, Settings, Value};
 
 /// The setting definitions, in the order `selkies --help` lists them.
 pub static DEFINITIONS: &[SettingDef] = &[
@@ -2903,8 +2903,12 @@ impl Settings {
         self.str_value("turn_username")
     }
 
-    pub fn turn_password(&self) -> &str {
-        self.str_value("turn_password")
+    /// The long-term TURN password, none where unset.
+    pub fn turn_password(&self) -> Option<&str> {
+        match self.value("turn_password") {
+            Some(Value::Str(password)) if !password.is_empty() => Some(password),
+            _ => None,
+        }
     }
 
     pub fn stun_host(&self) -> &str {
