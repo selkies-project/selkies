@@ -237,6 +237,8 @@ html[data-translucency="3"] .stream-strip { background: rgba(0, 0, 0, 0.35); }
 }
 .header-controls .header-action-button:hover { background-color: var(--sk-surface-alt); color: var(--sk-text); }
 .header-controls .header-action-button svg { width: 17px; height: 17px; }
+/* The translucency knob shows its level by the fill the component grades, which the header's plain buttons clear. */
+.header-controls .sidebar-translucency[aria-pressed="true"] { background: revert-layer; color: var(--sk-accent-text); }
 
 /* The theme pill: the moon slides out and the sun in as the theme flips. */
 .theme-pill {
@@ -560,9 +562,6 @@ html[data-translucency="3"] .stream-strip { background: rgba(0, 0, 0, 0.35); }
 }
 /* The citation at the drawer's foot, as far under the last section as the drawer's padding leaves below it. */
 .sidebar-footer { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 9px 0 2px; }
-.sidebar .sidebar-translucency { border-color: var(--sk-border-soft); color: var(--sk-text-muted); }
-.sidebar .sidebar-translucency:hover { color: var(--sk-text); }
-.sidebar .sidebar-translucency[aria-pressed="true"] { color: var(--sk-accent-text); }
 .sidebar .muted { color: var(--sk-text-muted); }
 .sidebar a.cite-link { color: var(--sk-violet); text-decoration: underline; text-underline-offset: 2px; font-size: 12px; }
 .sidebar [data-slot="kbd"] { background-color: var(--sk-surface-inset); border: 1px solid var(--sk-border-soft); color: var(--sk-text); }

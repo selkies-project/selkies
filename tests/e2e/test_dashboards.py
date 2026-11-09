@@ -544,15 +544,15 @@ def viewer_check(page, res: "H.Results") -> None:
 def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     """Gaming mode stays reachable on a touch client, and by its chord.
 
-    The header carries the fullscreen and gaming-mode pair on every client;
-    the trackpad toggle joins the keyboard tile in the action-button row (in
+    The action-button row carries the fullscreen and gaming-mode pair on every
+    client; the trackpad toggle joins the keyboard tile in that row (in
     a bar layout the bar's touch group, or the edge fan's, with no second one
     in the soft keys), and appears only once touch is seen. The Ctrl+Shift+X
     chord is the core's own, so it works whatever the dashboard shows.
     """
     if dashboard == "default":
         present = lambda: page.evaluate("""() => ({
-            gaming: !!document.querySelector('.header-controls .gaming-mode-button'),
+            gaming: !!document.querySelector('.sidebar-action-buttons .gaming-mode-button'),
             trackpad: !!document.querySelector('.sidebar-action-buttons .trackpad-mode-button'),
             headerTrackpad: !!document.querySelector('.header-controls .trackpad-mode-button'),
         })""")
@@ -593,12 +593,12 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
 
 
 def sidebar_layout_check(page, res: "H.Results") -> None:
-    """Pin the sidebar layout: header icon parity, uniform tiles, and a files
-    dialog that follows the theme.
+    """Pin the sidebar layout: icon parity of the fullscreen and gaming tiles,
+    uniform tiles, and a files dialog that follows the theme.
 
     Runs after gaming_mode_check: the touchstart it dispatches is what makes
     the keyboard and trackpad tiles render, so the action row is at its
-    fullest seven here and has to wrap without resizing any tile.
+    fullest nine here and has to wrap without resizing any tile.
     """
     if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
         page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
@@ -637,9 +637,9 @@ def sidebar_layout_check(page, res: "H.Results") -> None:
         keyRowIcons: [...document.querySelectorAll('.sidebar-mobile-key-actions svg')].filter((s) => !s.closest('.key-palette-toggle')).length,
       };
     }""")
-    uniform = (tiles["n"] == 7 and tiles["rows"] == 2
+    uniform = (tiles["n"] == 9 and tiles["rows"] == 2
                and max(tiles["widths"]) - min(tiles["widths"]) <= 1.0)
-    res.check("seven action tiles wrap onto two rows at one width", uniform, tiles)
+    res.check("nine action tiles wrap onto two rows at one width", uniform, tiles)
     res.check("the key row holds the five soft keys and no icon buttons",
               tiles["keyRow"] == 5 and tiles["keyRowIcons"] == 0, tiles)
 
@@ -896,12 +896,13 @@ GLASS = {"default": ".sidebar", "wish": ".toolbar", "edge": EDGE_BUTTON}
 
 
 def translucency_button(page, dashboard: str) -> Optional[Any]:
-    """The layout's translucency button: in the sidebar's footer, the drawer
-    opened first; in the toolbar menu's footer, beside the layout and theme
-    toggles, the menu opened first; or a button of the edge fan."""
+    """The layout's translucency button: in the sidebar's header, beside the
+    theme and layout toggles, the drawer opened first; in the toolbar menu's
+    footer, beside the layout and theme toggles, the menu opened first; or a
+    button of the edge fan."""
     if dashboard == "default":
         sidebar_open(page)
-        found = page.locator(".sidebar .sidebar-footer .translucency-button")
+        found = page.locator(".sidebar .header-controls .translucency-button")
     elif dashboard == "wish":
         found = page.locator('[role="menu"] .translucency-button')
         if not found.count():

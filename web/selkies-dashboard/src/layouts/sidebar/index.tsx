@@ -6,11 +6,11 @@
 
 /**
  * The default layout: the classic drawer on the left edge, opened by the
- * handle there or by Ctrl+Shift+M. Its header carries the wordmark, the
- * theme pill, the layout toggle, fullscreen, and gaming mode; a row of tiles
- * toggles the streams; a touch client gets the soft keys under them; every
- * panel is a section below, each folding on its own, and the footer carries
- * the translucency knob, which the header has no room for. The sections hold the
+ * handle there or by Ctrl+Shift+M. Its header carries the wordmark and the
+ * appearance controls (the theme pill, the layout toggle, the translucency
+ * knob); a row of tiles toggles the streams and holds fullscreen and gaming
+ * mode; a touch client gets the soft keys under them; every panel is a section
+ * below, each folding on its own, and the footer carries the citation. The sections hold the
  * same panels the toolbar carries, drawn in this layout's own skin
  * (`sidebar.css`), and the stats section's switch lays the strip over the
  * stream. Entering fullscreen or gaming mode folds the drawer, and the
@@ -40,21 +40,11 @@ import "./sidebar.css";
 /** Height of the handle in pixels, which its drag keeps inside the window. */
 const HANDLE_HEIGHT = 60;
 
-/** One stream toggle tile. */
-function Tile({ active, label, className, onClick, children }: { active: boolean; label: string; className?: string; onClick: () => void; children: React.ReactNode }) {
+/** One tile of the action row: a stream's toggle or an action; `title` says more than `label` where given. */
+function Tile({ active, label, title, className, onClick, children }: { active: boolean; label: string; title?: string; className?: string; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button type="button" className={`action-button ${className ?? ""}`} aria-pressed={active} aria-label={label} title={label} onClick={onClick}>
+    <button type="button" className={`action-button ${className ?? ""}`} aria-pressed={active} aria-label={label} title={title ?? label} onClick={onClick}>
       {children}
-    </button>
-  );
-}
-
-/** One of the header's buttons, beside the theme and layout toggles. */
-function HeaderButton({ action }: { action: Action }) {
-  return (
-    <button type="button" className={`header-action-button ${action.className}`} aria-label={action.label} title={action.title}
-      onClick={action.run}>
-      <action.icon />
     </button>
   );
 }
@@ -134,8 +124,10 @@ export default function SidebarLayout() {
   };
 
   const actions = useActions();
-  // The touch client's own beside the stream switches; the touch gamepad's switch is in the gamepads section.
-  const tiles = [actions.keyboardButton, actions.trackpad].filter((action): action is Action => action !== null);
+  // Fullscreen and gaming mode after the stream switches, then the touch client's own; the touch gamepad's switch
+  // is in the gamepads section.
+  const tiles = [actions.fullscreen, actions.gamingMode, actions.keyboardButton, actions.trackpad]
+    .filter((action): action is Action => action !== null);
   const handleLabel = t(shown ? "topMenu.hideToolbar" : "topMenu.showToolbar");
 
   return (
@@ -155,8 +147,7 @@ export default function SidebarLayout() {
           <div className="header-controls">
             <ThemePill />
             <LayoutToggle className="header-action-button" />
-            {actions.fullscreen && <HeaderButton action={actions.fullscreen} />}
-            {actions.gamingMode && <HeaderButton action={actions.gamingMode} />}
+            <TranslucencyToggle className="header-action-button sidebar-translucency" />
           </div>
         </header>
 
@@ -168,7 +159,7 @@ export default function SidebarLayout() {
               </Tile>
             ))}
             {tiles.map((action) => (
-              <Tile key={action.className} active={!!action.active} className={action.className} label={action.label} onClick={action.run}>
+              <Tile key={action.className} active={!!action.active} className={action.className} label={action.label} title={action.title} onClick={action.run}>
                 <action.icon />
               </Tile>
             ))}
@@ -185,10 +176,11 @@ export default function SidebarLayout() {
           </Section>
         ))}
 
-        <footer className="sidebar-footer">
-          <TranslucencyToggle className="sidebar-translucency" />
-          {actions.cite && <CiteLink />}
-        </footer>
+        {actions.cite && (
+          <footer className="sidebar-footer">
+            <CiteLink />
+          </footer>
+        )}
       </aside>
     </>
   );
