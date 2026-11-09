@@ -81,8 +81,9 @@ def menu_block(dashboard: str, mode: str) -> "H.Results":
             entries = encoder_menu(page, dashboard)
             by_label = {text.replace(UNSUPPORTED, "").strip().strip("()[]").strip(): (text, disabled)
                         for text, disabled in (entries or [])}
+            # Every full-frame codec, and JPEG over WebSockets only.
             res.check("every encoder the server allows is listed",
-                      entries is not None and len(entries) == (5 if mode == "webrtc" else 7), entries)
+                      entries is not None and len(entries) == (5 if mode == "webrtc" else 6), entries)
             res.check("H.265, which this browser does not play, is listed disabled and marked as unsupported here",
                       H265 in by_label and by_label[H265][1] and UNSUPPORTED in by_label[H265][0], by_label.get(H265))
             res.check("H.264 is listed, enabled, and unmarked",
