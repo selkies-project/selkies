@@ -34,7 +34,7 @@ coded to 36199, and a frame of a scroll, which marks nothing, the same stream bi
  9 files changed, 103 insertions(+), 17 deletions(-)
 
 diff --git a/Source/API/EbSvtAv1.h b/Source/API/EbSvtAv1.h
-index a0e8c94..cb895f0 100644
+index 6f96676..fe1b468 100644
 --- a/Source/API/EbSvtAv1.h
 +++ b/Source/API/EbSvtAv1.h
 @@ -119,6 +119,12 @@ typedef struct EbBufferHeaderType {
@@ -51,10 +51,10 @@ index a0e8c94..cb895f0 100644
  
  typedef struct EbComponentType {
 diff --git a/Source/Lib/Codec/enc_dec_process.c b/Source/Lib/Codec/enc_dec_process.c
-index 541a104..20b83f0 100644
+index a94fea1..765612f 100644
 --- a/Source/Lib/Codec/enc_dec_process.c
 +++ b/Source/Lib/Codec/enc_dec_process.c
-@@ -2932,6 +2932,19 @@ EbErrorType svt_aom_mode_decision_kernel_iter(void* context) {
+@@ -2949,6 +2949,19 @@ EbErrorType svt_aom_mode_decision_kernel_iter(void* context) {
                                             (scs->super_block_size == 64 || ed_ctx->md_ctx->max_block_size == 64)) ||
                          (ed_ctx->md_ctx->depth_removal_ctrls.disallow_below_32x32 &&
                           ed_ctx->md_ctx->max_block_size == 32);
@@ -74,7 +74,7 @@ index 541a104..20b83f0 100644
                      if (scs->allintra) {
                          pd0_detector_allintra(pcs, md_ctx);
                      } else {
-@@ -3010,7 +3023,7 @@ EbErrorType svt_aom_mode_decision_kernel_iter(void* context) {
+@@ -3027,7 +3040,7 @@ EbErrorType svt_aom_mode_decision_kernel_iter(void* context) {
                      ed_ctx->md_ctx->pd_pass = PD_PASS_1;
                      // This classifier is used for the case PD0 is bypassed and for pd0_level 2
                      // where the cnt_nz_coeff is not derived @ PD0
@@ -83,7 +83,7 @@ index 541a104..20b83f0 100644
                          lpd1_detector_skip_pd0(pcs, md_ctx, pic_width_in_sb);
                      }
  
-@@ -3033,6 +3046,11 @@ EbErrorType svt_aom_mode_decision_kernel_iter(void* context) {
+@@ -3050,6 +3063,11 @@ EbErrorType svt_aom_mode_decision_kernel_iter(void* context) {
                      } else {
                          svt_aom_sig_deriv_enc_dec_default(pcs, ed_ctx->md_ctx);
                      }
@@ -96,10 +96,10 @@ index 541a104..20b83f0 100644
                      // is fixed.
                      md_ctx->fixed_partition = md_ctx->pred_depth_only && md_ctx->md_disallow_nsq_search;
 diff --git a/Source/Lib/Codec/md_process.h b/Source/Lib/Codec/md_process.h
-index 154165c..31f90d8 100644
+index b67cc89..2109192 100644
 --- a/Source/Lib/Codec/md_process.h
 +++ b/Source/Lib/Codec/md_process.h
-@@ -1271,6 +1271,9 @@ typedef struct ModeDecisionContext {
+@@ -1278,6 +1278,9 @@ typedef struct ModeDecisionContext {
      // Per-pixel residual-cost threshold for the LPD1 GLOBALMV (MDS0-2) bypass.
      // 0: OFF. Otherwise: bypass fires when pd0_mds0_best_cost[mds_idx] < th * blk_area.
      uint8_t lpd1_globalmv_bypass_th;
@@ -110,10 +110,10 @@ index 154165c..31f90d8 100644
      // GLOBALMV-bypass classifier. Reset to UINT32_MAX per SB via a single memset; PD0 storage
      // sites overwrite per block. UINT32_MAX => "not available" => bypass declines (safe fallback).
 diff --git a/Source/Lib/Codec/motion_estimation.c b/Source/Lib/Codec/motion_estimation.c
-index 7a7281b..199a3eb 100644
+index 88eba13..1e1ff19 100644
 --- a/Source/Lib/Codec/motion_estimation.c
 +++ b/Source/Lib/Codec/motion_estimation.c
-@@ -2829,8 +2829,8 @@ static INLINE void init_me_hme_data(MeContext* me_ctx) {
+@@ -2830,8 +2830,8 @@ static INLINE void init_me_hme_data(MeContext* me_ctx) {
  // below me_ctx->me_static_b64_th, populate the minimal set of outputs that
  // downstream consumers (construct_me_candidate_array*, compute_distortion)
  // need and return true so the caller can skip init/HME/integer ME.
@@ -124,7 +124,7 @@ index 7a7281b..199a3eb 100644
          return false;
      }
  
-@@ -2842,7 +2842,10 @@ static bool me_static_b64_bypass(MeContext* me_ctx, uint32_t b64_origin_x, uint3
+@@ -2843,7 +2843,10 @@ static bool me_static_b64_bypass(MeContext* me_ctx, uint32_t b64_origin_x, uint3
                                           b64_origin_y,
                                           me_ctx->b64_width,
                                           me_ctx->b64_height);
@@ -136,7 +136,7 @@ index 7a7281b..199a3eb 100644
          return false;
      }
  
-@@ -2917,7 +2920,9 @@ EbErrorType svt_aom_motion_estimation_b64(
+@@ -2919,7 +2922,9 @@ EbErrorType svt_aom_motion_estimation_b64(
      // processed b64, which can drive an out-of-bounds reference fetch in inter prediction
      // (observed as a SIGSEGV in svt_av1_convolve_2d_copy_sr_neon on edge SBs at >=1080p RTC).
      init_me_hme_data(me_ctx);
@@ -148,10 +148,10 @@ index 7a7281b..199a3eb 100644
          hme_b64(pcs, b64_origin_x, b64_origin_y, me_ctx, input_ptr);
  
 diff --git a/Source/Lib/Codec/pcs.c b/Source/Lib/Codec/pcs.c
-index 44f7252..286de8e 100644
+index b8a63a0..a4b39b5 100644
 --- a/Source/Lib/Codec/pcs.c
 +++ b/Source/Lib/Codec/pcs.c
-@@ -1568,3 +1568,22 @@ EbErrorType svt_aom_me_creator(EbPtr* object_dbl_ptr, EbPtr object_init_data_ptr
+@@ -1581,3 +1581,22 @@ EbErrorType svt_aom_me_creator(EbPtr* object_dbl_ptr, EbPtr object_init_data_ptr
  
      return EB_ErrorNone;
  }
@@ -175,10 +175,10 @@ index 44f7252..286de8e 100644
 +    return true;
 +}
 diff --git a/Source/Lib/Codec/pcs.h b/Source/Lib/Codec/pcs.h
-index c5c6ce0..bcefe27 100644
+index decbb25..d6641d9 100644
 --- a/Source/Lib/Codec/pcs.h
 +++ b/Source/Lib/Codec/pcs.h
-@@ -766,7 +766,7 @@ typedef struct PictureParentControlSet {
+@@ -793,7 +793,7 @@ typedef struct PictureParentControlSet {
  
      uint8_t hbd_md;
  
@@ -187,7 +187,7 @@ index c5c6ce0..bcefe27 100644
      uint8_t             log2_tile_rows;
      uint8_t             log2_tile_cols;
      uint8_t             log2_sb_size;
-@@ -1259,6 +1259,11 @@ EbErrorType alloc_sb_geoms(SbGeom** geom, int width, int height);
+@@ -1293,6 +1293,11 @@ EbErrorType alloc_sb_geoms(SbGeom** geom, int width, int height);
  void        free_sb_geoms(SbGeom* geom);
  void        copy_sb_geoms(SbGeom* dst_geom, SbGeom* src_geom, uint16_t width, uint16_t height);
  
@@ -200,10 +200,10 @@ index c5c6ce0..bcefe27 100644
  }
  #endif
 diff --git a/Source/Lib/Codec/product_coding_loop.c b/Source/Lib/Codec/product_coding_loop.c
-index 0122868..f2f8ccb 100644
+index 785a04a..35043b1 100644
 --- a/Source/Lib/Codec/product_coding_loop.c
 +++ b/Source/Lib/Codec/product_coding_loop.c
-@@ -6218,6 +6218,9 @@ static bool lpd1_should_perform_tx(PictureControlSet* pcs, ModeDecisionContext*
+@@ -6332,6 +6332,9 @@ static bool lpd1_should_perform_tx(PictureControlSet* pcs, ModeDecisionContext*
      if (!is_inter_mode(cand->block_mi.mode)) {
          return true;
      }
@@ -213,7 +213,7 @@ index 0122868..f2f8ccb 100644
  
      if (!ctx->lpd1_tx_skip_decision_ctrls.skip_tx_score_th) {
          return true;
-@@ -6471,7 +6474,8 @@ static void full_loop_core_light_pd1(PictureControlSet* pcs, ModeDecisionContext
+@@ -6590,7 +6593,8 @@ static void full_loop_core_light_pd1(PictureControlSet* pcs, ModeDecisionContext
      cand_bf->cnt_nz_coeff    = cand_bf->eob.y[0];
      // Skip-prediction (luma-only RD). See lpd1_blk_skip_luma_rd().
      // Inputs (prediction-SSD + residual-SSD) are produced by perform_dct_dct_tx_light_pd1 above.
@@ -223,7 +223,7 @@ index 0122868..f2f8ccb 100644
      if (ctx->lpd1_blk_skip_luma_rd_pct && perform_tx && cand_bf->block_has_coeff &&
          is_inter_mode(cand->block_mi.mode)) {
          if (lpd1_blk_skip_luma_rd(ctx, cand_bf, y_coeff_bits, y_full_distortion[DIST_SSD])) {
-@@ -6483,7 +6487,7 @@ static void full_loop_core_light_pd1(PictureControlSet* pcs, ModeDecisionContext
+@@ -6602,7 +6606,7 @@ static void full_loop_core_light_pd1(PictureControlSet* pcs, ModeDecisionContext
  
      // If going to skip chroma TX, detect if block is complex in chroma, and if so, force chroma to be performed.
      if (!perform_chroma) {
@@ -232,7 +232,7 @@ index 0122868..f2f8ccb 100644
              chroma_component = chroma_complexity_check(pcs, ctx, cand, input_pic, loc);
  
              if (ctx->lpd1_tx_ctrls.chroma_detector_level <= 3) {
-@@ -8792,8 +8796,11 @@ static void convert_md_recon_16bit_to_8bit(PictureControlSet* pcs, ModeDecisionC
+@@ -8953,8 +8957,11 @@ static void convert_md_recon_16bit_to_8bit(PictureControlSet* pcs, ModeDecisionC
  static bool lpd1_try_mds0_bypass(PictureControlSet* pcs, ModeDecisionContext* ctx, EbPictureBufferDesc* input_pic,
                                   const BlockLocation* loc, ModeDecisionCandidateBuffer** cand_bf_ptr_array_base,
                                   ModeDecisionCandidate* fast_cand_array, uint32_t* fast_candidate_total_count) {
@@ -246,7 +246,7 @@ index 0122868..f2f8ccb 100644
          return false;
      }
  
-@@ -8813,7 +8820,8 @@ static bool lpd1_try_mds0_bypass(PictureControlSet* pcs, ModeDecisionContext* ct
+@@ -8974,7 +8981,8 @@ static bool lpd1_try_mds0_bypass(PictureControlSet* pcs, ModeDecisionContext* ct
  
      // PD0 residual variance must be low (per-pixel). UINT32_MAX sentinel (PD0 skipped) fails this check.
      const uint32_t blk_area = (uint32_t)(ctx->blk_geom->bwidth * ctx->blk_geom->bheight);
@@ -257,10 +257,10 @@ index 0122868..f2f8ccb 100644
      }
  
 diff --git a/Source/Lib/Globals/enc_handle.c b/Source/Lib/Globals/enc_handle.c
-index 13bab3d..eebef00 100644
+index 4582d37..36041db 100644
 --- a/Source/Lib/Globals/enc_handle.c
 +++ b/Source/Lib/Globals/enc_handle.c
-@@ -891,10 +891,16 @@ static void free_stale_maps(EbEncHandle* enc_handle_ptr) {
+@@ -966,10 +966,16 @@ static void free_stale_maps(EbEncHandle* enc_handle_ptr) {
          for (uint32_t i = 0; i < enc_handle_ptr->input_buffer_resource_ptr->object_total_count; i++)
              free(enc_handle_ptr->in_stale[i]);
      }
@@ -277,7 +277,7 @@ index 13bab3d..eebef00 100644
      enc_handle_ptr->stale_blocks = 0;
  }
  
-@@ -5120,14 +5126,15 @@ static int pool_index(const EbSystemResource* res, const EbObjectWrapper* wrappe
+@@ -5316,14 +5322,15 @@ static int pool_index(const EbSystemResource* res, const EbObjectWrapper* wrappe
  /* Size the stale maps for pictures of `blocks` 16x16 blocks, every block of every buffer stale
   * where they did not already fit. Returns false where they could not be allocated. */
  static bool size_stale_maps(EbEncHandle* h, uint32_t blocks) {
@@ -295,7 +295,7 @@ index 13bab3d..eebef00 100644
          free_stale_maps(h);
          return false;
      }
-@@ -5140,8 +5147,9 @@ static bool size_stale_maps(EbEncHandle* h, uint32_t blocks) {
+@@ -5336,8 +5343,9 @@ static bool size_stale_maps(EbEncHandle* h, uint32_t blocks) {
          memset(h->y8b_stale[i], 1, blocks);
      }
      for (uint32_t i = 0; i < in_count; i++) {
@@ -307,7 +307,7 @@ index 13bab3d..eebef00 100644
              free_stale_maps(h);
              return false;
          }
-@@ -5758,8 +5766,19 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
+@@ -5981,8 +5989,19 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
      const int      y8b_idx = pool_index(enc_handle_ptr->input_y8b_buffer_resource_ptr, y8b_wrapper);
      const int      in_idx  = pool_index(enc_handle_ptr->input_buffer_resource_ptr, eb_wrapper_ptr);
      const uint8_t* constant = app_hdr->p_buffer != NULL ? app_hdr->constant_blocks : NULL;

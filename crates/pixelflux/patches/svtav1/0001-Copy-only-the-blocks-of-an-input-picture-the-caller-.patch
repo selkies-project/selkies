@@ -25,7 +25,7 @@ six logical processors.
  3 files changed, 204 insertions(+), 14 deletions(-)
 
 diff --git a/Source/API/EbSvtAv1.h b/Source/API/EbSvtAv1.h
-index 0b2f529..a0e8c94 100644
+index 5683783..6f96676 100644
 --- a/Source/API/EbSvtAv1.h
 +++ b/Source/API/EbSvtAv1.h
 @@ -111,6 +111,14 @@ typedef struct EbBufferHeaderType {
@@ -44,10 +44,10 @@ index 0b2f529..a0e8c94 100644
  
  typedef struct EbComponentType {
 diff --git a/Source/Lib/Globals/enc_handle.c b/Source/Lib/Globals/enc_handle.c
-index bd65283..13bab3d 100644
+index ca454a5..4582d37 100644
 --- a/Source/Lib/Globals/enc_handle.c
 +++ b/Source/Lib/Globals/enc_handle.c
-@@ -882,9 +882,26 @@ static void svt_enc_handle_stop_threads(EbEncHandle* enc_handle_ptr) {
+@@ -957,9 +957,26 @@ static void svt_enc_handle_stop_threads(EbEncHandle* enc_handle_ptr) {
  /**********************************
  * Encoder Library Handle Deonstructor
  **********************************/
@@ -74,7 +74,7 @@ index bd65283..13bab3d 100644
      EB_FREE(enc_handle_ptr->app_callback_ptr);
      EB_DELETE(enc_handle_ptr->scs_pool_ptr);
      EB_DELETE(enc_handle_ptr->picture_parent_control_set_pool_ptr);
-@@ -5090,8 +5107,107 @@ static EbErrorType downsample_copy_frame_buffer(SequenceControlSet* scs, uint8_t
+@@ -5286,8 +5303,107 @@ static EbErrorType downsample_copy_frame_buffer(SequenceControlSet* scs, uint8_t
  from the sample application to the library buffers
  */
  
@@ -183,10 +183,10 @@ index bd65283..13bab3d 100644
      EbErrorType return_error = EB_ErrorNone;
  
      EbPictureBufferDesc* input_pic             = (EbPictureBufferDesc*)destination;
-@@ -5108,16 +5224,35 @@ static EbErrorType copy_frame_buffer(SequenceControlSet* scs, uint8_t* destinati
+@@ -5304,16 +5420,35 @@ static EbErrorType copy_frame_buffer(SequenceControlSet* scs, uint8_t* destinati
      const uint32_t chroma_height = (luma_height + subsampling_y) >> subsampling_y;
  
-     if (scs->static_config.encoder_bit_depth == EB_EIGHT_BIT) {
+     if (SVT_EFFECTIVE_BIT_DEPTH(scs->static_config.encoder_bit_depth) == EB_EIGHT_BIT) {
 -        svt_av1_copy_wxh_8bit(input_ptr->luma,
 -                              input_ptr->y_stride,
 -                              y8b_input_picture_ptr->y_buffer,
@@ -229,7 +229,7 @@ index bd65283..13bab3d 100644
      } else { // 10bit packed
          uint32_t comp_stride_y = input_pic->y_stride / 4;
  
-@@ -5306,7 +5441,8 @@ static void memset_input_buffer(SequenceControlSet* scs, EbBufferHeaderType* dst
+@@ -5502,7 +5637,8 @@ static void memset_input_buffer(SequenceControlSet* scs, EbBufferHeaderType* dst
  from the sample application to the library buffers
  */
  static void copy_input_buffer(SequenceControlSet* scs, EbBufferHeaderType* dst, EbBufferHeaderType* dst_y8b,
@@ -239,7 +239,7 @@ index bd65283..13bab3d 100644
      // Copy the higher level structure
      dst->n_alloc_len  = src->n_alloc_len;
      dst->n_filled_len = src->n_filled_len;
-@@ -5325,7 +5461,8 @@ static void copy_input_buffer(SequenceControlSet* scs, EbBufferHeaderType* dst,
+@@ -5521,7 +5657,8 @@ static void copy_input_buffer(SequenceControlSet* scs, EbBufferHeaderType* dst,
          // Bypass copy for the unecessary picture in IPPP pass
          // Copy the picture buffer
          if (src->p_buffer != NULL) {
@@ -249,9 +249,9 @@ index bd65283..13bab3d 100644
              // Copy the metadata array
              if (svt_aom_copy_metadata_buffer(dst, src->metadata) != EB_ErrorNone) {
                  dst->metadata = NULL;
-@@ -5569,8 +5706,10 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
-     EbObjectWrapper* y8b_wrapper;
-     svt_get_empty_object(enc_handle_ptr->input_y8b_buffer_producer_fifo_ptr, &y8b_wrapper);
+@@ -5791,8 +5928,10 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
+         return EB_ErrorInsufficientResources;
+     }
      // if resolution has changed, and the y8b_wrapper settings do not match scs settings, update y8b_wrapper settings
 +    bool y8b_resized = false;
      if (buffer_update_needed((EbBufferHeaderType*)y8b_wrapper->object_ptr, scs)) {
@@ -260,9 +260,9 @@ index bd65283..13bab3d 100644
      }
      //set live count to 1 to be decremented at the end of the encode in RC
      svt_object_inc_live_count(y8b_wrapper, 1);
-@@ -5579,8 +5718,10 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
- 
-     svt_get_empty_object(enc_handle_ptr->input_buffer_producer_fifo_ptr, &eb_wrapper_ptr);
+@@ -5804,8 +5943,10 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
+         return EB_ErrorInsufficientResources;
+     }
      // if resolution has changed, and the input_buffer settings do not match scs settings, update input_buffer settings
 +    bool in_resized = false;
      if (buffer_update_needed((EbBufferHeaderType*)eb_wrapper_ptr->object_ptr, scs)) {
@@ -271,7 +271,7 @@ index bd65283..13bab3d 100644
      }
  
      //set live count to 1 to be decremented at the end of the encode in RC, and released
-@@ -5607,14 +5748,48 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
+@@ -5830,14 +5971,48 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
      const size_t chroma_height = (luma_height + subsampling_y) >> subsampling_y;
      const size_t read_size     = (luma_width * luma_height + 2 * chroma_width * chroma_height) << is_16bit_input;
  
