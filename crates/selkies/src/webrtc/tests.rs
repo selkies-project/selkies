@@ -337,6 +337,7 @@ impl DisplayPlane for FakePlane {
         _keep: &HashSet<String>,
         _primary_scale: f64,
     ) -> LayoutOutcome {
+        self.log.lock().push("wayland-before".into());
         LayoutOutcome::default()
     }
 
@@ -345,6 +346,7 @@ impl DisplayPlane for FakePlane {
         _layouts: &mut Layouts,
         _dpis: &HashMap<String, String>,
     ) -> LayoutOutcome {
+        self.log.lock().push("wayland-after".into());
         LayoutOutcome::default()
     }
 
@@ -1751,6 +1753,55 @@ async fn media_size_wayland_grows_the_screen_first_and_fits_it_after() {
     assert!(steps[1].starts_with("start"), "{steps:?}");
     assert_eq!(steps.last().unwrap(), "fit-screen 1280 720", "{steps:?}");
     rig.service.shutdown().await;
+}
+
+/// A Wayland primary that narrows or shortens where it stands takes its rectangle, and has its
+/// screen fitted, before the secondary is placed in the room it frees: the compositor refuses an
+/// output that overlaps the primary's screen, which gives the room up only once the capture
+/// carries it. A screen the rectangle outgrows in the other dimension is grown first.
+#[tokio::test]
+async fn wayland_a_shrinking_primary_fits_its_screen_before_the_secondary_is_placed() {
+    for (res, grown) in [
+        ("1600x838", None),
+        ("1600x1200", Some("grow-screen 1600 1200")),
+    ] {
+        let rig = Rig::new((1920, 1080), quick());
+        rig.service.policy.lock().wayland = true;
+        rig.set_primary(FakePipeline::new(&rig.log, "primary", 1920, 1080, None).capturing());
+        rig.set_display(
+            "display2",
+            FakePipeline::new(&rig.log, "display2", 1280, 720, Some((1920, 0))).capturing(),
+        );
+        {
+            let mut st = rig.service.st.lock();
+            let seeds = st.seeds.clone();
+            let mut entry = crate::ws::state::DisplayState::new(&seeds, None, true, None);
+            entry.width = 1280;
+            entry.height = 720;
+            st.displays.insert("display2".into(), entry);
+        }
+        rig.service.on_resize_handler(res, "primary").await;
+        let steps = rig.steps();
+        let (w, h) = res.split_once('x').unwrap();
+        let at = |step: &str| steps.iter().position(|s| s == step);
+        let (Some(region), Some(fit), Some(placed)) = (
+            at(&format!("region primary 0 0 {w} {h}")),
+            at(&format!("fit-screen {w} {h}")),
+            at("wayland-before"),
+        ) else {
+            panic!("{res}: {steps:?}");
+        };
+        assert!(region < fit && fit < placed, "{res}: {steps:?}");
+        if let Some(grown) = grown {
+            assert!(at(grown).is_some_and(|i| i < region), "{res}: {steps:?}");
+        }
+        assert!(
+            steps[placed..]
+                .iter()
+                .all(|s| !s.starts_with("region primary")),
+            "{res}: {steps:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
