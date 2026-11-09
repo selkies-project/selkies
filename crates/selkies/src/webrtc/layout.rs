@@ -353,7 +353,7 @@ impl WebRtcService {
                         .realized_geometry(wayland_output_id(Some("primary")))
                         .await
                 {
-                    (w, h) = realized;
+                    (w, h, _) = realized;
                 }
                 if w <= 0 || h <= 0 {
                     if wayland {

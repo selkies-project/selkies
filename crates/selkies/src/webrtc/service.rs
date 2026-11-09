@@ -1528,14 +1528,14 @@ impl WebRtcService {
         display: &str,
         pipeline: &Arc<dyn MediaPipeline>,
     ) -> Option<(i32, i32)> {
-        let (w, h) = pipeline
+        let (w, h, scale) = pipeline
             .realized_geometry(wayland_output_id(Some(display)))
             .await?;
         let (old_w, old_h, region) = pipeline.geometry();
         if (old_w, old_h) != (w, h) {
             pipeline.set_geometry(w, h, region);
         }
-        info!(target: "webrtc", "Wayland realized geometry for '{display}': {w}x{h} (asked {old_w}x{old_h})");
+        info!(target: "webrtc", "Wayland realized geometry for '{display}': {w}x{h} @ scale {scale} (asked {old_w}x{old_h})");
         self.engine
             .send_remote_resolution(&format!("{w}x{h}"), display);
         Some((w, h))
