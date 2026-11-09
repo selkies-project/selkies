@@ -8,6 +8,8 @@
 //! the service over them, the service itself real.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +52,9 @@ pub struct FakeCapture {
     pub fail_start: Mutex<bool>,
     /// What the realized-geometry barrier reads back.
     pub geometry: Mutex<RealizedGeometry>,
+    /// Read back the size of the last start instead, as a compositor that realizes every
+    /// request would.
+    pub geometry_follows_start: Mutex<bool>,
     /// The recorded `(state, last_error)`.
     pub state: Mutex<(String, Option<String>)>,
     /// The encoder the fake capture settled on.
@@ -70,6 +75,7 @@ impl Default for FakeCapture {
             tx: Mutex::default(),
             fail_start: Mutex::default(),
             geometry: Mutex::new(Ok(None)),
+            geometry_follows_start: Mutex::new(false),
             state: Mutex::new(("running".into(), None)),
             info: Mutex::new(None),
             reselect_backend: Mutex::new(false),
@@ -225,6 +231,9 @@ impl CaptureHandle for FakeCapture {
     fn set_cursor_sink(&self, _sink: Option<Arc<dyn CursorSink>>) {}
 
     fn realized_geometry(&self, _output: u32) -> RealizedGeometry {
+        if *self.geometry_follows_start.lock() {
+            return Ok(self.starts.lock().last().map(|s| (s.width, s.height, 1.0)));
+        }
         self.geometry.lock().clone()
     }
 
@@ -237,6 +246,8 @@ impl CaptureHandle for FakeCapture {
 #[derive(Default)]
 pub struct FakeCaptures {
     pub made: Mutex<Vec<(String, Arc<FakeCapture>)>>,
+    /// Make captures whose realized geometry follows their starts.
+    pub geometry_follows_start: Mutex<bool>,
 }
 
 impl FakeCaptures {
@@ -252,6 +263,7 @@ impl FakeCaptures {
 impl CaptureFactory for FakeCaptures {
     fn capture(&self, display_id: &str) -> Arc<dyn CaptureHandle> {
         let capture = Arc::new(FakeCapture::default());
+        *capture.geometry_follows_start.lock() = *self.geometry_follows_start.lock();
         self.made
             .lock()
             .push((display_id.to_string(), capture.clone()));
@@ -266,6 +278,9 @@ pub struct FakeDisplay {
     pub root: Mutex<Option<(i32, i32)>>,
     pub calls: Mutex<Vec<String>>,
     pub fits: Mutex<bool>,
+    /// Awaited once, inside the next Wayland layout pass after it read the layout: what a page
+    /// sends while a pass runs.
+    pub during_layout: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send>>>>,
 }
 
 #[async_trait]
@@ -326,6 +341,10 @@ impl Display for FakeDisplay {
         _k: &HashSet<String>,
         _s: f64,
     ) -> LayoutOutcome {
+        let during = self.during_layout.lock().take();
+        if let Some(during) = during {
+            during.await;
+        }
         LayoutOutcome::default()
     }
 

@@ -953,7 +953,8 @@ impl WsService {
                 self.schedule_idr(display_id);
                 self.broadcast_live_server_settings(display_id).await;
                 if Self::is_wayland() {
-                    self.sync_wayland_realized_geometry(display_id, true).await;
+                    self.sync_wayland_realized_geometry(display_id, true, None)
+                        .await;
                 }
                 restart_ok = self.capture_of(display_id).is_some();
             }
@@ -1218,7 +1219,8 @@ impl WsService {
         }
         self.start_capture_for_display(display_id, layout).await;
         self.start_backpressure_task(display_id);
-        self.sync_wayland_realized_geometry(display_id, true).await;
+        self.sync_wayland_realized_geometry(display_id, true, None)
+            .await;
     }
 
     /// `r,`: route a client resize once the displays have been laid out. The layout comes from
@@ -1309,7 +1311,8 @@ impl WsService {
                 self.start_capture_for_display(display_id, layout).await;
             }
         }
-        self.sync_wayland_realized_geometry(display_id, true).await;
+        self.sync_wayland_realized_geometry(display_id, true, None)
+            .await;
         let (rw, rh, dpi) = {
             let st = self.st.lock();
             match st.displays.get(display_id) {
@@ -1331,7 +1334,17 @@ impl WsService {
     /// Reconcile a display's state with the compositor's realized geometry (it may even-mask
     /// dimensions or keep the old mode), the Wayland counterpart of X11's realized clamp. The
     /// read is a barrier too: answered only after any queued capture start finished.
-    async fn sync_wayland_realized_geometry(&self, display_id: &str, broadcast: bool) {
+    ///
+    /// A layout pass passes `laid_out`, the size it read for the display. A different size in
+    /// the state now is a resize that arrived during the pass and coalesced into the next one:
+    /// it stays for that pass to lay out, rather than being overwritten with what this pass
+    /// realized.
+    async fn sync_wayland_realized_geometry(
+        &self,
+        display_id: &str,
+        broadcast: bool,
+        laid_out: Option<(i32, i32)>,
+    ) {
         if !Self::is_wayland() || !self.reg.lock().running.contains(display_id) {
             return;
         }
@@ -1358,11 +1371,18 @@ impl WsService {
         if w <= 0 || h <= 0 {
             return;
         }
-        {
+        let asked = {
             let mut st = self.st.lock();
+            let asked = st
+                .displays
+                .get(display_id)
+                .map(|d| (d.width, d.height))
+                .filter(|size| laid_out.is_some_and(|read| read != *size));
             if let Some(d) = st.displays.get_mut(display_id) {
-                d.width = w;
-                d.height = h;
+                if asked.is_none() {
+                    d.width = w;
+                    d.height = h;
+                }
                 if scale > 0.0 {
                     d.scale = scale;
                 }
@@ -1371,12 +1391,16 @@ impl WsService {
                 l.w = w;
                 l.h = h;
             }
-            if display_id == PRIMARY_DISPLAY {
+            if display_id == PRIMARY_DISPLAY && asked.is_none() {
                 st.seeds.display_width = w;
                 st.seeds.display_height = h;
             }
-        }
+            asked
+        };
         info!(target: "ws", "Wayland realized geometry for '{display_id}': {w}x{h} @ scale {scale}");
+        if let Some((aw, ah)) = asked {
+            info!(target: "ws", "'{display_id}' was asked for {aw}x{ah} during the layout pass; the next pass lays that out.");
+        }
         if broadcast {
             self.broadcast_stream_resolution().await;
         }
@@ -2252,7 +2276,7 @@ impl WsService {
                 self.schedule_idr(did);
                 self.broadcast_live_server_settings(did).await;
                 if Self::is_wayland() {
-                    self.sync_wayland_realized_geometry(did, true).await;
+                    self.sync_wayland_realized_geometry(did, true, None).await;
                 }
             } else {
                 warn!(target: "ws", "Cannot restart capture for '{did}': no layout found. Triggering full reconfiguration as a fallback.");
@@ -3649,6 +3673,15 @@ impl WsService {
             return;
         }
         debug!(target: "ws", "Calculating new extended desktop layout from ALL clients...");
+        // Each display's size as this pass reads it: a resize that lands while the pass runs
+        // coalesces into the next pass, which the geometry this one realizes must not undo.
+        let laid_out: std::collections::HashMap<String, (i32, i32)> = self
+            .st
+            .lock()
+            .displays
+            .iter()
+            .map(|(id, d)| (id.clone(), (d.width, d.height)))
+            .collect();
         let Some((mut layouts, mut total_w, mut total_h, stream_fps)) = self.compute_layouts()
         else {
             error!(target: "ws", "Calculated total display size is zero. Aborting reconfiguration.");
@@ -3723,7 +3756,7 @@ impl WsService {
                 self.wayland_after_primary(&mut layouts, &mut keep).await;
             }
         }
-        self.verdict_on_captures(&layouts).await;
+        self.verdict_on_captures(&layouts, &laid_out).await;
         let primary_layout = self.st.lock().layouts.get(PRIMARY_DISPLAY).copied();
         if wayland && let Some(primary) = primary_layout {
             // Last: the primary's view is as big as what it captures, and the capture is live at
@@ -4099,8 +4132,14 @@ impl WsService {
     }
 
     /// A capture that did not come up yields a verdict: a secondary is dropped, the primary is
-    /// told the stream stopped with `video_active` kept, so the next pass restarts it.
-    async fn verdict_on_captures(&self, layouts: &Layouts) {
+    /// told the stream stopped with `video_active` kept, so the next pass restarts it. On
+    /// Wayland each display is first reconciled with what was realized, short of a size it was
+    /// asked for after `laid_out` was read.
+    async fn verdict_on_captures(
+        &self,
+        layouts: &Layouts,
+        laid_out: &std::collections::HashMap<String, (i32, i32)>,
+    ) {
         let wayland = Self::is_wayland();
         for display_id in layouts.keys() {
             let active = self
@@ -4114,7 +4153,12 @@ impl WsService {
             }
             if wayland {
                 // Barrier: the read answers only after the queued start finished.
-                self.sync_wayland_realized_geometry(display_id, false).await;
+                self.sync_wayland_realized_geometry(
+                    display_id,
+                    false,
+                    laid_out.get(display_id).copied(),
+                )
+                .await;
             }
             let capture = self
                 .capture_of(display_id)

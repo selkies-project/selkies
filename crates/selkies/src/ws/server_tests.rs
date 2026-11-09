@@ -1947,3 +1947,66 @@ fn a_lone_wayland_resize_carries_the_session_screen() {
         &[],
     );
 }
+
+// --- A resize during a Wayland layout pass -------------------------------------------------------
+
+/// A page's resize that lands while a layout pass runs coalesces into the next pass, and that
+/// pass lays it out: what the running pass realized for the display is the size it read before
+/// the request came, which must not overwrite the request.
+#[tokio::test]
+#[ignore = "run by a_resize_during_a_wayland_layout_pass_is_laid_out_next, in a process of its own"]
+async fn a_resize_during_a_wayland_layout_pass_in_its_process() {
+    if !crate::session_screens::testing::isolated() {
+        return;
+    }
+    crate::settings::install(crate::settings::Settings::parse(
+        &["--wayland=true".to_string()],
+        &|_| None,
+    ));
+    let rig = Rig::new();
+    *rig.captures.geometry_follows_start.lock() = true;
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let mut second = rig.controller().await;
+    second.say(&secondary_settings("display2", "right")).await;
+    settle().await;
+    assert_eq!(rig.layout("display2").map(|l| (l.w, l.h)), Some((800, 600)));
+
+    let service = rig.service.clone();
+    *rig.display.during_layout.lock() = Some(Box::pin(async move {
+        service.handle_resize("1024x768", "display2").await;
+    }));
+    rig.service.handle_resize("1600x900", PRIMARY_DISPLAY).await;
+    settle().await;
+    assert!(
+        rig.display.during_layout.lock().is_none(),
+        "the secondary's resize arrived during the primary's pass"
+    );
+    assert_eq!(
+        rig.layout("display2").map(|l| (l.w, l.h)),
+        Some((1024, 768)),
+        "the next pass lays out the resize that arrived during the last one"
+    );
+    assert_eq!(
+        rig.service.st.lock().displays["display2"].width,
+        1024,
+        "and the secondary's state keeps it"
+    );
+    let capture = rig
+        .captures
+        .of("display2")
+        .expect("the secondary's capture");
+    assert_eq!(
+        capture.starts.lock().last().map(|s| (s.width, s.height)),
+        Some((1024, 768)),
+        "and its capture follows it"
+    );
+}
+
+#[test]
+fn a_resize_during_a_wayland_layout_pass_is_laid_out_next() {
+    crate::session_screens::testing::run_isolated(
+        "ws::server_tests::a_resize_during_a_wayland_layout_pass_in_its_process",
+        &[],
+    );
+}
