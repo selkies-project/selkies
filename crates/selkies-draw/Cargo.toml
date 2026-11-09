@@ -1,0 +1,22 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "selkies-draw"
+description = "The rasterizer the Selkies window manager's frames and menus and the selkies-desktop shell draw with: a tiny-skia canvas, cosmic-text, resvg, and XDG icon lookup."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# tiny-skia rasterizes, cosmic-text shapes and renders text from the system
+# fonts, resvg renders SVG icons, image decodes PNG and JPEG.
+tiny-skia = "0.12"
+cosmic-text = "0.19"
+resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# The desktop entries' executable checks and detached launches.
+libc = "0.2"
