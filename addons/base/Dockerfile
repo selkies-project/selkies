@@ -318,9 +318,15 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY --from=web /build/dist/web ./dist/web
 ENV SELKIES_WEB_DIST="/src/dist/web"
+COPY infra/packaging/version.sh infra/packaging/stamp-version.sh /tmp/packaging/
+# A release's build passes its version (images.yaml), which every public crate
+# then carries as the packages' builds stamp it; any other build keeps the
+# tree's 0.0.0
+ARG SELKIES_VERSION=""
 RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/src/target \
     set -e; \
+    if [ -n "${SELKIES_VERSION}" ]; then sh /tmp/packaging/stamp-version.sh /src "${SELKIES_VERSION}"; fi; \
     cargo fetch --locked; \
     pixelflux="$(cargo metadata --locked --format-version 1 \
         | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"; \
@@ -335,6 +341,9 @@ RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt
     X264_STATIC=1 X265_STATIC=1 VPX_STATIC=1 SVTAV1ENC_STATIC=1 \
         cargo build --release --locked -p selkies; \
     install -Dm755 target/release/selkies /out/selkies; \
+    version="$(. /tmp/packaging/version.sh && crate_version "${SELKIES_VERSION:-0.0.0}")"; \
+    /out/selkies --version | grep -F "selkies ${version} (pixelflux ${version} ("; \
+    /out/selkies --version | grep -F ", pcmflux ${version})"; \
     ldd /out/selkies | awk '/=>/ {print $3}' | xargs -r readlink -f | xargs -r dpkg -S | \
         cut -d: -f1 | sort -u > /out/runtime-packages; \
     test -s /out/runtime-packages

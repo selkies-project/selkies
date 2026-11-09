@@ -89,18 +89,8 @@ mkdir -p "${SRC}/dist"
 cp -r "${REPO}/dist/web" "${SRC}/dist/web"
 chmod -R u+w "${SRC}"
 export SELKIES_WEB_DIST="${SRC}/dist/web"
-# Every public crate carries the release version. Each native crate also keeps
-# its own manifest and lock for a standalone wheel build, while the root lock
-# covers both that build and this workspace build under `--locked`.
-sed -i "1,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|" "${SRC}/Cargo.toml"
-for member in selkies selkies-rtc pixelflux pcmflux; do
-    sed -i "/^name = \"${member}\"$/{n;s|^version = .*|version = \"${CRATE_VERSION}\"|}" "${SRC}/Cargo.lock"
-done
-for component in pixelflux pcmflux; do
-    sed -i "1,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|" "${SRC}/crates/${component}/Cargo.toml"
-    sed -i "/^name = \"${component}\"$/{n;s|^version = .*|version = \"${CRATE_VERSION}\"|}" \
-        "${SRC}/crates/${component}/Cargo.lock"
-done
+# Every public crate carries the release version
+sh "${REPO}/infra/packaging/stamp-version.sh" "${SRC}" "${SELKIES_VERSION:-0.0.0}"
 cargo fetch --locked --manifest-path "${SRC}/Cargo.toml"
 
 if [ -z "${SELKIES_CODECS:-}" ]; then
@@ -137,6 +127,7 @@ CARGO_TARGET_DIR="${BUILD}/target" cargo build --release --locked -p selkies \
 install -Dm755 "${BUILD}/target/release/selkies" "${PKG_ROOT}/usr/bin/selkies"
 # Fails the package build rather than shipping a server that cannot start, one
 # reporting a version other than the package's, or one without its client
-"${PKG_ROOT}/usr/bin/selkies" --version | grep -F "selkies ${CRATE_VERSION} "
+"${PKG_ROOT}/usr/bin/selkies" --version | grep -F "selkies ${CRATE_VERSION} (pixelflux ${CRATE_VERSION} ("
+"${PKG_ROOT}/usr/bin/selkies" --version | grep -F ", pcmflux ${CRATE_VERSION})"
 "${PKG_ROOT}/usr/bin/selkies" --version | grep -F "web client: embedded ("
 "${PKG_ROOT}/usr/bin/selkies" --help > /dev/null

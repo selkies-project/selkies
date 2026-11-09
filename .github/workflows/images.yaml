@@ -106,6 +106,7 @@ jobs:
           build-args: |
             DISTRIB_IMAGE=${{ matrix.flavor.image }}
             DISTRIB_RELEASE=${{ matrix.flavor.release }}
+            SELKIES_VERSION=${{ inputs.release && inputs.tag_prefix || '' }}
           outputs: type=image,"name=${{ env.BASE_IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: base-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
