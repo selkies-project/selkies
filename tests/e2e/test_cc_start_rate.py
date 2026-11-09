@@ -4,11 +4,13 @@ restarted server starts the page's next stream there, on both transports.
 
 With congestion control on, a display's steered rate that held for 10 s is told
 to its controller (`CC_RATE` over WebSockets, a `cc_rate` data-channel message
-over WebRTC), which keeps it in localStorage per origin and display. A page
-with a rate kept sends it when it connects (`ccStartKbps` in its WebSockets
-SETTINGS, `cc_start_kbps` in its WebRTC HELLO), and a restarted server starts
-the display there rather than at the configured rate. A rate a day old starts
-nothing, and one the user overrides by setting a bitrate is dropped.
+over WebRTC), which keeps it in localStorage per origin and display. Only a tick
+that carried frames counts toward the hold, so tests/tools/motion_scene.py keeps
+the screen moving while the page waits for the rate. A page with a rate kept
+sends it when it connects (`ccStartKbps` in its WebSockets SETTINGS,
+`cc_start_kbps` in its WebRTC HELLO), and a restarted server starts the display
+there rather than at the configured rate. A rate a day old starts nothing, and
+one the user overrides by setting a bitrate is dropped.
 """
 import os
 import sys
@@ -20,6 +22,8 @@ import helpers as H  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 ENV = {"SELKIES_CONGESTION_CONTROL": "true"}
+PAINTER = os.path.join(H.TOOLS, "motion_scene.py")
+WIDTH, HEIGHT = 1280, 720
 KEY_JS = "(location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_') + '_cc_start'"
 SEEDED = "starting at 2000 kbps, from the rate its page last held"
 
@@ -53,10 +57,15 @@ def run(res: "H.Results", mode: str) -> None:
             browser, page, _, _ = C.launch_chrome(pw, mode=mode)
             try:
                 res.check(f"{mode}: video flowing", video(page, mode))
-                deadline, got = time.time() + 25, {}
-                while time.time() < deadline and not got:
-                    got = kept(page)
-                    time.sleep(0.5)
+                painter = H.spawn([sys.executable, PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"])
+                try:
+                    deadline, got = time.time() + 25, {}
+                    while time.time() < deadline and not got:
+                        got = kept(page)
+                        time.sleep(0.5)
+                finally:
+                    painter.kill()
+                    painter.wait()
                 res.check(f"{mode}: the page keeps the rate its display held",
                           100 <= got.get("kbps", 0) <= 100000, got)
 
