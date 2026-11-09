@@ -4,7 +4,9 @@
 //! row with a 32 px icon over its name and description, and the favorites as
 //! a grid of large icons; Grid shows every list as a grid of icons; and Tiles
 //! drops the categories for a list of every application with the favorites
-//! as tiles beside it.  Each category row carries its theme icon.
+//! as tiles beside it.  Each category row carries its theme icon.  The
+//! shell's own settings open from a button beside the search box rather
+//! than from a category, so the categories list the applications alone.
 
 use crate::config::MenuLayout;
 use crate::desktop::{Desktop, Hover, Popup};
@@ -215,6 +217,8 @@ fn identity() -> String {
 struct Layout {
     frame: Rect,
     search: Rect,
+    /// The Settings button at the right end of the search row.
+    settings: Rect,
     /// The category column, zero wide while searching and in the tiles
     /// layout.
     categories: Rect,
@@ -300,7 +304,18 @@ fn layout(d: &Desktop) -> Layout {
     let width = WIDTH.min(d.panel.width - 2 * ui::POPUP_MARGIN);
     let x = (bar.x + ui::POPUP_MARGIN).min(d.panel.width - ui::POPUP_MARGIN - width);
     let frame = Rect::new(x.max(ui::POPUP_MARGIN), y, width, height);
-    let search = Rect::new(frame.x + PAD, frame.y + PAD, frame.w - 2 * PAD, SEARCH_HEIGHT);
+    let settings = Rect::new(
+        frame.right() - PAD - SEARCH_HEIGHT,
+        frame.y + PAD,
+        SEARCH_HEIGHT,
+        SEARCH_HEIGHT,
+    );
+    let search = Rect::new(
+        frame.x + PAD,
+        frame.y + PAD,
+        settings.x - PAD / 2 - frame.x - PAD,
+        SEARCH_HEIGHT,
+    );
     let footer = Rect::new(frame.x, frame.bottom() - FOOTER_HEIGHT, frame.w, FOOTER_HEIGHT);
     let content_top = search.bottom() + PAD;
     let content_h = footer.y - content_top - 4;
@@ -330,6 +345,7 @@ fn layout(d: &Desktop) -> Layout {
     Layout {
         frame,
         search,
+        settings,
         categories,
         apps,
         tiles,
@@ -351,9 +367,30 @@ fn category_rows(d: &Desktop) -> Vec<CategoryRow> {
         rows.push(CategoryRow::Separator);
     }
     for i in 0..d.apps.categories.len() {
-        rows.push(CategoryRow::Section(Section::Category(i)));
+        if !category_entries(d, i).is_empty() {
+            rows.push(CategoryRow::Section(Section::Category(i)));
+        }
     }
     rows
+}
+
+/// The entries a category lists: its applications without the shell's own settings, which the
+/// Settings button opens, so a category holding nothing else is not listed.
+fn category_entries(d: &Desktop, index: usize) -> Vec<usize> {
+    let Some(category) = d.apps.categories.get(index) else {
+        return Vec::new();
+    };
+    category
+        .entries
+        .iter()
+        .copied()
+        .filter(|&entry| {
+            d.apps
+                .entries
+                .get(entry)
+                .is_some_and(|e| e.id != entries::SETTINGS_ID)
+        })
+        .collect()
 }
 
 /// The entry indexes of the favorites that exist, in their configured order.
@@ -392,6 +429,11 @@ fn ensure_items(d: &mut Desktop) {
     if d.config.menu_layout == MenuLayout::Tiles {
         d.menu.section = Section::All;
     }
+    if matches!(d.menu.section, Section::Category(_))
+        && !category_rows(d).contains(&CategoryRow::Section(d.menu.section))
+    {
+        d.menu.section = Section::All;
+    }
     let items = if !query.is_empty() {
         d.apps.search(&query)
     } else {
@@ -404,24 +446,9 @@ fn ensure_items(d: &mut Desktop) {
                 .filter_map(|id| d.apps.find(id))
                 .collect(),
             Section::All => d.apps.all_sorted(),
-            Section::Category(i) => d
-                .apps
-                .categories
-                .get(i)
-                .map(|c| c.entries.clone())
-                .unwrap_or_default(),
+            Section::Category(i) => category_entries(d, i),
         }
     };
-    if !d
-        .apps
-        .categories
-        .iter()
-        .enumerate()
-        .any(|(i, _)| d.menu.section == Section::Category(i))
-        && matches!(d.menu.section, Section::Category(_))
-    {
-        d.menu.section = Section::All;
-    }
     d.menu.items = items;
     d.menu.items_valid = true;
     if let Some(selected) = d.menu.selected
@@ -557,6 +584,9 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
     if !layout.frame.contains(x, y) {
         return None;
     }
+    if layout.settings.contains(x, y) {
+        return Some(Hover::MenuSettings);
+    }
     if layout.categories.w > 0 && layout.categories.contains(x, y) {
         let row = ((y - layout.categories.y as f64 + d.menu.category_scroll) / CATEGORY_ROW as f64).floor();
         if row >= 0.0 {
@@ -660,6 +690,10 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
         }
         Hover::MenuCategory(_) => {
             d.redraw_panel();
+        }
+        Hover::MenuSettings => {
+            d.close_popup();
+            d.open_settings(None);
         }
         _ => {}
     }
@@ -889,6 +923,7 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
         );
     }
 
+    draw_settings_button(d, canvas, layout.settings);
     if layout.categories.w > 0 {
         draw_categories(d, canvas, &layout);
     }
@@ -991,6 +1026,25 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
     }
 
     layout.frame
+}
+
+/// Draws the Settings button: the settings icon on a field-colored square, lit while hovered.
+fn draw_settings_button(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect) {
+    canvas.fill_rounded(rect, 6.0, ui::field_bg());
+    if d.hover == Hover::MenuSettings {
+        canvas.fill_rounded(rect, 6.0, ui::hover_bg());
+    }
+    let size = CATEGORY_ICON;
+    let icon_rect = Rect::new(
+        rect.x + (rect.w - size) / 2,
+        rect.y + (rect.h - size) / 2,
+        size,
+        size,
+    );
+    let scale = d.panel.scale.max(1);
+    if let Some(icon) = d.icons.get("preferences-system", (size * scale) as u32) {
+        canvas.draw_image_fit(&icon, icon_rect);
+    }
 }
 
 /// Draws the category column.

@@ -207,6 +207,8 @@ pub enum Hover {
     ShowDesktop,
     /// A menu category row.
     MenuCategory(usize),
+    /// The start menu's Settings button.
+    MenuSettings,
     /// A menu application row, or a cell of the application grid.
     MenuApp(usize),
     /// A favorite's tile in the menu's tiles layout.

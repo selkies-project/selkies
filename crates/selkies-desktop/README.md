@@ -19,7 +19,8 @@ people reach for in a multi-application container:
 
 * **Start menu** with a search box (type to filter, arrows and Enter to
   launch), favorites, recently launched applications and the usual
-  categories, read from the standard `.desktop` files.  Applications that
+  categories, read from the standard `.desktop` files, and a button beside
+  the search box that opens the shell's settings.  Applications that
   appear or disappear, such as a [proot-apps](https://github.com/linuxserver/proot-apps)
   install, show up without a restart.
 * **Quick launcher** on the Super key, which the window manager forwards as
