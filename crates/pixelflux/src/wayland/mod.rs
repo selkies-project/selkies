@@ -42,6 +42,8 @@ pub mod vkclient;
 pub mod wlclient;
 /// The installed window policy's seat in the compositor: events out, commands applied.
 pub mod wm;
+/// `ext_workspace_manager_v1`, the virtual desktops a pager reads and switches.
+pub mod workspace;
 /// XWayland and Smithay's X11 window manager, driven by the window policy.
 pub mod xwm;
 

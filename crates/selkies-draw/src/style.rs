@@ -21,7 +21,8 @@ use tiny_skia::Color;
 
 use crate::render::{parse_color, rgb, rgba};
 
-/// The colors the user can set: the four the rest derive from.
+/// The colors the user can set: the four the rest derive from. The defaults are a dark scheme
+/// with a sky-blue accent, the one the desktop's Dark preset names.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
     /// Markers, selections, switches, and the active choice.
@@ -37,10 +38,10 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Theme {
         Theme {
-            accent: rgb(0x79, 0x67, 0xc5),
-            panel: rgb(0x0a, 0x0e, 0x17),
-            popup: rgb(0x12, 0x18, 0x26),
-            text: rgb(0xee, 0xf2, 0xf8),
+            accent: rgb(0x3d, 0xae, 0xe9),
+            panel: rgb(0x31, 0x36, 0x3b),
+            popup: rgb(0x2a, 0x2e, 0x32),
+            text: rgb(0xfc, 0xfc, 0xfc),
         }
     }
 }
@@ -253,9 +254,10 @@ pub fn luminance(color: Color) -> f32 {
     0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
 }
 
-/// Black or white, whichever reads on a color.
+/// Black or white, whichever reads on a color. The threshold sits above the default accent blue
+/// (a luminance of 0.60), which takes white text, and below a gold accent, which takes black.
 pub fn on_color(color: Color) -> Color {
-    if luminance(color) > 0.55 {
+    if luminance(color) > 0.62 {
         rgb(0x10, 0x10, 0x10)
     } else {
         Color::WHITE

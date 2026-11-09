@@ -1046,6 +1046,8 @@ pub struct AppState {
     pub wm: Option<crate::wayland::wm::WmState>,
     /// The window list taskbars read (`zwlr_foreign_toplevel_manager_v1`).
     pub foreign_toplevel: crate::wayland::foreign_toplevel::ForeignToplevelState,
+    /// The virtual desktops pagers read and switch (`ext_workspace_manager_v1`).
+    pub workspace: crate::wayland::workspace::WorkspaceState,
     /// Xwayland and its window manager, started under a window policy.
     pub xwm: crate::wayland::xwm::XwmState,
     /// The compositor's event loop, for sources started after it is up (Xwayland).
@@ -2584,8 +2586,19 @@ impl ShmHandler for AppState {
         &self.shm_state
     }
 }
-/// Output protocol marker impl (no per-output callbacks are needed).
-impl OutputHandler for AppState {}
+/// Output protocol: a `wl_output` a client binds after the globals that name outputs enters
+/// the workspace group and the window handles on it, since those enters reach only the
+/// objects the client held when they were sent.
+impl OutputHandler for AppState {
+    fn output_bound(
+        &mut self,
+        output: Output,
+        wl_output: smithay::reexports::wayland_server::protocol::wl_output::WlOutput,
+    ) {
+        crate::wayland::workspace::output_bound(self, &output, &wl_output);
+        crate::wayland::foreign_toplevel::output_bound(self, &output, &wl_output);
+    }
+}
 
 /// Linux-dmabuf protocol: imports client dmabufs into the GLES renderer.
 ///

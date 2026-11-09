@@ -9,17 +9,17 @@
 //! built-in defaults, the `<applications>` rules, and the menu file; `menu.xml` and the pipe menus
 //! it names for the root menu.
 //!
-//! The files are looked for where labwc and openbox look, the user's configuration directory
-//! first and then the system ones, under the backend's own name first (`labwc` on Wayland,
-//! `openbox` on X11) and the other's second, so an image that configured one window manager is
-//! read the same way on both backends. The two formats are one schema apart from the root
-//! element's name, and the few labwc additions the images use (`onRelease`, an action's
-//! `command` attribute, `<core><decoration>`) are read too. What neither image configures (the
-//! full actions language, several desktops, chords) is not implemented; an action of a name
+//! The files are looked for where openbox looks, `openbox/` under the user's configuration
+//! directory first and then under the system ones, on both backends alike, so one set of files
+//! configures the desktop whichever backend runs it. labwc's dialect of the format is read too
+//! (a `<labwc_config>` root, `onRelease`, an action's `command` attribute, `<core><decoration>`),
+//! so a configuration written for it carries over. What neither dialect's users configure here
+//! (the full actions language, several desktops, chords) is not implemented; an action of a name
 //! this module does not know parses as [`Action::Unknown`] and is logged once when it would run.
 //!
-//! The defaults are openbox's own bindings, the ones its stock `rc.xml` carries, so a `<keyboard>`
-//! or `<mouse>` section that names only its additions, as labwc's `<default />` does, keeps the
+//! The defaults are openbox's own bindings, the ones its stock `rc.xml` carries, with the
+//! Super-arrow quick tiles (`SnapToEdge`) in place of its edge moves, so a `<keyboard>` or
+//! `<mouse>` section that names only its additions, as labwc's `<default />` does, keeps the
 //! rest; an `rc.xml` that lists a full mouse section replaces the defaults for every context it
 //! names, as openbox reads it.
 
@@ -112,6 +112,18 @@ pub enum Action {
         height: Option<i32>,
     },
     MoveToEdge(ResizeEdge),
+    /// Quick-tile the window toward an edge of its output: a half, then a quarter, or back
+    /// (`SnapToEdge` in labwc's spelling; the engine documents the transitions).
+    SnapToEdge(ResizeEdge),
+    /// Switch to a virtual desktop.
+    GoToDesktop(DesktopTarget),
+    /// Move the window to a virtual desktop, switching there too when `follow` is set.
+    SendToDesktop {
+        to: DesktopTarget,
+        follow: bool,
+    },
+    /// Put the window on every desktop, or back on the current one alone.
+    ToggleOmnipresent,
     NextWindow,
     PreviousWindow,
     ShowDesktop,
@@ -119,6 +131,31 @@ pub enum Action {
     Reconfigure,
     /// An action this manager does not implement, kept by name for the log.
     Unknown(String),
+}
+
+/// The desktop a `GoToDesktop` or `SendToDesktop` names in its `<to>` element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesktopTarget {
+    /// A desktop by number, counted from zero here and from one in the file.
+    Index(u32),
+    /// The next desktop, wrapping to the first (`next`, `right`, `down`).
+    Next,
+    /// The desktop before, wrapping to the last (`previous`, `left`, `up`).
+    Previous,
+    Last,
+}
+
+impl DesktopTarget {
+    /// The target openbox's spelling names; `None` for an unknown word or a number below one.
+    pub fn parse(text: &str) -> Option<DesktopTarget> {
+        let text = text.trim().to_ascii_lowercase();
+        Some(match text.as_str() {
+            "next" | "right" | "east" | "down" | "south" => DesktopTarget::Next,
+            "previous" | "prev" | "left" | "west" | "up" | "north" => DesktopTarget::Previous,
+            "last" => DesktopTarget::Last,
+            number => DesktopTarget::Index(number.parse::<u32>().ok().filter(|n| *n >= 1)? - 1),
+        })
+    }
 }
 
 /// A position in an `<x>` or `<y>` element: a number, one from the far edge, or centered.
@@ -332,6 +369,9 @@ pub struct Config {
     pub menu_files: Vec<String>,
     pub show_menu_icons: bool,
     pub rules: Vec<Rule>,
+    /// The number of virtual desktops `<desktops><number>` names; the desktop shell's own
+    /// `desktops` setting wins over it.
+    pub desktops: Option<u32>,
     /// The `<theme><name>` the file names, kept for the log.
     pub theme_name: Option<String>,
     /// The files the configuration was read from, for the startup line.
@@ -359,6 +399,7 @@ impl Default for Config {
             menu_files: vec!["menu.xml".to_string()],
             show_menu_icons: true,
             rules: Vec::new(),
+            desktops: None,
             theme_name: None,
             sources: Vec::new(),
             search_dirs: Vec::new(),
@@ -369,21 +410,13 @@ impl Default for Config {
 /// The directories an `rc.xml` or a `menu.xml` is looked for in, in precedence order: the
 /// user's configuration directory and then the system ones, each under the backend's own
 /// window manager's name first and the other's second.
-pub fn search_dirs(backend: Backend) -> Vec<PathBuf> {
-    let names: [&str; 2] = match backend {
-        Backend::Wayland => ["labwc", "openbox"],
-        Backend::X11 => ["openbox", "labwc"],
-    };
-    let mut dirs = Vec::new();
-    let config_home = selkies_draw::dirs::config_home();
-    for name in names {
-        dirs.push(config_home.join(name));
-    }
-    for dir in selkies_draw::dirs::config_dirs() {
-        for name in names {
-            dirs.push(dir.join(name));
-        }
-    }
+pub fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![selkies_draw::dirs::config_home().join("openbox")];
+    dirs.extend(
+        selkies_draw::dirs::config_dirs()
+            .into_iter()
+            .map(|dir| dir.join("openbox")),
+    );
     dirs
 }
 
@@ -397,10 +430,10 @@ pub fn find_file(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
 }
 
 impl Config {
-    /// The configuration for a backend: the first `rc.xml` found along [`search_dirs`] over the
-    /// defaults, or the defaults alone.
-    pub fn load(backend: Backend) -> Config {
-        let dirs = search_dirs(backend);
+    /// The configuration: the first `rc.xml` found along [`search_dirs`] over the defaults, or
+    /// the defaults alone.
+    pub fn load() -> Config {
+        let dirs = search_dirs();
         let mut config = Config::default();
         if let Some(path) = find_file(&dirs, "rc.xml") {
             match std::fs::read_to_string(&path) {
@@ -448,6 +481,12 @@ impl Config {
                     _ => PlacementMonitor::Mouse,
                 };
             }
+        }
+        if let Some(desktops) = root.child("desktops")
+            && let Some(number) = desktops.child_text("number").and_then(|t| t.parse::<u32>().ok())
+            && number >= 1
+        {
+            self.desktops = Some(number);
         }
         if let Some(resistance) = root.child("resistance") {
             if let Some(v) = resistance.child_text("strength").and_then(|t| t.parse().ok()) {
@@ -683,6 +722,13 @@ fn edge(node: &Node) -> Option<ResizeEdge> {
     })
 }
 
+/// The desktop a `<to>` child or attribute names.
+fn desktop_target(node: &Node) -> Option<DesktopTarget> {
+    node.child_text("to")
+        .or_else(|| node.attr("to"))
+        .and_then(DesktopTarget::parse)
+}
+
 /// The action an `<action name="...">` element describes, openbox's children or labwc's
 /// attributes carrying its arguments.
 pub fn parse_action(node: &Node) -> Option<Action> {
@@ -738,7 +784,17 @@ pub fn parse_action(node: &Node) -> Option<Action> {
             width: node.child_text("width").and_then(|t| t.parse().ok()),
             height: node.child_text("height").and_then(|t| t.parse().ok()),
         },
-        "movetoedge" | "snaptoedge" => Action::MoveToEdge(edge(node)?),
+        "movetoedge" => Action::MoveToEdge(edge(node)?),
+        "snaptoedge" => Action::SnapToEdge(edge(node)?),
+        "gotodesktop" => Action::GoToDesktop(desktop_target(node)?),
+        "desktopnext" | "desktopright" => Action::GoToDesktop(DesktopTarget::Next),
+        "desktopprevious" | "desktopleft" => Action::GoToDesktop(DesktopTarget::Previous),
+        "desktoplast" => Action::GoToDesktop(DesktopTarget::Last),
+        "sendtodesktop" | "senddesktop" => Action::SendToDesktop {
+            to: desktop_target(node)?,
+            follow: node.child_text("follow").map(truthy).unwrap_or(true),
+        },
+        "toggleomnipresent" => Action::ToggleOmnipresent,
         "nextwindow" => Action::NextWindow,
         "previouswindow" => Action::PreviousWindow,
         "showdesktop" => Action::ShowDesktop,
@@ -919,7 +975,9 @@ impl Menus {
     }
 }
 
-/// The bindings openbox's stock `rc.xml` carries, the ones an image's additions sit beside.
+/// The bindings openbox's stock `rc.xml` carries, the ones an image's additions sit beside, with
+/// Super and an arrow quick-tiling the focused window, Control added switching the virtual
+/// desktop, and Shift added as well taking the window along.
 pub fn default_keybinds() -> Vec<KeyBind> {
     let bind = |spec: &str, on_release: bool, actions: Vec<Action>| {
         let (modifiers, name) = parse_chord(spec).expect("a default chord parses");
@@ -945,10 +1003,32 @@ pub fn default_keybinds() -> Vec<KeyBind> {
         bind("A-Tab", false, vec![Action::NextWindow]),
         bind("A-S-Tab", false, vec![Action::PreviousWindow]),
         bind("W-a", false, vec![Action::ToggleMaximize(Direction::Both)]),
-        bind("W-Up", false, vec![Action::Maximize(Direction::Both)]),
-        bind("W-Down", false, vec![Action::Unmaximize(Direction::Both)]),
-        bind("W-Left", false, vec![Action::MoveToEdge(ResizeEdge::Left)]),
-        bind("W-Right", false, vec![Action::MoveToEdge(ResizeEdge::Right)]),
+        bind("W-Up", false, vec![Action::SnapToEdge(ResizeEdge::Top)]),
+        bind("W-Down", false, vec![Action::SnapToEdge(ResizeEdge::Bottom)]),
+        bind("W-Left", false, vec![Action::SnapToEdge(ResizeEdge::Left)]),
+        bind("W-Right", false, vec![Action::SnapToEdge(ResizeEdge::Right)]),
+        bind(
+            "C-W-Left",
+            false,
+            vec![Action::GoToDesktop(DesktopTarget::Previous)],
+        ),
+        bind("C-W-Right", false, vec![Action::GoToDesktop(DesktopTarget::Next)]),
+        bind(
+            "C-W-S-Left",
+            false,
+            vec![Action::SendToDesktop {
+                to: DesktopTarget::Previous,
+                follow: true,
+            }],
+        ),
+        bind(
+            "C-W-S-Right",
+            false,
+            vec![Action::SendToDesktop {
+                to: DesktopTarget::Next,
+                follow: true,
+            }],
+        ),
     ]
 }
 

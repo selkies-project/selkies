@@ -52,8 +52,9 @@ use pixelflux::wm::{
     Command, Event, Extents, Frame, KeyEvent, Modifiers, OutputInfo, PointerEvent, PointerKind, Rect,
     Request, ResizeEdge, Size, SizeHints, States, Transform, Under, Verdict, WindowId, WindowPolicy,
 };
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::protocol::randr::{self, ConnectionExt as _};
+use x11rb::protocol::xinput::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     self, AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask,
     GrabMode, InputFocus, ModMask, SetMode, StackMode, Window, WindowClass,
@@ -75,6 +76,8 @@ const MAX_SCALE: i32 = 4;
 /// this name and ask for a server frame under any other, so the manager answers to the name of
 /// the one whose configuration and behavior it carries rather than an unknown one.
 const NET_WM_NAME: &str = "Openbox";
+/// The `_NET_WM_DESKTOP` value of a window on every desktop.
+const ALL_DESKTOPS: u32 = 0xffff_ffff;
 
 /// The session's integer scale from the `Xft.dpi` resource in the root's database, 1 without
 /// one; 96 dots an inch is scale 1, with the rounding the shell uses so the two agree.
@@ -505,6 +508,28 @@ impl Manager {
         props.set32(root, atoms._NET_CLIENT_LIST, AtomEnum::WINDOW, &[]);
         props.set32(root, atoms._NET_CLIENT_LIST_STACKING, AtomEnum::WINDOW, &[]);
         props.set_text(root, atoms._NET_DESKTOP_NAMES, "Desktop");
+        // Raw key presses tell the manager of every key the session presses, which its grabs
+        // alone do not: a bind on a bare modifier runs on the modifier's release only when no
+        // other key was pressed meanwhile, and that key goes to the client, never to a grab.
+        if conn
+            .extension_information(xinput::X11_EXTENSION_NAME)
+            .ok()
+            .flatten()
+            .is_some()
+            && conn
+                .xinput_xi_query_version(2, 0)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .is_some()
+        {
+            let _ = conn.xinput_xi_select_events(
+                root,
+                &[xinput::EventMask {
+                    deviceid: xinput::Device::ALL_MASTER.into(),
+                    mask: vec![xinput::XIEventMask::RAW_KEY_PRESS],
+                }],
+            );
+        }
         let _ = conn.randr_select_input(
             root,
             randr::NotifyMask::SCREEN_CHANGE
@@ -1320,6 +1345,7 @@ impl Manager {
         let Some(client) = self.clients.get(&window) else {
             return;
         };
+        let client_id = client.id;
         let mut states = Vec::new();
         if client.states.maximized {
             states.push(a._NET_WM_STATE_MAXIMIZED_HORZ);
@@ -1375,7 +1401,8 @@ impl Manager {
             AtomEnum::CARDINAL,
             &[e.left as u32, e.right as u32, e.top as u32, e.bottom as u32],
         );
-        props.set32(window, a._NET_WM_DESKTOP, AtomEnum::CARDINAL, &[0]);
+        let desktop = self.engine.desktop_of(client_id).unwrap_or(ALL_DESKTOPS);
+        props.set32(window, a._NET_WM_DESKTOP, AtomEnum::CARDINAL, &[desktop]);
     }
 
     // ---- commands -------------------------------------------------------------------------------
@@ -1465,6 +1492,18 @@ impl Manager {
             Command::Effect { id, transform } => self.effect(id, transform),
             Command::WakeAt(at) => {
                 self.wake_at = Some(self.wake_at.map_or(at, |w| w.min(at)));
+            }
+            Command::Desktops { count, current } => {
+                let a = self.atoms;
+                let props = self.props();
+                props.set32(self.root, a._NET_NUMBER_OF_DESKTOPS, AtomEnum::CARDINAL, &[count]);
+                props.set32(self.root, a._NET_CURRENT_DESKTOP, AtomEnum::CARDINAL, &[current]);
+                props.set32(
+                    self.root,
+                    a._NET_DESKTOP_VIEWPORT,
+                    AtomEnum::CARDINAL,
+                    &vec![0; 2 * count as usize],
+                );
             }
             Command::Redraw => {
                 let windows: Vec<Window> = self.clients.keys().copied().collect();
@@ -1570,20 +1609,21 @@ impl Manager {
         let Some(client) = self.clients.get_mut(&window) else {
             return;
         };
-        let was_minimized = client.states.minimized;
+        let was_minimized = client.states.minimized || client.states.hidden;
         client.states = states;
         if rect.w > 0 && rect.h > 0 {
             self.place(window, rect);
         }
         let client = self.clients.get_mut(&window).unwrap();
-        if states.minimized && !was_minimized {
+        let minimized = states.minimized || states.hidden;
+        if minimized && !was_minimized {
             if client.mapped && !client.client_hidden {
                 client.ignore_unmaps += 1;
                 let _ = self.conn.unmap_window(window);
             }
             let _ = self.conn.unmap_window(client.frame.window);
             self.set_wm_state(window, props::WM_STATE_ICONIC);
-        } else if !states.minimized && was_minimized {
+        } else if !minimized && was_minimized {
             if !client.client_hidden {
                 let _ = self.conn.map_window(window);
             }
@@ -1870,6 +1910,12 @@ impl Manager {
                 self.last_time = e.time;
                 self.key(e.detail, e.state.into(), false);
             }
+            XEvent::XinputRawKeyPress(e) => {
+                if self.engine.release_bind_armed() {
+                    let (keysym, _) = self.keymap.keysym(e.detail.min(255) as u8, false);
+                    self.engine.note_key_pressed(keysym);
+                }
+            }
             XEvent::MappingNotify(_) => {
                 if let Ok(keymap) = Keymap::read(&self.conn) {
                     self.keymap = keymap;
@@ -2110,6 +2156,10 @@ impl Manager {
     fn client_message(&mut self, e: xproto::ClientMessageEvent) {
         let a = self.atoms;
         let data = e.data.as_data32();
+        if e.type_ == a._NET_CURRENT_DESKTOP {
+            self.dispatch(Event::ActivateDesktop(data[0]));
+            return;
+        }
         if e.type_ == a._NET_SHOWING_DESKTOP {
             let on = data[0] != 0;
             self.props().set32(
@@ -2199,6 +2249,13 @@ impl Manager {
                         continue;
                     };
                 self.dispatch(Event::Request { id, request });
+            }
+        } else if e.type_ == a._NET_WM_DESKTOP {
+            let desktop = (data[0] != ALL_DESKTOPS).then_some(data[0]);
+            let mut out = Vec::new();
+            self.engine.send_window_to_desktop(id, desktop, &mut out);
+            for command in out {
+                self.apply(command);
             }
         } else if e.type_ == a._NET_ACTIVE_WINDOW {
             self.dispatch(Event::Request {

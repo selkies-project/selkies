@@ -110,6 +110,9 @@ mod tests {
                 "Resize",
                 "Always on top",
                 "Windows",
+                "Send to desktop",
+                "All desktops",
+                "Desktop",
             ] {
                 assert!(table.contains_key(key), "{name} lacks {key:?}");
             }

@@ -12,7 +12,10 @@
 //! holds every managed window with its geometry, states, and frame, the stacking order in
 //! openbox's layers (desktop, below, normal, above, dock, and a focused fullscreen window over
 //! all), the focus history Alt-Tab cycles and a closed window falls back through, the drag in
-//! progress, the open menu, and the running effects. Geometry is in the compositor's logical
+//! progress, the open menu, the running effects, and the virtual desktops: one set for the whole
+//! layout, each window on one of them or on all, where a window on another desktop stays in the
+//! stacking order but is hidden from the backend, the pointer, Alt-Tab, and placement the way a
+//! minimized window is, and comes back where it stood when its desktop is current again. Geometry is in the compositor's logical
 //! layout coordinates throughout; what differs per backend is only how a command is carried out.
 //!
 //! Decisions follow openbox where the images' configuration assumes it: a new window is focused
@@ -26,6 +29,7 @@
 
 pub mod effects;
 pub mod grab;
+pub mod memory;
 pub mod pipes;
 pub mod place;
 
@@ -39,17 +43,22 @@ use pixelflux::wm::{
 };
 
 use self::effects::{EffectKind, Effects};
-use self::grab::{Grab, GrabKind};
+use self::grab::{Grab, GrabKind, Zone};
+use self::memory::{Remembered, WindowMemory};
 use self::pipes::PipeJob;
 use crate::config::{
-    Action, Backend, Config, Context, Direction, KeyBind, MenuItem, Menus, MouseEvent, PlacementMonitor,
-    RuleLayer, lower_keysym,
+    Action, Backend, Config, Context, DesktopTarget, Direction, KeyBind, MenuItem, Menus, MouseEvent,
+    PlacementMonitor, RuleLayer, lower_keysym,
 };
 use crate::frame::{self, Appearance, Renderer};
 use crate::i18n::tr;
 use crate::menu::{self, Entry, Level, Target};
 use crate::theme::ThemeWatch;
 use selkies_draw::apps::{self, Apps};
+use selkies_draw::geom::Rect as DrawRect;
+use selkies_draw::render::Canvas;
+use selkies_draw::style::with_alpha;
+use selkies_draw::tiny_skia::Pixmap;
 
 /// What starts the programs the configuration names: `Execute` actions and pipe menus, run with
 /// the display environment the backend knows.
@@ -67,14 +76,18 @@ const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 
-/// Overlay keys: the Alt-Tab list, and the menu levels from `MENU_KEY` up.
+/// Overlay keys: the Alt-Tab list, the quick-tile zone a drag will land in, and the menu levels
+/// from `MENU_KEY` up.
 const CYCLE_KEY: u32 = 1;
+const TILE_KEY: u32 = 2;
 const MENU_KEY: u32 = 100;
 
 /// The menu id the engine fills with the installed applications by category, whatever a menu
 /// file says it executes, so the images' `menu.xml` names it for openbox and labwc and gets the
 /// same menu here without a pipe.
 pub const APPLICATIONS_MENU: &str = "selkies-applications";
+/// The menu id of the window menu's desktops submenu, built here.
+const SEND_TO_DESKTOP_MENU: &str = "client-send-to-desktop-menu";
 /// The ids of the applications menu's category submenus: the prefix and the category's name.
 const APPLICATIONS_CATEGORY_PREFIX: &str = "selkies-applications/";
 
@@ -99,6 +112,11 @@ fn category_key(name: &str) -> &'static str {
 /// How far a cascade steps.
 const CASCADE_STEP: i32 = frame::TITLE_HEIGHT;
 
+/// Virtual desktops unless the desktop's settings or `rc.xml` say otherwise, and the most either
+/// may ask for.
+const DEFAULT_DESKTOPS: u32 = 2;
+const MAX_DESKTOPS: u32 = 16;
+
 /// The X keysyms the engine reads itself.
 mod keys {
     pub const ESCAPE: u32 = 0xff1b;
@@ -119,6 +137,20 @@ mod keys {
     pub const SHIFT_R: u32 = 0xffe2;
     pub const META_L: u32 = 0xffe7;
     pub const META_R: u32 = 0xffe8;
+}
+
+/// The modifiers held with a key, less the one the key itself is: a compositor reports a
+/// modifier's own bit set on its press, an X server not yet, and a bind on a bare modifier
+/// (`Super_L`) has to match on both.
+fn without_own_modifier(mut modifiers: Modifiers, keysym: u32) -> Modifiers {
+    match keysym {
+        keys::SUPER_L | keys::SUPER_R => modifiers.logo = false,
+        keys::ALT_L | keys::ALT_R | keys::META_L | keys::META_R => modifiers.alt = false,
+        keys::CONTROL_L | keys::CONTROL_R => modifiers.ctrl = false,
+        keys::SHIFT_L | keys::SHIFT_R => modifiers.shift = false,
+        _ => {}
+    }
+    modifiers
 }
 
 /// Whether a keysym is a modifier key.
@@ -190,8 +222,14 @@ struct Win {
     /// The edge the last resize drag held still, kept until the client's answer to that drag
     /// has arrived, so a size the client snaps to after the release keeps that edge in place.
     resize_anchor: Option<ResizeEdge>,
-    /// The geometry before a maximize or fullscreen.
+    /// The geometry before a maximize, a quick tile, or fullscreen.
     saved: Option<Rect>,
+    /// The quick-tile zone the window fills, exclusive with `maximized`.
+    tile: Option<Zone>,
+    /// The virtual desktop the window is on, `None` for every desktop.
+    desktop: Option<u32>,
+    /// Whether the window is on a desktop other than the current one.
+    hidden: bool,
     maximized: bool,
     fullscreen: bool,
     minimized: bool,
@@ -237,7 +275,7 @@ impl Win {
 
     /// Whether the window is shown: mapped and not minimized.
     fn shown(&self) -> bool {
-        self.mapped && !self.minimized
+        self.mapped && !self.minimized && !self.hidden
     }
 
     /// Whether the window takes part in the taskbar and Alt-Tab.
@@ -256,6 +294,7 @@ impl Win {
             fullscreen: self.fullscreen,
             resizing: false,
             minimized: self.minimized,
+            hidden: self.hidden,
         }
     }
 }
@@ -314,6 +353,13 @@ pub struct Engine {
     cycle: Option<Cycle>,
     effects: Effects,
     pipes: Vec<PipeJob>,
+    /// The quick-tile zone the move drag in progress would land in, on which output.
+    tile_preview: Option<(Zone, OutputId)>,
+    /// How many virtual desktops there are, and which one is shown.
+    desktop_count: u32,
+    current_desktop: u32,
+    /// Where each application's window last stood.
+    memory: WindowMemory,
     /// The desktop entries the applications menu lists, read when it first opens and again
     /// once an applications directory changed or the configuration was reloaded.
     apps: Option<Apps>,
@@ -334,7 +380,7 @@ impl Engine {
     /// An engine for a backend, its configuration and menus read from the files, its programs
     /// started through `launcher`.
     pub fn new(backend: Backend, launcher: Box<dyn Launcher>) -> Engine {
-        let config = Config::load(backend);
+        let config = Config::load();
         let menus = Menus::load(&config);
         let theme = ThemeWatch::new();
         crate::i18n::select(
@@ -365,6 +411,11 @@ impl Engine {
             log::debug!(target: "wm", "rc.xml names the {name} theme; the frames follow the desktop's theme");
         }
         let now = Instant::now();
+        let desktop_count = theme
+            .desktops
+            .or(config.desktops)
+            .unwrap_or(DEFAULT_DESKTOPS)
+            .clamp(1, MAX_DESKTOPS);
         Engine {
             theme_poll: now + Duration::from_secs(1),
             config,
@@ -387,6 +438,10 @@ impl Engine {
             cycle: None,
             effects: Effects::default(),
             pipes: Vec::new(),
+            tile_preview: None,
+            desktop_count,
+            current_desktop: 0,
+            memory: WindowMemory::load(),
             apps: None,
             consumed_keys: HashSet::new(),
             release_bind: None,
@@ -394,8 +449,37 @@ impl Engine {
             showing_desktop: false,
             unknown_logged: HashSet::new(),
             now,
-            out: Vec::new(),
+            out: vec![Command::Desktops {
+                count: desktop_count,
+                current: 0,
+            }],
         }
+    }
+
+    /// Whether a bind that runs on its key's release is armed, for a backend that sees only
+    /// the keys it grabbed and has to watch for the press that disarms it.
+    pub fn release_bind_armed(&self) -> bool {
+        self.release_bind.is_some()
+    }
+
+    /// A key the backend saw pressed outside the engine's own events: a key other than a
+    /// modifier disarms the release bind, as it does when the engine sees the press itself.
+    pub fn note_key_pressed(&mut self, keysym: u32) {
+        if !is_modifier(keysym) {
+            self.release_bind = None;
+        }
+    }
+
+    /// The desktop a window is on, `None` for every desktop, for a backend that publishes it.
+    pub fn desktop_of(&self, id: WindowId) -> Option<u32> {
+        self.win(id).and_then(|w| w.desktop)
+    }
+
+    /// Move a window to a desktop at a client's or a pager's request, as a backend relays it
+    /// outside the event stream; the commands that follow are pushed onto `out`.
+    pub fn send_window_to_desktop(&mut self, id: WindowId, desktop: Option<u32>, out: &mut Vec<Command>) {
+        self.send_to_desktop(id, desktop, false);
+        out.append(&mut self.out);
     }
 
     /// The key bindings in force, for a backend that grabs them.
@@ -420,7 +504,7 @@ impl Engine {
 
     /// Read the configuration and the menus again, as the `Reconfigure` action does.
     pub fn reconfigure(&mut self) {
-        let config = Config::load(self.backend);
+        let config = Config::load();
         self.menus = Menus::load(&config);
         self.apps = None;
         self.config = config;
@@ -430,6 +514,7 @@ impl Engine {
             self.render_frame(id);
         }
         self.emit_stack();
+        self.set_desktop_count(self.configured_desktops());
         log::info!(target: "wm", "configuration read again: {} keybinds, {} mousebinds, {} menus",
             self.config.keybinds.len(), self.config.mousebinds.len(), self.menus.menus.len());
     }
@@ -500,7 +585,8 @@ impl Engine {
             if gone.contains(&output) || self.output(output).is_none() {
                 output = primary;
             }
-            let (maximized, fullscreen, placed, rect) = (win.maximized, win.fullscreen, win.placed, win.rect);
+            let (maximized, tile, fullscreen, placed, rect) =
+                (win.maximized, win.tile, win.fullscreen, win.placed, win.rect);
             let exact = places_itself(win.info.window_type);
             if let Some(win) = self.windows.get_mut(&id) {
                 win.output = output;
@@ -510,6 +596,8 @@ impl Engine {
                 self.set_rect(id, area);
             } else if maximized {
                 self.fit_maximized(id);
+            } else if let Some(zone) = tile {
+                self.fit_tile(id, zone);
             } else if placed && !exact {
                 let extents = self.extents_of(id);
                 let frame = rect.grown(extents);
@@ -629,6 +717,9 @@ impl Engine {
             committed: None,
             resize_anchor: None,
             saved: None,
+            tile: None,
+            desktop: self.desktop_for_new(&info),
+            hidden: false,
             maximized: info.wants_maximized || rule.as_ref().and_then(|r| r.maximized).unwrap_or(false),
             fullscreen: info.wants_fullscreen || rule.as_ref().and_then(|r| r.fullscreen).unwrap_or(false),
             minimized: false,
@@ -661,6 +752,13 @@ impl Engine {
         let wants_minimized =
             win.info.wants_minimized || rule.as_ref().and_then(|r| r.iconic).unwrap_or(false);
         win.minimized = wants_minimized;
+        win.hidden = win.desktop.is_some_and(|d| d != self.current_desktop);
+        if remembers_place(&win.info)
+            && rule.as_ref().and_then(|r| r.maximized).is_none()
+            && self.memory.get(&win.info.app_id).is_some_and(|r| r.maximized)
+        {
+            win.maximized = true;
+        }
         self.windows.insert(id, win);
         self.apply_decoration_choice(id);
         if let Some((w, h)) = rule.as_ref().and_then(|r| r.size)
@@ -738,6 +836,8 @@ impl Engine {
         } else if matches!(win.info.window_type, WindowType::Dock | WindowType::Desktop) {
             let requested = win.info.requested.unwrap_or(size);
             Rect::new(requested.x, requested.y, frame_size.0, frame_size.1)
+        } else if let Some(remembered) = self.remembered_frame(id, frame_size, area) {
+            remembered
         } else {
             let others: Vec<Rect> = self
                 .stack
@@ -772,6 +872,61 @@ impl Engine {
             win.rect = client;
             win.placed = true;
         }
+    }
+
+    /// The frame a new window of an application opens at where its last window stood: the
+    /// remembered position at the new window's own size, kept on the work area, or `None` where
+    /// nothing is remembered or another window of the application already shows there.
+    fn remembered_frame(&self, id: WindowId, frame_size: (i32, i32), area: Rect) -> Option<Rect> {
+        let win = self.win(id)?;
+        if !remembers_place(&win.info) {
+            return None;
+        }
+        let remembered = self.memory.get(&win.info.app_id)?;
+        let frame = place::clamp(
+            Rect::new(remembered.frame.x, remembered.frame.y, frame_size.0, frame_size.1),
+            area,
+        );
+        let app_id = win.info.app_id.to_ascii_lowercase();
+        let taken = self.windows.iter().any(|(other, w)| {
+            *other != id
+                && w.shown()
+                && w.info.app_id.eq_ignore_ascii_case(&app_id)
+                && (self.frame_rect(*other).x - frame.x).abs() < CASCADE_STEP
+                && (self.frame_rect(*other).y - frame.y).abs() < CASCADE_STEP
+        });
+        if taken {
+            return None;
+        }
+        log::debug!(target: "wm", "window {id} of {app_id} placed where its last window stood");
+        Some(frame)
+    }
+
+    /// Record where a window stood for the next window of its application.
+    fn remember(&mut self, id: WindowId) {
+        let Some(win) = self.win(id) else {
+            return;
+        };
+        if !remembers_place(&win.info) || !win.placed || win.committed.is_none() || win.fullscreen {
+            return;
+        }
+        let extents = frame::extents(&self.theme.look.style, false, false);
+        let rect = if win.maximized || win.tile.is_some() {
+            win.saved.unwrap_or(win.rect)
+        } else {
+            win.rect
+        };
+        let frame = rect.grown(if win.decorated {
+            extents
+        } else {
+            Extents::default()
+        });
+        let remembered = Remembered {
+            frame,
+            maximized: win.maximized,
+        };
+        let app_id = win.info.app_id.clone();
+        self.memory.remember(&app_id, remembered);
     }
 
     fn mapped(&mut self, id: WindowId, size: Size) {
@@ -898,6 +1053,7 @@ impl Engine {
     }
 
     fn removed(&mut self, id: WindowId) {
+        self.remember(id);
         self.unmapped(id);
         self.windows.remove(&id);
         self.mru.retain(|w| *w != id);
@@ -991,7 +1147,10 @@ impl Engine {
             return;
         }
         if on {
-            win.saved = Some(win.rect);
+            if win.tile.is_none() {
+                win.saved = Some(win.rect);
+            }
+            win.tile = None;
             win.maximized = true;
             win.shaded = false;
             self.fit_maximized(id);
@@ -1004,6 +1163,270 @@ impl Engine {
             self.set_rect(id, grab::client_of(frame, extents));
         }
         self.render_frame(id);
+    }
+
+    /// Size a tiled window to its zone on its output's work area.
+    fn fit_tile(&mut self, id: WindowId, zone: Zone) {
+        let Some(win) = self.win(id) else {
+            return;
+        };
+        let area = self.workarea(win.output);
+        let extents = self.extents_of(id);
+        let client = grab::client_of(grab::zone_rect(zone, area), extents);
+        self.set_rect(id, client);
+    }
+
+    /// Quick-tile a window into a zone, or take it out of its zone and back to the geometry it
+    /// had before, as a maximize is undone. A tile saves the geometry only where no maximize or
+    /// tile already did, so a window tiled from its maximized state restores to its own size.
+    fn set_tile(&mut self, id: WindowId, zone: Option<Zone>) {
+        let Some(win) = self.windows.get_mut(&id) else {
+            return;
+        };
+        if !win.mapped || win.fullscreen {
+            return;
+        }
+        match zone {
+            Some(zone) => {
+                if win.tile.is_none() && !win.maximized {
+                    win.saved = Some(win.rect);
+                }
+                win.maximized = false;
+                win.shaded = false;
+                win.tile = Some(zone);
+                self.fit_tile(id, zone);
+            }
+            None => {
+                if win.tile.take().is_none() {
+                    return;
+                }
+                let restored = win.saved.take().unwrap_or(win.rect);
+                let extents = self.extents_of(id);
+                let area = self.workarea(self.windows[&id].output);
+                let frame = place::clamp(restored.grown(extents), area);
+                self.set_rect(id, grab::client_of(frame, extents));
+            }
+        }
+        self.render_frame(id);
+    }
+
+    /// A keyboard snap toward an edge: the zone transitions of [`grab::snapped`], with a maximize
+    /// for the top and, for a window with nothing to restore, a minimize for the bottom.
+    fn snap(&mut self, id: WindowId, edge: ResizeEdge) {
+        let Some(win) = self.win(id) else {
+            return;
+        };
+        if !win.shown() || win.fullscreen {
+            return;
+        }
+        let (maximized, tile) = (win.maximized, win.tile);
+        let current = if maximized { Some(Zone::Maximize) } else { tile };
+        match grab::snapped(current, edge) {
+            Some(Zone::Maximize) => self.set_maximized(id, true),
+            Some(zone) => self.set_tile(id, Some(zone)),
+            None if maximized => self.set_maximized(id, false),
+            None if tile.is_some() => self.set_tile(id, None),
+            None => self.set_minimized(id, true),
+        }
+    }
+
+    /// Show, move, or take down the overlay marking the zone a move drag would tile into.
+    fn set_tile_preview(&mut self, preview: Option<(Zone, OutputId)>) {
+        if self.tile_preview == preview {
+            return;
+        }
+        self.tile_preview = preview;
+        match preview {
+            Some((zone, output)) => {
+                let rect = grab::zone_rect(zone, self.workarea(output));
+                let scale = self.scale_of(output);
+                let look = self.theme.look;
+                if let Some(image) = tile_overlay(rect, scale, &look) {
+                    self.out.push(Command::Overlay {
+                        key: TILE_KEY,
+                        rect,
+                        image,
+                    });
+                }
+            }
+            None => self.out.push(Command::ClearOverlay(TILE_KEY)),
+        }
+    }
+
+    // ---- virtual desktops -------------------------------------------------------------------
+
+    /// The desktop count the desktop shell's `desktops` setting names, else `rc.xml`'s, else the
+    /// default, within bounds.
+    fn configured_desktops(&self) -> u32 {
+        self.theme
+            .desktops
+            .or(self.config.desktops)
+            .unwrap_or(DEFAULT_DESKTOPS)
+            .clamp(1, MAX_DESKTOPS)
+    }
+
+    /// The desktop a new window opens on: its parent's, else the current one; a window of a
+    /// type that belongs to the desktop itself (a dock, the wallpaper, a notification, a tooltip)
+    /// is on every desktop.
+    fn desktop_for_new(&self, info: &WindowInfo) -> Option<u32> {
+        if matches!(
+            info.window_type,
+            WindowType::Dock
+                | WindowType::Desktop
+                | WindowType::Notification
+                | WindowType::Tooltip
+                | WindowType::Splash
+                | WindowType::Dnd
+        ) {
+            return None;
+        }
+        match info.parent.and_then(|p| self.win(p)) {
+            Some(parent) => parent.desktop,
+            None => Some(self.current_desktop),
+        }
+    }
+
+    fn publish_desktops(&mut self) {
+        self.out.push(Command::Desktops {
+            count: self.desktop_count,
+            current: self.current_desktop,
+        });
+    }
+
+    /// Bring a window's `hidden` in line with the current desktop; true when it changed. A
+    /// window that hides leaves the hover, the pointer grab, and the Alt-Tab list; one that
+    /// shows comes back where it stood in the stacking order, which it never left.
+    fn refresh_hidden(&mut self, id: WindowId) -> bool {
+        let current = self.current_desktop;
+        let Some(win) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        let hidden = win.desktop.is_some_and(|d| d != current);
+        if win.hidden == hidden {
+            return false;
+        }
+        win.hidden = hidden;
+        if hidden {
+            win.hover = None;
+            win.pressed = None;
+            self.effects.cancel(id);
+            if self.grab.as_ref().is_some_and(|g| g.window == id) {
+                self.end_grab();
+            }
+            if let Some(cycle) = self.cycle.as_mut() {
+                cycle.windows.retain(|w| *w != id);
+                if cycle.windows.is_empty() {
+                    self.cycle = None;
+                    self.out.push(Command::ClearOverlay(CYCLE_KEY));
+                } else {
+                    cycle.index = cycle.index.min(cycle.windows.len() - 1);
+                }
+            }
+        }
+        true
+    }
+
+    /// Show another desktop: the windows on the one left hide, the ones on the new one show,
+    /// and the focus goes to the most recently focused window there.
+    fn switch_desktop(&mut self, index: u32) {
+        let index = index.min(self.desktop_count.saturating_sub(1));
+        if index == self.current_desktop {
+            return;
+        }
+        self.close_menu();
+        self.current_desktop = index;
+        let ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        for id in ids {
+            if self.refresh_hidden(id) {
+                self.configure(id);
+                self.render_frame(id);
+            }
+        }
+        if self.cycle.is_some() {
+            self.render_cycle();
+        }
+        let focus_hidden = self.focus.and_then(|f| self.win(f)).is_some_and(|w| !w.shown());
+        if focus_hidden || self.focus.is_none() {
+            self.focus_fallback();
+        }
+        self.update_hover();
+        self.emit_stack();
+        self.publish_desktops();
+        log::debug!(target: "wm", "desktop {} shown", index + 1);
+    }
+
+    /// Put a window on a desktop, or on every desktop with `None`, its transient children with
+    /// it; `follow` switches there as well.
+    fn send_to_desktop(&mut self, id: WindowId, desktop: Option<u32>, follow: bool) {
+        let desktop = desktop.map(|d| d.min(self.desktop_count.saturating_sub(1)));
+        let Some(win) = self.windows.get_mut(&id) else {
+            return;
+        };
+        if win.desktop == desktop {
+            if follow && let Some(d) = desktop {
+                self.switch_desktop(d);
+            }
+            return;
+        }
+        win.desktop = desktop;
+        let children: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| w.info.parent == Some(id))
+            .map(|(child, _)| *child)
+            .collect();
+        for child in children.iter().copied().chain(std::iter::once(id)) {
+            if let Some(win) = self.windows.get_mut(&child) {
+                win.desktop = desktop;
+            }
+            if self.refresh_hidden(child) {
+                if self.focus == Some(child) && !self.windows[&child].shown() {
+                    self.focus_fallback_excluding(child);
+                }
+                self.configure(child);
+                self.render_frame(child);
+            }
+        }
+        self.emit_stack();
+        if follow && let Some(d) = desktop {
+            self.switch_desktop(d);
+        }
+    }
+
+    /// Change how many desktops there are: windows beyond the last move onto it, and so does
+    /// the current desktop when it was beyond.
+    fn set_desktop_count(&mut self, count: u32) {
+        let count = count.clamp(1, MAX_DESKTOPS);
+        if count == self.desktop_count {
+            return;
+        }
+        self.desktop_count = count;
+        let ids: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| w.desktop.is_some_and(|d| d >= count))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.send_to_desktop(id, Some(count - 1), false);
+        }
+        if self.current_desktop >= count {
+            self.switch_desktop(count - 1);
+        } else {
+            self.publish_desktops();
+        }
+        log::info!(target: "wm", "{count} virtual desktops");
+    }
+
+    /// The desktop a target names from the current one.
+    fn resolve_desktop(&self, target: DesktopTarget) -> u32 {
+        let count = self.desktop_count.max(1);
+        match target {
+            DesktopTarget::Index(i) => i.min(count - 1),
+            DesktopTarget::Next => (self.current_desktop + 1) % count,
+            DesktopTarget::Previous => (self.current_desktop + count - 1) % count,
+            DesktopTarget::Last => count - 1,
+        }
     }
 
     fn set_fullscreen(&mut self, id: WindowId, on: bool, output: Option<OutputId>) {
@@ -1353,6 +1776,7 @@ impl Engine {
             hover,
             pressed,
             scale,
+            shadow: self.backend == Backend::Wayland && !maximized,
         };
         let look = self.theme.look;
         let frame: Frame = self.renderer.render(&look, client, &appearance);
@@ -1484,18 +1908,27 @@ impl Engine {
         if !win.shown() || win.fullscreen {
             return;
         }
-        if win.maximized && matches!(kind, GrabKind::Resize(_)) {
-            return;
-        }
-        if win.maximized {
+        let (maximized, tiled) = (win.maximized, win.tile.is_some());
+        if matches!(kind, GrabKind::Resize(_)) {
+            if maximized {
+                return;
+            }
+            // A resized tile is the user's own size from here on, so nothing restores it.
+            if let Some(win) = self.windows.get_mut(&id) {
+                win.tile = None;
+                win.saved = None;
+            }
+        } else if maximized || tiled {
             let pointer_x = self.pointer.0;
-            let saved = win.saved.unwrap_or(win.rect);
             let rect = win.rect;
             let ratio = ((pointer_x - rect.x as f64) / rect.w.max(1) as f64).clamp(0.0, 1.0);
-            self.set_maximized(id, false);
+            if maximized {
+                self.set_maximized(id, false);
+            } else {
+                self.set_tile(id, None);
+            }
             let restored = self.windows[&id].rect;
             let x = (pointer_x - ratio * restored.w as f64).round() as i32;
-            let _ = saved;
             self.set_rect(id, Rect::new(x, rect.y, restored.w, restored.h));
         }
         let rect = self.windows[&id].rect;
@@ -1547,6 +1980,10 @@ impl Engine {
                 } else {
                     frame
                 };
+                let preview = self
+                    .output_at(x, y)
+                    .and_then(|o| grab::zone_at(o.rect, x, y).map(|zone| (zone, o.id)));
+                self.set_tile_preview(preview);
                 grab::client_of(frame, extents)
             }
             GrabKind::Resize(edge) => grab::constrain(wanted, &hints, edge),
@@ -1568,12 +2005,25 @@ impl Engine {
     }
 
     fn end_grab(&mut self) {
+        let preview = self.tile_preview;
+        self.set_tile_preview(None);
         if let Some(grab) = self.grab.take() {
             let id = grab.window;
             if let GrabKind::Resize(edge) = grab.kind
                 && let Some(win) = self.windows.get_mut(&id)
             {
                 win.resize_anchor = Some(edge);
+            }
+            if let Some((zone, output)) = preview {
+                if let Some(win) = self.windows.get_mut(&id) {
+                    win.output = output;
+                }
+                match zone {
+                    Zone::Maximize => self.set_maximized(id, true),
+                    zone => self.set_tile(id, Some(zone)),
+                }
+                self.update_hover();
+                return;
             }
             if let Some(rect) = self.win(id).map(|w| w.rect) {
                 let output = self.output_of_rect(rect).map(|o| o.id);
@@ -1961,6 +2411,7 @@ impl Engine {
         }
         if self.grab.is_some() && event.keysym == keys::ESCAPE {
             let grab = self.grab.take();
+            self.set_tile_preview(None);
             if let Some(grab) = grab {
                 self.set_rect(grab.window, grab.start);
                 self.render_frame(grab.window);
@@ -1969,7 +2420,7 @@ impl Engine {
             self.consumed_keys.insert(event.keycode);
             return Verdict::Consumed;
         }
-        let modifiers = bind_modifiers(event.modifiers);
+        let modifiers = without_own_modifier(bind_modifiers(event.modifiers), event.keysym);
         let keysym = lower_keysym(event.base_keysym);
         let bind = self
             .config
@@ -2212,6 +2663,31 @@ impl Engine {
                     self.render_frame(id);
                 }
             }
+            Action::SnapToEdge(edge) => {
+                if let Some(id) = target {
+                    self.snap(id, *edge);
+                }
+            }
+            Action::GoToDesktop(to) => {
+                let index = self.resolve_desktop(*to);
+                self.switch_desktop(index);
+            }
+            Action::SendToDesktop { to, follow } => {
+                if let Some(id) = target {
+                    let index = self.resolve_desktop(*to);
+                    self.send_to_desktop(id, Some(index), *follow);
+                }
+            }
+            Action::ToggleOmnipresent => {
+                if let Some(id) = target {
+                    let desktop = if self.windows[&id].desktop.is_none() {
+                        Some(self.current_desktop)
+                    } else {
+                        None
+                    };
+                    self.send_to_desktop(id, desktop, false);
+                }
+            }
             Action::NextWindow => self.cycle_step(1),
             Action::PreviousWindow => self.cycle_step(-1),
             Action::ShowDesktop => self.show_desktop(true),
@@ -2266,20 +2742,26 @@ impl Engine {
                 .copied()
                 .filter(|w| {
                     self.win(*w)
-                        .is_some_and(|c| c.mapped && c.listed() && c.focusable)
+                        .is_some_and(|c| c.mapped && !c.hidden && c.listed() && c.focusable)
                 })
                 .collect();
             for id in self.stack.clone() {
                 if !windows.contains(&id)
                     && self
                         .win(id)
-                        .is_some_and(|c| c.mapped && c.listed() && c.focusable)
+                        .is_some_and(|c| c.mapped && !c.hidden && c.listed() && c.focusable)
                 {
                     windows.push(id);
                 }
             }
             for (id, win) in &self.windows {
-                if win.minimized && win.mapped && win.listed() && win.focusable && !windows.contains(id) {
+                if win.minimized
+                    && win.mapped
+                    && !win.hidden
+                    && win.listed()
+                    && win.focusable
+                    && !windows.contains(id)
+                {
                     windows.push(*id);
                 }
             }
@@ -2423,6 +2905,7 @@ impl Engine {
     fn entries_for(&mut self, id: &str, window: Option<WindowId>) -> (Vec<Entry>, bool) {
         match id {
             "client-menu" => (self.client_menu(window), false),
+            SEND_TO_DESKTOP_MENU => (self.send_to_desktop_menu(window), false),
             "client-list-combined-menu" | "client-list-menu" => (self.client_list(), false),
             APPLICATIONS_MENU => (self.applications_categories(), false),
             _ if id.starts_with(APPLICATIONS_CATEGORY_PREFIX) => {
@@ -2662,6 +3145,13 @@ impl Engine {
             false,
         ));
         entries.push(Entry::Separator { label: None });
+        if self.desktop_count > 1 {
+            entries.push(Entry::Submenu {
+                label: tr("Send to desktop").to_string(),
+                icon: None,
+                target: Target::Menu(SEND_TO_DESKTOP_MENU.to_string()),
+            });
+        }
         entries.push(item(
             "Always on top",
             vec![Action::ToggleAlwaysOnTop],
@@ -2684,6 +3174,40 @@ impl Engine {
         ));
         entries.push(Entry::Separator { label: None });
         entries.push(item("Close", vec![Action::Close], true, false));
+        entries
+    }
+
+    /// The window menu's desktops: one entry a desktop, the window's own marked, and every
+    /// desktop at once.
+    fn send_to_desktop_menu(&self, window: Option<WindowId>) -> Vec<Entry> {
+        let Some(id) = window else {
+            return Vec::new();
+        };
+        let Some(win) = self.win(id) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<Entry> = (0..self.desktop_count)
+            .map(|i| Entry::Item {
+                label: format!("{} {}", tr("Desktop"), i + 1),
+                icon: None,
+                actions: vec![Action::SendToDesktop {
+                    to: DesktopTarget::Index(i),
+                    follow: false,
+                }],
+                window: Some(id),
+                enabled: true,
+                checked: win.desktop == Some(i),
+            })
+            .collect();
+        entries.push(Entry::Separator { label: None });
+        entries.push(Entry::Item {
+            label: tr("All desktops").to_string(),
+            icon: None,
+            actions: vec![Action::ToggleOmnipresent],
+            window: Some(id),
+            enabled: true,
+            checked: win.desktop.is_none(),
+        });
         entries
     }
 
@@ -3117,6 +3641,8 @@ impl Engine {
                     self.apply_decoration_choice(id);
                     if self.windows[&id].maximized {
                         self.fit_maximized(id);
+                    } else if let Some(zone) = self.windows[&id].tile {
+                        self.fit_tile(id, zone);
                     }
                     self.configure(id);
                     self.render_frame(id);
@@ -3125,11 +3651,37 @@ impl Engine {
                     self.redraw_level(depth);
                 }
                 self.out.push(Command::Redraw);
+                self.set_desktop_count(self.configured_desktops());
                 log::info!(target: "wm", "desktop theme changed; frames drawn again");
             }
         }
         self.out.push(Command::WakeAt(self.theme_poll));
     }
+}
+
+/// Whether a window's place is worth remembering for its application: a top-level normal window
+/// with an app id, not a dialog over a parent and not one that places itself.
+fn remembers_place(info: &WindowInfo) -> bool {
+    info.window_type == WindowType::Normal
+        && info.parent.is_none()
+        && !info.app_id.trim().is_empty()
+        && !places_itself(info.window_type)
+}
+
+/// The overlay marking a quick-tile zone: the accent, translucent inside a thicker rim, inset
+/// from the zone so two adjacent zones read apart. An X server shows its rim alone, since the
+/// manager shapes an overlay to its opaque pixels there.
+fn tile_overlay(rect: Rect, scale: i32, look: &crate::theme::Look) -> Option<pixelflux::wm::Image> {
+    let scale = scale.max(1);
+    let mut pixmap = Pixmap::new((rect.w * scale).max(1) as u32, (rect.h * scale).max(1) as u32)?;
+    {
+        let mut canvas = Canvas::new(pixmap.as_mut(), scale);
+        let inner = DrawRect::new(4, 4, rect.w - 8, rect.h - 8);
+        let radius = look.style.corners as f32;
+        canvas.fill_rounded(inner, radius, with_alpha(look.palette.accent, 0x40));
+        canvas.stroke_rounded(inner, radius, 2.0, with_alpha(look.palette.accent, 0xe0));
+    }
+    Some(frame::image_of(pixmap, scale))
 }
 
 /// The icon name an app id resolves to in an icon theme: the id itself, else its last segment.
@@ -3211,6 +3763,10 @@ impl WindowPolicy for Engine {
                 self.launcher.set_x11_display(display);
                 Verdict::Pass
             }
+            Event::ActivateDesktop(index) => {
+                self.switch_desktop(index);
+                Verdict::Pass
+            }
         };
         if !self.out.iter().any(|c| matches!(c, Command::WakeAt(_))) {
             self.out.push(Command::WakeAt(self.theme_poll));
@@ -3241,6 +3797,7 @@ mod tests {
         let mut engine = Engine::new(Backend::Wayland, Box::new(Recorder(spawned.clone())));
         engine.config = Config::default();
         engine.menus = Menus::default();
+        engine.memory = WindowMemory::transient();
         let mut out = Vec::new();
         engine.handle(
             Event::Outputs(vec![OutputInfo {
@@ -3391,6 +3948,190 @@ mod tests {
         engine.handle(press(at.0, at.1, true), &mut out);
         engine.handle(press(at.0, at.1, false), &mut out);
         assert!(out.iter().any(|c| matches!(c, Command::Close(1))));
+    }
+
+    /// Super and an arrow quick-tile the focused window to a half, then a quarter, and back; a
+    /// title bar drag to the screen's edge shows the zone and tiles the window there on release.
+    #[test]
+    fn quick_tiles_by_key_and_by_drag() {
+        let (mut engine, _) = engine();
+        open(&mut engine, 1, 600, 400);
+        let before = engine.windows[&1].rect;
+        let e = frame::extents(&engine.theme.look.style, false, false);
+        let snap = |engine: &mut Engine, edge: ResizeEdge| {
+            engine.run_action(&Action::SnapToEdge(edge), Some(1), (0.0, 0.0));
+        };
+        snap(&mut engine, ResizeEdge::Left);
+        assert_eq!(engine.windows[&1].tile, Some(Zone::Left));
+        assert_eq!(
+            engine.windows[&1].rect,
+            grab::client_of(Rect::new(0, 0, 640, 768), e)
+        );
+        snap(&mut engine, ResizeEdge::Top);
+        assert_eq!(engine.windows[&1].tile, Some(Zone::TopLeft));
+        assert_eq!(
+            engine.windows[&1].rect,
+            grab::client_of(Rect::new(0, 0, 640, 384), e)
+        );
+        snap(&mut engine, ResizeEdge::Bottom);
+        assert_eq!(engine.windows[&1].tile, Some(Zone::Left));
+        snap(&mut engine, ResizeEdge::Bottom);
+        assert_eq!(engine.windows[&1].tile, Some(Zone::BottomLeft));
+        snap(&mut engine, ResizeEdge::Bottom);
+        assert_eq!(engine.windows[&1].tile, None);
+        assert_eq!(engine.windows[&1].rect, before);
+        snap(&mut engine, ResizeEdge::Top);
+        assert!(engine.windows[&1].maximized);
+        snap(&mut engine, ResizeEdge::Right);
+        assert!(!engine.windows[&1].maximized);
+        assert_eq!(engine.windows[&1].tile, Some(Zone::Right));
+        snap(&mut engine, ResizeEdge::Bottom);
+        snap(&mut engine, ResizeEdge::Bottom);
+        assert_eq!(engine.windows[&1].tile, None);
+        assert_eq!(engine.windows[&1].rect, before);
+
+        let mut out = Vec::new();
+        let title = (before.x as f64 + 200.0, before.y as f64 - 10.0);
+        let press = |x: f64, y: f64, pressed: bool| {
+            Event::Pointer(
+                PointerEvent {
+                    x,
+                    y,
+                    kind: PointerKind::Button {
+                        button: BTN_LEFT,
+                        pressed,
+                    },
+                    modifiers: Modifiers::default(),
+                    time: 2000,
+                },
+                Under::default(),
+            )
+        };
+        let motion = |x: f64, y: f64| {
+            Event::Pointer(
+                PointerEvent {
+                    x,
+                    y,
+                    kind: PointerKind::Motion,
+                    modifiers: Modifiers::default(),
+                    time: 2001,
+                },
+                Under::default(),
+            )
+        };
+        engine.handle(press(title.0, title.1, true), &mut out);
+        out.clear();
+        engine.handle(motion(1279.0, 400.0), &mut out);
+        let zone = Rect::new(640, 0, 640, 768);
+        assert!(
+            out.iter().any(
+                |c| matches!(c, Command::Overlay { key, rect, .. } if *key == TILE_KEY && *rect == zone)
+            )
+        );
+        out.clear();
+        engine.handle(press(1279.0, 400.0, false), &mut out);
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Command::ClearOverlay(k) if *k == TILE_KEY))
+        );
+        assert_eq!(engine.windows[&1].tile, Some(Zone::Right));
+        assert_eq!(engine.windows[&1].rect, grab::client_of(zone, e));
+        assert_eq!(engine.windows[&1].saved.map(|r| (r.w, r.h)), Some((600, 400)));
+    }
+
+    /// A bind on the bare Super key runs on its release whether the press reports the key's own
+    /// modifier bit (a compositor) or not (an X server), and a key pressed in between disarms it.
+    #[test]
+    fn a_release_bind_matches_the_modifier_key_itself() {
+        let (mut engine, spawned) = engine();
+        engine
+            .config
+            .apply_rc(
+                r#"<openbox_config><keyboard><keybind key="Super_L" onRelease="yes"><action name="Execute"><command>launcher</command></action></keybind></keyboard></openbox_config>"#,
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        let super_l = |pressed: bool, logo: bool| {
+            Event::Key(KeyEvent {
+                keysym: keys::SUPER_L,
+                base_keysym: keys::SUPER_L,
+                keycode: 133,
+                pressed,
+                modifiers: Modifiers {
+                    logo,
+                    ..Modifiers::default()
+                },
+            })
+        };
+        engine.handle(super_l(true, true), &mut out);
+        engine.handle(super_l(false, false), &mut out);
+        assert_eq!(spawned.lock().unwrap().as_slice(), ["launcher"]);
+        engine.handle(super_l(true, false), &mut out);
+        engine.note_key_pressed(0x7a);
+        engine.handle(super_l(false, false), &mut out);
+        assert_eq!(spawned.lock().unwrap().len(), 1);
+        engine.handle(super_l(true, true), &mut out);
+        engine.note_key_pressed(keys::SHIFT_L);
+        engine.handle(super_l(false, false), &mut out);
+        assert_eq!(spawned.lock().unwrap().len(), 2);
+    }
+
+    /// A window on another desktop is hidden and out of the focus and the stacking the backend
+    /// sees, comes back when its desktop is shown, and a window sent to a desktop takes its
+    /// dialogs along; the desktops are published to the backend on every change.
+    #[test]
+    fn virtual_desktops_hide_and_show_windows() {
+        let (mut engine, _) = engine();
+        let mut out = Vec::new();
+        assert!(out.is_empty());
+        open(&mut engine, 1, 600, 400);
+        open(&mut engine, 2, 300, 200);
+        assert_eq!(engine.focus, Some(2));
+        assert_eq!(engine.windows[&1].desktop, Some(0));
+        engine.run_action(&Action::GoToDesktop(DesktopTarget::Next), None, (0.0, 0.0));
+        assert_eq!(engine.current_desktop, 1);
+        assert!(engine.windows[&1].hidden && engine.windows[&2].hidden);
+        assert_eq!(engine.focus, None);
+        out.clear();
+        engine.handle(Event::Tick(engine.now), &mut out);
+        let hidden_configures = engine
+            .windows
+            .values()
+            .all(|w| w.sent.is_some_and(|(_, s)| s.hidden));
+        assert!(hidden_configures);
+        open(&mut engine, 3, 200, 200);
+        assert_eq!(engine.windows[&3].desktop, Some(1));
+        assert!(!engine.windows[&3].hidden);
+        assert_eq!(engine.focus, Some(3));
+        engine.run_action(
+            &Action::SendToDesktop {
+                to: DesktopTarget::Index(0),
+                follow: false,
+            },
+            Some(3),
+            (0.0, 0.0),
+        );
+        assert!(engine.windows[&3].hidden);
+        assert_eq!(engine.focus, None);
+        engine.run_action(&Action::GoToDesktop(DesktopTarget::Previous), None, (0.0, 0.0));
+        assert_eq!(engine.current_desktop, 0);
+        assert!(!engine.windows[&1].hidden && !engine.windows[&3].hidden);
+        assert_eq!(engine.focus, Some(3));
+        let stack = engine.ordered_stack();
+        assert_eq!(stack.last(), Some(&3));
+        assert!(stack.contains(&1) && stack.contains(&2));
+        engine.run_action(&Action::ToggleOmnipresent, Some(1), (0.0, 0.0));
+        assert_eq!(engine.windows[&1].desktop, None);
+        engine.handle(Event::ActivateDesktop(1), &mut out);
+        assert!(!engine.windows[&1].hidden && engine.windows[&3].hidden);
+        assert_eq!(engine.focus, Some(1));
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Command::Desktops { count: 2, current: 1 }))
+        );
+        engine.set_desktop_count(1);
+        assert_eq!(engine.current_desktop, 0);
+        assert!(engine.windows.values().all(|w| !w.hidden));
     }
 
     /// A click inside a client focuses it and passes through; Alt-F4 is taken and closes the

@@ -5,11 +5,120 @@
  */
 
 //! Interactive move and resize: the geometry a drag asks for from where the pointer went, the
-//! client's size hints applied to it, and openbox's edge resistance, where a frame dragged
-//! against the screen's edge or another frame's stops there until the pointer pushes past the
-//! resistance.
+//! client's size hints applied to it, openbox's edge resistance, where a frame dragged against
+//! the screen's edge or another frame's stops there until the pointer pushes past the resistance,
+//! and the quick-tile zones a move drag reaches at the output's edges.
+//!
+//! The zones are the common desktops': the pointer at the left or right edge of the output tiles
+//! the window to that half, in the top or bottom fifth of such an edge to that quarter, and at
+//! the top edge maximizes it. The zone follows the pointer, not the frame, so a window dragged
+//! by a far corner still tiles where the hand went. A narrow output (a phone held upright) has
+//! room for one window across, so every edge there maximizes.
 
 use pixelflux::wm::{Extents, Rect, ResizeEdge, SizeHints, WindowId};
+
+/// A quick-tile zone: where a tiled window lies on its output's work area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Zone {
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    /// The whole work area: the top edge's zone, applied as a maximize.
+    Maximize,
+}
+
+/// How close to an output's edge, in logical pixels, the pointer must be to reach a zone.
+const ZONE_EDGE: i32 = 8;
+/// Below this width an output takes one window across, so every zone is the whole area.
+const NARROW_OUTPUT: i32 = 700;
+
+/// The zone the pointer at `(x, y)` reaches on an output of `output` logical pixels, if any.
+pub fn zone_at(output: Rect, x: f64, y: f64) -> Option<Zone> {
+    let (x, y) = (x.round() as i32, y.round() as i32);
+    if !output.contains(
+        x.clamp(output.x, output.right() - 1),
+        y.clamp(output.y, output.bottom() - 1),
+    ) {
+        return None;
+    }
+    let left = x <= output.x + ZONE_EDGE;
+    let right = x >= output.right() - 1 - ZONE_EDGE;
+    let top = y <= output.y + ZONE_EDGE;
+    let fifth = output.h / 5;
+    let upper = y < output.y + fifth;
+    let lower = y >= output.bottom() - fifth;
+    if output.w < NARROW_OUTPUT {
+        return (left || right || top).then_some(Zone::Maximize);
+    }
+    Some(match (left, right, top) {
+        (true, _, _) if upper => Zone::TopLeft,
+        (true, _, _) if lower => Zone::BottomLeft,
+        (true, _, _) => Zone::Left,
+        (_, true, _) if upper => Zone::TopRight,
+        (_, true, _) if lower => Zone::BottomRight,
+        (_, true, _) => Zone::Right,
+        (_, _, true) => Zone::Maximize,
+        _ => return None,
+    })
+}
+
+/// The frame rectangle a zone covers on a work area.
+pub fn zone_rect(zone: Zone, area: Rect) -> Rect {
+    let half_w = area.w / 2;
+    let half_h = area.h / 2;
+    let right_x = area.x + half_w;
+    let right_w = area.w - half_w;
+    let bottom_y = area.y + half_h;
+    let bottom_h = area.h - half_h;
+    match zone {
+        Zone::Left => Rect::new(area.x, area.y, half_w, area.h),
+        Zone::Right => Rect::new(right_x, area.y, right_w, area.h),
+        Zone::TopLeft => Rect::new(area.x, area.y, half_w, half_h),
+        Zone::TopRight => Rect::new(right_x, area.y, right_w, half_h),
+        Zone::BottomLeft => Rect::new(area.x, bottom_y, half_w, bottom_h),
+        Zone::BottomRight => Rect::new(right_x, bottom_y, right_w, bottom_h),
+        Zone::Maximize => area,
+    }
+}
+
+/// The zone a keyboard snap toward `edge` moves a window to from its current one: left and
+/// right take that half, or move a quarter across; up takes a window from
+/// a bottom quarter to its half, from a half to its top quarter, and otherwise maximizes; down
+/// takes a top quarter to its half, a half to its bottom quarter, and otherwise restores (the
+/// caller minimizes a window that has nothing to restore). `None` means restore.
+pub fn snapped(current: Option<Zone>, edge: ResizeEdge) -> Option<Zone> {
+    use Zone::*;
+    match edge {
+        ResizeEdge::Left => Some(match current {
+            Some(TopRight) => TopLeft,
+            Some(BottomRight) => BottomLeft,
+            _ => Left,
+        }),
+        ResizeEdge::Right => Some(match current {
+            Some(TopLeft) => TopRight,
+            Some(BottomLeft) => BottomRight,
+            _ => Right,
+        }),
+        ResizeEdge::Top => Some(match current {
+            Some(BottomLeft) => Left,
+            Some(BottomRight) => Right,
+            Some(Left) => TopLeft,
+            Some(Right) => TopRight,
+            _ => Maximize,
+        }),
+        ResizeEdge::Bottom => match current {
+            Some(TopLeft) => Some(Left),
+            Some(TopRight) => Some(Right),
+            Some(Left) => Some(BottomLeft),
+            Some(Right) => Some(BottomRight),
+            _ => None,
+        },
+        _ => current,
+    }
+}
 
 /// What a drag does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,6 +335,40 @@ mod tests {
         assert_eq!(
             constrain(Rect::new(0, 0, 5, 5), &SizeHints::default(), ResizeEdge::None).w,
             MIN_SIZE
+        );
+    }
+
+    /// The pointer at an output's edges reaches the halves, the quarters at the ends of the
+    /// side edges, and the maximize zone at the top; a narrow output maximizes everywhere.
+    #[test]
+    fn zones_follow_the_pointer() {
+        let output = Rect::new(0, 0, 1920, 1080);
+        assert_eq!(zone_at(output, 2.0, 500.0), Some(Zone::Left));
+        assert_eq!(zone_at(output, 1919.0, 500.0), Some(Zone::Right));
+        assert_eq!(zone_at(output, 0.0, 10.0), Some(Zone::TopLeft));
+        assert_eq!(zone_at(output, 1915.0, 1079.0), Some(Zone::BottomRight));
+        assert_eq!(zone_at(output, 900.0, 0.0), Some(Zone::Maximize));
+        assert_eq!(zone_at(output, 900.0, 1079.0), None);
+        assert_eq!(zone_at(output, 900.0, 500.0), None);
+        assert_eq!(
+            zone_at(Rect::new(0, 0, 480, 900), 0.0, 450.0),
+            Some(Zone::Maximize)
+        );
+        let area = Rect::new(0, 0, 1000, 800);
+        assert_eq!(zone_rect(Zone::Right, area), Rect::new(500, 0, 500, 800));
+        assert_eq!(zone_rect(Zone::BottomLeft, area), Rect::new(0, 400, 500, 400));
+        assert_eq!(snapped(None, ResizeEdge::Left), Some(Zone::Left));
+        assert_eq!(snapped(Some(Zone::Left), ResizeEdge::Top), Some(Zone::TopLeft));
+        assert_eq!(snapped(Some(Zone::TopLeft), ResizeEdge::Bottom), Some(Zone::Left));
+        assert_eq!(
+            snapped(Some(Zone::Left), ResizeEdge::Bottom),
+            Some(Zone::BottomLeft)
+        );
+        assert_eq!(snapped(Some(Zone::BottomLeft), ResizeEdge::Bottom), None);
+        assert_eq!(snapped(None, ResizeEdge::Top), Some(Zone::Maximize));
+        assert_eq!(
+            snapped(Some(Zone::TopRight), ResizeEdge::Left),
+            Some(Zone::TopLeft)
         );
     }
 

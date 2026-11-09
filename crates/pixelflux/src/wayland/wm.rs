@@ -72,7 +72,8 @@ pub struct WmState {
     pub frames: HashMap<WindowId, FrameBuffers>,
     pub overlays: BTreeMap<u32, Overlay>,
     pub effects: HashMap<WindowId, Transform>,
-    /// Windows the policy hid (minimized): unmapped from the Space, kept here for their return.
+    /// Windows the policy hid (minimized, or on another desktop): unmapped from the Space,
+    /// kept here for their return.
     pub hidden: HashMap<WindowId, Window>,
     /// The client rectangle the policy last configured each window to.
     pub rects: HashMap<WindowId, Rect>,
@@ -562,6 +563,13 @@ pub fn show_desktop(state: &mut AppState, on: bool) {
     }
 }
 
+/// A pager asked to switch to a virtual desktop, counted from zero.
+pub fn activate_desktop(state: &mut AppState, index: u32) {
+    if active(state) {
+        dispatch(state, Event::ActivateDesktop(index));
+    }
+}
+
 /// The modifiers the seat's keyboard holds.
 fn modifiers(state: &AppState) -> Modifiers {
     let mods: Option<ModifiersState> = state.seat.get_keyboard().map(|k| k.modifier_state());
@@ -842,6 +850,9 @@ fn apply(state: &mut AppState, command: Command) {
                 });
             }
         }
+        Command::Desktops { count, current } => {
+            crate::wayland::workspace::set_desktops(state, count, current);
+        }
         Command::Redraw => {
             for node in &mut state.output_nodes {
                 if let Some(cap) = node.capture.as_mut() {
@@ -913,8 +924,8 @@ fn sync_decoration_mode(state: &mut AppState, id: WindowId) {
 }
 
 /// Place and size a window as the policy asked: an xdg configure for the size and states, a
-/// Space mapping for the position, a Space unmapping for a hidden one, and the output's enter
-/// and leave as the window moves between outputs.
+/// Space mapping for the position, a Space unmapping for a minimized one or one on another
+/// desktop, and the output's enter and leave as the window moves between outputs.
 fn configure(state: &mut AppState, id: WindowId, rect: Rect, states: States) {
     if let Some(wm) = state.wm.as_mut() {
         wm.rects.insert(id, rect);
@@ -952,7 +963,7 @@ fn configure(state: &mut AppState, id: WindowId, rect: Rect, states: States) {
     if let Some(surface) = window.x11_surface() {
         crate::wayland::xwm::configure(surface, rect, states);
     }
-    if states.minimized {
+    if states.minimized || states.hidden {
         if in_space {
             state.space.unmap_elem(&window);
             if let Some(wm) = state.wm.as_mut() {

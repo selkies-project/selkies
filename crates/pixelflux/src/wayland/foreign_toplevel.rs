@@ -11,16 +11,21 @@
 //! close asks the client, and the rest are ignored since every window is fullscreen then. A
 //! taskbar's `set_rectangle` tells the policy where it shows the window, the target of a
 //! minimize effect, in layout coordinates: the rectangle arrives relative to the taskbar's own
-//! surface, a layer surface whose place on its output the layer map knows.
+//! surface, a layer surface whose place on its output the layer map knows. A window the policy
+//! put on another virtual desktop stays listed but on no output, neither minimized nor shown,
+//! so a taskbar following the outputs drops it from the current desktop's list and takes it
+//! back when the window enters its output again.
 
 use std::collections::HashMap;
 
 use smithay::desktop::{Window, layer_map_for_output};
 use smithay::input::pointer::Focus;
+use smithay::output::Output;
 use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
     zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
 };
+use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
@@ -88,9 +93,14 @@ fn published_of(state: &AppState, window: &Window, id: WindowId) -> Published {
         Some(w) if wm::active(state) => w.focus == Some(id),
         _ => state.keyboard_focus == Some(id),
     };
-    let (maximized, minimized, fullscreen) = match states {
-        Some(s) => (s.maximized, s.minimized, s.fullscreen),
-        None => (false, false, true),
+    let (maximized, minimized, fullscreen, hidden) = match states {
+        Some(s) => (
+            s.maximized,
+            s.minimized && !s.hidden,
+            s.fullscreen,
+            s.hidden,
+        ),
+        None => (false, false, true, false),
     };
     Published {
         title: info.title,
@@ -99,7 +109,7 @@ fn published_of(state: &AppState, window: &Window, id: WindowId) -> Published {
         minimized,
         activated: focused,
         fullscreen,
-        output: Some(window_output_id(window)),
+        output: (!hidden).then(|| window_output_id(window)),
     }
 }
 
@@ -227,6 +237,38 @@ pub fn update_all(state: &mut AppState) {
     let ids: Vec<WindowId> = state.foreign_toplevel.handles.keys().copied().collect();
     for id in ids {
         update(state, id);
+    }
+}
+
+/// A client bound a `wl_output`: the handles it holds of the windows on that output enter it,
+/// since an enter reaches only the objects the client held when it was sent.
+pub fn output_bound(state: &mut AppState, output: &Output, wl_output: &WlOutput) {
+    let Some(node_id) = state
+        .output_nodes
+        .iter()
+        .find(|n| n.output == *output)
+        .map(|n| n.id)
+    else {
+        return;
+    };
+    let client = wl_output.client().map(|c| c.id());
+    for (id, handles) in &state.foreign_toplevel.handles {
+        if state
+            .foreign_toplevel
+            .published
+            .get(id)
+            .and_then(|p| p.output)
+            != Some(node_id)
+        {
+            continue;
+        }
+        for handle in handles
+            .iter()
+            .filter(|h| h.client().map(|c| c.id()) == client)
+        {
+            handle.output_enter(wl_output);
+            handle.done();
+        }
     }
 }
 

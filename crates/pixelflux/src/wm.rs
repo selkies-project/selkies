@@ -472,6 +472,9 @@ pub enum Event {
     /// An X server the compositor runs for its X11 clients is up on this display number, so
     /// the policy can hand `DISPLAY` to what it starts.
     X11Display(u32),
+    /// A client (a pager) asked, through the workspace protocol, to switch to this virtual
+    /// desktop, counted from zero.
+    ActivateDesktop(u32),
 }
 
 /// The xdg states a configure carries, which the compositor also publishes to taskbars.
@@ -483,6 +486,9 @@ pub struct States {
     pub resizing: bool,
     /// Hidden by a minimize: the client keeps its surface and nothing of it is composited.
     pub minimized: bool,
+    /// On another virtual desktop: kept and composited like a minimized window, but told to
+    /// taskbars as a window on no output rather than a minimized one.
+    pub hidden: bool,
 }
 
 /// A raster the policy drew: premultiplied RGBA, `width * 4` bytes a row, in physical pixels
@@ -578,6 +584,9 @@ pub enum Command {
     /// Everything on the layout changed from the policy's side (a theme), so every frame is
     /// to be presented again.
     Redraw,
+    /// The virtual desktops: how many there are and which is current, counted from zero, for
+    /// the workspace protocol the pagers read.
+    Desktops { count: u32, current: u32 },
 }
 
 /// A window manager's decisions for the compositor; see the module documentation.

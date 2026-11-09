@@ -385,7 +385,7 @@ pub fn configure(surface: &X11Surface, rect: Rect, states: States) {
     let _ = surface.set_maximized(states.maximized);
     let _ = surface.set_fullscreen(states.fullscreen);
     let _ = surface.set_activated(states.activated);
-    let _ = surface.set_hidden(states.minimized);
+    let _ = surface.set_hidden(states.minimized || states.hidden);
 }
 
 /// Publish what the manager supports beyond Smithay's own list, so clients ask for it.

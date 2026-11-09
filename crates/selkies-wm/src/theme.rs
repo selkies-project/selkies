@@ -59,6 +59,8 @@ pub struct Palette {
     pub menu_title_bg: Color,
     /// The accent, for on-screen displays and hovered buttons.
     pub accent: Color,
+    /// The hovered close button's fill, the same red whatever the theme.
+    pub close: Color,
 }
 
 impl Palette {
@@ -83,6 +85,7 @@ impl Palette {
             menu_disabled: style::blend(theme.popup, theme.text, 0.4),
             menu_title_bg: theme.panel,
             accent: theme.accent,
+            close: selkies_draw::render::rgb(0xda, 0x44, 0x53),
         }
     }
 
@@ -140,6 +143,8 @@ pub struct ThemeWatch {
     pub look: Look,
     /// The icon theme the desktop names, for the frames' and menus' icons.
     pub icon_theme: Option<String>,
+    /// The number of virtual desktops the desktop's `desktops` setting names.
+    pub desktops: Option<u32>,
 }
 
 impl ThemeWatch {
@@ -154,6 +159,7 @@ impl ThemeWatch {
             checked: Instant::now(),
             look: Look::from_values(&values),
             icon_theme: icon_theme(&values),
+            desktops: desktops(&values),
         }
     }
 
@@ -172,9 +178,11 @@ impl ThemeWatch {
         let values = style::desktop_values();
         let look = Look::from_values(&values);
         let icon_theme = icon_theme(&values);
-        let changed = look != self.look || icon_theme != self.icon_theme;
+        let desktops = desktops(&values);
+        let changed = look != self.look || icon_theme != self.icon_theme || desktops != self.desktops;
         self.look = look;
         self.icon_theme = icon_theme;
+        self.desktops = desktops;
         changed
     }
 
@@ -192,6 +200,14 @@ impl Default for ThemeWatch {
 
 fn modified(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// The `desktops` setting as a count of one or more, `None` where it is missing or malformed.
+fn desktops(values: &HashMap<String, String>) -> Option<u32> {
+    values
+        .get("desktops")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|n| *n >= 1)
 }
 
 fn icon_theme(values: &HashMap<String, String>) -> Option<String> {

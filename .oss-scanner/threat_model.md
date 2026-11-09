@@ -29,9 +29,17 @@
   key and pointer bindings start the commands they name in the session user's environment, the Xwayland socket
   the compositor starts for its X11 clients (`crates/pixelflux/src/wayland/xwm.rs`) is one more local socket in
   `/tmp/.X11-unix`, and `zwlr_foreign_toplevel_manager_v1` lets any Wayland client of the capture socket list,
-  activate, minimize, and close windows (`crates/pixelflux/src/wayland/foreign_toplevel.rs`). Everything there
-  runs as the session user, who may already do each of these; the boundary it keeps is the stream's: a panic in
-  the window manager is caught at the policy boundary and the compositor carries on without it.
+  activate, minimize, and close windows (`crates/pixelflux/src/wayland/foreign_toplevel.rs`), and
+  `ext_workspace_manager_v1` lets any such client read the virtual desktops and ask the window policy for a switch
+  (`crates/pixelflux/src/wayland/workspace.rs`); both carry no bytes to parse beyond the protocol's typed arguments.
+  Everything there runs as the session user, who may already do each of these; the boundary it keeps is the
+  stream's: a panic in the window manager is caught at the policy boundary and the compositor carries on without it.
+- Under `--desktop`, the `selkies-desktop` shell serves the desktop Settings portal
+  (`crates/selkies-desktop/src/portal.rs`): `org.freedesktop.portal.Settings` on the session bus under
+  `org.freedesktop.portal.Desktop`, taken only while no other process owns that name. Any process of the session
+  user's bus may call it; it answers `ReadAll`, `ReadOne`, `Read`, and its `version` property from the shell's own
+  theme decision, takes no writes, and runs nothing a caller names, so a caller learns only the scheme, accent, and
+  theme names every window of the session is drawn with.
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
   `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
   write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose

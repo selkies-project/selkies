@@ -22,8 +22,8 @@
 //! killed takes its shell down instead of leaving one drawing beside the shell the next server
 //! starts; the programs the user launches are left running, as they are under any manager.
 //!
-//! An `autostart` file is run once the manager is up, as openbox and labwc run theirs: the first
-//! one found along the backend's configuration directories ([`crate::config::search_dirs`],
+//! An `autostart` file is run once the manager is up, as openbox runs its own: the first
+//! one found along the configuration directories ([`crate::config::search_dirs`],
 //! the user's over the system's), executed with `sh` in the session environment.
 
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::config::{self, Backend};
+use crate::config;
 use crate::core::Launcher;
 
 /// The environment the session's children run in.
@@ -188,10 +188,10 @@ fn spawn_detached(env: &SessionEnv, program: &str, args: &[&str], what: &str) {
     }
 }
 
-/// Run the backend's `autostart` file where one exists: the first along the configuration
-/// directories, with `sh`. Returns the file run.
-pub fn run_autostart(env: &SessionEnv, backend: Backend) -> Option<PathBuf> {
-    let dirs = config::search_dirs(backend);
+/// Run the `autostart` file where one exists: the first along the configuration directories,
+/// with `sh`. Returns the file run.
+pub fn run_autostart(env: &SessionEnv) -> Option<PathBuf> {
+    let dirs = config::search_dirs();
     let file = config::find_file(&dirs, "autostart").or_else(|| config::find_file(&dirs, "autostart.sh"))?;
     let path = file.to_string_lossy().into_owned();
     spawn_detached(env, "sh", &[&path], &format!("autostart {path}"));

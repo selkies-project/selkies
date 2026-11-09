@@ -92,7 +92,7 @@ pub fn start(is_wayland: bool) {
         match selkies_wm::x11::spawn(&display, env.clone(), shell) {
             Ok(handle) => {
                 info!(target: "wm", "window manager on {display}{}", if desktop { " with the desktop" } else { "" });
-                autostart(&env, Backend::X11);
+                autostart(&env);
                 Some(handle)
             }
             Err(e) => {
@@ -109,10 +109,10 @@ pub fn start(is_wayland: bool) {
     });
 }
 
-/// Run the backend's `autostart` file where one exists.
-fn autostart(env: &Arc<Mutex<SessionEnv>>, backend: Backend) {
+/// Run the `autostart` file where one exists.
+fn autostart(env: &Arc<Mutex<SessionEnv>>) {
     let env = env.lock().unwrap_or_else(|p| p.into_inner()).clone();
-    if let Some(file) = run_autostart(&env, backend) {
+    if let Some(file) = run_autostart(&env) {
         info!(target: "wm", "autostart: {}", file.display());
     }
 }
@@ -142,7 +142,7 @@ fn start_wayland(env: Arc<Mutex<SessionEnv>>, shell: Option<String>) -> bool {
                 }
                 Err(_) => warn!(target: "wm", "Xwayland gave no display within {XWAYLAND_WAIT:?}; the desktop starts without one"),
             }
-            autostart(&env, Backend::Wayland);
+            autostart(&env);
             let Some(program) = shell else {
                 return;
             };

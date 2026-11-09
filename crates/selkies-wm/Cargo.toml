@@ -18,7 +18,7 @@ pixelflux.workspace = true
 selkies-draw = { path = "../selkies-draw" }
 log = { version = "0.4", features = ["std"] }
 # The X11 backend's connection, and the keysym names binds are written in.
-x11rb = { version = "0.14", features = ["randr", "shape", "xfixes", "xkb", "cursor", "render", "xtest"] }
+x11rb = { version = "0.14", features = ["randr", "shape", "xfixes", "xkb", "cursor", "render", "xtest", "xinput"] }
 xkbcommon = { version = "0.9", default-features = false }
 # rc.xml and menu.xml.
 quick-xml = "0.41"

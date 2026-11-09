@@ -2525,10 +2525,22 @@ where
             .into_iter()
             .map(CompositionElements::Cursor),
     );
+    // The top layer (a desktop's panel) lies over the windows, except under a window the policy
+    // shows fullscreen on top: a video or a game covers the panel, as it does on every desktop,
+    // and the panel is back once the window leaves fullscreen.
+    let fullscreen_on_top = scene
+        .space
+        .elements_for_output(scene.output)
+        .next_back()
+        .and_then(|window| wayland::frontend::window_meta(window).map(|m| m.id))
+        .and_then(|id| scene.wm.and_then(|wm| wm.states.get(&id)))
+        .is_some_and(|states| states.fullscreen);
     {
         let layer_map = layer_map_for_output(scene.output);
         push_layer_elements(renderer, &mut elements, &layer_map, Layer::Overlay, scale);
-        push_layer_elements(renderer, &mut elements, &layer_map, Layer::Top, scale);
+        if !fullscreen_on_top {
+            push_layer_elements(renderer, &mut elements, &layer_map, Layer::Top, scale);
+        }
     }
     for window in scene.space.elements_for_output(scene.output).rev() {
         push_window_elements(
@@ -2543,6 +2555,9 @@ where
     }
     {
         let layer_map = layer_map_for_output(scene.output);
+        if fullscreen_on_top {
+            push_layer_elements(renderer, &mut elements, &layer_map, Layer::Top, scale);
+        }
         push_layer_elements(renderer, &mut elements, &layer_map, Layer::Bottom, scale);
         push_layer_elements(
             renderer,
@@ -5896,6 +5911,7 @@ fn create_output_on(
                 .unwrap_or(0)
         );
     }
+    wayland::workspace::outputs_changed(state);
     wayland::wm::outputs_changed(state);
     wayland::xwm::publish_workarea(state);
     true
@@ -6094,6 +6110,7 @@ fn destroy_output_on(state: &mut AppState, id: u32) -> bool {
         "[Wayland] Output {id} destroyed; {} window(s) relocated to primary.",
         windows.len()
     );
+    wayland::workspace::outputs_changed(state);
     wayland::wm::outputs_changed(state);
     wayland::xwm::publish_workarea(state);
     true
@@ -6859,6 +6876,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         encode_reaper: Vec::new(),
         wm: None,
         foreign_toplevel: wayland::foreign_toplevel::ForeignToplevelState::new(&dh),
+        workspace: wayland::workspace::WorkspaceState::new(&dh),
         xwm: wayland::xwm::XwmState::new(
             smithay::wayland::xwayland_shell::XWaylandShellState::new::<AppState>(&dh),
         ),
