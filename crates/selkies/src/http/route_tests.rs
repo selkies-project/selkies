@@ -8,7 +8,7 @@
 //! routes, the listener's reachability, and the idle-connection rule, each over a real
 //! listener on the loopback.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -28,6 +28,20 @@ const MASTER: &str = "unit-master-token";
 const CTRL: &str = "unit-ctrl-token";
 const VIEW: &str = "unit-view-token";
 const ODD: &str = "unit odd/token;=ü";
+
+/// The Basic password the gate is configured with.
+static PASSWORD: LazyLock<String> = LazyLock::new(drawn_password);
+/// The view-only Basic password the gate is configured with.
+static VIEW_PASSWORD: LazyLock<String> = LazyLock::new(drawn_password);
+/// A Basic password the gate is not configured with.
+static WRONG_PASSWORD: LazyLock<String> = LazyLock::new(drawn_password);
+/// The password of a proxy's own Basic login, which the gate does not know.
+static PROXY_PASSWORD: LazyLock<String> = LazyLock::new(drawn_password);
+
+/// A password drawn per run, so no two of the tests' passwords match.
+fn drawn_password() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
 
 fn hdrs(v: &[(String, String)]) -> Vec<(&str, &str)> {
     v.iter()
@@ -74,7 +88,7 @@ fn secure_config() -> HttpConfig {
     HttpConfig {
         master_token: MASTER.into(),
         basic_auth_user: "user".into(),
-        basic_auth_password: "secret".into(),
+        basic_auth_password: PASSWORD.clone(),
         ..HttpConfig::default()
     }
 }
@@ -385,7 +399,7 @@ async fn secure_basic_off() {
             "/api/tokens",
             &[
                 (MASTER_TOKEN_HEADER, &bearer(MASTER)),
-                ("authorization", &basic("proxyuser", "proxypass"))
+                ("authorization", &basic("proxyuser", &PROXY_PASSWORD))
             ],
             table.as_bytes()
         )
@@ -458,7 +472,7 @@ async fn secure_basic_off() {
             "/api/switch",
             &[
                 (MASTER_TOKEN_HEADER, &bearer(MASTER)),
-                ("authorization", &basic("proxyuser", "proxypass"))
+                ("authorization", &basic("proxyuser", &PROXY_PASSWORD))
             ],
             switch
         )
@@ -617,7 +631,7 @@ async fn secure_basic_on() {
         .call(
             "POST",
             "/api/upload",
-            &[("authorization", &basic("user", "secret"))],
+            &[("authorization", &basic("user", &PASSWORD))],
         )
         .await;
     assert!(
@@ -628,14 +642,14 @@ async fn secure_basic_on() {
         app.call(
             "GET",
             "/api/files/",
-            &[("authorization", &basic("user", "secret"))],
+            &[("authorization", &basic("user", &PASSWORD))],
         )
         .await
         .status,
         403,
         "Basic+token: Basic credentials without a token cannot list files"
     );
-    let proxy = basic("user", "secret");
+    let proxy = basic("user", &PASSWORD);
     let r = app
         .call(
             "POST",
@@ -723,7 +737,7 @@ async fn secure_basic_on() {
         app.call_body(
             "POST",
             "/api/switch",
-            &[("authorization", &basic("user", "secret"))],
+            &[("authorization", &basic("user", &PASSWORD))],
             switch
         )
         .await
@@ -798,7 +812,7 @@ async fn legacy_modes() {
     let basic_on = HttpConfig {
         master_token: String::new(),
         enable_basic_auth: true,
-        basic_auth_viewonly_password: "look".into(),
+        basic_auth_viewonly_password: VIEW_PASSWORD.clone(),
         ..secure_config()
     };
     let (app, _state) = stub_server(basic_on).await;
@@ -823,7 +837,7 @@ async fn legacy_modes() {
         .call(
             "POST",
             "/api/upload",
-            &[("authorization", &basic("user", "secret"))],
+            &[("authorization", &basic("user", &PASSWORD))],
         )
         .await;
     assert!(
@@ -834,7 +848,7 @@ async fn legacy_modes() {
         .call(
             "POST",
             "/api/upload",
-            &[("authorization", &basic("user", "look"))],
+            &[("authorization", &basic("user", &VIEW_PASSWORD))],
         )
         .await;
     assert!(
@@ -845,7 +859,7 @@ async fn legacy_modes() {
         .call(
             "GET",
             "/api/files/",
-            &[("authorization", &basic("user", "look"))],
+            &[("authorization", &basic("user", &VIEW_PASSWORD))],
         )
         .await;
     assert!(
@@ -856,7 +870,7 @@ async fn legacy_modes() {
         .call(
             "GET",
             "/api/files/",
-            &[("authorization", &basic("user", "wrong"))],
+            &[("authorization", &basic("user", &WRONG_PASSWORD))],
         )
         .await;
     assert!(
@@ -878,7 +892,7 @@ async fn basic_challenge_schemes() {
         ..secure_config()
     };
     let (app, _state) = stub_server(config).await;
-    let wrong = basic("user", "wrong");
+    let wrong = basic("user", &WRONG_PASSWORD);
     let modes = [
         None,
         Some("navigate"),
@@ -890,9 +904,9 @@ async fn basic_challenge_schemes() {
     ];
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-    let wrong_user = basic("other", "secret");
+    let wrong_user = basic("other", &PASSWORD);
     let no_colon = format!("Basic {}", STANDARD.encode("user"));
-    let valid = basic("user", "secret");
+    let valid = basic("user", &PASSWORD);
     for (name, credentials, accepted) in [
         ("no credentials", None, false),
         ("wrong password", Some(wrong.as_str()), false),
@@ -951,7 +965,7 @@ async fn basic_socket_cookie() {
     let config = HttpConfig {
         master_token: String::new(),
         enable_basic_auth: true,
-        basic_auth_viewonly_password: "look".into(),
+        basic_auth_viewonly_password: VIEW_PASSWORD.clone(),
         ..secure_config()
     };
     let (app, _state) = stub_server(config).await;
@@ -974,7 +988,7 @@ async fn basic_socket_cookie() {
     let upgrade = [("upgrade", "websocket"), ("connection", "Upgrade")];
 
     let r = app
-        .call("GET", "/", &[("authorization", &basic("user", "secret"))])
+        .call("GET", "/", &[("authorization", &basic("user", &PASSWORD))])
         .await;
     let cookie = set_cookie(&r).expect("a Basic-authenticated page load sets the socket cookie");
     assert!(
@@ -1067,7 +1081,11 @@ async fn basic_socket_cookie() {
     );
 
     let r = app
-        .call("GET", "/", &[("authorization", &basic("user", "look"))])
+        .call(
+            "GET",
+            "/",
+            &[("authorization", &basic("user", &VIEW_PASSWORD))],
+        )
         .await;
     let viewer = value_of(&set_cookie(&r).expect("the view-only login sets one too"));
     let c = carried(&viewer);
@@ -1085,7 +1103,11 @@ async fn basic_socket_cookie() {
         r.body
     );
     let r = app
-        .call("GET", "/", &[("authorization", &basic("user", "wrong"))])
+        .call(
+            "GET",
+            "/",
+            &[("authorization", &basic("user", &WRONG_PASSWORD))],
+        )
         .await;
     assert!(
         r.status == 401 && set_cookie(&r).is_none(),
@@ -1096,7 +1118,7 @@ async fn basic_socket_cookie() {
         .call(
             "GET",
             "/",
-            &[("authorization", &basic("user", "secret")), ("cookie", &c)],
+            &[("authorization", &basic("user", &PASSWORD)), ("cookie", &c)],
         )
         .await;
     assert!(
@@ -1108,7 +1130,7 @@ async fn basic_socket_cookie() {
         .call(
             "GET",
             "/",
-            &[("authorization", &basic("user", "secret")), ("cookie", &c)],
+            &[("authorization", &basic("user", &PASSWORD)), ("cookie", &c)],
         )
         .await;
     assert!(
@@ -1120,7 +1142,7 @@ async fn basic_socket_cookie() {
             "GET",
             "/",
             &[
-                ("authorization", &basic("user", "secret")),
+                ("authorization", &basic("user", &PASSWORD)),
                 ("x-forwarded-proto", "https"),
             ],
         )
@@ -1155,10 +1177,10 @@ async fn switch_origin_cases() {
         enable_basic_auth: true,
         enable_dual_mode: true,
         basic_auth_user: "user".into(),
-        basic_auth_password: "secret".into(),
+        basic_auth_password: PASSWORD.clone(),
         ..HttpConfig::default()
     };
-    let auth = basic("user", "secret");
+    let auth = basic("user", &PASSWORD);
     let b = |extra: &[(&str, &str)]| -> Vec<(String, String)> {
         let mut v = vec![("authorization".to_string(), auth.clone())];
         v.extend(
