@@ -48,7 +48,7 @@ use super::resize::{
     ResolutionInfo, ensure_mode, get_new_res, grow_framebuffer, has_pluggable_outputs,
     read_realized_root, resize_display,
 };
-use super::x11::{self, WindowRect, X11, applied_dpi, on_x11, with_x11};
+use super::x11::{self, ModeSet, WindowRect, X11, applied_dpi, on_x11, with_x11};
 use super::xrandr::{list_monitors_xrandr, parse_wh, run_xrandr};
 use super::{DisplayError, Layout, Layouts, Rect};
 use crate::core::PRIMARY_DISPLAY;
@@ -321,7 +321,14 @@ fn primary_first(layouts: &Layouts) -> Vec<(&String, &Layout)> {
 /// differently than this server was measured to allow never counts as a match: monitors
 /// outlive the client that set them, and a stale outputless set at the right geometry is
 /// invisible to GTK apps.
-fn replace_selkies_monitors_sync(x: &mut X11, layouts: &Layouts) -> Result<()> {
+///
+/// `mode`, prepared on this connection, is applied first in the same grab, and an error
+/// applying it leaves the monitors as they were (`replace_selkies_monitors_at`).
+fn replace_selkies_monitors_sync(
+    x: &mut X11,
+    layouts: &Layouts,
+    mode: Option<&ModeSet>,
+) -> Result<()> {
     let out_id = x.first_connected_output()?;
     let live = selkies_monitors(x)?;
     let names = monitor_names(layouts, &live);
@@ -331,10 +338,17 @@ fn replace_selkies_monitors_sync(x: &mut X11, layouts: &Layouts) -> Result<()> {
         .collect();
     let ordered = primary_first(layouts);
     let share = output_shared() != Some(false);
-    if monitors_match(&live, &desired, share, out_id.is_some()) {
+    let swap = !monitors_match(&live, &desired, share, out_id.is_some());
+    if !swap && mode.is_none() {
         return Ok(());
     }
     x.grabbed(|x| {
+        if let Some(set) = mode {
+            x.apply_mode_set(set)?;
+        }
+        if !swap {
+            return Ok(());
+        }
         let live = set_selkies_layout(x, out_id, &ordered, share, &names)?;
         let live_names: BTreeSet<&String> = live.keys().collect();
         let wanted: BTreeSet<&String> = desired.keys().collect();
@@ -385,7 +399,7 @@ pub async fn replace_selkies_monitors(layouts: &Layouts, screen_name: Option<&st
         return true;
     }
     let owned = layouts.clone();
-    match on_x11(move |x| replace_selkies_monitors_sync(x, &owned)).await {
+    match on_x11(move |x| replace_selkies_monitors_sync(x, &owned, None)).await {
         Ok(()) => return true,
         Err(e) => {
             info!(target: "display", "Native monitor replace failed ({e}); using xrandr fallback.")
@@ -402,6 +416,45 @@ pub async fn replace_selkies_monitors(layouts: &Layouts, screen_name: Option<&st
     designate_primary_output(screen_name).await;
     announce_monitor_change().await;
     ok
+}
+
+/// Swap the `selkies-*` set to `layouts` and set the framebuffer to `w` by `h` in one server
+/// grab, natively. False leaves both to `replace_selkies_monitors` and `resize_display`, whose
+/// xrandr fallbacks are clients of their own, which a grabbed server does not answer.
+///
+/// GTK takes the screen's size from its monitors, and a desktop that reads the CRTCs when GTK
+/// reports a change (MATE's panel, in an idle callback) lays out for the mode it finds. A swap
+/// and a mode set in grabs of their own leave a gap in which that read finds the new monitor
+/// over the old mode, and the mode set changes no monitor, so nothing is reported again: the
+/// panel stays laid out for the old mode. In one grab, every read a client makes on either
+/// change is answered with both in place. The mode goes in first, so one the server refuses
+/// leaves the monitors as they were.
+async fn replace_selkies_monitors_at(
+    layouts: &Layouts,
+    w: i32,
+    h: i32,
+    refresh: Option<f64>,
+) -> bool {
+    if layouts.is_empty() {
+        return false;
+    }
+    let owned = layouts.clone();
+    let done = on_x11(move |x| {
+        let set = x.prepare_mode_set(w, h, refresh, None)?;
+        replace_selkies_monitors_sync(x, &owned, Some(&set))?;
+        x.mode_set_realized(&set)
+    })
+    .await;
+    match done {
+        Ok((rw, rh, rate)) => {
+            info!(target: "display", "Successfully applied RandR mode '{w}x{h}' ({rw}x{rh} at {rate:.2} Hz).");
+            true
+        }
+        Err(e) => {
+            info!(target: "display", "Native mode set with the monitor swap failed ({e}); swapping and setting the mode apart.");
+            false
+        }
+    }
 }
 
 /// Define/replace logical monitor `name` over `rect`: native RandR 1.5 first, `xrandr
@@ -647,10 +700,12 @@ fn needs_mode_set(info: &ResolutionInfo, total_w: i32, total_h: i32) -> bool {
 /// sizes the framebuffer, and defines one `selkies-<id>` logical monitor per display so
 /// window managers tile against the per-display regions.
 ///
-/// The monitors go first, at their final rectangles and under a server grab: window
-/// managers re-tile maximized windows on every root ConfigureNotify, so no WM-visible
-/// stimulus (the swap itself, the resize after it) may ever expose a monitor-less or partial
-/// set. A server that refuses runtime mode creation may still honor a plain framebuffer grow
+/// The monitors and the mode go in under one server grab (`replace_selkies_monitors_at`),
+/// the monitors at their final rectangles: window managers re-tile maximized windows on every
+/// root ConfigureNotify, so no stimulus may ever expose a monitor-less or partial set, nor a
+/// monitor over a mode the screen does not have yet. Where that native path fails, the swap
+/// and the resize run apart, the swap first, each with its fallback. A server that refuses
+/// runtime mode creation may still honor a plain framebuffer grow
 /// (`RRSetScreenSize`): the output keeps its mode while captures and pointer warps address
 /// the enlarged root. The server, not the request, is the authority on the realized
 /// geometry, and it can report success while leaving the root short, so the layout is fitted
@@ -694,18 +749,24 @@ pub async fn apply_monitor_layout(
         }
         Some(_) => {}
     }
-    if !replace_selkies_monitors(layouts, screen_name.as_deref()).await {
-        clear_selkies_monitors().await;
-        return false;
-    }
-    if needs_mode_set(&info, total_w, total_h)
-        && resize_display(&total_mode, refresh, None).await.is_none()
-        && !grow_framebuffer(total_w, total_h).await
-    {
-        error!(
-            target: "display",
-            "Neither a mode-set nor a framebuffer grow reached {total_mode}; fitting the layout to whatever the root realized."
-        );
+    let mode_set = needs_mode_set(&info, total_w, total_h);
+    let together = mode_set
+        && screen_name.is_some()
+        && replace_selkies_monitors_at(layouts, total_w, total_h, refresh).await;
+    if !together {
+        if !replace_selkies_monitors(layouts, screen_name.as_deref()).await {
+            clear_selkies_monitors().await;
+            return false;
+        }
+        if mode_set
+            && resize_display(&total_mode, refresh, None).await.is_none()
+            && !grow_framebuffer(total_w, total_h).await
+        {
+            error!(
+                target: "display",
+                "Neither a mode-set nor a framebuffer grow reached {total_mode}; fitting the layout to whatever the root realized."
+            );
+        }
     }
     let (realized_w, realized_h) = read_realized_root((total_w, total_h)).await;
     if (realized_w, realized_h) == (total_w, total_h) {

@@ -210,6 +210,22 @@ pub struct RandrQuery {
     pub shown: Option<(i32, i32)>,
 }
 
+/// A mode set made ready ahead of the grab that applies it (`X11::prepare_mode_set`): the
+/// mode is made and on the output, and the CRTC it goes on is read.
+pub struct ModeSet {
+    request: (i32, i32),
+    screen: (u32, u32),
+    root: (i32, i32),
+    crtc: u32,
+    timestamp: u32,
+    current: randr::GetCrtcInfoReply,
+    at: (i16, i16),
+    mode_id: u32,
+    rotation: randr::Rotation,
+    outputs: Vec<u32>,
+    rate: f64,
+}
+
 type Result<T> = std::result::Result<T, DisplayError>;
 
 impl X11 {
@@ -665,6 +681,20 @@ impl X11 {
         refresh: Option<f64>,
         output_size: Option<(i32, i32)>,
     ) -> Result<(i32, i32, f64)> {
+        let set = self.prepare_mode_set(w_req, h_req, refresh, output_size)?;
+        self.grabbed(|x| x.apply_mode_set(&set))?;
+        self.mode_set_realized(&set)
+    }
+
+    /// What `resize_on_display` does ahead of its grab: the mode made and attached, and the
+    /// CRTC it goes on read.
+    pub fn prepare_mode_set(
+        &mut self,
+        w_req: i32,
+        h_req: i32,
+        refresh: Option<f64>,
+        output_size: Option<(i32, i32)>,
+    ) -> Result<ModeSet> {
         if w_req <= 0 || h_req <= 0 {
             return Err(DisplayError::Invalid(format!(
                 "invalid resolution '{w_req}x{h_req}'"
@@ -715,77 +745,99 @@ impl X11 {
         } else {
             ci.outputs.clone()
         };
-        let (geom_w, geom_h) = self.root_size()?;
-        let (mm_w, mm_h) = (millimeters(screen_w as i32), millimeters(screen_h as i32));
         let rotation = if u16::from(ci.rotation) == 0 {
             randr::Rotation::ROTATE0
         } else {
             ci.rotation
         };
-        let (crtc_x, crtc_y) = if output_size.is_none() {
+        let at = if output_size.is_none() {
             (ci.x, ci.y)
         } else {
             (0, 0)
         };
+        Ok(ModeSet {
+            request: (w_req, h_req),
+            screen: (screen_w, screen_h),
+            root: self.root_size()?,
+            crtc,
+            timestamp: ts,
+            current: ci,
+            at,
+            mode_id,
+            rotation,
+            outputs,
+            rate,
+        })
+    }
+
+    /// The requests that set a prepared mode, for the caller to make under its grab.
+    pub fn apply_mode_set(&mut self, set: &ModeSet) -> Result<()> {
+        let (screen_w, screen_h) = set.screen;
+        let ci = &set.current;
         let crtc_fits = ci.x as i32 + ci.width as i32 <= screen_w as i32
             && ci.y as i32 + ci.height as i32 <= screen_h as i32;
-        let root = self.root;
-        self.grabbed(|x| {
-            if ci.mode != 0 && !crtc_fits {
-                let status = x
-                    .conn
-                    .randr_set_crtc_config(
-                        crtc,
-                        x11rb::CURRENT_TIME,
-                        ts,
-                        ci.x,
-                        ci.y,
-                        0,
-                        rotation,
-                        &[],
-                    )?
-                    .reply()?
-                    .status;
-                if status != SetConfig::SUCCESS {
-                    return Err(DisplayError::Refused(format!(
-                        "CRTC disable returned status {status:?}"
-                    )));
-                }
-            }
-            if (geom_w as u32, geom_h as u32) != (screen_w, screen_h) {
-                x.conn
-                    .randr_set_screen_size(root, screen_w as u16, screen_h as u16, mm_w, mm_h)?
-                    .check()?;
-            }
-            let status = x
+        if ci.mode != 0 && !crtc_fits {
+            let status = self
                 .conn
                 .randr_set_crtc_config(
-                    crtc,
+                    set.crtc,
                     x11rb::CURRENT_TIME,
-                    ts,
-                    crtc_x,
-                    crtc_y,
-                    mode_id,
-                    rotation,
-                    &outputs,
+                    set.timestamp,
+                    ci.x,
+                    ci.y,
+                    0,
+                    set.rotation,
+                    &[],
                 )?
                 .reply()?
                 .status;
             if status != SetConfig::SUCCESS {
                 return Err(DisplayError::Refused(format!(
-                    "SetCrtcConfig returned status {status:?}"
+                    "CRTC disable returned status {status:?}"
                 )));
             }
-            Ok(())
-        })?;
+        }
+        if (set.root.0 as u32, set.root.1 as u32) != (screen_w, screen_h) {
+            let (mm_w, mm_h) = (millimeters(screen_w as i32), millimeters(screen_h as i32));
+            self.conn
+                .randr_set_screen_size(self.root, screen_w as u16, screen_h as u16, mm_w, mm_h)?
+                .check()?;
+        }
+        let status = self
+            .conn
+            .randr_set_crtc_config(
+                set.crtc,
+                x11rb::CURRENT_TIME,
+                set.timestamp,
+                set.at.0,
+                set.at.1,
+                set.mode_id,
+                set.rotation,
+                &set.outputs,
+            )?
+            .reply()?
+            .status;
+        if status != SetConfig::SUCCESS {
+            return Err(DisplayError::Refused(format!(
+                "SetCrtcConfig returned status {status:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The screen's size and the refresh of an applied mode set, once the server has it;
+    /// `Refused` where the root did not take the size.
+    pub fn mode_set_realized(&mut self, set: &ModeSet) -> Result<(i32, i32, f64)> {
         self.sync()?;
         let (got_w, got_h) = self.root_size()?;
+        let (screen_w, screen_h) = set.screen;
         if (got_w as u32, got_h as u32) != (screen_w, screen_h) {
+            let (w_req, h_req) = set.request;
             return Err(DisplayError::Refused(format!(
                 "screen is {got_w}x{got_h} after applying '{w_req}x{h_req}'"
             )));
         }
-        Ok((screen_w as i32, screen_h as i32, rate))
+        Ok((screen_w as i32, screen_h as i32, set.rate))
     }
 
     /// `RRSetScreenSize` to exactly `w` by `h`, with no CRTC change: what sizes the root of
