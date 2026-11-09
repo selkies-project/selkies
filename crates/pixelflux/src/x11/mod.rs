@@ -1697,6 +1697,7 @@ where
                                         stride as u32,
                                         cap_w as usize,
                                         cap_h as usize,
+                                        false,
                                         y,
                                         uv,
                                         strides,

@@ -203,16 +203,17 @@ fn band_heights(height: usize, bands: usize) -> Vec<usize> {
     heights
 }
 
-/// Convert a packed BGRA buffer to 8-bit 4:2:0 BT.709 limited range as NV12, a luma plane and
-/// an interleaved chroma one `strides` bytes a row, the picture x264 encodes in place
-/// (`Nv12Planes`), in the bands `convert_to_yuv_mt` splits it into. Its samples are the ones
-/// `convert_to_yuv_mt` writes to I420, the chroma interleaved.
+/// Convert a packed buffer, B,G,R,A or with `rgba_input` R,G,B,A, to 8-bit 4:2:0 BT.709 limited
+/// range as NV12, a luma plane and an interleaved chroma one `strides` bytes a row, the picture
+/// x264 encodes in place (`Nv12Planes`), in the bands `convert_to_yuv_mt` splits it into. Its
+/// samples are the ones `convert_to_yuv_mt` writes to I420, the chroma interleaved.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn convert_to_nv12_mt(
     src: &[u8],
     src_stride: u32,
     width: usize,
     height: usize,
+    rgba_input: bool,
     y_buf: &mut [u8],
     uv_buf: &mut [u8],
     strides: (usize, usize),
@@ -228,7 +229,12 @@ pub(crate) fn convert_to_nv12_mt(
             width: width as u32,
             height: h as u32,
         };
-        yuv::bgra_to_yuv_nv12(
+        let convert = if rgba_input {
+            yuv::rgba_to_yuv_nv12
+        } else {
+            yuv::bgra_to_yuv_nv12
+        };
+        convert(
             &mut img,
             src_band,
             src_stride,
@@ -2398,6 +2404,7 @@ pub fn encode_cpu_from(
                             (width_usize * 4) as u32,
                             width_usize,
                             actual_height,
+                            use_gpu,
                             y,
                             uv,
                             strides,
@@ -3708,13 +3715,13 @@ mod tests {
     }
 
     /// The NV12 conversion x264 encodes in place writes the samples the I420 one does, its
-    /// chroma interleaved, at any band count and into padded rows.
+    /// chroma interleaved, from either byte order, at any band count and into padded rows.
     #[test]
     fn the_nv12_convert_writes_the_i420_samples_interleaved() {
         use super::{Nv12Planes, convert_to_nv12_mt, convert_to_yuv_mt};
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         for (w, h) in [(64usize, 64usize), (130, 66), (1920, 1080)] {
-            let bgra: Vec<u8> = (0..w * h * 4)
+            let pixels: Vec<u8> = (0..w * h * 4)
                 .map(|_| {
                     seed ^= seed << 13;
                     seed ^= seed >> 7;
@@ -3722,47 +3729,49 @@ mod tests {
                     seed as u8
                 })
                 .collect();
-            let (mut yp, mut up, mut vp) =
-                (vec![0u8; w * h], vec![0u8; w * h / 4], vec![0u8; w * h / 4]);
-            convert_to_yuv_mt(
-                &bgra,
-                (w * 4) as u32,
-                w,
-                h,
-                false,
-                false,
-                false,
-                false,
-                &mut yp,
-                &mut up,
-                &mut vp,
-                (w, w / 2),
-                1,
-            )
-            .expect("I420");
-            for bands in [1usize, 4, 7] {
-                let mut nv12 = Nv12Planes::new(w, h);
-                let strides = (nv12.stride[0], nv12.stride[1]);
-                let (y, uv) = nv12.planes_mut();
-                convert_to_nv12_mt(&bgra, (w * 4) as u32, w, h, y, uv, strides, bands)
-                    .expect("NV12");
-                let (y, uv) = nv12.planes();
-                for row in 0..h {
-                    assert_eq!(
-                        &y[row * strides.0..][..w],
-                        &yp[row * w..][..w],
-                        "{w}x{h} luma row {row}"
-                    );
-                }
-                for row in 0..h / 2 {
-                    let line = &uv[row * strides.1..][..w];
-                    let (u, v) = (&up[row * w / 2..][..w / 2], &vp[row * w / 2..][..w / 2]);
-                    assert!(
-                        line.chunks(2)
-                            .zip(u.iter().zip(v))
-                            .all(|(c, (u, v))| c == [*u, *v]),
-                        "{w}x{h} {bands} bands: chroma row {row}"
-                    );
+            for rgba in [false, true] {
+                let (mut yp, mut up, mut vp) =
+                    (vec![0u8; w * h], vec![0u8; w * h / 4], vec![0u8; w * h / 4]);
+                convert_to_yuv_mt(
+                    &pixels,
+                    (w * 4) as u32,
+                    w,
+                    h,
+                    rgba,
+                    false,
+                    false,
+                    false,
+                    &mut yp,
+                    &mut up,
+                    &mut vp,
+                    (w, w / 2),
+                    1,
+                )
+                .expect("I420");
+                for bands in [1usize, 4, 7] {
+                    let mut nv12 = Nv12Planes::new(w, h);
+                    let strides = (nv12.stride[0], nv12.stride[1]);
+                    let (y, uv) = nv12.planes_mut();
+                    convert_to_nv12_mt(&pixels, (w * 4) as u32, w, h, rgba, y, uv, strides, bands)
+                        .expect("NV12");
+                    let (y, uv) = nv12.planes();
+                    for row in 0..h {
+                        assert_eq!(
+                            &y[row * strides.0..][..w],
+                            &yp[row * w..][..w],
+                            "{w}x{h} rgba {rgba}: luma row {row}"
+                        );
+                    }
+                    for row in 0..h / 2 {
+                        let line = &uv[row * strides.1..][..w];
+                        let (u, v) = (&up[row * w / 2..][..w / 2], &vp[row * w / 2..][..w / 2]);
+                        assert!(
+                            line.chunks(2)
+                                .zip(u.iter().zip(v))
+                                .all(|(c, (u, v))| c == [*u, *v]),
+                            "{w}x{h} rgba {rgba}, {bands} bands: chroma row {row}"
+                        );
+                    }
                 }
             }
         }
@@ -3846,7 +3855,7 @@ mod tests {
             let picture = &mut pictures[n % 2];
             let strides = (picture.stride[0], picture.stride[1]);
             let (y, uv) = picture.planes_mut();
-            convert_to_nv12_mt(bgra, (w * 4) as u32, w, h, y, uv, strides, 2).unwrap();
+            convert_to_nv12_mt(bgra, (w * 4) as u32, w, h, false, y, uv, strides, 2).unwrap();
             y[mb_w] = !y[w - 1];
             if n == 4 {
                 in_place.release_input();
