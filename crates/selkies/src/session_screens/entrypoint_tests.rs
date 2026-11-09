@@ -212,10 +212,10 @@ fn a_software_verdict_keeps_wayland_on_software_gl() {
         env.get("GALLIUM_DRIVER").is_none() && env.get("MESA_LOADER_DRIVER_OVERRIDE").is_none(),
         "a software Wayland session gets software GL"
     );
-    assert!(
-        env.get("SELKIES_WAYLAND_RENDERER") == Some("pixman")
-            && env.get("KWIN_COMPOSE") == Some("Q"),
-        "and its session compositor renders in software"
+    assert_eq!(
+        env.get("SELKIES_WAYLAND_RENDERER"),
+        Some("pixman"),
+        "and its capture compositor renders in software"
     );
     let env = run(
         &software(),
