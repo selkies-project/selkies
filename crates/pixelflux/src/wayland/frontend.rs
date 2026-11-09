@@ -207,6 +207,13 @@ pub struct WlCapture {
     /// each with the count of recycled frames (`WlEncodeStats::recycled`) after which it is
     /// free to go back to the host; `published` counts the frames handed over.
     pub host_inflight: Vec<(u64, crate::wayland::host::HostFrame)>,
+    /// Client buffers encoded as they stood (`crate::scanout_candidate`), each held, so its
+    /// client is not told to draw into it again, until the recycled count passes the frame
+    /// that reads it, as `host_inflight` holds host frames.
+    pub scanout_inflight: Vec<(u64, smithay::backend::renderer::utils::Buffer)>,
+    /// Whether the last frame was encoded from a client's buffer, else why it was composited,
+    /// so only a change is logged; `None` before the first frame.
+    pub direct: Option<Result<(), &'static str>>,
     pub published: u64,
     /// The frame count of the last publish that encodes the retained host frame.
     pub host_retained_use: u64,

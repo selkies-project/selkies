@@ -164,7 +164,17 @@ path, and the size is checked before the node is opened because a refusal afterw
 produces nothing. Both backends take the codec as
 a parameter rather than carrying a second copy of the interface: the queues, controls, and surface formats are
 the same whichever coded format the capture queue is set to, so a device that advertises H.265 serves it there.
-Only the picture type is codec-specific, because an H.265 NAL header is two bytes where H.264's is one. `encoders/nvenc.rs`
+Only the picture type is codec-specific, because an H.265 NAL header is two bytes where H.264's is one. The Wayland frontend composites an
+output's frame on its own tick, a pass X11 never pays since its clients draw into the one framebuffer the capture
+reads, except where the frame's element list is one opaque surface over exactly the output with nothing drawn over
+it (`scanout_candidate`, decided every frame as a display compositor picks direct scanout): a zero-copy session is
+then handed the client's dmabuf itself, and the pixman path's encode thread reads the client's shm rows where they
+lie, each held for the client until the encode is done; a session whose driver refuses one such buffer composites for
+the rest of the capture (`WlEncodeControls::scanout_refused`), and the readback path on the GL renderer composites,
+since its pool is RGBA and a client's shm buffer is not. Measured at 1920x936 on an RTX 3060 with a covering
+Chrome window and a scrolling foot terminal, the compositor's part of a frame (capture to encode start) fell from
+0.30 to 0.07 ms on the NVENC zero-copy session and from 0.8 to 0.03 ms on x264 in software, where the composite of
+the scrolling terminal was a whole-frame blit. `encoders/nvenc.rs`
 is codec-parameterized (H.264, HEVC, AV1; a codec the GPU lacks is refused at open). `encoders/vaapi/` is
 the VA-API session, driving libva directly (`va-sys` carries bindings of the libva headers it vendors and opens
 the host's library at run time) for all five codecs: `mod.rs` holds the device, the surfaces, the video
