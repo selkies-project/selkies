@@ -11,7 +11,7 @@
 //! rather than with an error status every browser logs as a failed load; 409 is the other transport
 //! serving and 503 a service starting or stopping.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Router;
@@ -90,15 +90,31 @@ pub async fn signaling_handler(
                 .map(|c| c.0.to_string())
         })
         .unwrap_or_else(|| "unknown".to_string());
-    upgrade.on_upgrade(move |ws| serve_signaling(registry, ws, raddr, ceiling))
+    let host = parts
+        .headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    upgrade.on_upgrade(move |ws| serve_signaling(registry, ws, raddr, host, ceiling))
 }
 
-/// Serve one signaling WebSocket through the registry until it ends. `ceiling` is the highest role
-/// the credential behind the connection grants.
+/// The IP address a request's `Host` header names, with or without its port (`203.0.113.7:8080`,
+/// `[2001:db8::1]:8080`, `203.0.113.7`); `None` for a host name.
+pub fn entry_address(host: &str) -> Option<IpAddr> {
+    let host = host.trim();
+    host.parse::<SocketAddr>()
+        .map(|address| address.ip())
+        .or_else(|_| host.trim_start_matches('[').trim_end_matches(']').parse())
+        .ok()
+}
+
+/// Serve one signaling WebSocket through the registry until it ends. `host` is the request's
+/// `Host` header and `ceiling` the highest role the credential behind the connection grants.
 pub async fn serve_signaling(
     registry: Arc<PeerRegistry>,
     ws: WebSocket,
     raddr: String,
+    host: Option<String>,
     ceiling: Option<ClientType>,
 ) {
     let (peer_socket, mut outbox) = socket();
@@ -145,8 +161,32 @@ pub async fn serve_signaling(
         }
     });
     registry
-        .serve(peer_socket, inbound_rx, &raddr, ceiling)
+        .serve(peer_socket, inbound_rx, &raddr, host.as_deref(), ceiling)
         .await;
     reader.abort();
     let _ = writer.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entry_address;
+
+    #[test]
+    fn a_host_header_names_its_address_with_or_without_a_port() {
+        for (host, address) in [
+            ("203.0.113.7:8080", Some("203.0.113.7")),
+            ("203.0.113.7", Some("203.0.113.7")),
+            ("[2001:db8::1]:8080", Some("2001:db8::1")),
+            ("[2001:db8::1]", Some("2001:db8::1")),
+            ("desktop.example.test:8080", None),
+            ("desktop.example.test", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                entry_address(host),
+                address.map(|a| a.parse().unwrap()),
+                "{host}"
+            );
+        }
+    }
 }

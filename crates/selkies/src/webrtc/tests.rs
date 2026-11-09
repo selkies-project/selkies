@@ -800,7 +800,7 @@ async fn signaling_client(
     let (peer_socket, outbox) = socket();
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let registry = registry.clone();
-    tokio::spawn(async move { registry.serve(peer_socket, rx, "test", None).await });
+    tokio::spawn(async move { registry.serve(peer_socket, rx, "test", None, None).await });
     let hello = json!({"client_type": "controller", "client_slot": 1, "display_id": display});
     tx.send(Inbound::Text(format!("HELLO client {hello}")))
         .await
@@ -2424,7 +2424,7 @@ async fn owner_a_reload_still_gathering_keeps_the_display() {
     let registry = rig.service.peer_registry().expect("running");
     let (peer_socket, _outbox) = socket();
     let (tx, rx) = tokio::sync::mpsc::channel(16);
-    tokio::spawn(async move { registry.serve(peer_socket, rx, "test", None).await });
+    tokio::spawn(async move { registry.serve(peer_socket, rx, "test", None, None).await });
     let hello = json!({"client_type": "controller", "client_slot": 1, "display_id": "primary",
                        "client_tab_id": "tab-a"});
     tx.send(Inbound::Text(format!("HELLO client {hello}")))

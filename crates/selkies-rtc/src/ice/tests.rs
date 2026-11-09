@@ -1002,6 +1002,34 @@ async fn late_address_nat1to1_and_port_range() {
     mux.close().await;
 }
 
+#[tokio::test]
+async fn a_peer_s_entry_is_the_public_address_its_host_candidates_advertise() {
+    let mut config = IceConfig {
+        public_ips: vec![
+            "203.0.113.5".parse().unwrap(),
+            "198.51.100.7".parse().unwrap(),
+        ],
+        ..loopback_config(false, false)
+    };
+    let stock = Harness::new(config.clone()).await;
+    assert!(config.prefer_public_ip("198.51.100.7".parse().unwrap()));
+    let entered = Harness::new(config).await;
+    for (server, advertised, why) in [
+        (
+            &stock,
+            "203.0.113.5",
+            "the first address of the family by default",
+        ),
+        (&entered, "198.51.100.7", "the peer's entry once preferred"),
+    ] {
+        let candidates = server.host_candidates();
+        assert!(
+            !candidates.is_empty() && candidates.iter().all(|c| c.host == advertised),
+            "{why}: {candidates:?}"
+        );
+    }
+}
+
 // --- the TCP mux -------------------------------------------------------------------------
 
 /// The browser's side of ICE-TCP: one stream to the passive candidate, RFC 4571 frames.
