@@ -591,9 +591,8 @@ pub fn is_trusted_config_file(path: &Path) -> bool {
     if metadata.uid() != 0 && metadata.uid() != uid {
         warn!(
             target: "webrtc",
-            "RTC config file '{}' is owned by uid {}, not root or the current user ({uid}).",
-            path.display(),
-            metadata.uid()
+            "RTC config file '{}' is owned by neither root nor the user Selkies runs as; refusing to trust it.",
+            path.display()
         );
         return false;
     }

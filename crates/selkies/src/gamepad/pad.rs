@@ -237,8 +237,8 @@ impl Pad {
                 let me = unsafe { libc::geteuid() };
                 if owner != me {
                     error!(target: "gamepad",
-                        "{} belongs to uid {owner}, not this session: gamepads are not served there; point \
-                         js_socket_path at a directory of this user's own.", path.display());
+                        "{} belongs to another account, not this session: gamepads are not served there; \
+                         point js_socket_path at a directory of this user's own.", path.display());
                     return None;
                 }
                 if let Err(e) = std::fs::remove_file(path) {
