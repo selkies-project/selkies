@@ -131,8 +131,17 @@ def drive(res: "H.Results", mode: str) -> None:
                 if not (info and info2):
                     return
                 pages = {"primary": page, "secondary": dpage}
-                rng = random.Random(11)
                 mark = len(H.server_log())
+                # The pages open at 1280x720, the secondary's windowed size. Start both at the
+                # sizes the passes first toggle away from, or the first secondary pass resizes
+                # nothing, and a still screen then sends no new frame.
+                page.set_viewport_size({"width": PRIMARY_SIZES[1][0], "height": PRIMARY_SIZES[1][1]})
+                dpage.set_viewport_size({"width": SECONDARY_SIZES[1][0], "height": SECONDARY_SIZES[1][1]})
+                stalled = streams_advance(pages, mode, STALL_SECONDS)
+                res.check("both streams decode at the sizes the passes start from", not stalled, stalled)
+                if stalled:
+                    return
+                rng = random.Random(11)
                 frozen = None
                 pi = si = 1
                 for i in range(PASSES):
