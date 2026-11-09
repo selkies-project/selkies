@@ -139,6 +139,17 @@ impl Keymap {
         Keymap { syms }
     }
 
+    /// The level one keysym of a keycode, the key as it is without Shift.
+    ///
+    /// # Arguments
+    /// * `keycode` - The keycode as the display server numbers it.
+    pub fn base_keysym(&self, keycode: u32) -> Option<u32> {
+        self.syms
+            .get(&keycode)
+            .map(|(level1, _)| *level1)
+            .filter(|sym| *sym != 0)
+    }
+
     /// Translates a key press into the key the UI handles.
     ///
     /// # Arguments
@@ -327,6 +338,8 @@ xkb_symbols "pc+us" {
         assert_eq!(map.translate(65, false, false), Some(Key::Char(' ')));
         assert_eq!(map.translate(36, false, false), Some(Key::Enter));
         assert_eq!(map.translate(200, false, false), None);
+        assert_eq!(map.base_keysym(24), Some(0x71));
+        assert_eq!(map.base_keysym(200), None);
     }
 
     #[test]

@@ -282,6 +282,21 @@ impl<'a> Canvas<'a> {
             .and_then(|next| next.intersect(&self.clip?));
     }
 
+    /// Runs a drawing restricted to a logical rectangle, intersected with the
+    /// current clip, and puts the clip back as it was after, so a caller's
+    /// own clip survives what it calls.
+    ///
+    /// # Arguments
+    /// * `rect` - The logical rectangle to keep the drawing inside.
+    /// * `draw` - The drawing.
+    pub fn clipped<R>(&mut self, rect: Rect, draw: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.clip;
+        self.clip(rect);
+        let out = draw(self);
+        self.clip = saved;
+        out
+    }
+
     /// Whether the current clip leaves nothing to draw.
     fn clip_empty(&self) -> bool {
         self.clip.is_none()

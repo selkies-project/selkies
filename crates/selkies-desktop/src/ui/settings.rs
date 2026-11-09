@@ -6,6 +6,8 @@
 //! sidebar carries a search field and the pages, grouped under captions:
 //! Appearance (Theme, Colors, Windows, Wallpaper), Workspace (Panel,
 //! Desktops, Shortcuts), Applications (Files, Language) and System (About).
+//! A caption is set small, upper case and dim under a hairline, so it reads
+//! as a heading rather than a page; the page shown is a filled accent pill.
 //! The search field filters the sidebar to the pages whose name or row
 //! titles contain the text, and Enter opens the first match.  The page fills
 //! the rest of the window with captioned cards of rows, each row a name on
@@ -18,13 +20,27 @@
 //! spectrum and a hex field that opens over the page and shows the color on
 //! screen as it is dragged.
 //!
-//! The Theme page shows each scheme and each style as a card with the
-//! desktop rendered as it would look under it, the one in effect ringed
-//! with the accent, and the large live preview below.  A style also sets
-//! the bar's layout and margin and the start menu's layout, which live on
-//! the Panel page.  The Shortcuts page lists what the keyboard does, read
-//! from the file the window manager publishes under the runtime directory
-//! every time the page opens, and the shell's own fixed keys below it.
+//! The Theme and Wallpaper pages pin a live preview above their rows, which
+//! stays in place while the rows scroll.  The Theme page shows each scheme
+//! and each style as a card with the desktop rendered as it would look
+//! under it, the one in effect ringed with the accent; the cards of a group
+//! share one line when they fit.  A style also sets the bar's layout and
+//! margin and the start menu's layout, which live on the Panel page.  The
+//! Wallpaper page's preview is the monitor shown, painted as the desktop
+//! paints it.
+//!
+//! The Shortcuts page edits what the keyboard does.  It lists the binds the
+//! window manager publishes ([`keybinds`]), read again every second while the
+//! page is shown so a change shows once the window manager applied it.  A
+//! click on a bind's keys captures a new chord: the window's next key with
+//! the modifiers held becomes it, a modifier alone only when it is released
+//! with nothing else pressed, Escape cancels and Backspace turns the bind
+//! off.  The chord is written to the user's overrides file, which the window
+//! manager reads, and while the capture runs the window holds the keyboard
+//! where the display server lets it, so a chord the window manager already
+//! binds reaches the window instead of running.  A changed bind has a reset,
+//! two binds on one chord name each other, and a row at the end adds a bind
+//! that runs a command.  The shell's own fixed keys follow.
 //!
 //! The right-click menu of the bar depends on what was clicked
 //! ([`PanelTarget`]): every item offers what hides or configures it, the
@@ -32,19 +48,21 @@
 //! window on the page concerned.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tiny_skia::{Color, PathBuilder, Pixmap};
+use xkeysym::Keysym;
 
 use crate::config::{
     self, BackgroundStyle, ButtonSide, COLOR_KEYS, Config, FILES_KEYS, Glyphs, MenuLayout, PANEL_KEYS,
     Surface, WALLPAPER_KEYS, WINDOW_KEYS, WallpaperMode,
 };
 use crate::desktop::{Desktop, Geometry, Hover, PanelTarget, Popup};
-use crate::event::{Button, Request};
+use crate::event::{Button, Modifiers, Request};
 use crate::geom::Rect;
-use crate::i18n::{self, tr};
+use crate::i18n::{self, tr, trf};
+use crate::keybinds::{self, Published};
 use crate::render::{Align, Canvas, color_to_hsv, hsv_to_color, parse_color};
 use crate::ui::{self, popups, preview};
 use crate::xkb::Key;
@@ -76,7 +94,11 @@ const SEARCH_HEIGHT: i32 = 32;
 /// Height of a page row in the sidebar.
 const NAV_ROW: i32 = 32;
 /// Height of a group caption in the sidebar.
-const NAV_CAPTION: i32 = 26;
+const NAV_CAPTION: i32 = 22;
+/// Space above a sidebar group after the first, its hairline in the middle.
+const NAV_GROUP_GAP: i32 = 17;
+/// Font size of a sidebar group caption.
+const NAV_CAPTION_FONT: f32 = 10.5;
 /// Side of an icon chip.
 const CHIP: i32 = 30;
 /// Height of an application list row.
@@ -121,10 +143,11 @@ const PICKER_MARK: f32 = 6.0;
 const PICKER_HEIGHT: i32 = PICKER_AREA + PICKER_HUE + CONTROL + 4 * PICKER_PAD;
 /// Side of a color swatch.
 const SWATCH: i32 = 22;
-/// Width of a preset card.
-const PRESET_WIDTH: i32 = 200;
-/// Height of a preset card: its preview at the preview's aspect, and its name.
-const PRESET_HEIGHT: i32 = 150;
+/// The least width of a preset card; a group's cards share its line when
+/// they fit at this width.
+const PRESET_MIN_WIDTH: i32 = 110;
+/// The width under which a preset card names itself in the small font.
+const PRESET_SMALL_NAME: i32 = 150;
 /// Inner padding of a preset card.
 const PRESET_PAD: i32 = 8;
 /// Height of the name line under a preset's preview.
@@ -135,6 +158,15 @@ const PRESET_GAP: i32 = 10;
 const KEYCAP: i32 = 24;
 /// Width of the slash between alternative chords.
 const KEYCAP_SLASH: i32 = 12;
+/// Height a shortcut row gains for the line under its description.
+const SHORTCUT_NOTE: i32 = 14;
+/// Height of a note line at the head of a page.
+const NOTE_LINE: i32 = 18;
+/// How often the published shortcuts are read again while the Shortcuts
+/// page is shown.
+const KEYBINDS_POLL: Duration = Duration::from_secs(1);
+/// Side of the mark beside a warning.
+const WARNING_MARK: i32 = 8;
 /// Thickness of an accent mark, which the video stream carries at half
 /// resolution in chroma and so blurs when thinner.
 const ACCENT_STROKE: f32 = 3.0;
@@ -183,13 +215,16 @@ const LANGUAGES: [(&str, &str); 19] = [
 ];
 
 /// The color schemes: the four colors of each, as accent, bar, menus and
-/// text.  Dark, the default, and Light share the sky-blue accent; the
-/// Selkies pair is the brand's violet on deep indigo.
-const SCHEMES: [(&str, [&str; 4]); 4] = [
-    ("Dark", ["#3daee9", "#31363b", "#2a2e32", "#fcfcfc"]),
-    ("Light", ["#3daee9", "#eff0f1", "#fcfcfc", "#232629"]),
+/// text.  Selkies Dark, the default, is the brand's violet on deep indigo,
+/// and Selkies Light its day version; Dark and Light share a sky-blue
+/// accent on neutral grays; Ember is a copper accent on warm charcoal,
+/// dark enough to take white text.
+const SCHEMES: [(&str, [&str; 4]); 5] = [
     ("Selkies Dark", ["#7967c5", "#0a0e17", "#121826", "#eef2f8"]),
     ("Selkies Light", ["#6b5bd6", "#e4e7ee", "#f5f6f9", "#1b2030"]),
+    ("Dark", ["#3daee9", "#31363b", "#2a2e32", "#fcfcfc"]),
+    ("Light", ["#3daee9", "#eff0f1", "#fcfcfc", "#232629"]),
+    ("Ember", ["#b9671b", "#1c1917", "#272220", "#f4ede4"]),
 ];
 
 /// A style: a name and the frame, bar and menu settings it bundles.
@@ -291,8 +326,14 @@ const STYLES: [Style; 3] = [
     },
 ];
 
-/// Space above and below the preview inside its card.
+/// Space above and below a preview inside its card.
 const PREVIEW_PAD: i32 = 10;
+/// Height of the Wallpaper page's preview.
+const WALLPAPER_PREVIEW: i32 = 190;
+/// The mark beside a warning, an amber that reads on dark and light cards.
+fn warning() -> Color {
+    Color::from_rgba8(0xf0, 0xa0, 0x30, 0xff)
+}
 
 /// Preset background colors, true black first.
 const SWATCHES: [&str; 12] = [
@@ -301,18 +342,18 @@ const SWATCHES: [&str; 12] = [
 ];
 /// Preset accent colors, the default first.
 const ACCENTS: [&str; 12] = [
-    "#3daee9", "#7967c5", "#3d7dd6", "#2f9e6e", "#d5499a", "#e0803a", "#d64545", "#8a8f99", "#1fa8b8",
+    "#7967c5", "#3daee9", "#3d7dd6", "#2f9e6e", "#d5499a", "#e0803a", "#d64545", "#8a8f99", "#1fa8b8",
     "#c9a227", "#9d8cf0", "#b56576",
 ];
 /// Preset surface colors for the bar and the menus, the defaults first and
 /// the light ones last.
 const SURFACES: [&str; 12] = [
-    "#31363b", "#2a2e32", "#0a0e17", "#121826", "#000000", "#1d222b", "#2e3440", "#3b2d4a", "#eff0f1",
+    "#0a0e17", "#121826", "#31363b", "#2a2e32", "#000000", "#1d222b", "#2e3440", "#3b2d4a", "#eff0f1",
     "#fcfcfc", "#e4e7ee", "#fdf6e3",
 ];
 /// Preset text colors, the default first and the dark ones last.
 const TEXTS: [&str; 12] = [
-    "#fcfcfc", "#eef2f8", "#ffffff", "#d0d4da", "#b6c0d2", "#f5e6c8", "#c8e6ff", "#93a1a1", "#586e75",
+    "#eef2f8", "#fcfcfc", "#ffffff", "#d0d4da", "#b6c0d2", "#f5e6c8", "#c8e6ff", "#93a1a1", "#586e75",
     "#333333", "#232629", "#111111",
 ];
 
@@ -506,34 +547,6 @@ pub fn search_pages(query: &str) -> Vec<Page> {
         .collect()
 }
 
-/// The shortcuts the window manager publishes, parsed from its file: one
-/// per line, the chord, a tab and the description; lines without a tab or
-/// with either side empty are skipped.
-///
-/// # Arguments
-/// * `text` - The file's text.
-pub fn parse_keybinds(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(chord, description)| (chord.trim(), description.trim()))
-        .filter(|(chord, description)| !chord.is_empty() && !description.is_empty())
-        .map(|(chord, description)| (chord.to_string(), description.to_string()))
-        .collect()
-}
-
-/// The file the window manager publishes its shortcuts in.
-fn keybinds_path() -> Option<PathBuf> {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|dir| !dir.is_empty())
-        .map(|dir| PathBuf::from(dir).join("selkies-wm").join("keybinds"))
-}
-
-/// Reads the published shortcuts; `None` when nothing is published.
-fn read_keybinds() -> Option<Vec<(String, String)>> {
-    let text = std::fs::read_to_string(keybinds_path()?).ok()?;
-    Some(parse_keybinds(&text))
-}
-
 /// The shell's own fixed shortcuts: the chord and what it does.
 fn desktop_shortcuts() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -624,6 +637,30 @@ pub enum Field {
     Color,
     /// One of the interface colors.
     Theme(ThemeColor),
+    /// The command of a shortcut being added.
+    Command,
+}
+
+/// What a captured chord is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CaptureTarget {
+    /// A bind of the window manager's configuration, by the chord the
+    /// configuration gives it.
+    Rebind(String),
+    /// A bind of the user's that runs a command, by its chord and command.
+    Custom { spec: String, command: String },
+    /// The bind being added for the command typed.
+    Add,
+}
+
+/// A shortcut being captured from the keyboard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capture {
+    /// What the chord is for.
+    pub target: CaptureTarget,
+    /// A modifier pressed while nothing else was held, which becomes the
+    /// chord itself if it is released before anything else is pressed.
+    held: Option<u32>,
 }
 
 /// What clicking a control or a menu item does.
@@ -667,6 +704,13 @@ enum Action {
     Hue,
     /// Press on the picker's saturation and value square.
     Area,
+    /// Capture a chord for a shortcut from the keyboard.
+    Capture(CaptureTarget),
+    /// Put a bind back on the chord its configuration gives it, by that
+    /// chord.
+    ResetBind(String),
+    /// Remove a bind of the user's that runs a command.
+    RemoveCustom { spec: String, command: String },
 }
 
 /// How a control is drawn.
@@ -699,6 +743,9 @@ enum Kind {
     ColorArea,
     /// A preset card: a rendered preview of its look over its name.
     Preset,
+    /// A shortcut's chord as key caps, which a click captures anew; the
+    /// label is the chord's label, empty for a bind turned off.
+    Keys,
 }
 
 /// One clickable thing in the window.
@@ -718,14 +765,28 @@ struct Control {
     clip: Option<Rect>,
 }
 
-/// A piece of text in the page: a group caption, a row's name or a value
-/// shown at a row's right.
+/// How a piece of text in the page is set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    /// A row's name.
+    Name,
+    /// A group's caption, bold and dim.
+    Caption,
+    /// A value at a row's right, dim and flush right.
+    Value,
+    /// A line under a row's name, small and dim.
+    Hint,
+    /// A line under a row's name warning of something, small beside a mark.
+    Warning,
+    /// A paragraph at the head of a page, dim and wrapped over two lines.
+    Note,
+}
+
+/// A piece of text in the page.
 struct Text {
     rect: Rect,
     text: String,
-    caption: bool,
-    /// Whether the text is a value, set dim and flush right.
-    value: bool,
+    tone: Tone,
 }
 
 /// A key cap on the Shortcuts page, or the slash between alternatives.
@@ -752,12 +813,15 @@ struct Layout {
     texts: Vec<Text>,
     /// The group captions of the sidebar.
     nav_texts: Vec<Text>,
+    /// The hairlines above the sidebar's groups.
+    nav_lines: Vec<Rect>,
     /// Card backgrounds.
     cards: Vec<Rect>,
     /// Hairlines between rows.
     lines: Vec<Rect>,
-    /// Where the theme preview is drawn, when the page has it.
-    previews: Vec<Rect>,
+    /// The card of the preview pinned above the page's rows, when the page
+    /// has one.
+    pinned: Option<Rect>,
     /// The key caps of the Shortcuts page.
     caps: Vec<Cap>,
     /// Height of the page's content before scrolling.
@@ -813,7 +877,14 @@ pub struct SettingsState {
     pub bar_drag: Option<f64>,
     /// The window manager's shortcuts as last read; `None` when none are
     /// published.
-    pub keybinds: Option<Vec<(String, String)>>,
+    pub keybinds: Option<Published>,
+    /// When the published shortcuts are read next while the Shortcuts page
+    /// is shown.
+    poll_at: Option<Instant>,
+    /// The shortcut being captured from the keyboard, if any.
+    pub capture: Option<Capture>,
+    /// The command of the shortcut being added.
+    pub command: String,
     /// The preset cards' previews, by the look and scale they were rendered
     /// for.
     presets: HashMap<String, Arc<Pixmap>>,
@@ -859,6 +930,9 @@ impl Default for SettingsState {
             picker: None,
             bar_drag: None,
             keybinds: None,
+            poll_at: None,
+            capture: None,
+            command: String::new(),
             presets: HashMap::new(),
         }
     }
@@ -883,7 +957,10 @@ impl SettingsState {
         self.picker = None;
         self.bar_drag = None;
         self.pointer = (-1.0, -1.0);
-        self.keybinds = read_keybinds();
+        self.keybinds = keybinds::read_published();
+        self.poll_at = Some(Instant::now() + KEYBINDS_POLL);
+        self.capture = None;
+        self.command.clear();
         self.dirty = true;
     }
 
@@ -898,6 +975,30 @@ impl SettingsState {
         self.drag = None;
         self.picker = None;
         self.bar_drag = None;
+        self.capture = None;
+        self.poll_at = None;
+    }
+
+    /// Whether the window shows the Shortcuts page, whose shortcuts are
+    /// read again every second.
+    fn polls_keybinds(&self) -> bool {
+        self.id.is_some() && self.page == Page::Shortcuts && self.picking.is_none()
+    }
+
+    /// When the published shortcuts are next read, while the window shows
+    /// the Shortcuts page.
+    pub fn next_poll(&self) -> Option<Instant> {
+        self.poll_at.filter(|_| self.polls_keybinds())
+    }
+
+    /// Reads the published shortcuts again, marking the window for drawing
+    /// when they changed.
+    fn reread_keybinds(&mut self) {
+        let fresh = keybinds::read_published();
+        if fresh != self.keybinds {
+            self.keybinds = fresh;
+            self.dirty = true;
+        }
     }
 
     /// Whether a slider, a part of the color picker or the scrollbar is
@@ -1236,6 +1337,24 @@ fn page_rect_in(frame: Rect) -> Rect {
     Rect::new(x, y, frame.right() - PAD - ui::SCROLLBAR - x, bottom - y)
 }
 
+/// Height of what a view pins above its scrolled rows, with the gap under
+/// it: the Theme and Wallpaper pages' previews.
+fn pinned_height(view: View) -> i32 {
+    match view {
+        View::Page(Page::Theme) => preview::HEIGHT + 2 * PREVIEW_PAD + GROUP_GAP,
+        View::Page(Page::Wallpaper) => WALLPAPER_PREVIEW + 2 * PREVIEW_PAD + GROUP_GAP,
+        _ => 0,
+    }
+}
+
+/// The part of the page area that scrolls, for a frame: the page area
+/// below what the view pins.
+fn scroll_rect_in(frame: Rect, view: View) -> Rect {
+    let page = page_rect_in(frame);
+    let top = pinned_height(view).min(page.h);
+    Rect::new(page.x, page.y + top, page.w, page.h - top)
+}
+
 /// The wallpaper the page shows: the monitor's, or the shared one.
 fn shown_wallpaper(d: &Desktop) -> config::Wallpaper {
     match d.settings.monitor {
@@ -1261,6 +1380,7 @@ fn field_text(d: &Desktop, field: Field) -> String {
     }
     match field {
         Field::Search => String::new(),
+        Field::Command => d.settings.command.clone(),
         Field::ClockFormat => d.config.clock_format.clone(),
         Field::StartIcon => d.config.start_icon.clone().unwrap_or_default(),
         Field::StartLabel => d.config.start_label.clone().unwrap_or_default(),
@@ -1278,9 +1398,12 @@ fn field_color(d: &Desktop, field: Field) -> Color {
     match field {
         Field::Color => shown_wallpaper(d).color,
         Field::Theme(color) => color.current(d.config.theme),
-        Field::Search | Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => {
-            Color::BLACK
-        }
+        Field::Search
+        | Field::ClockFormat
+        | Field::StartIcon
+        | Field::StartLabel
+        | Field::Image
+        | Field::Command => Color::BLACK,
     }
 }
 
@@ -1375,6 +1498,7 @@ fn preset_name(name: &str) -> &'static str {
         "Light" => tr("Light"),
         "Selkies Dark" => tr("Selkies Dark"),
         "Selkies Light" => tr("Selkies Light"),
+        "Ember" => tr("Ember"),
         "Linux" => tr("Linux"),
         "Fruit" => tr("Fruit"),
         _ => tr("Redmond"),
@@ -1483,8 +1607,7 @@ impl Groups<'_> {
         self.out.texts.push(Text {
             rect: Rect::new(self.x + CARD_PAD, self.y, self.width - 2 * CARD_PAD, CAPTION),
             text: caption.to_string(),
-            caption: true,
-            value: false,
+            tone: Tone::Caption,
         });
         self.y += CAPTION;
         self.card_top = Some(self.y);
@@ -1529,8 +1652,7 @@ impl Groups<'_> {
             self.out.texts.push(Text {
                 rect: Rect::new(inner_x, self.y, TITLE_WIDTH - 8, ROW),
                 text: title.to_string(),
-                caption: false,
-                value: false,
+                tone: Tone::Name,
             });
         }
         let area = Rect::new(inner_x + TITLE_WIDTH, self.y, inner_w - TITLE_WIDTH, height);
@@ -1696,38 +1818,49 @@ impl Groups<'_> {
         self.push(Kind::Button, rect, Action::Pick(key), "+", false);
     }
 
-    /// Adds a row holding the theme preview, as tall as it needs.
-    fn preview(&mut self) {
-        self.begin_row();
-        let height = preview::HEIGHT + 2 * PREVIEW_PAD;
-        self.out.previews.push(Rect::new(
-            self.x + CARD_PAD,
-            self.y,
-            self.width - 2 * CARD_PAD,
-            height,
-        ));
-        self.y += height;
-    }
-
-    /// Adds the preset cards of a group, as many per line as fit.
+    /// Adds the preset cards of a group: on one line, sharing its width,
+    /// when they fit there at the least width, else as many a line as fit.
+    /// A card is its look's preview at the preview's aspect over its name.
     fn presets(&mut self, cards: Vec<PresetCard>) {
         self.begin_row();
         let inner_x = self.x + CARD_PAD;
         let inner_w = self.width - 2 * CARD_PAD;
-        let columns = ((inner_w + PRESET_GAP) / (PRESET_WIDTH + PRESET_GAP)).max(1) as usize;
+        let fit = ((inner_w + PRESET_GAP) / (PRESET_MIN_WIDTH + PRESET_GAP)).max(1) as usize;
+        let columns = cards.len().clamp(1, fit);
+        let width = (inner_w - (columns as i32 - 1) * PRESET_GAP) / columns as i32;
+        let image_h = (width - 2 * PRESET_PAD) * preview::HEIGHT / preview::WIDTH;
+        let height = image_h + 2 * PRESET_PAD + PRESET_NAME;
         let lines = cards.len().div_ceil(columns).max(1) as i32;
         for (i, card) in cards.into_iter().enumerate() {
             let (col, line) = ((i % columns) as i32, (i / columns) as i32);
             let rect = Rect::new(
-                inner_x + col * (PRESET_WIDTH + PRESET_GAP),
-                self.y + PRESET_GAP + line * (PRESET_HEIGHT + PRESET_GAP),
-                PRESET_WIDTH,
-                PRESET_HEIGHT,
+                inner_x + col * (width + PRESET_GAP),
+                self.y + PRESET_GAP + line * (height + PRESET_GAP),
+                width,
+                height,
             );
             self.push(Kind::Preset, rect, card.action, &card.name, card.active)
                 .look = Some(card.look);
         }
-        self.y += PRESET_GAP + lines * (PRESET_HEIGHT + PRESET_GAP);
+        self.y += PRESET_GAP + lines * (height + PRESET_GAP);
+    }
+
+    /// Adds a paragraph at the head of the page, outside any card, over two
+    /// lines.
+    fn note(&mut self, text: &str) {
+        self.finish();
+        self.started = true;
+        self.out.texts.push(Text {
+            rect: Rect::new(
+                self.x + CARD_PAD,
+                self.y,
+                self.width - 2 * CARD_PAD,
+                2 * NOTE_LINE,
+            ),
+            text: text.to_string(),
+            tone: Tone::Note,
+        });
+        self.y += 2 * NOTE_LINE;
     }
 
     /// Adds a row with one flat button at its right.
@@ -1738,58 +1871,237 @@ impl Groups<'_> {
         self.push(Kind::Button, rect, action, label, false);
     }
 
-    /// Adds a row showing a value at its right, which nothing changes.
+    /// Adds a row showing a value at its right, which nothing changes; a row
+    /// without a value gives its name the whole width.
     fn info(&mut self, title: &str, value: &str) {
         let area = self.row(title, 1);
+        if value.is_empty() {
+            if !title.is_empty()
+                && let Some(name) = self.out.texts.last_mut()
+            {
+                name.rect.w = area.right() - name.rect.x;
+            }
+            return;
+        }
         self.out.texts.push(Text {
             rect: area,
             text: value.to_string(),
-            caption: false,
-            value: true,
+            tone: Tone::Value,
         });
     }
 
-    /// Adds a shortcut row: the description at the left over the whole
-    /// width the chord leaves it, and the chord's keys as caps at the
-    /// right, alternatives separated by a slash.
-    fn shortcut(&mut self, description: &str, chord: &str) {
+    /// Adds a shortcut row: the description at the left over the width the
+    /// chord leaves it, a line under it when the row has one, and at the
+    /// right the chord's keys as caps, alternatives separated by a slash,
+    /// with the row's buttons before them.  A row that can be captured
+    /// anew has its caps as one control, which shows the prompt while it
+    /// captures.
+    fn shortcut(&mut self, row: ShortcutRow<'_>) {
         self.begin_row();
         let inner_x = self.x + CARD_PAD;
         let inner_w = self.width - 2 * CARD_PAD;
-        let mut caps: Vec<(String, bool)> = Vec::new();
-        for (i, alternative) in chord.split(" / ").enumerate() {
-            if i > 0 {
-                caps.push(("/".to_string(), false));
+        let height = if row.note.is_some() {
+            ROW + SHORTCUT_NOTE
+        } else {
+            ROW
+        };
+        let cap_y = self.y + (height - KEYCAP) / 2;
+        let mut right = inner_x + inner_w;
+        match &row.capture {
+            Some(target) => {
+                let capturing = row.capturing;
+                let width = if capturing {
+                    chip_width(tr("Press a key combination…"))
+                } else if row.chord.is_empty() {
+                    chip_width(tr("Off"))
+                } else {
+                    caps_width(&row.chord)
+                };
+                let rect = Rect::new(right - width - 8, cap_y - 2, width + 8, KEYCAP + 4);
+                self.push(
+                    Kind::Keys,
+                    rect,
+                    Action::Capture(target.clone()),
+                    &row.chord,
+                    capturing,
+                );
+                right = rect.x;
             }
-            for key in alternative.split('+').map(str::trim).filter(|k| !k.is_empty()) {
-                caps.push((key.to_string(), true));
+            None => {
+                let total = caps_width(&row.chord);
+                let mut x = right - total;
+                for (text, key) in caps_of(&row.chord) {
+                    let w = cap_width(&text, key);
+                    self.out.caps.push(Cap {
+                        rect: Rect::new(x, cap_y, w, KEYCAP),
+                        text,
+                        key,
+                    });
+                    x += w + GAP;
+                }
+                right -= total;
             }
         }
-        let widths: Vec<i32> = caps
-            .iter()
-            .map(
-                |(text, key)| {
-                    if *key { chip_width(text) - 10 } else { KEYCAP_SLASH }
-                },
-            )
-            .collect();
-        let total: i32 = widths.iter().sum::<i32>() + GAP * (widths.len() as i32 - 1).max(0);
-        let mut x = inner_x + inner_w - total;
-        for ((text, key), w) in caps.into_iter().zip(widths) {
-            self.out.caps.push(Cap {
-                rect: Rect::new(x, self.y + (ROW - KEYCAP) / 2, w, KEYCAP),
-                text,
-                key,
-            });
-            x += w + GAP;
+        for (label, action) in row.buttons.into_iter().rev() {
+            let w = chip_width(label);
+            let rect = Rect::new(right - GAP - w, self.y + (height - CONTROL) / 2, w, CONTROL);
+            self.push(Kind::Button, rect, action, label, false);
+            right = rect.x;
         }
+        let text_w = (right - 12 - inner_x).max(40);
+        let name_h = if row.note.is_some() { ROW - 12 } else { ROW };
         self.out.texts.push(Text {
-            rect: Rect::new(inner_x, self.y, (inner_w - total - 12).max(40), ROW),
-            text: description.to_string(),
-            caption: false,
-            value: false,
+            rect: Rect::new(inner_x, self.y, text_w, name_h),
+            text: row.description.to_string(),
+            tone: Tone::Name,
         });
-        self.y += ROW;
+        if let Some((note, tone)) = row.note {
+            self.out.texts.push(Text {
+                rect: Rect::new(inner_x, self.y + ROW - 20, text_w, 22),
+                text: note,
+                tone,
+            });
+        }
+        self.y += height;
+    }
+}
+
+/// A shortcut row to lay out.
+struct ShortcutRow<'a> {
+    /// What the shortcut does.
+    description: &'a str,
+    /// The chord's label, alternatives separated by ` / `; empty for a bind
+    /// turned off.
+    chord: String,
+    /// What a click on the keys captures a chord for, when they can be
+    /// changed.
+    capture: Option<CaptureTarget>,
+    /// Whether the keys are being captured now.
+    capturing: bool,
+    /// The buttons before the keys.
+    buttons: Vec<(&'static str, Action)>,
+    /// The line under the description, and how it is set.
+    note: Option<(String, Tone)>,
+}
+
+impl<'a> ShortcutRow<'a> {
+    /// A row that only shows its chord.
+    fn fixed(description: &'a str, chord: &'a str) -> ShortcutRow<'a> {
+        ShortcutRow {
+            description,
+            chord: chord.to_string(),
+            capture: None,
+            capturing: false,
+            buttons: Vec::new(),
+            note: None,
+        }
+    }
+}
+
+/// The caps of a chord's label: each key, and a slash between alternatives.
+fn caps_of(chord: &str) -> Vec<(String, bool)> {
+    let mut caps = Vec::new();
+    for (i, alternative) in chord.split(" / ").enumerate() {
+        if i > 0 {
+            caps.push(("/".to_string(), false));
+        }
+        caps.extend(
+            keybinds::label_keys(alternative)
+                .into_iter()
+                .map(|key| (key, true)),
+        );
+    }
+    caps
+}
+
+/// Width of one cap, or of the slash between alternatives.
+fn cap_width(text: &str, key: bool) -> i32 {
+    if key { chip_width(text) - 10 } else { KEYCAP_SLASH }
+}
+
+/// Width the caps of a chord's label take with the gaps between them.
+fn caps_width(chord: &str) -> i32 {
+    let caps = caps_of(chord);
+    let widths: i32 = caps.iter().map(|(text, key)| cap_width(text, *key)).sum();
+    widths + GAP * (caps.len() as i32 - 1).max(0)
+}
+
+/// Whether a chord is being captured for a target.
+fn capturing(d: &Desktop, target: &CaptureTarget) -> bool {
+    d.settings.capture.as_ref().is_some_and(|c| &c.target == target)
+}
+
+/// The rows of the window manager's shortcuts: every bind of its
+/// configuration, then the user's command binds.  A changed bind offers a
+/// reset and a command bind its removal; a row whose chord another holds
+/// names that one, and the row being captured says how to cancel.
+///
+/// # Arguments
+/// * `published` - The shortcuts the window manager publishes.
+/// * `capture` - The capture running, if any.
+fn shortcut_rows<'a>(published: &'a Published, capture: Option<&Capture>) -> Vec<ShortcutRow<'a>> {
+    let note = |spec: &str, own: &str, capturing: bool| {
+        if capturing {
+            return Some((
+                tr("Escape cancels, Backspace turns the shortcut off").to_string(),
+                Tone::Hint,
+            ));
+        }
+        let others = published.others_on(spec, own);
+        (!others.is_empty()).then(|| {
+            (
+                trf("Also used by {name}", &[("name", &others.join(", "))]),
+                Tone::Warning,
+            )
+        })
+    };
+    let is_capturing = |target: &CaptureTarget| capture.is_some_and(|c| &c.target == target);
+    let mut rows = Vec::new();
+    for bind in &published.binds {
+        let target = CaptureTarget::Rebind(bind.origin.clone());
+        let capturing = is_capturing(&target);
+        let mut buttons = Vec::new();
+        if bind.changed() {
+            buttons.push((tr("Reset"), Action::ResetBind(bind.origin.clone())));
+        }
+        rows.push(ShortcutRow {
+            description: &bind.description,
+            chord: chord_label(&bind.spec, &bind.label),
+            note: note(&bind.spec, &bind.description, capturing),
+            capture: Some(target),
+            capturing,
+            buttons,
+        });
+    }
+    for custom in &published.custom {
+        let target = CaptureTarget::Custom {
+            spec: custom.spec.clone(),
+            command: custom.command.clone(),
+        };
+        let capturing = is_capturing(&target);
+        let remove = Action::RemoveCustom {
+            spec: custom.spec.clone(),
+            command: custom.command.clone(),
+        };
+        rows.push(ShortcutRow {
+            description: &custom.command,
+            chord: chord_label(&custom.spec, &custom.label),
+            note: note(&custom.spec, &custom.command, capturing),
+            capture: Some(target),
+            capturing,
+            buttons: vec![(tr("Remove"), remove)],
+        });
+    }
+    rows
+}
+
+/// The label a shortcut row shows for a chord: the one the window manager
+/// published, else one made from the chord; empty for a bind turned off.
+fn chord_label(spec: &str, published: &str) -> String {
+    match (spec.is_empty(), published.is_empty()) {
+        (true, _) => String::new(),
+        (false, true) => keybinds::label(spec),
+        (false, false) => published.to_string(),
     }
 }
 
@@ -1808,7 +2120,7 @@ fn layout(d: &Desktop) -> Layout {
 fn scrollbar(d: &Desktop) -> Option<ui::Scrollbar> {
     let frame = frame(d);
     let content = build(d, frame, 0.0, view(d)).content;
-    let page = page_rect_in(frame);
+    let page = scroll_rect_in(frame, view(d));
     let gutter = Rect::new(page.x, page.y, page.w + ui::SCROLLBAR, page.h);
     ui::Scrollbar::new(gutter, content, d.settings.scroll)
 }
@@ -1836,17 +2148,23 @@ fn build_sidebar(d: &Desktop, frame: Rect, out: &mut Layout) {
         Kind::Text,
     ));
     let pages = search_pages(&d.settings.search);
-    let mut y = search.bottom() + PAD;
+    let mut y = search.bottom() + PAD - 4;
+    let mut first = true;
     for group in Group::ALL {
         let members: Vec<Page> = pages.iter().copied().filter(|p| p.group() == group).collect();
         if members.is_empty() {
             continue;
         }
+        if !first {
+            out.nav_lines
+                .push(Rect::new(search.x + 6, y + NAV_GROUP_GAP / 2, search.w - 12, 1));
+            y += NAV_GROUP_GAP;
+        }
+        first = false;
         out.nav_texts.push(Text {
-            rect: Rect::new(search.x + 10, y, search.w - 20, NAV_CAPTION),
-            text: group.name().to_string(),
-            caption: true,
-            value: false,
+            rect: Rect::new(search.x + 12, y, search.w - 24, NAV_CAPTION),
+            text: group.name().to_uppercase(),
+            tone: Tone::Caption,
         });
         y += NAV_CAPTION;
         for page in members {
@@ -1857,9 +2175,8 @@ fn build_sidebar(d: &Desktop, frame: Rect, out: &mut Layout) {
                 d.settings.page == page,
                 Kind::Nav,
             ));
-            y += NAV_ROW;
+            y += NAV_ROW + 2;
         }
-        y += GAP;
     }
 }
 
@@ -1871,8 +2188,13 @@ fn build_sidebar(d: &Desktop, frame: Rect, out: &mut Layout) {
 /// * `scroll` - How far the page is scrolled.
 /// * `view` - The page or the application list laid out.
 fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
-    let page = page_rect_in(frame);
+    let page = scroll_rect_in(frame, view);
     let mut out = Layout::default();
+    let pinned = pinned_height(view);
+    if pinned > 0 {
+        let area = page_rect_in(frame);
+        out.pinned = Some(Rect::new(area.x, area.y, area.w, pinned - GROUP_GAP));
+    }
     build_sidebar(d, frame, &mut out);
     let footer = |label: &str, action: Action| Control {
         rect: Rect::new(
@@ -1901,8 +2223,7 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
         out.texts.push(Text {
             rect: Rect::new(page.x + CARD_PAD, page.y, page.w - 2 * CARD_PAD, CAPTION),
             text: title.to_string(),
-            caption: true,
-            value: false,
+            tone: Tone::Caption,
         });
         let list = Rect::new(page.x, page.y + CAPTION, page.w, page.h - CAPTION);
         out.cards.push(list);
@@ -2044,18 +2365,40 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
             );
         }
         Page::Shortcuts => {
+            groups.note(tr(
+                "Combinations your browser or operating system take for themselves never reach the desktop; pick another combination for those.",
+            ));
             groups.group(tr("Window manager"));
             match &d.settings.keybinds {
-                Some(binds) if !binds.is_empty() => {
-                    for (chord, description) in binds {
-                        groups.shortcut(description, chord);
+                Some(published) => {
+                    if published.binds.is_empty() && published.custom.is_empty() {
+                        groups.info(tr("No shortcuts published"), "");
+                    }
+                    for row in shortcut_rows(published, d.settings.capture.as_ref()) {
+                        groups.shortcut(row);
+                    }
+                    let adding = capturing(d, &CaptureTarget::Add);
+                    let label = if adding {
+                        tr("Press a key combination…")
+                    } else {
+                        tr("Choose keys…")
+                    };
+                    groups.field(
+                        tr("Add shortcut"),
+                        Field::Command,
+                        field_text(d, Field::Command),
+                        focus == Some(Field::Command),
+                        &[(label, Action::Capture(CaptureTarget::Add))],
+                    );
+                    if let Some(button) = groups.out.controls.last_mut() {
+                        button.active = adding;
                     }
                 }
-                _ => groups.info(tr("No shortcuts published"), ""),
+                None => groups.info(tr("No shortcuts published"), ""),
             }
             groups.group(tr("Desktop"));
             for (chord, description) in desktop_shortcuts() {
-                groups.shortcut(description, chord);
+                groups.shortcut(ShortcutRow::fixed(description, chord));
             }
         }
         Page::Files => {
@@ -2219,8 +2562,6 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                 })
                 .collect();
             groups.presets(styles);
-            groups.group(tr("Preview"));
-            groups.preview();
         }
         Page::Colors => {
             groups.group(tr("Colors"));
@@ -2430,10 +2771,14 @@ fn cross_path(rect: Rect, reach: f32) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
-/// Draws a flat button: a tonal pill with its label.
+/// Draws a flat button: a tonal pill with its label, ringed with the accent
+/// while what it started runs.
 fn draw_button(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
     let rect = control.rect;
     canvas.fill_rounded(rect, 7.0, ui::text_alpha(if hovered { 0x2a } else { 0x16 }));
+    if control.active {
+        canvas.stroke_rounded(rect, 7.0, ACCENT_STROKE, ui::accent());
+    }
     ui::label(
         canvas,
         &mut d.fonts,
@@ -2447,7 +2792,8 @@ fn draw_button(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
 }
 
 /// Draws a text field with its caret when focused.  An empty field shows
-/// what it is for: the search field its prompt, the others `none`.
+/// what it is for: the search field its prompt, the command of a shortcut
+/// being added that it takes one, the others `none`.
 fn draw_field(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
     let rect = control.rect;
     canvas.fill_rounded(rect, 7.0, ui::text_alpha(0x10));
@@ -2461,10 +2807,10 @@ fn draw_field(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hover
     let text_rect = Rect::new(rect.x + 8, rect.y, rect.w - 16, rect.h);
     let empty = control.label.is_empty();
     let shown = if empty && !control.active {
-        if control.action == Action::Focus(Field::Search) {
-            tr("Search settings").to_string()
-        } else {
-            "none".to_string()
+        match control.action {
+            Action::Focus(Field::Search) => tr("Search settings").to_string(),
+            Action::Focus(Field::Command) => tr("Command").to_string(),
+            _ => "none".to_string(),
         }
     } else {
         control.label.clone()
@@ -2620,10 +2966,12 @@ fn draw_slider(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
     );
 }
 
-/// The rendered preview of a look at a scale, from the cache or drawn now.
-fn preset_image(d: &mut Desktop, look: &preview::Look, scale: i32) -> Option<Arc<Pixmap>> {
+/// The rendered preview of a look at a scale, shrunk to a width in
+/// pixels, from the cache or drawn now.  The shrink filters the whole
+/// image, which drawing it scaled down would only sample.
+fn preset_image(d: &mut Desktop, look: &preview::Look, scale: i32, width: u32) -> Option<Arc<Pixmap>> {
     let key = format!(
-        "{}{}{}{}:{:?}:{}:{}:{:?}:{scale}",
+        "{}{}{}{}:{:?}:{}:{}:{:?}:{scale}:{width}",
         hex(look.theme.accent),
         hex(look.theme.panel),
         hex(look.theme.popup),
@@ -2636,7 +2984,8 @@ fn preset_image(d: &mut Desktop, look: &preview::Look, scale: i32) -> Option<Arc
     if let Some(image) = d.settings.presets.get(&key) {
         return Some(image.clone());
     }
-    let image = Arc::new(preview::render(d, look, scale)?);
+    let full = preview::render(d, look, scale)?;
+    let image = Arc::new(crate::render::resize_pixmap(&full, width.clamp(1, full.width()))?);
     if d.settings.presets.len() >= 32 {
         d.settings.presets.clear();
     }
@@ -2660,8 +3009,9 @@ fn draw_preset(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
         rect.h - 2 * PRESET_PAD - PRESET_NAME,
     );
     let scale = canvas.scale();
+    let width = (image_rect.w * scale).max(1) as u32;
     if let Some(look) = &control.look
-        && let Some(image) = preset_image(d, look, scale)
+        && let Some(image) = preset_image(d, look, scale, width)
     {
         canvas.clip(image_rect);
         canvas.draw_image_fit(&image, image_rect);
@@ -2681,7 +3031,11 @@ fn draw_preset(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
             rect.w - 2 * PRESET_PAD,
             PRESET_NAME,
         ),
-        ui::FONT_SIZE,
+        if rect.w < PRESET_SMALL_NAME {
+            ui::FONT_SMALL
+        } else {
+            ui::FONT_SIZE
+        },
         control.active,
         Align::Center,
         ui::text(),
@@ -2690,6 +3044,57 @@ fn draw_preset(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
         canvas.stroke_rounded(rect, CARD_RADIUS, ACCENT_STROKE, ui::accent());
     } else if hovered {
         canvas.stroke_rounded(rect, CARD_RADIUS, 1.0, ui::text_dim());
+    }
+}
+
+/// Draws a shortcut's chord that a click captures anew: its caps flush
+/// right on a hover highlight, `Off` for a bind turned off, and while it
+/// captures the prompt in a field ringed with the accent.
+fn draw_keys(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
+    let rect = control.rect;
+    if control.active {
+        canvas.fill_rounded(rect, 7.0, ui::text_alpha(0x10));
+        canvas.stroke_rounded(rect, 7.0, ACCENT_STROKE, ui::accent());
+        ui::label(
+            canvas,
+            &mut d.fonts,
+            tr("Press a key combination…"),
+            Rect::new(rect.x + 6, rect.y, rect.w - 12, rect.h),
+            ui::FONT_SMALL,
+            false,
+            Align::Center,
+            ui::text(),
+        );
+        return;
+    }
+    if hovered {
+        canvas.fill_rounded(rect, 7.0, ui::hover_bg());
+    }
+    let inner = Rect::new(rect.x + 4, rect.y + 2, rect.w - 8, KEYCAP);
+    if control.label.is_empty() {
+        canvas.stroke_rounded(inner, 5.0, 1.0, ui::popup_border());
+        ui::label(
+            canvas,
+            &mut d.fonts,
+            tr("Off"),
+            inner,
+            ui::FONT_SMALL,
+            false,
+            Align::Center,
+            ui::text_dim(),
+        );
+        return;
+    }
+    let mut x = inner.right() - caps_width(&control.label);
+    for (text, key) in caps_of(&control.label) {
+        let w = cap_width(&text, key);
+        let cap = Cap {
+            rect: Rect::new(x, inner.y, w, KEYCAP),
+            text,
+            key,
+        };
+        draw_cap(d, canvas, &cap);
+        x += w + GAP;
     }
 }
 
@@ -2717,14 +3122,9 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
     match control.kind {
         Kind::Nav => {
             if control.active {
-                canvas.fill_rounded(rect, 6.0, ui::active_bg());
-                canvas.fill_rounded(
-                    Rect::new(rect.x, rect.y + 7, ACCENT_STROKE as i32, rect.h - 14),
-                    ACCENT_STROKE / 2.0,
-                    ui::accent(),
-                );
+                canvas.fill_rounded(rect, 7.0, ui::accent());
             } else if hovered {
-                canvas.fill_rounded(rect, 6.0, ui::hover_bg());
+                canvas.fill_rounded(rect, 7.0, ui::hover_bg());
             }
             ui::label(
                 canvas,
@@ -2734,9 +3134,14 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
                 ui::FONT_SIZE,
                 control.active,
                 Align::Left,
-                ui::text(),
+                if control.active {
+                    ui::on_accent()
+                } else {
+                    ui::text()
+                },
             );
         }
+        Kind::Keys => draw_keys(d, canvas, control, hovered),
         Kind::AppRow => {
             if hovered {
                 canvas.fill_rounded(rect, 5.0, ui::hover_bg());
@@ -2880,7 +3285,7 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
 pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
     sync_picker(d);
     let frame = frame(d);
-    let page = page_rect_in(frame);
+    let page = scroll_rect_in(frame, view(d));
     canvas.fill_rect(frame, ui::popup_bg());
     canvas.fill_rect(
         Rect::new(frame.x, frame.y, SIDEBAR, frame.h),
@@ -2894,17 +3299,23 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
             draw_control(d, canvas, control, d.hover == Hover::Control(index));
         }
     }
+    for line in &layout.nav_lines {
+        canvas.fill_rect(*line, ui::separator());
+    }
     for text in &layout.nav_texts {
         ui::label(
             canvas,
             &mut d.fonts,
             &text.text,
             text.rect,
-            ui::FONT_SMALL,
+            NAV_CAPTION_FONT,
             true,
             Align::Left,
-            ui::text_dim(),
+            ui::text_alpha(0x8c),
         );
+    }
+    if let Some(card) = layout.pinned {
+        draw_pinned(d, canvas, card);
     }
     canvas.clip(page);
     for card in &layout.cards {
@@ -2913,26 +3324,8 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
     for line in &layout.lines {
         canvas.fill_rect(*line, ui::separator());
     }
-    for area in &layout.previews {
-        if area.bottom() > page.y && area.y < page.bottom() {
-            preview::draw(d, canvas, *area, page);
-        }
-    }
     for text in &layout.texts {
-        ui::label(
-            canvas,
-            &mut d.fonts,
-            &text.text,
-            text.rect,
-            ui::FONT_SIZE,
-            text.caption,
-            if text.value { Align::Right } else { Align::Left },
-            if text.caption || text.value {
-                ui::text_dim()
-            } else {
-                ui::text()
-            },
-        );
+        draw_text(d, canvas, text);
     }
     for cap in &layout.caps {
         draw_cap(d, canvas, cap);
@@ -2958,6 +3351,106 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
             draw_control(d, canvas, control, d.hover == Hover::Control(index));
         }
     }
+}
+
+/// Draws the preview a page pins above its rows in its card: the live
+/// look on the Theme page, the monitor shown on the Wallpaper page.
+fn draw_pinned(d: &mut Desktop, canvas: &mut Canvas<'_>, card: Rect) {
+    canvas.fill_rounded(card, CARD_RADIUS, ui::field_bg());
+    let area = Rect::new(
+        card.x + CARD_PAD,
+        card.y + PREVIEW_PAD,
+        card.w - 2 * CARD_PAD,
+        card.h - 2 * PREVIEW_PAD,
+    );
+    canvas.clip(card);
+    match d.settings.page {
+        Page::Wallpaper => {
+            let wallpaper = shown_wallpaper(d);
+            let monitor = d.settings.monitor;
+            preview::draw_monitor(d, canvas, area, &wallpaper, monitor);
+        }
+        _ => preview::draw(d, canvas, area, card),
+    }
+    canvas.reset_clip();
+}
+
+/// Draws a piece of the page's text as its tone sets it.
+fn draw_text(d: &mut Desktop, canvas: &mut Canvas<'_>, text: &Text) {
+    let (size, bold, align, color) = match text.tone {
+        Tone::Name => (ui::FONT_SIZE, false, Align::Left, ui::text()),
+        Tone::Caption => (ui::FONT_SIZE, true, Align::Left, ui::text_dim()),
+        Tone::Value => (ui::FONT_SIZE, false, Align::Right, ui::text_dim()),
+        Tone::Hint => (ui::FONT_SMALL, false, Align::Left, ui::text_dim()),
+        Tone::Warning => {
+            let mark = Rect::new(
+                text.rect.x,
+                text.rect.y + (text.rect.h - WARNING_MARK) / 2,
+                WARNING_MARK,
+                WARNING_MARK,
+            );
+            canvas.fill_rounded(mark, 2.0, warning());
+            let rest = Rect::new(
+                mark.right() + 6,
+                text.rect.y,
+                text.rect.w - WARNING_MARK - 6,
+                text.rect.h,
+            );
+            ui::label(
+                canvas,
+                &mut d.fonts,
+                &text.text,
+                rest,
+                ui::FONT_SMALL,
+                false,
+                Align::Left,
+                ui::text(),
+            );
+            return;
+        }
+        Tone::Note => {
+            let scale = canvas.scale() as f32;
+            let (first, second) = ui::wrap_two_lines(
+                &mut d.fonts,
+                &text.text,
+                ui::FONT_SMALL * scale,
+                text.rect.w as f32 * scale,
+            );
+            let rect = text.rect;
+            let color = ui::text_dim();
+            canvas.draw_text(
+                &mut d.fonts,
+                &first,
+                rect.x,
+                rect.y + NOTE_LINE / 2,
+                rect.w,
+                Align::Left,
+                color,
+            );
+            if let Some(second) = second {
+                canvas.draw_text(
+                    &mut d.fonts,
+                    &second,
+                    rect.x,
+                    rect.y + NOTE_LINE + NOTE_LINE / 2,
+                    rect.w,
+                    Align::Left,
+                    color,
+                );
+            }
+            return;
+        }
+    };
+    ui::label(
+        canvas,
+        &mut d.fonts,
+        &text.text,
+        text.rect,
+        size,
+        bold,
+        align,
+        color,
+    );
 }
 
 /// Takes the picker's hue, saturation and value from its setting when that
@@ -3072,6 +3565,11 @@ fn click(d: &mut Desktop, x: f64, y: f64, button: Button) {
     if open.is_some() && !layout.picker.is_some_and(|picker| picker.frame.contains(x, y)) {
         d.settings.picker = None;
     }
+    // A click ends a capture, and one on the keys being captured does no more.
+    let captured = d.settings.capture.as_ref().map(|c| c.target.clone());
+    if captured.is_some() {
+        cancel_capture(d);
+    }
     let Hover::Control(index) = hover else {
         commit_field(d);
         if let Some(bar) = scrollbar(d)
@@ -3149,6 +3647,17 @@ fn click(d: &mut Desktop, x: f64, y: f64, button: Button) {
         }
         Action::Hue => pick_hue(d, control.rect, x, true),
         Action::Area => pick_area(d, control.rect, x, y, true),
+        Action::Capture(target) => {
+            if captured.as_ref() != Some(&target) {
+                start_capture(d, target);
+            }
+        }
+        Action::ResetBind(origin) => {
+            edit_keybinds(d, |text| keybinds::with_rebind(text, &origin, None));
+        }
+        Action::RemoveCustom { spec, command } => {
+            edit_keybinds(d, |text| keybinds::without_execute(text, &spec, &command));
+        }
     }
     d.set_hover(hit(d, x, y).unwrap_or(Hover::None));
     d.redraw_settings();
@@ -3157,11 +3666,182 @@ fn click(d: &mut Desktop, x: f64, y: f64, button: Button) {
 /// Shows a page from the top, leaving the application list, and reads the
 /// published shortcuts again for the Shortcuts page.
 fn show_page(d: &mut Desktop, page: Page) {
+    cancel_capture(d);
     d.settings.page = page;
     d.settings.picking = None;
     d.settings.scroll = 0.0;
     if page == Page::Shortcuts {
-        d.settings.keybinds = read_keybinds();
+        d.settings.reread_keybinds();
+        d.settings.poll_at = Some(Instant::now() + KEYBINDS_POLL);
+    }
+}
+
+/// Starts capturing a chord for a shortcut, holding the keyboard for the
+/// window meanwhile.  A shortcut being added needs its command first, so
+/// without one the command's field takes the focus instead.
+fn start_capture(d: &mut Desktop, target: CaptureTarget) {
+    if target == CaptureTarget::Add && d.settings.command.trim().is_empty() {
+        d.settings.focus = Some(Field::Command);
+        d.settings.editing = d.settings.command.clone();
+        return;
+    }
+    let Some(id) = d.settings.id else {
+        return;
+    };
+    d.settings.capture = Some(Capture { target, held: None });
+    d.requests.push(Request::GrabKeyboard { id, grab: true });
+}
+
+/// Ends a capture without a chord, letting the keyboard go.
+pub fn cancel_capture(d: &mut Desktop) {
+    finish_capture(d, None);
+}
+
+/// Ends a capture, writing the chord captured to the overrides: a bind
+/// moved to it, a command bind moved to it, or the bind being added.  An
+/// empty chord turns a bind off and removes a command bind.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `spec` - The chord, empty for none, or `None` when the capture was
+///   canceled.
+fn finish_capture(d: &mut Desktop, spec: Option<String>) {
+    let Some(capture) = d.settings.capture.take() else {
+        return;
+    };
+    if let Some(id) = d.settings.id {
+        d.requests.push(Request::GrabKeyboard { id, grab: false });
+    }
+    d.redraw_settings();
+    let Some(spec) = spec else {
+        return;
+    };
+    match capture.target {
+        CaptureTarget::Rebind(origin) => {
+            edit_keybinds(d, |text| keybinds::with_rebind(text, &origin, Some(&spec)));
+        }
+        CaptureTarget::Custom { spec: old, command } => edit_keybinds(d, |text| {
+            let text = keybinds::without_execute(text, &old, &command);
+            if spec.is_empty() {
+                text
+            } else {
+                keybinds::with_execute(&text, &spec, &command)
+            }
+        }),
+        CaptureTarget::Add => {
+            let command = d.settings.command.trim().to_string();
+            if !spec.is_empty() && !command.is_empty() {
+                d.settings.command.clear();
+                edit_keybinds(d, |text| keybinds::with_execute(text, &spec, &command));
+            }
+        }
+    }
+}
+
+/// Edits the shortcut overrides and reads the published shortcuts again,
+/// which show the change once the window manager applied it.
+fn edit_keybinds(d: &mut Desktop, edit: impl FnOnce(&str) -> String) {
+    if let Err(error) = keybinds::edit_overrides(edit) {
+        eprintln!(
+            "selkies-desktop: cannot write {}: {error}",
+            keybinds::overrides_path().display()
+        );
+    }
+    d.settings.reread_keybinds();
+    clamp_scroll(d);
+    d.redraw_settings();
+}
+
+/// What a key going down or up does to a capture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Step {
+    /// Nothing is decided yet.
+    Wait,
+    /// The capture is canceled.
+    Cancel,
+    /// The chord is captured, empty to turn the shortcut off.
+    Chord(String),
+}
+
+/// Turns a key going down or up into the next step of a capture: a key
+/// with the modifiers held makes the chord, and so does a modifier alone
+/// released before anything else was pressed.  Escape alone cancels, and
+/// Backspace alone turns the shortcut off.
+///
+/// # Arguments
+/// * `held` - The modifier pressed alone so far, kept between keys.
+/// * `keysym` - The key's unshifted keysym.
+/// * `modifiers` - The modifiers held as the key went down or up.
+/// * `pressed` - Whether the key went down.
+fn capture_step(held: &mut Option<u32>, keysym: u32, modifiers: Modifiers, pressed: bool) -> Step {
+    let alone = modifiers == Modifiers::default();
+    if keybinds::is_modifier(keysym) {
+        if pressed {
+            *held = (alone && held.is_none()).then_some(keysym);
+        } else if *held == Some(keysym) {
+            return Step::Chord(keybinds::key_name(keysym));
+        } else {
+            *held = None;
+        }
+        return Step::Wait;
+    }
+    if !pressed {
+        return Step::Wait;
+    }
+    if alone && keysym == Keysym::Escape.raw() {
+        return Step::Cancel;
+    }
+    if alone && keysym == Keysym::BackSpace.raw() {
+        return Step::Chord(String::new());
+    }
+    Step::Chord(keybinds::spec(modifiers, keysym))
+}
+
+/// Feeds a key going down or up to the capture running, finishing it when
+/// the key decides it.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `keysym` - The key's unshifted keysym.
+/// * `modifiers` - The modifiers held as the key went down or up.
+/// * `pressed` - Whether the key went down.
+pub fn key_sym(d: &mut Desktop, keysym: u32, modifiers: Modifiers, pressed: bool) {
+    let Some(capture) = d.settings.capture.as_mut() else {
+        return;
+    };
+    match capture_step(&mut capture.held, keysym, modifiers, pressed) {
+        Step::Wait => {}
+        Step::Cancel => cancel_capture(d),
+        Step::Chord(chord) => finish_capture(d, Some(chord)),
+    }
+}
+
+/// Reads the published shortcuts every second while the Shortcuts page is
+/// shown, so a change shows once the window manager applied it.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `now` - The current time.
+pub fn tick(d: &mut Desktop, now: Instant) {
+    if !d.settings.polls_keybinds() {
+        return;
+    }
+    if d.settings.poll_at.is_none_or(|at| now >= at) {
+        d.settings.reread_keybinds();
+        d.settings.poll_at = Some(now + KEYBINDS_POLL);
+        clamp_scroll(d);
+    }
+}
+
+/// Keeps the page's scroll within its content, which shrinks when the
+/// shortcuts read again are fewer.
+fn clamp_scroll(d: &mut Desktop) {
+    let frame = frame(d);
+    let content = build(d, frame, 0.0, view(d)).content as f64;
+    let max = (content - scroll_rect_in(frame, view(d)).h as f64).max(0.0);
+    if d.settings.scroll > max {
+        d.settings.scroll = max;
+        d.redraw_settings();
     }
 }
 
@@ -3239,7 +3919,12 @@ fn preview_color(d: &mut Desktop, field: Field, color: Color) {
             }
             d.repaint_wallpapers();
         }
-        Field::Search | Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => {}
+        Field::Search
+        | Field::ClockFormat
+        | Field::StartIcon
+        | Field::StartLabel
+        | Field::Image
+        | Field::Command => {}
     }
 }
 
@@ -3248,7 +3933,12 @@ fn color_key(d: &Desktop, field: Field) -> Option<&'static str> {
     match field {
         Field::Color => Some(wallpaper_key(d, "background")),
         Field::Theme(color) => Some(color.key()),
-        Field::Search | Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => None,
+        Field::Search
+        | Field::ClockFormat
+        | Field::StartIcon
+        | Field::StartLabel
+        | Field::Image
+        | Field::Command => None,
     }
 }
 
@@ -3319,7 +4009,8 @@ fn release(d: &mut Desktop) {
 }
 
 /// Writes the focused field's text and drops the focus.  The search field
-/// writes nothing: its text is the filter itself.
+/// writes nothing, its text being the filter itself, and the command of a
+/// shortcut being added is kept for its capture.
 fn commit_field(d: &mut Desktop) {
     let Some(field) = d.settings.focus.take() else {
         return;
@@ -3327,6 +4018,10 @@ fn commit_field(d: &mut Desktop) {
     let text = std::mem::take(&mut d.settings.editing);
     let (key, value) = match field {
         Field::Search => return,
+        Field::Command => {
+            d.settings.command = text.trim().to_string();
+            return;
+        }
         Field::Color => match parse_color(&text) {
             Some(_) => (wallpaper_key(d, "background"), text.trim().to_string()),
             None => return,
@@ -3384,7 +4079,7 @@ fn escape(d: &mut Desktop) -> bool {
 /// * `delta` - Scroll amount, positive downwards.
 pub fn pointer_axis(d: &mut Desktop, x: f64, y: f64, delta: f64) {
     let frame = frame(d);
-    let page = page_rect_in(frame);
+    let page = scroll_rect_in(frame, view(d));
     if x < page.x as f64 {
         return;
     }
@@ -3407,6 +4102,9 @@ pub fn pointer_axis(d: &mut Desktop, x: f64, y: f64, delta: f64) {
 /// * `d` - The desktop.
 /// * `key` - The key.
 pub fn key(d: &mut Desktop, key: Key) {
+    if d.settings.capture.is_some() {
+        return;
+    }
     if key == Key::Escape {
         if !escape(d) {
             close(d);
@@ -3446,6 +4144,7 @@ pub fn key(d: &mut Desktop, key: Key) {
 
 /// Closes the window, from its frame's close button or Escape.
 pub fn close(d: &mut Desktop) {
+    cancel_capture(d);
     if let Some(id) = d.settings.id {
         d.requests.push(Request::CloseWindow { id });
     }
@@ -3504,7 +4203,12 @@ mod tests {
             assert_eq!(current_scheme(config_from(&changes).theme), Some(*name));
             assert_eq!(current_scheme(scheme_theme(colors)), Some(*name));
         }
-        assert_eq!(current_scheme(ui::Theme::default()), Some("Dark"));
+        assert_eq!(current_scheme(ui::Theme::default()), Some("Selkies Dark"));
+        assert_eq!(SCHEMES[0].0, "Selkies Dark");
+        let defaults = &SCHEMES[0].1;
+        assert_eq!(ACCENTS[0], defaults[0]);
+        assert_eq!(&SURFACES[..2], &defaults[1..3]);
+        assert_eq!(TEXTS[0], defaults[3]);
         let theme = ui::Theme {
             accent: parse_color("#123456").unwrap(),
             ..ui::Theme::default()
@@ -3556,29 +4260,157 @@ mod tests {
     }
 
     #[test]
-    fn the_keybinds_file_parses_a_chord_and_a_description_per_line() {
-        let text = "Super+Left\tTile the window to the left half\n\
-                    Ctrl+Super+Right\tSwitch to the next desktop\n\
-                    no tab here\n\
-                    \tmissing chord\n\
-                    Super+Return\t\n\
-                    \n\
-                    Alt+F4 \t Close the window \n";
+    fn every_scheme_accent_takes_white_text() {
+        for (name, colors) in &SCHEMES {
+            let accent = parse_color(colors[0]).unwrap();
+            assert_eq!(selkies_draw::style::on_color(accent), Color::WHITE, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_groups_preset_cards_share_one_line_when_they_fit() {
+        let page = scroll_rect_in(Rect::new(0, 0, WIDTH, HEIGHT), View::Page(Page::Theme));
+        let mut out = Layout::default();
+        let mut groups = Groups {
+            out: &mut out,
+            clip: page,
+            x: page.x,
+            width: page.w,
+            y: page.y,
+            card_top: None,
+            rows: 0,
+            started: false,
+        };
+        let card = |name: &str| PresetCard {
+            name: name.to_string(),
+            look: preview::Look {
+                theme: ui::Theme::default(),
+                style: crate::config::WindowStyle::default(),
+                centered: false,
+                margin: 0,
+                menu: MenuLayout::Columns,
+            },
+            action: Action::Reset,
+            active: false,
+        };
+        groups.presets(SCHEMES.iter().map(|(name, _)| card(name)).collect());
+        groups.presets(STYLES.iter().map(|style| card(style.name)).collect());
+        groups.finish();
+        let schemes = &out.controls[..SCHEMES.len()];
+        let styles = &out.controls[SCHEMES.len()..];
+        for line in [schemes, styles] {
+            assert!(line.iter().all(|c| c.rect.y == line[0].rect.y));
+            let inner_right = page.x + page.w - CARD_PAD;
+            let slack = inner_right - line.last().unwrap().rect.right();
+            assert!((0..line.len() as i32).contains(&slack), "{slack}");
+            assert_eq!(line[0].rect.x, page.x + CARD_PAD);
+            assert!(line[0].rect.w >= PRESET_MIN_WIDTH);
+        }
+        assert!(schemes[0].rect.w < styles[0].rect.w);
+    }
+
+    #[test]
+    fn the_pinned_previews_leave_the_rows_a_scrolled_area_below_them() {
+        let frame = Rect::new(0, 0, WIDTH, HEIGHT);
+        let page = page_rect_in(frame);
+        for (shown, pinned) in [
+            (Page::Theme, true),
+            (Page::Wallpaper, true),
+            (Page::Shortcuts, false),
+        ] {
+            let rows = scroll_rect_in(frame, View::Page(shown));
+            assert_eq!(rows.bottom(), page.bottom());
+            assert_eq!(rows.y > page.y, pinned, "{shown:?}");
+        }
+        assert_eq!(scroll_rect_in(frame, View::List("favorites")), page);
+    }
+
+    #[test]
+    fn the_published_shortcuts_are_polled_a_second_apart_only_on_their_page() {
+        let mut state = SettingsState::default();
+        let before = Instant::now();
+        state.open(Some(Page::Shortcuts));
+        assert_eq!(state.next_poll(), None, "a closed window polls nothing");
+        state.id = Some(7);
+        let due = state.next_poll().expect("the Shortcuts page polls");
+        assert!(due >= before + KEYBINDS_POLL);
+        state.page = Page::Theme;
+        assert_eq!(state.next_poll(), None);
+        state.close();
+        assert_eq!(state.next_poll(), None);
+    }
+
+    #[test]
+    fn a_capture_takes_a_chord_or_a_modifier_released_alone() {
+        let none = Modifiers::default();
+        let logo = Modifiers { logo: true, ..none };
+        let ctrl = Modifiers { ctrl: true, ..none };
+        let super_l = Keysym::Super_L.raw();
+        let mut held = None;
+        assert_eq!(capture_step(&mut held, super_l, none, true), Step::Wait);
         assert_eq!(
-            parse_keybinds(text),
-            vec![
-                (
-                    "Super+Left".to_string(),
-                    "Tile the window to the left half".to_string()
-                ),
-                (
-                    "Ctrl+Super+Right".to_string(),
-                    "Switch to the next desktop".to_string()
-                ),
-                ("Alt+F4".to_string(), "Close the window".to_string()),
-            ]
+            capture_step(&mut held, super_l, logo, false),
+            Step::Chord("Super_L".to_string())
         );
-        assert!(parse_keybinds("").is_empty());
+
+        let mut held = None;
+        assert_eq!(capture_step(&mut held, super_l, none, true), Step::Wait);
+        assert_eq!(
+            capture_step(&mut held, Keysym::Left.raw(), logo, true),
+            Step::Chord("W-Left".to_string())
+        );
+
+        let mut held = None;
+        let control = Keysym::Control_L.raw();
+        assert_eq!(capture_step(&mut held, control, none, true), Step::Wait);
+        assert_eq!(capture_step(&mut held, super_l, ctrl, true), Step::Wait);
+        assert_eq!(held, None, "a second modifier makes the first no chord alone");
+        assert_eq!(capture_step(&mut held, super_l, logo, false), Step::Wait);
+        assert_eq!(capture_step(&mut held, control, ctrl, false), Step::Wait);
+
+        let mut held = None;
+        assert_eq!(
+            capture_step(&mut held, Keysym::Escape.raw(), none, true),
+            Step::Cancel
+        );
+        assert_eq!(
+            capture_step(&mut held, Keysym::BackSpace.raw(), none, true),
+            Step::Chord(String::new())
+        );
+        assert_eq!(
+            capture_step(&mut held, Keysym::Escape.raw(), ctrl, true),
+            Step::Chord("C-Escape".to_string())
+        );
+        assert_eq!(capture_step(&mut held, Keysym::t.raw(), none, false), Step::Wait);
+    }
+
+    #[test]
+    fn shortcut_rows_offer_a_reset_a_removal_and_name_a_shared_chord() {
+        let published = keybinds::parse(
+            "W-Left\tW-Left\tSuper+Left\tTile left\n\
+             W-Left\tW-Up\tSuper+Left\tTile up\n\
+             \tA-F4\t\tClose\n\
+             execute\tW-e\tSuper+E\tfoot\n",
+        );
+        let rows = shortcut_rows(&published, None);
+        assert_eq!(rows.len(), 4);
+        assert!(rows[0].buttons.is_empty());
+        assert!(matches!(&rows[0].note, Some((text, Tone::Warning)) if text.contains("Tile up")));
+        assert!(matches!(&rows[1].buttons[..], [(_, Action::ResetBind(origin))] if origin == "W-Up"));
+        assert_eq!(rows[2].chord, "");
+        assert!(matches!(&rows[2].buttons[..], [(_, Action::ResetBind(origin))] if origin == "A-F4"));
+        assert!(rows[2].note.is_none());
+        assert!(matches!(
+            &rows[3].buttons[..],
+            [(_, Action::RemoveCustom { spec, command })] if spec == "W-e" && command == "foot"
+        ));
+        let capture = Capture {
+            target: CaptureTarget::Rebind("A-F4".to_string()),
+            held: None,
+        };
+        let rows = shortcut_rows(&published, Some(&capture));
+        assert!(rows[2].capturing);
+        assert!(matches!(&rows[2].note, Some((_, Tone::Hint))));
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub struct Modifiers {
     pub ctrl: bool,
     /// An alt key.
     pub alt: bool,
+    /// A Super key.
+    pub logo: bool,
 }
 
 /// A pointer button.
@@ -99,6 +101,15 @@ pub enum Event {
         surface: SurfaceId,
         key: Key,
         modifiers: Modifiers,
+    },
+    /// A key went down or up while one of the shell's windows had keyboard
+    /// focus, as the unshifted keysym of its key, for capturing a shortcut:
+    /// a bare modifier counts as a shortcut only on its release.
+    KeySym {
+        surface: SurfaceId,
+        keysym: u32,
+        modifiers: Modifiers,
+        pressed: bool,
     },
     /// A surface lost keyboard focus.
     KeyboardLeave { surface: SurfaceId },
@@ -198,6 +209,10 @@ pub enum Request {
     /// Where the bar shows each window, in the bar surface's logical
     /// coordinates, so the window manager's minimize heads for the button.
     TaskbarRects(Vec<(u64, crate::geom::Rect)>),
+    /// Hold the keyboard for one of the shell's windows, or let it go, so a
+    /// shortcut being captured reaches the window rather than the window
+    /// manager's grabs.
+    GrabKeyboard { id: u32, grab: bool },
     /// Retitle one of the shell's windows.
     SetTitle { id: u32, title: String },
     /// Start dragging files from a window, with a ghost image of the selection

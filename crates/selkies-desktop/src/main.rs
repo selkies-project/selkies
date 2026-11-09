@@ -11,6 +11,7 @@ mod event;
 mod files;
 mod i18n;
 mod ipc;
+mod keybinds;
 mod portal;
 mod toolkits;
 mod tray;

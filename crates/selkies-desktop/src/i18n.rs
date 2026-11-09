@@ -174,8 +174,8 @@ mod tests {
         assert!(keys.contains(&"Settings"));
     }
 
-    /// Every `tr("…")` and `trf("…")` key in the sources, except this
-    /// module's own tests.
+    /// Every `tr("…")` and `trf("…")` key in the sources, a literal broken
+    /// onto the next line as well, except this module's own tests.
     fn source_keys() -> Vec<String> {
         fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).unwrap().flatten() {
@@ -184,13 +184,15 @@ mod tests {
                     walk(&path, out);
                 } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("i18n.rs") {
                     let text = std::fs::read_to_string(&path).unwrap();
-                    for call in ["tr(\"", "trf(\""] {
+                    for call in ["tr(", "trf("] {
                         for (at, _) in text.match_indices(call) {
                             let before = text[..at].chars().next_back();
                             if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                                 continue;
                             }
-                            let rest = &text[at + call.len()..];
+                            let Some(rest) = text[at + call.len()..].trim_start().strip_prefix('"') else {
+                                continue;
+                            };
                             if let Some(end) = rest.find('"') {
                                 out.push(rest[..end].to_string());
                             }

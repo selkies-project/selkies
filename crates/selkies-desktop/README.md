@@ -41,16 +41,25 @@ people reach for in a multi-application container:
   menu or by `selkies-desktop --settings [PAGE]`, with a sidebar of pages
   under four captions and a search field that filters them by name or by
   the rows they hold (Enter opens the first match).  Appearance: Theme, the
-  dark, light and Selkies schemes and the Linux, Fruit and Redmond styles as
-  cards each showing the desktop as it would look, over a live preview;
-  Colors, the four colors of the interface from presets or a picker;
-  Windows, the frames' shading, button side, glyphs and corners; Wallpaper,
-  for every monitor, shared or one by one.  Workspace: Panel, the bar's
-  edge, auto-hide, height, width, opacity, icon, label, layout, margin,
-  items, quick launch buttons and start menu; Desktops, how many and the
-  pager; Shortcuts, the keyboard shortcuts in force as the window manager
-  publishes them in `$XDG_RUNTIME_DIR/selkies-wm/keybinds` (a chord, a tab
-  and the description per line), with the shell's own keys under them.
+  Selkies Dark (the default), Selkies Light, Dark, Light and Ember schemes
+  and the Linux, Fruit and Redmond styles as cards each showing the desktop
+  as it would look, under a live preview that stays in place as the cards
+  scroll; Colors, the four colors of the interface from presets or a
+  picker; Windows, the frames' shading, button side, glyphs and corners;
+  Wallpaper, for every monitor, shared or one by one, under a preview of
+  the monitor painted as the desktop paints it.  Workspace: Panel, the
+  bar's edge, auto-hide, height, width, opacity, icon, label, layout,
+  margin, items, quick launch buttons and start menu; Desktops, how many
+  and the pager; Shortcuts, an editor of the keyboard shortcuts the window
+  manager publishes in `$XDG_RUNTIME_DIR/selkies-wm/keybinds` (per line the
+  chord in openbox's spelling, the chord the configuration gives, the label
+  and the description, tab-separated; `execute` lines for command binds).
+  A click on a bind's keys captures a new chord (Escape cancels, Backspace
+  turns the bind off, a modifier alone counts on its release), written to
+  `~/.config/selkies-wm/keybinds` as a `rebind` line the window manager
+  reads within a second; changed binds have a reset, binds sharing a chord
+  are flagged, and a row adds a bind that runs a command (an `execute`
+  line).  The shell's own keys follow.
   Applications: Files, the file manager's view, sort and hidden files;
   Language.  System: About, the version, the backend, the desktop count and
   the config file.  A page of settings has a reset, and a right click on an
@@ -151,10 +160,10 @@ so an edit applies within a moment.
 | `panel_margin` | `0` | Space between the bar and the screen edges in pixels, 0 to 16, which floats it with every corner rounded |
 | `start_label` | | Text shown on the start button beside its icon |
 | `menu_layout` | `columns` | How the start menu lists applications: `columns` (categories and rows), `grid` (categories and a grid of icons) or `tiles` (every application in a list with the favorites as tiles beside it) |
-| `color_accent` | `#3daee9` | Color of markers, selections, switches and the chosen option |
-| `color_panel` | `#31363b` | Color of the bar |
-| `color_popup` | `#2a2e32` | Color of menus, popups and windows |
-| `color_text` | `#fcfcfc` | Color of text; hover, separator and field shades derive from it |
+| `color_accent` | `#7967c5` | Color of markers, selections, switches and the chosen option |
+| `color_panel` | `#0a0e17` | Color of the bar |
+| `color_popup` | `#121826` | Color of menus, popups and windows |
+| `color_text` | `#eef2f8` | Color of text; hover, separator and field shades derive from it |
 | `theme_windows` | `true` | Generate the window manager's theme from the colors and the frame settings, and reload it; `false` removes the generated theme |
 | `window_surface` | `flat` | Shading of title bars, the bar and the popups: `flat`, `gradient` or `glossy` |
 | `window_buttons` | `right` | Side of a title bar the buttons sit on: `right` or `left` |

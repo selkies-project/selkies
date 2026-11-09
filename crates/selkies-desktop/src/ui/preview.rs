@@ -1,31 +1,36 @@
-//! The preview on the settings window's Theme page: a small desktop drawn
-//! with a [`Look`], the colors and the window style as they are or as a
-//! preset would set them, with the wallpaper, two windows in the window
-//! manager's frames, the start menu open in its layout and the bar in its
-//! layout, so every choice shows at once without opening anything.  The
+//! The previews of the settings window.  The Theme page's is a small
+//! desktop drawn with a [`Look`], the colors and the window style as they
+//! are or as a preset would set them, with the wallpaper, two windows in the
+//! window manager's frames, the start menu open in its layout and the bar in
+//! its layout, so every choice shows at once without opening anything.  The
 //! live preview paints straight onto the page; a preset card renders its
-//! look into a pixmap of its own, which the page then shrinks.
+//! look into a pixmap of its own, which the page then shrinks.  The
+//! Wallpaper page's is one monitor at its own aspect with the bar along its
+//! edge.  Both paint the wallpaper through the desktop's own painter
+//! ([`background::paint_wallpaper`]), from a copy of the image shrunk once to
+//! the size it is drawn at, so a preview cannot disagree with the desktop.
 
 use std::sync::Arc;
 
-use tiny_skia::Color;
+use tiny_skia::{Color, Pixmap};
 
-use tiny_skia::Pixmap;
-
-use crate::config::{BackgroundStyle, ButtonSide, Glyphs, MenuLayout, WallpaperMode, WindowStyle};
+use crate::config::{ButtonSide, Glyphs, MenuLayout, Wallpaper, WindowStyle};
 use crate::desktop::Desktop;
 use crate::geom::Rect;
 use crate::i18n::tr;
 use crate::render::{Align, Canvas};
-use crate::ui;
+use crate::ui::{self, background};
 use crate::wmtheme::{self, Palette};
 
 /// Width of the preview's screen.
 pub const WIDTH: i32 = 352;
 /// Height of the preview's screen.
 pub const HEIGHT: i32 = 220;
-/// Height of the bar in the preview.
+/// Height of the bar in the Theme page's preview.
 const BAR: i32 = 20;
+/// The least height of the bar in the Wallpaper page's preview, which
+/// leaves its items room.
+const BAR_LEAST: i32 = 18;
 /// Height of a title bar in the preview.
 const TITLE: i32 = 18;
 /// Side of a window button's bitmap.
@@ -111,10 +116,11 @@ pub fn render(d: &mut Desktop, look: &Look, scale: i32) -> Option<Pixmap> {
     Some(pix)
 }
 
-/// Paints the desktop of a look into the screen rectangle: the wallpaper,
-/// the two windows, the start menu and the bar.
+/// Paints the desktop of a look into the screen rectangle: the primary
+/// monitor's wallpaper, the two windows, the start menu and the bar.
 fn paint(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look) {
-    draw_wallpaper(d, canvas, screen);
+    let wallpaper = d.config.wallpaper_for(1);
+    paint_wallpaper(d, canvas, screen, &wallpaper, monitor_geometry(d, None));
     let palette = Palette::new(look.theme);
     let top = d.panel_top();
     let margin = look.margin / 2;
@@ -137,60 +143,113 @@ fn paint(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look) {
         Rect::new(screen.x + 4 + margin, menu_y, 150, menu_h),
         look.menu,
     );
-    draw_bar(d, canvas, screen, look);
+    draw_bar(d, canvas, screen, look, BAR, margin);
     canvas.stroke_rounded(screen, 4.0, 1.0, ui::popup_border());
 }
 
-/// Paints the shared wallpaper into the screen: its color or gradient and
-/// its image, shrunk once per path and scale.
-fn draw_wallpaper(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect) {
-    let wallpaper = d.config.wallpaper.clone();
-    match wallpaper.style {
-        BackgroundStyle::Solid => canvas.fill_rounded(screen, 4.0, wallpaper.color),
-        BackgroundStyle::Gradient => canvas.fill_rounded_shaded(screen, 4.0, |_, v| {
-            let top = ui::shifted(wallpaper.color, 28);
-            let bottom = ui::shifted(wallpaper.color, -8);
-            ui::blend(top, bottom, v)
-        }),
-    }
-    let Some(path) = wallpaper.image else {
+/// A monitor's logical rectangle and output scale, by its settings number,
+/// the primary for `None`; a 1920x1080 screen before any is known.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `number` - The monitor's number, from 1.
+pub fn monitor_geometry(d: &Desktop, number: Option<u32>) -> (Rect, i32) {
+    let index = number.unwrap_or(1).max(1) as usize - 1;
+    d.monitor_list()
+        .get(index)
+        .and_then(|(id, at)| {
+            let background = d.background(*id)?;
+            let whole = Rect::new(0, 0, background.geometry.width, background.geometry.height);
+            let rect = background.monitors.get(*at).copied().unwrap_or(whole);
+            (!rect.is_empty()).then_some((rect, background.geometry.scale.max(1)))
+        })
+        .unwrap_or((Rect::new(0, 0, 1920, 1080), 1))
+}
+
+/// Paints a monitor's wallpaper into a preview's screen as the desktop
+/// paints it there, the image shrunk once per path and drawn size.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `canvas` - The canvas painted.
+/// * `screen` - The preview's screen.
+/// * `wallpaper` - The wallpaper settings.
+/// * `monitor` - The monitor's logical rectangle and scale, which size the
+///   image in the center mode.
+fn paint_wallpaper(
+    d: &mut Desktop,
+    canvas: &mut Canvas<'_>,
+    screen: Rect,
+    wallpaper: &Wallpaper,
+    monitor: (Rect, i32),
+) {
+    let full = wallpaper.image.as_ref().and_then(|path| d.wallpaper_image(path));
+    let (Some(path), Some(full)) = (wallpaper.image.clone(), full) else {
+        background::paint_wallpaper(canvas, screen, wallpaper, None);
         return;
     };
-    let scale = canvas.scale();
+    let (rect, scale) = monitor;
+    let zoom = screen.w as f32 / rect.w.max(1) as f32;
+    let native = (
+        full.width() as f32 / scale as f32 * zoom,
+        full.height() as f32 / scale as f32 * zoom,
+    );
+    let (w, h) = background::drawn_size(wallpaper.mode, native, screen);
+    let longest =
+        ((w.max(h) * canvas.scale() as f32).ceil() as u32).clamp(1, full.width().max(full.height()));
     let cached = d
         .preview_wallpaper
         .as_ref()
-        .filter(|(p, s, _)| *p == path && *s == scale)
+        .filter(|(p, size, _)| *p == path && *size == longest)
         .map(|(_, _, image)| image.clone());
-    let image = cached.or_else(|| {
-        let full = d.wallpaper_image(&path)?;
-        let longest = (WIDTH.max(HEIGHT) * scale) as u32;
-        let small = Arc::new(crate::render::resize_pixmap(
-            &full,
-            longest.min(full.width().max(full.height())),
-        )?);
-        d.preview_wallpaper = Some((path.clone(), scale, small.clone()));
+    let small = cached.or_else(|| {
+        let small = Arc::new(crate::render::resize_pixmap(&full, longest)?);
+        d.preview_wallpaper = Some((path, longest, small.clone()));
         Some(small)
     });
-    let Some(image) = image else {
-        return;
-    };
-    canvas.clip(screen);
-    match wallpaper.mode {
-        WallpaperMode::Fill => canvas.draw_image_cover(&image, screen),
-        WallpaperMode::Fit => canvas.draw_image_fit(&image, screen),
-        WallpaperMode::Stretch => canvas.draw_image_stretch(&image, screen),
-        WallpaperMode::Center => {
-            let side = HEIGHT / 3;
-            let rect = Rect::new(
-                screen.x + (screen.w - side) / 2,
-                screen.y + (screen.h - side) / 2,
-                side,
-                side,
-            );
-            canvas.draw_image_fit(&image, rect);
+    let image = small.as_deref().map(|pixels| background::WallpaperImage {
+        pixels,
+        native: (native.0.round() as i32, native.1.round() as i32),
+    });
+    background::paint_wallpaper(canvas, screen, wallpaper, image);
+}
+
+/// Draws the Wallpaper page's preview centered in an area: the monitor at
+/// its own aspect with its wallpaper, and the bar along its edge, at the
+/// monitor's proportions, when the bar is on that monitor.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `canvas` - The settings window's canvas.
+/// * `area` - The area the preview is centered in.
+/// * `wallpaper` - The wallpaper shown.
+/// * `number` - The monitor's number, or `None` for the shared wallpaper,
+///   shown on the primary.
+pub fn draw_monitor(
+    d: &mut Desktop,
+    canvas: &mut Canvas<'_>,
+    area: Rect,
+    wallpaper: &Wallpaper,
+    number: Option<u32>,
+) {
+    let monitor = monitor_geometry(d, number);
+    let (rect, _) = monitor;
+    let ratio = (area.w as f32 / rect.w.max(1) as f32).min(area.h as f32 / rect.h.max(1) as f32);
+    let (w, h) = (
+        (rect.w as f32 * ratio).round() as i32,
+        (rect.h as f32 * ratio).round() as i32,
+    );
+    let screen = Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h);
+    canvas.clipped(screen, |canvas| {
+        paint_wallpaper(d, canvas, screen, wallpaper, monitor);
+        if number.unwrap_or(1) == 1 {
+            let height = ((d.config.panel_height as f32 * ratio).round() as i32).max(BAR_LEAST);
+            let margin = (d.config.panel_margin as f32 * ratio).round() as i32;
+            let look = Look::current(d);
+            draw_bar(d, canvas, screen, &look, height, margin);
         }
-    }
+    });
+    canvas.stroke_rounded(screen, 4.0, 1.0, ui::popup_border());
 }
 
 /// Draws a window's frame: the title bar shaded in the surface style with
@@ -553,16 +612,23 @@ fn draw_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect, layout: MenuL
 
 /// Draws the bar along the configured edge in the look's layout, with the
 /// start button, two taskbar buttons and the clock.
-fn draw_bar(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look) {
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `canvas` - The canvas painted.
+/// * `screen` - The preview's screen.
+/// * `look` - The look drawn.
+/// * `height` - The bar's height in the preview.
+/// * `margin` - The bar's margin from the screen edges in the preview.
+fn draw_bar(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look, height: i32, margin: i32) {
     let corners = look.style.corners;
-    let margin = look.margin / 2;
     let usable = screen.w - 2 * margin;
     let width = (usable * d.config.panel_width / 100).max(60);
     let x = screen.x + margin + (usable - width) / 2;
     let bar = if d.panel_top() {
-        Rect::new(x, screen.y + margin, width, BAR)
+        Rect::new(x, screen.y + margin, width, height)
     } else {
-        Rect::new(x, screen.bottom() - BAR - margin, width, BAR)
+        Rect::new(x, screen.bottom() - height - margin, width, height)
     };
     let bg = ui::panel_bg(d.config.panel_opacity);
     if margin > 0 {
@@ -602,10 +668,11 @@ fn draw_bar(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look)
     } else {
         bar.x + 3
     };
-    let start = Rect::new(x0, bar.y + 2, 24 + label_w, BAR - 4);
+    let start = Rect::new(x0, bar.y + 2, 24 + label_w, height - 4);
     canvas.fill_rounded(start, 3.0, ui::active_bg());
     if let Some(icon) = d.start_icon(14) {
-        canvas.draw_image_fit(&icon, Rect::new(start.x + 5, start.y + 1, 14, 14));
+        let icon_y = start.y + (start.h - 14) / 2;
+        canvas.draw_image_fit(&icon, Rect::new(start.x + 5, icon_y, 14, 14));
     }
     if let Some(text) = label {
         ui::label(
@@ -621,7 +688,7 @@ fn draw_bar(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look)
     }
     let mut task_x = start.right() + 4;
     for (i, name) in [tr("Files"), tr("Window")].iter().enumerate() {
-        let task = Rect::new(task_x, bar.y + 2, 54, BAR - 4);
+        let task = Rect::new(task_x, bar.y + 2, 54, height - 4);
         canvas.fill_rounded(task, 3.0, if i == 0 { ui::active_bg() } else { ui::field_bg() });
         if i == 0 {
             canvas.fill_rounded(

@@ -294,9 +294,9 @@ pub struct Desktop {
     /// Where the panel surface's top-left corner sits in the primary
     /// background's logical coordinates, for that blending.
     pub panel_offset: (i32, i32),
-    /// The wallpaper image shrunk for the settings window's theme preview,
-    /// with the path and scale it was made for.
-    pub preview_wallpaper: Option<(std::path::PathBuf, i32, Arc<Pixmap>)>,
+    /// The wallpaper image shrunk for the settings window's previews, with
+    /// the path and the length of the longer side in pixels it was made for.
+    pub preview_wallpaper: Option<(std::path::PathBuf, u32, Arc<Pixmap>)>,
     /// Icons docked in the system tray.
     pub tray_icons: usize,
     /// The strip of the bar the tray icons occupy, in panel coordinates.
@@ -1038,9 +1038,21 @@ impl Desktop {
                 SurfaceId::Window(id) => ui::files::key(self, id, key, modifiers),
                 _ => self.key(key),
             },
+            Event::KeySym {
+                surface: SurfaceId::Window(id),
+                keysym,
+                modifiers,
+                pressed,
+            } if self.is_settings(id) => settings::key_sym(self, keysym, modifiers, pressed),
+            Event::KeySym { .. } => {}
             Event::KeyboardLeave { surface } => {
                 if surface == SurfaceId::Panel && matches!(self.popup, Popup::Menu | Popup::Launcher) {
                     self.close_popup();
+                }
+                if let SurfaceId::Window(id) = surface
+                    && self.is_settings(id)
+                {
+                    settings::cancel_capture(self);
                 }
             }
             Event::WindowCloseRequested { window } => {
@@ -1242,7 +1254,8 @@ impl Desktop {
         }
     }
 
-    /// Updates the clock text and tooltip timers.
+    /// Updates the clock text and tooltip timers, and reads the published
+    /// shortcuts again while the settings window shows them.
     ///
     /// # Arguments
     /// * `now` - The current time.
@@ -1280,6 +1293,7 @@ impl Desktop {
             self.panel_dirty = true;
         }
         self.files.tick(now);
+        settings::tick(self, now);
     }
 
     /// When `tick` next has something to do.
@@ -1304,6 +1318,9 @@ impl Desktop {
         }
         if let Some((_, _, due)) = &self.preview {
             let due = *due;
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        if let Some(due) = self.settings.next_poll() {
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
         deadline

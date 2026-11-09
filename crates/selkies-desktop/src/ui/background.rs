@@ -115,12 +115,12 @@ pub fn draw_wallpaper_layer(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
                 let number = d.monitor_number(id, monitor_index);
                 let wallpaper = d.config.wallpaper_for(number);
                 let image = wallpaper.image.as_ref().and_then(|p| d.wallpaper_image(p));
-                draw_wallpaper(
-                    &mut layer_canvas,
-                    monitor.intersect(&whole),
-                    &wallpaper,
-                    image.as_deref(),
-                );
+                let scale = layer_canvas.scale().max(1) as u32;
+                let image = image.as_deref().map(|pixels| WallpaperImage {
+                    pixels,
+                    native: ((pixels.width() / scale) as i32, (pixels.height() / scale) as i32),
+                });
+                paint_wallpaper(&mut layer_canvas, monitor.intersect(&whole), &wallpaper, image);
             }
         }
         d.backgrounds[index].wallpaper_cache = layer.map(|l| (key, l));
@@ -192,11 +192,61 @@ fn draw_shadowed(canvas: &mut Canvas<'_>, fonts: &mut Fonts, text: &Arc<Text>, c
     canvas.draw_text(fonts, text, cell.x, center_y, cell.w, Align::Center, ui::text());
 }
 
+/// A wallpaper image ready to paint.
+#[derive(Clone, Copy)]
+pub struct WallpaperImage<'a> {
+    /// The pixels drawn, the decoded file or a copy shrunk for a preview.
+    pub pixels: &'a Pixmap,
+    /// The logical size the image covers at its own resolution on the
+    /// monitor painted, which the center mode shows it at: its pixels over
+    /// the monitor's scale on the desktop, that shrunk by the preview's
+    /// ratio to the monitor in a preview.
+    pub native: (i32, i32),
+}
+
+/// The logical size an image is drawn at in an area in a mode, for sizing
+/// a preview's shrunk copy of it.
+///
+/// # Arguments
+/// * `mode` - How the image is placed.
+/// * `native` - The size the image covers at its own resolution, as in
+///   [`WallpaperImage::native`].
+/// * `area` - The area painted.
+pub fn drawn_size(mode: WallpaperMode, native: (f32, f32), area: Rect) -> (f32, f32) {
+    let (w, h) = (native.0.max(1.0), native.1.max(1.0));
+    let (aw, ah) = (area.w as f32, area.h as f32);
+    match mode {
+        WallpaperMode::Fill => {
+            let ratio = (aw / w).max(ah / h);
+            (w * ratio, h * ratio)
+        }
+        WallpaperMode::Fit => {
+            let ratio = (aw / w).min(ah / h);
+            (w * ratio, h * ratio)
+        }
+        WallpaperMode::Stretch => (aw, ah),
+        WallpaperMode::Center => (w, h),
+    }
+}
+
 /// Paints one monitor: the solid color or the dithered gradient, and the
-/// image over it in its mode.  The gradient is dithered
-/// because the stream that carries the desktop is 8-bit 4:2:0 video, where a
-/// smooth ramp quantizes into visible bands.
-fn draw_wallpaper(canvas: &mut Canvas<'_>, area: Rect, wallpaper: &Wallpaper, image: Option<&Pixmap>) {
+/// image over it in its mode.  The desktop and the settings window's
+/// previews both paint through here, so a preview shows what the desktop
+/// draws.  The gradient is dithered because the stream that carries the
+/// desktop is 8-bit 4:2:0 video, where a smooth ramp quantizes into visible
+/// bands.
+///
+/// # Arguments
+/// * `canvas` - The canvas painted.
+/// * `area` - The monitor's rectangle on it.
+/// * `wallpaper` - The monitor's wallpaper settings.
+/// * `image` - The wallpaper's image, when it has one that loaded.
+pub fn paint_wallpaper(
+    canvas: &mut Canvas<'_>,
+    area: Rect,
+    wallpaper: &Wallpaper,
+    image: Option<WallpaperImage<'_>>,
+) {
     if area.is_empty() {
         return;
     }
@@ -220,20 +270,17 @@ fn draw_wallpaper(canvas: &mut Canvas<'_>, area: Rect, wallpaper: &Wallpaper, im
             canvas.fill_dithered_gradient(area, top, bottom);
         }
     }
-    if let Some(image) = image {
-        canvas.clip(area);
-        match wallpaper.mode {
-            WallpaperMode::Fill => canvas.draw_image_cover(image, area),
-            WallpaperMode::Fit => canvas.draw_image_fit(image, area),
-            WallpaperMode::Stretch => canvas.draw_image_stretch(image, area),
+    if let Some(WallpaperImage { pixels, native }) = image {
+        canvas.clipped(area, |canvas| match wallpaper.mode {
+            WallpaperMode::Fill => canvas.draw_image_cover(pixels, area),
+            WallpaperMode::Fit => canvas.draw_image_fit(pixels, area),
+            WallpaperMode::Stretch => canvas.draw_image_stretch(pixels, area),
             WallpaperMode::Center => {
-                let w = (image.width() / canvas.scale() as u32) as i32;
-                let h = (image.height() / canvas.scale() as u32) as i32;
+                let (w, h) = native;
                 let rect = Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h);
-                canvas.draw_image_fit(image, rect);
+                canvas.draw_image_fit(pixels, rect);
             }
-        }
-        canvas.reset_clip();
+        });
     }
 }
 

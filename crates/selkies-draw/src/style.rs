@@ -21,8 +21,8 @@ use tiny_skia::Color;
 
 use crate::render::{parse_color, rgb, rgba};
 
-/// The colors the user can set: the four the rest derive from. The defaults are a dark scheme
-/// with a sky-blue accent, the one the desktop's Dark preset names.
+/// The colors the user can set: the four the rest derive from. The defaults are the Selkies
+/// violet on deep indigo, the one the desktop's Selkies Dark preset names.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
     /// Markers, selections, switches, and the active choice.
@@ -38,10 +38,10 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Theme {
         Theme {
-            accent: rgb(0x3d, 0xae, 0xe9),
-            panel: rgb(0x31, 0x36, 0x3b),
-            popup: rgb(0x2a, 0x2e, 0x32),
-            text: rgb(0xfc, 0xfc, 0xfc),
+            accent: rgb(0x79, 0x67, 0xc5),
+            panel: rgb(0x0a, 0x0e, 0x17),
+            popup: rgb(0x12, 0x18, 0x26),
+            text: rgb(0xee, 0xf2, 0xf8),
         }
     }
 }
@@ -254,8 +254,8 @@ pub fn luminance(color: Color) -> f32 {
     0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
 }
 
-/// Black or white, whichever reads on a color. The threshold sits above the default accent blue
-/// (a luminance of 0.60), which takes white text, and below a gold accent, which takes black.
+/// Black or white, whichever reads on a color. The threshold sits above a sky-blue accent (a
+/// luminance of 0.60), which takes white text, and below a gold accent, which takes black.
 pub fn on_color(color: Color) -> Color {
     if luminance(color) > 0.62 {
         rgb(0x10, 0x10, 0x10)
@@ -319,5 +319,16 @@ mod tests {
         assert!((0x7e..=0x81).contains(&mixed.red()));
         assert_eq!(on_color(rgb(0xff, 0xff, 0xff)), rgb(0x10, 0x10, 0x10));
         assert_eq!(on_color(rgb(0, 0, 0)), Color::WHITE);
+    }
+
+    /// The defaults are the Selkies Dark scheme, whose violet accent takes white text.
+    #[test]
+    fn the_default_theme_is_selkies_dark() {
+        let theme = Theme::default();
+        assert_eq!(theme.accent, rgb(0x79, 0x67, 0xc5));
+        assert_eq!(theme.panel, rgb(0x0a, 0x0e, 0x17));
+        assert_eq!(theme.popup, rgb(0x12, 0x18, 0x26));
+        assert_eq!(theme.text, rgb(0xee, 0xf2, 0xf8));
+        assert_eq!(on_color(theme.accent), Color::WHITE);
     }
 }

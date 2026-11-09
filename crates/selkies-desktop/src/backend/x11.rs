@@ -961,6 +961,7 @@ impl X11Backend {
                 | xproto::EventMask::POINTER_MOTION
                 | xproto::EventMask::LEAVE_WINDOW
                 | xproto::EventMask::KEY_PRESS
+                | xproto::EventMask::KEY_RELEASE
                 | xproto::EventMask::STRUCTURE_NOTIFY,
         ) else {
             return;
@@ -1080,6 +1081,41 @@ impl X11Backend {
             let window = self.windows.remove(index);
             let _ = self.conn.free_gc(window.surface.gc);
             let _ = self.conn.destroy_window(window.surface.window);
+        }
+    }
+
+    /// Takes the keyboard for one of the shell's windows, or gives it back.
+    /// An active grab keeps the window manager's passive key grabs from
+    /// activating, so a chord it binds reaches the window being taught a
+    /// new one instead of running.
+    fn grab_window_keyboard(&self, id: u32, grab: bool) {
+        if !grab {
+            let _ = self.conn.ungrab_keyboard(x11rb::CURRENT_TIME);
+            return;
+        }
+        if let Some(window) = self.windows.iter().find(|w| w.id == id).map(|w| w.surface.window) {
+            let _ = self.conn.grab_keyboard(
+                false,
+                window,
+                x11rb::CURRENT_TIME,
+                xproto::GrabMode::ASYNC,
+                xproto::GrabMode::ASYNC,
+            );
+        }
+    }
+
+    /// Queues the unshifted keysym of a key going down or up on one of the
+    /// shell's windows.
+    fn push_keysym(&mut self, surface: SurfaceId, keycode: u8, modifiers: Modifiers, pressed: bool) {
+        if let SurfaceId::Window(_) = surface
+            && let Some(keysym) = self.keymap.base_keysym(keycode as u32)
+        {
+            self.events.push(Event::KeySym {
+                surface,
+                keysym,
+                modifiers,
+                pressed,
+            });
         }
     }
 
@@ -1414,13 +1450,19 @@ impl X11Backend {
                 self.last_time = e.time;
                 let modifiers = modifiers_of(e.state);
                 let caps = e.state.contains(xproto::KeyButMask::LOCK);
+                let surface = self.surface_of(e.event);
                 if let Some(key) = self.keymap.translate(e.detail as u32, modifiers.shift, caps) {
                     self.events.push(Event::Key {
-                        surface: self.surface_of(e.event),
+                        surface,
                         key,
                         modifiers,
                     });
                 }
+                self.push_keysym(surface, e.detail, modifiers, true);
+            }
+            XEvent::KeyRelease(e) => {
+                let surface = self.surface_of(e.event);
+                self.push_keysym(surface, e.detail, modifiers_of(e.state), false);
             }
             XEvent::ClientMessage(e) => {
                 if e.type_ == self.atoms.WM_PROTOCOLS
@@ -1491,12 +1533,14 @@ impl X11Backend {
     }
 }
 
-/// The modifier keys held in an event's state mask.
+/// The modifier keys held in an event's state mask, Super as Mod4 where
+/// the core keymaps put it.
 fn modifiers_of(state: xproto::KeyButMask) -> Modifiers {
     Modifiers {
         shift: state.contains(xproto::KeyButMask::SHIFT),
         ctrl: state.contains(xproto::KeyButMask::CONTROL),
         alt: state.contains(xproto::KeyButMask::MOD1),
+        logo: state.contains(xproto::KeyButMask::MOD4),
     }
 }
 
@@ -1930,6 +1974,10 @@ impl Backend for X11Backend {
             }
             Request::TaskbarRects(rects) => {
                 self.publish_icon_geometry(rects);
+                let _ = self.conn.flush();
+            }
+            Request::GrabKeyboard { id, grab } => {
+                self.grab_window_keyboard(*id, *grab);
                 let _ = self.conn.flush();
             }
             Request::StartDrag { window, .. } => {

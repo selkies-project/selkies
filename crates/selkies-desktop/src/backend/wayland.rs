@@ -1397,7 +1397,7 @@ impl Backend for WaylandBackend {
                     manager.commit();
                 }
             }
-            Request::SetVolume(_) | Request::ToggleMute => {}
+            Request::SetVolume(_) | Request::ToggleMute | Request::GrabKeyboard { .. } => {}
         }
     }
 }
@@ -1931,6 +1931,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                     shift: held & 1 != 0,
                     ctrl: held & 4 != 0,
                     alt: held & 8 != 0,
+                    logo: held & 0x40 != 0,
                 };
                 state.caps_lock = mods_locked & 2 != 0;
             }
@@ -1939,7 +1940,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 state: key_state,
                 ..
             } => {
-                if key_state == WEnum::Value(wl_keyboard::KeyState::Pressed)
+                let pressed = key_state == WEnum::Value(wl_keyboard::KeyState::Pressed);
+                if pressed
                     && let Some(surface) = state.keyboard_surface
                     && let Some(k) = state
                         .keymap
@@ -1949,6 +1951,16 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                         surface,
                         key: k,
                         modifiers: state.modifiers,
+                    });
+                }
+                if let Some(surface @ SurfaceId::Window(_)) = state.keyboard_surface
+                    && let Some(keysym) = state.keymap.base_keysym(key + 8)
+                {
+                    state.events.push(Event::KeySym {
+                        surface,
+                        keysym,
+                        modifiers: state.modifiers,
+                        pressed,
                     });
                 }
             }
