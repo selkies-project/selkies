@@ -2,7 +2,7 @@
 
 ## What this project does and where untrusted input enters
 - Selkies streams a Linux desktop to a browser: a Rust server on the tokio runtime (`crates/selkies`, the `selkies`
-  executable, with its WebRTC stack in `crates/selkies-rtc`) with a bundled JavaScript web client
+  executable, with its WebRTC stack in `crates/selkies-rtc`) with a JavaScript web client compiled into it
   (`web/selkies-web-core`, dashboards in `web/selkies-dashboard*`). One desktop user runs it; it injects
   keyboard, mouse, touch and gamepad input, syncs the clipboard both ways, serves files under a configured root, and
   plays audio, microphone and webcam through LD_PRELOAD interposers (`addons/*-interposer`, `addons/fake-udev`).
@@ -14,10 +14,11 @@
   collaborator; the controller (full token or Basic auth user); the orchestrator holding the master token
   (`POST /api/tokens`, the signaling server peer).
 - Entry points, under `crates/selkies/src` unless named otherwise: `http` (the auth gate in `auth.rs`, the token
-  endpoint and table in `tokens.rs`, the operator routes in `routes.rs`), `files` (upload, download, recording,
-  screenshot, print, apps routes), `ws` (data plane, binary opcodes in `protocol.rs`), WebRTC signaling
-  (`crates/selkies-rtc/src/signaling`, mounted by `webrtc/routes.rs`), the WebRTC stack (`crates/selkies-rtc`: `ice`,
-  `dtls`, `srtp`, `rtp`, `sctp`, `sdp`, and the vendored `rtc-dtls`, `rtc-sctp`, and `rtc-srtp` under `vendor/`, edited in tree and in scope),
+  endpoint and table in `tokens.rs`, the operator routes in `routes.rs`, the web client in `static_files.rs`: a
+  `web_root` directory no path or link leaves, or the table `embedded.rs` serves, which a request names by key),
+  `files` (upload, download, recording, screenshot, print, apps routes), `ws` (data plane, binary opcodes in
+  `protocol.rs`), WebRTC signaling (`crates/selkies-rtc/src/signaling`, mounted by `webrtc/routes.rs`), the WebRTC
+  stack (`crates/selkies-rtc`: `ice`, `dtls`, `srtp`, `rtp`, `sctp`, `sdp`, and the vendored `rtc-dtls`, `rtc-sctp`, and `rtc-srtp` under `vendor/`, edited in tree and in scope),
   `input` (`Dispatcher::receive`, the input authority in `authority.rs`), `core` (`Role`). Native media entry
   points include browser webcam bitstreams and H.264 SPS input in `crates/pixelflux/src/{webcam,encoders/sps.rs}`,
   microphone Opus and RED in `crates/pcmflux/src/red.rs`, the token-gated Computer-Use HTTP server in

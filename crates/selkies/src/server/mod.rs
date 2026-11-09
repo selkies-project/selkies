@@ -208,7 +208,7 @@ pub async fn run() -> Result<(), String> {
         token: settings().audit_webhook_token().to_string(),
         timeout: std::time::Duration::from_secs_f64(settings().audit_webhook_timeout().max(0.1)),
     });
-    let static_root = http::static_files::resolve_static_root(&cfg.web_root);
+    let web_client = http::static_files::resolve(&cfg.web_root);
 
     let late_ws = Arc::new(stack::LateService::default());
     let late_rtc = Arc::new(stack::LateService::default());
@@ -227,7 +227,7 @@ pub async fn run() -> Result<(), String> {
             crate::stats::metrics::Metrics::new(false),
         )))
     });
-    let mut state = AppState::new(cfg, modes.clone()).with_static_root(static_root);
+    let mut state = AppState::new(cfg, modes.clone()).with_web_client(web_client);
     if let Some(m) = &metrics {
         state = state.with_metrics(m.clone());
     }

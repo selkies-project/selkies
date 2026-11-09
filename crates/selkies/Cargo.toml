@@ -68,6 +68,16 @@ tempfile = "3"
 xkbcommon = { version = "0.9", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 
+[build-dependencies]
+# build.rs packs the web client into the executable (build/web_bundle.rs)
+flate2 = "1"
+mime_guess = "2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+# The tests compile build/web_bundle.rs, which tags files by their xxh3 hash
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
 [features]
 ## Writes one line per frame sent to `$BASELINE_FRAME_LOG`, what the comparison benchmark reads; a
 ## measurement build only, never a release.

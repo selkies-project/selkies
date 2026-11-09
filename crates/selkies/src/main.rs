@@ -9,9 +9,10 @@
 //! Resolves the settings, configures logging, publishes the socket directories the
 //! interposers read, settles the desktop's density on X11, probes the encoders this host
 //! serves once, and runs the stream server on a tokio runtime until a signal unwinds it.
-//! `selkies --version` prints the package version and the pixelflux and pcmflux it links and exits,
-//! `selkies --help` the settings, and `selkies <command>` runs one of the tools `commands`
-//! lists instead.
+//! `selkies --version` prints the package version and the pixelflux and pcmflux it links, then
+//! the web client it embeds on a line of its own, which the packaging builds check, and exits;
+//! `selkies --help` prints the settings, and `selkies <command>` runs one of the tools
+//! `commands` lists instead.
 
 use std::process::ExitCode;
 
@@ -68,6 +69,7 @@ fn main() -> ExitCode {
             env!("CARGO_PKG_VERSION"),
             selkies::native_libraries()
         );
+        println!("{}", selkies::http::embedded::summary());
         return ExitCode::SUCCESS;
     }
     let known_command = args.first().is_some_and(|name| {

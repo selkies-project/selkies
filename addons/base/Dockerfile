@@ -269,9 +269,10 @@ COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-screens.patch
 COPY addons/base/build-labwc.sh /build/
 RUN /build/build-labwc.sh && mkdir -p /build-out/lib && cp -a /usr/lib/*.so* /build-out/lib/
 
-# The web client, through scripts/ci/build-web.sh as every channel builds it. The
-# controller database's GitHub lookups use the build secret github_token where
-# one is given (`--secret id=github_token,env=GITHUB_TOKEN`).
+# The web client, through scripts/ci/build-web.sh as every channel builds it, for
+# the server stage to compile in. The controller database's GitHub lookups use
+# the build secret github_token where one is given
+# (`--secret id=github_token,env=GITHUB_TOKEN`).
 FROM node:26-alpine AS web
 WORKDIR /build
 COPY Cargo.toml ./
@@ -291,6 +292,8 @@ RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
 # workspace path dependencies. libx264, x265, libvpx, and SVT-AV1 are built
 # from pixelflux's scripts/build-x264.sh, build-x265.sh, build-libvpx.sh, and
 # build-svtav1.sh, with the patches it carries for them, and linked statically.
+# The web client is compiled in from the web stage's dist/web, which
+# SELKIES_WEB_DIST names so a build that finds none fails.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS server
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG RUST_TOOLCHAIN="1.99.1"
@@ -313,6 +316,8 @@ RUN set -e; \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY --from=web /build/dist/web ./dist/web
+ENV SELKIES_WEB_DIST="/src/dist/web"
 RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/src/target \
     set -e; \

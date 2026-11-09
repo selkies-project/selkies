@@ -5,9 +5,10 @@
 
 jupyter-server-proxy calls every entry of that group for the server it
 proxies. The configuration is the server's own: `selkies session
---jupyter-config` prints it with the executable and the web client's icon as
-installed, so this only runs the executable this wheel installed and returns
-its entry, and the two never describe different launchers.
+--jupyter-config` prints it with the executable and the web client's icon,
+which it writes out of the executable into the user's data directory, so this
+only runs the executable this wheel installed and returns its entry, and the
+two never describe different launchers.
 """
 import json
 import shutil

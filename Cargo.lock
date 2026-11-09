@@ -3481,6 +3481,7 @@ dependencies = [
  "url",
  "x11rb",
  "xkbcommon",
+ "xxhash-rust",
  "zip",
 ]
 

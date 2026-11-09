@@ -21,7 +21,10 @@
 # them, and everything Cargo writes goes under /build.
 #
 # The web client is built once per run by scripts/ci/build-web.sh into
-# dist/web, which every channel installs as it is.
+# dist/web, which every channel installs as it is, and copied beside the
+# crates, where the server's build script embeds it (crates/selkies/build.rs).
+# SELKIES_WEB_DIST names the copy, which makes a build that finds no client
+# fail.
 #
 # With --wheel, maturin builds the selkies wheel from the same copy instead
 # (pyproject.toml, `bindings = "bin"`), with the release version as it is
@@ -83,7 +86,10 @@ SRC="${BUILD}/server"
 rm -rf "${SRC}"
 mkdir -p "${SRC}"
 cp -r "${REPO}/Cargo.toml" "${REPO}/Cargo.lock" "${REPO}/crates" "${SRC}/"
+mkdir -p "${SRC}/dist"
+cp -r "${REPO}/dist/web" "${SRC}/dist/web"
 chmod -R u+w "${SRC}"
+export SELKIES_WEB_DIST="${SRC}/dist/web"
 # Every public crate carries the release version. Each native crate also keeps
 # its own manifest and lock for a standalone wheel build, while the root lock
 # covers both that build and this workspace build under `--locked`.

@@ -883,7 +883,8 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
             return 0;
         }
         Parsed::JupyterConfig => {
-            println!("{:#}", jupyter_config());
+            let data_home = super::sessions::data_dirs().into_iter().next();
+            println!("{:#}", jupyter_config(data_home.as_deref()));
             return 0;
         }
         Parsed::Error(message) => {
@@ -960,13 +961,48 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
 /// servers from `ServerProxy.servers` in any file of a Jupyter configuration directory's
 /// `jupyter_server_config.d`, so `selkies session --jupyter-config` written there gives every
 /// Jupyter server of that environment a Selkies launcher item. The entry names this executable
-/// and the installed web client's `selkies.svg`.
-pub fn jupyter_config() -> Json {
+/// and the web client's `selkies.svg` as a file ([`jupyter_icon`]), `data_home` being the
+/// user's data directory.
+pub fn jupyter_config(data_home: Option<&Path>) -> Json {
     let selkies = std::env::current_exe().unwrap_or_else(|_| "selkies".into());
-    let icon = crate::http::static_files::bundle_dir()
-        .unwrap_or_default()
-        .join("selkies.svg");
+    let icon = jupyter_icon(crate::http::static_files::WebClient::bundled(), data_home);
     json!({"ServerProxy": {"servers": {"selkies": jupyter(&selkies, &icon)}}})
+}
+
+/// The launcher's icon, the web client's `selkies.svg`, as the file jupyter-server-proxy reads
+/// on every request for it: a directory serving the client holds one, and an embedded client's
+/// is written to `selkies/selkies.svg` under `data_home`, where it outlives the command that
+/// printed its path, whenever what is there differs. A bare `selkies.svg` where neither is to
+/// be had, which the launcher draws as a missing icon.
+pub fn jupyter_icon(
+    client: Option<crate::http::static_files::WebClient>,
+    data_home: Option<&Path>,
+) -> PathBuf {
+    use crate::http::static_files::WebClient;
+    let fallback = PathBuf::from("selkies.svg");
+    match client {
+        Some(WebClient::Directory(dir)) => dir.join("selkies.svg"),
+        Some(WebClient::Embedded(table)) => {
+            let (Some(home), Some(svg)) = (data_home, table.read("selkies.svg")) else {
+                return fallback;
+            };
+            let path = home.join("selkies/selkies.svg");
+            if fs::read(&path).is_ok_and(|held| held == svg) {
+                return path;
+            }
+            // Two Jupyter servers may start at once: each renames a whole file into place.
+            let staged = path.with_extension(format!("svg.{}", std::process::id()));
+            let written = fs::create_dir_all(home.join("selkies"))
+                .and_then(|()| fs::write(&staged, &svg))
+                .and_then(|()| fs::rename(&staged, &path));
+            if written.is_err() {
+                let _ = fs::remove_file(&staged);
+                return fallback;
+            }
+            path
+        }
+        None => fallback,
+    }
 }
 
 /// The server process jupyter-server-proxy starts a desktop with.
@@ -974,7 +1010,8 @@ pub fn jupyter_config() -> Json {
 /// Jupyter authenticates the route and the proxy's Unix socket sits in a directory only this
 /// user reaches, so Selkies runs without its own login or TLS. The session follows the server
 /// down (`--follow`), which on a kill stops nothing itself. A notebook panel cannot hold the
-/// pointer or the keyboard, hence a tab. `icon` is the dashboard's `selkies.svg` as installed.
+/// pointer or the keyboard, hence a tab. `icon` is the dashboard's `selkies.svg` as a file
+/// ([`jupyter_icon`]).
 pub fn jupyter(selkies: &Path, icon: &Path) -> Json {
     json!({
         "command": [
@@ -1224,7 +1261,8 @@ mod tests {
 
     #[test]
     fn the_jupyter_config_offers_this_executable_as_a_proxy_server() {
-        let config = jupyter_config();
+        let data_home = crate::http::testing::tempfile_dir("selkies-jupyter-data-");
+        let config = jupyter_config(Some(&data_home));
         let entry = &config["ServerProxy"]["servers"]["selkies"];
         let exe = std::env::current_exe().unwrap();
         assert_eq!(
@@ -1239,6 +1277,54 @@ mod tests {
                 .is_some_and(|p| p.ends_with("selkies.svg")),
             "the web client's icon"
         );
+        let _ = fs::remove_dir_all(&data_home);
+    }
+
+    #[test]
+    fn the_embedded_icon_is_written_where_jupyter_reads_it_and_left_while_current() {
+        use crate::http::static_files::WebClient;
+        use std::os::unix::fs::MetadataExt;
+        let home = crate::http::testing::tempfile_dir("selkies-jupyter-icon-");
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">{}</svg>",
+            "<path d=\"M0 0h10v10z\"/>".repeat(20)
+        );
+        let table = crate::http::embedded::leak(&[("selkies.svg", svg.as_bytes())], 0);
+        assert!(
+            table.files[0].gzip_etag.is_some(),
+            "stored compressed, so it is inflated"
+        );
+        let embedded = || Some(WebClient::Embedded(table));
+        let path = jupyter_icon(embedded(), Some(&home));
+        assert_eq!(path, home.join("selkies/selkies.svg"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), svg);
+        let inode = fs::metadata(&path).unwrap().ino();
+        jupyter_icon(embedded(), Some(&home));
+        assert_eq!(
+            fs::metadata(&path).unwrap().ino(),
+            inode,
+            "a current icon is left"
+        );
+        fs::write(&path, "stale").unwrap();
+        jupyter_icon(embedded(), Some(&home));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            svg,
+            "a stale one is replaced"
+        );
+        assert_eq!(
+            fs::read_dir(home.join("selkies")).unwrap().count(),
+            1,
+            "nothing staged is left beside it"
+        );
+        assert_eq!(
+            jupyter_icon(Some(WebClient::Directory(home.join("web"))), Some(&home)),
+            home.join("web/selkies.svg"),
+            "a directory's own icon"
+        );
+        assert_eq!(jupyter_icon(embedded(), None), Path::new("selkies.svg"));
+        assert_eq!(jupyter_icon(None, Some(&home)), Path::new("selkies.svg"));
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

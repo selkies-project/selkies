@@ -19,6 +19,7 @@ use serde_json::json;
 
 use super::auth::{AUTH_REALM, Ceiling, MASTER_TOKEN_HEADER, SESSION_TOKEN_COOKIE};
 use super::listen::ListenConfig;
+use super::static_files::WebClient;
 use super::supervisor::FixedSupervisor;
 use super::testing::{TestServer, basic};
 use super::{AppState, HttpConfig, MetricsSource, TurnSource, TurnVerdict, build};
@@ -1611,7 +1612,7 @@ async fn frame_ancestors_header() {
             ..HttpConfig::default()
         };
         let state = AppState::new(config, FixedSupervisor::new(None, &[]))
-            .with_static_root(super::static_files::bundle_dir());
+            .with_web_client(embedded_client());
         let app = TestServer::start(build(state, Vec::new())).await;
         let r = app.call("GET", "/", &[]).await;
         assert!(
@@ -1639,39 +1640,178 @@ async fn frame_ancestors_header() {
     }
 }
 
-/// The bundled client: fixed names revalidate, hashed assets cache, nothing escapes the root.
+/// A page load's files as `build.rs` embeds them: the entry page, the core, the manifest and
+/// an icon under fixed names, and a script and a font the build names by content hash.
+fn embedded_client() -> Option<WebClient> {
+    let core = "export function connect() { return 'selkies'; }\n".repeat(64);
+    let app = "import { connect } from '../selkies-core.js';\nconnect();\n".repeat(64);
+    let font: Vec<u8> = (0..256u64)
+        .flat_map(|i| (i.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 7).to_le_bytes())
+        .collect();
+    let table = super::embedded::leak(
+        &[
+            (
+                "index.html",
+                b"<!doctype html><html><body>embedded</body></html>",
+            ),
+            ("selkies-core.js", core.as_bytes()),
+            ("manifest.json", b"{\"name\":\"Selkies\"}"),
+            ("favicon.ico", b"\x00\x00\x01\x00"),
+            ("assets/app-abc123.js", app.as_bytes()),
+            ("assets/inter-abc123.woff2", &font),
+        ],
+        784_111_777,
+    );
+    Some(WebClient::Embedded(table))
+}
+
+/// The embedded client: gzip to whoever takes it, the file as it is to whoever does not, an
+/// entity tag per representation and the table's date as validators, the revalidation rule
+/// per file, and nothing a request could name outside the table.
 #[tokio::test]
-async fn static_client() {
+async fn the_embedded_client_is_served_from_its_table() {
     let state = AppState::new(HttpConfig::default(), FixedSupervisor::new(None, &[]))
-        .with_static_root(super::static_files::bundle_dir());
+        .with_web_client(embedded_client());
     let app = TestServer::start(build(state, Vec::new())).await;
-    let r = app.call("GET", "/selkies-core.js", &[]).await;
+    let gzip = [("accept-encoding", "gzip, deflate, br")];
+    let r = app.call("GET", "/selkies-core.js", &gzip).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        r.header("content-encoding"),
+        Some("gzip"),
+        "a compressed file goes out as it is stored"
+    );
+    assert_eq!(r.header("content-type"), Some("text/javascript"));
+    assert_eq!(r.header("vary"), Some("accept-encoding"));
+    assert_eq!(
+        r.header("cache-control"),
+        Some("no-cache"),
+        "the core revalidates"
+    );
+    assert_eq!(
+        r.header("last-modified"),
+        Some("Sun, 06 Nov 1994 08:49:37 GMT")
+    );
+    let gzip_tag = r.header("etag").expect("a tag").to_string();
+    let identity = app.call("GET", "/selkies-core.js", &[]).await;
+    assert_eq!(identity.status, 200);
     assert!(
-        r.status == 200 && r.header("cache-control") == Some("no-cache"),
-        "{} {:?}",
+        identity.header("content-encoding").is_none(),
+        "a client naming no gzip gets none"
+    );
+    assert!(
+        identity.body.starts_with("export function connect()"),
+        "inflated for it"
+    );
+    assert_eq!(
+        identity.header("content-length"),
+        Some(identity.body.len().to_string().as_str())
+    );
+    assert_eq!(identity.header("vary"), Some("accept-encoding"));
+    let identity_tag = identity.header("etag").expect("a tag").to_string();
+    assert_ne!(
+        gzip_tag, identity_tag,
+        "each representation has a tag of its own"
+    );
+
+    let r = app
+        .call(
+            "GET",
+            "/selkies-core.js",
+            &[("if-none-match", &gzip_tag), gzip[0]],
+        )
+        .await;
+    assert_eq!(
+        (r.status, r.header("cache-control"), r.header("etag")),
+        (304, Some("no-cache"), Some(gzip_tag.as_str())),
+        "revalidation is a 304 keeping the rule"
+    );
+    assert!(r.body.is_empty());
+    let r = app
+        .call(
+            "GET",
+            "/selkies-core.js",
+            &[("if-none-match", &identity_tag), gzip[0]],
+        )
+        .await;
+    assert_eq!(
+        r.status, 200,
+        "the other representation's tag does not match"
+    );
+    let r = app
+        .call(
+            "GET",
+            "/assets/app-abc123.js",
+            &[("if-modified-since", "Sun, 06 Nov 1994 08:49:37 GMT")],
+        )
+        .await;
+    assert_eq!(r.status, 304, "the date validates where no tag is sent");
+
+    let r = app.call("GET", "/assets/app-abc123.js", &gzip).await;
+    assert!(
+        r.status == 200
+            && r.header("content-encoding") == Some("gzip")
+            && r.header("cache-control").is_none(),
+        "a hashed asset keeps heuristic caching: {} {:?}",
         r.status,
         r.header("cache-control")
     );
-    let r = app.call("GET", "/manifest.json", &[]).await;
+    assert!(r.header("last-modified").is_some(), "which its date allows");
+    let r = app.call("GET", "/assets/inter-abc123.woff2", &gzip).await;
+    assert_eq!(r.status, 200);
     assert!(
-        r.status == 200 && r.header("cache-control").is_none(),
-        "the manifest keeps heuristic caching"
+        r.header("content-encoding").is_none() && r.header("vary").is_none(),
+        "a font gzip cannot shorten is stored and sent as it is"
+    );
+    assert_eq!(r.header("content-type"), Some("font/woff2"));
+    for path in ["/manifest.json", "/favicon.ico"] {
+        let r = app.call("GET", path, &gzip).await;
+        assert!(
+            r.status == 200 && r.header("cache-control").is_none(),
+            "{path} keeps heuristic caching"
+        );
+    }
+    let r = app.call("GET", "/", &gzip).await;
+    assert!(
+        r.status == 200
+            && r.body.contains("embedded")
+            && r.header("cache-control") == Some("no-cache"),
+        "the entry page: {} {:?}",
+        r.status,
+        r.header("cache-control")
     );
     let r = app.call("GET", "/index.html", &[]).await;
     assert!(r.status == 200 && r.header("cache-control") == Some("no-cache"));
-    assert_eq!(app.call("GET", "/nothing-here.js", &[]).await.status, 404);
+    assert_eq!(r.header("content-type"), Some("text/html"));
+
+    let r = app
+        .call("GET", "/selkies-core.js", &[("range", "bytes=0-9")])
+        .await;
     assert_eq!(
-        app.call("GET", "/../Cargo.toml", &[]).await.status,
-        404,
-        "nothing above the root is served"
+        (r.status, r.body.len()),
+        (200, identity.body.len()),
+        "a range request gets the whole file"
     );
-    assert_eq!(
-        app.call("GET", "/assets/", &[]).await.status,
-        404,
-        "no directory index"
-    );
-    let r = app.call("HEAD", "/index.html", &[]).await;
+    let r = app.call("HEAD", "/selkies-core.js", &[]).await;
     assert_eq!(r.status, 200, "HEAD answers");
+    assert_eq!(
+        r.header("content-length"),
+        Some(identity.body.len().to_string().as_str())
+    );
+    assert!(r.body.is_empty(), "with no body");
+    for path in [
+        "/nothing-here.js",
+        "/../Cargo.toml",
+        "/assets/",
+        "/assets",
+        "/assets/../index.html",
+    ] {
+        assert_eq!(
+            app.call("GET", path, &[]).await.status,
+            404,
+            "{path} names no file of the table"
+        );
+    }
     for path in ["/", "/index.html", "/api/file-manager/rename"] {
         let r = app.call("POST", path, &[]).await;
         assert!(
@@ -2215,8 +2355,8 @@ async fn ipv6_loopback_redirect_on_the_listener() {
         subfolder: "/desk".into(),
         ..HttpConfig::default()
     };
-    let state = AppState::new(config, FixedSupervisor::new(None, &[]))
-        .with_static_root(super::static_files::bundle_dir());
+    let state =
+        AppState::new(config, FixedSupervisor::new(None, &[])).with_web_client(embedded_client());
     let cfg = ListenConfig {
         addr: "127.0.0.1,::1".into(),
         port: 0,
@@ -2312,24 +2452,22 @@ async fn static_client_edges() {
     std::fs::write(outside.join("secret.txt"), "secret").unwrap();
     std::os::unix::fs::symlink(outside.join("secret.txt"), web.join("away.txt")).unwrap();
     std::os::unix::fs::symlink(web.join("core.js"), web.join("alias.js")).unwrap();
-    let root = super::static_files::resolve_static_root(&web.to_string_lossy());
-    assert_eq!(
-        root.as_deref(),
-        Some(web.as_path()),
+    let root = super::static_files::resolve(&web.to_string_lossy());
+    assert!(
+        matches!(&root, Some(WebClient::Directory(dir)) if *dir == web),
         "a web_root holding an index.html wins"
     );
-    let bundle = super::static_files::resolve_static_root(&outside.to_string_lossy());
-    assert_eq!(
-        bundle,
-        super::static_files::bundle_dir(),
-        "one missing index.html falls back to the bundle"
+    let bundle = super::static_files::resolve(&outside.to_string_lossy());
+    assert!(
+        !matches!(&bundle, Some(WebClient::Directory(dir)) if *dir == outside),
+        "one missing index.html is passed over"
     );
 
     let config = HttpConfig {
         subfolder: "/desk".into(),
         ..HttpConfig::default()
     };
-    let state = AppState::new(config, FixedSupervisor::new(None, &[])).with_static_root(root);
+    let state = AppState::new(config, FixedSupervisor::new(None, &[])).with_web_client(root);
     let app = TestServer::start(build(state, Vec::new())).await;
     let r = app.call("GET", "/desk/", &[]).await;
     assert!(

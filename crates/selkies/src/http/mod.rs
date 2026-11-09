@@ -29,12 +29,13 @@
 //! refuse a misconfiguration with exit status [`EXIT_CONFIG_ERROR`] before anything binds, and
 //! [`Server::start`] brings up the rest: the certificate ([`tls::build`]), the tokens-file
 //! watcher, every listener with the contract line `Selkies server running on <endpoint>`
-//! ([`listen::start`]), and the certificate watcher. Disk-bound work (the tokens file,
-//! certificate files, name resolution, the static bundle's checks) runs on blocking threads,
-//! never on the runtime's workers.
+//! ([`listen::start`]), and the certificate watcher. Disk-bound and CPU-bound work (the tokens
+//! file, certificate files, name resolution, a web root's checks, inflating an embedded file
+//! for a client that takes no gzip) runs on blocking threads, never on the runtime's workers.
 
 pub mod audit;
 pub mod auth;
+pub mod embedded;
 pub mod listen;
 pub mod routes;
 pub mod static_files;
@@ -47,10 +48,11 @@ pub mod verdict;
 mod route_tests;
 #[cfg(test)]
 pub(crate) mod testing;
+#[cfg(test)]
+mod web_bundle;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -279,8 +281,8 @@ pub struct AppState {
     pub supervisor: Arc<dyn Supervisor>,
     pub metrics: Option<Arc<dyn MetricsSource>>,
     pub turn: Option<Arc<dyn TurnSource>>,
-    /// The directory the web client is served from, or none when no content was found.
-    pub static_root: Option<PathBuf>,
+    /// Where the web client is served from, or none when no source holds one.
+    pub web_client: Option<static_files::WebClient>,
 }
 
 impl AppState {
@@ -293,7 +295,7 @@ impl AppState {
             supervisor,
             metrics: None,
             turn: None,
-            static_root: None,
+            web_client: None,
         }
     }
 
@@ -307,8 +309,8 @@ impl AppState {
         self
     }
 
-    pub fn with_static_root(mut self, root: Option<PathBuf>) -> AppState {
-        self.static_root = root;
+    pub fn with_web_client(mut self, client: Option<static_files::WebClient>) -> AppState {
+        self.web_client = client;
         self
     }
 }

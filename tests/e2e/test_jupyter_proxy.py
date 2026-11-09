@@ -3,7 +3,7 @@
 
 The configuration it prints, placed in a Jupyter configuration directory's
 jupyter_server_config.d, registers a server process with jupyter-server-proxy, so a
-Jupyter server lists a Selkies item and serves the desktop at /selkies/: it
+Jupyter server lists a Selkies item, its icon the web client's, and serves the desktop at /selkies/: it
 starts the launcher on a Unix socket of the proxy's own and carries the page,
 the API, and the data WebSocket behind Jupyter's token, its Xvfb screen
 started at the images' size rather than the whole framebuffer. Proved in a browser,
@@ -139,6 +139,10 @@ def block(res: H.Results, wayland: bool) -> None:
         res.check(f"{tag} the proxy lists the Selkies desktop", entry.get("launcher_entry", {}).get("title") == "Selkies",
                   entry)
         res.check(f"{tag} the desktop opens in a tab of its own", entry.get("new_browser_tab") is True)
+        icon_url = entry.get("launcher_entry", {}).get("icon_url", "")
+        code, icon = get(f"{base}{icon_url}", token) if icon_url else (None, b"")
+        res.check(f"{tag} the launcher's icon is the web client's", code == 200 and b"<svg" in icon,
+                  (icon_url, code, icon[:40]))
         with sync_playwright() as pw:
             browser = C.launch_browser(pw, "chromium")
             context = browser.new_context(viewport={"width": 1280, "height": 720})
