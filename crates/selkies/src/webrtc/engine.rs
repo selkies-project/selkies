@@ -14,9 +14,12 @@
 //! so a viewer cannot bring one up, and its controller leaving ends it with its viewers.
 //!
 //! Peers are registered only after the offer was sent: a failure before registration tears the
-//! half-built connection down there, because no other teardown path could ever find it. An
-//! explicit stop deregisters a peer before closing it, so the state event that close raises finds
-//! no entry and every teardown step runs once (`reap_peer`).
+//! half-built connection down there, because no other teardown path could ever find it. Until
+//! then a starting peer counts as a consumer of its display, since its sender subscribed to the
+//! display's graph when the start began, and the offer waits on ICE gathering, which against a
+//! TURN server that does not answer lasts the agent's gather timeout. An explicit stop
+//! deregisters a peer before closing it, so the state event that close raises finds no entry and
+//! every teardown step runs once (`reap_peer`).
 //!
 //! The ICE topology is decided once, at startup: `open_ice_muxes` binds the shared UDP and TCP
 //! ports the settings name, failing the service on a port in use, and every peer reads the muxes
@@ -387,6 +390,32 @@ pub enum StartError {
     Signaling(String),
 }
 
+/// A peer's place among the engine's starting peers, given up when its start ends, a cancelled
+/// one included: a start whose task is aborted mid-gather (a service stop) would otherwise keep
+/// its display consumed for good.
+struct Starting<'a> {
+    starting: &'a Mutex<HashMap<String, String>>,
+    peer: String,
+}
+
+impl<'a> Starting<'a> {
+    fn enter(starting: &'a Mutex<HashMap<String, String>>, peer: &str, display: &str) -> Self {
+        starting
+            .lock()
+            .insert(peer.to_string(), display.to_string());
+        Starting {
+            starting,
+            peer: peer.to_string(),
+        }
+    }
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        self.starting.lock().remove(&self.peer);
+    }
+}
+
 /// The WebRTC engine (module docblock).
 pub struct RtcEngine {
     me: Weak<RtcEngine>,
@@ -396,6 +425,9 @@ pub struct RtcEngine {
     muxes: RwLock<IceMuxes>,
     certificate: Arc<Certificate>,
     pub(crate) peers: Mutex<PeerTable>,
+    /// Peers between their start and their entry in `peers`, by the display each streams: their
+    /// senders already ride the display's graph, so the display stays consumed.
+    starting: Mutex<HashMap<String, String>>,
     pub(crate) displays: Mutex<HashMap<String, Arc<DisplayGraph>>>,
     pub(crate) last_cursor: Mutex<Option<Json>>,
     common: Mutex<HashMap<(String, bool), CommonFrames<u64>>>,
@@ -419,6 +451,7 @@ impl RtcEngine {
             muxes: RwLock::new(IceMuxes::default()),
             certificate,
             peers: Mutex::new(PeerTable::default()),
+            starting: Mutex::new(HashMap::new()),
             displays: Mutex::new(HashMap::new()),
             last_cursor: Mutex::new(None),
             common: Mutex::new(HashMap::new()),
@@ -684,7 +717,11 @@ impl RtcEngine {
             request.client_type,
             request.display_id.clone(),
         );
-        match self.start_pipeline(request).await {
+        let started = {
+            let _starting = Starting::enter(&self.starting, &peer_id, &display_id);
+            self.start_pipeline(request).await
+        };
+        match started {
             Ok(()) => {
                 info!(target: "webrtc", "RTC pipeline started for peer {peer_id} ({}, display '{display_id}').", client_type.as_str());
             }
@@ -994,7 +1031,8 @@ impl RtcEngine {
                 .peers
                 .lock()
                 .iter()
-                .any(|(_, p)| p.display_id == display_id);
+                .any(|(_, p)| p.display_id == display_id)
+                || self.starting.lock().values().any(|d| d == display_id);
             if remaining && !(controller_left && display_id != "primary") {
                 return;
             }

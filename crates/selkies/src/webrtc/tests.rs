@@ -2223,6 +2223,81 @@ async fn owner_a_page_beside_it_is_held_back_until_it_owns_the_display() {
     rig.service.shutdown().await;
 }
 
+/// A TURN server that never answers, for the peers the engine starts from here on: their
+/// gathering waits out the ICE agent's timeout. It answers nothing once dropped either.
+fn silent_turn(rig: &Rig) -> std::net::UdpSocket {
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = silent.local_addr().unwrap();
+    rig.service
+        .engine
+        .update_ice_servers(vec![selkies_rtc::ice::IceServer {
+            urls: vec![format!("turn:{addr}?transport=udp")],
+            username: Some("user".into()),
+            credential: Some("secret".into()),
+        }]);
+    silent
+}
+
+/// A page that starts as the display's last peer leaves gets the display's media: the graph its
+/// sender subscribed to stays while it gathers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_still_gathering_keeps_its_display_consumed() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rig.peer("a", ClientType::Controller, "primary").await;
+    let graph = rig.service.engine.displays.lock().get("primary").cloned();
+    let _silent = silent_turn(&rig);
+    let engine = rig.service.engine.clone();
+    tokio::spawn(async move {
+        engine
+            .start_rtc_connection(PeerRequest::new("b", ClientType::Controller, "primary"))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        rig.service.engine.peers.lock().get("b").is_none(),
+        "b is still gathering"
+    );
+    rig.service
+        .engine
+        .stop_rtc_connection("a", "controller")
+        .await;
+    let kept = rig.service.engine.displays.lock().get("primary").cloned();
+    assert!(
+        matches!((kept, graph), (Some(kept), Some(graph)) if Arc::ptr_eq(&kept, &graph)),
+        "the graph b's sender rides stays"
+    );
+}
+
+/// A start aborted mid-gather, as a service stop aborts it, leaves its display to be released
+/// with the last peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_aborted_start_leaves_its_display_releasable() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rig.peer("a", ClientType::Controller, "primary").await;
+    let _silent = silent_turn(&rig);
+    let engine = rig.service.engine.clone();
+    let start = tokio::spawn(async move {
+        engine
+            .start_rtc_connection(PeerRequest::new("b", ClientType::Controller, "primary"))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    start.abort();
+    assert!(start.await.is_err_and(|e| e.is_cancelled()));
+    rig.service
+        .engine
+        .stop_rtc_connection("a", "controller")
+        .await;
+    assert!(
+        !rig.service.engine.displays.lock().contains_key("primary"),
+        "the display is released with its last peer"
+    );
+}
+
 /// The owner's reload keeps the display while its new connection gathers against a TURN server
 /// that never answers, which outlasts the reconnect grace: its session has started, its peer
 /// connection is not in the engine yet.
@@ -2239,14 +2314,7 @@ async fn owner_a_reload_still_gathering_keeps_the_display() {
         st.peer_tabs.insert("b".into(), Some("tab-b".into()));
         st.owner_tabs.insert("primary".into(), "tab-a".into());
     }
-    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let addr = silent.local_addr().unwrap();
-    let turn = selkies_rtc::ice::IceServer {
-        urls: vec![format!("turn:{addr}?transport=udp")],
-        username: Some("user".into()),
-        credential: Some("secret".into()),
-    };
-    rig.service.engine.update_ice_servers(vec![turn]);
+    let _silent = silent_turn(&rig);
     rig.service
         .engine
         .stop_rtc_connection("a", "controller")
@@ -2282,7 +2350,6 @@ async fn owner_a_reload_still_gathering_keeps_the_display() {
         "tab-a",
         "past the grace, the reloading tab still owns the display"
     );
-    drop(silent);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
