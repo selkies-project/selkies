@@ -1877,6 +1877,12 @@ impl X11Pipeline {
         self.hw.as_ref().is_some_and(|enc| enc.is_hardware())
     }
 
+    /// Whether the session runs its constant quality under the peak of its bitrate
+    /// (`encoders::session_capped`), for this pipeline's stream log.
+    pub fn capped(&self) -> bool {
+        encoders::session_capped(self.hw.as_ref(), &self.settings)
+    }
+
     /// The encoder's one rate control where its backend has one alone
     /// (`FrameEncoder::fixed_rate_control`), for this pipeline's stream log.
     pub fn fixed_rate_control(&self) -> Option<&'static str> {

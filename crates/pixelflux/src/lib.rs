@@ -1866,7 +1866,8 @@ fn encoder_desc(
         range_str,
         encoders::rate_desc(
             settings,
-            video_encoder.and_then(FrameEncoder::fixed_rate_control)
+            video_encoder.and_then(FrameEncoder::fixed_rate_control),
+            encoders::session_capped(video_encoder, settings)
         )
     )
 }
@@ -1888,17 +1889,19 @@ pub(crate) fn log_stream_settings(
     );
     let fullcolor = encoders::session_fullcolor(video_encoder, settings);
     let full_range = encoders::session_full_range(video_encoder, settings);
+    let capped = encoders::session_capped(video_encoder, settings);
     log_stream_settings_of(
-        tag, settings, n_stripes, backend, fixed_rate, holds, fullcolor, full_range,
+        tag, settings, n_stripes, backend, fixed_rate, holds, capped, fullcolor, full_range,
     );
     report::bit_depth(encoders::session_bit_depth(video_encoder, settings));
-    report::capped(encoders::session_capped(video_encoder, settings));
+    report::capped(capped);
 }
 
 /// The "Stream settings active" line for a backend named outright, `(name, hardware)`, where
 /// the session is not a `FrameEncoder` (NvFBC's own NVENC session); `None` is the CPU path, `fixed_rate` is the backend's one rate control where it has one
-/// (`FrameEncoder::fixed_rate_control`), and `holds` says whether the session holds a cleanup
-/// at the quantizer asked for (`FrameEncoder::holds_quantizer`).
+/// (`FrameEncoder::fixed_rate_control`), `holds` says whether the session holds a cleanup at
+/// the quantizer asked for (`FrameEncoder::holds_quantizer`), and `capped` whether a constant
+/// quality runs under the peak of `video_bitrate_kbps` (`encoders::session_capped`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn log_stream_settings_of(
     tag: &str,
@@ -1907,6 +1910,7 @@ pub(crate) fn log_stream_settings_of(
     backend: Option<(&str, bool)>,
     fixed_rate: Option<&str>,
     holds: bool,
+    capped: bool,
     fullcolor: bool,
     full_range: bool,
 ) {
@@ -1914,7 +1918,7 @@ pub(crate) fn log_stream_settings_of(
     println!(
         "{}",
         stream_settings_line(
-            tag, settings, n_stripes, backend, fixed_rate, holds, fullcolor, full_range
+            tag, settings, n_stripes, backend, fixed_rate, holds, capped, fullcolor, full_range
         )
     );
 }
@@ -1929,6 +1933,7 @@ fn stream_settings_line(
     backend: Option<(&str, bool)>,
     fixed_rate: Option<&str>,
     holds: bool,
+    capped: bool,
     fullcolor: bool,
     full_range: bool,
 ) -> String {
@@ -1960,7 +1965,10 @@ fn stream_settings_line(
             log_msg.push_str(" Streaming");
         }
 
-        log_msg.push_str(&format!(" | {}", encoders::rate_desc(settings, fixed_rate)));
+        log_msg.push_str(&format!(
+            " | {}",
+            encoders::rate_desc(settings, fixed_rate, capped)
+        ));
         if let Some(paint_over) = encoders::paint_over_desc(settings, fixed_rate, holds) {
             log_msg.push_str(&format!(" | {paint_over}"));
         }
@@ -2002,6 +2010,7 @@ mod stream_settings_line_tests {
                 Some(("NVENC", true)),
                 fixed,
                 fixed.is_none(),
+                false,
                 false,
                 false,
             )

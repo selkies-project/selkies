@@ -1083,7 +1083,7 @@ fn encode_loop<F>(
                         log_msg.push_str(&format!(
                             " | Mode: {} | {}",
                             pl.codec().display(),
-                            crate::encoders::rate_desc(&psettings, fixed)
+                            crate::encoders::rate_desc(&psettings, fixed, pl.capped())
                         ));
                         if let Some(paint_over) = paint_over {
                             log_msg.push_str(&format!(" | {paint_over}"));

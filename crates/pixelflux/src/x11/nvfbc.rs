@@ -937,6 +937,7 @@ fn open(settings: &CaptureSettings) -> Option<GpuCapture> {
         Some(("NVENC", true)),
         None,
         true,
+        encoder.capped(),
         encoder.is_fullcolor(),
         false,
     );

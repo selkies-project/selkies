@@ -498,12 +498,16 @@ pub fn colorspace_desc(fullcolor: bool, full_range: bool) -> &'static str {
 
 /// The rate-control field of a video stream's log line, as the session applies it: a backend
 /// with one rate control (`fixed`, from `FrameEncoder::fixed_rate_control`) runs it at the
-/// bitrate target whatever the mode, and every other session runs its mode, a CRF one with no
-/// bitrate cap.
-pub fn rate_desc(settings: &CaptureSettings, fixed: Option<&str>) -> String {
+/// bitrate target whatever the mode, and every other session runs its mode, a CRF one under the
+/// peak of its bitrate where it is `capped` (`session_capped`) and with no bitrate cap otherwise.
+pub fn rate_desc(settings: &CaptureSettings, fixed: Option<&str>, capped: bool) -> String {
     match fixed {
         Some(mode) => format!("{mode} {}", settings.video_bitrate_kbps),
         None if settings.video_cbr_mode => format!("CBR {}", settings.video_bitrate_kbps),
+        None if capped => format!(
+            "CRF: {} (Peak {})",
+            settings.video_crf, settings.video_bitrate_kbps
+        ),
         None => format!("CRF: {}", settings.video_crf),
     }
 }
@@ -557,7 +561,8 @@ mod tests {
     use super::*;
 
     /// The rate field says what the session runs: a backend with one rate control runs it at the
-    /// bitrate target in either mode, and every other session runs its mode, CRF naming no bitrate.
+    /// bitrate target in either mode, and every other session runs its mode, CRF naming its peak
+    /// where the session takes one and no bitrate otherwise.
     #[test]
     fn the_rate_field_names_what_the_backend_applies() {
         let crf = CaptureSettings {
@@ -570,11 +575,12 @@ mod tests {
             video_cbr_mode: true,
             ..crf.clone()
         };
-        assert_eq!(rate_desc(&crf, None), "CRF: 25");
-        assert_eq!(rate_desc(&cbr, None), "CBR 8000");
+        assert_eq!(rate_desc(&crf, None, false), "CRF: 25");
+        assert_eq!(rate_desc(&crf, None, true), "CRF: 25 (Peak 8000)");
+        assert_eq!(rate_desc(&cbr, None, false), "CBR 8000");
         for settings in [&crf, &cbr] {
-            assert_eq!(rate_desc(settings, Some("VBR")), "VBR 8000");
-            assert_eq!(rate_desc(settings, Some("CBR")), "CBR 8000");
+            assert_eq!(rate_desc(settings, Some("VBR"), false), "VBR 8000");
+            assert_eq!(rate_desc(settings, Some("CBR"), false), "CBR 8000");
         }
     }
 
