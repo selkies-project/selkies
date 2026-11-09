@@ -13,7 +13,8 @@
 //! client opens odd stream ids and a server even ones, a channel opened before the
 //! association is established sends its `DATA_CHANNEL_OPEN` once it is, a message larger
 //! than the peer's `a=max-message-size` is refused rather than sent, and a bulk transfer
-//! paces itself on `buffered_amount` against `DATA_CHANNEL_BULK_HIGH_WATER`.
+//! paces itself on what its channel has unacknowledged against the path's bandwidth-delay
+//! product, never below `DATA_CHANNEL_BULK_HIGH_WATER` (`path`).
 //!
 //! Six behaviors hold here through the vendored `rtc-sctp`
 //! (`crates/selkies-rtc/vendor/rtc-sctp`, its diff against the published crate in
@@ -54,6 +55,7 @@ pub mod association;
 pub mod channel;
 pub mod dcep;
 pub mod driver;
+pub mod path;
 
 pub use association::{
     ADVERTISED_RWND, DEFAULT_REMOTE_MAX_MESSAGE_SIZE, LOCAL_MAX_MESSAGE_SIZE, MAX_REASSEMBLY_BYTES,

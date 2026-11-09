@@ -990,6 +990,23 @@ fn a_sack_past_anything_sent_leaves_the_association_working() {
     assert!(rig.answers_heartbeat());
 }
 
+/// What a channel has in flight counts toward the bulk gate until it is acknowledged, where
+/// `bufferedAmount` counts only what waits to go out: a message sent next waits behind both.
+#[test]
+fn bytes_in_flight_stay_unacknowledged_until_a_sack_covers_them() {
+    let mut rig = Rig::new();
+    rig.establish();
+    let tsns = rig.outstanding(3);
+    assert_eq!(rig.sctp.buffered_amount(0), 0, "nothing waits to go out");
+    assert_eq!(
+        rig.sctp.unacknowledged_amount(0),
+        3,
+        "three bytes in flight"
+    );
+    rig.deliver(rig.sack(tsns[2], &[]));
+    assert_eq!(rig.sctp.unacknowledged_amount(0), 0);
+}
+
 /// A small deterministic generator, so a failure replays.
 struct XorShift(u64);
 
