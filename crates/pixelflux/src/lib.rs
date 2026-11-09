@@ -3542,6 +3542,9 @@ impl ScreenshotReadbacks {
         }
         // SAFETY: a non-null address of the extension's entry point has its signature.
         unsafe {
+            // A GL context is current, so its EGL display, made by `egl_display`, has
+            // libEGL open.
+            #[allow(clippy::disallowed_methods)]
             let address = smithay::backend::egl::get_proc_address("glBufferStorageEXT");
             (!address.is_null())
                 .then(|| std::mem::transmute::<*const std::ffi::c_void, BufferStorageFn>(address))
@@ -5920,6 +5923,46 @@ struct WaylandThreadConfig {
     pointer_share: Arc<crate::wayland::frontend::PointerShare>,
 }
 
+/// The library smithay opens for its EGL calls, by the name it opens it by.
+const EGL_LIBRARY: &str = "libEGL.so.1";
+
+/// Whether [`EGL_LIBRARY`] opens. It is opened once and kept open, so smithay's own open of it
+/// finds it loaded.
+fn egl_library() -> Result<(), String> {
+    static LIBRARY: OnceLock<Result<libloading::Library, String>> = OnceLock::new();
+    LIBRARY
+        // SAFETY: libEGL's initializers are the ones smithay runs when it opens the library.
+        .get_or_init(|| {
+            unsafe { libloading::Library::new(EGL_LIBRARY) }.map_err(|e| {
+                match std::error::Error::source(&e) {
+                    Some(why) => format!("{e}: {why}"),
+                    None => e.to_string(),
+                }
+            })
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|e| format!("{EGL_LIBRARY} is not available: {e}"))
+}
+
+/// An EGL display on `native`, or an error where libEGL is not installed.
+///
+/// smithay opens libEGL the first time any of its EGL calls runs and panics where the library
+/// is missing. Every EGL display is made here, after [`egl_library`] has opened it, so a host
+/// without libEGL gets an error its GPU path declines on, as for any other EGL failure.
+/// `clippy.toml` holds the crate to this function and keeps smithay's EGL entry points out.
+pub(crate) fn egl_display<N>(native: N) -> Result<EGLDisplay, String>
+where
+    N: smithay::backend::egl::native::EGLNativeDisplay + 'static,
+{
+    egl_library()?;
+    // SAFETY: the EGL displays made outside smithay (the GPU probe's, on EGL devices and X11)
+    // are on other native displays than the GBM devices smithay's are, so terminating one of
+    // them never ends a display smithay tracks.
+    #[allow(clippy::disallowed_methods)]
+    unsafe { EGLDisplay::new(native) }.map_err(|e| format!("{e}"))
+}
+
 /// Bring the hardware renderer up on a DRM render node: the GBM device, the EGL display and
 /// context it backs, the GLES renderer, and the allocator the render targets come from.
 ///
@@ -5939,7 +5982,7 @@ fn gpu_render_init(
     let gbm_allocator =
         RawGbmDevice::new(file_for_alloc).map_err(|_| "Failed to create Raw GBM Device")?;
     let gbm = GbmDevice::new(file).map_err(|_| "Failed to create GBM device")?;
-    let egl = unsafe { EGLDisplay::new(gbm) }.map_err(|_| "Failed to create EGL display")?;
+    let egl = egl_display(gbm).map_err(|e| format!("Failed to create EGL display: {e}"))?;
     let context = EGLContext::new(&egl).map_err(|_| "Failed to create EGL context")?;
     let renderer =
         unsafe { GlesRenderer::new(context) }.map_err(|_| "Failed to init GlesRenderer")?;

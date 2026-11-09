@@ -1,0 +1,13 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# smithay opens libEGL.so.1 on its first EGL call and panics where the library is
+# missing. EGL displays are made through `egl_display`, which opens it first and
+# returns an error instead; these are the calls that would open it before that.
+disallowed-methods = [
+    { path = "smithay::backend::egl::display::EGLDisplay::new", reason = "use egl_display, which returns an error where libEGL is missing instead of panicking" },
+    { path = "smithay::backend::egl::device::EGLDevice::enumerate", reason = "opens libEGL and panics where it is missing; make a display with egl_display first" },
+    { path = "smithay::backend::egl::ffi::make_sure_egl_is_loaded", reason = "opens libEGL and panics where it is missing; make a display with egl_display first" },
+    { path = "smithay::backend::egl::get_proc_address", reason = "opens libEGL and panics where it is missing; call it only under a display made by egl_display" },
+]

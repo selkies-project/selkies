@@ -1032,7 +1032,7 @@ fn open(settings: &CaptureSettings) -> Option<GpuCapture> {
     let wants_egl = crate::driver_selects_nvenc(&driver);
     let egl = GbmDevice::new(egl_file)
         .ok()
-        .and_then(|dev| unsafe { EGLDisplay::new(dev) }.ok());
+        .and_then(|dev| crate::egl_display(dev).ok());
     if wants_egl && egl.is_none() {
         return declined(&format!(
             "no EGL display on {} for the NVENC import",

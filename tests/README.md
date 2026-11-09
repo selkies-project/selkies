@@ -72,6 +72,10 @@ unit tier needs only the source tree and `pytest`.
   the kernel headers define. The server's gamepad tests
   (`crates/selkies/src/gamepad`, `cargo test`) compare them against its own
   constants.
+- **`hide_libs.so`** — a preload that makes `dlopen` fail for the libraries
+  `HIDE_LIBS` names (`:`-separated file name prefixes), so a host that has
+  them runs the paths of one that does not. The missing-library suite runs the
+  probe and both backends' sessions under it.
 
 `make -C tests/tools gamepad` builds the interposer-side inspection tools
 (`jsread`, `sdlenum`, `sdlread`, `udevscan`), which need SDL2 and libudev. They
