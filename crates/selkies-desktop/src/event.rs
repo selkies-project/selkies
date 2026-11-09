@@ -12,7 +12,8 @@ pub enum SurfaceId {
     Panel,
     /// A wallpaper layer, one per output, by the backend's output number.
     Background(u32),
-    /// A file manager window, by the desktop's window number.
+    /// A window of the shell's own, a file manager window or the settings
+    /// window, by the desktop's window number.
     Window(u32),
 }
 
@@ -101,7 +102,7 @@ pub enum Event {
     },
     /// A surface lost keyboard focus.
     KeyboardLeave { surface: SurfaceId },
-    /// The window manager asked a file manager window to close.
+    /// The window manager asked one of the shell's windows to close.
     WindowCloseRequested { window: u32 },
     /// A drag the desktop started entered one of its surfaces.
     DragEnter { surface: SurfaceId, x: f64, y: f64 },
@@ -180,18 +181,21 @@ pub enum Request {
     ToggleMute,
     /// Switch to the virtual desktop at an index.
     SwitchDesktop(u32),
-    /// Open a file manager window of a size, titled, with the icon a window
-    /// manager may show for it.
+    /// Open one of the shell's windows of a size, titled, with the app id a
+    /// window manager and a taskbar know it by, the icon name a compositor
+    /// resolves in its theme, and our own rendering of that icon as pixels.
     OpenWindow {
         id: u32,
         title: String,
         width: i32,
         height: i32,
+        app_id: &'static str,
+        icon_name: &'static str,
         icon: Option<Box<Pixmap>>,
     },
-    /// Destroy a file manager window.
+    /// Destroy one of the shell's windows.
     CloseWindow { id: u32 },
-    /// Retitle a file manager window.
+    /// Retitle one of the shell's windows.
     SetTitle { id: u32, title: String },
     /// Start dragging files from a window, with a ghost image of the selection
     /// at the output scale the window renders at.

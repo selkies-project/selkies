@@ -23,8 +23,14 @@
     <item label="Files" icon="system-file-manager">
       <action name="Execute"><command>selkies-desktop --files</command></action>
     </item>
+    <item label="Change Wallpaper" icon="preferences-desktop-wallpaper">
+      <action name="Execute"><command>selkies-desktop --settings wallpaper</command></action>
+    </item>
     <item label="Desktop Settings" icon="preferences-desktop">
       <action name="Execute"><command>selkies-desktop --settings</command></action>
+    </item>
+    <item label="Keyboard Shortcuts" icon="preferences-desktop-keyboard">
+      <action name="Execute"><command>selkies-desktop --settings shortcuts</command></action>
     </item>
     <item label="Firefox" icon="firefox">
       <action name="Execute"><command>firefox</command></action>

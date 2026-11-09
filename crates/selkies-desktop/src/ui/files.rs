@@ -19,7 +19,7 @@ use crate::files::{
 use crate::geom::Rect;
 use crate::i18n::{tr, trf};
 use crate::render::{Align, Canvas, Fonts, rgba};
-use crate::ui;
+use crate::ui::{self, settings};
 use crate::xkb::Key;
 
 /// Height of the toolbar.
@@ -876,9 +876,9 @@ fn open_item(d: &mut Desktop, id: u32, index: usize) {
     }
     let picker = d.files.window(id).and_then(|w| w.picker.clone());
     if let Some(picker) = picker {
-        let (key, monitor) = match picker.target {
-            PickTarget::Wallpaper { key, monitor } => (key, monitor),
-            PickTarget::StartIcon => ("start_icon", None),
+        let (key, monitor, page) = match picker.target {
+            PickTarget::Wallpaper { key, monitor } => (key, monitor, settings::Page::Wallpaper),
+            PickTarget::StartIcon => ("start_icon", None, settings::Page::Panel),
         };
         let value = item.path.to_string_lossy().to_string();
         if let Err(error) = crate::config::save(&[(key, value)]) {
@@ -886,7 +886,7 @@ fn open_item(d: &mut Desktop, id: u32, index: usize) {
         }
         d.apply_config();
         close(d, id);
-        d.open_popup(crate::desktop::Popup::Settings);
+        d.open_settings(Some(page));
         d.settings.monitor = monitor;
         return;
     }

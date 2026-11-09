@@ -37,14 +37,30 @@ people reach for in a multi-application container:
 * **Quick launch** buttons beside the start button and a **system tray**
   beside the clock that hosts the XEmbed icons applications such as Steam
   dock, under openbox and under labwc through XWayland.
-* **Settings** from a right click on the bar, in four pages: the bar's edge,
-  auto-hide, height, width, opacity, icon, items, quick launch buttons and
-  start menu favorites; the file manager's view, sort and hidden files; the
-  wallpaper of every monitor, shared or one by one; and the theme, with a
-  preview of the desktop, a dark and a light scheme, the four colors of the
-  interface, and the window frames.  Each page has a reset, and a right
-  click on an application in the start menu pins it to the favorites or the
-  quick launch.  A right click on the desktop still opens the window
+* **Settings** in a window of their own, opened from the bar's right-click
+  menu or by `selkies-desktop --settings [PAGE]`, with a sidebar of pages
+  under four captions and a search field that filters them by name or by
+  the rows they hold (Enter opens the first match).  Appearance: Theme, the
+  dark, light and Selkies schemes and the Linux, Fruit and Redmond styles as
+  cards each showing the desktop as it would look, over a live preview;
+  Colors, the four colors of the interface from presets or a picker;
+  Windows, the frames' shading, button side, glyphs and corners; Wallpaper,
+  for every monitor, shared or one by one.  Workspace: Panel, the bar's
+  edge, auto-hide, height, width, opacity, icon, label, layout, margin,
+  items, quick launch buttons and start menu; Desktops, how many and the
+  pager; Shortcuts, the keyboard shortcuts in force as the window manager
+  publishes them in `$XDG_RUNTIME_DIR/selkies-wm/keybinds` (a chord, a tab
+  and the description per line), with the shell's own keys under them.
+  Applications: Files, the file manager's view, sort and hidden files;
+  Language.  System: About, the version, the backend, the desktop count and
+  the config file.  A page of settings has a reset, and a right click on an
+  application in the start menu pins it to the favorites or the quick
+  launch.  Every item of the bar has a right-click menu of its own: the
+  pager adds or removes a desktop, the clock, the volume control, the tray
+  and the show desktop button each hide themselves, a quick launch button
+  leaves the quick launch, and each opens the settings on its page; the bar
+  between them moves to the other edge, hides, adds a desktop or reloads
+  the applications.  A right click on the desktop still opens the window
   manager's own menu.
 * **Window frames** that follow the theme: a window manager theme is
   generated from the colors and the frame settings under `~/.themes`, where
@@ -180,6 +196,8 @@ selkies-desktop --launcher        # open or close the quick launcher
 selkies-desktop --show-desktop    # minimize every window, or restore them
 selkies-desktop --files [DIR]     # open the file manager, on a folder when given
 selkies-desktop --settings        # open the settings window
+selkies-desktop --settings PAGE   # on a page: theme, colors, windows, wallpaper, panel,
+                                  # desktops, shortcuts, files, language or about
 selkies-desktop --reload          # read the applications and settings again
 selkies-desktop --quit
 selkies-desktop --lookup-icon firefox   # print the file an icon name resolves to

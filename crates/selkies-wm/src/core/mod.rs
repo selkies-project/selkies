@@ -416,7 +416,7 @@ impl Engine {
             .or(config.desktops)
             .unwrap_or(DEFAULT_DESKTOPS)
             .clamp(1, MAX_DESKTOPS);
-        Engine {
+        let engine = Engine {
             theme_poll: now + Duration::from_secs(1),
             config,
             menus,
@@ -453,7 +453,9 @@ impl Engine {
                 count: desktop_count,
                 current: 0,
             }],
-        }
+        };
+        engine.publish_keybinds();
+        engine
     }
 
     /// Whether a bind that runs on its key's release is armed, for a backend that sees only
@@ -487,6 +489,39 @@ impl Engine {
         &self.config.keybinds
     }
 
+    /// Write the shortcuts in force where the desktop shell reads them for its Shortcuts page:
+    /// `selkies-wm/keybinds` under the runtime directory, a line a bind as the chord's label, a
+    /// tab, and what it does in the session's language. Written only when the text changed.
+    fn publish_keybinds(&self) {
+        let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(runtime).join("selkies-wm");
+        let path = dir.join("keybinds");
+        let mut text = String::new();
+        for bind in &self.config.keybinds {
+            let description = bind
+                .actions
+                .iter()
+                .map(|a| a.description())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if description.is_empty() {
+                continue;
+            }
+            text.push_str(&crate::config::chord_label(bind.modifiers, bind.keysym));
+            text.push('\t');
+            text.push_str(&description);
+            text.push('\n');
+        }
+        if std::fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+            return;
+        }
+        if let Err(error) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text)) {
+            log::debug!(target: "wm", "shortcuts not published to {}: {error}", path.display());
+        }
+    }
+
     /// The pointer bindings in force, for a backend that grabs the ones acting inside clients.
     pub fn mousebinds(&self) -> &[crate::config::MouseBind] {
         &self.config.mousebinds
@@ -517,6 +552,7 @@ impl Engine {
         self.set_desktop_count(self.configured_desktops());
         log::info!(target: "wm", "configuration read again: {} keybinds, {} mousebinds, {} menus",
             self.config.keybinds.len(), self.config.mousebinds.len(), self.menus.menus.len());
+        self.publish_keybinds();
     }
 
     // ---- outputs -------------------------------------------------------------------------
@@ -1766,10 +1802,13 @@ impl Engine {
             win.hover,
             win.pressed,
         );
+        // A class that is no icon name is drawn with its desktop entry's icon.
+        let icon_name =
+            apps::icon_for_app_id(&self.apps().entries, &app_id).unwrap_or_else(|| app_id.clone());
         let appearance = Appearance {
             title: &title,
             icon: None,
-            app_id: &app_id,
+            app_id: &icon_name,
             active,
             maximized,
             shaded,
@@ -3635,6 +3674,12 @@ impl Engine {
             self.theme_poll = now + Duration::from_secs(1);
             if self.theme.poll(now) {
                 self.look_generation += 1;
+                crate::i18n::select(
+                    selkies_draw::style::desktop_values()
+                        .get("language")
+                        .map(String::as_str),
+                );
+                self.publish_keybinds();
                 self.renderer.set_icon_theme(self.theme.icon_theme.as_deref());
                 let ids: Vec<WindowId> = self.windows.keys().copied().collect();
                 for id in ids {
@@ -3668,9 +3713,10 @@ fn remembers_place(info: &WindowInfo) -> bool {
         && !places_itself(info.window_type)
 }
 
-/// The overlay marking a quick-tile zone: the accent, translucent inside a thicker rim, inset
-/// from the zone so two adjacent zones read apart. An X server shows its rim alone, since the
-/// manager shapes an overlay to its opaque pixels there.
+/// The overlay marking a quick-tile zone: the accent, translucent inside a rim, inset from the
+/// zone so two adjacent zones read apart. The rim is 4 px because the stream reaches the user at
+/// 4:2:0, where a thinner colored line arrives smeared across chroma rows. An X server shows the
+/// rim alone, since the manager shapes an overlay to its opaque pixels there.
 fn tile_overlay(rect: Rect, scale: i32, look: &crate::theme::Look) -> Option<pixelflux::wm::Image> {
     let scale = scale.max(1);
     let mut pixmap = Pixmap::new((rect.w * scale).max(1) as u32, (rect.h * scale).max(1) as u32)?;
@@ -3679,7 +3725,7 @@ fn tile_overlay(rect: Rect, scale: i32, look: &crate::theme::Look) -> Option<pix
         let inner = DrawRect::new(4, 4, rect.w - 8, rect.h - 8);
         let radius = look.style.corners as f32;
         canvas.fill_rounded(inner, radius, with_alpha(look.palette.accent, 0x40));
-        canvas.stroke_rounded(inner, radius, 2.0, with_alpha(look.palette.accent, 0xe0));
+        canvas.stroke_rounded(inner, radius, 4.0, with_alpha(look.palette.accent, 0xe0));
     }
     Some(frame::image_of(pixmap, scale))
 }

@@ -21,15 +21,16 @@ pub enum Command {
     ShowDesktop,
     /// Open a file manager window, on a folder when one is given.
     Files(Option<PathBuf>),
-    /// Open the settings window.
-    Settings,
+    /// Open the settings window, on a page by id when one is given.
+    Settings(Option<String>),
     /// Exit the desktop.
     Quit,
 }
 
 impl Command {
     /// The command for a line, as typed on the command line or sent over the
-    /// socket: a word, followed for `files` by an optional path.
+    /// socket: a word, followed for `files` by an optional path and for
+    /// `settings` by an optional page id.
     ///
     /// # Arguments
     /// * `line` - The command, with or without leading dashes.
@@ -45,7 +46,7 @@ impl Command {
             "reload" => Some(Command::Reload),
             "show-desktop" => Some(Command::ShowDesktop),
             "files" => Some(Command::Files((!rest.is_empty()).then(|| PathBuf::from(rest)))),
-            "settings" => Some(Command::Settings),
+            "settings" => Some(Command::Settings((!rest.is_empty()).then(|| rest.to_string()))),
             "quit" | "exit" => Some(Command::Quit),
             _ => None,
         }
@@ -60,7 +61,8 @@ impl Command {
             Command::ShowDesktop => "show-desktop".to_string(),
             Command::Files(None) => "files".to_string(),
             Command::Files(Some(path)) => format!("files {}", path.display()),
-            Command::Settings => "settings".to_string(),
+            Command::Settings(None) => "settings".to_string(),
+            Command::Settings(Some(page)) => format!("settings {page}"),
             Command::Quit => "quit".to_string(),
         }
     }
@@ -171,7 +173,15 @@ mod tests {
         assert_eq!(Command::Launcher.line(), "launcher");
         assert_eq!(Command::parse("show-desktop"), Some(Command::ShowDesktop));
         assert_eq!(Command::parse("files"), Some(Command::Files(None)));
-        assert_eq!(Command::parse("--settings"), Some(Command::Settings));
+        assert_eq!(Command::parse("--settings"), Some(Command::Settings(None)));
+        assert_eq!(
+            Command::parse("--settings wallpaper"),
+            Some(Command::Settings(Some("wallpaper".to_string())))
+        );
+        assert_eq!(
+            Command::Settings(Some("about".to_string())).line(),
+            "settings about"
+        );
         assert_eq!(
             Command::parse("--files /tmp/my dir"),
             Some(Command::Files(Some(PathBuf::from("/tmp/my dir"))))

@@ -27,7 +27,6 @@ use crate::xkb::Keymap;
 /// Largest output scale honored.
 const MAX_SCALE: i32 = 4;
 /// Window class of the file manager windows.
-const FILES_APP_ID: &str = super::wayland::FILES_APP_ID;
 /// Longest `_NET_WM_ICON` property read, in 32-bit units.
 const MAX_ICON_LENGTH: u32 = 1 << 20;
 /// Pixels one wheel click scrolls.
@@ -909,6 +908,7 @@ impl X11Backend {
         title: &str,
         width: i32,
         height: i32,
+        app_id: &str,
         icon: Option<&tiny_skia::Pixmap>,
     ) {
         if self.windows.iter().any(|w| w.id == id) {
@@ -940,7 +940,7 @@ impl X11Backend {
             window,
             xproto::AtomEnum::WM_CLASS,
             xproto::AtomEnum::STRING,
-            format!("{FILES_APP_ID}\0{FILES_APP_ID}\0").as_bytes(),
+            format!("{app_id}\0{app_id}\0").as_bytes(),
         );
         let hints = x11rb::properties::WmHints {
             input: Some(true),
@@ -1880,9 +1880,11 @@ impl Backend for X11Backend {
                 title,
                 width,
                 height,
+                app_id,
                 icon,
+                ..
             } => {
-                self.create_toplevel(*id, title, *width, *height, icon.as_deref());
+                self.create_toplevel(*id, title, *width, *height, app_id, icon.as_deref());
                 let _ = self.conn.flush();
             }
             Request::CloseWindow { id } => {

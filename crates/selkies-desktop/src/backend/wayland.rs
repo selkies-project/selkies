@@ -55,7 +55,6 @@ const MAX_SCALE: i32 = 4;
 /// The mime type file drags are offered as.
 const URI_LIST: &str = "text/uri-list";
 /// Application ID of the file manager windows.
-pub const FILES_APP_ID: &str = "selkies-desktop-files";
 /// Linux evdev button codes.
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -437,10 +436,11 @@ impl State {
         }
     }
 
-    /// Creates a file manager window of a size, left to the compositor to
-    /// place, with the icon its title bar shows: the file manager's icon name
-    /// for the compositor's theme, and our own rendering of it as pixels for
-    /// a compositor that cannot resolve the name.
+    /// Creates one of the shell's windows of a size, left to the compositor to
+    /// place, under its app id and with the icon its title bar shows: the
+    /// icon's name for the compositor's theme, and our own rendering of it as
+    /// pixels for a compositor that cannot resolve the name.
+    #[allow(clippy::too_many_arguments)]
     fn create_window(
         &mut self,
         qh: &QueueHandle<State>,
@@ -448,6 +448,8 @@ impl State {
         title: &str,
         width: i32,
         height: i32,
+        app_id: &str,
+        icon_name: &str,
         icon: Option<&tiny_skia::Pixmap>,
     ) {
         let (Some(compositor), Some(wm_base)) = (self.compositor.clone(), self.wm_base.clone()) else {
@@ -459,7 +461,7 @@ impl State {
         let wl = compositor.create_surface(qh, ());
         let xdg = wm_base.get_xdg_surface(&wl, qh, SurfaceId::Window(id));
         let toplevel = xdg.get_toplevel(qh, SurfaceId::Window(id));
-        toplevel.set_app_id(FILES_APP_ID.to_string());
+        toplevel.set_app_id(app_id.to_string());
         toplevel.set_title(title.to_string());
         toplevel.set_min_size(ui::WINDOW_MIN_WIDTH, ui::WINDOW_MIN_HEIGHT);
         let decoration = self.decoration_manager.as_ref().map(|manager| {
@@ -470,7 +472,7 @@ impl State {
         let mut icon_buffer = None;
         if let Some(manager) = &self.icon_manager {
             let icon_object = manager.create_icon(qh, ());
-            icon_object.set_name("system-file-manager".to_string());
+            icon_object.set_name(icon_name.to_string());
             if let Some(pixmap) = icon
                 && let Some(shm) = &self.shm
                 && pixmap.width() == pixmap.height()
@@ -1336,11 +1338,21 @@ impl Backend for WaylandBackend {
                 title,
                 width,
                 height,
+                app_id,
+                icon_name,
                 icon,
             } => {
                 let qh = self.queue.handle();
-                self.state
-                    .create_window(&qh, *id, title, *width, *height, icon.as_deref());
+                self.state.create_window(
+                    &qh,
+                    *id,
+                    title,
+                    *width,
+                    *height,
+                    app_id,
+                    icon_name,
+                    icon.as_deref(),
+                );
             }
             Request::CloseWindow { id } => self.state.destroy_window(*id),
             Request::SetTitle { id, title } => {

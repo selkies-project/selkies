@@ -627,6 +627,123 @@ pub fn keysym_from_name(name: &str) -> Option<u32> {
     Some(lower_keysym(raw))
 }
 
+/// The name a chord is shown under: the modifiers as Ctrl, Alt, Shift, and Super in that order,
+/// then the key, joined with `+` (`Ctrl+Alt+T`, `Super+Left`).
+pub fn chord_label(modifiers: Modifiers, keysym: u32) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if modifiers.ctrl {
+        parts.push("Ctrl".to_string());
+    }
+    if modifiers.alt {
+        parts.push("Alt".to_string());
+    }
+    if modifiers.shift {
+        parts.push("Shift".to_string());
+    }
+    if modifiers.logo {
+        parts.push("Super".to_string());
+    }
+    parts.push(key_label(keysym));
+    parts.join("+")
+}
+
+/// A key's name as a user reads it: a letter in upper case, a modifier without its side, and the
+/// usual names for the others (`Enter`, `Space`, `Left`, `F4`).
+fn key_label(keysym: u32) -> String {
+    let name = xkbcommon::xkb::keysym_get_name(xkbcommon::xkb::Keysym::new(keysym));
+    match name.as_str() {
+        "Super_L" | "Super_R" => "Super".to_string(),
+        "Alt_L" | "Alt_R" => "Alt".to_string(),
+        "Control_L" | "Control_R" => "Ctrl".to_string(),
+        "Shift_L" | "Shift_R" => "Shift".to_string(),
+        "Return" | "KP_Enter" => "Enter".to_string(),
+        "space" => "Space".to_string(),
+        "Escape" => "Esc".to_string(),
+        "Prior" => "Page Up".to_string(),
+        "Next" => "Page Down".to_string(),
+        "minus" => "-".to_string(),
+        "plus" => "+".to_string(),
+        other if other.chars().count() == 1 => other.to_uppercase(),
+        other => other.replace('_', " "),
+    }
+}
+
+impl Action {
+    /// What the action does, in the session's language, for a list of the shortcuts in force.
+    pub fn description(&self) -> String {
+        use crate::i18n::tr;
+        match self {
+            Action::Execute(command) => match command.trim() {
+                "selkies-desktop --launcher" => tr("Quick launcher").to_string(),
+                "selkies-desktop --toggle-menu" => tr("Start menu").to_string(),
+                "selkies-desktop --files" => tr("File manager").to_string(),
+                "selkies-desktop --settings" => tr("Settings").to_string(),
+                "x-terminal-emulator" | "selkies-terminal" => tr("Terminal").to_string(),
+                other => format!("{} {other}", tr("Run command")),
+            },
+            Action::ShowMenu(id) if id == "client-menu" => tr("Window menu").to_string(),
+            Action::ShowMenu(id) if id.starts_with("client-list") => tr("Windows").to_string(),
+            Action::ShowMenu(_) => tr("Desktop menu").to_string(),
+            Action::Close | Action::Kill => tr("Close the window").to_string(),
+            Action::Iconify => tr("Minimize the window").to_string(),
+            Action::Focus | Action::Raise => tr("Raise the window").to_string(),
+            Action::Unfocus | Action::Lower | Action::RaiseLower | Action::FocusToBottom => {
+                tr("Send the window to the back").to_string()
+            }
+            Action::Maximize(_) => tr("Maximize the window").to_string(),
+            Action::Unmaximize(_) => tr("Restore the window").to_string(),
+            Action::ToggleMaximize(_) => tr("Maximize or restore the window").to_string(),
+            Action::Fullscreen | Action::Unfullscreen | Action::ToggleFullscreen => {
+                tr("Fullscreen").to_string()
+            }
+            Action::Shade | Action::Unshade | Action::ToggleShade => tr("Shade the window").to_string(),
+            Action::Decorate | Action::Undecorate | Action::ToggleDecorations => {
+                tr("Decorations").to_string()
+            }
+            Action::ToggleAlwaysOnTop => tr("Always on top").to_string(),
+            Action::ToggleAlwaysOnBottom => tr("Keep the window below others").to_string(),
+            Action::Move => tr("Move the window").to_string(),
+            Action::Resize(_) => tr("Resize the window").to_string(),
+            Action::MoveResizeTo { .. } | Action::MoveToEdge(_) => tr("Move the window").to_string(),
+            Action::SnapToEdge(ResizeEdge::Left) => tr("Tile the window to the left half").to_string(),
+            Action::SnapToEdge(ResizeEdge::Right) => tr("Tile the window to the right half").to_string(),
+            Action::SnapToEdge(ResizeEdge::Top) => tr("Tile the window upward, or maximize it").to_string(),
+            Action::SnapToEdge(_) => tr("Tile the window downward, or restore it").to_string(),
+            Action::GoToDesktop(to) => {
+                desktop_description("Next desktop", "Previous desktop", "Desktop", *to)
+            }
+            Action::SendToDesktop { to, .. } => desktop_description(
+                "Move the window to the next desktop",
+                "Move the window to the previous desktop",
+                "Move the window to desktop",
+                *to,
+            ),
+            Action::ToggleOmnipresent => tr("Window on all desktops").to_string(),
+            Action::NextWindow => tr("Next window").to_string(),
+            Action::PreviousWindow => tr("Previous window").to_string(),
+            Action::ShowDesktop | Action::ToggleShowDesktop => tr("Show the desktop").to_string(),
+            Action::Reconfigure => tr("Reconfigure the window manager").to_string(),
+            Action::Unknown(name) => name.clone(),
+        }
+    }
+}
+
+/// The description of a desktop action: the next or previous key, or the numbered key with the
+/// desktop's number (`Desktop 3`), the last desktop named as the next.
+fn desktop_description(
+    next: &'static str,
+    previous: &'static str,
+    numbered: &'static str,
+    to: DesktopTarget,
+) -> String {
+    use crate::i18n::tr;
+    match to {
+        DesktopTarget::Next | DesktopTarget::Last => tr(next).to_string(),
+        DesktopTarget::Previous => tr(previous).to_string(),
+        DesktopTarget::Index(i) => format!("{} {}", tr(numbered), i + 1),
+    }
+}
+
 /// A keysym with an ASCII letter lowered, so a bind on a letter matches the key with Shift held.
 pub fn lower_keysym(keysym: u32) -> u32 {
     if (0x41..=0x5a).contains(&keysym) {
@@ -1144,6 +1261,43 @@ pub fn default_mousebinds() -> Vec<MouseBind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chord is shown with its modifiers in one order and the key as a user names it, and an
+    /// action describes itself for the shortcuts list.
+    #[test]
+    fn chords_and_actions_describe_themselves() {
+        let (modifiers, key) = parse_chord("C-A-t").unwrap();
+        assert_eq!(
+            chord_label(modifiers, keysym_from_name(key).unwrap()),
+            "Ctrl+Alt+T"
+        );
+        let (modifiers, key) = parse_chord("W-S-Left").unwrap();
+        assert_eq!(
+            chord_label(modifiers, keysym_from_name(key).unwrap()),
+            "Shift+Super+Left"
+        );
+        assert_eq!(
+            chord_label(Modifiers::default(), keysym_from_name("Super_L").unwrap()),
+            "Super"
+        );
+        assert_eq!(
+            chord_label(Modifiers::default(), keysym_from_name("space").unwrap()),
+            "Space"
+        );
+        assert_eq!(
+            Action::Execute("selkies-desktop --launcher".into()).description(),
+            "Quick launcher"
+        );
+        assert_eq!(
+            Action::SnapToEdge(ResizeEdge::Left).description(),
+            "Tile the window to the left half"
+        );
+        assert_eq!(
+            Action::GoToDesktop(DesktopTarget::Index(2)).description(),
+            "Desktop 3"
+        );
+        assert_eq!(Action::Execute("xterm".into()).description(), "Run command xterm");
+    }
 
     /// The image's labwc additions sit beside the defaults, a bind on a key the defaults hold
     /// replacing it, and the labwc spellings are read.

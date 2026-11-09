@@ -1,14 +1,18 @@
 //! The preview on the settings window's Theme page: a small desktop drawn
-//! with the colors and the window style as they are, with the wallpaper,
-//! two windows in the window manager's frames, the start menu open in its
-//! layout and the bar in its layout, so every choice shows at once without
-//! opening anything.
+//! with a [`Look`], the colors and the window style as they are or as a
+//! preset would set them, with the wallpaper, two windows in the window
+//! manager's frames, the start menu open in its layout and the bar in its
+//! layout, so every choice shows at once without opening anything.  The
+//! live preview paints straight onto the page; a preset card renders its
+//! look into a pixmap of its own, which the page then shrinks.
 
 use std::sync::Arc;
 
 use tiny_skia::Color;
 
-use crate::config::{BackgroundStyle, ButtonSide, Glyphs, MenuLayout, WallpaperMode};
+use tiny_skia::Pixmap;
+
+use crate::config::{BackgroundStyle, ButtonSide, Glyphs, MenuLayout, WallpaperMode, WindowStyle};
 use crate::desktop::Desktop;
 use crate::geom::Rect;
 use crate::i18n::tr;
@@ -35,11 +39,40 @@ const FOLDERS: [&str; 6] = ["Documents", "Downloads", "Music", "Pictures", "Publ
 /// The applications the preview's start menu lists.
 const APPS: [&str; 5] = ["Files", "Terminal", "Browser", "Editor", "Settings"];
 
-/// Draws the preview centered in an area.
+/// What the preview shows the desktop as: the colors, the window style, and
+/// the three layout settings a style bundles with it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    /// The interface colors.
+    pub theme: ui::Theme,
+    /// The window frames, the bar and the popups.
+    pub style: WindowStyle,
+    /// Whether the bar's items sit in its middle.
+    pub centered: bool,
+    /// The bar's margin from the screen edges.
+    pub margin: i32,
+    /// The start menu's layout.
+    pub menu: MenuLayout,
+}
+
+impl Look {
+    /// The look the desktop has at the moment.
+    pub fn current(d: &Desktop) -> Look {
+        Look {
+            theme: d.config.theme,
+            style: d.config.window,
+            centered: d.config.panel_centered,
+            margin: d.config.panel_margin,
+            menu: d.config.menu_layout,
+        }
+    }
+}
+
+/// Draws the preview of the current look centered in an area.
 ///
 /// # Arguments
 /// * `d` - The desktop.
-/// * `canvas` - The panel canvas.
+/// * `canvas` - The settings window's canvas.
 /// * `area` - The area the preview is centered in.
 /// * `page` - The page area the canvas is clipped to, restored afterwards.
 pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>, area: Rect, page: Rect) {
@@ -50,17 +83,47 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>, area: Rect, page: Rect) {
         HEIGHT,
     );
     canvas.clip(screen);
+    paint(d, canvas, screen, &Look::current(d));
+    canvas.reset_clip();
+    canvas.clip(page);
+}
+
+/// Renders a look into a pixmap of the preview's size, for a preset card.
+/// Every color helper reads the theme and style in use, so they are swapped
+/// for the look while it paints and put back after.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `look` - The look to show.
+/// * `scale` - Output scale the pixmap is rendered at.
+pub fn render(d: &mut Desktop, look: &Look, scale: i32) -> Option<Pixmap> {
+    let scale = scale.max(1);
+    let mut pix = Pixmap::new((WIDTH * scale) as u32, (HEIGHT * scale) as u32)?;
+    let (theme, style) = (ui::theme(), ui::style());
+    ui::set_theme(look.theme);
+    ui::set_style(look.style);
+    {
+        let mut canvas = Canvas::new(pix.as_mut(), scale);
+        paint(d, &mut canvas, Rect::new(0, 0, WIDTH, HEIGHT), look);
+    }
+    ui::set_theme(theme);
+    ui::set_style(style);
+    Some(pix)
+}
+
+/// Paints the desktop of a look into the screen rectangle: the wallpaper,
+/// the two windows, the start menu and the bar.
+fn paint(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look) {
     draw_wallpaper(d, canvas, screen);
-    let style = ui::style();
-    let palette = Palette::new(ui::theme());
+    let palette = Palette::new(look.theme);
     let top = d.panel_top();
-    let margin = d.config.panel_margin / 2;
+    let margin = look.margin / 2;
     let desk_y = if top { screen.y + BAR + margin } else { screen.y };
     let back = Rect::new(screen.x + 214, desk_y + 18, 130, 104);
-    draw_window(d, canvas, back, &palette, false, tr("Window"));
+    draw_window(d, canvas, back, &palette, look.style, false, tr("Window"));
     draw_terminal(canvas, back);
     let front = Rect::new(screen.x + 150, desk_y + 42, 196, 148);
-    draw_window(d, canvas, front, &palette, true, tr("Files"));
+    draw_window(d, canvas, front, &palette, look.style, true, tr("Files"));
     draw_files(d, canvas, front);
     let menu_h = 130;
     let menu_y = if top {
@@ -68,11 +131,14 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>, area: Rect, page: Rect) {
     } else {
         screen.bottom() - BAR - margin - 4 - menu_h
     };
-    draw_menu(d, canvas, Rect::new(screen.x + 4 + margin, menu_y, 150, menu_h));
-    draw_bar(d, canvas, screen, style.corners);
+    draw_menu(
+        d,
+        canvas,
+        Rect::new(screen.x + 4 + margin, menu_y, 150, menu_h),
+        look.menu,
+    );
+    draw_bar(d, canvas, screen, look);
     canvas.stroke_rounded(screen, 4.0, 1.0, ui::popup_border());
-    canvas.reset_clip();
-    canvas.clip(page);
 }
 
 /// Paints the shared wallpaper into the screen: its color or gradient and
@@ -134,10 +200,10 @@ fn draw_window(
     canvas: &mut Canvas<'_>,
     rect: Rect,
     palette: &Palette,
+    style: WindowStyle,
     active: bool,
     title: &str,
 ) {
-    let style = ui::style();
     let radius = (style.corners as f32 * 0.75).round();
     let title_rect = Rect::new(rect.x, rect.y, rect.w, TITLE);
     let border = if active {
@@ -340,7 +406,7 @@ fn draw_files(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect) {
 /// Draws the start menu open in its layout: the search box, then the
 /// categories and application rows, the categories and a grid of icons,
 /// or the application list with the favorites' tiles.
-fn draw_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect) {
+fn draw_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect, layout: MenuLayout) {
     let radius = (ui::popup_radius() * 0.75).round();
     ui::fill_surface(canvas, rect, radius, ui::popup_bg());
     canvas.stroke_rounded(rect, radius, 1.0, ui::popup_border());
@@ -358,7 +424,6 @@ fn draw_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect) {
     );
     let columns_y = search.bottom() + 5;
     let content_h = rect.bottom() - columns_y - 16;
-    let layout = d.config.menu_layout;
     let left_w = if layout == MenuLayout::Tiles { 64 } else { 56 };
     let left = Rect::new(rect.x + 5, columns_y, left_w, content_h);
     let left_rows: Vec<&str> = match layout {
@@ -486,10 +551,11 @@ fn draw_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect) {
     );
 }
 
-/// Draws the bar along the configured edge in its layout, with the start
-/// button, two taskbar buttons and the clock.
-fn draw_bar(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, corners: i32) {
-    let margin = d.config.panel_margin / 2;
+/// Draws the bar along the configured edge in the look's layout, with the
+/// start button, two taskbar buttons and the clock.
+fn draw_bar(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look) {
+    let corners = look.style.corners;
+    let margin = look.margin / 2;
     let usable = screen.w - 2 * margin;
     let width = (usable * d.config.panel_width / 100).max(60);
     let x = screen.x + margin + (usable - width) / 2;
@@ -531,7 +597,7 @@ fn draw_bar(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, corners: i32
         ui::text_width(&mut d.fonts, text, FONT, true, d.panel.scale) + 4
     });
     let group_w = 24 + label_w + 4 + 2 * 57;
-    let x0 = if d.config.panel_centered {
+    let x0 = if look.centered {
         (bar.x + (bar.w - group_w) / 2).clamp(bar.x + 3, (bar.right() - 56 - group_w).max(bar.x + 3))
     } else {
         bar.x + 3

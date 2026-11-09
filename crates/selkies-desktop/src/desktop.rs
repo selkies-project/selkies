@@ -18,6 +18,7 @@ use crate::geom::Rect;
 use crate::i18n::{tr, trf};
 use crate::icons::Icons;
 use crate::render::{Canvas, Fonts};
+use crate::ui::settings::Page;
 use crate::ui::{self, background, launcher, menu, panel, popups, settings};
 use crate::xkb::Key;
 
@@ -126,6 +127,27 @@ pub struct Frame<'a> {
     pub grab: bool,
 }
 
+/// What a right click on the bar landed on, which decides the menu it gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelTarget {
+    /// The bar itself, between its items.
+    Bar,
+    /// The start button.
+    Start,
+    /// A quick launch button, by position.
+    Launcher(usize),
+    /// The pager.
+    Pager,
+    /// The clock.
+    Clock,
+    /// The volume control.
+    Volume,
+    /// The system tray strip.
+    Tray,
+    /// The show desktop button.
+    ShowDesktop,
+}
+
 /// Which popup is open above the bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Popup {
@@ -141,10 +163,9 @@ pub enum Popup {
     Calendar,
     /// The context menu of a taskbar button, by toplevel index.
     TaskMenu(usize),
-    /// The bar's own right-click menu, by the bar X it opened at.
-    PanelMenu(i32),
-    /// The settings window.
-    Settings,
+    /// The bar's right-click menu, by the bar X it opened at and the item
+    /// it was opened on.
+    PanelMenu(i32, PanelTarget),
 }
 
 /// What the pointer rests on, for hover highlights and tooltips.
@@ -233,7 +254,7 @@ pub struct Desktop {
     pub menu: menu::MenuState,
     /// Quick launcher state.
     pub launcher: launcher::LauncherState,
-    /// Settings window state.
+    /// The settings window and its state.
     pub settings: settings::SettingsState,
     /// Selected desktop icon.
     pub desktop_selection: Option<usize>,
@@ -286,6 +307,8 @@ pub struct Desktop {
     pub desktops: u32,
     /// The index of the current virtual desktop.
     pub current_desktop: u32,
+    /// The name of the display backend the shell runs on, for the About page.
+    pub backend: String,
 }
 
 impl Desktop {
@@ -317,6 +340,9 @@ impl Desktop {
         let icons = Icons::new(config.icon_theme.as_deref());
         if session && config.files_manager {
             entries::ensure_files_entry();
+        }
+        if session {
+            entries::ensure_settings_entry();
         }
         let apps = Apps::load(entries::find_terminal(&config).is_some());
         let logo = crate::render::load_raster(std::path::Path::new(crate::config::LOGO_PATH), 0);
@@ -365,6 +391,7 @@ impl Desktop {
             portal,
             desktops: 1,
             current_desktop: 0,
+            backend: String::new(),
         };
         desktop.requests.push(desktop.panel_request());
         desktop
@@ -538,6 +565,7 @@ impl Desktop {
         for window in &mut self.files.windows {
             window.dirty = true;
         }
+        self.settings.dirty = true;
         self.start_icon = None;
         for toplevel in &mut self.toplevels {
             toplevel.icon = None;
@@ -596,6 +624,8 @@ impl Desktop {
             title,
             width: files::DEFAULT_WIDTH,
             height: files::DEFAULT_HEIGHT,
+            app_id: entries::FILES_APP_ID,
+            icon_name: "system-file-manager",
             icon,
         });
         id
@@ -623,9 +653,62 @@ impl Desktop {
         );
     }
 
-    /// The numbers of every file manager window, for rendering them in turn.
+    /// The numbers of every window of the shell's own, the file manager's
+    /// and the settings window, for rendering them in turn.
     pub fn window_ids(&self) -> Vec<u32> {
-        self.files.ids()
+        let mut ids = self.files.ids();
+        ids.extend(self.settings.id);
+        ids
+    }
+
+    /// Whether a window number is the settings window's.
+    fn is_settings(&self, id: u32) -> bool {
+        self.settings.id == Some(id)
+    }
+
+    /// Opens the settings window, on a page when one is asked for, as a
+    /// toplevel of the shell's own sized for the screen.  A window already
+    /// open is closed first and opened again, since the shell cannot ask
+    /// the window manager to raise one of its own windows.
+    ///
+    /// # Arguments
+    /// * `page` - The page to show, or `None` to keep the last one.
+    pub fn open_settings(&mut self, page: Option<Page>) {
+        self.close_popup();
+        if self.settings.id.is_some() {
+            settings::close(self);
+        }
+        let id = self.files.allocate_id();
+        self.settings.open(page);
+        self.settings.id = Some(id);
+        let screen_h = self
+            .primary_background()
+            .filter(|b| b.geometry.configured)
+            .map_or(self.panel.height, |b| b.geometry.height);
+        let width = settings::WIDTH
+            .min(self.panel.width - 2 * ui::POPUP_MARGIN)
+            .max(ui::WINDOW_MIN_WIDTH);
+        let height = settings::HEIGHT
+            .min(screen_h - self.reserved_height() - 2 * ui::POPUP_MARGIN)
+            .max(ui::WINDOW_MIN_HEIGHT);
+        let icon = self
+            .icons
+            .get("preferences-system", 48)
+            .map(|icon| Box::new((*icon).clone()));
+        self.requests.push(Request::OpenWindow {
+            id,
+            title: tr("Settings").to_string(),
+            width,
+            height,
+            app_id: entries::SETTINGS_APP_ID,
+            icon_name: "preferences-system",
+            icon,
+        });
+    }
+
+    /// Marks the settings window for redraw.
+    pub fn redraw_settings(&mut self) {
+        self.settings.dirty = true;
     }
 
     /// Reads the applications, icons and settings again.
@@ -948,6 +1031,7 @@ impl Desktop {
                 key,
                 modifiers,
             } => match surface {
+                SurfaceId::Window(id) if self.is_settings(id) => settings::key(self, key),
                 SurfaceId::Window(id) => ui::files::key(self, id, key, modifiers),
                 _ => self.key(key),
             },
@@ -956,7 +1040,13 @@ impl Desktop {
                     self.close_popup();
                 }
             }
-            Event::WindowCloseRequested { window } => ui::files::close(self, window),
+            Event::WindowCloseRequested { window } => {
+                if self.is_settings(window) {
+                    settings::close(self);
+                } else {
+                    ui::files::close(self, window);
+                }
+            }
             Event::DragEnter { surface, x, y } | Event::DragMotion { surface, x, y } => {
                 if let SurfaceId::Window(id) = surface {
                     ui::files::drag_motion(self, id, x, y);
@@ -1118,6 +1208,19 @@ impl Desktop {
                 background.launchers_pix = None;
                 background.dirty = true;
             }
+            SurfaceId::Window(id) if self.is_settings(id) => {
+                let current = self.settings.geometry;
+                if current.width == width
+                    && current.height == height
+                    && current.scale == scale
+                    && current.configured
+                {
+                    return;
+                }
+                self.settings.geometry = geometry;
+                self.settings.pix = None;
+                self.settings.dirty = true;
+            }
             SurfaceId::Window(id) => {
                 if let Some(window) = self.files.window_mut(id) {
                     let current = window.geometry;
@@ -1217,7 +1320,7 @@ impl Desktop {
             Hover::Clock => Some(crate::clock::format_now("%A, %B %-d, %Y")),
             Hover::ShowDesktop => Some(tr("Show desktop").to_string()),
             Hover::Pager(i) => Some(trf("Desktop {n}", &[("n", &(i + 1).to_string())])),
-            Hover::Start => Some(tr("Applications").to_string()),
+            Hover::Start => Some(tr("Applications (Super: quick launcher)").to_string()),
             Hover::Launcher(i) => self
                 .config
                 .launchers
@@ -1250,10 +1353,16 @@ impl Desktop {
                 {
                     window.dirty = true;
                 }
+                if let Hover::Control(_) = previous {
+                    self.settings.dirty = true;
+                }
             }
             let panel_changed = !matches!(
                 (self.hover, hover),
-                (Hover::Files(..) | Hover::None, Hover::Files(..) | Hover::None)
+                (
+                    Hover::Files(..) | Hover::Control(_) | Hover::None,
+                    Hover::Files(..) | Hover::Control(_) | Hover::None
+                )
             );
             self.hover = hover;
             self.hover_since = Instant::now();
@@ -1308,9 +1417,6 @@ impl Desktop {
         if popup == Popup::Calendar {
             self.calendar_offset = 0;
         }
-        if popup == Popup::Settings {
-            self.settings.open();
-        }
         if !was_open {
             self.requests.push(Request::MenuOpen(true));
         }
@@ -1326,7 +1432,6 @@ impl Desktop {
         self.volume_drag = false;
         self.menu.close();
         self.launcher.close();
-        self.settings.close();
         self.requests.push(Request::MenuOpen(false));
         self.set_hover(Hover::None);
         self.panel_dirty = true;
@@ -1484,16 +1589,11 @@ impl Desktop {
                     popups::volume_drag(self, x);
                     return;
                 }
-                if self.settings.dragging() {
-                    settings::drag(self, x, y);
-                    return;
-                }
                 let hover = match self.popup {
                     Popup::Menu => menu::hit(self, x, y).unwrap_or(Hover::None),
                     Popup::Launcher => launcher::hit(self, x, y).unwrap_or(Hover::None),
                     Popup::TaskMenu(_) => popups::task_menu_hit(self, x, y).unwrap_or(Hover::None),
-                    Popup::PanelMenu(_) => settings::panel_menu_hit(self, x, y).unwrap_or(Hover::None),
-                    Popup::Settings => settings::hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::PanelMenu(..) => settings::panel_menu_hit(self, x, y).unwrap_or(Hover::None),
                     _ => Hover::None,
                 };
                 let hover = if hover == Hover::None {
@@ -1512,6 +1612,7 @@ impl Desktop {
                     self.panel_dirty = false;
                 }
             }
+            SurfaceId::Window(id) if self.is_settings(id) => settings::pointer_motion(self, x, y),
             SurfaceId::Window(id) => ui::files::pointer_motion(self, id, x, y),
         }
     }
@@ -1529,15 +1630,16 @@ impl Desktop {
         modifiers: Modifiers,
     ) {
         if let SurfaceId::Window(id) = surface {
-            ui::files::pointer_button(self, id, x, y, button, pressed, time, modifiers);
+            if self.is_settings(id) {
+                settings::pointer_button(self, x, y, button, pressed);
+            } else {
+                ui::files::pointer_button(self, id, x, y, button, pressed, time, modifiers);
+            }
             return;
         }
         if !pressed {
             if self.volume_drag {
                 self.volume_drag = false;
-            }
-            if self.settings.dragging() {
-                settings::release(self);
             }
             return;
         }
@@ -1553,8 +1655,7 @@ impl Desktop {
                         Popup::Volume => popups::volume_click(self, x, y, button),
                         Popup::Calendar => popups::calendar_click(self, x, y, button),
                         Popup::TaskMenu(_) => popups::task_menu_click(self, x, y, button),
-                        Popup::PanelMenu(_) => settings::panel_menu_click(self, x, y, button),
-                        Popup::Settings => settings::click(self, x, y, button),
+                        Popup::PanelMenu(..) => settings::panel_menu_click(self, x, y, button),
                         Popup::None => false,
                     };
                     if inside_popup {
@@ -1628,7 +1729,11 @@ impl Desktop {
     /// Routes wheel scrolling.
     fn pointer_axis(&mut self, surface: SurfaceId, x: f64, y: f64, delta: f64) {
         if let SurfaceId::Window(id) = surface {
-            ui::files::pointer_axis(self, id, x, y, delta);
+            if self.is_settings(id) {
+                settings::pointer_axis(self, x, y, delta);
+            } else {
+                ui::files::pointer_axis(self, id, x, y, delta);
+            }
             return;
         }
         if surface != SurfaceId::Panel {
@@ -1640,7 +1745,6 @@ impl Desktop {
             Popup::Launcher => launcher::scroll(self, x, y, delta),
             Popup::Volume => popups::volume_scroll(self, x, y, delta),
             Popup::Calendar => popups::calendar_scroll(self, x, y, delta),
-            Popup::Settings => settings::scroll(self, x, y, delta),
             _ => false,
         };
         if !handled {
@@ -1657,7 +1761,7 @@ impl Desktop {
                 if self.popup == Popup::None
                     || !matches!(
                         self.hover,
-                        Hover::MenuApp(_) | Hover::MenuTile(_) | Hover::MenuCategory(_) | Hover::Control(_)
+                        Hover::MenuApp(_) | Hover::MenuTile(_) | Hover::MenuCategory(_)
                     )
                 {
                     self.set_hover(Hover::None);
@@ -1668,6 +1772,7 @@ impl Desktop {
                     self.set_hover(Hover::None);
                 }
             }
+            SurfaceId::Window(id) if self.is_settings(id) => settings::pointer_leave(self),
             SurfaceId::Window(id) => ui::files::pointer_leave(self, id),
         }
     }
@@ -1678,17 +1783,12 @@ impl Desktop {
     fn key(&mut self, key: Key) {
         match key {
             Key::Super => {}
-            Key::Escape => {
-                if self.popup != Popup::Settings || !settings::escape(self) {
-                    self.close_popup();
-                }
-            }
+            Key::Escape => self.close_popup(),
             _ => match self.popup {
                 Popup::Menu => menu::key(self, key),
                 Popup::Launcher => launcher::key(self, key),
                 Popup::Calendar => popups::calendar_key(self, key),
                 Popup::Volume => popups::volume_key(self, key),
-                Popup::Settings => settings::key(self, key),
                 _ => {}
             },
         }
@@ -1914,7 +2014,8 @@ impl Desktop {
         ))
     }
 
-    /// Renders a file manager window when it changed.
+    /// Renders one of the shell's windows when it changed: the settings
+    /// window, or a file manager window.
     ///
     /// # Arguments
     /// * `id` - The window's number.
@@ -1922,6 +2023,9 @@ impl Desktop {
     /// # Returns
     /// The frame to present, or `None` when nothing changed.
     pub fn render_window(&mut self, id: u32) -> Option<Frame<'_>> {
+        if self.is_settings(id) {
+            return self.render_settings();
+        }
         let index = self.files.windows.iter().position(|w| w.id == id)?;
         let geometry = self.files.windows[index].geometry;
         if !geometry.configured || !self.files.windows[index].dirty {
@@ -1949,6 +2053,40 @@ impl Desktop {
         self.files.windows[index].pix = Some(pix);
         Some(Frame {
             pixmap: self.files.windows[index].pix.as_ref()?,
+            scale: geometry.scale,
+            damage: vec![whole],
+            input: vec![whole],
+            visible: vec![whole],
+            grab: false,
+        })
+    }
+
+    /// Renders the settings window when it changed.
+    ///
+    /// # Returns
+    /// The frame to present, or `None` when nothing changed.
+    fn render_settings(&mut self) -> Option<Frame<'_>> {
+        let geometry = self.settings.geometry;
+        if !geometry.configured || !self.settings.dirty {
+            return None;
+        }
+        self.settings.dirty = false;
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let mut pix = match self.settings.pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => pix,
+            _ => Pixmap::new(w, h)?,
+        };
+        {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            settings::draw(self, &mut canvas);
+        }
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        self.settings.pix = Some(pix);
+        Some(Frame {
+            pixmap: self.settings.pix.as_ref()?,
             scale: geometry.scale,
             damage: vec![whole],
             input: vec![whole],

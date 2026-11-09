@@ -1,39 +1,58 @@
-//! The bar's right-click menu and the settings window it opens: a column of
-//! pages on the left and the page's settings on the right, in captioned
-//! cards with one setting per row, its name on the left and its control on
-//! the right.  The Panel page holds the bar and the start menu, the Files
-//! page the file manager, the Desktop page the wallpaper of every monitor,
-//! shared or one by one, and the Theme page the colors of the interface and
-//! the look of window frames: a preview of the desktop as it would be, a
-//! dark and a light scheme, three styles of frame, the four colors each
-//! from a row of presets or from a picker with a spectrum and a hex field
-//! that opens over the page and shows the color on screen as it is dragged,
-//! and the shading, buttons and corners of windows one by one.  A style
-//! also sets the bar's layout and margin and the start menu's layout, which
-//! live on the Panel page.  Every change is written to the config file at once, which the desktop then
-//! reads back, so the file stays the one source of the settings.  Images
-//! are chosen through the file manager in its picker form, and applications
-//! for the quick launch and favorites lists from a list that opens in place.
-//! A page taller than the window scrolls.
+//! The settings window and the bar's right-click menus.
+//!
+//! The window is a toplevel of the shell's own, opened through the same
+//! machinery as a file manager window and placed and decorated by the window
+//! manager, so it floats, moves and closes like any other.  Inside it a
+//! sidebar carries a search field and the pages, grouped under captions:
+//! Appearance (Theme, Colors, Windows, Wallpaper), Workspace (Panel,
+//! Desktops, Shortcuts), Applications (Files, Language) and System (About).
+//! The search field filters the sidebar to the pages whose name or row
+//! titles contain the text, and Enter opens the first match.  The page fills
+//! the rest of the window with captioned cards of rows, each row a name on
+//! the left and its control on the right, and scrolls when it is taller than
+//! the window.  Every change is written to the config file at once, which
+//! the desktop then reads back, so the file stays the one source of the
+//! settings.  Images are chosen through the file manager in its picker form,
+//! applications for the quick launch and favorites lists from a list that
+//! opens in place, and a color from a row of presets or from a picker with a
+//! spectrum and a hex field that opens over the page and shows the color on
+//! screen as it is dragged.
+//!
+//! The Theme page shows each scheme and each style as a card with the
+//! desktop rendered as it would look under it, the one in effect ringed
+//! with the accent, and the large live preview below.  A style also sets
+//! the bar's layout and margin and the start menu's layout, which live on
+//! the Panel page.  The Shortcuts page lists what the keyboard does, read
+//! from the file the window manager publishes under the runtime directory
+//! every time the page opens, and the shell's own fixed keys below it.
+//!
+//! The right-click menu of the bar depends on what was clicked
+//! ([`PanelTarget`]): every item offers what hides or configures it, the
+//! pager adds and removes desktops, and each "settings" entry opens the
+//! window on the page concerned.
 
-use tiny_skia::{Color, PathBuilder};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tiny_skia::{Color, PathBuilder, Pixmap};
 
 use crate::config::{
     self, BackgroundStyle, ButtonSide, COLOR_KEYS, Config, FILES_KEYS, Glyphs, MenuLayout, PANEL_KEYS,
     Surface, WALLPAPER_KEYS, WINDOW_KEYS, WallpaperMode,
 };
-use crate::desktop::{Desktop, Hover, Popup};
-use crate::event::Button;
+use crate::desktop::{Desktop, Geometry, Hover, PanelTarget, Popup};
+use crate::event::{Button, Request};
 use crate::geom::Rect;
-use crate::i18n::tr;
+use crate::i18n::{self, tr};
 use crate::render::{Align, Canvas, color_to_hsv, hsv_to_color, parse_color};
 use crate::ui::{self, popups, preview};
 use crate::xkb::Key;
 
-/// Settings window width, with a gutter for the page's scrollbar.
-const WIDTH: i32 = 700 + ui::SCROLLBAR;
-/// Settings window height, grown when a page needs more and the screen has it.
-const HEIGHT: i32 = 460;
+/// Width the settings window opens at.
+pub const WIDTH: i32 = 900;
+/// Height the settings window opens at.
+pub const HEIGHT: i32 = 600;
 /// Inner padding of the window.
 const PAD: i32 = 16;
 /// Height of one line of a setting row.
@@ -50,18 +69,24 @@ const CAPTION: i32 = 28;
 const GROUP_GAP: i32 = 12;
 /// Width of the name column of a row.
 const TITLE_WIDTH: i32 = 150;
-/// Width of the page column.
-const NAV_WIDTH: i32 = 136;
-/// Height of a page row.
+/// Width of the sidebar, search field and pages.
+const SIDEBAR: i32 = 220;
+/// Height of the sidebar's search field.
+const SEARCH_HEIGHT: i32 = 32;
+/// Height of a page row in the sidebar.
 const NAV_ROW: i32 = 32;
+/// Height of a group caption in the sidebar.
+const NAV_CAPTION: i32 = 26;
 /// Side of an icon chip.
 const CHIP: i32 = 30;
 /// Height of an application list row.
 const LIST_ROW: i32 = 30;
 /// Width of the right-click menu.
-const MENU_WIDTH: i32 = 220;
+const MENU_WIDTH: i32 = 250;
 /// Row height of the right-click menu.
 const MENU_ROW: i32 = 30;
+/// Height of a separator in the right-click menu.
+const MENU_SEPARATOR: i32 = 9;
 /// Space between controls flowed in a row.
 const GAP: i32 = 4;
 /// Width of a toggle switch.
@@ -96,9 +121,26 @@ const PICKER_MARK: f32 = 6.0;
 const PICKER_HEIGHT: i32 = PICKER_AREA + PICKER_HUE + CONTROL + 4 * PICKER_PAD;
 /// Side of a color swatch.
 const SWATCH: i32 = 22;
+/// Width of a preset card.
+const PRESET_WIDTH: i32 = 200;
+/// Height of a preset card: its preview at the preview's aspect, and its name.
+const PRESET_HEIGHT: i32 = 150;
+/// Inner padding of a preset card.
+const PRESET_PAD: i32 = 8;
+/// Height of the name line under a preset's preview.
+const PRESET_NAME: i32 = 22;
+/// Space between preset cards.
+const PRESET_GAP: i32 = 10;
+/// Height of a key cap on the Shortcuts page.
+const KEYCAP: i32 = 24;
+/// Width of the slash between alternative chords.
+const KEYCAP_SLASH: i32 = 12;
+/// Thickness of an accent mark, which the video stream carries at half
+/// resolution in chroma and so blurs when thinner.
+const ACCENT_STROKE: f32 = 3.0;
 
-/// The sliders of the Panel and Theme pages: key, lowest, highest, step
-/// and unit.
+/// The sliders of the Panel, Desktops and Windows pages: key, lowest,
+/// highest, step and unit.
 const SLIDERS: [(&str, i32, i32, i32, &str); 6] = [
     (
         "panel_height",
@@ -112,6 +154,32 @@ const SLIDERS: [(&str, i32, i32, i32, &str); 6] = [
     ("panel_margin", 0, config::MAX_PANEL_MARGIN, 2, "px"),
     ("window_corners", 0, config::MAX_CORNERS, 1, "px"),
     ("desktops", 1, config::MAX_DESKTOPS as i32, 1, ""),
+];
+
+/// The keys of the Desktops page, which the Panel page's reset leaves alone.
+const DESKTOP_KEYS: [&str; 3] = ["desktops", "show_pager", "tasks_all_desktops"];
+
+/// The languages the interface comes in, by code, each named in itself.
+const LANGUAGES: [(&str, &str); 19] = [
+    ("en", "English"),
+    ("ar", "العربية"),
+    ("da", "Dansk"),
+    ("de", "Deutsch"),
+    ("es", "Español"),
+    ("fil", "Filipino"),
+    ("fr", "Français"),
+    ("hi", "हिन्दी"),
+    ("it", "Italiano"),
+    ("ja", "日本語"),
+    ("ko", "한국어"),
+    ("nl", "Nederlands"),
+    ("pt", "Português"),
+    ("ru", "Русский"),
+    ("th", "ไทย"),
+    ("tr", "Türkçe"),
+    ("vi", "Tiếng Việt"),
+    ("zh_cn", "简体中文"),
+    ("zh_tw", "繁體中文"),
 ];
 
 /// The color schemes: the four colors of each, as accent, bar, menus and
@@ -170,6 +238,20 @@ impl Style {
             ("panel_margin", self.margin.to_string()),
             ("menu_layout", menu_value(self.menu).to_string()),
         ]
+    }
+
+    /// The look the desktop would have under the style, with the colors as
+    /// they are.
+    fn look(&self, d: &Desktop) -> preview::Look {
+        let mut look = preview::Look::current(d);
+        look.style.surface = self.surface;
+        look.style.buttons = self.buttons;
+        look.style.glyphs = self.glyphs;
+        look.style.corners = self.corners;
+        look.centered = self.centered;
+        look.margin = self.margin;
+        look.menu = self.menu;
+        look
     }
 }
 
@@ -234,32 +316,233 @@ const TEXTS: [&str; 12] = [
     "#333333", "#232629", "#111111",
 ];
 
+/// The groups the sidebar lists the pages under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// How the desktop looks.
+    Appearance,
+    /// The bar, the desktops and the keys.
+    Workspace,
+    /// The file manager and the language.
+    Applications,
+    /// About the shell.
+    System,
+}
+
+impl Group {
+    /// Every group in sidebar order.
+    const ALL: [Group; 4] = [
+        Group::Appearance,
+        Group::Workspace,
+        Group::Applications,
+        Group::System,
+    ];
+
+    /// The group's caption.
+    fn name(self) -> &'static str {
+        match self {
+            Group::Appearance => tr("Appearance"),
+            Group::Workspace => tr("Workspace"),
+            Group::Applications => tr("Applications"),
+            Group::System => tr("System"),
+        }
+    }
+}
+
 /// The pages of the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
+    /// The scheme and style presets, with the live preview.
+    Theme,
+    /// The four colors of the interface.
+    Colors,
+    /// The window frames.
+    Windows,
+    /// The wallpaper of every monitor.
+    Wallpaper,
     /// The bar and the start menu.
     Panel,
+    /// The virtual desktops.
+    Desktops,
+    /// The keyboard shortcuts in force.
+    Shortcuts,
     /// The file manager.
     Files,
-    /// The wallpaper.
-    Desktop,
-    /// The colors and the window frames.
-    Theme,
+    /// The interface language.
+    Language,
+    /// The shell's version and session.
+    About,
 }
 
 impl Page {
-    /// Every page in order.
-    const ALL: [Page; 4] = [Page::Panel, Page::Files, Page::Desktop, Page::Theme];
+    /// Every page in sidebar order.
+    pub const ALL: [Page; 10] = [
+        Page::Theme,
+        Page::Colors,
+        Page::Windows,
+        Page::Wallpaper,
+        Page::Panel,
+        Page::Desktops,
+        Page::Shortcuts,
+        Page::Files,
+        Page::Language,
+        Page::About,
+    ];
+
+    /// The page's id, as `--settings <page>` names it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Page::Theme => "theme",
+            Page::Colors => "colors",
+            Page::Windows => "windows",
+            Page::Wallpaper => "wallpaper",
+            Page::Panel => "panel",
+            Page::Desktops => "desktops",
+            Page::Shortcuts => "shortcuts",
+            Page::Files => "files",
+            Page::Language => "language",
+            Page::About => "about",
+        }
+    }
+
+    /// The page with an id, case and surrounding space ignored.
+    pub fn from_id(id: &str) -> Option<Page> {
+        let id = id.trim().to_ascii_lowercase();
+        Page::ALL.into_iter().find(|page| page.id() == id)
+    }
 
     /// The page's name.
     fn name(self) -> &'static str {
         match self {
-            Page::Panel => tr("Panel"),
-            Page::Files => tr("Files"),
-            Page::Desktop => tr("Desktop"),
             Page::Theme => tr("Theme"),
+            Page::Colors => tr("Colors"),
+            Page::Windows => tr("Windows"),
+            Page::Wallpaper => tr("Wallpaper"),
+            Page::Panel => tr("Panel"),
+            Page::Desktops => tr("Desktops"),
+            Page::Shortcuts => tr("Shortcuts"),
+            Page::Files => tr("Files"),
+            Page::Language => tr("Language"),
+            Page::About => tr("About"),
         }
     }
+
+    /// The group the sidebar lists the page under.
+    fn group(self) -> Group {
+        match self {
+            Page::Theme | Page::Colors | Page::Windows | Page::Wallpaper => Group::Appearance,
+            Page::Panel | Page::Desktops | Page::Shortcuts => Group::Workspace,
+            Page::Files | Page::Language => Group::Applications,
+            Page::About => Group::System,
+        }
+    }
+
+    /// The titles of the page's rows, which the search matches beside the
+    /// page's name.
+    fn keywords(self) -> Vec<&'static str> {
+        match self {
+            Page::Theme => vec![tr("Scheme"), tr("Style"), tr("Preview")],
+            Page::Colors => vec![tr("Accent"), tr("Bar"), tr("Menus"), tr("Text")],
+            Page::Windows => vec![
+                tr("Decorate windows"),
+                tr("Surface"),
+                tr("Buttons"),
+                tr("Glyphs"),
+                tr("Corners"),
+            ],
+            Page::Wallpaper => vec![
+                tr("Monitor"),
+                tr("Background"),
+                tr("Color"),
+                tr("Image"),
+                tr("Fit"),
+            ],
+            Page::Panel => vec![
+                tr("Edge"),
+                tr("Auto-hide"),
+                tr("Height"),
+                tr("Width"),
+                tr("Opacity"),
+                tr("Icon"),
+                tr("Label"),
+                tr("Layout"),
+                tr("Margin"),
+                tr("Clock"),
+                tr("Format"),
+                tr("Volume"),
+                tr("Tray"),
+                tr("Quick launch"),
+                tr("Start menu"),
+                tr("Favorites"),
+                tr("Recent"),
+            ],
+            Page::Desktops => vec![tr("Show the pager"), tr("Show windows of all desktops")],
+            Page::Shortcuts => vec![tr("Window manager"), tr("Desktop"), tr("Quick launcher")],
+            Page::Files => vec![tr("View"), tr("Sort"), tr("Hidden files")],
+            Page::Language => vec![],
+            Page::About => vec![tr("Version"), tr("Backend"), tr("Config file")],
+        }
+    }
+}
+
+/// The pages a search matches: every page for an empty query, else the
+/// pages whose name or any row title contains the text, case ignored, in
+/// sidebar order.
+///
+/// # Arguments
+/// * `query` - The search text.
+pub fn search_pages(query: &str) -> Vec<Page> {
+    let query = query.trim().to_lowercase();
+    Page::ALL
+        .into_iter()
+        .filter(|page| {
+            query.is_empty()
+                || page.name().to_lowercase().contains(&query)
+                || page
+                    .keywords()
+                    .iter()
+                    .any(|title| title.to_lowercase().contains(&query))
+        })
+        .collect()
+}
+
+/// The shortcuts the window manager publishes, parsed from its file: one
+/// per line, the chord, a tab and the description; lines without a tab or
+/// with either side empty are skipped.
+///
+/// # Arguments
+/// * `text` - The file's text.
+pub fn parse_keybinds(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(chord, description)| (chord.trim(), description.trim()))
+        .filter(|(chord, description)| !chord.is_empty() && !description.is_empty())
+        .map(|(chord, description)| (chord.to_string(), description.to_string()))
+        .collect()
+}
+
+/// The file the window manager publishes its shortcuts in.
+fn keybinds_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| PathBuf::from(dir).join("selkies-wm").join("keybinds"))
+}
+
+/// Reads the published shortcuts; `None` when nothing is published.
+fn read_keybinds() -> Option<Vec<(String, String)>> {
+    let text = std::fs::read_to_string(keybinds_path()?).ok()?;
+    Some(parse_keybinds(&text))
+}
+
+/// The shell's own fixed shortcuts: the chord and what it does.
+fn desktop_shortcuts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("Super", tr("Quick launcher")),
+        ("Escape", tr("Close the popup")),
+        ("Up / Down / Tab", tr("Move through the launcher's results")),
+        ("Enter", tr("Launch the selected result")),
+        ("A / Z", tr("Type to search applications and commands")),
+    ]
 }
 
 /// The colors of the interface the user can set.
@@ -327,6 +610,8 @@ impl ThemeColor {
 /// A text field of the settings window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
+    /// The sidebar's search field.
+    Search,
     /// The clock's strftime pattern.
     ClockFormat,
     /// The start button's icon name or image path.
@@ -341,7 +626,7 @@ pub enum Field {
     Theme(ThemeColor),
 }
 
-/// What clicking a control does.
+/// What clicking a control or a menu item does.
 #[derive(Clone, Debug, PartialEq)]
 enum Action {
     /// Write keys and values; an empty value removes the key.
@@ -354,12 +639,16 @@ enum Action {
     Browse,
     /// Open the file manager to choose a start button icon.
     BrowseIcon,
-    /// Open the settings window, from the bar's menu.
-    OpenSettings,
+    /// Open the settings window, on a page or as it was, from the bar's menu.
+    OpenSettings(Option<Page>),
+    /// Open the settings window on the favorites list, from the bar's menu.
+    EditFavorites,
     /// Read the applications again, from the bar's menu.
     Reload,
-    /// Close the window.
-    Close,
+    /// Toggle mute, from the volume control's menu.
+    ToggleMute,
+    /// Take an application off the quick launch, from its button's menu.
+    RemoveLauncher(String),
     /// Show a page.
     Page(Page),
     /// Open the application list for a list setting.
@@ -393,9 +682,7 @@ enum Kind {
     Button,
     /// A color square.
     Swatch,
-    /// The cross that closes the window.
-    Close,
-    /// A page in the left column.
+    /// A page in the sidebar.
     Nav,
     /// An application icon; a click removes it.
     Chip,
@@ -410,6 +697,8 @@ enum Kind {
     HueStrip,
     /// The picker's saturation and value square.
     ColorArea,
+    /// A preset card: a rendered preview of its look over its name.
+    Preset,
 }
 
 /// One clickable thing in the window.
@@ -423,15 +712,28 @@ struct Control {
     color: Option<Color>,
     /// The application whose icon the control shows.
     app: Option<usize>,
+    /// The look a preset card shows.
+    look: Option<preview::Look>,
     /// The area the control is confined to when it scrolls.
     clip: Option<Rect>,
 }
 
-/// A piece of text in the page: a group caption or a row's name.
+/// A piece of text in the page: a group caption, a row's name or a value
+/// shown at a row's right.
 struct Text {
     rect: Rect,
     text: String,
     caption: bool,
+    /// Whether the text is a value, set dim and flush right.
+    value: bool,
+}
+
+/// A key cap on the Shortcuts page, or the slash between alternatives.
+struct Cap {
+    rect: Rect,
+    text: String,
+    /// Whether the text is a key rather than the slash.
+    key: bool,
 }
 
 /// What the page area shows.
@@ -448,12 +750,16 @@ enum View {
 struct Layout {
     controls: Vec<Control>,
     texts: Vec<Text>,
+    /// The group captions of the sidebar.
+    nav_texts: Vec<Text>,
     /// Card backgrounds.
     cards: Vec<Rect>,
     /// Hairlines between rows.
     lines: Vec<Rect>,
     /// Where the theme preview is drawn, when the page has it.
     previews: Vec<Rect>,
+    /// The key caps of the Shortcuts page.
+    caps: Vec<Cap>,
     /// Height of the page's content before scrolling.
     content: i32,
     /// The open color picker, laid over the page.
@@ -473,10 +779,22 @@ struct PickerLayout {
     first: usize,
 }
 
-/// The window's state between events.
+/// The window's state between events, and the window itself while open.
 pub struct SettingsState {
+    /// The desktop's number for the window while it is open.
+    pub id: Option<u32>,
+    /// Size and scale of the window.
+    pub geometry: Geometry,
+    /// The rendered pixels.
+    pub pix: Option<Pixmap>,
+    /// Whether the window needs drawing.
+    pub dirty: bool,
+    /// Last pointer position in the window.
+    pub pointer: (f64, f64),
     /// The page shown.
     pub page: Page,
+    /// The sidebar's search text.
+    pub search: String,
     /// The list setting whose application list is open, if any.
     pub picking: Option<&'static str>,
     /// The monitor whose wallpaper is shown, or `None` for the shared one.
@@ -493,6 +811,12 @@ pub struct SettingsState {
     pub picker: Option<Picker>,
     /// The scrollbar thumb being dragged, as the offset into it grabbed.
     pub bar_drag: Option<f64>,
+    /// The window manager's shortcuts as last read; `None` when none are
+    /// published.
+    pub keybinds: Option<Vec<(String, String)>>,
+    /// The preset cards' previews, by the look and scale they were rendered
+    /// for.
+    presets: HashMap<String, Arc<Pixmap>>,
 }
 
 /// The color picker of a field.
@@ -519,7 +843,13 @@ pub enum PickerPart {
 impl Default for SettingsState {
     fn default() -> SettingsState {
         SettingsState {
-            page: Page::Panel,
+            id: None,
+            geometry: Geometry::default(),
+            pix: None,
+            dirty: false,
+            pointer: (-1.0, -1.0),
+            page: Page::Theme,
+            search: String::new(),
             picking: None,
             monitor: None,
             focus: None,
@@ -528,13 +858,22 @@ impl Default for SettingsState {
             drag: None,
             picker: None,
             bar_drag: None,
+            keybinds: None,
+            presets: HashMap::new(),
         }
     }
 }
 
 impl SettingsState {
-    /// Resets the window for opening.
-    pub fn open(&mut self) {
+    /// Resets the window for opening, on a page when one is asked for.
+    ///
+    /// # Arguments
+    /// * `page` - The page to show, or `None` to keep the last one.
+    pub fn open(&mut self, page: Option<Page>) {
+        if let Some(page) = page {
+            self.page = page;
+        }
+        self.search.clear();
         self.picking = None;
         self.monitor = None;
         self.focus = None;
@@ -543,10 +882,16 @@ impl SettingsState {
         self.drag = None;
         self.picker = None;
         self.bar_drag = None;
+        self.pointer = (-1.0, -1.0);
+        self.keybinds = read_keybinds();
+        self.dirty = true;
     }
 
     /// Clears the state when the window closes.
     pub fn close(&mut self) {
+        self.id = None;
+        self.geometry = Geometry::default();
+        self.pix = None;
         self.focus = None;
         self.picking = None;
         self.editing.clear();
@@ -564,28 +909,192 @@ impl SettingsState {
     }
 }
 
-/// The items of the bar's right-click menu.
-fn panel_menu_items(d: &Desktop) -> Vec<(&'static str, Action)> {
-    let position = if d.panel_top() { "bottom" } else { "top" };
-    vec![
-        (tr("Settings…"), Action::OpenSettings),
-        (
-            if d.panel_top() {
-                tr("Move panel to bottom")
-            } else {
-                tr("Move panel to top")
+/// An entry of the bar's right-click menu.
+#[derive(Clone, Debug, PartialEq)]
+enum MenuEntry {
+    /// A row: its label, what it does, and whether it can be chosen.
+    Item {
+        label: &'static str,
+        action: Action,
+        enabled: bool,
+    },
+    /// A hairline between rows.
+    Separator,
+}
+
+impl MenuEntry {
+    /// An enabled row.
+    fn item(label: &'static str, action: Action) -> MenuEntry {
+        MenuEntry::Item {
+            label,
+            action,
+            enabled: true,
+        }
+    }
+
+    /// The entry's height.
+    fn height(&self) -> i32 {
+        match self {
+            MenuEntry::Item { .. } => MENU_ROW,
+            MenuEntry::Separator => MENU_SEPARATOR,
+        }
+    }
+}
+
+/// What the bar's right-click menu decides its entries by.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MenuFacts {
+    /// Whether the bar sits along the top edge.
+    top: bool,
+    /// Whether the bar hides.
+    autohide: bool,
+    /// How many virtual desktops there are.
+    desktops: u32,
+    /// Whether the sink is muted, or `None` while audio is unavailable.
+    muted: Option<bool>,
+    /// The desktop file ID of the quick launch button clicked, if one was.
+    launcher: Option<String>,
+}
+
+/// A menu entry that writes one key.
+fn set_entry(label: &'static str, key: &'static str, value: &str) -> MenuEntry {
+    MenuEntry::item(label, Action::Set(vec![(key, value.to_string())]))
+}
+
+/// The entries of the bar's right-click menu for what was clicked.
+///
+/// # Arguments
+/// * `target` - The bar item clicked.
+/// * `facts` - The state the entries depend on.
+fn panel_menu_entries(target: PanelTarget, facts: &MenuFacts) -> Vec<MenuEntry> {
+    let settings = |label: &'static str, page: Page| MenuEntry::item(label, Action::OpenSettings(Some(page)));
+    let more = facts.desktops.saturating_add(1).to_string();
+    let fewer = facts.desktops.saturating_sub(1).max(1).to_string();
+    let add_desktop = MenuEntry::Item {
+        label: tr("Add a desktop"),
+        action: Action::Set(vec![("desktops", more)]),
+        enabled: facts.desktops < config::MAX_DESKTOPS,
+    };
+    match target {
+        PanelTarget::Bar => vec![
+            MenuEntry::item(tr("Settings…"), Action::OpenSettings(None)),
+            set_entry(
+                if facts.top {
+                    tr("Move panel to bottom")
+                } else {
+                    tr("Move panel to top")
+                },
+                "panel_position",
+                if facts.top { "bottom" } else { "top" },
+            ),
+            set_entry(
+                if facts.autohide {
+                    tr("Always show the panel")
+                } else {
+                    tr("Auto-hide the panel")
+                },
+                "panel_autohide",
+                if facts.autohide { "false" } else { "true" },
+            ),
+            add_desktop,
+            MenuEntry::item(tr("Reload applications"), Action::Reload),
+        ],
+        PanelTarget::Pager => vec![
+            add_desktop,
+            MenuEntry::Item {
+                label: tr("Remove a desktop"),
+                action: Action::Set(vec![("desktops", fewer)]),
+                enabled: facts.desktops > 1,
             },
-            Action::Set(vec![("panel_position", position.to_string())]),
-        ),
-        (tr("Reload applications"), Action::Reload),
-    ]
+            MenuEntry::Separator,
+            settings(tr("Desktop settings…"), Page::Desktops),
+        ],
+        PanelTarget::Clock => vec![
+            settings(tr("Clock settings…"), Page::Panel),
+            set_entry(tr("Hide the clock"), "show_clock", "false"),
+        ],
+        PanelTarget::Volume => vec![
+            MenuEntry::Item {
+                label: if facts.muted == Some(true) {
+                    tr("Unmute")
+                } else {
+                    tr("Mute")
+                },
+                action: Action::ToggleMute,
+                enabled: facts.muted.is_some(),
+            },
+            set_entry(tr("Hide the volume control"), "show_volume", "false"),
+            settings(tr("Sound settings…"), Page::Panel),
+        ],
+        PanelTarget::Start | PanelTarget::Launcher(_) => {
+            let mut entries = vec![
+                settings(tr("Panel settings…"), Page::Panel),
+                MenuEntry::item(tr("Edit favorites…"), Action::EditFavorites),
+            ];
+            if let Some(id) = &facts.launcher {
+                entries.push(MenuEntry::item(
+                    tr("Remove from quick launch"),
+                    Action::RemoveLauncher(id.clone()),
+                ));
+            }
+            entries
+        }
+        PanelTarget::Tray => vec![
+            set_entry(tr("Hide the system tray"), "show_tray", "false"),
+            settings(tr("Panel settings…"), Page::Panel),
+        ],
+        PanelTarget::ShowDesktop => vec![
+            set_entry(tr("Hide this button"), "show_desktop_button", "false"),
+            settings(tr("Panel settings…"), Page::Panel),
+        ],
+    }
+}
+
+/// The entries of the open right-click menu.
+fn panel_menu_items(d: &Desktop) -> Vec<MenuEntry> {
+    let Popup::PanelMenu(_, target) = d.popup else {
+        return Vec::new();
+    };
+    // The bar numbers its quick launch buttons over the entries that resolve
+    // to an application, as its layout does.
+    let launcher = match target {
+        PanelTarget::Launcher(position) => d
+            .config
+            .launchers
+            .iter()
+            .filter(|id| d.apps.find(id).is_some())
+            .nth(position)
+            .cloned(),
+        _ => None,
+    };
+    let facts = MenuFacts {
+        top: d.panel_top(),
+        autohide: d.config.panel_autohide,
+        desktops: d.desktops,
+        muted: d.volume.map(|v| v.muted),
+        launcher,
+    };
+    panel_menu_entries(target, &facts)
 }
 
 /// The rectangle of the right-click menu anchored at a bar X.
 fn panel_menu_rect(d: &Desktop, x: i32) -> Rect {
-    let items = panel_menu_items(d).len() as i32;
+    let height: i32 = panel_menu_items(d).iter().map(MenuEntry::height).sum();
     let anchor = Rect::new(x - 8, d.bar_rect().y, 16, d.bar_rect().h);
-    popups::anchor_above(d, anchor, MENU_WIDTH, items * MENU_ROW + 12)
+    popups::anchor_above(d, anchor, MENU_WIDTH, height + 12)
+}
+
+/// The rectangles of the menu's entries, in order.
+fn panel_menu_rows(d: &Desktop, frame: Rect) -> Vec<Rect> {
+    let mut y = frame.y + 6;
+    panel_menu_items(d)
+        .iter()
+        .map(|entry| {
+            let rect = Rect::new(frame.x + 6, y, frame.w - 12, entry.height());
+            y += entry.height();
+            rect
+        })
+        .collect()
 }
 
 /// Draws the right-click menu; returns its rectangle.
@@ -597,14 +1106,16 @@ fn panel_menu_rect(d: &Desktop, x: i32) -> Rect {
 pub fn draw_panel_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, x: i32) -> Rect {
     let frame = panel_menu_rect(d, x);
     ui::draw_popup_frame(canvas, frame);
-    for (row, (label, _)) in panel_menu_items(d).into_iter().enumerate() {
-        let rect = Rect::new(
-            frame.x + 6,
-            frame.y + 6 + row as i32 * MENU_ROW,
-            frame.w - 12,
-            MENU_ROW,
-        );
-        if d.hover == Hover::PanelMenuItem(row) {
+    let rows = panel_menu_rows(d, frame);
+    for (row, (entry, rect)) in panel_menu_items(d).into_iter().zip(rows).enumerate() {
+        let MenuEntry::Item { label, enabled, .. } = entry else {
+            canvas.fill_rect(
+                Rect::new(rect.x + 8, rect.y + rect.h / 2, rect.w - 16, 1),
+                ui::separator(),
+            );
+            continue;
+        };
+        if enabled && d.hover == Hover::PanelMenuItem(row) {
             canvas.fill_rounded(rect, 5.0, ui::hover_bg());
         }
         let label_rect = Rect::new(rect.x + 10, rect.y, rect.w - 20, rect.h);
@@ -616,7 +1127,7 @@ pub fn draw_panel_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, x: i32) -> Rect
             ui::FONT_SIZE,
             false,
             Align::Left,
-            ui::text(),
+            if enabled { ui::text() } else { ui::text_dim() },
         );
     }
     frame
@@ -629,16 +1140,21 @@ pub fn draw_panel_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, x: i32) -> Rect
 /// * `x` - Pointer X.
 /// * `y` - Pointer Y.
 pub fn panel_menu_hit(d: &Desktop, x: f64, y: f64) -> Option<Hover> {
-    let Popup::PanelMenu(at) = d.popup else {
+    let Popup::PanelMenu(at, _) = d.popup else {
         return None;
     };
     let frame = panel_menu_rect(d, at);
     if !frame.contains(x, y) {
         return None;
     }
-    let row = ((y - frame.y as f64 - 6.0) / MENU_ROW as f64).floor();
-    if row >= 0.0 && (row as usize) < panel_menu_items(d).len() {
-        return Some(Hover::PanelMenuItem(row as usize));
+    let rows = panel_menu_rows(d, frame);
+    for (row, (entry, rect)) in panel_menu_items(d).iter().zip(rows).enumerate() {
+        if rect.contains(x, y) {
+            return match entry {
+                MenuEntry::Item { enabled: true, .. } => Some(Hover::PanelMenuItem(row)),
+                _ => Some(Hover::None),
+            };
+        }
     }
     Some(Hover::None)
 }
@@ -658,21 +1174,19 @@ pub fn panel_menu_click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool
         return true;
     }
     if let Hover::PanelMenuItem(row) = hover
-        && let Some((_, action)) = panel_menu_items(d).get(row).cloned()
+        && let Some(MenuEntry::Item { action, .. }) = panel_menu_items(d).get(row).cloned()
     {
+        d.close_popup();
         match action {
-            Action::OpenSettings => {
-                d.close_popup();
-                d.open_popup(Popup::Settings);
+            Action::OpenSettings(page) => d.open_settings(page),
+            Action::EditFavorites => {
+                d.open_settings(Some(Page::Panel));
+                d.settings.picking = Some("favorites");
             }
-            Action::Set(changes) => {
-                d.close_popup();
-                d.write_config(&changes);
-            }
-            _ => {
-                d.close_popup();
-                d.reload();
-            }
+            Action::Set(changes) => d.write_config(&changes),
+            Action::ToggleMute => d.toggle_mute(),
+            Action::RemoveLauncher(id) => d.toggle_list_entry("launchers", &id),
+            _ => d.reload(),
         }
     }
     true
@@ -702,46 +1216,22 @@ fn wallpaper_key(d: &Desktop, base: &'static str) -> &'static str {
     }
 }
 
-/// The settings window rectangle for a height.
-fn frame_for(d: &Desktop, height: i32) -> Rect {
-    let bar = d.bar_rect();
-    let room = d
-        .primary_background()
-        .filter(|b| b.geometry.configured)
-        .map_or(d.panel.height - bar.h, |b| {
-            b.icon_area().h.min(d.panel.height - bar.h)
-        });
-    let height = height.min(room - ui::POPUP_MARGIN * 2).max(240);
-    let width = WIDTH.min(d.panel.width - 2 * ui::POPUP_MARGIN);
-    let x = ((d.panel.width - width) / 2).max(ui::POPUP_MARGIN);
-    let y = if d.panel_top() {
-        bar.bottom() + ui::POPUP_MARGIN
-    } else {
-        bar.y - ui::POPUP_MARGIN - height
-    };
-    Rect::new(x, y, width, height)
-}
-
-/// The settings window rectangle: tall enough for the tallest page when
-/// the screen allows, so it keeps its size from page to page, scrolled
-/// otherwise.
+/// The window's rectangle: the whole of its surface.
 fn frame(d: &Desktop) -> Rect {
-    let probe = frame_for(d, HEIGHT);
-    let content = Page::ALL
-        .iter()
-        .map(|page| build(d, probe, 0.0, View::Page(*page)).content)
-        .max()
-        .unwrap_or(0);
-    let needed = content + (probe.h - page_rect_in(probe).h);
-    frame_for(d, needed.max(HEIGHT))
+    Rect::new(0, 0, d.settings.geometry.width, d.settings.geometry.height)
 }
 
-/// The page area to the right of the page column, for a frame: below the
-/// title, above the footer with the Reset or Back button, and short of the
-/// gutter its scrollbar sits in.
+/// The sidebar's search field, for a frame.
+fn search_rect_in(frame: Rect) -> Rect {
+    Rect::new(frame.x + PAD, frame.y + PAD, SIDEBAR - PAD, SEARCH_HEIGHT)
+}
+
+/// The page area to the right of the sidebar, for a frame: above the
+/// footer with the Reset or Back button, and short of the gutter its
+/// scrollbar sits in.
 fn page_rect_in(frame: Rect) -> Rect {
-    let x = frame.x + PAD + NAV_WIDTH + PAD;
-    let y = frame.y + PAD + CONTROL + 10;
+    let x = frame.x + SIDEBAR + PAD;
+    let y = frame.y + PAD;
     let bottom = frame.bottom() - PAD - CONTROL - 10;
     Rect::new(x, y, frame.right() - PAD - ui::SCROLLBAR - x, bottom - y)
 }
@@ -763,10 +1253,14 @@ fn hex(color: Color) -> String {
 /// The text a field shows: what is being typed when it has focus, the
 /// setting otherwise.
 fn field_text(d: &Desktop, field: Field) -> String {
+    if field == Field::Search {
+        return d.settings.search.clone();
+    }
     if d.settings.focus == Some(field) {
         return d.settings.editing.clone();
     }
     match field {
+        Field::Search => String::new(),
         Field::ClockFormat => d.config.clock_format.clone(),
         Field::StartIcon => d.config.start_icon.clone().unwrap_or_default(),
         Field::StartLabel => d.config.start_label.clone().unwrap_or_default(),
@@ -784,7 +1278,9 @@ fn field_color(d: &Desktop, field: Field) -> Color {
     match field {
         Field::Color => shown_wallpaper(d).color,
         Field::Theme(color) => color.current(d.config.theme),
-        Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => Color::BLACK,
+        Field::Search | Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => {
+            Color::BLACK
+        }
     }
 }
 
@@ -805,13 +1301,22 @@ fn chip_width(label: &str) -> i32 {
     14 + width + 14
 }
 
-/// The keys a page's reset removes.
+/// The keys a page's reset removes; none for a page that holds no setting.
 fn page_keys(d: &Desktop) -> Vec<&'static str> {
     match d.settings.page {
-        Page::Panel => PANEL_KEYS.to_vec(),
-        Page::Files => FILES_KEYS.to_vec(),
-        Page::Desktop => WALLPAPER_KEYS.iter().map(|k| wallpaper_key(d, k)).collect(),
         Page::Theme => COLOR_KEYS.iter().chain(WINDOW_KEYS.iter()).copied().collect(),
+        Page::Colors => COLOR_KEYS.to_vec(),
+        Page::Windows => WINDOW_KEYS.to_vec(),
+        Page::Wallpaper => WALLPAPER_KEYS.iter().map(|k| wallpaper_key(d, k)).collect(),
+        Page::Panel => PANEL_KEYS
+            .iter()
+            .copied()
+            .filter(|key| !DESKTOP_KEYS.contains(key))
+            .collect(),
+        Page::Desktops => DESKTOP_KEYS.to_vec(),
+        Page::Files => FILES_KEYS.to_vec(),
+        Page::Language => vec!["language"],
+        Page::Shortcuts | Page::About => Vec::new(),
     }
 }
 
@@ -835,6 +1340,23 @@ fn current_style(config: &Config) -> Option<&'static str> {
         .iter()
         .find(|style| style.matches(config))
         .map(|style| style.name)
+}
+
+/// The theme a scheme's four colors make.
+fn scheme_theme(colors: &[&str; 4]) -> ui::Theme {
+    let mut theme = ui::Theme::default();
+    let mut slots = [
+        &mut theme.accent,
+        &mut theme.panel,
+        &mut theme.popup,
+        &mut theme.text,
+    ];
+    for (slot, color) in slots.iter_mut().zip(colors) {
+        if let Some(parsed) = parse_color(color) {
+            **slot = parsed;
+        }
+    }
+    theme
 }
 
 /// The layout word a menu layout writes.
@@ -920,6 +1442,15 @@ fn placed(area: Rect, at: (i32, i32), w: i32, h: i32) -> Rect {
     Rect::new(at.0, area.y + at.1 * ROW + (ROW - h) / 2, w, h)
 }
 
+/// A preset card to lay out: its name, the look it shows, what choosing it
+/// writes, and whether it is in effect.
+struct PresetCard {
+    name: String,
+    look: preview::Look,
+    action: Action,
+    active: bool,
+}
+
 /// Builds a page: captioned cards of rows, each row a name and a control.
 struct Groups<'a> {
     out: &'a mut Layout,
@@ -953,6 +1484,7 @@ impl Groups<'_> {
             rect: Rect::new(self.x + CARD_PAD, self.y, self.width - 2 * CARD_PAD, CAPTION),
             text: caption.to_string(),
             caption: true,
+            value: false,
         });
         self.y += CAPTION;
         self.card_top = Some(self.y);
@@ -968,28 +1500,37 @@ impl Groups<'_> {
         }
     }
 
+    /// Opens a card without a caption when none is open, and counts a row
+    /// in it, with a hairline above when it is not the first.
+    fn begin_row(&mut self) {
+        if self.card_top.is_none() {
+            self.card_top = Some(self.y);
+            self.rows = 0;
+        }
+        if self.rows > 0 {
+            self.out
+                .lines
+                .push(Rect::new(self.x + CARD_PAD, self.y, self.width - 2 * CARD_PAD, 1));
+        }
+        self.rows += 1;
+    }
+
     /// Starts a row with a name; returns the area its control goes in.
     ///
     /// # Arguments
     /// * `title` - The row's name.
     /// * `lines` - Lines of `ROW` height the control takes.
     fn row(&mut self, title: &str, lines: i32) -> Rect {
-        if self.card_top.is_none() {
-            self.card_top = Some(self.y);
-            self.rows = 0;
-        }
+        self.begin_row();
         let inner_x = self.x + CARD_PAD;
         let inner_w = self.width - 2 * CARD_PAD;
-        if self.rows > 0 {
-            self.out.lines.push(Rect::new(inner_x, self.y, inner_w, 1));
-        }
-        self.rows += 1;
         let height = lines.max(1) * ROW;
         if !title.is_empty() {
             self.out.texts.push(Text {
                 rect: Rect::new(inner_x, self.y, TITLE_WIDTH - 8, ROW),
                 text: title.to_string(),
                 caption: false,
+                value: false,
             });
         }
         let area = Rect::new(inner_x + TITLE_WIDTH, self.y, inner_w - TITLE_WIDTH, height);
@@ -1007,6 +1548,7 @@ impl Groups<'_> {
             kind,
             color: None,
             app: None,
+            look: None,
             clip: Some(self.clip),
         });
         let last = self.out.controls.len() - 1;
@@ -1156,11 +1698,7 @@ impl Groups<'_> {
 
     /// Adds a row holding the theme preview, as tall as it needs.
     fn preview(&mut self) {
-        if self.card_top.is_none() {
-            self.card_top = Some(self.y);
-            self.rows = 0;
-        }
-        self.rows += 1;
+        self.begin_row();
         let height = preview::HEIGHT + 2 * PREVIEW_PAD;
         self.out.previews.push(Rect::new(
             self.x + CARD_PAD,
@@ -1171,12 +1709,87 @@ impl Groups<'_> {
         self.y += height;
     }
 
+    /// Adds the preset cards of a group, as many per line as fit.
+    fn presets(&mut self, cards: Vec<PresetCard>) {
+        self.begin_row();
+        let inner_x = self.x + CARD_PAD;
+        let inner_w = self.width - 2 * CARD_PAD;
+        let columns = ((inner_w + PRESET_GAP) / (PRESET_WIDTH + PRESET_GAP)).max(1) as usize;
+        let lines = cards.len().div_ceil(columns).max(1) as i32;
+        for (i, card) in cards.into_iter().enumerate() {
+            let (col, line) = ((i % columns) as i32, (i / columns) as i32);
+            let rect = Rect::new(
+                inner_x + col * (PRESET_WIDTH + PRESET_GAP),
+                self.y + PRESET_GAP + line * (PRESET_HEIGHT + PRESET_GAP),
+                PRESET_WIDTH,
+                PRESET_HEIGHT,
+            );
+            self.push(Kind::Preset, rect, card.action, &card.name, card.active)
+                .look = Some(card.look);
+        }
+        self.y += PRESET_GAP + lines * (PRESET_HEIGHT + PRESET_GAP);
+    }
+
     /// Adds a row with one flat button at its right.
     fn button(&mut self, title: &str, label: &str, action: Action) {
         let area = self.row(title, 1);
         let w = chip_width(label).min(area.w);
         let rect = Rect::new(area.right() - w, area.y + (ROW - CONTROL) / 2, w, CONTROL);
         self.push(Kind::Button, rect, action, label, false);
+    }
+
+    /// Adds a row showing a value at its right, which nothing changes.
+    fn info(&mut self, title: &str, value: &str) {
+        let area = self.row(title, 1);
+        self.out.texts.push(Text {
+            rect: area,
+            text: value.to_string(),
+            caption: false,
+            value: true,
+        });
+    }
+
+    /// Adds a shortcut row: the description at the left over the whole
+    /// width the chord leaves it, and the chord's keys as caps at the
+    /// right, alternatives separated by a slash.
+    fn shortcut(&mut self, description: &str, chord: &str) {
+        self.begin_row();
+        let inner_x = self.x + CARD_PAD;
+        let inner_w = self.width - 2 * CARD_PAD;
+        let mut caps: Vec<(String, bool)> = Vec::new();
+        for (i, alternative) in chord.split(" / ").enumerate() {
+            if i > 0 {
+                caps.push(("/".to_string(), false));
+            }
+            for key in alternative.split('+').map(str::trim).filter(|k| !k.is_empty()) {
+                caps.push((key.to_string(), true));
+            }
+        }
+        let widths: Vec<i32> = caps
+            .iter()
+            .map(
+                |(text, key)| {
+                    if *key { chip_width(text) - 10 } else { KEYCAP_SLASH }
+                },
+            )
+            .collect();
+        let total: i32 = widths.iter().sum::<i32>() + GAP * (widths.len() as i32 - 1).max(0);
+        let mut x = inner_x + inner_w - total;
+        for ((text, key), w) in caps.into_iter().zip(widths) {
+            self.out.caps.push(Cap {
+                rect: Rect::new(x, self.y + (ROW - KEYCAP) / 2, w, KEYCAP),
+                text,
+                key,
+            });
+            x += w + GAP;
+        }
+        self.out.texts.push(Text {
+            rect: Rect::new(inner_x, self.y, (inner_w - total - 12).max(40), ROW),
+            text: description.to_string(),
+            caption: false,
+            value: false,
+        });
+        self.y += ROW;
     }
 }
 
@@ -1185,7 +1798,7 @@ fn view(d: &Desktop) -> View {
     d.settings.picking.map_or(View::Page(d.settings.page), View::List)
 }
 
-/// Lays out the window as it is.
+/// Lays the window out as it is.
 fn layout(d: &Desktop) -> Layout {
     build(d, frame(d), d.settings.scroll, view(d))
 }
@@ -1200,6 +1813,56 @@ fn scrollbar(d: &Desktop) -> Option<ui::Scrollbar> {
     ui::Scrollbar::new(gutter, content, d.settings.scroll)
 }
 
+/// Lays the sidebar out: the search field, then the pages the search
+/// leaves, each group under its caption.
+fn build_sidebar(d: &Desktop, frame: Rect, out: &mut Layout) {
+    let fixed = |rect: Rect, action: Action, label: &str, active: bool, kind: Kind| Control {
+        rect,
+        action,
+        label: label.to_string(),
+        active,
+        kind,
+        color: None,
+        app: None,
+        look: None,
+        clip: None,
+    };
+    let search = search_rect_in(frame);
+    out.controls.push(fixed(
+        search,
+        Action::Focus(Field::Search),
+        &d.settings.search,
+        d.settings.focus == Some(Field::Search),
+        Kind::Text,
+    ));
+    let pages = search_pages(&d.settings.search);
+    let mut y = search.bottom() + PAD;
+    for group in Group::ALL {
+        let members: Vec<Page> = pages.iter().copied().filter(|p| p.group() == group).collect();
+        if members.is_empty() {
+            continue;
+        }
+        out.nav_texts.push(Text {
+            rect: Rect::new(search.x + 10, y, search.w - 20, NAV_CAPTION),
+            text: group.name().to_string(),
+            caption: true,
+            value: false,
+        });
+        y += NAV_CAPTION;
+        for page in members {
+            out.controls.push(fixed(
+                Rect::new(search.x, y, search.w, NAV_ROW),
+                Action::Page(page),
+                page.name(),
+                d.settings.page == page,
+                Kind::Nav,
+            ));
+            y += NAV_ROW;
+        }
+        y += GAP;
+    }
+}
+
 /// Lays the window out inside a frame.
 ///
 /// # Arguments
@@ -1210,50 +1873,26 @@ fn scrollbar(d: &Desktop) -> Option<ui::Scrollbar> {
 fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
     let page = page_rect_in(frame);
     let mut out = Layout::default();
-    let fixed = |rect: Rect, action: Action, label: &str, active: bool, kind: Kind| Control {
-        rect,
+    build_sidebar(d, frame, &mut out);
+    let footer = |label: &str, action: Action| Control {
+        rect: Rect::new(
+            frame.right() - PAD - chip_width(label),
+            frame.bottom() - PAD - CONTROL,
+            chip_width(label),
+            CONTROL,
+        ),
         action,
         label: label.to_string(),
-        active,
-        kind,
+        active: false,
+        kind: Kind::Button,
         color: None,
         app: None,
+        look: None,
         clip: None,
-    };
-    out.controls.push(fixed(
-        Rect::new(frame.right() - PAD - CONTROL, frame.y + PAD, CONTROL, CONTROL),
-        Action::Close,
-        "",
-        false,
-        Kind::Close,
-    ));
-    for (i, item) in Page::ALL.iter().enumerate() {
-        out.controls.push(fixed(
-            Rect::new(frame.x + PAD, page.y + i as i32 * NAV_ROW, NAV_WIDTH, NAV_ROW),
-            Action::Page(*item),
-            item.name(),
-            d.settings.page == *item,
-            Kind::Nav,
-        ));
-    }
-    let footer = |label: &str| {
-        let w = chip_width(label);
-        Rect::new(
-            frame.right() - PAD - w,
-            frame.bottom() - PAD - CONTROL,
-            w,
-            CONTROL,
-        )
     };
 
     if let View::List(key) = view {
-        out.controls.push(fixed(
-            footer(tr("Back")),
-            Action::Back,
-            tr("Back"),
-            false,
-            Kind::Button,
-        ));
+        out.controls.push(footer(tr("Back"), Action::Back));
         let (title, members) = if key == "favorites" {
             (tr("Favorites"), &d.config.favorites)
         } else {
@@ -1263,6 +1902,7 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
             rect: Rect::new(page.x + CARD_PAD, page.y, page.w - 2 * CARD_PAD, CAPTION),
             text: title.to_string(),
             caption: true,
+            value: false,
         });
         let list = Rect::new(page.x, page.y + CAPTION, page.w, page.h - CAPTION);
         out.cards.push(list);
@@ -1280,6 +1920,7 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                 kind: Kind::AppRow,
                 color: None,
                 app: Some(index),
+                look: None,
                 clip: Some(list),
             });
         }
@@ -1287,13 +1928,9 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
         return out;
     }
 
-    out.controls.push(fixed(
-        footer(tr("Reset")),
-        Action::Reset,
-        tr("Reset"),
-        false,
-        Kind::Button,
-    ));
+    if !page_keys(d).is_empty() {
+        out.controls.push(footer(tr("Reset"), Action::Reset));
+    }
     let mut groups = Groups {
         out: &mut out,
         clip: page,
@@ -1375,14 +2012,6 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
             groups.switch(tr("Volume"), "show_volume", d.config.show_volume);
             groups.switch(tr("Tray"), "show_tray", d.config.show_tray);
             groups.switch(tr("Desktop"), "show_desktop_button", d.config.show_desktop_button);
-            groups.group(tr("Virtual desktops"));
-            groups.slider(tr("Desktops"), "desktops", slider_value(d, "desktops"), "");
-            groups.switch(tr("Show the pager"), "show_pager", d.config.show_pager);
-            groups.switch(
-                tr("Show windows of all desktops"),
-                "tasks_all_desktops",
-                d.config.tasks_all_desktops,
-            );
             groups.group(tr("Quick launch"));
             let launchers = d.config.launchers.clone();
             groups.chips(tr("Applications"), "launchers", &launchers, d);
@@ -1403,6 +2032,31 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
             let favorites = d.config.favorites.clone();
             groups.chips(tr("Favorites"), "favorites", &favorites, d);
             groups.switch(tr("Recent"), "track_recent", d.config.track_recent);
+        }
+        Page::Desktops => {
+            groups.group(tr("Virtual desktops"));
+            groups.slider(tr("Desktops"), "desktops", slider_value(d, "desktops"), "");
+            groups.switch(tr("Show the pager"), "show_pager", d.config.show_pager);
+            groups.switch(
+                tr("Show windows of all desktops"),
+                "tasks_all_desktops",
+                d.config.tasks_all_desktops,
+            );
+        }
+        Page::Shortcuts => {
+            groups.group(tr("Window manager"));
+            match &d.settings.keybinds {
+                Some(binds) if !binds.is_empty() => {
+                    for (chord, description) in binds {
+                        groups.shortcut(description, chord);
+                    }
+                }
+                _ => groups.info(tr("No shortcuts published"), ""),
+            }
+            groups.group(tr("Desktop"));
+            for (chord, description) in desktop_shortcuts() {
+                groups.shortcut(description, chord);
+            }
         }
         Page::Files => {
             groups.group(tr("Files"));
@@ -1436,7 +2090,31 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
             groups.segments(tr("Sort"), &sorts, current);
             groups.switch(tr("Hidden files"), "files_hidden", d.config.files_hidden);
         }
-        Page::Desktop => {
+        Page::Language => {
+            groups.group(tr("Language"));
+            let mut options: Vec<(String, Action)> = vec![(tr("System").to_string(), set("language", ""))];
+            options.extend(
+                LANGUAGES
+                    .iter()
+                    .map(|(code, name)| (name.to_string(), set("language", code))),
+            );
+            let current = d.config.language.as_deref().map(|code| {
+                let code = i18n::normalize(code).unwrap_or("en");
+                LANGUAGES
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("English", |(_, name)| *name)
+            });
+            groups.segments(tr("Language"), &options, current.unwrap_or(tr("System")));
+        }
+        Page::About => {
+            groups.group(tr("About"));
+            groups.info(tr("Version"), env!("CARGO_PKG_VERSION"));
+            groups.info(tr("Backend"), &d.backend);
+            groups.info(tr("Desktops"), &d.desktops.to_string());
+            groups.info(tr("Config file"), &config::config_file().display().to_string());
+        }
+        Page::Wallpaper => {
             groups.group(tr("Wallpaper"));
             let monitors = d.monitor_list();
             if monitors.len() > 1 {
@@ -1508,10 +2186,9 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
             }
         }
         Page::Theme => {
-            groups.group(tr("Preview"));
-            groups.preview();
-            groups.group(tr("Theme"));
-            let schemes: Vec<(String, Action)> = SCHEMES
+            let scheme = current_scheme(d.config.theme);
+            groups.group(tr("Scheme"));
+            let schemes: Vec<PresetCard> = SCHEMES
                 .iter()
                 .map(|(name, colors)| {
                     let changes = COLOR_KEYS
@@ -1519,23 +2196,33 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                         .zip(colors)
                         .map(|(key, color)| (*key, color.to_string()))
                         .collect();
-                    (preset_name(name).to_string(), Action::Set(changes))
+                    let mut look = preview::Look::current(d);
+                    look.theme = scheme_theme(colors);
+                    PresetCard {
+                        name: preset_name(name).to_string(),
+                        look,
+                        action: Action::Set(changes),
+                        active: scheme == Some(*name),
+                    }
                 })
                 .collect();
-            groups.segments(
-                tr("Scheme"),
-                &schemes,
-                current_scheme(d.config.theme).map_or("", preset_name),
-            );
-            let styles: Vec<(String, Action)> = STYLES
+            groups.presets(schemes);
+            let style = current_style(&d.config);
+            groups.group(tr("Style"));
+            let styles: Vec<PresetCard> = STYLES
                 .iter()
-                .map(|style| (preset_name(style.name).to_string(), Action::Set(style.changes())))
+                .map(|s| PresetCard {
+                    name: preset_name(s.name).to_string(),
+                    look: s.look(d),
+                    action: Action::Set(s.changes()),
+                    active: style == Some(s.name),
+                })
                 .collect();
-            groups.segments(
-                tr("Style"),
-                &styles,
-                current_style(&d.config).map_or("", preset_name),
-            );
+            groups.presets(styles);
+            groups.group(tr("Preview"));
+            groups.preview();
+        }
+        Page::Colors => {
             groups.group(tr("Colors"));
             for color in ThemeColor::ALL {
                 let field = Field::Theme(color);
@@ -1548,6 +2235,8 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                     color.presets(),
                 );
             }
+        }
+        Page::Windows => {
             groups.group(tr("Windows"));
             let window = d.config.window;
             groups.switch(tr("Decorate windows"), "theme_windows", window.decorate);
@@ -1647,6 +2336,7 @@ fn lay_out_picker(d: &Desktop, out: &mut Layout, frame: Rect, page: Rect, picker
         kind,
         color: None,
         app: None,
+        look: None,
         clip: None,
     };
     out.controls
@@ -1756,12 +2446,13 @@ fn draw_button(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
     );
 }
 
-/// Draws a text field with its caret when focused.
+/// Draws a text field with its caret when focused.  An empty field shows
+/// what it is for: the search field its prompt, the others `none`.
 fn draw_field(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
     let rect = control.rect;
     canvas.fill_rounded(rect, 7.0, ui::text_alpha(0x10));
     if control.active {
-        canvas.stroke_rounded(rect, 7.0, 1.5, ui::accent());
+        canvas.stroke_rounded(rect, 7.0, ACCENT_STROKE, ui::accent());
     } else if hovered {
         canvas.stroke_rounded(rect, 7.0, 1.0, ui::text_dim());
     } else {
@@ -1770,7 +2461,11 @@ fn draw_field(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hover
     let text_rect = Rect::new(rect.x + 8, rect.y, rect.w - 16, rect.h);
     let empty = control.label.is_empty();
     let shown = if empty && !control.active {
-        "none".to_string()
+        if control.action == Action::Focus(Field::Search) {
+            tr("Search settings").to_string()
+        } else {
+            "none".to_string()
+        }
     } else {
         control.label.clone()
     };
@@ -1786,9 +2481,9 @@ fn draw_field(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hover
         color,
     );
     if control.active {
+        let scale = d.settings.geometry.scale;
         let caret_x = text_rect.x
-            + ui::text_width(&mut d.fonts, &control.label, ui::FONT_SIZE, false, d.panel.scale)
-                .min(text_rect.w - 2);
+            + ui::text_width(&mut d.fonts, &control.label, ui::FONT_SIZE, false, scale).min(text_rect.w - 2);
         canvas.fill_rect(
             Rect::new(caret_x + 1, text_rect.y + 7, 1, text_rect.h - 14),
             ui::text(),
@@ -1925,6 +2620,97 @@ fn draw_slider(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
     );
 }
 
+/// The rendered preview of a look at a scale, from the cache or drawn now.
+fn preset_image(d: &mut Desktop, look: &preview::Look, scale: i32) -> Option<Arc<Pixmap>> {
+    let key = format!(
+        "{}{}{}{}:{:?}:{}:{}:{:?}:{scale}",
+        hex(look.theme.accent),
+        hex(look.theme.panel),
+        hex(look.theme.popup),
+        hex(look.theme.text),
+        look.style,
+        look.centered,
+        look.margin,
+        look.menu
+    );
+    if let Some(image) = d.settings.presets.get(&key) {
+        return Some(image.clone());
+    }
+    let image = Arc::new(preview::render(d, look, scale)?);
+    if d.settings.presets.len() >= 32 {
+        d.settings.presets.clear();
+    }
+    d.settings.presets.insert(key, image.clone());
+    Some(image)
+}
+
+/// Draws a preset card: the look's preview shrunk into the card over its
+/// name, ringed with the accent when it is in effect.
+fn draw_preset(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
+    let rect = control.rect;
+    canvas.fill_rounded(
+        rect,
+        CARD_RADIUS,
+        ui::text_alpha(if hovered { 0x1c } else { 0x0c }),
+    );
+    let image_rect = Rect::new(
+        rect.x + PRESET_PAD,
+        rect.y + PRESET_PAD,
+        rect.w - 2 * PRESET_PAD,
+        rect.h - 2 * PRESET_PAD - PRESET_NAME,
+    );
+    let scale = canvas.scale();
+    if let Some(look) = &control.look
+        && let Some(image) = preset_image(d, look, scale)
+    {
+        canvas.clip(image_rect);
+        canvas.draw_image_fit(&image, image_rect);
+        canvas.reset_clip();
+        if let Some(clip) = control.clip {
+            canvas.clip(clip);
+        }
+    }
+    canvas.stroke_rounded(image_rect, 3.0, 1.0, ui::popup_border());
+    ui::label(
+        canvas,
+        &mut d.fonts,
+        &control.label,
+        Rect::new(
+            rect.x + PRESET_PAD,
+            image_rect.bottom(),
+            rect.w - 2 * PRESET_PAD,
+            PRESET_NAME,
+        ),
+        ui::FONT_SIZE,
+        control.active,
+        Align::Center,
+        ui::text(),
+    );
+    if control.active {
+        canvas.stroke_rounded(rect, CARD_RADIUS, ACCENT_STROKE, ui::accent());
+    } else if hovered {
+        canvas.stroke_rounded(rect, CARD_RADIUS, 1.0, ui::text_dim());
+    }
+}
+
+/// Draws a key cap, or the slash between alternative chords.
+fn draw_cap(d: &mut Desktop, canvas: &mut Canvas<'_>, cap: &Cap) {
+    if cap.key {
+        canvas.fill_rounded(cap.rect, 5.0, ui::text_alpha(0x1c));
+        canvas.stroke_rounded(cap.rect, 5.0, 1.0, ui::popup_border());
+    }
+    ui::label(
+        canvas,
+        &mut d.fonts,
+        &cap.text,
+        cap.rect,
+        ui::FONT_SMALL,
+        false,
+        Align::Center,
+        if cap.key { ui::text() } else { ui::text_dim() },
+    );
+}
+
 /// Draws one control.
 fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
     let rect = control.rect;
@@ -1932,6 +2718,11 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
         Kind::Nav => {
             if control.active {
                 canvas.fill_rounded(rect, 6.0, ui::active_bg());
+                canvas.fill_rounded(
+                    Rect::new(rect.x, rect.y + 7, ACCENT_STROKE as i32, rect.h - 14),
+                    ACCENT_STROKE / 2.0,
+                    ui::accent(),
+                );
             } else if hovered {
                 canvas.fill_rounded(rect, 6.0, ui::hover_bg());
             }
@@ -1939,7 +2730,7 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
                 canvas,
                 &mut d.fonts,
                 &control.label,
-                Rect::new(rect.x + 10, rect.y, rect.w - 20, rect.h),
+                Rect::new(rect.x + 12, rect.y, rect.w - 22, rect.h),
                 ui::FONT_SIZE,
                 control.active,
                 Align::Left,
@@ -1995,24 +2786,18 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
             if let Some(color) = control.color {
                 canvas.fill_rounded(rect, 5.0, color);
             }
-            let border = if control.active {
-                ui::accent()
-            } else if hovered {
-                ui::text()
+            if control.active {
+                canvas.stroke_rounded(rect, 5.0, ACCENT_STROKE, ui::accent());
             } else {
-                ui::popup_border()
-            };
-            canvas.stroke_rounded(rect, 5.0, if control.active { 2.0 } else { 1.0 }, border);
+                canvas.stroke_rounded(
+                    rect,
+                    5.0,
+                    1.0,
+                    if hovered { ui::text() } else { ui::popup_border() },
+                );
+            }
         }
         Kind::Switch => draw_switch(canvas, control, hovered),
-        Kind::Close => {
-            if hovered {
-                canvas.fill_rounded(rect, 5.0, ui::hover_bg());
-            }
-            if let Some(path) = cross_path(rect, 5.0) {
-                canvas.stroke_path(&path, 1.8, ui::text());
-            }
-        }
         Kind::Slider => draw_slider(d, canvas, control, hovered),
         Kind::Picker => {
             let color = control.color.unwrap_or(Color::BLACK);
@@ -2029,14 +2814,16 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
             for (path, width) in &strokes {
                 canvas.stroke_path(path, *width, ink);
             }
-            let border = if control.active {
-                ui::accent()
-            } else if hovered {
-                ui::text()
+            if control.active {
+                canvas.stroke_rounded(rect, 5.0, ACCENT_STROKE, ui::accent());
             } else {
-                ui::popup_border()
-            };
-            canvas.stroke_rounded(rect, 5.0, if control.active { 2.0 } else { 1.0 }, border);
+                canvas.stroke_rounded(
+                    rect,
+                    5.0,
+                    1.0,
+                    if hovered { ui::text() } else { ui::popup_border() },
+                );
+            }
         }
         Kind::ColorArea => {
             let (h, s, v) = d.settings.picker.map_or((0.0, 0.0, 0.0), |picker| picker.hsv);
@@ -2080,36 +2867,44 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
             );
         }
         Kind::Button => draw_button(d, canvas, control, hovered),
+        Kind::Preset => draw_preset(d, canvas, control, hovered),
     }
 }
 
-/// Draws the settings window; returns its rectangle.
+/// Draws the window: the sidebar, the page in its cards, the scrollbar and
+/// the open color picker over everything.
 ///
 /// # Arguments
 /// * `d` - The desktop.
-/// * `canvas` - The panel canvas.
-pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
+/// * `canvas` - The window's canvas.
+pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
     sync_picker(d);
     let frame = frame(d);
     let page = page_rect_in(frame);
-    ui::draw_popup_frame(canvas, frame);
-    ui::label(
-        canvas,
-        &mut d.fonts,
-        tr("Settings"),
-        Rect::new(frame.x + PAD, frame.y + PAD, frame.w - 2 * PAD - CONTROL, CONTROL),
-        ui::FONT_SIZE + 3.0,
-        true,
-        Align::Left,
-        ui::text(),
+    canvas.fill_rect(frame, ui::popup_bg());
+    canvas.fill_rect(
+        Rect::new(frame.x, frame.y, SIDEBAR, frame.h),
+        ui::text_alpha(0x0a),
     );
-    canvas.fill_rect(Rect::new(page.x - PAD / 2, page.y, 1, page.h), ui::separator());
+    canvas.fill_rect(Rect::new(frame.x + SIDEBAR, frame.y, 1, frame.h), ui::separator());
     let layout = layout(d);
     let first = layout.picker.map_or(layout.controls.len(), |picker| picker.first);
     for (index, control) in layout.controls.iter().enumerate().take(first) {
         if control.clip.is_none() {
             draw_control(d, canvas, control, d.hover == Hover::Control(index));
         }
+    }
+    for text in &layout.nav_texts {
+        ui::label(
+            canvas,
+            &mut d.fonts,
+            &text.text,
+            text.rect,
+            ui::FONT_SMALL,
+            true,
+            Align::Left,
+            ui::text_dim(),
+        );
     }
     canvas.clip(page);
     for card in &layout.cards {
@@ -2131,9 +2926,16 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
             text.rect,
             ui::FONT_SIZE,
             text.caption,
-            Align::Left,
-            if text.caption { ui::text_dim() } else { ui::text() },
+            if text.value { Align::Right } else { Align::Left },
+            if text.caption || text.value {
+                ui::text_dim()
+            } else {
+                ui::text()
+            },
         );
+    }
+    for cap in &layout.caps {
+        draw_cap(d, canvas, cap);
     }
     for (index, control) in layout.controls.iter().enumerate().take(first) {
         if let Some(clip) = control.clip {
@@ -2156,7 +2958,6 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
             draw_control(d, canvas, control, d.hover == Hover::Control(index));
         }
     }
-    frame
 }
 
 /// Takes the picker's hue, saturation and value from its setting when that
@@ -2209,19 +3010,60 @@ pub fn hit(d: &Desktop, x: f64, y: f64) -> Option<Hover> {
     Some(Hover::None)
 }
 
-/// Handles a click; returns whether it landed in the window.
+/// Follows the pointer in the window: a drag in progress, else the hover.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `x` - Pointer X.
+/// * `y` - Pointer Y.
+pub fn pointer_motion(d: &mut Desktop, x: f64, y: f64) {
+    d.settings.pointer = (x, y);
+    if d.settings.dragging() {
+        drag(d, x, y);
+        return;
+    }
+    let hover = hit(d, x, y).unwrap_or(Hover::None);
+    d.set_hover(hover);
+}
+
+/// Clears the hover when the pointer leaves the window.
+pub fn pointer_leave(d: &mut Desktop) {
+    d.settings.pointer = (-1.0, -1.0);
+    if matches!(d.hover, Hover::Control(_)) {
+        d.set_hover(Hover::None);
+    }
+}
+
+/// Routes a button press to the window, or ends a drag on the release.
 ///
 /// # Arguments
 /// * `d` - The desktop.
 /// * `x` - Pointer X.
 /// * `y` - Pointer Y.
 /// * `button` - The button.
-pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
+/// * `pressed` - Whether the button went down.
+pub fn pointer_button(d: &mut Desktop, x: f64, y: f64, button: Button, pressed: bool) {
+    d.settings.pointer = (x, y);
+    if pressed {
+        click(d, x, y, button);
+    } else if d.settings.dragging() {
+        release(d);
+    }
+}
+
+/// Handles a click.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `x` - Pointer X.
+/// * `y` - Pointer Y.
+/// * `button` - The button.
+fn click(d: &mut Desktop, x: f64, y: f64, button: Button) {
     let Some(hover) = hit(d, x, y) else {
-        return false;
+        return;
     };
     if button != Button::Left {
-        return true;
+        return;
     }
     let layout = layout(d);
     // A click anywhere but in the open picker closes it, then goes on to
@@ -2239,11 +3081,11 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
             d.settings.scroll = bar.scroll_at(y, grab);
             d.settings.bar_drag = Some(grab);
         }
-        d.redraw_panel();
-        return true;
+        d.redraw_settings();
+        return;
     };
     let Some(control) = layout.controls.get(index) else {
-        return true;
+        return;
     };
     let action = control.action.clone();
     if !matches!(action, Action::Focus(_)) {
@@ -2264,17 +3106,13 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
             let key = wallpaper_key(d, "wallpaper");
             let monitor = d.settings.monitor;
             d.pick_wallpaper(key, monitor);
-            return true;
+            return;
         }
         Action::BrowseIcon => {
             d.pick_start_icon();
-            return true;
+            return;
         }
-        Action::Page(page) => {
-            d.settings.page = page;
-            d.settings.picking = None;
-            d.settings.scroll = 0.0;
-        }
+        Action::Page(page) => show_page(d, page),
         Action::Pick(key) => {
             d.settings.picking = Some(key);
             d.settings.scroll = 0.0;
@@ -2294,11 +3132,11 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
             d.settings.drag = Some((key, value));
             d.preview_panel(key, value);
         }
-        Action::OpenSettings | Action::Reload => {}
-        Action::Close => {
-            d.close_popup();
-            return true;
-        }
+        Action::OpenSettings(_)
+        | Action::EditFavorites
+        | Action::Reload
+        | Action::ToggleMute
+        | Action::RemoveLauncher(_) => {}
         Action::OpenPicker(field) => {
             if open != Some(field) {
                 let hsv = color_to_hsv(field_color(d, field));
@@ -2313,8 +3151,18 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
         Action::Area => pick_area(d, control.rect, x, y, true),
     }
     d.set_hover(hit(d, x, y).unwrap_or(Hover::None));
-    d.redraw_panel();
-    true
+    d.redraw_settings();
+}
+
+/// Shows a page from the top, leaving the application list, and reads the
+/// published shortcuts again for the Shortcuts page.
+fn show_page(d: &mut Desktop, page: Page) {
+    d.settings.page = page;
+    d.settings.picking = None;
+    d.settings.scroll = 0.0;
+    if page == Page::Shortcuts {
+        d.settings.keybinds = read_keybinds();
+    }
 }
 
 /// Sets the picker's hue from a pointer X over the hue strip.
@@ -2361,7 +3209,7 @@ fn apply_picker(d: &mut Desktop, picker: Picker) {
     d.settings.picker = Some(picker);
     let (h, s, v) = picker.hsv;
     preview_color(d, picker.field, hsv_to_color(h, s, v));
-    d.redraw_panel();
+    d.redraw_settings();
 }
 
 /// Applies a color on screen without writing it: an interface color to the
@@ -2382,6 +3230,7 @@ fn preview_color(d: &mut Desktop, field: Field, color: Color) {
                 ThemeColor::Text => d.config.theme.text = color,
             }
             ui::set_theme(d.config.theme);
+            d.redraw_panel();
         }
         Field::Color => {
             match d.settings.monitor {
@@ -2390,7 +3239,7 @@ fn preview_color(d: &mut Desktop, field: Field, color: Color) {
             }
             d.repaint_wallpapers();
         }
-        Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => {}
+        Field::Search | Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => {}
     }
 }
 
@@ -2399,23 +3248,23 @@ fn color_key(d: &Desktop, field: Field) -> Option<&'static str> {
     match field {
         Field::Color => Some(wallpaper_key(d, "background")),
         Field::Theme(color) => Some(color.key()),
-        Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => None,
+        Field::Search | Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => None,
     }
 }
 
-/// Follows a drag of a slider or of a part of the color picker, applying the
-/// value on screen.
+/// Follows a drag of a slider, of a part of the color picker or of the
+/// scrollbar, applying the value on screen.
 ///
 /// # Arguments
 /// * `d` - The desktop.
 /// * `x` - Pointer X.
 /// * `y` - Pointer Y.
-pub fn drag(d: &mut Desktop, x: f64, y: f64) {
+fn drag(d: &mut Desktop, x: f64, y: f64) {
     if let Some(grab) = d.settings.bar_drag {
         if let Some(bar) = scrollbar(d) {
             d.settings.scroll = bar.scroll_at(y, grab);
         }
-        d.redraw_panel();
+        d.redraw_settings();
         return;
     }
     if let Some(picker) = d.settings.picker
@@ -2441,18 +3290,18 @@ pub fn drag(d: &mut Desktop, x: f64, y: f64) {
         d.settings.drag = Some((key, value));
         d.preview_panel(key, value);
     }
-    d.redraw_panel();
+    d.redraw_settings();
 }
 
 /// Ends a drag of a slider or of the color picker, writing the value.
 ///
 /// # Arguments
 /// * `d` - The desktop.
-pub fn release(d: &mut Desktop) {
+fn release(d: &mut Desktop) {
     if d.settings.bar_drag.take().is_some() {
-        let (x, y) = d.pointer;
+        let (x, y) = d.settings.pointer;
         d.set_hover(hit(d, x, y).unwrap_or(Hover::None));
-        d.redraw_panel();
+        d.redraw_settings();
     }
     if let Some(mut picker) = d.settings.picker
         && picker.drag.take().is_some()
@@ -2469,13 +3318,15 @@ pub fn release(d: &mut Desktop) {
     }
 }
 
-/// Writes the focused field's text and drops the focus.
+/// Writes the focused field's text and drops the focus.  The search field
+/// writes nothing: its text is the filter itself.
 fn commit_field(d: &mut Desktop) {
     let Some(field) = d.settings.focus.take() else {
         return;
     };
     let text = std::mem::take(&mut d.settings.editing);
     let (key, value) = match field {
+        Field::Search => return,
         Field::Color => match parse_color(&text) {
             Some(_) => (wallpaper_key(d, "background"), text.trim().to_string()),
             None => return,
@@ -2502,69 +3353,106 @@ fn commit_field(d: &mut Desktop) {
 }
 
 /// Handles Escape: drops the focus of a field being typed into, keeping the
-/// setting as it was, else closes the color picker.
+/// setting as it was, else closes the color picker, else clears a search.
 ///
 /// # Arguments
 /// * `d` - The desktop.
 ///
 /// # Returns
-/// Whether either was open, so the key is used up.
-pub fn escape(d: &mut Desktop) -> bool {
+/// Whether any of those was open, so the key is used up.
+fn escape(d: &mut Desktop) -> bool {
     if d.settings.focus.take().is_some() {
         d.settings.editing.clear();
-    } else if d.settings.picker.take().is_none() {
+    } else if d.settings.picker.take().is_some() {
+    } else if !d.settings.search.is_empty() {
+        d.settings.search.clear();
+    } else {
         return false;
     }
-    let (x, y) = d.pointer;
+    let (x, y) = d.settings.pointer;
     d.set_hover(hit(d, x, y).unwrap_or(Hover::None));
-    d.redraw_panel();
+    d.redraw_settings();
     true
 }
 
-/// Handles wheel scrolling over the page or the application list; returns
-/// whether it landed in the window.
+/// Handles wheel scrolling over the page or the application list.
 ///
 /// # Arguments
 /// * `d` - The desktop.
 /// * `x` - Pointer X.
 /// * `y` - Pointer Y.
 /// * `delta` - Scroll amount, positive downwards.
-pub fn scroll(d: &mut Desktop, x: f64, y: f64, delta: f64) -> bool {
+pub fn pointer_axis(d: &mut Desktop, x: f64, y: f64, delta: f64) {
     let frame = frame(d);
-    if !frame.contains(x, y) {
-        return false;
-    }
     let page = page_rect_in(frame);
+    if x < page.x as f64 {
+        return;
+    }
     let content = build(d, frame, 0.0, view(d)).content as f64;
     let max = (content - page.h as f64).max(0.0);
     let next = (d.settings.scroll + delta.signum() * ui::SCROLL_STEP).clamp(0.0, max);
     if next != d.settings.scroll {
         d.settings.scroll = next;
         d.set_hover(hit(d, x, y).unwrap_or(Hover::None));
-        d.redraw_panel();
+        d.redraw_settings();
     }
-    true
 }
 
-/// Handles a key press while the window is open: typing goes to the focused
-/// field, Enter writes it.
+/// Handles a key press in the window: Escape closes what is open in it
+/// and then the window itself; typing goes to the focused field, Enter
+/// writes it; with no field focused, typing searches the pages and Enter
+/// opens the first match.
 ///
 /// # Arguments
 /// * `d` - The desktop.
 /// * `key` - The key.
 pub fn key(d: &mut Desktop, key: Key) {
-    if d.settings.focus.is_none() {
+    if key == Key::Escape {
+        if !escape(d) {
+            close(d);
+        }
         return;
     }
-    match key {
-        Key::Char(c) => d.settings.editing.push(c),
-        Key::Backspace => {
-            d.settings.editing.pop();
-        }
-        Key::Enter | Key::Tab => commit_field(d),
-        _ => return,
+    let focus = d.settings.focus;
+    if focus.is_none() && matches!(key, Key::Char(_) | Key::Backspace) {
+        d.settings.focus = Some(Field::Search);
     }
-    d.redraw_panel();
+    match d.settings.focus {
+        None => return,
+        Some(Field::Search) => match key {
+            Key::Char(c) => d.settings.search.push(c),
+            Key::Backspace => {
+                d.settings.search.pop();
+            }
+            Key::Enter => {
+                if let Some(page) = search_pages(&d.settings.search).first().copied() {
+                    show_page(d, page);
+                }
+            }
+            Key::Tab => d.settings.focus = None,
+            _ => return,
+        },
+        Some(_) => match key {
+            Key::Char(c) => d.settings.editing.push(c),
+            Key::Backspace => {
+                d.settings.editing.pop();
+            }
+            Key::Enter | Key::Tab => commit_field(d),
+            _ => return,
+        },
+    }
+    d.redraw_settings();
+}
+
+/// Closes the window, from its frame's close button or Escape.
+pub fn close(d: &mut Desktop) {
+    if let Some(id) = d.settings.id {
+        d.requests.push(Request::CloseWindow { id });
+    }
+    d.settings.close();
+    if matches!(d.hover, Hover::Control(_)) {
+        d.set_hover(Hover::None);
+    }
 }
 
 #[cfg(test)]
@@ -2579,6 +3467,17 @@ mod tests {
             .map(|(key, value)| (key.to_string(), value.clone()))
             .collect();
         Config::from_values(&values)
+    }
+
+    /// The labels of a menu's rows, separators left out.
+    fn labels(entries: &[MenuEntry]) -> Vec<&'static str> {
+        entries
+            .iter()
+            .filter_map(|entry| match entry {
+                MenuEntry::Item { label, .. } => Some(*label),
+                MenuEntry::Separator => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -2603,6 +3502,7 @@ mod tests {
                 .map(|(key, color)| (*key, color.to_string()))
                 .collect();
             assert_eq!(current_scheme(config_from(&changes).theme), Some(*name));
+            assert_eq!(current_scheme(scheme_theme(colors)), Some(*name));
         }
         assert_eq!(current_scheme(ui::Theme::default()), Some("Dark"));
         let theme = ui::Theme {
@@ -2625,5 +3525,184 @@ mod tests {
             }
         }
         assert_eq!(flow(0, 100, &[60, 60]).1, 2);
+    }
+
+    #[test]
+    fn page_ids_round_trip_and_reject_the_unknown() {
+        for page in Page::ALL {
+            assert_eq!(Page::from_id(page.id()), Some(page));
+            assert_eq!(Page::from_id(&page.id().to_uppercase()), Some(page));
+        }
+        assert_eq!(Page::from_id(" wallpaper "), Some(Page::Wallpaper));
+        assert_eq!(Page::from_id("sound"), None);
+        assert_eq!(Page::from_id(""), None);
+    }
+
+    #[test]
+    fn the_search_matches_page_names_and_row_titles() {
+        assert_eq!(search_pages("").len(), Page::ALL.len());
+        assert_eq!(search_pages("   "), Page::ALL.to_vec());
+        assert_eq!(search_pages("wallp"), vec![Page::Wallpaper]);
+        assert_eq!(search_pages("CORNERS"), vec![Page::Windows]);
+        assert!(search_pages("clock").contains(&Page::Panel));
+        assert_eq!(search_pages("pager"), vec![Page::Desktops]);
+        assert!(search_pages("xyzzy").is_empty());
+        let order = search_pages("e");
+        let positions: Vec<usize> = order
+            .iter()
+            .map(|page| Page::ALL.iter().position(|p| p == page).unwrap())
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn the_keybinds_file_parses_a_chord_and_a_description_per_line() {
+        let text = "Super+Left\tTile the window to the left half\n\
+                    Ctrl+Super+Right\tSwitch to the next desktop\n\
+                    no tab here\n\
+                    \tmissing chord\n\
+                    Super+Return\t\n\
+                    \n\
+                    Alt+F4 \t Close the window \n";
+        assert_eq!(
+            parse_keybinds(text),
+            vec![
+                (
+                    "Super+Left".to_string(),
+                    "Tile the window to the left half".to_string()
+                ),
+                (
+                    "Ctrl+Super+Right".to_string(),
+                    "Switch to the next desktop".to_string()
+                ),
+                ("Alt+F4".to_string(), "Close the window".to_string()),
+            ]
+        );
+        assert!(parse_keybinds("").is_empty());
+    }
+
+    #[test]
+    fn each_bar_item_gets_its_own_menu() {
+        let facts = MenuFacts {
+            top: false,
+            autohide: false,
+            desktops: 2,
+            muted: Some(false),
+            launcher: Some("foot".to_string()),
+        };
+        let bar = panel_menu_entries(PanelTarget::Bar, &facts);
+        assert_eq!(
+            labels(&bar),
+            vec![
+                "Settings…",
+                "Move panel to top",
+                "Auto-hide the panel",
+                "Add a desktop",
+                "Reload applications",
+            ]
+        );
+        let hidden = MenuFacts {
+            top: true,
+            autohide: true,
+            ..facts.clone()
+        };
+        assert!(labels(&panel_menu_entries(PanelTarget::Bar, &hidden)).contains(&"Move panel to bottom"));
+        assert!(labels(&panel_menu_entries(PanelTarget::Bar, &hidden)).contains(&"Always show the panel"));
+
+        let pager = panel_menu_entries(PanelTarget::Pager, &facts);
+        assert_eq!(
+            labels(&pager),
+            vec!["Add a desktop", "Remove a desktop", "Desktop settings…"]
+        );
+        assert!(pager.contains(&MenuEntry::Separator));
+        assert!(matches!(
+            &pager[0],
+            MenuEntry::Item { action: Action::Set(changes), enabled: true, .. }
+                if changes == &vec![("desktops", "3".to_string())]
+        ));
+        assert!(matches!(
+            &pager[1],
+            MenuEntry::Item { action: Action::Set(changes), enabled: true, .. }
+                if changes == &vec![("desktops", "1".to_string())]
+        ));
+        assert!(matches!(
+            &pager[3],
+            MenuEntry::Item {
+                action: Action::OpenSettings(Some(Page::Desktops)),
+                ..
+            }
+        ));
+        let one = MenuFacts {
+            desktops: 1,
+            ..facts.clone()
+        };
+        assert!(matches!(
+            &panel_menu_entries(PanelTarget::Pager, &one)[1],
+            MenuEntry::Item { enabled: false, .. }
+        ));
+        let full = MenuFacts {
+            desktops: config::MAX_DESKTOPS,
+            ..facts.clone()
+        };
+        assert!(matches!(
+            &panel_menu_entries(PanelTarget::Pager, &full)[0],
+            MenuEntry::Item { enabled: false, .. }
+        ));
+
+        assert_eq!(
+            labels(&panel_menu_entries(PanelTarget::Clock, &facts)),
+            vec!["Clock settings…", "Hide the clock"]
+        );
+        let volume = panel_menu_entries(PanelTarget::Volume, &facts);
+        assert_eq!(
+            labels(&volume),
+            vec!["Mute", "Hide the volume control", "Sound settings…"]
+        );
+        let muted = MenuFacts {
+            muted: Some(true),
+            ..facts.clone()
+        };
+        assert_eq!(
+            labels(&panel_menu_entries(PanelTarget::Volume, &muted))[0],
+            "Unmute"
+        );
+        let silent = MenuFacts {
+            muted: None,
+            ..facts.clone()
+        };
+        assert!(matches!(
+            &panel_menu_entries(PanelTarget::Volume, &silent)[0],
+            MenuEntry::Item { enabled: false, .. }
+        ));
+
+        let start = panel_menu_entries(PanelTarget::Start, &MenuFacts::default());
+        assert_eq!(labels(&start), vec!["Panel settings…", "Edit favorites…"]);
+        let launcher = panel_menu_entries(PanelTarget::Launcher(0), &facts);
+        assert_eq!(
+            labels(&launcher),
+            vec!["Panel settings…", "Edit favorites…", "Remove from quick launch"]
+        );
+        assert!(matches!(
+            &launcher[2],
+            MenuEntry::Item { action: Action::RemoveLauncher(id), .. } if id == "foot"
+        ));
+        assert_eq!(
+            labels(&panel_menu_entries(PanelTarget::Tray, &facts)),
+            vec!["Hide the system tray", "Panel settings…"]
+        );
+        assert_eq!(
+            labels(&panel_menu_entries(PanelTarget::ShowDesktop, &facts)),
+            vec!["Hide this button", "Panel settings…"]
+        );
+    }
+
+    #[test]
+    fn every_language_code_is_known_to_the_translations() {
+        for (code, name) in LANGUAGES {
+            assert!(!name.is_empty());
+            if code != "en" {
+                assert_eq!(i18n::normalize(code), Some(code), "{code}");
+            }
+        }
     }
 }

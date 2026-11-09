@@ -75,6 +75,12 @@ pub fn launch_with(entry: &Entry, config: &Config, files: &[PathBuf]) {
 
 /// The desktop file ID of the built-in file manager.
 pub const FILES_ID: &str = "selkies-desktop-files.desktop";
+/// The app id the file manager's windows carry, the desktop entry's name.
+pub const FILES_APP_ID: &str = "selkies-desktop-files";
+/// The settings window's desktop entry, which lists it among the applications.
+pub const SETTINGS_ID: &str = "selkies-desktop-settings.desktop";
+/// The app id the settings window carries, the desktop entry's name.
+pub const SETTINGS_APP_ID: &str = "selkies-desktop-settings";
 
 /// Writes the file manager's desktop entry into the user's applications
 /// directory when it is missing, so the menu lists it and `xdg-open` hands
@@ -105,6 +111,30 @@ pub fn ensure_files_entry() {
     {
         let _ = std::fs::write(&mimeapps, add_default(&text, "inode/directory", FILES_ID));
     }
+}
+
+/// Writes the settings window's desktop entry where none is, so the start menu, the launcher,
+/// and the window manager's frames know the window by its entry: its name, its icon, and the
+/// command that opens it.
+pub fn ensure_settings_entry() {
+    let dir = config::data_home().join("applications");
+    let path = dir.join(SETTINGS_ID);
+    if path.is_file() || std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let mut text = String::from("[Desktop Entry]\nType=Application\nName=Settings\n");
+    for (code, name) in crate::i18n::all("Settings") {
+        text.push_str(&format!("Name[{code}]={name}\n"));
+    }
+    text.push_str("Comment=Configure the desktop\n");
+    for (code, comment) in crate::i18n::all("Configure the desktop") {
+        text.push_str(&format!("Comment[{code}]={comment}\n"));
+    }
+    text.push_str(
+        "Exec=selkies-desktop --settings\nIcon=preferences-system\nTerminal=false\n\
+         Categories=Settings;System;\nStartupNotify=false\n",
+    );
+    let _ = std::fs::write(&path, text);
 }
 
 /// Whether a `mimeapps.list` names a default application for a type.

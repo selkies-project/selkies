@@ -5,7 +5,9 @@
 //! applications, and a query whose first word is a program on the search
 //! path, or that matches no application, ends in a row that runs it through
 //! the shell.  It is the start menu's search without the menu around it, so
-//! it borrows the menu's favorites and the same launch path.
+//! it borrows the menu's favorites and the same launch path.  Under the
+//! rows of an empty field one dim line names the window manager's tiling
+//! and desktop keys, the one place a new user is sure to pass.
 
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::entries;
@@ -29,7 +31,9 @@ const ICON: i32 = 22;
 /// Inner padding.
 const PAD: i32 = 8;
 /// Width of the accent bar at the left of the selected row.
-const ACCENT_BAR: i32 = 3;
+const ACCENT_BAR: i32 = 4;
+/// Height of the hint line under the rows of an empty field.
+const HINT: i32 = 24;
 /// Space between a top bar and the launcher.
 const TOP_OFFSET: i32 = 48;
 /// Most rows the list shows.
@@ -142,7 +146,8 @@ fn layout(d: &Desktop) -> Layout {
     let bar = d.bar_rect();
     let count = d.launcher.items.len() as i32;
     let rows_h = if count > 0 { count * ROW + PAD } else { 0 };
-    let height = PAD + SEARCH_HEIGHT + rows_h + PAD;
+    let hint_h = if d.launcher.query.is_empty() { HINT } else { 0 };
+    let height = PAD + SEARCH_HEIGHT + rows_h + hint_h + PAD;
     let width = WIDTH.min(d.panel.width - 2 * ui::POPUP_MARGIN).max(1);
     let x = (d.panel.width - width) / 2;
     let y = if d.panel_top() {
@@ -428,6 +433,23 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
                 ui::text_dim(),
             );
         }
+    }
+    if query.is_empty() {
+        ui::label(
+            canvas,
+            &mut d.fonts,
+            tr("Super+Arrows tile windows · Ctrl+Super+Arrows switch desktops"),
+            Rect::new(
+                layout.frame.x + PAD,
+                layout.frame.bottom() - PAD - HINT,
+                layout.frame.w - 2 * PAD,
+                HINT,
+            ),
+            ui::FONT_SMALL,
+            false,
+            Align::Center,
+            ui::text_dim(),
+        );
     }
     layout.frame
 }

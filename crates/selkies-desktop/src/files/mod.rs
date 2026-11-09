@@ -473,6 +473,15 @@ impl Manager {
         self.windows.iter().map(|w| w.id).collect()
     }
 
+    /// Takes the next window number.  Every window the shell opens, the
+    /// settings window included, numbers itself here, since the backends
+    /// tell the shell's toplevels apart by this number alone.
+    pub fn allocate_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
     /// Creates a window on a folder, not yet given a surface.
     ///
     /// # Arguments
@@ -483,8 +492,7 @@ impl Manager {
     /// # Returns
     /// The window's number.
     pub fn open(&mut self, dir: Option<PathBuf>, picker: Option<Picker>, defaults: Defaults) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.allocate_id();
         let dir = dir.filter(|d| d.is_dir()).unwrap_or_else(config::home);
         let mut window = FilesWindow {
             id,

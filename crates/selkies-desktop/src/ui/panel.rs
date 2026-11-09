@@ -10,7 +10,7 @@
 //! always carries its window's index into the desktop's window list, so
 //! filtering changes which buttons exist, never what an index means.
 
-use crate::desktop::{Desktop, Hover, Popup};
+use crate::desktop::{Desktop, Hover, PanelTarget, Popup};
 use crate::event::{Button, WindowAction};
 use crate::geom::Rect;
 use crate::render::{Align, Canvas};
@@ -311,7 +311,7 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button, _time: u32) {
     match hit(d, x, y) {
         Hover::Start => match button {
             Button::Left => d.toggle_menu(),
-            Button::Right => d.open_popup(Popup::PanelMenu(x as i32)),
+            Button::Right => d.open_popup(Popup::PanelMenu(x as i32, PanelTarget::Start)),
             Button::Middle => {}
         },
         Hover::Launcher(position) => match button {
@@ -320,12 +320,12 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button, _time: u32) {
                     d.launch_app(index);
                 }
             }
-            Button::Right => d.open_popup(Popup::PanelMenu(x as i32)),
+            Button::Right => d.open_popup(Popup::PanelMenu(x as i32, PanelTarget::Launcher(position))),
             Button::Middle => {}
         },
         Hover::Pager(index) => match button {
             Button::Left => d.switch_desktop(index as u32),
-            Button::Right => d.open_popup(Popup::PanelMenu(x as i32)),
+            Button::Right => d.open_popup(Popup::PanelMenu(x as i32, PanelTarget::Pager)),
             Button::Middle => {}
         },
         Hover::Task(index) => match button {
@@ -336,21 +336,26 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button, _time: u32) {
         Hover::Volume => match button {
             Button::Left => d.open_popup(Popup::Volume),
             Button::Middle => d.toggle_mute(),
-            Button::Right => d.open_popup(Popup::PanelMenu(x as i32)),
+            Button::Right => d.open_popup(Popup::PanelMenu(x as i32, PanelTarget::Volume)),
         },
         Hover::Clock => match button {
             Button::Left => d.open_popup(Popup::Calendar),
-            Button::Right => d.open_popup(Popup::PanelMenu(x as i32)),
+            Button::Right => d.open_popup(Popup::PanelMenu(x as i32, PanelTarget::Clock)),
             Button::Middle => {}
         },
         Hover::ShowDesktop => match button {
             Button::Left => d.show_desktop(),
-            Button::Right => d.open_popup(Popup::PanelMenu(x as i32)),
+            Button::Right => d.open_popup(Popup::PanelMenu(x as i32, PanelTarget::ShowDesktop)),
             Button::Middle => {}
         },
         _ => {
             if button == Button::Right && d.bar_rect().contains(x, y) {
-                d.open_popup(Popup::PanelMenu(x as i32));
+                let target = if d.tray_slot.is_some_and(|slot| slot.contains(x, y)) {
+                    PanelTarget::Tray
+                } else {
+                    PanelTarget::Bar
+                };
+                d.open_popup(Popup::PanelMenu(x as i32, target));
             }
         }
     }
@@ -588,8 +593,8 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
         canvas.fill_rounded(rect, 5.0, bg);
         if active {
             canvas.fill_rounded(
-                Rect::new(rect.x + 6, rect.bottom() - 3, rect.w - 12, 2),
-                1.0,
+                Rect::new(rect.x + 6, rect.bottom() - 4, rect.w - 12, 3),
+                1.5,
                 ui::accent(),
             );
         }

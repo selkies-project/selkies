@@ -35,7 +35,9 @@ session.  With a command, talks to the running panel instead:
   --toggle-menu    open or close the start menu
   --launcher       open or close the quick launcher
   --files [DIR]    open the file manager, on a folder when given
-  --settings       open the settings window
+  --settings [PAGE] open the settings window, on a page: theme, colors,
+                   windows, wallpaper, panel, desktops, shortcuts, files,
+                   language or about
   --show-desktop   minimize every window, or restore them
   --reload         read the applications and settings again
   --quit           exit the running panel
@@ -75,6 +77,10 @@ fn main() {
                 return;
             }
             other => match ipc::Command::parse(&args.join(" ")) {
+                Some(ipc::Command::Settings(Some(page))) if ui::settings::Page::from_id(&page).is_none() => {
+                    eprintln!("selkies-desktop: unknown settings page {page}\n{USAGE}");
+                    std::process::exit(2);
+                }
                 Some(ipc::Command::Files(dir)) => {
                     let dir = dir.map(|d| std::fs::canonicalize(&d).unwrap_or(d));
                     if let Err(error) = ipc::send(ipc::Command::Files(dir)) {
@@ -115,6 +121,7 @@ fn run() -> i32 {
     };
     let debug = std::env::var_os("SELKIES_DESKTOP_DEBUG").is_some();
     desktop.opaque_output = backend.name() == "x11";
+    desktop.backend = backend.name().to_string();
     if debug {
         eprintln!(
             "selkies-desktop: using the {} backend, language {}",
@@ -323,7 +330,9 @@ fn run() -> i32 {
                     ipc::Command::Files(dir) => {
                         desktop.open_files(dir, None);
                     }
-                    ipc::Command::Settings => desktop.open_popup(desktop::Popup::Settings),
+                    ipc::Command::Settings(page) => {
+                        desktop.open_settings(page.as_deref().and_then(ui::settings::Page::from_id));
+                    }
                     ipc::Command::Quit => return 0,
                 }
             }
