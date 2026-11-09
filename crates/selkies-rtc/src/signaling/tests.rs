@@ -420,17 +420,17 @@ async fn what_a_hello_said_reaches_session_start_and_the_peer_entry() {
         .into_iter()
         .find(|l| l.starts_with("SESSION_START"))
         .expect("a start");
-    let uid = start.split(' ').nth(1).unwrap().to_owned();
+    let peer_id = start.split(' ').nth(1).unwrap().to_owned();
     assert_eq!(
         start,
-        format!("SESSION_START {uid} controller display2 left tok fullcolor=h264 tenbit=")
+        format!("SESSION_START {peer_id} controller display2 left tok fullcolor=h264 tenbit=")
     );
     assert!(
         page.sent()[1].starts_with("SESSION_OK server-"),
         "{:?}",
         page.sent()
     );
-    let info = registry.peer(&uid).expect("registered");
+    let info = registry.peer(&peer_id).expect("registered");
     assert_eq!(info.client_slot, Some(1));
     assert_eq!(info.page_size, Some((1280, 720)));
     assert_eq!(info.tab_id.as_deref().map(str::len), Some(64));
@@ -465,7 +465,7 @@ struct Rig {
     registry: Arc<PeerRegistry>,
     server: Sock,
     page: Sock,
-    uid: String,
+    peer_id: String,
     hold: Duration,
 }
 
@@ -487,12 +487,12 @@ impl Rig {
             &[&resumable(client_type, key), "SESSION server"],
         )
         .await;
-        let uid = server.started().last().cloned().expect("a session started");
+        let peer_id = server.started().last().cloned().expect("a session started");
         Rig {
             registry,
             server,
             page,
-            uid,
+            peer_id,
             hold,
         }
     }
@@ -507,23 +507,23 @@ async fn a_cut_pages_session_is_held_and_a_hello_naming_its_key_resumes_it() {
     let rig = Rig::start(true, "controller", KEY).await;
     rig.page.cut().await;
     rig.server
-        .send(&format!(r#"{} {{"ice": 1}}"#, rig.uid))
+        .send(&format!(r#"{} {{"ice": 1}}"#, rig.peer_id))
         .await;
     rig.server
-        .send(&format!(r#"{} {{"ice": 2}}"#, rig.uid))
+        .send(&format!(r#"{} {{"ice": 2}}"#, rig.peer_id))
         .await;
     settle().await;
     assert!(
         rig.server.ended().is_empty(),
         "the server peer hears nothing"
     );
-    assert!(rig.registry.session_partner(&rig.uid).is_some());
-    assert_eq!(rig.registry.held_lines(&rig.uid).len(), 2);
+    assert!(rig.registry.session_partner(&rig.peer_id).is_some());
+    assert_eq!(rig.registry.held_lines(&rig.peer_id).len(), 2);
 
     let back = rig.join(&[&resumable("controller", KEY)]).await;
     let server_id = rig
         .registry
-        .session_partner(&rig.uid)
+        .session_partner(&rig.peer_id)
         .expect("still in session");
     assert_eq!(
         back.sent(),
@@ -533,12 +533,12 @@ async fn a_cut_pages_session_is_held_and_a_hello_naming_its_key_resumes_it() {
             format!(r#"{server_id} {{"ice": 2}}"#),
         ]
     );
-    assert_eq!(rig.registry.socket_of(&rig.uid), Some(back.socket.id()));
-    assert!(rig.registry.held_lines(&rig.uid).is_empty());
+    assert_eq!(rig.registry.socket_of(&rig.peer_id), Some(back.socket.id()));
+    assert!(rig.registry.held_lines(&rig.peer_id).is_empty());
 
     tokio::time::sleep(rig.hold * 2).await;
     rig.server
-        .send(&format!(r#"{} {{"ice": 3}}"#, rig.uid))
+        .send(&format!(r#"{} {{"ice": 3}}"#, rig.peer_id))
         .await;
     back.send(&format!(r#"{server_id} {{"ice": 4}}"#)).await;
     settle().await;
@@ -548,7 +548,7 @@ async fn a_cut_pages_session_is_held_and_a_hello_naming_its_key_resumes_it() {
     );
     assert_eq!(
         rig.server.started(),
-        vec![rig.uid.clone()],
+        vec![rig.peer_id.clone()],
         "no second start"
     );
     assert_eq!(
@@ -557,7 +557,7 @@ async fn a_cut_pages_session_is_held_and_a_hello_naming_its_key_resumes_it() {
     );
     assert_eq!(
         rig.server.sent().last().unwrap(),
-        &format!(r#"{} {{"ice": 4}}"#, rig.uid)
+        &format!(r#"{} {{"ice": 4}}"#, rig.peer_id)
     );
 }
 
@@ -566,8 +566,8 @@ async fn a_session_nobody_resumes_ends_after_the_hold_and_a_later_hello_is_a_new
     let rig = Rig::start(true, "controller", KEY).await;
     rig.page.cut().await;
     tokio::time::sleep(rig.hold * 2).await;
-    assert_eq!(rig.server.ended(), vec![rig.uid.clone()]);
-    assert!(rig.registry.peer(&rig.uid).is_none());
+    assert_eq!(rig.server.ended(), vec![rig.peer_id.clone()]);
+    assert!(rig.registry.peer(&rig.peer_id).is_none());
     let late = rig.join(&[&resumable("controller", KEY)]).await;
     assert_eq!(late.sent().first().map(String::as_str), Some("HELLO"));
 }
@@ -576,8 +576,8 @@ async fn a_session_nobody_resumes_ends_after_the_hold_and_a_later_hello_is_a_new
 async fn a_close_frame_ends_the_session_at_once() {
     let rig = Rig::start(true, "controller", KEY).await;
     rig.page.close_frame().await;
-    assert_eq!(rig.server.ended(), vec![rig.uid.clone()]);
-    assert!(rig.registry.peer(&rig.uid).is_none());
+    assert_eq!(rig.server.ended(), vec![rig.peer_id.clone()]);
+    assert!(rig.registry.peer(&rig.peer_id).is_none());
 }
 
 #[tokio::test]
@@ -588,7 +588,7 @@ async fn another_key_gets_a_session_of_its_own_and_the_held_one_ends() {
         .join(&[&resumable("controller", &"f".repeat(32)), "SESSION server"])
         .await;
     assert_eq!(other.sent().first().map(String::as_str), Some("HELLO"));
-    assert_eq!(rig.server.ended(), vec![rig.uid.clone()]);
+    assert_eq!(rig.server.ended(), vec![rig.peer_id.clone()]);
     assert_eq!(rig.server.started().len(), 2);
 }
 
@@ -598,26 +598,35 @@ async fn the_same_key_in_another_role_resumes_nothing() {
     rig.page.cut().await;
     let viewer = rig.join(&[&resumable("viewer", KEY)]).await;
     assert_eq!(viewer.sent().first().map(String::as_str), Some("HELLO"));
-    assert_eq!(rig.registry.socket_of(&rig.uid), Some(rig.page.socket.id()));
+    assert_eq!(
+        rig.registry.socket_of(&rig.peer_id),
+        Some(rig.page.socket.id())
+    );
 }
 
 #[tokio::test]
 async fn a_page_that_named_no_key_ends_at_once_on_a_cut() {
     let rig = Rig::start(true, "controller", "").await;
     rig.page.cut().await;
-    assert_eq!(rig.server.ended(), vec![rig.uid.clone()]);
+    assert_eq!(rig.server.ended(), vec![rig.peer_id.clone()]);
 }
 
 #[tokio::test]
 async fn a_cut_the_server_did_not_see_resumes_and_the_stale_socket_closing_ends_nothing() {
     let rig = Rig::start(true, "controller", KEY).await;
     let fresh = rig.join(&[&resumable("controller", KEY)]).await;
-    let server_id = rig.registry.session_partner(&rig.uid).expect("in session");
+    let server_id = rig
+        .registry
+        .session_partner(&rig.peer_id)
+        .expect("in session");
     assert_eq!(fresh.sent().first(), Some(&format!("RESUMED {server_id}")));
     assert_eq!(rig.page.close_code(), Some(1000));
     tokio::time::sleep(rig.hold * 2).await;
     assert!(rig.server.ended().is_empty());
-    assert_eq!(rig.registry.socket_of(&rig.uid), Some(fresh.socket.id()));
+    assert_eq!(
+        rig.registry.socket_of(&rig.peer_id),
+        Some(fresh.socket.id())
+    );
 }
 
 #[tokio::test]
@@ -626,12 +635,12 @@ async fn relaying_to_a_cut_page_carries_on_and_what_it_holds_is_bounded() {
     rig.page.cut().await;
     for i in 0..HELD_LINES_MAX + 10 {
         rig.server
-            .send(&format!(r#"{} {{"ice": {i}}}"#, rig.uid))
+            .send(&format!(r#"{} {{"ice": {i}}}"#, rig.peer_id))
             .await;
     }
     settle().await;
     assert!(!rig.server.closed());
-    assert_eq!(rig.registry.held_lines(&rig.uid).len(), HELD_LINES_MAX);
+    assert_eq!(rig.registry.held_lines(&rig.peer_id).len(), HELD_LINES_MAX);
 }
 
 #[tokio::test]
@@ -641,7 +650,7 @@ async fn a_relay_goes_only_between_session_partners() {
         .join(&[&resumable("viewer", &"e".repeat(32)), "SESSION server"])
         .await;
     let other_uid = rig.server.started().last().cloned().unwrap();
-    let server_id = rig.registry.session_partner(&rig.uid).unwrap();
+    let server_id = rig.registry.session_partner(&rig.peer_id).unwrap();
     rig.page
         .send(&format!(r#"{other_uid} {{"ice": "forged"}}"#))
         .await;
@@ -655,7 +664,7 @@ async fn a_relay_goes_only_between_session_partners() {
         rig.server
             .sent()
             .iter()
-            .any(|l| l == &format!(r#"{} {{"ice": "real"}}"#, rig.uid))
+            .any(|l| l == &format!(r#"{} {{"ice": "real"}}"#, rig.peer_id))
     );
 }
 
@@ -820,9 +829,9 @@ async fn a_viewer_tokens_controller_claim_is_coerced_to_viewer() {
         &[&page("controller", Some("ann-Hq7"), "tab-a", 1)],
     )
     .await;
-    let uid = registry.peer_ids().pop().unwrap();
+    let peer_id = registry.peer_ids().pop().unwrap();
     assert_eq!(
-        registry.peer(&uid).unwrap().client_type,
+        registry.peer(&peer_id).unwrap().client_type,
         Some(ClientType::Viewer)
     );
 }

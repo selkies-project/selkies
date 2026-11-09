@@ -137,7 +137,7 @@ enum StormKey {
 }
 
 struct Peer {
-    uid: String,
+    peer_id: String,
     socket: Arc<PeerSocket>,
     raddr: String,
     is_server: bool,
@@ -161,7 +161,7 @@ struct Peer {
 /// claims is this process, so they come from here and not from SESSION_START's fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerInfo {
-    pub uid: String,
+    pub peer_id: String,
     pub raddr: String,
     pub is_server: bool,
     pub client_type: Option<ClientType>,
@@ -223,15 +223,15 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// The end of a connection's service, run when `serve` returns or is dropped.
 struct ServeEnd<'a> {
     registry: &'a Arc<PeerRegistry>,
-    uid: String,
+    peer_id: String,
     socket: Arc<PeerSocket>,
     cut: bool,
 }
 
 impl Drop for ServeEnd<'_> {
     fn drop(&mut self) {
-        if !(self.cut && self.registry.hold_session(&self.uid, &self.socket)) {
-            self.registry.remove_peer(&self.uid, Some(&self.socket));
+        if !(self.cut && self.registry.hold_session(&self.peer_id, &self.socket)) {
+            self.registry.remove_peer(&self.peer_id, Some(&self.socket));
         }
         self.registry.notify_client_presence();
     }
@@ -291,11 +291,11 @@ impl PeerRegistry {
     }
 
     /// What is known of a registered peer.
-    pub fn peer(&self, uid: &str) -> Option<PeerInfo> {
+    pub fn peer(&self, peer_id: &str) -> Option<PeerInfo> {
         let state = self.state();
-        let peer = state.peers.get(uid)?;
+        let peer = state.peers.get(peer_id)?;
         Some(PeerInfo {
-            uid: peer.uid.clone(),
+            peer_id: peer.peer_id.clone(),
             raddr: peer.raddr.clone(),
             is_server: peer.is_server,
             client_type: peer.client_type,
@@ -312,8 +312,8 @@ impl PeerRegistry {
     }
 
     /// A fatal verdict on one peer's socket, as a refused secondary display gets.
-    pub fn close_peer(&self, uid: &str, code: u16, reason: &str) {
-        if let Some(peer) = self.state().peers.get(uid) {
+    pub fn close_peer(&self, peer_id: &str, code: u16, reason: &str) {
+        if let Some(peer) = self.state().peers.get(peer_id) {
             peer.socket.close(code, reason);
         }
     }
@@ -386,8 +386,8 @@ impl PeerRegistry {
                 }
             }
         };
-        let uid = match self.hello_peer(&text, &socket, raddr, ceiling) {
-            Ok(uid) => uid,
+        let peer_id = match self.hello_peer(&text, &socket, raddr, ceiling) {
+            Ok(peer_id) => peer_id,
             Err(refusal) => {
                 error!(target: "signaling", "Error during handshake with peer {raddr}: {}", refusal.log);
                 socket.close(refusal.code, &refusal.reason);
@@ -397,7 +397,7 @@ impl PeerRegistry {
         self.notify_client_presence();
         let mut end = ServeEnd {
             registry: self,
-            uid: uid.clone(),
+            peer_id: peer_id.clone(),
             socket: Arc::clone(&socket),
             cut: false,
         };
@@ -416,12 +416,12 @@ impl PeerRegistry {
                     socket.ping();
                 }
                 Ok(Some(Inbound::Text(text))) => {
-                    if !self.handle_text(&uid, &socket, &text) {
+                    if !self.handle_text(&peer_id, &socket, &text) {
                         return;
                     }
                 }
                 Ok(Some(Inbound::Binary)) => {
-                    warn!(target: "signaling", "Ignoring non-text message from peer {uid}");
+                    warn!(target: "signaling", "Ignoring non-text message from peer {peer_id}");
                 }
                 Ok(Some(Inbound::Ping(data))) => socket.pong(data),
                 Ok(Some(Inbound::Pong(data))) => {
@@ -435,12 +435,12 @@ impl PeerRegistry {
                     }
                 }
                 Ok(Some(Inbound::CloseFrame)) => {
-                    info!(target: "signaling", "Peer connection closed: {uid}");
+                    info!(target: "signaling", "Peer connection closed: {peer_id}");
                     socket.mark_closed();
                     return;
                 }
                 Ok(Some(Inbound::Cut) | None) => {
-                    info!(target: "signaling", "Peer connection cut: {uid}");
+                    info!(target: "signaling", "Peer connection cut: {peer_id}");
                     socket.mark_closed();
                     end.cut = true;
                     return;
@@ -597,7 +597,7 @@ impl PeerRegistry {
         client_type: Option<ClientType>,
     ) -> Option<(String, String, Vec<String>)> {
         let key = hello.resume_key.as_deref()?;
-        let uid = state
+        let peer_id = state
             .peers
             .values()
             .find(|peer| {
@@ -607,13 +607,13 @@ impl PeerRegistry {
                         .as_deref()
                         .is_some_and(|own| constant_time_eq(own.as_bytes(), key.as_bytes()))
             })?
-            .uid
+            .peer_id
             .clone();
-        let partner = state.sessions.get(&uid)?.clone();
+        let partner = state.sessions.get(&peer_id)?.clone();
         if !state.peers.get(&partner).is_some_and(|peer| peer.is_server) {
             return None;
         }
-        let peer = state.peers.get(&uid)?;
+        let peer = state.peers.get(&peer_id)?;
         if peer.status != Status::Session
             || peer.client_type != client_type
             || peer.display_id != hello.display_id
@@ -621,17 +621,17 @@ impl PeerRegistry {
         {
             return None;
         }
-        if let Some(hold) = state.holds.remove(&uid) {
+        if let Some(hold) = state.holds.remove(&peer_id) {
             hold.abort();
         }
-        let peer = state.peers.get_mut(&uid)?;
+        let peer = state.peers.get_mut(&peer_id)?;
         if !peer.socket.is_closed() {
             peer.socket.close(1000, "Resumed on a new connection.");
         }
         peer.socket = Arc::clone(socket);
         peer.raddr = raddr.to_owned();
         let held = std::mem::take(&mut peer.held);
-        Some((uid, partner, held))
+        Some((peer_id, partner, held))
     }
 
     /// Validate a hello, evict what it supersedes, and register its peer, all under the lock.
@@ -669,21 +669,21 @@ impl PeerRegistry {
             if ceiling == Some(ClientType::Viewer) && client_type == Some(ClientType::Controller) {
                 client_type = Some(ClientType::Viewer);
             }
-            if let Some((uid, partner, held)) =
+            if let Some((peer_id, partner, held)) =
                 Self::resume(&mut state, socket, raddr, &hello, client_type)
             {
                 drop(state);
-                info!(target: "signaling", "Peer {uid} resumed its session from {raddr}");
+                info!(target: "signaling", "Peer {peer_id} resumed its session from {raddr}");
                 let sent = socket.send_text(format!("RESUMED {partner}")).is_ok()
                     && held.into_iter().all(|line| socket.send_text(line).is_ok());
                 if !sent {
-                    warn!(target: "signaling", "Peer {uid} lost its socket during its resume");
+                    warn!(target: "signaling", "Peer {peer_id} lost its socket during its resume");
                 }
-                return Ok(uid);
+                return Ok(peer_id);
             }
             self.admit_client(&mut state, &hello, client_type, raddr)?;
         }
-        let uid = format!(
+        let peer_id = format!(
             "{}-{}",
             if hello.is_server { "server" } else { "client" },
             random_id()
@@ -691,9 +691,9 @@ impl PeerRegistry {
         let seq = state.next_seq;
         state.next_seq += 1;
         state.peers.insert(
-            uid.clone(),
+            peer_id.clone(),
             Peer {
-                uid: uid.clone(),
+                peer_id: peer_id.clone(),
                 socket: Arc::clone(socket),
                 raddr: raddr.to_owned(),
                 is_server: hello.is_server,
@@ -714,7 +714,7 @@ impl PeerRegistry {
             },
         );
         if socket.send_text("HELLO".to_owned()).is_err() {
-            state.peers.remove(&uid);
+            state.peers.remove(&peer_id);
             return Err(Refusal {
                 code: 1006,
                 reason: String::new(),
@@ -723,10 +723,10 @@ impl PeerRegistry {
         }
         info!(
             target: "signaling",
-            "Registered peer {uid} at {raddr} ({})",
+            "Registered peer {peer_id} at {raddr} ({})",
             client_type.map_or("server", ClientType::as_str)
         );
-        Ok(uid)
+        Ok(peer_id)
     }
 
     /// The collision and gate rules a client that resumed nothing meets (module docstring).
@@ -756,7 +756,7 @@ impl PeerRegistry {
                         && peer.display_id == display
                         && Self::supersedes(client_type, peer)
                 })
-                .map(|peer| peer.uid.clone())
+                .map(|peer| peer.peer_id.clone())
                 .collect();
             if !existing.is_empty() && self.eviction_storm(state, &key) {
                 return Err(verdict(STORM, format!("takeover storm, from {raddr}")));
@@ -800,7 +800,7 @@ impl PeerRegistry {
                             && !self.beside(peer, client_type, tab_id)
                             && Self::supersedes(client_type, peer)
                     })
-                    .map(|peer| peer.uid.clone())
+                    .map(|peer| peer.peer_id.clone())
                     .collect();
                 if !colliding.is_empty() && self.eviction_storm(state, &key) {
                     // The token is a credential: the log names the page by its address alone.
@@ -850,7 +850,7 @@ impl PeerRegistry {
                         && peer.display_id == display
                         && !(skip_beside && self.beside(peer, client_type, tab_id))
                 })
-                .map(|peer| peer.uid.clone())
+                .map(|peer| peer.peer_id.clone())
         };
         let mut controller = controller_of_display(state, false);
         if client_type == Some(ClientType::Controller) {
@@ -909,23 +909,23 @@ impl PeerRegistry {
     }
 
     /// Handle one text line from a registered peer. Returns whether the connection goes on.
-    fn handle_text(&self, uid: &str, socket: &Arc<PeerSocket>, msg: &str) -> bool {
+    fn handle_text(&self, peer_id: &str, socket: &Arc<PeerSocket>, msg: &str) -> bool {
         let mut state = self.state();
-        let Some(status) = state.peers.get(uid).map(|peer| peer.status.clone()) else {
-            error!(target: "signaling", "Peer {uid} not found in the registry");
+        let Some(status) = state.peers.get(peer_id).map(|peer| peer.status.clone()) else {
+            error!(target: "signaling", "Peer {peer_id} not found in the registry");
             return false;
         };
         match status {
-            Status::Session => Self::relay_session(&mut state, uid, msg),
-            Status::Room(room_id) => Self::relay_room(&state, uid, socket, &room_id, msg),
+            Status::Session => Self::relay_session(&mut state, peer_id, msg),
+            Status::Room(room_id) => Self::relay_room(&state, peer_id, socket, &room_id, msg),
             Status::Idle if msg.starts_with("SESSION") => {
-                Self::start_session(&mut state, uid, socket, msg)
+                Self::start_session(&mut state, peer_id, socket, msg)
             }
             Status::Idle if msg.starts_with("ROOM") => {
-                Self::join_room(&mut state, uid, socket, msg)
+                Self::join_room(&mut state, peer_id, socket, msg)
             }
             Status::Idle => {
-                debug!(target: "signaling", "Ignoring an unknown message from {uid}");
+                debug!(target: "signaling", "Ignoring an unknown message from {peer_id}");
             }
         }
         true
@@ -933,36 +933,48 @@ impl PeerRegistry {
 
     /// Relay `<peer-id> <message>` between session partners, in either direction. What a cut
     /// partner cannot take waits for its resume, up to `HELD_LINES_MAX`.
-    fn relay_session(state: &mut State, uid: &str, msg: &str) {
+    fn relay_session(state: &mut State, peer_id: &str, msg: &str) {
         let Some((other_id, body)) = split_word(msg) else {
-            warn!(target: "signaling", "Malformed session message from {uid}");
+            warn!(target: "signaling", "Malformed session message from {peer_id}");
             return;
         };
         if !state.peers.contains_key(other_id) {
             warn!(target: "signaling", "Peer {other_id} not found for session message relay");
             return;
         }
-        let partners = state.sessions.get(uid).is_some_and(|peer| peer == other_id)
-            || state.sessions.get(other_id).is_some_and(|peer| peer == uid);
+        let partners = state
+            .sessions
+            .get(peer_id)
+            .is_some_and(|peer| peer == other_id)
+            || state
+                .sessions
+                .get(other_id)
+                .is_some_and(|peer| peer == peer_id);
         if !partners {
-            warn!(target: "signaling", "Rejecting session relay {uid} -> {other_id}: not session partners");
+            warn!(target: "signaling", "Rejecting session relay {peer_id} -> {other_id}: not session partners");
             return;
         }
         let Some(other) = state.peers.get_mut(other_id) else {
             return;
         };
         if other.status != Status::Session {
-            warn!(target: "signaling", "Rejecting session relay {uid} -> {other_id}: target not in a session");
+            warn!(target: "signaling", "Rejecting session relay {peer_id} -> {other_id}: target not in a session");
             return;
         }
-        debug!(target: "signaling", "{uid} -> {other_id}: {} bytes", body.len());
-        let line = format!("{uid} {body}");
+        debug!(target: "signaling", "{peer_id} -> {other_id}: {} bytes", body.len());
+        let line = format!("{peer_id} {body}");
         if other.socket.send_text(line.clone()).is_err() && other.held.len() < HELD_LINES_MAX {
             other.held.push(line);
         }
     }
 
-    fn relay_room(state: &State, uid: &str, socket: &Arc<PeerSocket>, room_id: &str, msg: &str) {
+    fn relay_room(
+        state: &State,
+        peer_id: &str,
+        socket: &Arc<PeerSocket>,
+        room_id: &str,
+        msg: &str,
+    ) {
         let error = |text: String| {
             let _ = socket.send_text(format!("ERROR {text}"));
         };
@@ -985,14 +997,14 @@ impl PeerRegistry {
         }
         let _ = other
             .socket
-            .send_text(format!("ROOM_PEER_MSG {uid} {body}"));
+            .send_text(format!("ROOM_PEER_MSG {peer_id} {body}"));
     }
 
     /// Pair a caller with the streaming server. Only the server is called: a session with
     /// another page would hand it this page's offer and overwrite its state.
-    fn start_session(state: &mut State, uid: &str, socket: &Arc<PeerSocket>, msg: &str) {
+    fn start_session(state: &mut State, peer_id: &str, socket: &Arc<PeerSocket>, msg: &str) {
         let Some((_, callee)) = split_word(msg) else {
-            warn!(target: "signaling", "Malformed session message from {uid}");
+            warn!(target: "signaling", "Malformed session message from {peer_id}");
             return;
         };
         let callee = callee.trim_end();
@@ -1001,7 +1013,7 @@ impl PeerRegistry {
                 .by_age()
                 .iter()
                 .find(|peer| peer.is_server)
-                .map_or_else(|| callee.to_owned(), |peer| peer.uid.clone())
+                .map_or_else(|| callee.to_owned(), |peer| peer.peer_id.clone())
         } else {
             callee.to_owned()
         };
@@ -1014,11 +1026,11 @@ impl PeerRegistry {
             return;
         }
         let _ = socket.send_text(format!("SESSION_OK {callee_id}"));
-        let Some(peer) = state.peers.get(uid) else {
+        let Some(peer) = state.peers.get(peer_id) else {
             return;
         };
         let start = SessionStart {
-            peer_id: uid.to_owned(),
+            peer_id: peer_id.to_owned(),
             client_type: peer
                 .client_type
                 .map_or("None", ClientType::as_str)
@@ -1029,20 +1041,20 @@ impl PeerRegistry {
             fullcolor_codecs: peer.fullcolor_codecs.clone(),
             tenbit_codecs: peer.tenbit_codecs.clone(),
         };
-        info!(target: "signaling", "Session from {uid} ({}) to {callee_id}", peer.raddr);
+        info!(target: "signaling", "Session from {peer_id} ({}) to {callee_id}", peer.raddr);
         if let Some(callee) = state.peers.get_mut(&callee_id) {
             let _ = callee.socket.send_text(start.to_line());
             callee.status = Status::Session;
         }
-        if let Some(peer) = state.peers.get_mut(uid) {
+        if let Some(peer) = state.peers.get_mut(peer_id) {
             peer.status = Status::Session;
         }
-        state.sessions.insert(uid.to_owned(), callee_id);
+        state.sessions.insert(peer_id.to_owned(), callee_id);
     }
 
-    fn join_room(state: &mut State, uid: &str, socket: &Arc<PeerSocket>, msg: &str) {
+    fn join_room(state: &mut State, peer_id: &str, socket: &Arc<PeerSocket>, msg: &str) {
         let Some((_, room_id)) = split_word(msg) else {
-            warn!(target: "signaling", "Malformed room message from {uid}");
+            warn!(target: "signaling", "Malformed room message from {peer_id}");
             return;
         };
         if room_id == "session" || room_id.contains(char::is_whitespace) {
@@ -1051,14 +1063,14 @@ impl PeerRegistry {
         }
         let members = state.rooms.entry(room_id.to_owned()).or_default();
         let others: Vec<String> = members.iter().cloned().collect();
-        members.insert(uid.to_owned());
+        members.insert(peer_id.to_owned());
         let _ = socket.send_text(format!("ROOM_OK {}", others.join(" ")));
-        if let Some(peer) = state.peers.get_mut(uid) {
+        if let Some(peer) = state.peers.get_mut(peer_id) {
             peer.status = Status::Room(room_id.to_owned());
         }
         for other in others {
             if let Some(peer) = state.peers.get(&other) {
-                let _ = peer.socket.send_text(format!("ROOM_PEER_JOINED {uid}"));
+                let _ = peer.socket.send_text(format!("ROOM_PEER_JOINED {peer_id}"));
             }
         }
     }
@@ -1066,12 +1078,12 @@ impl PeerRegistry {
     /// Keep the session of a client whose socket was cut for `session_hold`, for a hello
     /// naming its resume key, and end it after. Returns whether it is held: a client in no
     /// session, one that named no key, and one that resumed on another socket since are not.
-    fn hold_session(self: &Arc<PeerRegistry>, uid: &str, socket: &Arc<PeerSocket>) -> bool {
+    fn hold_session(self: &Arc<PeerRegistry>, peer_id: &str, socket: &Arc<PeerSocket>) -> bool {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return false;
         };
         let mut state = self.state();
-        let Some(peer) = state.peers.get(uid) else {
+        let Some(peer) = state.peers.get(peer_id) else {
             return false;
         };
         if peer.socket.id() != socket.id()
@@ -1082,19 +1094,19 @@ impl PeerRegistry {
             return false;
         }
         let registry = Arc::clone(self);
-        let held_uid = uid.to_owned();
+        let held_id = peer_id.to_owned();
         let held_socket = Arc::clone(socket);
         let hold = self.options.session_hold;
         let task = runtime.spawn(async move {
             tokio::time::sleep(hold).await;
-            registry.state().holds.remove(&held_uid);
-            registry.remove_peer(&held_uid, Some(&held_socket));
+            registry.state().holds.remove(&held_id);
+            registry.remove_peer(&held_id, Some(&held_socket));
             registry.notify_client_presence();
         });
-        state.holds.insert(uid.to_owned(), task);
+        state.holds.insert(peer_id.to_owned(), task);
         info!(
             target: "signaling",
-            "Signaling socket of peer {uid} cut; its session is held {:.0}s for a resume.",
+            "Signaling socket of peer {peer_id} cut; its session is held {:.0}s for a resume.",
             hold.as_secs_f64()
         );
         true
@@ -1106,25 +1118,25 @@ impl PeerRegistry {
     /// the server socket is shared by every display's session and every viewer. A server peer
     /// leaving closes every client as going away (module docstring). `socket` is the one that
     /// ended, when the peer is removed for it: a peer that resumed on another stays.
-    pub fn remove_peer(&self, uid: &str, socket: Option<&Arc<PeerSocket>>) {
+    pub fn remove_peer(&self, peer_id: &str, socket: Option<&Arc<PeerSocket>>) {
         let mut state = self.state();
         if let Some(socket) = socket
             && state
                 .peers
-                .get(uid)
+                .get(peer_id)
                 .is_some_and(|peer| peer.socket.id() != socket.id())
         {
             return;
         }
-        let Some(peer) = state.peers.get(uid) else {
-            state.sessions.remove(uid);
+        let Some(peer) = state.peers.get(peer_id) else {
+            state.sessions.remove(peer_id);
             return;
         };
         let is_server = peer.is_server;
         let raddr = peer.raddr.clone();
         let client_type = peer.client_type;
         let peer_socket = Arc::clone(&peer.socket);
-        Self::evict_dead_peer(&mut state, uid);
+        Self::evict_dead_peer(&mut state, peer_id);
         if is_server {
             for other in state.peers.values() {
                 if !other.is_server {
@@ -1135,7 +1147,7 @@ impl PeerRegistry {
             peer_socket.close(1000, "Connection closed");
             info!(
                 target: "signaling",
-                "Disconnected from peer {uid} at {raddr} ({})",
+                "Disconnected from peer {peer_id} at {raddr} ({})",
                 client_type.map_or("unknown", ClientType::as_str)
             );
         }
@@ -1156,18 +1168,18 @@ impl PeerRegistry {
         self.state().eviction_times.len()
     }
 
-    pub(super) fn held_lines(&self, uid: &str) -> Vec<String> {
+    pub(super) fn held_lines(&self, peer_id: &str) -> Vec<String> {
         self.state()
             .peers
-            .get(uid)
+            .get(peer_id)
             .map_or_else(Vec::new, |peer| peer.held.clone())
     }
 
-    pub(super) fn session_partner(&self, uid: &str) -> Option<String> {
-        self.state().sessions.get(uid).cloned()
+    pub(super) fn session_partner(&self, peer_id: &str) -> Option<String> {
+        self.state().sessions.get(peer_id).cloned()
     }
 
-    pub(super) fn socket_of(&self, uid: &str) -> Option<u64> {
-        self.state().peers.get(uid).map(|peer| peer.socket.id())
+    pub(super) fn socket_of(&self, peer_id: &str) -> Option<u64> {
+        self.state().peers.get(peer_id).map(|peer| peer.socket.id())
     }
 }
