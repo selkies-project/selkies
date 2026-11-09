@@ -12,8 +12,8 @@
 
 use crate::CaptureSettings;
 use crate::encoders::software::{
-    EncodedStripe, Nv12Planes, StripeState, acknowledge_reference, encode_cpu, encode_cpu_from,
-    held_input, invalidate_reference, release_input, stripes_held_still,
+    EncodedStripe, Nv12Planes, StripeState, acknowledge_reference, encode_cpu_from, held_input,
+    invalidate_reference, release_input, stripes_held_still,
 };
 use crate::encoders::{self, Codec, FrameEncoder, FrameSource};
 use smithay::utils::{Physical, Rectangle};
@@ -2305,7 +2305,8 @@ impl X11Pipeline {
             if self.settings.codec.is_video() && self.settings.video_streaming_mode && !reported {
                 // As a full frame above: a frame that codes a stripe at the paint-over quality
                 // while it holds still is hashed before it is encoded, and decided on its own
-                // change as well as the one before.
+                // change as well as the one before. Only that frame's rectangles are its own
+                // change, outside which the encoder may code blocks as constant.
                 let hashed = (self.settings.cleans_up()
                     && stripes_held_still(&self.stripes, &self.settings))
                 .then(|| {
@@ -2330,13 +2331,16 @@ impl X11Pipeline {
                     None => band_rects(&self.turbo_dirty, width, height),
                 };
                 let (stripes, settings) = (&mut self.stripes, &self.settings);
+                let current = hashed.is_some();
                 let mut encode = || {
-                    encode_cpu(
+                    encode_cpu_from(
                         stripes,
                         argb,
+                        None,
                         width,
                         height,
                         &rects,
+                        current,
                         settings,
                         self.frame_counter,
                         false,
@@ -2371,6 +2375,7 @@ impl X11Pipeline {
                     width,
                     height,
                     changed,
+                    true,
                     &self.settings,
                     self.frame_counter,
                     false,
@@ -4940,6 +4945,59 @@ mod tests {
                 (x ^ (x >> 16)) as u8
             })
             .collect()
+    }
+
+    /// A Turbo frame is decided on the hash of the frame before, which says nothing of where
+    /// this one changed: a block that held still through the frame before and moves in this one
+    /// is coded, not skipped as constant. The quantizer is pinned so x264's skip of a constant
+    /// macroblock, which takes a reference no coarser than the frame, would hold.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn a_turbo_change_after_a_still_frame_is_coded_not_skipped() {
+        use openh264::decoder::Decoder;
+        use openh264::formats::YUVSource;
+        const W: usize = 256;
+        const H: usize = 128;
+        let mut p = X11Pipeline::new(CaptureSettings {
+            width: W as i32,
+            height: H as i32,
+            codec: Codec::H264,
+            use_cpu: true,
+            video_streaming_mode: true,
+            video_cbr_mode: true,
+            video_bitrate_kbps: 20000,
+            video_min_qp: 30,
+            video_max_qp: 30,
+            video_crf: 25,
+            video_paintover_crf: 18,
+            paint_over_trigger_frames: 15,
+            use_paint_over_quality: true,
+            keyframe_interval_s: 0.0,
+            target_fps: 60.0,
+            ..Default::default()
+        });
+        assert!(p.hw.is_none(), "the CPU path codes the frames");
+        let stride = W * 4;
+        let still = vec![60u8; stride * H];
+        let mut moved = still.clone();
+        for row in moved.chunks_mut(stride).take(80).skip(48) {
+            row[96 * 4..128 * 4].fill(240);
+        }
+        let mut dec = Decoder::new().expect("decoder");
+        let mut luma = 0u8;
+        for frame in [&still, &still, &still, &moved] {
+            for stripe in p.process(frame, stride) {
+                let au = &stripe.data[crate::encoders::codec::VIDEO_HEADER_LEN..];
+                if let Some(img) = dec.decode(au).expect("decode") {
+                    let y_stride = img.strides().0;
+                    luma = img.y()[64 * y_stride + 112];
+                }
+            }
+        }
+        assert!(
+            luma > 180,
+            "the block that moved after a still frame decodes as it moved: luma {luma}"
+        );
     }
 
     /// A still screen x264 refines nothing more of at a constant rate, its frames slice headers

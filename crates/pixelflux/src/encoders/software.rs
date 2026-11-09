@@ -1744,6 +1744,7 @@ pub fn encode_cpu(
         width,
         height,
         damage_rects,
+        true,
         settings,
         frame_counter,
         use_gpu,
@@ -1867,6 +1868,12 @@ fn x264_input_layout(_width: usize, _height: usize) -> Option<InputLayout> {
 /// session encodes it in place and leaves `raw_pixels` unread, which a capture converting straight
 /// from the screen's memory never wrote. x264 reads the picture through the next encode
 /// ([`held_input`]).
+///
+/// `current` says whether `damage_rects` holds every change of this frame against the one
+/// before, as a compositor's damage or this frame's own hash does. Only then does x264 code the
+/// blocks they leave out as skips without analysis (`H264EncoderWrapper::constant_blocks`):
+/// rectangles read from the frame before's hash (a Turbo frame's) leave out a block that held
+/// still there and changes in this frame, which a skip would show as it was.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_cpu_from(
     stripes: &mut Vec<StripeState>,
@@ -1875,6 +1882,7 @@ pub fn encode_cpu_from(
     width: i32,
     height: i32,
     damage_rects: &[Rectangle<i32, Physical>],
+    current: bool,
     settings: &CaptureSettings,
     frame_counter: u16,
     use_gpu: bool,
@@ -2365,7 +2373,7 @@ pub fn encode_cpu_from(
                         enc.refine_blocks(&refinement.plan, refinement.offset() as f32);
                         refinement
                     });
-                    if hash_damage {
+                    if hash_damage || !current {
                         enc.constant_blocks(std::iter::empty());
                     } else {
                         enc.constant_blocks(stripe_state.ledger.unchanged());
