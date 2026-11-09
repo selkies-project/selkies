@@ -259,11 +259,13 @@ impl CaptureFactory for FakeCaptures {
     }
 }
 
-/// A display server whose every request is realized, or refused at `root`.
+/// A display server whose every request is realized, or refused at `root`. With `fits`, the
+/// extended layout is fitted to `root` in place, as the logical-monitor path does.
 #[derive(Default)]
 pub struct FakeDisplay {
     pub root: Mutex<Option<(i32, i32)>>,
     pub calls: Mutex<Vec<String>>,
+    pub fits: Mutex<bool>,
 }
 
 #[async_trait]
@@ -284,12 +286,18 @@ impl Display for FakeDisplay {
 
     async fn apply_extended_layout(
         &self,
-        _layouts: &mut Layouts,
+        layouts: &mut Layouts,
         w: i32,
         h: i32,
         _fps: f64,
     ) -> bool {
         self.calls.lock().push(format!("layout {w}x{h}"));
+        let root = *self.root.lock();
+        if *self.fits.lock()
+            && let Some((rw, rh)) = root
+        {
+            crate::display::geometry::reconcile_realized_layout(layouts, rw, rh);
+        }
         true
     }
 

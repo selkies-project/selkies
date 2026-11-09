@@ -3664,6 +3664,10 @@ impl WsService {
         if !wayland {
             self.retarget_kept_x11(&layouts, &mut keep, total_w, total_h)
                 .await;
+            // The logical-monitor path fits `layouts` to the realized root in place. The clamp
+            // below fits the request itself, so that it sees every display the root could not
+            // hold, and the pages are told their clamped sizes.
+            let requested = layouts.clone();
             if !self
                 .deps
                 .display
@@ -3672,6 +3676,7 @@ impl WsService {
             {
                 warn!(target: "ws", "The extended layout {total_w}x{total_h} could not be realized; clamping to the realized size below.");
             }
+            layouts = requested;
             self.clamp_to_realized_root(
                 &mut layouts,
                 &mut keep,
