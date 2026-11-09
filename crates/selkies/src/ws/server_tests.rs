@@ -1545,6 +1545,31 @@ async fn a_realized_root_smaller_than_the_layout_clamps_and_drops() {
     assert!(!rig.service.st.lock().displays.contains_key("display2"));
 }
 
+/// Where the display already fitted the layout to the realized root, as the logical-monitor
+/// path does, the pages still hear their clamped sizes and the display with no room is refused.
+#[tokio::test]
+async fn a_layout_the_display_fitted_in_place_still_clamps_and_drops() {
+    let rig = Rig::new();
+    *rig.display.root.lock() = Some((1000, 700));
+    *rig.display.fits.lock() = true;
+    let owner = rig.owner("a").await;
+    settle().await;
+    assert_eq!(rig.service.st.lock().displays[PRIMARY_DISPLAY].width, 1000);
+    assert_eq!(
+        typed(&owner.texts().await, "stream_resolution").unwrap()["width"],
+        json!(1000)
+    );
+    let mut second = rig.controller().await;
+    second.say(&secondary_settings("display2", "right")).await;
+    settle().await;
+    assert!(
+        second
+            .has("KILL The X server cannot extend the desktop to fit this display.")
+            .await
+    );
+    assert!(!rig.service.st.lock().displays.contains_key("display2"));
+}
+
 #[tokio::test]
 async fn reconciliation_reopens_the_effective_realized_layout() {
     let rig = Rig::new();
