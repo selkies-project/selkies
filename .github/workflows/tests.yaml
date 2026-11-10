@@ -1,8 +1,9 @@
 name: Tests
 
-# The suites in tests/. The integration tier runs on every push and pull
-# request; the browser tier is long enough to run nightly and on request, and
-# the perf and soak tiers only on request.
+# The suites in tests/. The integration tier and a smoke selection of the
+# browser tier run on every push and pull request (ci.yaml); the whole browser
+# tier is long enough to run nightly and on request, and the perf and soak
+# tiers only on request.
 #
 # tests/README.md documents what each tier needs and how to run it locally.
 
@@ -31,6 +32,14 @@ on:
         description: The caller already built the selkies wheel and the pixelflux and pcmflux wheels in this run
         type: boolean
         default: false
+      suites:
+        description: Suite name expression (pytest -k) within the tiers; a call that names its suites runs them alone, without the unit jobs
+        type: string
+        default: ''
+      shards:
+        description: JSON list of the shards to deal the selected suites into, e.g. "[1]" for one job
+        type: string
+        default: '[1, 2, 3]'
   schedule:
     # Nightly full browser matrix
     - cron: "0 4 * * *"
@@ -61,7 +70,7 @@ jobs:
     name: Unit suites (Python ${{ matrix.python-version }})
     needs: [wheel]
     if: >-
-      ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
+      ${{ always() && !inputs.suites && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
           && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
     runs-on: ubuntu-latest
     strategy:
@@ -150,7 +159,7 @@ jobs:
   # The server's own unit tier, which runs wherever the suites' does
   server-unit:
     name: Unit tests (server)
-    if: github.event_name != 'schedule' || github.repository == 'selkies-project/selkies'
+    if: ${{ !inputs.suites && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -200,10 +209,11 @@ jobs:
     with:
       package_version: 0.0.0.dev0
 
-  # Three shards, each the third of the selected cases tests/conftest.py deals
-  # it by budget, so a shard stays inside the job's two hours.
+  # Three shards unless the caller names others, each the share of the
+  # selected cases tests/conftest.py deals it by budget, so a shard stays
+  # inside the job's two hours.
   suites:
-    name: Suites (${{ inputs.tiers || 'integration or e2e' }}, ${{ matrix.shard }}/3)
+    name: Suites (${{ inputs.tiers || 'integration or e2e' }}, ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [wheel, wheels]
     if: >-
       ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
@@ -214,7 +224,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: ${{ fromJSON(inputs.shards || '[1, 2, 3]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free disk space
@@ -528,7 +538,7 @@ jobs:
         env:
           TIERS: ${{ inputs.tiers || 'integration or e2e' }}
           SUITES: ${{ inputs.suites || '' }}
-          SELKIES_SUITE_SHARD: ${{ matrix.shard }}/3
+          SELKIES_SUITE_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
         # A narrow selection can leave a shard nothing: pytest's 5, not a failure.
         run: python -m pytest tests -m "${TIERS}" -k "${SUITES}" -v --junitxml=suites-report.xml -o junit_logging=system-out || [ $? = 5 ]
       - name: Fail if any suite skipped
@@ -544,7 +554,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: suite-logs-${{ matrix.shard }}
+          # A second call in the same run (ci.yaml's smoke) keeps logs of its own
+          name: suite-logs-${{ inputs.suites && 'selected-' || '' }}${{ matrix.shard }}
           path: suite-logs/
           if-no-files-found: ignore
           retention-days: 7
