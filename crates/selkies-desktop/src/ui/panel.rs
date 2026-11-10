@@ -5,7 +5,7 @@
 //! clock and show desktop button stay at the right.  The bell is there while
 //! the shell serves notifications.
 //!
-//! The pager is one pill per virtual desktop, shown when the window manager
+//! The pager is one square per virtual desktop, shown when the window manager
 //! reports more than one; the taskbar lists the windows of the current
 //! desktop, every window when `tasks_all_desktops` is set.  A taskbar button
 //! always carries its window's index into the desktop's window list, so
@@ -27,10 +27,14 @@ const TASK_MIN_WIDTH: i32 = 40;
 const VOLUME_WIDTH: i32 = 32;
 /// Width of the notifications bell.
 const BELL_WIDTH: i32 = 32;
-/// Width of one pager pill.
-const PAGER_PILL_WIDTH: i32 = 26;
-/// Space between pager pills.
-const PAGER_PILL_GAP: i32 = 2;
+/// Space between pager squares.
+const PAGER_PILL_GAP: i32 = 4;
+
+/// Side of a pager square for a bar height: well inside the bar, so the squares read as
+/// marks beside the taskbar's buttons rather than as buttons of their own.
+fn pager_side(bar_h: i32) -> i32 {
+    (bar_h - 16).clamp(14, 28)
+}
 /// Width of the window outline on the show desktop button for a button
 /// height: two fifths of it, within the range that reads well.
 fn show_desktop_glyph_width(height: i32) -> i32 {
@@ -116,28 +120,29 @@ pub fn pager_count(desktops: u32, show_pager: bool) -> usize {
 }
 
 /// Width the pager takes on the bar, its trailing gap included; zero
-/// without pills.
-fn pager_width(count: usize) -> i32 {
+/// without squares.
+fn pager_width(count: usize, bar_h: i32) -> i32 {
     if count == 0 {
         return 0;
     }
-    count as i32 * (PAGER_PILL_WIDTH + PAGER_PILL_GAP) - PAGER_PILL_GAP + GAP
+    count as i32 * (pager_side(bar_h) + PAGER_PILL_GAP) - PAGER_PILL_GAP + GAP
 }
 
-/// The pager's pills from a left edge, each the bar's item height.
+/// The pager's squares from a left edge, centered in the bar's height.
 ///
 /// # Arguments
 /// * `x` - Left edge of the first pill.
 /// * `bar` - The bar.
 /// * `count` - Number of pills.
 pub fn pager_pills(x: i32, bar: Rect, count: usize) -> Vec<Rect> {
+    let side = pager_side(bar.h);
     (0..count as i32)
         .map(|i| {
             Rect::new(
-                x + i * (PAGER_PILL_WIDTH + PAGER_PILL_GAP),
-                bar.y + 3,
-                PAGER_PILL_WIDTH,
-                bar.h - 6,
+                x + i * (side + PAGER_PILL_GAP),
+                bar.y + (bar.h - side) / 2,
+                side,
+                side,
             )
         })
         .collect()
@@ -172,7 +177,7 @@ pub fn layout(d: &mut Desktop) -> Layout {
         .collect();
     let launchers_width = launcher_ids.len() as i32 * (bar.h - 6 + GAP);
     let pager_count = pager_count(d.desktops, d.config.show_pager);
-    let pager_width = pager_width(pager_count);
+    let pager_width = pager_width(pager_count, bar.h);
     let hidden: Vec<bool> = d.toplevels.iter().map(|t| t.state.hidden).collect();
     let listed = listed_tasks(&hidden, d.config.tasks_all_desktops);
     let mut right = bar.right() - GAP;
@@ -575,18 +580,7 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
         } else {
             ui::field_bg()
         };
-        canvas.fill_rounded(rect, 5.0, bg);
-        let color = if current { ui::on_accent() } else { ui::text_dim() };
-        ui::label(
-            canvas,
-            &mut d.fonts,
-            &(index + 1).to_string(),
-            rect,
-            ui::FONT_SMALL,
-            current,
-            Align::Center,
-            color,
-        );
+        canvas.fill_rounded(rect, 4.0, bg);
     }
     if let Some(first) = layout.pager.first() {
         canvas.fill_rect(
@@ -782,13 +776,13 @@ mod tests {
     }
 
     #[test]
-    fn pills_sit_side_by_side_at_the_bar_height() {
-        let bar = Rect::new(0, 0, 800, 32);
+    fn pager_squares_sit_side_by_side_centered_in_the_bar() {
+        let bar = Rect::new(0, 0, 800, 44);
         let pills = pager_pills(100, bar, 3);
         assert_eq!(pills.len(), 3);
-        assert_eq!(pills[0], Rect::new(100, 3, PAGER_PILL_WIDTH, 26));
+        assert_eq!(pills[0], Rect::new(100, 8, 28, 28));
         assert_eq!(pills[1].x, pills[0].right() + PAGER_PILL_GAP);
-        assert_eq!(pills[2].right(), 100 + 3 * PAGER_PILL_WIDTH + 2 * PAGER_PILL_GAP);
+        assert_eq!(pills[2].right(), 100 + 3 * 28 + 2 * PAGER_PILL_GAP);
         assert!(pager_pills(100, bar, 0).is_empty());
     }
 

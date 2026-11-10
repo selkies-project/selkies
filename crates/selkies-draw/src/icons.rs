@@ -245,9 +245,12 @@ impl Icons {
     /// Walks the theme chain for the best sized file: a directory holding the size itself (or a
     /// scalable one covering it) in any theme of the chain wins over a nearer theme's other
     /// sizes, as the icon theme specification looks icons up, and where no theme holds the size
-    /// the closest one across the chain is taken, a larger file ahead of a smaller one at the
-    /// same distance since shrinking keeps an icon's edges and enlarging smears them.
+    /// the closest larger one across the chain is taken, a smaller one only where none is
+    /// larger, since shrinking keeps an icon's edges and enlarging smears them: a 52 px slot
+    /// takes a 64 px file over a 48 px one.
     fn find_in_chain(&self, name: &str, size: u32) -> Option<PathBuf> {
+        /// Added to a smaller file's distance, so every larger file comes first.
+        const UNDERSIZED: u32 = 1 << 20;
         let mut closest: Option<(u32, u32, u32, PathBuf)> = None;
         for (depth, theme) in self.chain.iter().enumerate() {
             let depth = depth as u32;
@@ -259,7 +262,11 @@ impl Icons {
                 } else {
                     let physical = dir.size * dir.scale;
                     let distance = dir.distance(size);
-                    if physical < size { distance * 2 } else { distance }
+                    if physical < size {
+                        distance + UNDERSIZED
+                    } else {
+                        distance
+                    }
                 };
                 for root in &theme.roots {
                     let folder = root.join(&dir.path);
@@ -522,7 +529,8 @@ mod tests {
     const INDEX: &str = "[Icon Theme]\nName=Test\nInherits=hicolor,Adwaita\nDirectories=16x16/apps,scalable/apps,48x48@2/apps\n\n[16x16/apps]\nSize=16\nType=Fixed\n\n[scalable/apps]\nSize=128\nType=Scalable\nMinSize=8\nMaxSize=512\n\n[48x48@2/apps]\nSize=48\nScale=2\nType=Threshold\n";
 
     /// A theme later in the chain that holds the size asked for wins over an earlier theme's
-    /// other sizes, and where no theme holds it the larger of two equally distant files is taken.
+    /// other sizes, and where no theme holds it a larger file is taken over a smaller one, even
+    /// a nearer smaller one.
     #[test]
     fn the_chain_prefers_an_exact_size_anywhere_and_then_the_larger_file() {
         let base = std::env::temp_dir().join(format!("selkies-icons-{}", std::process::id()));
@@ -564,6 +572,10 @@ mod tests {
         );
         assert_eq!(
             icons.find_in_chain("browser", 24),
+            Some(second.join("browser.png"))
+        );
+        assert_eq!(
+            icons.find_in_chain("browser", 20),
             Some(second.join("browser.png"))
         );
         std::fs::remove_dir_all(&base).unwrap();

@@ -1622,9 +1622,9 @@ fn draw_tiles(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
         }
         let hovered = d.hover == Hover::MenuTile(position);
         let radius = (ui::popup_radius() / 2.0).min(6.0);
-        canvas.fill_rounded(tile, radius, ui::accent_alpha(if hovered { 0xff } else { 0xd8 }));
+        canvas.fill_rounded(tile, radius, tile_color(hovered));
         if hovered {
-            canvas.stroke_rounded(tile, radius, 1.5, ui::text_alpha(0x90));
+            canvas.stroke_rounded(tile, radius, 1.5, ui::text_alpha(0x60));
         }
         let icon_rect = Rect::new(
             tile.x + (tile.w - TILE_ICON) / 2,
@@ -1644,10 +1644,19 @@ fn draw_tiles(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
             ui::FONT_SMALL,
             false,
             Align::Center,
-            ui::on_accent(),
+            ui::text(),
         );
     }
     canvas.reset_clip();
+}
+
+/// A favorite tile's color: the menu's own a few shades lighter on a dark theme and darker on
+/// a light one, a little more while hovered, so the tiles stand off the menu without the
+/// accent's clash.
+fn tile_color(hovered: bool) -> tiny_skia::Color {
+    let base = ui::popup_bg();
+    let step = if hovered { 30 } else { 18 };
+    ui::shifted(base, if ui::luminance(base) < 0.5 { step } else { -step })
 }
 
 #[cfg(test)]
