@@ -388,7 +388,15 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     # setuid file it does not own, and an archive update to util-linux, shadow,
     # sudo, fuse3, or dbus would fail the layer taking it.
     selkies-privileged-files release && \
-    { chown -R -f -h --no-preserve-root ubuntu:ubuntu / || echo 'Failed to set filesystem ownership in some paths to ubuntu user'; }
+    # The chown copies each file of the layers below into this one once per
+    # name, so a file the distribution hardlinks lands here as that many
+    # copies (its Rust coreutils is one 11.8 MB program under 116 names, 1.3 GB
+    # copied). The links are recorded first and made again after it.
+    find / -xdev -type f -links +1 -printf '%i %p\n' | sort -n > /tmp/selkies-hardlinks && \
+    { chown -R -f -h --no-preserve-root ubuntu:ubuntu / || echo 'Failed to set filesystem ownership in some paths to ubuntu user'; } && \
+    awk '{ path = substr($0, index($0, " ") + 1) } $1 == inode { print first "\t" path; next } { inode = $1; first = path }' /tmp/selkies-hardlinks | \
+        while IFS="$(printf '\t')" read -r first path; do ln -f "${first}" "${path}" || echo "Failed to relink ${path}"; done && \
+    rm -f /tmp/selkies-hardlinks
 
 # Set locales
 ENV LANG="${LOCALE}"
