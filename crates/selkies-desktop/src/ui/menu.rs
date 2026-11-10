@@ -48,8 +48,9 @@ const CELL_W: i32 = 72;
 const CELL_H: i32 = 70;
 /// Icon size in the application grid.
 const CELL_ICON: i32 = 32;
-/// Width of a cell of the favorites' grid.
-const FAVORITE_W: i32 = 104;
+/// Narrowest a cell of the favorites' grid gets, four of them fitting the application
+/// column beside its scrollbar's gutter.
+const FAVORITE_W: i32 = 96;
 /// Height of a cell of the favorites' grid, room for a two-line name.
 const FAVORITE_H: i32 = 108;
 /// Icon size in the favorites' grid.
@@ -78,6 +79,9 @@ const SCROLLBAR_W: i32 = 6;
 const SCROLLBAR_HIT: i32 = 14;
 /// Shortest a scrollbar's thumb gets.
 const SCROLLBAR_MIN_THUMB: i32 = 28;
+/// Width kept free along a scrolling column's right edge for its scrollbar, shown or not, so
+/// the bar never covers a row and the content does not reflow when it appears.
+const SCROLL_GUTTER: i32 = SCROLLBAR_W + 4;
 
 /// A column of the menu that scrolls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -489,7 +493,19 @@ fn ensure_items(d: &mut Desktop) {
 
 /// Columns of a grid of cells this wide in an area.
 fn grid_columns(apps: Rect, cell_w: i32) -> usize {
-    (apps.w / cell_w).max(1) as usize
+    (content_width(apps) / cell_w).max(1) as usize
+}
+
+/// The width of a column's content, its scrollbar's gutter left out.
+fn content_width(column: Rect) -> i32 {
+    (column.w - SCROLL_GUTTER).max(1)
+}
+
+/// The width each cell of a grid takes: the column's content shared evenly among as many cells
+/// of at least `cell_w` as fit, so the grid spans the column rather than leaving the slack at
+/// its right.
+fn grid_cell_width(apps: Rect, cell_w: i32) -> i32 {
+    content_width(apps) / grid_columns(apps, cell_w) as i32
 }
 
 /// The cell of an item in the application grid, scrolled.
@@ -502,11 +518,12 @@ fn grid_columns(apps: Rect, cell_w: i32) -> usize {
 /// * `h` - The cell height.
 fn grid_cell(d: &Desktop, apps: Rect, row: usize, w: i32, h: i32) -> Rect {
     let columns = grid_columns(apps, w);
+    let cell_w = grid_cell_width(apps, w);
     let (r, c) = (row / columns, row % columns);
     Rect::new(
-        apps.x + c as i32 * w,
+        apps.x + c as i32 * cell_w,
         apps.y + r as i32 * h - d.menu.app_scroll as i32,
-        w,
+        cell_w,
         h,
     )
 }
@@ -719,7 +736,7 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
         let row = match arrangement(d) {
             Arrangement::Grid { w, h, .. } => {
                 let columns = grid_columns(layout.apps, w);
-                let column = ((x - layout.apps.x as f64) / w as f64).floor();
+                let column = ((x - layout.apps.x as f64) / grid_cell_width(layout.apps, w) as f64).floor();
                 let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / h as f64).floor();
                 if column < 0.0 || column as usize >= columns || line < 0.0 {
                     return Some(Hover::None);
@@ -1211,14 +1228,19 @@ fn draw_categories(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
                     Rect::new(
                         layout.categories.x + 8,
                         y + CATEGORY_ROW / 2,
-                        layout.categories.w - 16,
+                        content_width(layout.categories) - 16,
                         1,
                     ),
                     ui::separator(),
                 );
             }
             CategoryRow::Section(section) => {
-                let rect = Rect::new(layout.categories.x, y, layout.categories.w, CATEGORY_ROW);
+                let rect = Rect::new(
+                    layout.categories.x,
+                    y,
+                    content_width(layout.categories),
+                    CATEGORY_ROW,
+                );
                 let current = d.menu.section == *section;
                 let hovered = d.hover == Hover::MenuCategory(row);
                 if current {
@@ -1270,7 +1292,7 @@ fn draw_rows(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
         if y + ROW < layout.apps.y || y > layout.apps.bottom() {
             continue;
         }
-        let rect = Rect::new(layout.apps.x, y, layout.apps.w, ROW);
+        let rect = Rect::new(layout.apps.x, y, content_width(layout.apps), ROW);
         let selected = d.menu.selected == Some(row);
         let hovered = d.hover == Hover::MenuApp(row);
         if selected {
@@ -1432,12 +1454,25 @@ fn draw_tiles(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
 mod tests {
     use super::*;
 
+    /// The application column of a full-width menu holds four favorites and five application
+    /// cells beside its scrollbar's gutter, the cells spanning the content width without
+    /// reaching the gutter.
+    #[test]
+    fn the_favorites_grid_fits_four_columns_beside_the_scrollbar() {
+        let apps = Rect::new(0, 0, WIDTH - 3 * PAD - CATEGORY_WIDTH, 300);
+        assert_eq!(grid_columns(apps, FAVORITE_W), 4);
+        assert_eq!(grid_columns(apps, CELL_W), 5);
+        for cell_w in [FAVORITE_W, CELL_W] {
+            let span = grid_cell_width(apps, cell_w) * grid_columns(apps, cell_w) as i32;
+            assert!(span <= apps.w - SCROLL_GUTTER && span > apps.w - SCROLL_GUTTER - 5);
+        }
+    }
+
     #[test]
     fn grid_and_tiles_place_cells_by_width() {
-        let apps = Rect::new(10, 20, 290, 300);
+        let apps = Rect::new(10, 20, 300, 300);
         assert_eq!(grid_columns(apps, CELL_W), 4);
         assert_eq!(grid_columns(Rect::new(0, 0, 10, 10), CELL_W), 1);
-        assert_eq!(grid_columns(Rect::new(0, 0, 400, 300), FAVORITE_W), 3);
         let tiles = Rect::new(230, 20, 260, 300);
         assert_eq!(tile_rect(tiles, 0), Rect::new(230, 20, TILE, TILE));
         assert_eq!(tile_rect(tiles, 2).x, 230 + 2 * (TILE + TILE_GAP));
