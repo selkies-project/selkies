@@ -81,6 +81,17 @@ impl ForeignToplevelState {
 }
 
 /// Whether a window is listed: a toplevel on screen or hidden, never a parked one.
+/// Whether a window is mapped: in the space, or hidden by the policy (minimized, or on another
+/// virtual desktop). One a client withdrew, an unmapped X11 window or an xdg toplevel waiting
+/// for its next map, is not, so a change to it does not list it again.
+fn mapped(state: &AppState, window: &Window, id: WindowId) -> bool {
+    state.space.elements().any(|w| w == window)
+        || state
+            .wm
+            .as_ref()
+            .is_some_and(|wm| wm.hidden.contains_key(&id))
+}
+
 fn listed(window: &Window) -> bool {
     window_meta(window).is_some_and(|m| !m.parked.load(std::sync::atomic::Ordering::Relaxed))
 }
@@ -212,7 +223,9 @@ pub fn update(state: &mut AppState, id: WindowId) {
         return;
     };
     if !state.foreign_toplevel.handles.contains_key(&id) {
-        add(state, &window);
+        if mapped(state, &window, id) {
+            add(state, &window);
+        }
         return;
     }
     let published = published_of(state, &window, id);

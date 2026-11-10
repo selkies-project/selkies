@@ -2577,23 +2577,52 @@ where
     );
     // The top layer (a desktop's panel) lies over the windows, except under a window the policy
     // shows fullscreen on top: a video or a game covers the panel, as it does on every desktop,
-    // and the panel is back once the window leaves fullscreen.
+    // and the panel is back once the window leaves fullscreen. X11 override-redirect windows
+    // (menus, tooltips, a tray's icon strip, a game's own full-screen window) lie over the top
+    // layer, as Xwayland compositors stack them, since they place themselves; under a fullscreen
+    // window they keep their place in the stacking, so a tray's strip stays under the game with
+    // the panel it sits on.
     let fullscreen_on_top = scene
         .space
         .elements_for_output(scene.output)
-        .next_back()
+        .rfind(|window| !wayland::frontend::is_override_redirect(window))
         .and_then(|window| wayland::frontend::window_meta(window).map(|m| m.id))
         .and_then(|id| scene.wm.and_then(|wm| wm.states.get(&id)))
         .is_some_and(|states| states.fullscreen);
     {
         let layer_map = layer_map_for_output(scene.output);
         push_layer_elements(renderer, &mut elements, &layer_map, Layer::Overlay, scale);
-        if !fullscreen_on_top {
-            push_layer_elements(renderer, &mut elements, &layer_map, Layer::Top, scale);
-        }
+    }
+    let lifted = |window: &&smithay::desktop::Window| {
+        !fullscreen_on_top && wayland::frontend::is_override_redirect(window)
+    };
+    for window in scene
+        .space
+        .elements_for_output(scene.output)
+        .rev()
+        .filter(lifted)
+    {
+        push_window_elements(
+            scene.space,
+            scene.wm,
+            renderer,
+            &mut elements,
+            window,
+            scene.origin,
+            scale,
+        );
+    }
+    if !fullscreen_on_top {
+        let layer_map = layer_map_for_output(scene.output);
+        push_layer_elements(renderer, &mut elements, &layer_map, Layer::Top, scale);
     }
     push_ghost_elements(renderer, &mut elements, scene.wm, scene.origin, scale);
-    for window in scene.space.elements_for_output(scene.output).rev() {
+    for window in scene
+        .space
+        .elements_for_output(scene.output)
+        .rev()
+        .filter(|window| !lifted(window))
+    {
         push_window_elements(
             scene.space,
             scene.wm,

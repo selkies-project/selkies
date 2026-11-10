@@ -474,6 +474,13 @@ pub const PARKED_POS: (i32, i32) = (-(1 << 20), -(1 << 20));
 /// real size the moment the screen is given an output.
 pub const PARKED_LOGICAL_SIZE: (i32, i32) = (320, 240);
 
+/// Whether a window is an X11 override-redirect one, which places and stacks itself.
+pub fn is_override_redirect(window: &Window) -> bool {
+    window
+        .x11_surface()
+        .is_some_and(|s| s.is_override_redirect())
+}
+
 /// The window's meta, inserted at `new_toplevel`; windows created before that (none in
 /// practice) read as id 0 / primary output.
 pub fn window_meta(window: &Window) -> Option<&WindowMeta> {
@@ -1728,11 +1735,19 @@ impl AppState {
         })
     }
 
-    /// What the pointer targets at a logical layout point: an overlay or top layer surface,
-    /// then a window, then a bottom or background layer surface, each through its popup where
-    /// one lies under the point, since a popup takes pointer events on its own surface. Layer
-    /// geometry is output-local, so layers are hit-tested with the point local to the output
-    /// under it.
+    /// What the pointer targets at a logical layout point: an overlay layer surface, an X11
+    /// override-redirect window on top under the point, a top layer surface, then a window, then
+    /// a bottom or background layer surface, each through its popup where one lies under the
+    /// point, since a popup takes pointer events on its own surface. That is the order they are
+    /// drawn in. Layer geometry is output-local, so layers are hit-tested with the point local to
+    /// the output under it.
+    ///
+    /// While an X11 popup menu is open, the pointer is that menu's wherever it is, outside the
+    /// menu too: an X11 client grabs the pointer for its menu and closes the menu on a click
+    /// elsewhere, but rootless Xwayland hears of the pointer only over its own windows, so a
+    /// click on a Wayland surface would leave the menu open and holding the pointer.
+    /// [`x11_menu_open`]'s window gets the events, at points Xwayland turns into the root
+    /// coordinates the grab is delivered with.
     pub(crate) fn pointer_target_under(
         &self,
         p: Point<f64, Logical>,
@@ -1762,7 +1777,17 @@ impl AppState {
                 })
             })
         };
-        layer_hit(&[Layer::Overlay, Layer::Top])
+        if let Some(menu) = self.x11_menu_open() {
+            return Some(menu);
+        }
+        layer_hit(&[Layer::Overlay])
+            .or_else(|| {
+                self.space
+                    .element_under(p)
+                    .filter(|(window, _)| is_override_redirect(window))
+                    .map(|(window, loc)| (FocusTarget::Window(window.clone()), loc.to_f64()))
+            })
+            .or_else(|| layer_hit(&[Layer::Top]))
             .or_else(|| {
                 self.space.element_under(p).map(|(window, loc)| {
                     window
@@ -1772,6 +1797,26 @@ impl AppState {
                 })
             })
             .or_else(|| layer_hit(&[Layer::Bottom, Layer::Background]))
+    }
+
+    /// The topmost X11 popup menu that is open, with where it lies.
+    fn x11_menu_open(&self) -> Option<(FocusTarget, Point<f64, Logical>)> {
+        use smithay::xwayland::xwm::WmWindowType;
+        let menu = self.space.elements().rev().find(|window| {
+            window.x11_surface().is_some_and(|surface| {
+                surface.is_override_redirect()
+                    && matches!(
+                        surface.window_type(),
+                        Some(
+                            WmWindowType::PopupMenu
+                                | WmWindowType::DropdownMenu
+                                | WmWindowType::Menu
+                        )
+                    )
+            })
+        })?;
+        let loc = self.space.element_location(menu)?;
+        Some((FocusTarget::Window(menu.clone()), loc.to_f64()))
     }
 
     /// Hands pointer focus to what now lies under a still pointer once a window maps, unmaps,
