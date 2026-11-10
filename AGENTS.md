@@ -163,7 +163,9 @@ is recognized (the language's models in github/codeql list the forms: for a path
 with `starts_with` against the root it must stay under; for a value from a fixed set, a comparison against
 literals; for a redirect, a constant prefix the value follows), so the checker keeps watching that path. A protocol
 requirement alone is dismissed, with the standard that fixes it named (a hash, port or file format the protocol or
-its tools prescribe).
+its tools prescribe). An advisory that no release of a library fixes, once the code removes the path it describes, is
+listed with that mitigation in `scripts/ci/snyk-mitigated.json` on a maintainer's word, and the entry goes with the
+advisory or the library.
 
 ## Landing a change
 

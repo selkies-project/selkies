@@ -117,10 +117,8 @@ jobs:
 
       - name: Test them
         if: steps.token.outputs.present
-        # A vulnerable crate or library (exit status 1) fails the job as a failed test does
+        # A vulnerable crate or library fails the job as a failed test does,
+        # unless scripts/ci/snyk-mitigated.json names it with the code's mitigation
         run: |
-          status=0
-          for sbom in $(git ls-files --others --exclude-standard -- '*.cdx.json'); do
-            "${RUNNER_TEMP}/snyk" sbom test --file="${sbom}" --org=selkies || status=1
-          done
-          exit "${status}"
+          # shellcheck disable=SC2046  # one SBOM per line, no spaces in the paths
+          scripts/ci/snyk-sbom-test.sh "${RUNNER_TEMP}/snyk" selkies $(git ls-files --others --exclude-standard -- '*.cdx.json')
