@@ -5061,11 +5061,16 @@ mod qp_bound_sweep {
     }
 
     /// A capped CRF stripe its peak bound while the page scrolled codes the still page it
-    /// leaves again once the peak lets go, without a key frame: the page comes to the uncapped
-    /// session's quality, and every coarse block is refreshed once.
+    /// leaves again once the peak lets go, without a key frame: every coarse block is refreshed
+    /// once, and the page comes to within `NEAR_DB` of the uncapped session's quality. The
+    /// refresh's held quantizer lands at 37.7 dB on any host; the uncapped rate factor's own
+    /// result moves with the host's cores, which set x264's slice threads (37.9 dB on four,
+    /// 38.6-38.8 on one to three), and a refresh no finer than the session's quantizer lands at
+    /// 35.1-35.3.
     #[cfg(feature = "gpl")]
     #[test]
     fn x264_capped_crf_refreshes_what_it_coded_bound_once_its_peak_lets_go() {
+        const NEAR_DB: f64 = 1.5;
         const FRAMES: usize = 200;
         let page = still_page_luma();
         let (plain, _, _, _) = scroll_then_still(0, 0, FRAMES, false);
@@ -5080,7 +5085,7 @@ mod qp_bound_sweep {
         assert!(!coarse, "coarse blocks left");
         assert!(refreshing > 0, "nothing refreshed the still page");
         assert!(
-            b >= a - 0.5,
+            b >= a - NEAR_DB,
             "refreshed to {b:.2} dB against {a:.2} uncapped"
         );
     }
