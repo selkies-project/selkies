@@ -2467,12 +2467,16 @@ impl Engine {
             self.set_rect(id, Rect::new(x, rect.y, restored.w, restored.h));
         }
         let rect = self.windows[&id].rect;
+        let client_held = self
+            .press
+            .is_some_and(|p| !p.consumed && p.context == Context::Client);
         self.grab = Some(Grab {
             window: id,
             kind,
             origin: self.press.map(|p| p.at).unwrap_or(self.pointer),
             start: rect,
             button,
+            client_held,
         });
         self.set_cursor(match kind {
             GrabKind::Move => "grabbing",
@@ -2657,6 +2661,9 @@ impl Engine {
                 } if grab.button.is_none_or(|b| b == button_number(button)) => {
                     self.end_grab();
                     self.press = None;
+                    if grab.client_held {
+                        return Verdict::Pass;
+                    }
                 }
                 PointerKind::Button { pressed: true, .. } if grab.button.is_none() => {
                     self.end_grab();
@@ -5465,6 +5472,59 @@ mod tests {
         );
         assert!(!engine.windows[&1].minimized);
         assert_eq!(engine.focus, Some(1));
+    }
+
+    /// A drag a client's own title bar asked for gives the client the release that ends it,
+    /// so the client lets go of the button and the next press on its title bar drags again.
+    #[test]
+    fn a_client_drag_hands_its_release_to_the_client() {
+        let (mut engine, _) = engine();
+        open(&mut engine, 1, 600, 400);
+        let rect = engine.windows[&1].rect;
+        let under = Under {
+            window: Some(1),
+            ..Under::default()
+        };
+        let pointer = |x: f64, y: f64, kind: PointerKind| {
+            Event::Pointer(
+                PointerEvent {
+                    x,
+                    y,
+                    kind,
+                    modifiers: Modifiers::default(),
+                    time: 1,
+                },
+                under,
+            )
+        };
+        let button = |pressed: bool| PointerKind::Button {
+            button: BTN_LEFT,
+            pressed,
+        };
+        let mut out = Vec::new();
+        for _ in 0..2 {
+            let at = engine.windows[&1].rect;
+            let (x, y) = (at.x as f64 + 100.0, at.y as f64 + 10.0);
+            assert_eq!(
+                engine.handle(pointer(x, y, button(true)), &mut out),
+                Verdict::Pass
+            );
+            engine.handle(
+                Event::Request {
+                    id: 1,
+                    request: Request::Move,
+                },
+                &mut out,
+            );
+            assert!(engine.grab.is_some());
+            engine.handle(pointer(x + 50.0, y + 30.0, PointerKind::Motion), &mut out);
+            assert_eq!(
+                engine.handle(pointer(x + 50.0, y + 30.0, button(false)), &mut out),
+                Verdict::Pass
+            );
+            assert!(engine.grab.is_none());
+        }
+        assert_eq!(engine.windows[&1].rect.x, rect.x + 100);
     }
 
     /// Maximize fills the workarea under the title bar and restore brings the geometry back;

@@ -138,6 +138,10 @@ pub struct Grab {
     pub start: Rect,
     /// The button that holds the drag, released to end it; `None` for a drag the keyboard began.
     pub button: Option<u32>,
+    /// The client saw the press that holds the drag, as it does for a drag its own title bar
+    /// asks for, so the release that ends it goes to the client too: one that never sees it
+    /// goes on holding the button and takes the next press for a motion.
+    pub client_held: bool,
 }
 
 /// The client rectangle a drag asks for with the pointer at `(x, y)`, from the start geometry.
@@ -294,6 +298,7 @@ mod tests {
             origin: (100.0, 100.0),
             start: Rect::new(50, 60, 400, 300),
             button: Some(1),
+            client_held: false,
         }
     }
 
