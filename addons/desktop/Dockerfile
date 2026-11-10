@@ -124,8 +124,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 # The text editor, FerrisPad, from its release's package, checked against the
 # digest GitHub records for it; it takes light or dark from the GSettings the
 # shell sets. Its build needs a newer C library than some bases carry, and apt
-# refuses it there, so GNOME Text Editor takes its place, in the right-click
-# menu too (below). Resources, the system monitor, comes where the
+# refuses it there, so GNOME Text Editor takes its place. Resources, the system monitor, comes where the
 # distribution carries it.
 RUN --mount=type=secret,id=github_token,uid=1000 set -eu; \
     apt-get clean && apt-get update; \
@@ -260,11 +259,6 @@ RUN set -eu; \
 COPY --chown=1000:1000 addons/desktop/rootfs/ /
 COPY --chown=1000:1000 addons/desktop/selkies-terminal /usr/local/bin/
 RUN chmod -f 755 /usr/local/bin/selkies-terminal /etc/xdg/openbox/autostart && \
-    if ! command -v FerrisPad > /dev/null; then \
-        sed -i 's#icon="ferrispad"#icon="org.gnome.TextEditor"#;s#<command>FerrisPad</command>#<command>gnome-text-editor</command>#' \
-            /etc/xdg/openbox/menu.xml && \
-        grep -q '<command>gnome-text-editor</command>' /etc/xdg/openbox/menu.xml; \
-    fi && \
     update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/local/bin/selkies-terminal 50 && \
     [ "$(readlink -f /etc/alternatives/x-terminal-emulator)" = /usr/local/bin/selkies-terminal ] && \
     printf '%s\n' \

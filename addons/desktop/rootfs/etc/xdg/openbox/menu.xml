@@ -7,8 +7,8 @@
   The window manager's right-click menu on the desktop, installed as
   /etc/xdg/openbox/menu.xml, the file Openbox would read, and read on both
   backends; a user's ~/.config/openbox/menu.xml replaces it. It offers the
-  everyday applications, every installed one by category, the
-  open windows, and the desktop's own commands. The selkies-applications menu
+  desktop's own commands, every installed application by category, and the
+  open windows. The selkies-applications menu
   is the window manager's own, filled from the installed desktop entries with
   their icons, and an item written without an icon gets the one of the
   application it starts. There is no Exit: the window manager is the server's,
@@ -17,32 +17,17 @@
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
   <menu id="selkies-applications" label="Applications" icon="applications-all" />
   <menu id="root-menu" label="Selkies">
-    <item label="Terminal" icon="utilities-terminal">
-      <action name="Execute"><command>x-terminal-emulator</command></action>
-    </item>
-    <item label="Files" icon="system-file-manager">
-      <action name="Execute"><command>selkies-desktop --files</command></action>
-    </item>
     <item label="New Folder" icon="folder-new">
       <action name="Execute"><command>selkies-desktop --new-folder</command></action>
-    </item>
-    <item label="Change Wallpaper" icon="preferences-desktop-wallpaper">
-      <action name="Execute"><command>selkies-desktop --settings wallpaper</command></action>
     </item>
     <item label="Desktop Settings" icon="preferences-desktop">
       <action name="Execute"><command>selkies-desktop --settings</command></action>
     </item>
+    <item label="Change Wallpaper" icon="preferences-desktop-wallpaper">
+      <action name="Execute"><command>selkies-desktop --settings wallpaper</command></action>
+    </item>
     <item label="Keyboard Shortcuts" icon="preferences-desktop-keyboard">
       <action name="Execute"><command>selkies-desktop --settings shortcuts</command></action>
-    </item>
-    <item label="Firefox" icon="firefox">
-      <action name="Execute"><command>firefox</command></action>
-    </item>
-    <item label="Google Chrome" icon="google-chrome">
-      <action name="Execute"><command>google-chrome</command></action>
-    </item>
-    <item label="Text Editor" icon="ferrispad">
-      <action name="Execute"><command>FerrisPad</command></action>
     </item>
     <separator />
     <menu id="selkies-applications" />
