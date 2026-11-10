@@ -75,9 +75,9 @@ pub const MAX_STRIPE_CAPACITY: usize = 64;
 ///    conversion runs on the calling thread in place.
 /// 3. **Parallel bands**: otherwise `src` and the three output planes are carved into contiguous
 ///    per-band sub-slices (chroma rows scaled by `uv_rows` — full height for 4:4:4, half for
-///    4:2:0) and converted on the rayon pool, whose workers already exist, so a frame spawns no
-///    thread. The final band absorbs any leftover rows, taking all remaining rows whenever fewer
-///    than `band_h + 2` are left. The first error wins.
+///    4:2:0) and converted on the pool of `bands` threads (`on_band_pool`), whose workers
+///    already exist, so a frame spawns no thread. The final band absorbs any leftover rows,
+///    taking all remaining rows whenever fewer than `band_h + 2` are left. The first error wins.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn convert_to_yuv_mt(
     src: &[u8],
@@ -172,12 +172,14 @@ pub(crate) fn convert_to_yuv_mt(
         v_rest = v_next;
         jobs.push((src_band, y_band, u_band, v_band, h));
     }
-    jobs.into_par_iter()
-        .map(|(src_band, y_band, u_band, v_band, h)| {
-            convert_band(src_band, y_band, u_band, v_band, h)
-        })
-        .collect::<Result<Vec<()>, _>>()
-        .map(|_| ())
+    on_band_pool(bands, || {
+        jobs.into_par_iter()
+            .map(|(src_band, y_band, u_band, v_band, h)| {
+                convert_band(src_band, y_band, u_band, v_band, h)
+            })
+            .collect::<Result<Vec<()>, _>>()
+            .map(|_| ())
+    })
 }
 
 /// The rows of each band a conversion of `height` rows splits into for up to `bands` threads
@@ -201,6 +203,46 @@ fn band_heights(height: usize, bands: usize) -> Vec<usize> {
         row += h;
     }
     heights
+}
+
+/// The most bands a conversion keeps a pool for (`on_band_pool`); more run on rayon's global
+/// pool. A session converts in as many bands as its encode threads, eight at most
+/// (`session::threads_up_to`).
+const MAX_POOLED_BANDS: usize = 16;
+
+/// Run `convert`, a conversion's parallel bands, on a pool of `bands` threads: one a band
+/// count, built the first time a conversion asks for it and kept for the process.
+///
+/// rayon's global pool has a thread per CPU. Handed a frame's bands, it also wakes the threads
+/// it has no band for, and those spin before they sleep again, a cost that grows with the CPUs
+/// rather than the bands. On a pool of as many threads as bands, each thread takes a band.
+/// Where the pool cannot be built, or `bands` is over `MAX_POOLED_BANDS`, the bands run on the
+/// global pool.
+///
+/// A conversion called on a rayon pool's thread keeps to that pool: the forked child that
+/// `encodes_in_child` probes an encoder in installs one, since a pool built before the fork
+/// has no threads in the child.
+fn on_band_pool<R: Send>(bands: usize, convert: impl FnOnce() -> R + Send) -> R {
+    if rayon::current_thread_index().is_some() {
+        return convert();
+    }
+    static POOLS: [std::sync::OnceLock<Option<rayon::ThreadPool>>; MAX_POOLED_BANDS + 1] =
+        [const { std::sync::OnceLock::new() }; MAX_POOLED_BANDS + 1];
+    let pool = POOLS.get(bands).and_then(|pool| {
+        pool.get_or_init(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(bands)
+                .thread_name(|_| "pixelflux-csc".into())
+                .build()
+                .map_err(|e| eprintln!("[software] no {bands}-thread conversion pool: {e}"))
+                .ok()
+        })
+        .as_ref()
+    });
+    match pool {
+        Some(pool) => pool.install(convert),
+        None => convert(),
+    }
 }
 
 /// Convert a packed buffer, B,G,R,A or with `rgba_input` R,G,B,A, to 8-bit 4:2:0 BT.709 limited
@@ -258,10 +300,12 @@ pub(crate) fn convert_to_nv12_mt(
         uv_rest = uv_next;
         jobs.push((src_band, y_band, uv_band, h));
     }
-    jobs.into_par_iter()
-        .map(|(src_band, y_band, uv_band, h)| convert_band(src_band, y_band, uv_band, h))
-        .collect::<Result<Vec<()>, _>>()
-        .map(|_| ())
+    on_band_pool(bands, || {
+        jobs.into_par_iter()
+            .map(|(src_band, y_band, uv_band, h)| convert_band(src_band, y_band, uv_band, h))
+            .collect::<Result<Vec<()>, _>>()
+            .map(|_| ())
+    })
 }
 
 /// The fixed-point scale of the 10-bit conversion's coefficients.
@@ -400,10 +444,12 @@ pub(crate) fn convert_to_yuv10_mt(
         row += h;
         jobs.push((src_band, y_band, u_band, v_band, h));
     }
-    jobs.into_par_iter()
-        .for_each(|(src_band, y_band, u_band, v_band, h)| {
-            convert_band(src_band, y_band, u_band, v_band, h)
-        });
+    on_band_pool(bands, || {
+        jobs.into_par_iter()
+            .for_each(|(src_band, y_band, u_band, v_band, h)| {
+                convert_band(src_band, y_band, u_band, v_band, h)
+            })
+    });
 }
 
 thread_local! {
@@ -3439,6 +3485,40 @@ mod tests {
                 assert_eq!(g, vec![(0, h & !1)], "h={h} n={n}");
             }
         }
+    }
+
+    /// A conversion's bands run on a pool of as many threads; a count past the pooled ones runs
+    /// on the global pool, and a conversion already on a pool, such as the forked encoder
+    /// probe's, stays on it.
+    #[test]
+    fn bands_convert_on_a_pool_of_as_many_threads() {
+        use super::{MAX_POOLED_BANDS, on_band_pool};
+        let on_pool = || {
+            (
+                rayon::current_num_threads(),
+                rayon::current_thread_index().is_some(),
+            )
+        };
+        for bands in [2usize, 4, 7] {
+            assert_eq!(on_band_pool(bands, on_pool), (bands, true), "{bands} bands");
+            let named = on_band_pool(bands, || std::thread::current().name().map(str::to_owned));
+            assert_eq!(named.as_deref(), Some("pixelflux-csc"));
+        }
+        let past = MAX_POOLED_BANDS + 1;
+        assert_eq!(
+            on_band_pool(past, on_pool),
+            (rayon::current_num_threads(), false),
+            "{past} bands run where they are called"
+        );
+        let own = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("pool");
+        assert_eq!(
+            own.install(|| on_band_pool(4, on_pool)),
+            (1, true),
+            "a conversion on a pool keeps to it"
+        );
     }
 
     /// The host convert sites chroma at the center of the block on both its paths, the
