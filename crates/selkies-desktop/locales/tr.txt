@@ -60,6 +60,7 @@ No matches = Eşleşme yok
 Pin to favorites = Sık kullanılanlara sabitle
 Unpin from favorites = Sık kullanılanlardan kaldır
 Add to quick launch = Hızlı başlata ekle
+Add to desktop = Masaüstüne ekle
 Remove from quick launch = Hızlı başlattan kaldır
 Multimedia = Çoklu ortam
 Development = Geliştirme

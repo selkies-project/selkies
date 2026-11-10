@@ -60,6 +60,7 @@ No matches = कोई मेल नहीं
 Pin to favorites = पसंदीदा में पिन करें
 Unpin from favorites = पसंदीदा से हटाएँ
 Add to quick launch = त्वरित लॉन्च में जोड़ें
+Add to desktop = डेस्कटॉप पर जोड़ें
 Remove from quick launch = त्वरित लॉन्च से हटाएँ
 Multimedia = मल्टीमीडिया
 Development = डेवलपमेंट

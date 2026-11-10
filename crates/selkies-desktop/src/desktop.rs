@@ -1146,6 +1146,48 @@ impl Desktop {
         self.repaint_wallpapers();
     }
 
+    /// Puts an application's launcher on the desktop: its desktop entry copied into the Desktop
+    /// folder under the entry's own file name, marked executable as launchers there are, and
+    /// selected on the first free cell.
+    ///
+    /// The copy is registered as a Desktop launcher at once, so it shows the application's
+    /// name and icon before the folder's watch reloads the applications.
+    ///
+    /// # Arguments
+    /// * `id` - The application's desktop file ID.
+    pub fn add_to_desktop(&mut self, id: &str) {
+        let Some(entry) = self
+            .apps
+            .find(id)
+            .and_then(|index| self.apps.entries.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(file) = entry
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let dir = entries::desktop_dir();
+        let target = dir.join(&file);
+        if !target.exists() {
+            let copied = std::fs::create_dir_all(&dir).and_then(|()| std::fs::copy(&entry.path, &target));
+            if let Err(error) = copied {
+                eprintln!("selkies-desktop: cannot put {file} on the desktop: {error}");
+                return;
+            }
+            let _ = std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+            self.apps.desktop.push(selkies_draw::apps::Entry {
+                path: target,
+                ..entry
+            });
+        }
+        self.place_new_desktop_item(&file, None);
+    }
+
     /// Keeps the cells of every desktop item in the layout file.
     fn save_desktop_layout(&mut self, cells: &[crate::desktop_folder::Cell]) {
         if let Err(error) = crate::desktop_folder::write_layout(&self.desktop_items, cells) {

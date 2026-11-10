@@ -7,6 +7,8 @@
 //! as tiles beside it.  Each category row carries its theme icon.  The
 //! shell's own settings open from a button beside the search box rather
 //! than from a category, so the categories list the applications alone.
+//! An application's right-click menu pins it to the favorites or the quick
+//! launch and puts its launcher on the desktop.
 
 use crate::config::MenuLayout;
 use crate::desktop::{Desktop, Hover, Popup};
@@ -58,6 +60,8 @@ const TILE_ICON: i32 = 34;
 const PAD: i32 = 10;
 /// Height of the search box.
 const SEARCH_HEIGHT: i32 = 34;
+/// Width of the Settings button, room for its icon and a translated label.
+const SETTINGS_WIDTH: i32 = 140;
 /// Height of the footer.
 const FOOTER_HEIGHT: i32 = 30;
 /// Width of an application's right-click menu.
@@ -305,9 +309,9 @@ fn layout(d: &Desktop) -> Layout {
     let x = (bar.x + ui::POPUP_MARGIN).min(d.panel.width - ui::POPUP_MARGIN - width);
     let frame = Rect::new(x.max(ui::POPUP_MARGIN), y, width, height);
     let settings = Rect::new(
-        frame.right() - PAD - SEARCH_HEIGHT,
+        frame.right() - PAD - SETTINGS_WIDTH,
         frame.y + PAD,
-        SEARCH_HEIGHT,
+        SETTINGS_WIDTH,
         SEARCH_HEIGHT,
     );
     let search = Rect::new(
@@ -526,7 +530,11 @@ fn context_rows(d: &Desktop, index: usize) -> Vec<(&'static str, &'static str, S
     let id = entry.id.clone();
     let favorite = d.config.favorites.contains(&id);
     let launcher = d.config.launchers.contains(&id);
-    vec![
+    let on_desktop = entry
+        .path
+        .file_name()
+        .is_some_and(|name| entries::desktop_dir().join(name).exists());
+    let mut rows = vec![
         (
             if favorite {
                 tr("Unpin from favorites")
@@ -543,9 +551,13 @@ fn context_rows(d: &Desktop, index: usize) -> Vec<(&'static str, &'static str, S
                 tr("Add to quick launch")
             },
             "launchers",
-            id,
+            id.clone(),
         ),
-    ]
+    ];
+    if !on_desktop {
+        rows.push((tr("Add to desktop"), "desktop", id));
+    }
+    rows
 }
 
 /// The rectangle of the open right-click menu, kept inside the panel surface.
@@ -572,10 +584,12 @@ fn context_rect(d: &Desktop) -> Option<Rect> {
 pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
     ensure_items(d);
     let layout = layout(d);
-    if let Some(rect) = context_rect(d) {
+    if let Some(rect) = context_rect(d)
+        && let Some((index, _, _)) = d.menu.context
+    {
         if rect.contains(x, y) {
             let row = ((y - rect.y as f64 - 6.0) / CONTEXT_ROW as f64).floor();
-            if row >= 0.0 && (row as usize) < 2 {
+            if row >= 0.0 && (row as usize) < context_rows(d, index).len() {
                 return Some(Hover::MenuContextItem(row as usize));
             }
         }
@@ -664,7 +678,11 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
             && let Hover::MenuContextItem(item) = hover
             && let Some((_, key, id)) = context_rows(d, index).get(item).cloned()
         {
-            d.toggle_list_entry(key, &id);
+            if key == "desktop" {
+                d.add_to_desktop(&id);
+            } else {
+                d.toggle_list_entry(key, &id);
+            }
         }
         let hover = hit(d, x, y).unwrap_or(Hover::None);
         d.set_hover(hover);
@@ -1028,23 +1046,35 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
     layout.frame
 }
 
-/// Draws the Settings button: the settings icon on a field-colored square, lit while hovered.
+/// Draws the Settings button: the settings icon and its label on a field-colored button, lit
+/// while hovered.
 fn draw_settings_button(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect) {
     canvas.fill_rounded(rect, 6.0, ui::field_bg());
     if d.hover == Hover::MenuSettings {
         canvas.fill_rounded(rect, 6.0, ui::hover_bg());
     }
     let size = CATEGORY_ICON;
-    let icon_rect = Rect::new(
-        rect.x + (rect.w - size) / 2,
-        rect.y + (rect.h - size) / 2,
-        size,
-        size,
-    );
+    let icon_rect = Rect::new(rect.x + 10, rect.y + (rect.h - size) / 2, size, size);
     let scale = d.panel.scale.max(1);
     if let Some(icon) = d.icons.get("preferences-system", (size * scale) as u32) {
         canvas.draw_image_fit(&icon, icon_rect);
     }
+    let text = Rect::new(
+        icon_rect.right() + 8,
+        rect.y,
+        rect.right() - icon_rect.right() - 16,
+        rect.h,
+    );
+    ui::label(
+        canvas,
+        &mut d.fonts,
+        tr("Settings"),
+        text,
+        ui::FONT_SIZE,
+        false,
+        Align::Left,
+        ui::text(),
+    );
 }
 
 /// Draws the category column.

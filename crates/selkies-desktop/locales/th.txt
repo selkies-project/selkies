@@ -60,6 +60,7 @@ No matches = ไม่พบรายการที่ตรงกัน
 Pin to favorites = ปักหมุดในรายการโปรด
 Unpin from favorites = นำออกจากรายการโปรด
 Add to quick launch = เพิ่มในเปิดใช้ด่วน
+Add to desktop = เพิ่มไปยังเดสก์ท็อป
 Remove from quick launch = นำออกจากเปิดใช้ด่วน
 Multimedia = มัลติมีเดีย
 Development = การพัฒนา

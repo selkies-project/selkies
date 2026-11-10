@@ -60,6 +60,7 @@ No matches = 沒有相符項目
 Pin to favorites = 釘選到我的最愛
 Unpin from favorites = 從我的最愛移除
 Add to quick launch = 加入快速啟動
+Add to desktop = 新增至桌面
 Remove from quick launch = 從快速啟動移除
 Multimedia = 多媒體
 Development = 開發

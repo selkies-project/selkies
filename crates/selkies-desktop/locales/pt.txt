@@ -60,6 +60,7 @@ No matches = Nenhum resultado
 Pin to favorites = Fixar nos favoritos
 Unpin from favorites = Remover dos favoritos
 Add to quick launch = Adicionar ao acesso rápido
+Add to desktop = Adicionar à área de trabalho
 Remove from quick launch = Remover do acesso rápido
 Multimedia = Multimídia
 Development = Desenvolvimento

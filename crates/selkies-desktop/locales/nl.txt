@@ -60,6 +60,7 @@ No matches = Geen resultaten
 Pin to favorites = Aan favorieten vastmaken
 Unpin from favorites = Uit favorieten verwijderen
 Add to quick launch = Aan snelstart toevoegen
+Add to desktop = Aan bureaublad toevoegen
 Remove from quick launch = Uit snelstart verwijderen
 Multimedia = Multimedia
 Development = Ontwikkeling

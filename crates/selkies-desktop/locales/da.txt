@@ -60,6 +60,7 @@ No matches = Ingen resultater
 Pin to favorites = Fastgør til favoritter
 Unpin from favorites = Fjern fra favoritter
 Add to quick launch = Føj til hurtigstart
+Add to desktop = Føj til skrivebordet
 Remove from quick launch = Fjern fra hurtigstart
 Multimedia = Multimedie
 Development = Udvikling

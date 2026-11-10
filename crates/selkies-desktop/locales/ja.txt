@@ -60,6 +60,7 @@ No matches = 一致する項目がありません
 Pin to favorites = お気に入りに固定
 Unpin from favorites = お気に入りから外す
 Add to quick launch = クイック起動に追加
+Add to desktop = デスクトップに追加
 Remove from quick launch = クイック起動から削除
 Multimedia = マルチメディア
 Development = 開発

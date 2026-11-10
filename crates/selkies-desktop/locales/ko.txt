@@ -60,6 +60,7 @@ No matches = 일치하는 항목 없음
 Pin to favorites = 즐겨찾기에 고정
 Unpin from favorites = 즐겨찾기에서 제거
 Add to quick launch = 빠른 실행에 추가
+Add to desktop = 바탕 화면에 추가
 Remove from quick launch = 빠른 실행에서 제거
 Multimedia = 멀티미디어
 Development = 개발

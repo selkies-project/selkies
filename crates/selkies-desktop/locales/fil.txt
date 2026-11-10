@@ -60,6 +60,7 @@ No matches = Walang tugma
 Pin to favorites = I-pin sa mga paborito
 Unpin from favorites = Alisin sa mga paborito
 Add to quick launch = Idagdag sa mabilisang paglunsad
+Add to desktop = Idagdag sa desktop
 Remove from quick launch = Alisin sa mabilisang paglunsad
 Multimedia = Multimedia
 Development = Development

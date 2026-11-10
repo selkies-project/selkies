@@ -60,6 +60,7 @@ No matches = Không có kết quả
 Pin to favorites = Ghim vào yêu thích
 Unpin from favorites = Bỏ ghim khỏi yêu thích
 Add to quick launch = Thêm vào khởi chạy nhanh
+Add to desktop = Thêm vào màn hình nền
 Remove from quick launch = Xóa khỏi khởi chạy nhanh
 Multimedia = Đa phương tiện
 Development = Phát triển
