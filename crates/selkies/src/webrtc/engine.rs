@@ -607,10 +607,11 @@ impl RtcEngine {
         }
     }
 
-    /// Hold a display's frames to its steered rate; `None` lets every frame through.
-    pub fn set_video_budget(&self, display_id: &str, bps: Option<f64>) {
+    /// Account a display's frames against its steered rate, holding them to it where `hold`;
+    /// `None` lets every frame through and keeps no account.
+    pub fn set_video_budget(&self, display_id: &str, bps: Option<f64>, hold: bool) {
         if let Some(graph) = self.displays.lock().get(display_id) {
-            graph.video_bridge.set_budget(bps);
+            graph.video_bridge.set_budget(bps, hold);
         }
     }
 

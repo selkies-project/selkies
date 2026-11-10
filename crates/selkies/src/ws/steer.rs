@@ -107,6 +107,12 @@ pub struct CongestionSteer {
     /// Whether a queue or loss has backed the target off yet; until then it climbs at
     /// `START_STEP`.
     congested: bool,
+    /// Whether a tick has read a standing queue: the path has shown it queues what the stream
+    /// sends (`holds_to_target`).
+    pub met_queue: bool,
+    /// Whether a clean tick has seen the path carry the stream unconstrained: the target at its
+    /// ceiling, or over what the stream offered (`holds_to_target`).
+    pub carried: bool,
 }
 
 impl CongestionSteer {
@@ -130,6 +136,16 @@ impl CongestionSteer {
     pub const STALL_DELIVERY: f64 = 0.25;
     pub const STALL_EPISODE_S: f64 = 5.0;
     pub const CARRIED_S: f64 = 2.0;
+
+    /// Whether the stream is held to its target past what its encoder meets it by (over WebRTC
+    /// the bridge's budget, `PipelineBridge::set_budget`): until the path has carried it
+    /// unconstrained, so the climb from the start rate overshoots no more than the target, and
+    /// for good once the path has queued. A path that carried the ceiling and never queued
+    /// carries what an encoder sends past its target too, content its coarsest quantizer cannot
+    /// fit (NVENC's AV1 over a noise band: 13 frames a second dropped for the budget at 57 fps).
+    pub fn holds_to_target(&self) -> bool {
+        self.met_queue || !self.carried
+    }
 
     /// The rate the steer cruises at once the drain ends, while one is pending.
     pub fn cruise_kbps(&self) -> Option<f64> {
@@ -169,6 +185,13 @@ impl CongestionSteer {
             self.last_queue_s = queue_s;
         }
         let clean_kbps = self.clean_kbps;
+        if clean(queue_s)
+            && loss <= Self::LOSS
+            && (current >= ceiling
+                || offered_bps.is_some_and(|o| o < current * 1_000.0 * Self::APP_LIMITED))
+        {
+            self.carried = true;
+        }
         if clean(queue_s) && loss <= Self::LOSS {
             let since = *self.clean_since.get_or_insert(now);
             if now - since >= Self::CARRIED_S {
@@ -204,6 +227,7 @@ impl CongestionSteer {
             current = self.cruise_kbps.take().unwrap_or(current);
         }
         if let Some(queue) = queue_s.filter(|q| *q > 0.0) {
+            self.met_queue = true;
             self.strikes = 0;
             let sent_bps = match (offered_bps, acked_offered_bps) {
                 (Some(_), Some(acked)) => Some(acked),
@@ -749,6 +773,79 @@ pub(crate) mod tests {
             [current, CEILING, FLOOR, goodput, loss, now],
             [queue, offered, None, None],
         ))
+    }
+
+    /// The stream is held to its target through the climb from its start, let go once a clean
+    /// tick sees the path carry it at its ceiling or over what it offered, and held again for good
+    /// from the first standing queue: loss does not let it go, nor end it.
+    #[test]
+    fn a_stream_is_held_until_its_path_carries_it_and_once_it_queues() {
+        let mut steer = CongestionSteer::default();
+        assert!(steer.holds_to_target());
+        tick(
+            &mut steer,
+            4000.0,
+            GOODPUT,
+            0.0,
+            0.0,
+            Some(0.0),
+            Some(4_000_000.0),
+        );
+        assert!(steer.holds_to_target(), "a filled climb under the ceiling");
+        tick(
+            &mut steer,
+            8000.0,
+            GOODPUT,
+            0.2,
+            1.0,
+            Some(0.0),
+            Some(8_000_000.0),
+        );
+        assert!(steer.holds_to_target(), "a lossy tick at the ceiling");
+        tick(
+            &mut steer,
+            8000.0,
+            GOODPUT,
+            0.0,
+            2.0,
+            Some(0.0),
+            Some(8_000_000.0),
+        );
+        assert!(!steer.holds_to_target(), "a clean tick at the ceiling");
+        tick(&mut steer, 5600.0, DELIVERED, 0.0, 4.0, Some(0.1), None);
+        assert!(steer.met_queue && steer.holds_to_target());
+        for t in 5..40 {
+            tick(&mut steer, 8000.0, GOODPUT, 0.0, t as f64, Some(0.0), None);
+        }
+        assert!(
+            steer.holds_to_target(),
+            "a path that queued once is kept as one"
+        );
+
+        let mut steer = CongestionSteer::default();
+        tick(
+            &mut steer,
+            4000.0,
+            GOODPUT,
+            0.0,
+            0.0,
+            None,
+            Some(1_000_000.0),
+        );
+        assert!(steer.holds_to_target(), "an unmeasured queue");
+        tick(
+            &mut steer,
+            4000.0,
+            GOODPUT,
+            0.0,
+            1.0,
+            Some(0.0),
+            Some(1_000_000.0),
+        );
+        assert!(
+            !steer.holds_to_target(),
+            "a clean tick that offered under the target"
+        );
     }
 
     #[test]
@@ -2200,6 +2297,7 @@ pub(crate) mod tests {
         CongestionSteer {
             congested: true,
             capacity_kbps: Some(capacity_kbps),
+            met_queue: true,
             ..Default::default()
         }
     }

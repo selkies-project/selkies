@@ -25,7 +25,7 @@ use crate::settings::{effective_cpu_encode_threading, settings, settings_mut};
 use crate::webrtc::peer::Peer;
 use crate::webrtc::service::{State, WebRtcService, bitrate_range};
 use crate::ws::state::{DisplayState, display_settings, json_f64};
-use crate::ws::steer::{LinkAllowance, LinkProbeTick, SteerTick};
+use crate::ws::steer::{CongestionSteer, LinkAllowance, LinkProbeTick, SteerTick};
 
 /// Seconds of the cleanup's rate a still screen's cleanup frame comes to at most (pixelflux's
 /// `cleanup_cap`).
@@ -392,9 +392,16 @@ impl WebRtcService {
                 None => 0.0,
             }
         };
+        let hold = self
+            .st
+            .lock()
+            .congestion
+            .get(display)
+            .is_none_or(CongestionSteer::holds_to_target);
         self.engine.set_video_budget(
             display,
             Some(ceiling.max(kbps / LinkAllowance::SHARE) * 1000.0),
+            hold,
         );
         for peer in owners {
             peer.set_frame_floor(
@@ -839,7 +846,7 @@ impl WebRtcService {
             if !self.steers(&did, cc_on) {
                 // A CRF display whose encoder reads no peak streams at the bitrate its client
                 // chose, which a device that runs at the bitrate whatever the mode codes at.
-                self.engine.set_video_budget(&did, None);
+                self.engine.set_video_budget(&did, None, false);
                 for peer in &bucket.peers {
                     peer.set_steered_bps(None);
                 }
@@ -872,7 +879,7 @@ impl WebRtcService {
                     .path_probes
                     .get(&did)
                     .is_some_and(|p| p.padding);
-            let (target, restored, queued) = {
+            let (target, restored, queued, hold) = {
                 let mut st = self.st.lock();
                 let steer = st.congestion.entry(did.clone()).or_default();
                 let target = steer
@@ -893,7 +900,12 @@ impl WebRtcService {
                 // A target cut by a queue the path showed (the steer holds the capacity it
                 // measured), not by loss alone on a path that never queued: only then do repairs
                 // answer it.
-                (target, steer.restored, steer.capacity_kbps.is_some())
+                (
+                    target,
+                    steer.restored,
+                    steer.capacity_kbps.is_some(),
+                    steer.holds_to_target(),
+                )
             };
             for peer in &bucket.peers {
                 peer.set_steered_bps(Some((target * 1000.0) as u64));
@@ -958,10 +970,12 @@ impl WebRtcService {
             };
             // The budget runs to the room the allowance keeps its margin under: held to the
             // allowance itself, a cleanup's frames, a few percent past their rate, kept it full, and
-            // each one it dropped started the cleanup over.
+            // each one it dropped started the cleanup over. It holds the stream as the steer says
+            // (`CongestionSteer::holds_to_target`), and otherwise keeps account of it alone.
             self.engine.set_video_budget(
                 &did,
                 Some(target.max(allowance / LinkAllowance::SHARE) * 1000.0),
+                hold,
             );
             for peer in &bucket.peers {
                 peer.set_frame_floor(
