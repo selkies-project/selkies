@@ -4389,7 +4389,9 @@ export class Input {
         }
         if (!this._guac_markEvent(event)) return;
         const type = event.type;
-        const now = Date.now();
+        // When the finger moved, not when the handler runs: a main thread busy decoding the
+        // stream runs a lift's handler late, which would time a quick tap past a tap's length
+        const now = event.timeStamp;
         let preventDefault = false;
         let activeTouchMoved = false;
         const LONG_PRESS_MAX_MOVEMENT_SQ = 15 * 15;

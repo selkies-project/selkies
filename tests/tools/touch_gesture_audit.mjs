@@ -88,10 +88,13 @@ function makeInput(trackpad = true) {
 
 const touch = (id, x, y) => ({ identifier: id, clientX: x, clientY: y, screenX: x, screenY: y });
 
-/** Dispatches one touch event of `type` whose changed touches are `changed` and whose live touches are `live`. */
-function fire(input, type, changed, live) {
+/**
+ * Dispatches one touch event of `type` whose changed touches are `changed` and whose live touches
+ * are `live`, stamped with the clock or with `stamp`, when the finger moved before its handler ran.
+ */
+function fire(input, type, changed, live, stamp = now) {
     const event = {
-        type, changedTouches: changed, touches: live, target: element,
+        type, changedTouches: changed, touches: live, target: element, timeStamp: stamp,
         preventDefault() {}, stopPropagation() {},
     };
     input._handleTouchEvent(event);
@@ -312,8 +315,9 @@ function scrollThenLiftOne(input) {
     const rolled = travel(sent);
     advance(300);
     const before = travel(sent);
+    // Slowly, under the trackpad's acceleration, so the pointer travels as far as the finger
     for (let i = 1; i <= 10; i++) {
-        advance(16);
+        advance(100);
         fire(input, 'touchmove', [touch(1, 404 + 10 * i, 401)], [touch(1, 404 + 10 * i, 401)]);
     }
     const moved = travel(sent);
@@ -586,6 +590,19 @@ function pencilTap(input, x, y) {
     advance(1000);
     const all = leftTransitions(sent).map(([, s]) => s).join(',');
     check('direct touch: a finger tap still clicks', all === 'down,up', all);
+}
+{
+    // The lift's handler runs late, the page's main thread busy: the tap is as long as the
+    // finger stayed down
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    fire(input, 'touchstart', [t], [t]);
+    const lifted = now + 80;
+    advance(600);
+    fire(input, 'touchend', [t], [], lifted);
+    advance(1000);
+    const all = leftTransitions(sent).map(([, s]) => s).join(',');
+    check('direct touch: a tap whose lift is handled late still clicks', all === 'down,up', all);
 }
 {
     const { input, sent } = makeInput(true);
