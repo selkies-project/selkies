@@ -87,7 +87,10 @@
   that reason. Besides the commands a session user's `selkies-desktop --menu` and the like send it, the window
   manager writes one there itself, `bar-attached`, a list of display corners each with a flag (`ipc.rs`,
   `parse_bar_edges`): a word that does not read is skipped, and what reads only moves the bars of the displays it
-  names.
+  names. Its settings layer an image's `/etc/xdg/selkies-desktop/config` under the user's file and the
+  `SELKIES_DESKTOP_<KEY>` environment over both; the `terminals`, `run_command`, and `settings` keys only leave
+  entries out of its menus and its launcher, which the session user can still get around by running a program
+  any other way, so an image that must keep a user from a terminal removes the binaries' permissions as well.
 - Out of scope: `website/`, `docs/`, `infra/`, and the prebuilt third-party wheels and patches in `addons/base`.
 
 ## How to exercise it
