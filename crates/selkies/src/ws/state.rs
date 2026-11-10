@@ -164,6 +164,9 @@ pub struct DisplayState {
     /// The size the last layout pass laid out, as the compositor realized it: a realized read
     /// leaves a request that came after the pass to the pass that lays it out.
     pub laid_out: Option<(i32, i32)>,
+    /// The display's encoder, one under the one-reference cap (`capture_settings`), keeps its own
+    /// reference depth because two pages or more streamed the display (`deepen_references`).
+    pub deep_for_pages: bool,
     pub position: String,
     pub video_active: bool,
     pub encoder: String,
@@ -216,6 +219,7 @@ impl DisplayState {
             width: 0,
             height: 0,
             laid_out: None,
+            deep_for_pages: false,
             position: "right".into(),
             video_active,
             encoder: seeds.encoder.clone(),

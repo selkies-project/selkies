@@ -1423,6 +1423,90 @@ async fn actual_non_nvenc_sessions_keep_their_existing_reference_cap() {
     }
 }
 
+/// A second page on a display whose encoder keeps one reference has the encoder take its own
+/// depth in place, as a live tunable with no capture restart. The depth stays once the display
+/// is down to one page, through a reconcile, until the capture next starts.
+#[tokio::test]
+async fn a_second_page_takes_the_encoders_own_reference_depth() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    let frames = |rig: &Rig| {
+        rig.service.st.lock().instances[PRIMARY_DISPLAY]
+            .settings
+            .video_reference_frames
+    };
+    rig.service
+        .st
+        .lock()
+        .instances
+        .get_mut(PRIMARY_DISPLAY)
+        .unwrap()
+        .settings
+        .encode_node_index = -1;
+    assert_eq!(frames(&rig), 1, "one page, one reference");
+    let (starts, tunables) = (capture.count("start"), capture.count("tunables"));
+
+    let mut viewer = rig.viewer().await;
+    viewer.say("SETTINGS,{}").await;
+    settle().await;
+    assert_eq!(frames(&rig), 0, "two pages, the encoder's own depth");
+    assert!(capture.count("tunables") > tunables, "taken live");
+    assert_eq!(capture.count("start"), starts, "with no restart");
+
+    viewer.say("STOP_VIDEO").await;
+    settle().await;
+    let actual = settled_encoder("x264", false);
+    *capture.info.lock() = Some(actual.clone());
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(frames(&rig), 0, "one page again, the depth stays");
+    assert_eq!(
+        capture.count("start"),
+        starts,
+        "and nothing restarts for it"
+    );
+
+    let layout = rig.layout(PRIMARY_DISPLAY).unwrap();
+    rig.service.stop_capture_for_display(PRIMARY_DISPLAY).await;
+    rig.service
+        .start_capture_for_display(PRIMARY_DISPLAY, layout)
+        .await;
+    assert_eq!(
+        capture.starts.lock().last().unwrap().video_reference_frames,
+        1,
+        "its next start takes one reference again"
+    );
+}
+
+/// A page on each of two displays is one page per display: the primary keeps one reference.
+#[tokio::test]
+async fn a_page_on_another_display_leaves_the_primary_one_reference() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let mut second = rig.controller().await;
+    second.say(&secondary_settings("display2", "left")).await;
+    settle().await;
+    assert!(rig.captures.of("display2").is_some());
+    assert_eq!(
+        rig.service.st.lock().instances[PRIMARY_DISPLAY]
+            .settings
+            .video_reference_frames,
+        1
+    );
+    assert!(
+        rig.primary_capture()
+            .starts
+            .lock()
+            .iter()
+            .all(|s| s.video_reference_frames == 1)
+    );
+}
+
 #[tokio::test]
 async fn the_rate_control_and_quality_verbs_apply() {
     let rig = Rig::new();

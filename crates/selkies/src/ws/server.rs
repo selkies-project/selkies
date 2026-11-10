@@ -328,6 +328,7 @@ impl WsService {
     /// encoder that codes the two requests either side of a frame sends the page two key frames
     /// back to back; so this asks only where the relay has not, and the relay waits for it.
     pub(crate) fn schedule_idr_for_page(&self, client: ClientId, display_id: &str) {
+        self.deepen_references(display_id);
         let relay = self
             .reg
             .lock()
@@ -340,6 +341,87 @@ impl WsService {
         self.schedule_idr(display_id);
         if let Some(relay) = relay {
             relay.hold_sync();
+        }
+    }
+
+    /// The pages streaming `display_id`: its owner and, on the primary, the pages beside it and
+    /// the viewers, each unless its video is paused.
+    pub(crate) fn pages_streaming(&self, display_id: &str) -> usize {
+        let reg = self.reg.lock();
+        let live = |c: &ClientId| reg.clients.contains_key(c) && !reg.video_paused.contains(c);
+        let owner = usize::from(reg.owners.get(display_id).is_some_and(live));
+        if display_id != PRIMARY_DISPLAY {
+            return owner;
+        }
+        let beside = reg.co_controllers.iter().filter(|(c, _)| live(c)).count();
+        let viewers = reg
+            .clients
+            .iter()
+            .filter(|(c, client)| client.is_viewer() && live(c))
+            .count();
+        owner + beside + viewers
+    }
+
+    /// Two pages or more stream `display_id`: an encoder under the one-reference cap
+    /// (`capture_settings`) takes its own reference depth, so a page beside the owner that is
+    /// left frames is predicted past rather than sent a key frame. x264 reopens on its next
+    /// frame, which the key frame the page joins on shares; a hardware session restarts its
+    /// capture (`reconcile_reference_frames`). The depth stays when the display is down to one
+    /// page again, until its capture next starts or an x264 session next resizes
+    /// (`settle_depth_on_resize`).
+    fn deepen_references(&self, display_id: &str) {
+        if self.pages_streaming(display_id) < 2 {
+            return;
+        }
+        let software = {
+            let mut st = self.st.lock();
+            let Some(instance) = st.instances.get_mut(display_id) else {
+                return;
+            };
+            if instance.settings.video_reference_frames != 1 {
+                return;
+            }
+            let settings = &mut instance.settings;
+            let software = settings.use_cpu || settings.encode_node_index == -1;
+            if software {
+                settings.video_reference_frames = 0;
+            }
+            if let Some(d) = st.displays.get_mut(display_id) {
+                d.deep_for_pages = true;
+            }
+            software
+        };
+        info!(target: "ws", "Display '{display_id}' streams to two pages or more; its encoder keeps its own reference depth.");
+        if !software {
+            self.schedule_reference_reconcile(display_id);
+            return;
+        }
+        let settings = self
+            .st
+            .lock()
+            .instances
+            .get(display_id)
+            .map(|i| i.settings.clone());
+        if let (Some(capture), Some(settings)) = (self.capture_of(display_id), settings)
+            && let Err(e) = capture.update_tunables(&settings)
+        {
+            warn!(target: "ws", "Display '{display_id}' could not take its encoder's own reference depth: {e}");
+        }
+    }
+
+    /// A resize reopens a software encoder anyway: a depth it took for pages since gone
+    /// (`deepen_references`) ends with it.
+    fn settle_depth_on_resize(&self, display_id: &str, cs: &mut CaptureSettings) {
+        let software = cs.use_cpu || cs.encode_node_index == -1;
+        if cs.video_reference_frames != 0 || !software || self.pages_streaming(display_id) >= 2 {
+            return;
+        }
+        let mut st = self.st.lock();
+        if let Some(d) = st.displays.get_mut(display_id)
+            && d.deep_for_pages
+        {
+            d.deep_for_pages = false;
+            cs.video_reference_frames = 1;
         }
     }
 
@@ -1370,7 +1452,11 @@ impl WsService {
             .await;
         let layout = Layout::new(0, 0, w, h);
         let alive = self.capture_of(display_id).filter(|c| c.is_capturing());
-        match (alive, self.capture_settings(display_id, layout)) {
+        let fresh = self.capture_settings(display_id, layout).map(|mut cs| {
+            self.settle_depth_on_resize(display_id, &mut cs);
+            cs
+        });
+        match (alive, fresh) {
             (Some(capture), Some(fresh)) => {
                 let _guard = self.video_capture_lock.lock().await;
                 let applied = fresh.clone();
@@ -2409,21 +2495,22 @@ impl WsService {
     /// `None` for an unknown secondary.
     ///
     /// Software, VA-API/Intel, V4L2, and Tegra streams keep one reference frame
-    /// (`video_reference_frames`); NVENC keeps its acknowledged references for loss recovery.
-    /// A deeper buffer lets the encoder
-    /// predict past a frame a page dropped (`LOST_FRAME`, a relay's thinned run) instead of
-    /// coding a key frame, but every client
-    /// decodes against all of it on every frame: at 2560x1600 eight frames cost FFmpeg's decoder
-    /// 0.3 ms a frame over one, and a decoder that holds its whole buffer before showing a picture
-    /// shows each that many frames later. TCP loses nothing, so over WebSockets a drop is rare and
-    /// repaired by a key frame; the WebRTC pipeline keeps the depth for the losses its NACK and FEC
-    /// leave.
+    /// (`video_reference_frames`) while one page streams the display; NVENC keeps its acknowledged
+    /// references for loss recovery. A deeper buffer lets the encoder predict past a frame a page
+    /// dropped (`LOST_FRAME`, a relay's thinned run) instead of coding a key frame, but every
+    /// client decodes against all of it on every frame: at 2560x1600 eight frames cost FFmpeg's
+    /// decoder 0.3 ms a frame over one. TCP loses nothing, so one page's drop is rare and repaired
+    /// by a key frame. A display two pages or more stream, where a page beside the owner on a
+    /// narrower link is left frames, starts at the encoder's own depth, and a running one takes
+    /// it as the second page joins (`deepen_references`). The WebRTC pipeline keeps the depth for
+    /// the losses its NACK and FEC leave.
     pub(crate) fn capture_settings(
         &self,
         display_id: &str,
         layout: Layout,
     ) -> Option<CaptureSettings> {
         let cap = self.input().map(|i| i.cursor_size_cap()).unwrap_or(0);
+        let shared = self.pages_streaming(display_id) >= 2;
         let (d, capture_cursor, current_policy) = {
             let st = self.st.lock();
             let d = match st.displays.get(display_id) {
@@ -2509,8 +2596,12 @@ impl WsService {
                 cs.encode_node_index = -1;
                 cs.encode_node_path.clear();
             }
-            if hardware.as_deref() != Some("nvenc") {
+            let capped = hardware.as_deref() != Some("nvenc");
+            if capped && !shared {
                 cs.video_reference_frames = 1;
+            }
+            if let Some(d) = self.st.lock().displays.get_mut(display_id) {
+                d.deep_for_pages = capped && shared;
             }
         }
         Some(cs)
@@ -2796,10 +2887,11 @@ impl WsService {
         });
     }
 
-    /// Keep the one-reference WebSocket cap on every actual encoder except NVENC. The startup
-    /// probe is only a selection hint: a capture can open software for an unsupported format,
-    /// or demote to it after hardware errors. Native reference depth is structural, so a changed
-    /// actual class takes the ordinary capture restart and decoder-reset path exactly once.
+    /// Keep the one-reference WebSocket cap on every actual encoder except NVENC while one page
+    /// streams the display (`deepen_references` has the rest). The startup probe is only a
+    /// selection hint: a capture can open software for an unsupported format, or demote to it
+    /// after hardware errors. Native reference depth is structural, so a changed actual class
+    /// takes the ordinary capture restart and decoder-reset path exactly once.
     pub(crate) async fn reconcile_reference_frames(&self, display_id: &str) {
         let reconfigure = self.reconfigure_lock.lock().await;
         let capture = self.video_capture_lock.lock().await;
@@ -2830,11 +2922,9 @@ impl WsService {
             return;
         };
         let nvenc = actual.info.hardware && actual.info.encoder == "NVENC";
-        let wanted = EncoderPolicy {
-            reference_frames: u32::from(!nvenc),
-            software: !actual.info.hardware,
-        };
-        let (current, layout) = {
+        let shared = self.pages_streaming(display_id) >= 2;
+        let software = !actual.info.hardware;
+        let (current, layout, deep_for_pages) = {
             let st = self.st.lock();
             (
                 st.instances.get(display_id).map(|instance| EncoderPolicy {
@@ -2843,7 +2933,18 @@ impl WsService {
                         || instance.settings.encode_node_index == -1,
                 }),
                 st.layouts.get(display_id).copied(),
+                st.displays
+                    .get(display_id)
+                    .is_some_and(|d| d.deep_for_pages),
             )
+        };
+        // A session that took its own depth for pages since gone keeps it until its capture
+        // next starts (`deepen_references`).
+        let kept = deep_for_pages
+            && current.is_some_and(|c| c.reference_frames == 0 && c.software == software);
+        let wanted = EncoderPolicy {
+            reference_frames: u32::from(!(nvenc || shared || kept)),
+            software,
         };
         if current == Some(wanted) {
             return;
@@ -2865,6 +2966,9 @@ impl WsService {
             .await
         {
             self.start_backpressure_task(display_id);
+        }
+        if let Some(d) = self.st.lock().displays.get_mut(display_id) {
+            d.deep_for_pages = !nvenc && wanted.reference_frames == 0;
         }
     }
 
@@ -3953,7 +4057,10 @@ impl WsService {
                 .filter(|_| alive)
                 .and_then(|l| self.capture_settings(&did, l));
             match fresh.filter(|f| structurally_same(f, &old)) {
-                Some(fresh) => {
+                Some(mut fresh) => {
+                    if (fresh.width, fresh.height) != (old.width, old.height) {
+                        self.settle_depth_on_resize(&did, &mut fresh);
+                    }
                     self.track_capture(&did, |cs| *cs = fresh);
                     keep.insert(did);
                 }
