@@ -32,7 +32,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use log::{error, info, warn};
-use selkies_wm::config::Backend;
+use selkies_wm::config::{Backend, Policy};
+use selkies_wm::frame::Buttons;
 use selkies_wm::session::{
     SessionBus, SessionControl, SessionEnv, SessionPolicy, ShellLauncher, ShellSupervisor,
     start_autostart,
@@ -83,6 +84,12 @@ pub fn start(is_wayland: bool) {
             maximize: s.wm_maximize().on,
             restart_app: s.app_restart().on,
             shell: SHELL.to_string(),
+            wm: Policy {
+                decorations: s.wm_decorations().on,
+                buttons: Buttons::parse(s.wm_buttons()),
+                menus: s.wm_menus().on,
+                keybinds: s.wm_keybinds().on,
+            },
         };
         (s.wm().on, desktop.on, policy)
     };

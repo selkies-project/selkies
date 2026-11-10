@@ -84,6 +84,10 @@ pub trait Launcher: Send {
     fn set_desktop(&mut self, _on: bool) {}
     /// Run the session's application again, once everything it started has ended.
     fn relaunch(&mut self) {}
+    /// What the image takes away from the window manager over its files.
+    fn policy(&self) -> crate::config::Policy {
+        crate::config::Policy::default()
+    }
 }
 
 /// The session's mode as the window manager meets it: whether the desktop shell runs or the
@@ -424,7 +428,7 @@ impl Engine {
     /// An engine for a backend, its configuration and menus read from the files, its programs
     /// started through `launcher`.
     pub fn new(backend: Backend, launcher: Box<dyn Launcher>) -> Engine {
-        let config = Config::load(backend);
+        let config = Config::load(backend, launcher.policy());
         let menus = Menus::load(&config);
         let theme = ThemeWatch::new();
         crate::i18n::select(
@@ -600,7 +604,7 @@ impl Engine {
 
     /// Read the configuration and the menus again, as the `Reconfigure` action does.
     pub fn reconfigure(&mut self) {
-        let config = Config::load(self.backend);
+        let config = Config::load(self.backend, self.config.policy);
         self.menus = Menus::load(&config);
         self.apps = None;
         self.config = config;
@@ -759,7 +763,10 @@ impl Engine {
             pixelflux::wm::Decoration::Client | pixelflux::wm::Decoration::None => false,
         };
         let rule = self.rule_for(&win.info).and_then(|r| r.decor);
-        let decorated = self.theme.look.style.decorate && by_type && rule.unwrap_or(by_client);
+        let decorated = self.theme.look.style.decorate
+            && self.config.policy.decorations
+            && by_type
+            && rule.unwrap_or(by_client);
         if let Some(win) = self.windows.get_mut(&id) {
             win.decorated = decorated;
         }
@@ -1716,6 +1723,7 @@ impl Engine {
                 pressed: None,
                 scale,
                 shadow: false,
+                buttons: self.config.policy.buttons,
             };
             self.renderer.render(&look, client, &appearance)
         });
@@ -2303,6 +2311,7 @@ impl Engine {
             pressed,
             scale,
             shadow: self.backend == Backend::Wayland && !maximized,
+            buttons: self.config.policy.buttons,
         };
         let look = self.theme.look;
         let frame: Frame = self.renderer.render(&look, client, &appearance);
@@ -2601,6 +2610,7 @@ impl Engine {
                 },
                 win.maximized,
                 win.shaded,
+                self.config.policy.buttons,
             );
             let lx = x as i32 - frame.x;
             let ly = y as i32 - frame.y;
@@ -4590,6 +4600,15 @@ mod tests {
         (engine, mode)
     }
 
+    /// A policy without decorations frames no window.
+    #[test]
+    fn a_policy_without_decorations_frames_nothing() {
+        let (mut engine, _) = engine();
+        engine.config.policy.decorations = false;
+        open(&mut engine, 1, 400, 300);
+        assert!(!engine.win(1).unwrap().decorated);
+    }
+
     /// The application alone fills the screen with its top-level windows as they open, and
     /// leaves a dialog its own size.
     #[test]
@@ -4824,7 +4843,13 @@ mod tests {
         );
         let moved = engine.windows[&1].rect;
         assert_eq!((moved.x, moved.y), (rect1.x + 50, rect1.y + 30));
-        let layout = frame::layout(&engine.theme.look.style, Size { w: 600, h: 400 }, false, false);
+        let layout = frame::layout(
+            &engine.theme.look.style,
+            Size { w: 600, h: 400 },
+            false,
+            false,
+            frame::Buttons::ALL,
+        );
         let (_, close) = layout.buttons.last().copied().unwrap();
         let frame = engine.frame_rect(1);
         let at = ((frame.x + close.x + 5) as f64, (frame.y + close.y + 5) as f64);

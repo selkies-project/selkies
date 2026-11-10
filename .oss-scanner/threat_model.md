@@ -33,7 +33,10 @@
   `--app-restart`, the session's mode is read from `~/.config/selkies-wm/session` (the one word `desktop` or
   `application`; anything else is the image's mode) and written when the root menu or the window menu switches
   it, which they offer unless `--session-switch` is off or `--desktop` is locked; a locked mode only keeps the
-  window manager from starting the shell, since the session user can start any program, a pipe menu runs the command the menu names and parses what it prints, the
+  window manager from starting the shell, since the session user can start any program; `--wm-menus` or
+  `--wm-keybinds` turned off take the menu, close, kill, and run bindings away and have the window manager read
+  only the system's `rc.xml`, `menu.xml`, and no key bind overrides, which narrows what a session user reaches
+  through the window manager and nothing else, since the session user can still run programs and write files, a pipe menu runs the command the menu names and parses what it prints, the
   key and pointer bindings start the commands they name in the session user's environment, the Xwayland socket
   the compositor starts for its X11 clients (`crates/pixelflux/src/wayland/xwm.rs`) is one more local socket in
   `/tmp/.X11-unix`, and `zwlr_foreign_toplevel_manager_v1` lets any Wayland client of the capture socket list,

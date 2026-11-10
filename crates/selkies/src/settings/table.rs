@@ -1630,6 +1630,62 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: true,
     },
     SettingDef {
+        name: "wm_decorations",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Frame windows with the window manager's title bar and border; false frames none, as openbox's decor rule set to no does for every window. Windows that draw their own title bar keep it.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "wm_buttons",
+        kind: Kind::Str,
+        default: "minimize,maximize,close",
+        help: "The buttons the window manager's title bars show, a comma-separated list of minimize, maximize, and close, or none for no buttons.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "wm_menus",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Let the mouse open the window manager's menus: the root menu, the window list, and the window menu. False takes those bindings away and stops the window manager from reading the user's rc.xml, menu.xml, and key bind overrides, only the system's.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "wm_keybinds",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Keep the key binds that close or kill a window, open a menu, or start a program. False takes them away and stops the window manager from reading the user's rc.xml, menu.xml, and key bind overrides, only the system's.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "app_wayland_display",
         kind: Kind::Str,
         default: "",
@@ -2903,6 +2959,22 @@ impl Settings {
 
     pub fn wm_maximize(&self) -> BoolSetting {
         self.bool_setting("wm_maximize")
+    }
+
+    pub fn wm_decorations(&self) -> BoolSetting {
+        self.bool_setting("wm_decorations")
+    }
+
+    pub fn wm_buttons(&self) -> &str {
+        self.str_value("wm_buttons")
+    }
+
+    pub fn wm_menus(&self) -> BoolSetting {
+        self.bool_setting("wm_menus")
+    }
+
+    pub fn wm_keybinds(&self) -> BoolSetting {
+        self.bool_setting("wm_keybinds")
     }
 
     pub fn app_wayland_display(&self) -> &str {

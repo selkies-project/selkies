@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use pixelflux::wm::{Modifiers, ResizeEdge};
 
 use self::xml::{Node, truthy};
+use crate::frame::Buttons;
 
 /// Which display server the configuration is read for; it decides which window manager's
 /// directory is searched first.
@@ -425,6 +426,45 @@ pub struct Config {
     /// When the user's key bind overrides file was last modified as read, so a later change
     /// to it is noticed.
     pub overrides_seen: Option<std::time::SystemTime>,
+    /// What the image takes away over the files.
+    pub policy: Policy,
+}
+
+/// What the image decides of the window manager over its files, from the server's settings.
+///
+/// Each only takes away: `false` strips what the files and the defaults give, so an image's own
+/// `rc.xml` keeps working under a policy that leaves it alone. Taking away the menus or the key
+/// binds also stops the window manager from reading the user's `rc.xml`, `menu.xml`, and key
+/// bind overrides, only the system's, so a session locked down this way is not configured back
+/// from the user's home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Policy {
+    /// Server-side decorations; `false` frames no window.
+    pub decorations: bool,
+    /// The title bar's buttons.
+    pub buttons: Buttons,
+    /// The menus the mouse opens: the root menu, the window list, the window menu.
+    pub menus: bool,
+    /// The key binds that close or kill a window, open a menu, or start a program.
+    pub keybinds: bool,
+}
+
+impl Default for Policy {
+    fn default() -> Policy {
+        Policy {
+            decorations: true,
+            buttons: Buttons::ALL,
+            menus: true,
+            keybinds: true,
+        }
+    }
+}
+
+impl Policy {
+    /// Whether the user's own configuration is passed over.
+    pub fn locks_user_files(&self) -> bool {
+        !self.menus || !self.keybinds
+    }
 }
 
 impl Default for Config {
@@ -451,6 +491,7 @@ impl Default for Config {
             sources: Vec::new(),
             search_dirs: Vec::new(),
             overrides_seen: None,
+            policy: Policy::default(),
         }
     }
 }
@@ -491,9 +532,14 @@ pub fn modified(path: &Path) -> Option<std::time::SystemTime> {
 
 impl Config {
     /// The configuration: the first `rc.xml` found along [`search_dirs`] over the defaults, or
-    /// the defaults alone, with the user's key bind overrides applied over either.
-    pub fn load(backend: Backend) -> Config {
-        let dirs = search_dirs(backend);
+    /// the defaults alone, with the user's key bind overrides applied over either, and what the
+    /// policy takes away taken from the result ([`Policy`]).
+    pub fn load(backend: Backend, policy: Policy) -> Config {
+        let mut dirs = search_dirs(backend);
+        if policy.locks_user_files() {
+            let home = selkies_draw::dirs::config_home();
+            dirs.retain(|dir| !dir.starts_with(&home));
+        }
         let mut config = Config::default();
         if let Some(path) = find_file(&dirs, "rc.xml") {
             match std::fs::read_to_string(&path) {
@@ -507,13 +553,36 @@ impl Config {
         config.search_dirs = dirs;
         let overrides = overrides_path();
         config.overrides_seen = modified(&overrides);
-        if let Ok(text) = std::fs::read_to_string(&overrides) {
+        if !policy.locks_user_files()
+            && let Ok(text) = std::fs::read_to_string(&overrides)
+        {
             let applied = config.apply_overrides(&text);
             if applied > 0 {
                 config.sources.push(overrides);
             }
         }
+        config.restrict(policy);
         config
+    }
+
+    /// Take from the bindings what the policy takes away: the mouse binds that open a menu, and
+    /// the key binds that close or kill a window, open a menu, or start a program.
+    pub fn restrict(&mut self, policy: Policy) {
+        self.policy = policy;
+        if !policy.menus {
+            self.mousebinds
+                .retain(|b| !b.actions.iter().any(|a| matches!(a, Action::ShowMenu(_))));
+        }
+        if !policy.keybinds {
+            self.keybinds.retain(|b| {
+                !b.actions.iter().any(|a| {
+                    matches!(
+                        a,
+                        Action::Close | Action::Kill | Action::ShowMenu(_) | Action::Execute(_)
+                    )
+                })
+            });
+        }
     }
 
     /// Whether the overrides file changed since the configuration was read.
@@ -1437,6 +1506,46 @@ pub fn default_mousebinds() -> Vec<MouseBind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A policy that takes the menus and the key binds away strips the binds that open a menu,
+    /// close or kill a window, or start a program, and keeps the rest, Alt-Tab among them.
+    #[test]
+    fn a_locked_down_policy_strips_menus_and_the_binds_that_escape_the_application() {
+        let mut config = Config::default();
+        assert!(
+            config
+                .mousebinds
+                .iter()
+                .any(|b| b.actions.iter().any(|a| matches!(a, Action::ShowMenu(_))))
+        );
+        config.restrict(Policy {
+            menus: false,
+            keybinds: false,
+            ..Policy::default()
+        });
+        assert!(
+            !config
+                .mousebinds
+                .iter()
+                .any(|b| b.actions.iter().any(|a| matches!(a, Action::ShowMenu(_))))
+        );
+        assert!(!config.keybinds.iter().any(|b| {
+            b.actions.iter().any(|a| {
+                matches!(
+                    a,
+                    Action::Close | Action::Kill | Action::ShowMenu(_) | Action::Execute(_)
+                )
+            })
+        }));
+        assert!(
+            config
+                .keybinds
+                .iter()
+                .any(|b| b.actions.contains(&Action::NextWindow))
+        );
+        assert!(config.policy.locks_user_files());
+        assert!(!Policy::default().locks_user_files());
+    }
 
     /// Each backend looks under its own window manager's name first and the other's second,
     /// the user's directory before the system ones.

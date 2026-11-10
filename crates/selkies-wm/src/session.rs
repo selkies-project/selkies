@@ -212,6 +212,8 @@ pub struct SessionPolicy {
     pub restart_app: bool,
     /// The desktop shell's program, a name on the `PATH` or a path.
     pub shell: String,
+    /// What the image takes away from the window manager over its files.
+    pub wm: crate::config::Policy,
 }
 
 /// The session's mode as the server and its window manager share it: whether the desktop shell
@@ -233,6 +235,7 @@ pub struct SessionControl {
     maximize: bool,
     restart_app: bool,
     shell: String,
+    wm: crate::config::Policy,
     state_file: PathBuf,
 }
 
@@ -275,6 +278,7 @@ impl SessionControl {
             maximize: policy.maximize,
             restart_app: policy.restart_app,
             shell: policy.shell,
+            wm: policy.wm,
             state_file,
         }
     }
@@ -555,6 +559,10 @@ impl Launcher for ShellLauncher {
     fn relaunch(&mut self) {
         self.control.relaunch();
     }
+
+    fn policy(&self) -> crate::config::Policy {
+        self.control.wm
+    }
 }
 
 /// How long a shell has to stay up before an exit counts as a crash to back off from rather
@@ -748,6 +756,7 @@ mod tests {
             maximize: true,
             restart_app: false,
             shell: shell.to_string(),
+            wm: crate::config::Policy::default(),
         }
     }
 

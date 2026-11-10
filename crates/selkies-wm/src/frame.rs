@@ -104,8 +104,55 @@ pub fn extents(style: &WindowStyle, maximized: bool, shaded: bool) -> Extents {
     }
 }
 
-/// The layout of a frame around a client of `client` logical pixels.
-pub fn layout(style: &WindowStyle, client: Size, maximized: bool, shaded: bool) -> Layout {
+/// Which buttons a title bar shows, the image's choice over the theme's three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Buttons {
+    pub minimize: bool,
+    pub maximize: bool,
+    pub close: bool,
+}
+
+impl Buttons {
+    /// Every button.
+    pub const ALL: Buttons = Buttons {
+        minimize: true,
+        maximize: true,
+        close: true,
+    };
+
+    /// The buttons a comma-separated list names (`minimize`, `maximize`, `close`, openbox's
+    /// `iconify` too); `none`, or a list naming none of them, for no buttons.
+    pub fn parse(text: &str) -> Buttons {
+        let mut buttons = Buttons {
+            minimize: false,
+            maximize: false,
+            close: false,
+        };
+        for word in text.split(',').map(|w| w.trim().to_ascii_lowercase()) {
+            match word.as_str() {
+                "minimize" | "iconify" => buttons.minimize = true,
+                "maximize" => buttons.maximize = true,
+                "close" => buttons.close = true,
+                _ => {}
+            }
+        }
+        buttons
+    }
+
+    /// Whether the button of a context shows.
+    pub fn shows(self, context: Context) -> bool {
+        match context {
+            Context::Iconify => self.minimize,
+            Context::Maximize => self.maximize,
+            Context::Close => self.close,
+            _ => true,
+        }
+    }
+}
+
+/// The layout of a frame around a client of `client` logical pixels, with the title bar's
+/// buttons the image shows; the title takes the room a hidden button leaves.
+pub fn layout(style: &WindowStyle, client: Size, maximized: bool, shaded: bool, shown: Buttons) -> Layout {
     let extents = extents(style, maximized, shaded);
     let width = client.w + extents.left + extents.right;
     let height = if shaded {
@@ -124,10 +171,13 @@ pub fn layout(style: &WindowStyle, client: Size, maximized: bool, shaded: bool) 
         side
     };
     let top = (TITLE_HEIGHT - button_h) / 2;
-    let order: [Context; 3] = match style.buttons {
+    let order: Vec<Context> = match style.buttons {
         ButtonSide::Right => [Context::Iconify, Context::Maximize, Context::Close],
         ButtonSide::Left => [Context::Close, Context::Iconify, Context::Maximize],
-    };
+    }
+    .into_iter()
+    .filter(|&c| shown.shows(c))
+    .collect();
     let mut buttons = Vec::new();
     let pad = if style.glyphs == Glyphs::Wide { 0 } else { PADDING };
     match style.buttons {
@@ -141,13 +191,17 @@ pub fn layout(style: &WindowStyle, client: Size, maximized: bool, shaded: bool) 
         }
         ButtonSide::Left => {
             let mut x = pad;
-            for context in order {
+            for &context in &order {
                 buttons.push((context, Rect::new(x, top, side, button_h)));
                 x += step;
             }
         }
     }
-    let buttons_w = 3 * step + pad;
+    let buttons_w = if order.is_empty() {
+        0
+    } else {
+        order.len() as i32 * step + pad
+    };
     let icon = match style.buttons {
         ButtonSide::Right => Rect::new(PADDING, (TITLE_HEIGHT - ICON) / 2, ICON, ICON),
         ButtonSide::Left => Rect::new(width - PADDING - ICON, (TITLE_HEIGHT - ICON) / 2, ICON, ICON),
@@ -245,6 +299,8 @@ pub struct Appearance<'a> {
     /// Whether the frame casts a shadow outside its extents, for a backend that blends the parts
     /// over what lies beneath them; a maximized window casts none either way.
     pub shadow: bool,
+    /// The title bar's buttons.
+    pub buttons: Buttons,
 }
 
 /// The rasterizer of frames: the font system and the icon lookup, kept across frames so text
@@ -274,7 +330,13 @@ impl Renderer {
     pub fn render(&mut self, look: &Look, client: Size, appearance: &Appearance<'_>) -> Frame {
         let style = &look.style;
         let palette = &look.palette;
-        let layout = layout(style, client, appearance.maximized, appearance.shaded);
+        let layout = layout(
+            style,
+            client,
+            appearance.maximized,
+            appearance.shaded,
+            appearance.buttons,
+        );
         let e = layout.extents;
         let Size { w, h } = layout.size;
         let scale = appearance.scale.max(1);
@@ -812,7 +874,7 @@ mod tests {
     #[test]
     fn the_hit_test_names_every_part() {
         let style = WindowStyle::default();
-        let layout = layout(&style, Size { w: 400, h: 300 }, false, false);
+        let layout = layout(&style, Size { w: 400, h: 300 }, false, false, Buttons::ALL);
         assert_eq!(layout.size, Size { w: 408, h: 334 });
         assert_eq!(hit(&layout, 200, 15, false), Some(Context::Titlebar));
         assert_eq!(hit(&layout, 200, 1, false), Some(Context::Top));
@@ -831,7 +893,7 @@ mod tests {
         assert_eq!(hit(&layout, 405, 332, false), Some(Context::BRCorner));
         assert_eq!(hit(&layout, 1, 320, false), Some(Context::BLCorner));
         assert_eq!(hit(&layout, 500, 15, false), None);
-        let maximized = super::layout(&style, Size { w: 400, h: 300 }, true, false);
+        let maximized = super::layout(&style, Size { w: 400, h: 300 }, true, false, Buttons::ALL);
         assert_eq!(maximized.extents.left, 0);
         assert_eq!(hit(&maximized, 0, 200, false), None);
     }
@@ -839,7 +901,13 @@ mod tests {
     /// The buttons sit on the side the style names, in the order each side keeps.
     #[test]
     fn the_buttons_follow_the_style() {
-        let right = layout(&WindowStyle::default(), Size { w: 400, h: 300 }, false, false);
+        let right = layout(
+            &WindowStyle::default(),
+            Size { w: 400, h: 300 },
+            false,
+            false,
+            Buttons::ALL,
+        );
         let order: Vec<Context> = right.buttons.iter().map(|(c, _)| *c).collect();
         assert_eq!(order, vec![Context::Iconify, Context::Maximize, Context::Close]);
         assert!(right.buttons[2].1.x > right.buttons[0].1.x);
@@ -852,10 +920,39 @@ mod tests {
             Size { w: 400, h: 300 },
             false,
             false,
+            Buttons::ALL,
         );
         let order: Vec<Context> = left.buttons.iter().map(|(c, _)| *c).collect();
         assert_eq!(order, vec![Context::Close, Context::Iconify, Context::Maximize]);
         assert_eq!(left.buttons[0].1.x, PADDING);
+    }
+
+    /// The buttons the image hides leave the title bar, the ones left keeping their order at
+    /// the edge, and the title takes the room.
+    #[test]
+    fn hidden_buttons_leave_the_title_bar() {
+        let style = WindowStyle::default();
+        let all = layout(&style, Size { w: 400, h: 300 }, false, false, Buttons::ALL);
+        let close_only = layout(
+            &style,
+            Size { w: 400, h: 300 },
+            false,
+            false,
+            Buttons::parse("close"),
+        );
+        let order: Vec<Context> = close_only.buttons.iter().map(|(c, _)| *c).collect();
+        assert_eq!(order, vec![Context::Close]);
+        assert_eq!(close_only.buttons[0].1, all.buttons[2].1);
+        assert!(close_only.title.w > all.title.w);
+        let none = layout(
+            &style,
+            Size { w: 400, h: 300 },
+            false,
+            false,
+            Buttons::parse("none"),
+        );
+        assert!(none.buttons.is_empty());
+        assert_eq!(Buttons::parse("minimize, maximize,close"), Buttons::ALL);
     }
 
     /// What a focused, unmaximized window without a shadow shows at an output scale.
@@ -871,6 +968,7 @@ mod tests {
             pressed: None,
             scale,
             shadow,
+            buttons: Buttons::ALL,
         }
     }
 
@@ -1012,7 +1110,7 @@ mod tests {
             ..appearance(1, false)
         };
         let frame = renderer.render(&look, Size { w: 200, h: 100 }, &hovered);
-        let layout = layout(&look.style, Size { w: 200, h: 100 }, false, false);
+        let layout = layout(&look.style, Size { w: 200, h: 100 }, false, false, Buttons::ALL);
         let (_, close) = layout.buttons.last().copied().unwrap();
         let title = &frame.parts[0].image;
         let center = pixel(title, (close.x + 2) as u32, (close.y + close.h / 2) as u32);

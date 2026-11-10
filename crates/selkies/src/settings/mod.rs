@@ -1627,6 +1627,37 @@ mod tests {
         Settings::parse(&args, &|k| env_map.get(k).cloned())
     }
 
+    /// The session and window manager settings read their environment variables: the
+    /// defaults leave everything on but the restart, and each can be turned off, a locked
+    /// desktop mode keeping its lock.
+    #[test]
+    fn the_session_settings_read_their_environment() {
+        let s = parse(&[], &[]);
+        assert!(s.session_switch().on && s.wm_maximize().on && s.wm_decorations().on);
+        assert!(s.wm_menus().on && s.wm_keybinds().on && !s.app_restart().on);
+        assert_eq!(s.wm_buttons(), "minimize,maximize,close");
+        let s = parse(
+            &[],
+            &[
+                ("SELKIES_DESKTOP", "false|locked"),
+                ("SELKIES_SESSION_SWITCH", "false"),
+                ("SELKIES_APP_RESTART", "true"),
+                ("SELKIES_WM_MAXIMIZE", "false"),
+                ("SELKIES_WM_DECORATIONS", "false"),
+                ("SELKIES_WM_BUTTONS", "close"),
+                ("SELKIES_WM_MENUS", "false"),
+                ("SELKIES_WM_KEYBINDS", "false"),
+            ],
+        );
+        let desktop = s.desktop();
+        assert!(!desktop.on && desktop.locked);
+        assert!(!s.session_switch().on && s.app_restart().on && !s.wm_maximize().on);
+        assert!(!s.wm_decorations().on && !s.wm_menus().on && !s.wm_keybinds().on);
+        assert_eq!(s.wm_buttons(), "close");
+        let s = parse(&[], &[("SELKIES_WM_BUTTONS", "none")]);
+        assert_eq!(s.wm_buttons(), "none");
+    }
+
     #[test]
     fn defaults_resolve() {
         let s = parse(&[], &[]);
