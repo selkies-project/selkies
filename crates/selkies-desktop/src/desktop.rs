@@ -1962,6 +1962,10 @@ impl Desktop {
                     menu::scroll_drag(self, y);
                     return;
                 }
+                if self.menu.favorite_drag.is_some() {
+                    menu::favorite_motion(self, x, y);
+                    return;
+                }
                 let hover = match self.popup {
                     Popup::Menu => menu::hit(self, x, y).unwrap_or(Hover::None),
                     Popup::Launcher => launcher::hit(self, x, y).unwrap_or(Hover::None),
@@ -2048,6 +2052,9 @@ impl Desktop {
             }
             if self.menu.scroll_drag.take().is_some() {
                 self.redraw_panel();
+            }
+            if surface == SurfaceId::Panel && button == Button::Left {
+                menu::favorite_release(self, x, y);
             }
             return;
         }

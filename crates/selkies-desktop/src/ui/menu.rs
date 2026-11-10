@@ -12,7 +12,9 @@
 //! click, so the pointer can cross the column to the applications without
 //! changing the list, and a column whose content overflows shows a thin
 //! scrollbar whose thumb drags and whose track jumps there, since a pointer
-//! may have no wheel.
+//! may have no wheel.  A favorite launches on its release, so one held and
+//! dragged moves to the place it is dropped on instead, in the favorites'
+//! grid and among the tiles alike.
 
 use crate::config::MenuLayout;
 use crate::desktop::{Desktop, Hover, Popup};
@@ -83,6 +85,22 @@ const SCROLLBAR_MIN_THUMB: i32 = 28;
 /// the bar never covers a row and the content does not reflow when it appears.
 const SCROLL_GUTTER: i32 = SCROLLBAR_W + 4;
 
+/// How far a held favorite moves before it drags rather than launches.
+const FAVORITE_DRAG_THRESHOLD: f64 = 6.0;
+
+/// A favorite held by the pointer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FavoriteDrag {
+    /// Its place among the favorites shown.
+    pub from: usize,
+    /// Where the press was.
+    pub start: (f64, f64),
+    /// Where the pointer is.
+    pub at: (f64, f64),
+    /// Whether it moved far enough to drag.
+    pub dragging: bool,
+}
+
 /// A column of the menu that scrolls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrollColumn {
@@ -127,6 +145,8 @@ pub struct MenuState {
     pub context: Option<(usize, i32, i32)>,
     /// The scrollbar whose thumb is being dragged, with where in the thumb it was taken.
     pub scroll_drag: Option<(ScrollColumn, f64)>,
+    /// The favorite held since its press, until the release launches or moves it.
+    pub favorite_drag: Option<FavoriteDrag>,
     items: Vec<usize>,
     items_valid: bool,
     recent_ids: Vec<String>,
@@ -143,6 +163,7 @@ impl Default for MenuState {
             app_scroll: 0.0,
             context: None,
             scroll_drag: None,
+            favorite_drag: None,
             items: Vec::new(),
             items_valid: false,
             recent_ids: Vec::new(),
@@ -191,6 +212,7 @@ impl MenuState {
         self.selected = None;
         self.context = None;
         self.scroll_drag = None;
+        self.favorite_drag = None;
     }
 
     /// The application index shown at a row, when the list is current.
@@ -555,6 +577,181 @@ fn apps_content_height(d: &Desktop, apps: Rect) -> f64 {
     }
 }
 
+/// Whether the application list is the favorites, in their order, so its cells can be
+/// reordered.
+fn favorites_shown(d: &Desktop) -> bool {
+    d.menu.query.trim().is_empty() && d.menu.section == Section::Favorites
+}
+
+/// Holds a favorite on its press, to launch on the release or drag to a new place.
+fn hold_favorite(d: &mut Desktop, from: usize, x: f64, y: f64) {
+    d.menu.favorite_drag = Some(FavoriteDrag {
+        from,
+        start: (x, y),
+        at: (x, y),
+        dragging: false,
+    });
+}
+
+/// The place among the favorites a point drops a dragged one on: the cell or tile under it, a
+/// point past the last one counting as the last place.
+fn favorite_drop_at(d: &Desktop, layout: &Layout, x: f64, y: f64) -> Option<usize> {
+    let count = favorite_entries(d).len();
+    if count == 0 {
+        return None;
+    }
+    if layout.tiles.w > 0 {
+        if !layout.tiles.contains(x, y) {
+            return None;
+        }
+        return Some(
+            (0..count)
+                .find(|&i| tile_rect(layout.tiles, i).contains(x, y))
+                .unwrap_or(count - 1),
+        );
+    }
+    if !favorites_shown(d) || !layout.apps.contains(x, y) {
+        return None;
+    }
+    let Arrangement::Grid { w, h, .. } = arrangement(d) else {
+        let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / ROW as f64).floor();
+        return Some((line.max(0.0) as usize).min(count - 1));
+    };
+    let columns = grid_columns(layout.apps, w);
+    let column = ((x - layout.apps.x as f64) / grid_cell_width(layout.apps, w) as f64).floor();
+    let line = ((y - layout.apps.y as f64 + d.menu.app_scroll) / h as f64).floor();
+    let place = line.max(0.0) as usize * columns + (column.max(0.0) as usize).min(columns - 1);
+    Some(place.min(count - 1))
+}
+
+/// The rectangle of the favorite at a place, as the current layout draws it.
+fn favorite_rect(d: &Desktop, layout: &Layout, place: usize) -> Option<Rect> {
+    if layout.tiles.w > 0 {
+        return Some(tile_rect(layout.tiles, place));
+    }
+    match arrangement(d) {
+        Arrangement::Grid { w, h, .. } => Some(grid_cell(d, layout.apps, place, w, h)),
+        Arrangement::Rows => Some(Rect::new(
+            layout.apps.x,
+            layout.apps.y + place as i32 * ROW - d.menu.app_scroll as i32,
+            content_width(layout.apps),
+            ROW,
+        )),
+    }
+}
+
+/// Follows the pointer with a held favorite, which drags once it has moved far enough.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `x` - Pointer X.
+/// * `y` - Pointer Y.
+pub fn favorite_motion(d: &mut Desktop, x: f64, y: f64) {
+    let Some(drag) = d.menu.favorite_drag.as_mut() else {
+        return;
+    };
+    drag.at = (x, y);
+    let (dx, dy) = (x - drag.start.0, y - drag.start.1);
+    if !drag.dragging && dx.hypot(dy) >= FAVORITE_DRAG_THRESHOLD {
+        drag.dragging = true;
+    }
+    if drag.dragging {
+        d.redraw_panel();
+    }
+}
+
+/// Ends a held favorite on the release: a favorite that did not drag launches, one dragged
+/// onto another place moves there.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `x` - Pointer X.
+/// * `y` - Pointer Y.
+pub fn favorite_release(d: &mut Desktop, x: f64, y: f64) {
+    let Some(drag) = d.menu.favorite_drag.take() else {
+        return;
+    };
+    if !drag.dragging {
+        if let Some(index) = favorite_entries(d).get(drag.from).copied() {
+            d.launch_app(index);
+        }
+        return;
+    }
+    let layout = layout(d);
+    if let Some(to) = favorite_drop_at(d, &layout, x, y)
+        && to != drag.from
+    {
+        move_favorite(d, drag.from, to);
+    }
+    let hover = hit(d, x, y).unwrap_or(Hover::None);
+    d.set_hover(hover);
+    d.redraw_panel();
+}
+
+/// Moves the favorite at one place among those shown to another and writes the order, the
+/// favorites not installed keeping their places in the setting.
+fn move_favorite(d: &mut Desktop, from: usize, to: usize) {
+    let shown: Vec<String> = favorite_entries(d)
+        .into_iter()
+        .map(|index| d.apps.entries[index].id.clone())
+        .collect();
+    if from >= shown.len() || to >= shown.len() {
+        return;
+    }
+    let mut order = shown.clone();
+    let moved = order.remove(from);
+    order.insert(to, moved);
+    let list = reorder_setting(&d.config.favorites, &shown, order);
+    d.write_config(&[("favorites", list.join(", "))]);
+    d.menu.invalidate();
+}
+
+/// The setting's list with the entries shown put back into the slots they held in it, in their
+/// new order, every other entry where it was.
+fn reorder_setting(setting: &[String], shown: &[String], order: Vec<String>) -> Vec<String> {
+    let mut next = order.into_iter();
+    setting
+        .iter()
+        .map(|id| {
+            if shown.contains(id) {
+                next.next().unwrap_or_else(|| id.clone())
+            } else {
+                id.clone()
+            }
+        })
+        .collect()
+}
+
+/// Draws a dragged favorite: the place it would drop on outlined in the accent, and its icon
+/// under the pointer.
+fn draw_favorite_drag(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
+    let Some(drag) = d.menu.favorite_drag.filter(|drag| drag.dragging) else {
+        return;
+    };
+    if let Some(target) = favorite_drop_at(d, layout, drag.at.0, drag.at.1)
+        && let Some(rect) = favorite_rect(d, layout, target)
+    {
+        canvas.stroke_rounded(rect.inflate(-2), 6.0, 3.0, ui::accent());
+    }
+    let Some(index) = favorite_entries(d).get(drag.from).copied() else {
+        return;
+    };
+    let size = if layout.tiles.w > 0 {
+        TILE_ICON
+    } else {
+        FAVORITE_ICON
+    };
+    let rect = Rect::new(
+        drag.at.0 as i32 - size / 2,
+        drag.at.1 as i32 - size / 2,
+        size,
+        size,
+    );
+    if let Some(icon) = d.app_icon_sized(index, size) {
+        canvas.draw_image_fit(&icon, rect);
+    }
+}
+
 /// The rectangle a column scrolls in.
 fn column_rect(layout: &Layout, column: ScrollColumn) -> Rect {
     match column {
@@ -815,7 +1012,9 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
         return true;
     }
     match hover {
-        Hover::MenuApp(_) | Hover::MenuTile(_) => {
+        Hover::MenuApp(row) if favorites_shown(d) => hold_favorite(d, row, x, y),
+        Hover::MenuTile(position) => hold_favorite(d, position, x, y),
+        Hover::MenuApp(_) => {
             if let Some(index) = hovered_entry(d, hover) {
                 d.launch_app(index);
             }
@@ -1108,6 +1307,7 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
     if layout.tiles.w > 0 {
         draw_tiles(d, canvas, &layout);
     }
+    draw_favorite_drag(d, canvas, &layout);
 
     canvas.fill_rect(
         Rect::new(
@@ -1466,6 +1666,20 @@ mod tests {
             let span = grid_cell_width(apps, cell_w) * grid_columns(apps, cell_w) as i32;
             assert!(span <= apps.w - SCROLL_GUTTER && span > apps.w - SCROLL_GUTTER - 5);
         }
+    }
+
+    /// A reordered favorite moves among the installed ones while an entry not installed keeps
+    /// its slot in the setting.
+    #[test]
+    fn a_moved_favorite_keeps_the_uninstalled_ones_in_place() {
+        let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let setting = ids(&["a", "gone", "b", "c"]);
+        let shown = ids(&["a", "b", "c"]);
+        let order = ids(&["c", "a", "b"]);
+        assert_eq!(
+            reorder_setting(&setting, &shown, order),
+            ids(&["c", "gone", "a", "b"])
+        );
     }
 
     #[test]
