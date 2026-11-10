@@ -275,3 +275,6 @@ Create = Aanmaken
 Type a name for the folder = Typ een naam voor de map
 A file or folder with this name already exists = Er bestaat al een bestand of map met deze naam
 Cannot create the folder: {error} = Kan de map niet aanmaken: {error}
+Application icon = Toepassingspictogram
+Light or dark = Licht of donker
+Automatic = Automatisch

@@ -73,6 +73,10 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         ristretto \
         galculator \
         xarchiver \
+        # The image's wallpaper: a package with light and dark pictures the
+        # desktop switches between with its theme, linked below as the
+        # wallpaper a session starts with
+        breeze-wallpaper \
         # What a terminal session is expected to have beyond the base's
         # editors: completion, remote shells and copies, and the network and
         # process tools
@@ -189,7 +193,7 @@ RUN set -eu; \
 # the window manager that frames its windows under SELKIES_DESKTOP come from one tree.
 
 # What the desktop finds in place of settings of its own. Its start button and
-# default wallpaper are the Selkies logo it reads from a fixed path: the bare
+# its application-icon wallpaper are the Selkies logo it reads from a fixed path: the bare
 # mark, not the PWA icon's white plate, which only a launcher's mask needs;
 # without it the start button is a blank strip. Its icon theme is GTK's
 # setting, which Ubuntu's file names as Yaru, not installed here, leaving every
@@ -197,6 +201,8 @@ RUN set -eu; \
 # replaces it for GTK as well. The edit is checked, so an upstream file that no
 # longer matches fails the build rather than a session.
 COPY --chown=1000:1000 docs/assets/logo/mark-512x512.png /usr/share/selkies/www/icon.png
+# The wallpaper a session starts with, where the desktop looks for the image's own.
+RUN test -d /usr/share/wallpapers/Next && ln -sfn /usr/share/wallpapers/Next /usr/share/selkies/wallpaper
 RUN set -eu; \
     if grep -q '^gtk-icon-theme-name' /etc/gtk-3.0/settings.ini; then \
         sed -i 's/^gtk-icon-theme-name.*/gtk-icon-theme-name = breeze/' /etc/gtk-3.0/settings.ini; \

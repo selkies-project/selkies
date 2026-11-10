@@ -19,6 +19,7 @@ mod portal;
 mod toolkits;
 mod tray;
 mod ui;
+mod wallpapers;
 mod watch;
 mod wmtheme;
 mod xkb;
@@ -403,7 +404,9 @@ fn run() -> i32 {
             }
         }
         if fds[files_start..].iter().any(|fd| fd.revents & libc::POLLIN != 0) {
-            desktop.files.drain_worker();
+            if desktop.files.drain_worker() {
+                desktop.settings.dirty = true;
+            }
             desktop.files.drain_watch();
         }
         if debug {

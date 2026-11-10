@@ -275,3 +275,6 @@ Create = Tạo
 Type a name for the folder = Nhập tên cho thư mục
 A file or folder with this name already exists = Đã có tệp hoặc thư mục trùng tên
 Cannot create the folder: {error} = Không thể tạo thư mục: {error}
+Application icon = Biểu tượng ứng dụng
+Light or dark = Sáng hoặc tối
+Automatic = Tự động

@@ -275,3 +275,6 @@ Create = Opret
 Type a name for the folder = Skriv et navn til mappen
 A file or folder with this name already exists = Der findes allerede en fil eller mappe med dette navn
 Cannot create the folder: {error} = Kan ikke oprette mappen: {error}
+Application icon = Programikon
+Light or dark = Lys eller mørk
+Automatic = Automatisk

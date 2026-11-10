@@ -47,6 +47,7 @@
 //! window on the page concerned.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -149,6 +150,10 @@ const PRESET_SMALL_NAME: i32 = 150;
 const PRESET_PAD: i32 = 8;
 /// Height of the name line under a preset's preview.
 const PRESET_NAME: i32 = 22;
+/// Narrowest a wallpaper card gets.
+const WALLPAPER_CARD_MIN: i32 = 150;
+/// Height of the author line under a wallpaper card's name.
+const WALLPAPER_AUTHOR: i32 = 16;
 /// Space between preset cards.
 const PRESET_GAP: i32 = 10;
 /// Height of a key cap on the Shortcuts page.
@@ -677,6 +682,20 @@ enum Kind {
     /// A shortcut's chord as key caps, which a click captures anew; the
     /// label is the chord's label, empty for a bind turned off.
     Keys,
+    /// A wallpaper card: its thumbnail, split into its light and dark
+    /// pictures where it has both, over its name and author.
+    Wallpaper,
+}
+
+/// What a wallpaper card shows.
+#[derive(Clone, Debug, PartialEq)]
+struct WallpaperCard {
+    /// The light picture, or `None` for the application icon on the wallpaper's color.
+    light: Option<PathBuf>,
+    /// The dark picture, drawn on the card's right half, where the wallpaper has one.
+    dark: Option<PathBuf>,
+    /// Who made it.
+    author: Option<String>,
 }
 
 /// One clickable thing in the window.
@@ -692,6 +711,8 @@ struct Control {
     app: Option<usize>,
     /// The look a preset card shows.
     look: Option<preview::Look>,
+    /// What a wallpaper card shows.
+    wallpaper: Option<WallpaperCard>,
     /// The area the control is confined to when it scrolls.
     clip: Option<Rect>,
 }
@@ -817,6 +838,9 @@ pub struct SettingsState {
     /// The preset cards' previews, by the look and scale they were rendered
     /// for.
     presets: HashMap<String, Arc<Pixmap>>,
+    /// The wallpapers installed, read when the window opens and when the
+    /// Wallpaper page is shown.
+    pub wallpapers: Vec<crate::wallpapers::WallpaperEntry>,
 }
 
 /// The color picker of a field.
@@ -862,6 +886,7 @@ impl Default for SettingsState {
             capture: None,
             command: String::new(),
             presets: HashMap::new(),
+            wallpapers: Vec::new(),
         }
     }
 }
@@ -888,6 +913,7 @@ impl SettingsState {
         self.poll_at = Some(Instant::now() + KEYBINDS_POLL);
         self.capture = None;
         self.command.clear();
+        self.wallpapers = crate::wallpapers::list();
         self.dirty = true;
     }
 
@@ -1374,7 +1400,13 @@ fn page_keys(d: &Desktop) -> Vec<&'static str> {
         Page::Theme => COLOR_KEYS.iter().chain(WINDOW_KEYS.iter()).copied().collect(),
         Page::Colors => COLOR_KEYS.to_vec(),
         Page::Windows => WINDOW_KEYS.to_vec(),
-        Page::Wallpaper => WALLPAPER_KEYS.iter().map(|k| wallpaper_key(d, k)).collect(),
+        Page::Wallpaper => {
+            let mut keys: Vec<&'static str> = WALLPAPER_KEYS.iter().map(|k| wallpaper_key(d, k)).collect();
+            if d.settings.monitor.is_none() {
+                keys.push("wallpaper_variant");
+            }
+            keys
+        }
         Page::Panel => PANEL_KEYS
             .iter()
             .copied()
@@ -1519,6 +1551,15 @@ struct PresetCard {
     active: bool,
 }
 
+/// A wallpaper card to lay out: its name, what it shows, what choosing it
+/// writes, and whether it is the one shown.
+struct WallpaperChoice {
+    name: String,
+    card: WallpaperCard,
+    action: Action,
+    active: bool,
+}
+
 /// Builds a page: captioned cards of rows, each row a name and a control.
 struct Groups<'a> {
     out: &'a mut Layout,
@@ -1615,6 +1656,7 @@ impl Groups<'_> {
             color: None,
             app: None,
             look: None,
+            wallpaper: None,
             clip: Some(self.clip),
         });
         let last = self.out.controls.len() - 1;
@@ -1785,6 +1827,32 @@ impl Groups<'_> {
             );
             self.push(Kind::Preset, rect, card.action, &card.name, card.active)
                 .look = Some(card.look);
+        }
+        self.y += PRESET_GAP + lines * (height + PRESET_GAP);
+    }
+
+    /// Adds the wallpaper cards of a group, as many a line as fit at the
+    /// least width sharing it: a card is its thumbnail at a screen's shape
+    /// over its name and its author.
+    fn wallpapers(&mut self, cards: Vec<WallpaperChoice>) {
+        self.begin_row();
+        let inner_x = self.x + CARD_PAD;
+        let inner_w = self.width - 2 * CARD_PAD;
+        let columns = ((inner_w + PRESET_GAP) / (WALLPAPER_CARD_MIN + PRESET_GAP)).max(1) as usize;
+        let width = (inner_w - (columns as i32 - 1) * PRESET_GAP) / columns as i32;
+        let image_h = (width - 2 * PRESET_PAD) * 9 / 16;
+        let height = image_h + 2 * PRESET_PAD + PRESET_NAME + WALLPAPER_AUTHOR;
+        let lines = cards.len().div_ceil(columns).max(1) as i32;
+        for (i, choice) in cards.into_iter().enumerate() {
+            let (col, line) = ((i % columns) as i32, (i / columns) as i32);
+            let rect = Rect::new(
+                inner_x + col * (width + PRESET_GAP),
+                self.y + PRESET_GAP + line * (height + PRESET_GAP),
+                width,
+                height,
+            );
+            self.push(Kind::Wallpaper, rect, choice.action, &choice.name, choice.active)
+                .wallpaper = Some(choice.card);
         }
         self.y += PRESET_GAP + lines * (height + PRESET_GAP);
     }
@@ -2080,6 +2148,7 @@ fn build_sidebar(d: &Desktop, frame: Rect, out: &mut Layout) {
         color: None,
         app: None,
         look: None,
+        wallpaper: None,
         clip: None,
     };
     let column = sidebar_rect_in(frame);
@@ -2145,6 +2214,7 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
         color: None,
         app: None,
         look: None,
+        wallpaper: None,
         clip: None,
     };
 
@@ -2177,6 +2247,7 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                 color: None,
                 app: Some(index),
                 look: None,
+                wallpaper: None,
                 clip: Some(list),
             });
         }
@@ -2407,26 +2478,54 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                 groups.segments(tr("Monitor"), &options, &active);
             }
             let wallpaper = shown_wallpaper(d);
-            let style_key = wallpaper_key(d, "background_style");
-            groups.segments(
-                tr("Background"),
-                &[
-                    (tr("Solid").to_string(), set(style_key, "solid")),
-                    (tr("Gradient").to_string(), set(style_key, "gradient")),
-                ],
-                match wallpaper.style {
-                    BackgroundStyle::Solid => tr("Solid"),
-                    BackgroundStyle::Gradient => tr("Gradient"),
-                },
-            );
-            groups.color(
-                tr("Color"),
-                Field::Color,
-                wallpaper_key(d, "background"),
-                field_color(d, Field::Color),
-                picking_color == Some(Field::Color),
-                &SWATCHES,
-            );
+            let image_key = wallpaper_key(d, "wallpaper");
+            let mode_key = wallpaper_key(d, "wallpaper_mode");
+            let shown = wallpaper.image.as_deref().map(crate::wallpapers::real_path);
+            let choose = |path: &str, mode: &str| {
+                Action::Set(vec![(image_key, path.to_string()), (mode_key, mode.to_string())])
+            };
+            let mut cards = Vec::new();
+            let logo = Path::new(config::LOGO_PATH);
+            if logo.is_file() {
+                cards.push(WallpaperChoice {
+                    name: tr("Application icon").to_string(),
+                    card: WallpaperCard {
+                        light: None,
+                        dark: None,
+                        author: None,
+                    },
+                    action: choose(config::LOGO_PATH, "center"),
+                    active: shown.as_deref() == Some(crate::wallpapers::real_path(logo).as_path()),
+                });
+            }
+            for entry in &d.settings.wallpapers {
+                cards.push(WallpaperChoice {
+                    name: entry.name.clone(),
+                    card: WallpaperCard {
+                        light: entry.light.clone(),
+                        dark: entry.dark.clone(),
+                        author: entry.author.clone(),
+                    },
+                    action: choose(&entry.path.to_string_lossy(), "fill"),
+                    active: shown.as_ref() == Some(&entry.real),
+                });
+            }
+            groups.wallpapers(cards);
+            if d.settings.monitor.is_none() {
+                groups.segments(
+                    tr("Light or dark"),
+                    &[
+                        (tr("Automatic").to_string(), set("wallpaper_variant", "automatic")),
+                        (tr("Light").to_string(), set("wallpaper_variant", "light")),
+                        (tr("Dark").to_string(), set("wallpaper_variant", "dark")),
+                    ],
+                    match d.config.wallpaper_variant {
+                        config::WallpaperVariant::Automatic => tr("Automatic"),
+                        config::WallpaperVariant::Light => tr("Light"),
+                        config::WallpaperVariant::Dark => tr("Dark"),
+                    },
+                );
+            }
             groups.field(
                 tr("Image"),
                 Field::Image,
@@ -2434,10 +2533,9 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                 focus == Some(Field::Image),
                 &[
                     (tr("Browse…"), Action::Browse),
-                    (tr("Clear"), set(wallpaper_key(d, "wallpaper"), "none")),
+                    (tr("Clear"), set(image_key, "none")),
                 ],
             );
-            let mode_key = wallpaper_key(d, "wallpaper_mode");
             groups.segments(
                 tr("Fit"),
                 &[
@@ -2453,6 +2551,31 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                     WallpaperMode::Stretch => tr("Stretch"),
                 },
             );
+            // An image filling the screen leaves nothing of the background to see.
+            let covered = wallpaper.image.is_some()
+                && matches!(wallpaper.mode, WallpaperMode::Fill | WallpaperMode::Stretch);
+            if !covered {
+                let style_key = wallpaper_key(d, "background_style");
+                groups.segments(
+                    tr("Background"),
+                    &[
+                        (tr("Solid").to_string(), set(style_key, "solid")),
+                        (tr("Gradient").to_string(), set(style_key, "gradient")),
+                    ],
+                    match wallpaper.style {
+                        BackgroundStyle::Solid => tr("Solid"),
+                        BackgroundStyle::Gradient => tr("Gradient"),
+                    },
+                );
+                groups.color(
+                    tr("Color"),
+                    Field::Color,
+                    wallpaper_key(d, "background"),
+                    field_color(d, Field::Color),
+                    picking_color == Some(Field::Color),
+                    &SWATCHES,
+                );
+            }
             if let Some(n) = d.settings.monitor
                 && d.config.monitors.contains_key(&n)
             {
@@ -2613,6 +2736,7 @@ fn lay_out_picker(d: &Desktop, out: &mut Layout, frame: Rect, page: Rect, picker
         color: None,
         app: None,
         look: None,
+        wallpaper: None,
         clip: None,
     };
     out.controls
@@ -2889,8 +3013,9 @@ fn draw_slider(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
 /// pixels, from the cache or drawn now.  The shrink filters the whole
 /// image, which drawing it scaled down would only sample.
 fn preset_image(d: &mut Desktop, look: &preview::Look, scale: i32, width: u32) -> Option<Arc<Pixmap>> {
+    let wallpaper = d.config.wallpaper_for(1);
     let key = format!(
-        "{}{}{}{}:{:?}:{}:{}:{:?}:{scale}:{width}",
+        "{}{}{}{}:{:?}:{}:{}:{:?}:{:?}:{:?}:{:?}:{}:{scale}:{width}",
         hex(look.theme.accent),
         hex(look.theme.panel),
         hex(look.theme.popup),
@@ -2898,7 +3023,15 @@ fn preset_image(d: &mut Desktop, look: &preview::Look, scale: i32, width: u32) -
         look.style,
         look.centered,
         look.margin,
-        look.menu
+        look.menu,
+        wallpaper.image,
+        wallpaper.mode,
+        d.config.wallpaper_variant,
+        if wallpaper.color_set {
+            hex(wallpaper.color)
+        } else {
+            String::new()
+        },
     );
     if let Some(image) = d.settings.presets.get(&key) {
         return Some(image.clone());
@@ -2964,6 +3097,129 @@ fn draw_preset(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hove
     } else if hovered {
         canvas.stroke_rounded(rect, CARD_RADIUS, 1.0, ui::text_dim());
     }
+}
+
+/// Draws a wallpaper card: its thumbnail, the light picture on the left
+/// and the dark one on the right where it has both, the application icon
+/// on the color it would be painted on for the icon's card, and the name and
+/// author under it, the one shown ringed with the accent.
+fn draw_wallpaper_card(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hovered: bool) {
+    let rect = control.rect;
+    canvas.fill_rounded(
+        rect,
+        CARD_RADIUS,
+        ui::text_alpha(if hovered { 0x1c } else { 0x0c }),
+    );
+    let image_rect = Rect::new(
+        rect.x + PRESET_PAD,
+        rect.y + PRESET_PAD,
+        rect.w - 2 * PRESET_PAD,
+        rect.h - 2 * PRESET_PAD - PRESET_NAME - WALLPAPER_AUTHOR,
+    );
+    let Some(card) = control.wallpaper.clone() else {
+        return;
+    };
+    let size = (image_rect.w * canvas.scale()).max(1) as u32;
+    match &card.light {
+        None => {
+            let color = d.painted_wallpaper(config::Wallpaper::default(), (1, 1)).color;
+            canvas.fill_rect(image_rect, color);
+            let side = image_rect.h * 3 / 5;
+            if let Some(logo) = d.logo.as_ref() {
+                canvas.draw_image_fit(
+                    logo,
+                    Rect::new(
+                        image_rect.x + (image_rect.w - side) / 2,
+                        image_rect.y + (image_rect.h - side) / 2,
+                        side,
+                        side,
+                    ),
+                );
+            }
+        }
+        Some(light) => {
+            let half = image_rect.w / 2;
+            let (light_part, dark_part) = match card.dark {
+                Some(_) => (
+                    Rect::new(image_rect.x, image_rect.y, half, image_rect.h),
+                    Rect::new(
+                        image_rect.x + half,
+                        image_rect.y,
+                        image_rect.w - half,
+                        image_rect.h,
+                    ),
+                ),
+                None => (image_rect, Rect::new(0, 0, 0, 0)),
+            };
+            draw_thumbnail(d, canvas, light, size, image_rect, light_part);
+            if let Some(dark) = &card.dark {
+                draw_thumbnail(d, canvas, dark, size, image_rect, dark_part);
+            }
+        }
+    }
+    if let Some(clip) = control.clip {
+        canvas.clip(clip);
+    }
+    canvas.stroke_rounded(image_rect, 3.0, 1.0, ui::popup_border());
+    let name_rect = Rect::new(
+        rect.x + PRESET_PAD,
+        image_rect.bottom() + 2,
+        rect.w - 2 * PRESET_PAD,
+        PRESET_NAME,
+    );
+    ui::label(
+        canvas,
+        &mut d.fonts,
+        &control.label,
+        name_rect,
+        ui::FONT_SIZE,
+        control.active,
+        Align::Center,
+        ui::text(),
+    );
+    if let Some(author) = &card.author {
+        ui::label(
+            canvas,
+            &mut d.fonts,
+            author,
+            Rect::new(name_rect.x, name_rect.bottom() - 4, name_rect.w, WALLPAPER_AUTHOR),
+            ui::FONT_SMALL,
+            false,
+            Align::Center,
+            ui::text_dim(),
+        );
+    }
+    if control.active {
+        canvas.stroke_rounded(rect, CARD_RADIUS, ACCENT_STROKE, ui::accent());
+    } else if hovered {
+        canvas.stroke_rounded(rect, CARD_RADIUS, 1.0, ui::text_dim());
+    }
+}
+
+/// Draws a picture's thumbnail covering a card's thumbnail area, cut to one
+/// part of it, a placeholder until the thumbnail is decoded.
+///
+/// # Arguments
+/// * `path` - The picture.
+/// * `size` - The thumbnail's longer side in physical pixels.
+/// * `frame` - The card's thumbnail area, which the picture covers.
+/// * `part` - The part of it drawn.
+fn draw_thumbnail(d: &mut Desktop, canvas: &mut Canvas<'_>, path: &Path, size: u32, frame: Rect, part: Rect) {
+    canvas.clip(part);
+    match d.files.image_thumbnail(path, size) {
+        Some(image) => {
+            let scale = canvas.scale().max(1) as f32;
+            let native = (image.width() as f32 / scale, image.height() as f32 / scale);
+            let (w, h) = crate::ui::background::drawn_size(WallpaperMode::Fill, native, frame);
+            let (w, h) = (w.round() as i32, h.round() as i32);
+            canvas.draw_image_stretch(
+                &image,
+                Rect::new(frame.x + (frame.w - w) / 2, frame.y + (frame.h - h) / 2, w, h),
+            );
+        }
+        None => canvas.fill_rect(part, ui::text_alpha(0x10)),
+    }
+    canvas.reset_clip();
 }
 
 /// Draws a shortcut's chord that a click captures anew: its caps flush
@@ -3192,6 +3448,7 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
         }
         Kind::Button => draw_button(d, canvas, control, hovered),
         Kind::Preset => draw_preset(d, canvas, control, hovered),
+        Kind::Wallpaper => draw_wallpaper_card(d, canvas, control, hovered),
     }
 }
 
@@ -3594,6 +3851,9 @@ fn show_page(d: &mut Desktop, page: Page) {
     if page == Page::Shortcuts {
         d.settings.reread_keybinds();
         d.settings.poll_at = Some(Instant::now() + KEYBINDS_POLL);
+    }
+    if page == Page::Wallpaper {
+        d.settings.wallpapers = crate::wallpapers::list();
     }
 }
 

@@ -275,3 +275,6 @@ Create = Oluştur
 Type a name for the folder = Klasör için bir ad yazın
 A file or folder with this name already exists = Bu adda bir dosya veya klasör zaten var
 Cannot create the folder: {error} = Klasör oluşturulamıyor: {error}
+Application icon = Uygulama simgesi
+Light or dark = Açık veya koyu
+Automatic = Otomatik

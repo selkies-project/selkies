@@ -275,3 +275,6 @@ Create = สร้าง
 Type a name for the folder = พิมพ์ชื่อสำหรับโฟลเดอร์
 A file or folder with this name already exists = มีไฟล์หรือโฟลเดอร์ชื่อนี้อยู่แล้ว
 Cannot create the folder: {error} = สร้างโฟลเดอร์ไม่ได้: {error}
+Application icon = ไอคอนแอปพลิเคชัน
+Light or dark = สว่างหรือมืด
+Automatic = อัตโนมัติ

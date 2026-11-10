@@ -275,3 +275,6 @@ Create = 建立
 Type a name for the folder = 請輸入資料夾名稱
 A file or folder with this name already exists = 已有同名的檔案或資料夾
 Cannot create the folder: {error} = 無法建立資料夾：{error}
+Application icon = 應用程式圖示
+Light or dark = 淺色或深色
+Automatic = 自動

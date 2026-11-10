@@ -38,7 +38,11 @@ pub struct Wallpaper {
     pub style: BackgroundStyle,
     /// The color of the background.
     pub color: Color,
-    /// Image drawn over the background, if any.
+    /// Whether the color was chosen; one that was not follows the wallpaper's light or dark
+    /// variant.
+    pub color_set: bool,
+    /// Image drawn over the background, if any: an image file, or a wallpaper package's
+    /// folder ([`crate::wallpapers`]).
     pub image: Option<PathBuf>,
     /// How the image fills the monitor.
     pub mode: WallpaperMode,
@@ -49,10 +53,22 @@ impl Default for Wallpaper {
         Wallpaper {
             style: BackgroundStyle::Solid,
             color: rgb(0, 0, 0),
+            color_set: false,
             image: None,
             mode: WallpaperMode::Fill,
         }
     }
+}
+
+/// Which of a wallpaper's pictures the monitors show, and the color behind them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WallpaperVariant {
+    /// The dark ones under a dark theme, the light ones under a light one.
+    Automatic,
+    /// The light ones whatever the theme.
+    Light,
+    /// The dark ones whatever the theme.
+    Dark,
 }
 
 /// The parts of a wallpaper a monitor overrides.
@@ -144,6 +160,8 @@ pub struct Config {
     pub wallpaper: Wallpaper,
     /// Per-monitor wallpaper overrides, by monitor number starting at 1.
     pub monitors: HashMap<u32, WallpaperOverride>,
+    /// Which of the wallpapers' pictures every monitor shows.
+    pub wallpaper_variant: WallpaperVariant,
     /// strftime format of the panel clock.
     pub clock_format: String,
     /// Whether the clock is shown.
@@ -197,6 +215,7 @@ impl Default for Config {
             files_sort: "name".to_string(),
             files_hidden: false,
             wallpaper: Wallpaper::default(),
+            wallpaper_variant: WallpaperVariant::Automatic,
             monitors: HashMap::new(),
             clock_format: "%H:%M".to_string(),
             show_clock: true,
@@ -242,12 +261,15 @@ pub const FILES_ENTRY: &str = "selkies-desktop-files.desktop";
 /// The config file path.
 pub use selkies_draw::style::desktop_config_file as config_file;
 
-/// Wallpaper files looked for when none is configured, in order.
+/// Wallpapers looked for when none is configured, in order: the user's own image, the
+/// image's wallpaper (`/usr/share/selkies/wallpaper`, a package's folder or a link to one, or
+/// an image beside it), and the application icon last.
 fn default_wallpapers() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     for ext in ["png", "jpg", "jpeg"] {
         candidates.push(config_dir().join(format!("wallpaper.{ext}")));
     }
+    candidates.push(PathBuf::from("/usr/share/selkies/wallpaper"));
     for ext in ["png", "jpg", "jpeg"] {
         candidates.push(PathBuf::from(format!("/usr/share/selkies/wallpaper.{ext}")));
     }
@@ -261,7 +283,9 @@ impl Config {
         let values = selkies_draw::style::desktop_values();
         let mut config = Config::from_values(&values);
         if config.wallpaper.image.is_none() && !values.contains_key("wallpaper") {
-            config.wallpaper.image = default_wallpapers().into_iter().find(|p| p.is_file());
+            config.wallpaper.image = default_wallpapers()
+                .into_iter()
+                .find(|p| p.is_file() || crate::wallpapers::is_package(p));
             if !values.contains_key("wallpaper_mode")
                 && config.wallpaper.image.as_deref() == Some(Path::new(LOGO_PATH))
             {
@@ -361,6 +385,7 @@ impl Config {
         config.wallpaper = Wallpaper {
             style: base.style.unwrap_or(config.wallpaper.style),
             color: base.color.unwrap_or(config.wallpaper.color),
+            color_set: base.color.is_some(),
             image: base.image.unwrap_or(None),
             mode: base.mode.unwrap_or(config.wallpaper.mode),
         };
@@ -418,6 +443,13 @@ impl Config {
             config.desktops = count.clamp(1, MAX_DESKTOPS);
         }
         config.show_pager = truthy("show_pager", config.show_pager);
+        if let Some(variant) = values.get("wallpaper_variant") {
+            config.wallpaper_variant = match variant.trim().to_ascii_lowercase().as_str() {
+                "light" => WallpaperVariant::Light,
+                "dark" => WallpaperVariant::Dark,
+                _ => WallpaperVariant::Automatic,
+            };
+        }
         config.tasks_all_desktops = truthy("tasks_all_desktops", config.tasks_all_desktops);
         config
     }
@@ -435,6 +467,7 @@ impl Config {
             }
             if let Some(color) = over.color {
                 wallpaper.color = color;
+                wallpaper.color_set = true;
             }
             if let Some(image) = &over.image {
                 wallpaper.image = image.clone();
@@ -538,7 +571,8 @@ fn wallpaper_override(values: &HashMap<String, String>, suffix: &str) -> Wallpap
             } else {
                 PathBuf::from(path)
             };
-            over.image = Some(expanded.is_file().then_some(expanded));
+            over.image =
+                Some((expanded.is_file() || crate::wallpapers::is_package(&expanded)).then_some(expanded));
         }
     }
     if let Some(mode) = get("wallpaper_mode") {

@@ -138,7 +138,12 @@ people reach for in a multi-application container:
   on disk refreshes on its own.
 * **Every monitor** gets the wallpaper: one layer surface per Wayland output,
   including the screens Selkies adds for extra displays, and each RandR
-  monitor on X11.
+  monitor on X11.  The Wallpaper page lists the wallpapers installed in the
+  `wallpapers` and `backgrounds` folders of `~/.local/share` and the system
+  data directories as thumbnails, a package with light and dark pictures
+  split between the two, and a package shows its dark pictures under a dark
+  theme and its light ones under a light theme unless the page's Light or
+  dark choice keeps one.
 * **HiDPI** rendering at the output's scale on both display servers.
 * **Nineteen languages** for everything the desktop says, picked from the
   locale environment or the `language` setting; the translations are the
@@ -179,9 +184,10 @@ so an edit applies within a moment.
 | `language` | from `LC_ALL`, `LC_MESSAGES`, `LANG` | Interface language: `en`, `es`, `zh_cn`, `zh_tw`, `hi`, `pt`, `fr`, `ru`, `de`, `tr`, `it`, `nl`, `ar`, `ko`, `ja`, `vi`, `th`, `fil` or `da` |
 | `start_icon` | Selkies logo | Icon name from the theme, or the path of a PNG, JPEG or SVG, for the start button |
 | `background_style` | `solid` | `solid` or `gradient`, painted first |
-| `background` | `#000000` | Color of the solid background or the gradient |
-| `wallpaper` | first of `~/.config/selkies-desktop/wallpaper.{png,jpg}`, `/usr/share/selkies/wallpaper.{png,jpg}`, the Selkies logo | PNG or JPEG drawn over the background; `none` for no image |
+| `background` | black behind a dark wallpaper, the theme's window color behind a light one | Color of the solid background or the gradient |
+| `wallpaper` | first of `~/.config/selkies-desktop/wallpaper.{png,jpg}`, `/usr/share/selkies/wallpaper` (a wallpaper package or a link to one), `/usr/share/selkies/wallpaper.{png,jpg}`, the Selkies logo | PNG or JPEG, or a wallpaper package's folder, drawn over the background; `none` for no image |
 | `wallpaper_mode` | `fill` (`center` for the logo) | `fill` (cover, cropped), `fit`, `center` or `stretch` |
+| `wallpaper_variant` | `automatic` | Which pictures a wallpaper package shows and which color an unset `background` is: `automatic` follows the theme, `light` or `dark` keeps one |
 | `clock_format` | `%H:%M` | strftime pattern of the panel clock |
 | `show_clock` | `true` | Show the clock and its calendar |
 | `show_volume` | `true` | Show the volume control when PulseAudio answers |

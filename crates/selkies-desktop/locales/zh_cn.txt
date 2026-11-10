@@ -275,3 +275,6 @@ Create = 创建
 Type a name for the folder = 请输入文件夹名称
 A file or folder with this name already exists = 已存在同名的文件或文件夹
 Cannot create the folder: {error} = 无法创建文件夹：{error}
+Application icon = 应用程序图标
+Light or dark = 浅色或深色
+Automatic = 自动

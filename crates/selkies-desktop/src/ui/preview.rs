@@ -166,8 +166,12 @@ pub fn monitor_geometry(d: &Desktop, number: Option<u32>) -> (Rect, i32) {
         .unwrap_or((Rect::new(0, 0, 1920, 1080), 1))
 }
 
+/// How many shrunk wallpaper pictures the previews keep before starting over.
+const PREVIEW_WALLPAPERS: usize = 8;
+
 /// Paints a monitor's wallpaper into a preview's screen as the desktop
-/// paints it there, the image shrunk once per path and drawn size.
+/// paints it there, its picture and color the theme being drawn chooses, the
+/// image shrunk once per path and drawn size.
 ///
 /// # Arguments
 /// * `d` - The desktop.
@@ -183,6 +187,11 @@ fn paint_wallpaper(
     wallpaper: &Wallpaper,
     monitor: (Rect, i32),
 ) {
+    let size = (
+        (monitor.0.w * monitor.1).max(1) as u32,
+        (monitor.0.h * monitor.1).max(1) as u32,
+    );
+    let wallpaper = &d.painted_wallpaper(wallpaper.clone(), size);
     let full = wallpaper.image.as_ref().and_then(|path| d.wallpaper_image(path));
     let (Some(path), Some(full)) = (wallpaper.image.clone(), full) else {
         background::paint_wallpaper(canvas, screen, wallpaper, None);
@@ -197,14 +206,14 @@ fn paint_wallpaper(
     let (w, h) = background::drawn_size(wallpaper.mode, native, screen);
     let longest =
         ((w.max(h) * canvas.scale() as f32).ceil() as u32).clamp(1, full.width().max(full.height()));
-    let cached = d
-        .preview_wallpaper
-        .as_ref()
-        .filter(|(p, size, _)| *p == path && *size == longest)
-        .map(|(_, _, image)| image.clone());
+    let key = (path, longest);
+    let cached = d.preview_wallpaper.get(&key).cloned();
     let small = cached.or_else(|| {
         let small = Arc::new(crate::render::resize_pixmap(&full, longest)?);
-        d.preview_wallpaper = Some((path, longest, small.clone()));
+        if d.preview_wallpaper.len() >= PREVIEW_WALLPAPERS {
+            d.preview_wallpaper.clear();
+        }
+        d.preview_wallpaper.insert(key, small.clone());
         Some(small)
     });
     let image = small.as_deref().map(|pixels| background::WallpaperImage {

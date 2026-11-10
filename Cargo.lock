@@ -3738,6 +3738,7 @@ dependencies = [
  "libc",
  "memmap2",
  "selkies-draw",
+ "serde_json",
  "tiny-skia",
  "wayland-client",
  "wayland-cursor",

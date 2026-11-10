@@ -798,9 +798,28 @@ impl Manager {
     /// # Returns
     /// The thumbnail once it is ready.
     pub fn thumbnail(&mut self, item: &Item, size: u32) -> Option<Arc<Pixmap>> {
+        self.thumbnail_of(&item.path, item.modified, size)
+    }
+
+    /// A thumbnail for an image file named by its path, decoded in the background on first
+    /// request, as the settings' wallpaper cards ask for theirs.
+    ///
+    /// # Arguments
+    /// * `path` - The image file.
+    /// * `size` - Longer side in physical pixels.
+    ///
+    /// # Returns
+    /// The thumbnail once it is ready.
+    pub fn image_thumbnail(&mut self, path: &std::path::Path, size: u32) -> Option<Arc<Pixmap>> {
+        let modified = std::fs::metadata(path).map_or(0, |m| std::os::unix::fs::MetadataExt::mtime(&m));
+        self.thumbnail_of(path, modified, size)
+    }
+
+    /// The thumbnail of a file at a modification time and size, queued when not yet made.
+    fn thumbnail_of(&mut self, path: &std::path::Path, modified: i64, size: u32) -> Option<Arc<Pixmap>> {
         let key = ThumbKey {
-            path: item.path.clone(),
-            modified: item.modified,
+            path: path.to_path_buf(),
+            modified,
             size,
         };
         if let Some(cached) = self.thumbs.get(&key) {

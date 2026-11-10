@@ -275,3 +275,6 @@ Create = बनाएँ
 Type a name for the folder = फ़ोल्डर के लिए नाम लिखें
 A file or folder with this name already exists = इस नाम की फ़ाइल या फ़ोल्डर पहले से मौजूद है
 Cannot create the folder: {error} = फ़ोल्डर नहीं बनाया जा सका: {error}
+Application icon = ऐप्लिकेशन आइकन
+Light or dark = हल्का या गहरा
+Automatic = स्वचालित

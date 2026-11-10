@@ -275,3 +275,6 @@ Create = Créer
 Type a name for the folder = Saisissez un nom pour le dossier
 A file or folder with this name already exists = Un fichier ou un dossier portant ce nom existe déjà
 Cannot create the folder: {error} = Impossible de créer le dossier : {error}
+Application icon = Icône de l'application
+Light or dark = Clair ou sombre
+Automatic = Automatique

@@ -37,3 +37,5 @@ memmap2 = "0.9"
 # The desktop Settings portal the shell serves on the session bus, on the
 # D-Bus crate pixelflux already speaks to the portal through.
 zbus = { version = "6", default-features = false, features = ["default-rt", "service"] }
+# The metadata of wallpaper packages.
+serde_json = "1"

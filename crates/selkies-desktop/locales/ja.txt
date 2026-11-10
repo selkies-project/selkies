@@ -275,3 +275,6 @@ Create = 作成
 Type a name for the folder = フォルダーの名前を入力してください
 A file or folder with this name already exists = この名前のファイルまたはフォルダーは既に存在します
 Cannot create the folder: {error} = フォルダーを作成できません: {error}
+Application icon = アプリケーションのアイコン
+Light or dark = ライトまたはダーク
+Automatic = 自動

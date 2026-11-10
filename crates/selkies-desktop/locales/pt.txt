@@ -275,3 +275,6 @@ Create = Criar
 Type a name for the folder = Digite um nome para a pasta
 A file or folder with this name already exists = Já existe um arquivo ou pasta com este nome
 Cannot create the folder: {error} = Não foi possível criar a pasta: {error}
+Application icon = Ícone do aplicativo
+Light or dark = Claro ou escuro
+Automatic = Automático

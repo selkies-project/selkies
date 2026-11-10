@@ -275,3 +275,6 @@ Create = إنشاء
 Type a name for the folder = اكتب اسمًا للمجلد
 A file or folder with this name already exists = يوجد ملف أو مجلد بهذا الاسم بالفعل
 Cannot create the folder: {error} = تعذّر إنشاء المجلد: {error}
+Application icon = أيقونة التطبيق
+Light or dark = فاتح أو داكن
+Automatic = تلقائي

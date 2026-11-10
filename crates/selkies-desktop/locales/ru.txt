@@ -275,3 +275,6 @@ Create = Создать
 Type a name for the folder = Введите имя папки
 A file or folder with this name already exists = Файл или папка с таким именем уже существует
 Cannot create the folder: {error} = Не удалось создать папку: {error}
+Application icon = Значок приложения
+Light or dark = Светлый или тёмный
+Automatic = Автоматически

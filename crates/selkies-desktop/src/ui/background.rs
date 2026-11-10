@@ -135,10 +135,15 @@ pub fn draw_wallpaper_layer(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
         );
         if let Some(layer) = layer.as_mut() {
             let mut layer_canvas = Canvas::new(layer.as_mut(), canvas.scale());
-            layer_canvas.fill_rect(whole, d.config.wallpaper.color);
+            let physical = |rect: Rect| {
+                let scale = geometry.scale.max(1);
+                ((rect.w * scale).max(1) as u32, (rect.h * scale).max(1) as u32)
+            };
+            let shared = d.painted_wallpaper(d.config.wallpaper.clone(), physical(whole));
+            layer_canvas.fill_rect(whole, shared.color);
             for (monitor_index, monitor) in monitors.iter().enumerate() {
                 let number = d.monitor_number(id, monitor_index);
-                let wallpaper = d.config.wallpaper_for(number);
+                let wallpaper = d.painted_wallpaper(d.config.wallpaper_for(number), physical(*monitor));
                 let image = wallpaper.image.as_ref().and_then(|p| d.wallpaper_image(p));
                 let scale = layer_canvas.scale().max(1) as u32;
                 let image = image.as_deref().map(|pixels| WallpaperImage {

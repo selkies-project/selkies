@@ -275,3 +275,6 @@ Create = Gumawa
 Type a name for the folder = Mag-type ng pangalan para sa folder
 A file or folder with this name already exists = May file o folder na may ganitong pangalan na
 Cannot create the folder: {error} = Hindi magawa ang folder: {error}
+Application icon = Icon ng application
+Light or dark = Maliwanag o madilim
+Automatic = Awtomatiko

@@ -96,6 +96,12 @@ pub struct DesktopPress {
 /// How far, in logical pixels, a held icon moves before it is dragged.
 const DESKTOP_DRAG_THRESHOLD: f64 = 6.0;
 
+/// The color behind a light wallpaper under a dark theme, whose own window color is dark: the
+/// window color of the Selkies Light scheme.
+fn light_wallpaper() -> tiny_skia::Color {
+    crate::render::rgb(0xf5, 0xf6, 0xf9)
+}
+
 /// What a rendered wallpaper layer was made for: size, scale and monitors.
 pub type WallpaperKey = (i32, i32, i32, Vec<Rect>);
 
@@ -339,9 +345,11 @@ pub struct Desktop {
     /// Where the panel surface's top-left corner sits in the primary
     /// background's logical coordinates, for that blending.
     pub panel_offset: (i32, i32),
-    /// The wallpaper image shrunk for the settings window's previews, with
-    /// the path and the length of the longer side in pixels it was made for.
-    pub preview_wallpaper: Option<(std::path::PathBuf, u32, Arc<Pixmap>)>,
+    /// The wallpaper pictures shrunk for the settings window's previews, by
+    /// the path and the length of the longer side in pixels each was made
+    /// for: a light and a dark picture, at the theme cards' size and the
+    /// Wallpaper page's.
+    pub preview_wallpaper: HashMap<(std::path::PathBuf, u32), Arc<Pixmap>>,
     /// Icons docked in the system tray.
     pub tray_icons: usize,
     /// The strip of the bar the tray icons occupy, in panel coordinates.
@@ -445,7 +453,7 @@ impl Desktop {
             preview: None,
             opaque_output: false,
             panel_offset: (0, 0),
-            preview_wallpaper: None,
+            preview_wallpaper: HashMap::new(),
             tray_icons: 0,
             tray_slot: None,
             tray_moved: false,
@@ -832,6 +840,45 @@ impl Desktop {
         self.wallpapers.retain(|_, image| image.is_some());
         self.repaint_wallpapers();
         self.panel_dirty = true;
+    }
+
+    /// Whether the wallpapers show their dark pictures: as the variant setting says, else as
+    /// the theme being drawn is dark, its text light, which a theme preview sets for its own.
+    pub fn wallpaper_dark(&self) -> bool {
+        match self.config.wallpaper_variant {
+            crate::config::WallpaperVariant::Light => false,
+            crate::config::WallpaperVariant::Dark => true,
+            crate::config::WallpaperVariant::Automatic => ui::luminance(ui::theme().text) > 0.5,
+        }
+    }
+
+    /// A wallpaper as a monitor paints it: a color nobody chose is black behind a dark
+    /// wallpaper and the theme's window color behind a light one, the light scheme's under a
+    /// dark theme, and a wallpaper package is the picture of its variant for the size.
+    ///
+    /// # Arguments
+    /// * `wallpaper` - The wallpaper settings.
+    /// * `size` - The size in physical pixels the picture fills.
+    pub fn painted_wallpaper(
+        &self,
+        mut wallpaper: crate::config::Wallpaper,
+        size: (u32, u32),
+    ) -> crate::config::Wallpaper {
+        let dark = self.wallpaper_dark();
+        if !wallpaper.color_set {
+            let theme = ui::theme();
+            wallpaper.color = if dark {
+                crate::render::rgb(0, 0, 0)
+            } else if ui::luminance(theme.popup) > 0.5 {
+                theme.popup
+            } else {
+                light_wallpaper()
+            };
+        }
+        wallpaper.image = wallpaper
+            .image
+            .and_then(|path| crate::wallpapers::resolve(&path, dark, size));
+        wallpaper
     }
 
     /// A wallpaper image at its native size, decoded once per path.
