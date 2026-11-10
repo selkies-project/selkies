@@ -135,9 +135,13 @@ pub struct Config {
     /// Whether the start button, quick launch and taskbar sit in the middle
     /// of the bar rather than at its left.
     pub panel_centered: bool,
-    /// Space between the bar and the screen edges in logical pixels, which
-    /// floats it.
+    /// Space between a floating bar and the screen edges in logical pixels.
     pub panel_margin: i32,
+    /// Whether the bar floats clear of the screen edges by its margin while no window needs
+    /// the space; a window reaching the bar's edge attaches it.
+    pub panel_float: bool,
+    /// Corner radius of a floating bar in logical pixels.
+    pub panel_corners: i32,
     /// How the start menu lays its applications out.
     pub menu_layout: MenuLayout,
     /// Language code of the interface, or `None` to follow the environment.
@@ -204,7 +208,9 @@ impl Default for Config {
             start_icon: None,
             start_label: None,
             panel_centered: false,
-            panel_margin: 0,
+            panel_margin: DEFAULT_PANEL_MARGIN,
+            panel_float: true,
+            panel_corners: DEFAULT_PANEL_CORNERS,
             menu_layout: MenuLayout::Columns,
             language: None,
             theme: crate::ui::Theme::default(),
@@ -250,6 +256,12 @@ pub const MIN_PANEL_HEIGHT: i32 = 24;
 pub const MAX_PANEL_HEIGHT: i32 = 64;
 /// Widest margin around the bar the settings accept.
 pub const MAX_PANEL_MARGIN: i32 = 16;
+/// The margin a floating bar keeps from the screen edges by default.
+pub const DEFAULT_PANEL_MARGIN: i32 = 8;
+/// Largest corner radius of a floating bar the settings accept.
+pub const MAX_PANEL_CORNERS: i32 = 24;
+/// The corner radius of a floating bar by default, the Linux style's.
+pub const DEFAULT_PANEL_CORNERS: i32 = 6;
 /// Most virtual desktops the settings accept.
 pub const MAX_DESKTOPS: u32 = 9;
 /// Virtual desktops when the setting is absent.
@@ -341,6 +353,12 @@ impl Config {
             .and_then(|v| v.trim().trim_end_matches("px").parse::<i32>().ok())
         {
             config.panel_margin = margin.clamp(0, MAX_PANEL_MARGIN);
+        }
+        if let Some(corners) = values
+            .get("panel_corners")
+            .and_then(|v| v.trim().trim_end_matches("px").parse::<i32>().ok())
+        {
+            config.panel_corners = corners.clamp(0, MAX_PANEL_CORNERS);
         }
         if let Some(layout) = values.get("menu_layout").map(|v| v.trim().to_ascii_lowercase()) {
             config.menu_layout = match layout.as_str() {
@@ -443,6 +461,7 @@ impl Config {
             config.desktops = count.clamp(1, MAX_DESKTOPS);
         }
         config.show_pager = truthy("show_pager", config.show_pager);
+        config.panel_float = truthy("panel_float", config.panel_float);
         if let Some(variant) = values.get("wallpaper_variant") {
             config.wallpaper_variant = match variant.trim().to_ascii_lowercase().as_str() {
                 "light" => WallpaperVariant::Light,
@@ -484,7 +503,7 @@ impl Config {
 pub const WALLPAPER_KEYS: [&str; 4] = ["background_style", "background", "wallpaper", "wallpaper_mode"];
 
 /// The keys of the bar's and the start menu's settings, which share a page.
-pub const PANEL_KEYS: [&str; 21] = [
+pub const PANEL_KEYS: [&str; 23] = [
     "panel_position",
     "panel_height",
     "panel_width",
@@ -492,6 +511,8 @@ pub const PANEL_KEYS: [&str; 21] = [
     "panel_autohide",
     "panel_layout",
     "panel_margin",
+    "panel_float",
+    "panel_corners",
     "start_icon",
     "start_label",
     "menu_layout",

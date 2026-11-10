@@ -1435,7 +1435,6 @@ impl Backend for WaylandBackend {
                 top,
                 height,
                 autohide,
-                margin: _,
             } => {
                 self.state.panel_height = *height;
                 self.state.panel_top = *top;
@@ -1906,6 +1905,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LauncherLayer> for Stat
                         input: pending.input.clone(),
                         visible: pending.input.clone(),
                         grab: false,
+                        bar: None,
                     };
                     state.present_target(qh, Target::Launchers(data.0), &frame);
                 }

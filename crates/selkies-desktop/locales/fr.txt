@@ -278,3 +278,4 @@ Cannot create the folder: {error} = Impossible de créer le dossier : {error}
 Application icon = Icône de l'application
 Light or dark = Clair ou sombre
 Automatic = Automatique
+Float = Flottante

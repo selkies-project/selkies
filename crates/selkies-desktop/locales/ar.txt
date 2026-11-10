@@ -278,3 +278,4 @@ Cannot create the folder: {error} = تعذّر إنشاء المجلد: {error}
 Application icon = أيقونة التطبيق
 Light or dark = فاتح أو داكن
 Automatic = تلقائي
+Float = عائم

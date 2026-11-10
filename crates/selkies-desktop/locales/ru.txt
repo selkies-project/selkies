@@ -278,3 +278,4 @@ Cannot create the folder: {error} = Не удалось создать папк�
 Application icon = Значок приложения
 Light or dark = Светлый или тёмный
 Automatic = Автоматически
+Float = Плавающая

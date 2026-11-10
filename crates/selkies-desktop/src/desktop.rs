@@ -96,6 +96,12 @@ pub struct DesktopPress {
 /// How far, in logical pixels, a held icon moves before it is dragged.
 const DESKTOP_DRAG_THRESHOLD: f64 = 6.0;
 
+/// How long a floating bar takes to attach to the edge or come off it.
+const BAR_ATTACH: Duration = Duration::from_millis(220);
+
+/// How often the bar is drawn while it moves.
+const BAR_FRAME: Duration = Duration::from_millis(16);
+
 /// The color behind a light wallpaper under a dark theme, whose own window color is dark: the
 /// window color of the Selkies Light scheme.
 fn light_wallpaper() -> tiny_skia::Color {
@@ -149,6 +155,9 @@ pub struct Frame<'a> {
     pub visible: Vec<Rect>,
     /// Whether the surface wants every click on the screen while a popup is open.
     pub grab: bool,
+    /// The bar's background and its corner radius, which a backend that shapes the panel's
+    /// window rounds it to; `None` on every other surface.
+    pub bar: Option<(Rect, f32)>,
 }
 
 /// What a right click on the bar landed on, which decides the menu it gets.
@@ -333,6 +342,14 @@ pub struct Desktop {
     start_icon: Option<(Option<String>, u32, Option<Arc<Pixmap>>)>,
     /// Whether an auto-hiding bar is tucked away.
     panel_hidden: bool,
+    /// Whether the window manager said a window reaches the bar's edge, which attaches a
+    /// floating bar to it.
+    bar_attached: bool,
+    /// How far a floating bar has gone toward the edge: 0 floating, 1 attached.
+    bar_attach: f32,
+    /// The bar's move toward or away from the edge: where it started, where it goes, and
+    /// when it began.
+    bar_attach_anim: Option<(f32, f32, Instant)>,
     /// When a hiding bar goes away, after the pointer left it.
     hide_at: Option<Instant>,
     /// A slider value not yet applied to the bar, with the key it is for and
@@ -449,6 +466,9 @@ impl Desktop {
             files: files::Manager::new(),
             start_icon: None,
             panel_hidden: false,
+            bar_attached: false,
+            bar_attach: 0.0,
+            bar_attach_anim: None,
             hide_at: None,
             preview: None,
             opaque_output: false,
@@ -472,9 +492,60 @@ impl Desktop {
     }
 
     /// The space the bar reserves along its edge: its height and the margin
-    /// that floats it.
+    /// that floats it, whether it floats at the moment or not, so attaching
+    /// it moves no window.
     pub fn reserved_height(&self) -> i32 {
-        self.config.panel_height + self.config.panel_margin
+        self.config.panel_height + self.float_margin()
+    }
+
+    /// The margin a floating bar keeps from the screen edges: none when the
+    /// bar does not float.
+    pub fn float_margin(&self) -> i32 {
+        if self.config.panel_float {
+            self.config.panel_margin
+        } else {
+            0
+        }
+    }
+
+    /// How far the bar has gone toward the edge, 0 floating and 1 attached;
+    /// a bar that does not float is attached.
+    fn attach_progress(&self) -> f32 {
+        if self.float_margin() == 0 {
+            1.0
+        } else {
+            self.bar_attach
+        }
+    }
+
+    /// Takes the window manager's word on whether a window reaches the
+    /// bar's edge, moving a floating bar to the edge or back off it.
+    ///
+    /// # Arguments
+    /// * `attached` - Whether a window reaches the edge.
+    pub fn set_bar_attached(&mut self, attached: bool) {
+        if self.bar_attached == attached {
+            return;
+        }
+        self.bar_attached = attached;
+        let target = if attached { 1.0 } else { 0.0 };
+        self.bar_attach_anim = Some((self.bar_attach, target, Instant::now()));
+        self.panel_dirty = true;
+    }
+
+    /// Advances the bar's move toward or away from the edge.
+    fn step_bar_attach(&mut self, now: Instant) {
+        let Some((from, to, start)) = self.bar_attach_anim else {
+            return;
+        };
+        let t = (now.saturating_duration_since(start).as_secs_f32() / BAR_ATTACH.as_secs_f32()).min(1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        self.bar_attach = from + (to - from) * eased;
+        if t >= 1.0 {
+            self.bar_attach = to;
+            self.bar_attach_anim = None;
+        }
+        self.panel_dirty = true;
     }
 
     /// The request that places the bar as the settings have it.
@@ -483,7 +554,6 @@ impl Desktop {
             top: self.panel_top(),
             height: self.reserved_height(),
             autohide: self.config.panel_autohide,
-            margin: self.config.panel_margin,
         }
     }
 
@@ -534,7 +604,7 @@ impl Desktop {
     ///
     /// # Arguments
     /// * `key` - `panel_height`, `panel_width`, `panel_opacity`,
-    ///   `panel_margin` or `window_corners`.
+    ///   `panel_margin`, `panel_corners` or `window_corners`.
     /// * `value` - The value.
     pub fn preview_panel(&mut self, key: &str, value: i32) {
         let rest = if key == "panel_width" {
@@ -570,6 +640,7 @@ impl Desktop {
             "panel_width" => self.config.panel_width = value,
             "panel_opacity" => self.config.panel_opacity = value,
             "panel_margin" => self.config.panel_margin = value,
+            "panel_corners" => self.config.panel_corners = value,
             "window_corners" => self.config.window.corners = value,
             _ => return,
         }
@@ -1046,6 +1117,7 @@ impl Desktop {
             input,
             visible,
             grab: false,
+            bar: None,
         })
     }
 
@@ -1054,19 +1126,69 @@ impl Desktop {
         self.config.panel_position == crate::config::PanelPosition::Top
     }
 
-    /// The bar's rectangle in panel surface coordinates: its width a share
-    /// of the screen's, centered, and pulled in from the edges by its
-    /// margin.
+    /// The rectangle of the bar's items in panel surface coordinates: its
+    /// width a share of the screen's, centered, pulled in from the edges by
+    /// the margin while the bar floats, and spread to the screen's share and
+    /// centered in the band the bar reserves once it is attached, the move
+    /// between the two following the bar's progress toward the edge.
     pub fn bar_rect(&self) -> Rect {
         let height = self.config.panel_height;
-        let margin = self.config.panel_margin;
-        let usable = (self.panel.width - 2 * margin).max(1);
-        let width = (usable * self.config.panel_width / 100).max(1);
-        let x = margin + (usable - width) / 2;
+        let margin = self.float_margin() as f32;
+        let t = self.attach_progress();
+        let (x, width) = self.bar_span(t);
+        let inset = (margin * (1.0 - t / 2.0)).round() as i32;
         if self.panel_top() {
-            return Rect::new(x, margin, width, height);
+            return Rect::new(x, inset, width, height);
         }
-        Rect::new(x, self.panel.height - height - margin, width, height)
+        Rect::new(x, self.panel.height - height - inset, width, height)
+    }
+
+    /// Where the bar runs along its edge at a progress toward it: the
+    /// floating span inside the margin and the attached one at the screen's
+    /// edges, the share of the width each.
+    fn bar_span(&self, t: f32) -> (i32, i32) {
+        let margin = self.float_margin();
+        let share = |usable: i32| (usable * self.config.panel_width / 100).max(1);
+        let float_usable = (self.panel.width - 2 * margin).max(1);
+        let float_w = share(float_usable);
+        let float_x = margin + (float_usable - float_w) / 2;
+        let attached_w = share(self.panel.width.max(1));
+        let attached_x = (self.panel.width - attached_w) / 2;
+        let lerp = |a: i32, b: i32| (a as f32 + (b - a) as f32 * t).round() as i32;
+        (lerp(float_x, attached_x), lerp(float_w, attached_w))
+    }
+
+    /// The bar's background in panel surface coordinates with its corner
+    /// radius: the items' rectangle while the bar floats, growing to fill
+    /// the band the bar reserves as it attaches, its corners easing square
+    /// where it then spans the screen. A background that reaches the edge
+    /// runs past it by its radius, so only the corners away from the edge
+    /// are round.
+    pub fn bar_shape(&self) -> (Rect, f32) {
+        let height = self.config.panel_height;
+        let margin = self.float_margin() as f32;
+        let t = self.attach_progress();
+        let (x, width) = self.bar_span(t);
+        let corners = self.config.panel_corners as f32;
+        let radius = if width >= self.panel.width {
+            corners * (1.0 - t)
+        } else {
+            corners
+        };
+        let inset = (margin * (1.0 - t)).round() as i32;
+        let thickness = height + (margin * t).round() as i32;
+        let past = if inset == 0 { radius.ceil() as i32 } else { 0 };
+        let rect = if self.panel_top() {
+            Rect::new(x, inset - past, width, thickness + past)
+        } else {
+            Rect::new(
+                x,
+                self.panel.height - height - margin as i32,
+                width,
+                thickness + past,
+            )
+        };
+        (rect, radius)
     }
 
     /// Whether the window at an index exists.
@@ -1629,6 +1751,7 @@ impl Desktop {
     /// # Arguments
     /// * `now` - The current time.
     pub fn tick(&mut self, now: Instant) {
+        self.step_bar_attach(now);
         let clock = if self.config.show_clock {
             crate::clock::format_now(&self.config.clock_format)
         } else {
@@ -1694,6 +1817,10 @@ impl Desktop {
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
         if let Some(due) = self.hide_at {
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        if self.bar_attach_anim.is_some() {
+            let due = now + BAR_FRAME;
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
         if let Some((_, _, due)) = &self.preview {
@@ -2323,14 +2450,16 @@ impl Desktop {
         };
         let previous = std::mem::take(&mut self.panel_visible);
         let hidden = self.panel_hidden();
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        let shape = self.bar_shape();
         let mut visible = vec![if hidden {
             self.reveal_strip()
         } else {
-            self.bar_rect()
+            shape.0.intersect(&whole)
         }];
         {
             let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
-            let clear = previous.iter().fold(self.bar_rect(), |acc, r| acc.union(r));
+            let clear = previous.iter().fold(visible[0], |acc, r| acc.union(r));
             canvas.clear(clear.inflate(CLEAR_MARGIN));
             if hidden {
                 canvas.fill_rect(self.reveal_strip(), ui::panel_bg(self.config.panel_opacity / 2));
@@ -2360,6 +2489,7 @@ impl Desktop {
             input,
             visible,
             grab,
+            bar: (!hidden).then_some(shape),
         })
     }
 
@@ -2449,6 +2579,7 @@ impl Desktop {
             input,
             visible: vec![whole],
             grab: false,
+            bar: None,
         })
     }
 
@@ -2513,6 +2644,7 @@ impl Desktop {
                 input: Vec::new(),
                 visible: vec![whole],
                 grab: false,
+                bar: None,
             },
             Frame {
                 pixmap: surface.launchers_pix.as_ref()?,
@@ -2521,6 +2653,7 @@ impl Desktop {
                 input,
                 visible: cells,
                 grab: false,
+                bar: None,
             },
         ))
     }
@@ -2572,6 +2705,7 @@ impl Desktop {
             input: vec![whole],
             visible: vec![whole],
             grab: false,
+            bar: None,
         })
     }
 
@@ -2603,6 +2737,7 @@ impl Desktop {
             input: vec![whole],
             visible: vec![whole],
             grab: false,
+            bar: None,
         })
     }
 
@@ -2637,6 +2772,7 @@ impl Desktop {
             input: vec![whole],
             visible: vec![whole],
             grab: false,
+            bar: None,
         })
     }
 }

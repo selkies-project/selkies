@@ -278,3 +278,4 @@ Cannot create the folder: {error} = Hindi magawa ang folder: {error}
 Application icon = Icon ng application
 Light or dark = Maliwanag o madilim
 Automatic = Awtomatiko
+Float = Nakalutang

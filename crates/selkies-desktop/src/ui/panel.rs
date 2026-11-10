@@ -476,31 +476,18 @@ fn cycle_windows(d: &mut Desktop, forward: bool) {
 pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
     let layout = layout(d);
     let bg = ui::panel_bg(d.config.panel_opacity);
-    if d.config.panel_margin > 0 {
-        let radius = ui::panel_radius();
-        ui::fill_surface(canvas, layout.bar, radius, bg);
-        canvas.stroke_rounded(layout.bar, radius, 1.0, ui::separator());
-    } else if layout.bar.w < d.panel.width {
-        let radius = ui::panel_radius();
-        let overflow = radius as i32;
-        let shape = if d.panel_top() {
-            Rect::new(
-                layout.bar.x,
-                layout.bar.y - overflow,
-                layout.bar.w,
-                layout.bar.h + overflow,
-            )
-        } else {
-            Rect::new(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h + overflow)
-        };
-        ui::fill_surface(canvas, shape, radius, bg);
+    let (shape, radius) = d.bar_shape();
+    ui::fill_surface(canvas, shape, radius, bg);
+    let surface = Rect::new(0, 0, d.panel.width, d.panel.height);
+    if (shape.y >= 0 && shape.bottom() <= surface.bottom()) || radius > 0.0 {
         canvas.stroke_rounded(shape, radius, 1.0, ui::separator());
     } else {
-        ui::fill_surface(canvas, layout.bar, 0.0, bg);
-        canvas.fill_rect(
-            Rect::new(layout.bar.x, layout.bar.y, layout.bar.w, 1),
-            ui::separator(),
-        );
+        let edge_y = if d.panel_top() {
+            shape.bottom() - 1
+        } else {
+            shape.y
+        };
+        canvas.fill_rect(Rect::new(shape.x, edge_y, shape.w, 1), ui::separator());
     }
 
     let start_bg = if d.popup == Popup::Menu {

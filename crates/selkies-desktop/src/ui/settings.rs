@@ -175,7 +175,7 @@ const ACCENT_STROKE: f32 = 3.0;
 
 /// The sliders of the Panel, Desktops and Windows pages: key, lowest,
 /// highest, step and unit.
-const SLIDERS: [(&str, i32, i32, i32, &str); 6] = [
+const SLIDERS: [(&str, i32, i32, i32, &str); 7] = [
     (
         "panel_height",
         config::MIN_PANEL_HEIGHT,
@@ -186,6 +186,7 @@ const SLIDERS: [(&str, i32, i32, i32, &str); 6] = [
     ("panel_width", 20, 100, 5, "%"),
     ("panel_opacity", 0, 100, 5, "%"),
     ("panel_margin", 0, config::MAX_PANEL_MARGIN, 2, "px"),
+    ("panel_corners", 0, config::MAX_PANEL_CORNERS, 1, "px"),
     ("window_corners", 0, config::MAX_CORNERS, 1, "px"),
     ("desktops", 1, config::MAX_DESKTOPS as i32, 1, ""),
 ];
@@ -238,6 +239,7 @@ struct Style {
     corners: i32,
     centered: bool,
     margin: i32,
+    bar_corners: i32,
     menu: MenuLayout,
 }
 
@@ -251,6 +253,7 @@ impl Style {
             && window.corners == self.corners
             && config.panel_centered == self.centered
             && config.panel_margin == self.margin
+            && config.panel_corners == self.bar_corners
             && config.menu_layout == self.menu
     }
 
@@ -273,6 +276,7 @@ impl Style {
                 if self.centered { "centered" } else { "left" }.to_string(),
             ),
             ("panel_margin", self.margin.to_string()),
+            ("panel_corners", self.bar_corners.to_string()),
             ("menu_layout", menu_value(self.menu).to_string()),
         ]
     }
@@ -286,15 +290,20 @@ impl Style {
         look.style.glyphs = self.glyphs;
         look.style.corners = self.corners;
         look.centered = self.centered;
-        look.margin = self.margin;
+        if d.config.panel_float {
+            look.margin = self.margin;
+        }
+        look.bar_corners = self.bar_corners;
         look.menu = self.menu;
         look
     }
 }
 
-/// The styles: the Linux desktop as it is, the Fruit look with a floating
-/// dock, circle buttons and a grid of applications, and the Redmond look
-/// with square frames, wide buttons and a tiled start menu.
+/// The styles: the Linux desktop as it is, the Fruit look with a rounder
+/// floating dock, circle buttons and a grid of applications, and the
+/// Redmond look with square frames, a square bar, wide buttons and a tiled
+/// start menu. Each floats its bar by the same margin while the bar's
+/// float setting is on.
 const STYLES: [Style; 3] = [
     Style {
         name: "Linux",
@@ -303,7 +312,8 @@ const STYLES: [Style; 3] = [
         glyphs: Glyphs::Lines,
         corners: 8,
         centered: false,
-        margin: 0,
+        margin: 8,
+        bar_corners: 6,
         menu: MenuLayout::Columns,
     },
     Style {
@@ -314,6 +324,7 @@ const STYLES: [Style; 3] = [
         corners: 10,
         centered: false,
         margin: 8,
+        bar_corners: 14,
         menu: MenuLayout::Grid,
     },
     Style {
@@ -323,7 +334,8 @@ const STYLES: [Style; 3] = [
         glyphs: Glyphs::Wide,
         corners: 0,
         centered: false,
-        margin: 0,
+        margin: 8,
+        bar_corners: 0,
         menu: MenuLayout::Tiles,
     },
 ];
@@ -2321,12 +2333,21 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                     tr("Left")
                 },
             );
-            groups.slider(
-                tr("Margin"),
-                "panel_margin",
-                slider_value(d, "panel_margin"),
-                "px",
-            );
+            groups.switch(tr("Float"), "panel_float", d.config.panel_float);
+            if d.config.panel_float {
+                groups.slider(
+                    tr("Margin"),
+                    "panel_margin",
+                    slider_value(d, "panel_margin"),
+                    "px",
+                );
+                groups.slider(
+                    tr("Corners"),
+                    "panel_corners",
+                    slider_value(d, "panel_corners"),
+                    "px",
+                );
+            }
             groups.group(tr("Items"));
             groups.switch(tr("Clock"), "show_clock", d.config.show_clock);
             groups.field(
@@ -2769,6 +2790,7 @@ fn slider_value(d: &Desktop, key: &str) -> i32 {
         "panel_height" => d.config.panel_height,
         "panel_width" => d.config.panel_width,
         "panel_margin" => d.config.panel_margin,
+        "panel_corners" => d.config.panel_corners,
         "window_corners" => d.config.window.corners,
         "desktops" => d.config.desktops as i32,
         _ => d.config.panel_opacity,
@@ -4333,7 +4355,7 @@ mod tests {
         for style in &STYLES {
             let config = config_from(&style.changes());
             assert_eq!(current_style(&config), Some(style.name));
-            assert_eq!(style.changes().len(), 7);
+            assert_eq!(style.changes().len(), 8);
         }
         assert_eq!(current_style(&Config::default()), Some("Linux"));
         let mut odd = Config::default();
@@ -4420,6 +4442,7 @@ mod tests {
                 style: crate::config::WindowStyle::default(),
                 centered: false,
                 margin: 0,
+                bar_corners: 0,
                 menu: MenuLayout::Columns,
             },
             action: Action::Reset,

@@ -88,6 +88,8 @@ struct X11Surface {
     visible: Vec<Rect>,
     /// The input rectangles last presented, in logical pixels, which a reparent re-applies.
     input: Vec<Rect>,
+    /// The bar's background in physical pixels and its corner radius, on the panel's window.
+    bar: Option<(Rect, i32)>,
 }
 
 /// How a window's visible rectangles become its bounding shape.
@@ -147,9 +149,6 @@ pub struct X11Backend {
     pointer_shape: bool,
     panel_top: bool,
     panel_height: i32,
-    /// Space between the bar and the screen edges, which floats it and
-    /// rounds every corner of it.
-    panel_margin: i32,
     panel_autohide: bool,
     events: Vec<Event>,
     windows: Vec<X11Window>,
@@ -262,7 +261,6 @@ impl X11Backend {
             pointer_shape: false,
             panel_top: false,
             panel_height: ui::PANEL_HEIGHT,
-            panel_margin: 0,
             panel_autohide: false,
             events: Vec::new(),
             windows: Vec::new(),
@@ -901,16 +899,8 @@ impl X11Backend {
         let popup_radius = (ui::popup_radius() as i32) * scale;
         for (i, rect) in surface.visible.iter().enumerate() {
             let bar = i == 0 && shape == Shape::Panel;
-            if bar && self.panel_margin > 0 {
-                add_rounded_shape(&mut bounding, *rect, (ui::panel_radius() as i32) * scale);
-            } else if bar && rect.w < surface.width {
-                let overflow = (ui::panel_radius() as i32) * scale;
-                let extended = if self.panel_top {
-                    Rect::new(rect.x, rect.y - overflow, rect.w, rect.h + overflow)
-                } else {
-                    Rect::new(rect.x, rect.y, rect.w, rect.h + overflow)
-                };
-                add_rounded_shape(&mut bounding, extended, overflow);
+            if bar && let Some((background, radius)) = surface.bar {
+                add_rounded_shape(&mut bounding, background, radius);
             } else if bar || shape == Shape::Square {
                 push_rect(&mut bounding, *rect);
             } else {
@@ -1769,6 +1759,7 @@ fn create_window(
         pixels: Vec::new(),
         visible: Vec::new(),
         input: Vec::new(),
+        bar: None,
     })
 }
 
@@ -1946,6 +1937,9 @@ impl Backend for X11Backend {
                 }
             }
             surface.visible = visible;
+            surface.bar = frame
+                .bar
+                .map(|(rect, radius)| (rect.scaled(scale), (radius * scale as f32).round() as i32));
             if !is_window {
                 surface.input = if id == SurfaceId::Panel && frame.grab {
                     vec![Rect::new(0, 0, w / scale, h / scale)]
@@ -2049,9 +2043,7 @@ impl Backend for X11Backend {
                 top,
                 height,
                 autohide,
-                margin,
             } => {
-                self.panel_margin = *margin;
                 if self.panel_top != *top || self.panel_height != *height || self.panel_autohide != *autohide
                 {
                     self.panel_top = *top;

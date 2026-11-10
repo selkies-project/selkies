@@ -25,6 +25,9 @@ pub enum Command {
     Settings(Option<String>),
     /// Ask for a name and make a folder on the desktop, on the cell last pointed at.
     NewFolder,
+    /// A window reaches the bar's edge, or none does any more: the window manager's word on
+    /// whether a floating bar attaches to the edge.
+    BarAttached(bool),
     /// Exit the desktop.
     Quit,
 }
@@ -50,6 +53,7 @@ impl Command {
             "files" => Some(Command::Files((!rest.is_empty()).then(|| PathBuf::from(rest)))),
             "settings" => Some(Command::Settings((!rest.is_empty()).then(|| rest.to_string()))),
             "new-folder" => Some(Command::NewFolder),
+            "bar-attached" => Some(Command::BarAttached(rest == "1")),
             "quit" | "exit" => Some(Command::Quit),
             _ => None,
         }
@@ -67,6 +71,7 @@ impl Command {
             Command::Settings(None) => "settings".to_string(),
             Command::Settings(Some(page)) => format!("settings {page}"),
             Command::NewFolder => "new-folder".to_string(),
+            Command::BarAttached(attached) => format!("bar-attached {}", u8::from(*attached)),
             Command::Quit => "quit".to_string(),
         }
     }
@@ -75,26 +80,7 @@ impl Command {
 /// The socket path: under the runtime directory, named after the display so
 /// one desktop per session is reachable.
 pub fn socket_path() -> PathBuf {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let display = std::env::var("WAYLAND_DISPLAY")
-        .ok()
-        .filter(|d| !d.is_empty())
-        .or_else(|| std::env::var("DISPLAY").ok().filter(|d| !d.is_empty()))
-        .unwrap_or_else(|| "default".to_string());
-    let safe: String = display
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    dir.join(format!("selkies-desktop-{safe}.sock"))
+    selkies_draw::style::desktop_socket_path(|name| std::env::var(name).ok())
 }
 
 /// The listening side, owned by the running desktop.

@@ -375,6 +375,7 @@ fn run() -> i32 {
                         desktop.open_settings(page.as_deref().and_then(ui::settings::Page::from_id));
                     }
                     ipc::Command::NewFolder => desktop.new_desktop_folder(),
+                    ipc::Command::BarAttached(attached) => desktop.set_bar_attached(attached),
                     ipc::Command::Quit => return 0,
                 }
             }

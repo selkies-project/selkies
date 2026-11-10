@@ -278,3 +278,4 @@ Cannot create the folder: {error} = Kan de map niet aanmaken: {error}
 Application icon = Toepassingspictogram
 Light or dark = Licht of donker
 Automatic = Automatisch
+Float = Zwevend

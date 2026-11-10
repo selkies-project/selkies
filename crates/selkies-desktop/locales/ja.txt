@@ -278,3 +278,4 @@ Cannot create the folder: {error} = フォルダーを作成できません: {er
 Application icon = アプリケーションのアイコン
 Light or dark = ライトまたはダーク
 Automatic = 自動
+Float = フローティング

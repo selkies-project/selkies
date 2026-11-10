@@ -125,6 +125,34 @@ pub fn desktop_config_file() -> PathBuf {
     desktop_config_dir().join("config")
 }
 
+/// The socket the running desktop shell takes commands on: under the runtime directory, named
+/// after the display it runs on so one shell per session is reachable, read from the
+/// environment a variable lookup gives, which the window manager fills from the environment it
+/// starts the shell with.
+///
+/// # Arguments
+/// * `var` - Looks a variable up: `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`, `DISPLAY`.
+pub fn desktop_socket_path(var: impl Fn(&str) -> Option<String>) -> PathBuf {
+    let set = |name: &str| var(name).filter(|v| !v.is_empty());
+    let dir = set("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let display = set("WAYLAND_DISPLAY")
+        .or_else(|| set("DISPLAY"))
+        .unwrap_or_else(|| "default".to_string());
+    let safe: String = display
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    dir.join(format!("selkies-desktop-{safe}.sock"))
+}
+
 /// The desktop's settings as lowercase keys and raw values: the configuration file, with the
 /// `SELKIES_DESKTOP_<KEY>` environment over it.
 pub fn desktop_values() -> HashMap<String, String> {

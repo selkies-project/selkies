@@ -34,6 +34,7 @@ pub mod pipes;
 pub mod place;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pixelflux::wm::{
@@ -360,6 +361,8 @@ pub struct Engine {
     tile_ghost: Option<TileGhost>,
     /// The zone the pointer of a move drag rests in before it is shown, see [`TileDwell`].
     tile_dwell: Option<TileDwell>,
+    /// What the desktop shell was last told about the bar's edge, see [`BarLink`].
+    bar_link: Arc<Mutex<BarLink>>,
     /// How many virtual desktops there are, and which one is shown.
     desktop_count: u32,
     current_desktop: u32,
@@ -445,6 +448,7 @@ impl Engine {
             pipes: Vec::new(),
             tile_preview: None,
             tile_dwell: None,
+            bar_link: Arc::new(Mutex::new(BarLink::default())),
             tile_ghost: None,
             desktop_count,
             current_desktop: 0,
@@ -623,6 +627,15 @@ impl Engine {
     }
 
     fn outputs_changed(&mut self, outputs: Vec<OutputInfo>) {
+        // A workarea that changed is a bar placed anew, as a shell starting does, which is told
+        // where the edge stands again.
+        if outputs
+            .iter()
+            .map(|o| o.workarea)
+            .ne(self.outputs.iter().map(|o| o.workarea))
+        {
+            self.bar_link.lock().unwrap_or_else(|p| p.into_inner()).told = None;
+        }
         let gone: Vec<OutputId> = self
             .outputs
             .iter()
@@ -1431,6 +1444,80 @@ impl Engine {
         let zone = dwell.zone;
         self.tile_dwell = None;
         self.set_tile_preview(Some(zone));
+    }
+
+    /// Whether a window reaches a bar's edge: a shown window of the taskbar's whose frame
+    /// touches or crosses an edge of its output's workarea that something reserves, which
+    /// is where a floating bar attaches to the edge to give it the space; a maximized, a
+    /// tiled, a full-height, and a fullscreen window all do.
+    fn bar_edge_reached(&self) -> bool {
+        self.windows.iter().any(|(&id, win)| {
+            if !win.shown() || !win.listed() {
+                return false;
+            }
+            let Some(output) = self.output(win.output) else {
+                return false;
+            };
+            let (screen, area) = (output.rect, output.workarea);
+            let frame = if win.fullscreen {
+                win.rect
+            } else {
+                self.frame_rect(id)
+            };
+            let across = frame.x < area.right() && frame.right() > area.x;
+            across
+                && ((area.bottom() < screen.bottom() && frame.bottom() >= area.bottom())
+                    || (area.y > screen.y && frame.y <= area.y))
+        })
+    }
+
+    /// Tells the desktop shell whether a window reaches the bar's edge when that changed
+    /// since it was last told, over the shell's command socket, which the window manager
+    /// finds from the environment it starts the shell with.
+    ///
+    /// The word goes out on a thread of its own, so a shell that is not up or not answering
+    /// holds no compositor work; one that was not reached is tried again a second later.
+    fn tell_bar_edge(&mut self) {
+        let attached = self.bar_edge_reached();
+        {
+            let mut link = self.bar_link.lock().unwrap_or_else(|p| p.into_inner());
+            if link.told == Some(attached)
+                || link.sending
+                || link.failed_at.is_some_and(|at| self.now < at + BAR_RETRY)
+            {
+                return;
+            }
+            link.sending = true;
+        }
+        let env = self.launcher.env();
+        let path = selkies_draw::style::desktop_socket_path(|name| {
+            env.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        });
+        let link = self.bar_link.clone();
+        let now = self.now;
+        let sent = std::thread::Builder::new()
+            .name("wm-bar-edge".to_string())
+            .spawn(move || {
+                use std::io::Write;
+                let delivered = std::os::unix::net::UnixStream::connect(&path)
+                    .and_then(|mut stream| {
+                        stream.write_all(format!("bar-attached {}\n", u8::from(attached)).as_bytes())
+                    })
+                    .is_ok();
+                let mut link = link.lock().unwrap_or_else(|p| p.into_inner());
+                link.sending = false;
+                if delivered {
+                    link.told = Some(attached);
+                    link.failed_at = None;
+                } else {
+                    link.failed_at = Some(now);
+                }
+            });
+        if sent.is_err() {
+            self.bar_link.lock().unwrap_or_else(|p| p.into_inner()).sending = false;
+        }
     }
 
     /// Take the tile ghost down at once, as a drag's end does.
@@ -3987,6 +4074,21 @@ struct TileGhost {
 /// How long the ghost takes to reach a zone.
 const TILE_GHOST: Duration = Duration::from_millis(180);
 
+/// How long a shell that could not be told about the bar's edge waits before it is tried
+/// again.
+const BAR_RETRY: Duration = Duration::from_secs(1);
+
+/// What the desktop shell knows about the bar's edge, shared with the thread that tells it.
+#[derive(Debug, Default)]
+struct BarLink {
+    /// Whether a window reaches the edge, as the shell was last told; `None` before it was.
+    told: Option<bool>,
+    /// Whether a word is on its way.
+    sending: bool,
+    /// When the shell last could not be reached.
+    failed_at: Option<Instant>,
+}
+
 /// How long the pointer of a move drag rests in a zone before the zone is shown.
 const TILE_DWELL: Duration = Duration::from_millis(100);
 
@@ -4146,6 +4248,7 @@ impl WindowPolicy for Engine {
                 Verdict::Pass
             }
         };
+        self.tell_bar_edge();
         if !self.out.iter().any(|c| matches!(c, Command::WakeAt(_))) {
             self.out.push(Command::WakeAt(self.theme_poll));
         }
@@ -4445,6 +4548,21 @@ mod tests {
         assert_eq!(engine.windows[&1].rect, grab::client_of(zone, e));
         assert_eq!(engine.effects.kind(1), Some(EffectKind::Resize));
         assert_eq!(engine.windows[&1].saved.map(|r| (r.w, r.h)), Some((600, 400)));
+    }
+
+    /// A floating bar attaches while a window reaches the workarea's reserved edge: a
+    /// maximized or a half-tiled window does, a window placed clear of it does not.
+    #[test]
+    fn a_maximized_or_tiled_window_reaches_the_bar_edge() {
+        let (mut engine, _) = engine();
+        open(&mut engine, 1, 600, 400);
+        assert!(!engine.bar_edge_reached());
+        engine.set_maximized(1, true);
+        assert!(engine.bar_edge_reached());
+        engine.set_maximized(1, false);
+        assert!(!engine.bar_edge_reached());
+        engine.run_action(&Action::SnapToEdge(ResizeEdge::Left), Some(1), (0.0, 0.0));
+        assert!(engine.bar_edge_reached());
     }
 
     /// A resize from the left edge configures with the right edge held, and a size the client

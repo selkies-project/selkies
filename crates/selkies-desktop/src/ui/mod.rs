@@ -78,13 +78,6 @@ pub fn popup_radius() -> f32 {
     style().corners as f32
 }
 
-/// Corner radius of a bar narrower than the screen: a little more than the
-/// popups', none when they are square.
-pub fn panel_radius() -> f32 {
-    let corners = style().corners;
-    if corners == 0 { 0.0 } else { corners as f32 + 2.0 }
-}
-
 /// The color of a surface at a point, for the surface style in use: the
 /// base color flat, lightened towards the top for the gradient, and a
 /// lighter upper half over a darker lower half for the gloss.
@@ -581,13 +574,11 @@ mod tests {
             ..WindowStyle::default()
         });
         assert_eq!(popup_radius(), 0.0);
-        assert_eq!(panel_radius(), 0.0);
         set_style(WindowStyle {
             corners: 6,
             ..WindowStyle::default()
         });
         assert_eq!(popup_radius(), 6.0);
-        assert_eq!(panel_radius(), 8.0);
         set_style(WindowStyle::default());
     }
 }

@@ -83,10 +83,13 @@ people reach for in a multi-application container:
   labwc and openbox both look before the system themes, and the running
   window manager is told to reload, so title bars, borders and the
   right-click menus match the bar and the popups at once.  Three styles
-  come ready: Linux as the desktop is, Fruit with a floating dock, circle
-  buttons on the left and a grid of applications in the start menu,
-  and Redmond with square frames, wide buttons and a start menu of every
-  application beside the favorites as tiles.  The shading, the side the
+  come ready: Linux as the desktop is with a gently rounded bar, Fruit
+  with a rounder dock, circle buttons on the left and a grid of
+  applications in the start menu, and Redmond with square frames, a square
+  bar, wide buttons and a start menu of every application beside the
+  favorites as tiles.  Each floats its bar while the Panel page's Float
+  switch is on, and the bar glides to the screen's edge when a window needs
+  the space and back off it when none does.  The shading, the side the
   buttons sit on, their glyphs, the corner radius, the bar's layout and
   margin and the start menu's layout can each be set alone; the bar and the
   popups take the same shading and corners.  The button
@@ -169,7 +172,9 @@ so an edit applies within a moment.
 | `panel_opacity` | `95` | Opacity of the bar's background in percent |
 | `panel_autohide` | `false` | Hide the bar until the pointer touches the screen edge it sits on; it then reserves no space |
 | `panel_layout` | `left` | `left` keeps the start button, quick launch and taskbar at the left; `centered` puts them in the middle of the bar |
-| `panel_margin` | `0` | Space between the bar and the screen edges in pixels, 0 to 16, which floats it with every corner rounded |
+| `panel_float` | `true` | Float the bar clear of the screen edges while no window needs the space; a maximized, tiled, full-height, or fullscreen window reaching the bar's edge attaches it there, and the bar floats again once none does. The band the bar reserves is the same either way, so no window moves |
+| `panel_margin` | `8` | Space between a floating bar and the screen edges in pixels, 0 to 16 |
+| `panel_corners` | `6` | Corner radius of a floating bar in pixels, 0 to 24 |
 | `start_label` | | Text shown on the start button beside its icon |
 | `menu_layout` | `columns` | How the start menu lists applications: `columns` (categories and rows), `grid` (categories and a grid of icons) or `tiles` (every application in a list with the favorites as tiles beside it) |
 | `color_accent` | `#7967c5` | Color of markers, selections, switches and the chosen option |

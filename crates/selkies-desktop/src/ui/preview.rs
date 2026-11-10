@@ -54,8 +54,10 @@ pub struct Look {
     pub style: WindowStyle,
     /// Whether the bar's items sit in its middle.
     pub centered: bool,
-    /// The bar's margin from the screen edges.
+    /// The floating bar's margin from the screen edges, 0 for a bar that does not float.
     pub margin: i32,
+    /// The floating bar's corner radius.
+    pub bar_corners: i32,
     /// The start menu's layout.
     pub menu: MenuLayout,
 }
@@ -67,7 +69,8 @@ impl Look {
             theme: d.config.theme,
             style: d.config.window,
             centered: d.config.panel_centered,
-            margin: d.config.panel_margin,
+            margin: d.float_margin(),
+            bar_corners: d.config.panel_corners,
             menu: d.config.menu_layout,
         }
     }
@@ -253,7 +256,7 @@ pub fn draw_monitor(
         paint_wallpaper(d, canvas, screen, wallpaper, monitor);
         if number.unwrap_or(1) == 1 {
             let height = ((d.config.panel_height as f32 * ratio).round() as i32).max(BAR_LEAST);
-            let margin = (d.config.panel_margin as f32 * ratio).round() as i32;
+            let margin = (d.float_margin() as f32 * ratio).round() as i32;
             let look = Look::current(d);
             draw_bar(d, canvas, screen, &look, height, margin);
         }
@@ -630,7 +633,7 @@ fn draw_menu(d: &mut Desktop, canvas: &mut Canvas<'_>, rect: Rect, layout: MenuL
 /// * `height` - The bar's height in the preview.
 /// * `margin` - The bar's margin from the screen edges in the preview.
 fn draw_bar(d: &mut Desktop, canvas: &mut Canvas<'_>, screen: Rect, look: &Look, height: i32, margin: i32) {
-    let corners = look.style.corners;
+    let corners = look.bar_corners;
     let usable = screen.w - 2 * margin;
     let width = (usable * d.config.panel_width / 100).max(60);
     let x = screen.x + margin + (usable - width) / 2;

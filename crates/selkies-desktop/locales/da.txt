@@ -278,3 +278,4 @@ Cannot create the folder: {error} = Kan ikke oprette mappen: {error}
 Application icon = Programikon
 Light or dark = Lys eller mørk
 Automatic = Automatisk
+Float = Svævende

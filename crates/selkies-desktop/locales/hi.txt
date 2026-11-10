@@ -278,3 +278,4 @@ Cannot create the folder: {error} = फ़ोल्डर नहीं बना
 Application icon = ऐप्लिकेशन आइकन
 Light or dark = हल्का या गहरा
 Automatic = स्वचालित
+Float = तैरता हुआ

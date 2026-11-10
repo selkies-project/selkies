@@ -278,3 +278,4 @@ Cannot create the folder: {error} = Klasör oluşturulamıyor: {error}
 Application icon = Uygulama simgesi
 Light or dark = Açık veya koyu
 Automatic = Otomatik
+Float = Yüzen

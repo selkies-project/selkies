@@ -183,12 +183,7 @@ pub enum Request {
     /// that includes the margin that floats it off the edge, and whether it
     /// hides, in which case it reserves no space. The bar lies above windows either way, a
     /// fullscreen window alone covering it.
-    Panel {
-        top: bool,
-        height: i32,
-        autohide: bool,
-        margin: i32,
-    },
+    Panel { top: bool, height: i32, autohide: bool },
     /// Set the default sink's volume, in percent.
     SetVolume(u8),
     /// Toggle the default sink's mute.

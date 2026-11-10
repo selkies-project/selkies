@@ -278,3 +278,4 @@ Cannot create the folder: {error} = 无法创建文件夹：{error}
 Application icon = 应用程序图标
 Light or dark = 浅色或深色
 Automatic = 自动
+Float = 浮动

@@ -278,3 +278,4 @@ Cannot create the folder: {error} = สร้างโฟลเดอร์ไ�
 Application icon = ไอคอนแอปพลิเคชัน
 Light or dark = สว่างหรือมืด
 Automatic = อัตโนมัติ
+Float = ลอย
