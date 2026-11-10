@@ -1,0 +1,18 @@
+{
+  "name": "selkies-browserstack",
+  "private": true,
+  "description": "Selkies' web client on real browsers through BrowserStack",
+  "type": "module",
+  "license": "MPL-2.0",
+  "scripts": {
+    "smoke": "node smoke.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "webdriverio": "^10.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

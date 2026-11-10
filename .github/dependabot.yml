@@ -40,6 +40,15 @@ updates:
       web-client:
         patterns: ["*"]
 
+  # BrowserStack smoke
+  - package-ecosystem: npm
+    directory: /tests/browserstack
+    schedule:
+      interval: weekly
+    groups:
+      browserstack:
+        patterns: ["*"]
+
   # Documentation site
   - package-ecosystem: npm
     directory: /website

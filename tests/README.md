@@ -129,6 +129,46 @@ ln -sf ../usr/lib32/ld-linux.so.2 root/lib/ld-linux.so.2
 MULTILIB_SYSROOT=/tmp/multilib/root tests/packaging/simulate.sh
 ```
 
+## BrowserStack
+
+`tests/browserstack/smoke.ts` runs the web client on real browsers through
+BrowserStack. Edge on Windows, Safari on macOS and Chrome on a Pixel run over
+WebSockets, and Edge and Safari over WebRTC. The suite is TypeScript on
+WebdriverIO, run by Node's own type stripping, and has its own `package.json`.
+
+Each transport gets a server and an X display of its own on the machine
+running the suite. The servers serve HTTPS with a certificate made for the
+run, since the client needs a secure context. The browsers reach them
+through the BrowserStack Local tunnel, which is limited to those ports.
+
+A case waits for the stream, pressing the client's Play Stream button where
+the browser holds autoplay for a gesture. It then clicks the middle of the
+page and types a key, or taps it on the phone. A window on the display reads
+the button and key back as an application would.
+
+WebRTC runs with the server's default ICE servers and no relay. A case
+therefore needs a direct path between the runner and the browser's network,
+which no session on BrowserStack's Pixel found, and a WebRTC failure says
+whether an ICE path was found.
+
+It needs the account's `BROWSERSTACK_USERNAME` and `BROWSERSTACK_ACCESS_KEY`,
+the tunnel binary, `xev` and `xdpyinfo` (`x11-utils`), `openssl`, and what
+`scripts/ci/test-stack.sh` starts. `.github/workflows/browserstack.yaml` runs
+it daily and on request:
+
+```bash
+(cd tests/browserstack && npm ci)
+BROWSERSTACK_LOCAL=/path/to/BrowserStackLocal BROWSERSTACK_DISPLAYS=:99,:98 \
+  node tests/browserstack/smoke.ts
+```
+
+The other variables:
+
+- `SELKIES_TEST_SERVER`: the server.
+- `SELKIES_WEB_ROOT`: a web client build to serve instead of the embedded one (`scripts/ci/build-web.sh` writes `dist/web`).
+- `BROWSERSTACK_CASES`: a subset of the cases, such as `websockets:edge-windows`.
+- `BROWSERSTACK_OUT`: where the report, the screenshots and the server logs go.
+
 ## Image tier
 
 The `image` tier runs the maintainer's human-testing checklist (below) against

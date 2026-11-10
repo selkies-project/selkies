@@ -1,0 +1,139 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# The web client on real browsers through BrowserStack (tests/browserstack/):
+# Edge on Windows, Safari on macOS and Chrome on an Android phone over
+# WebSockets, Edge and Safari over WebRTC, each streaming from a server on the
+# runner through the BrowserStack Local tunnel and taking a click and a key, or
+# a tap. Daily and on request; the account's credentials are organization
+# secrets, which a fork does not get.
+name: BrowserStack
+
+on:
+  schedule:
+    - cron: "53 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The account's parallel sessions are shared by every run, so a run waits for
+# the one before it rather than cancelling it
+concurrency:
+  group: browserstack
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "26"
+
+jobs:
+  credentials:
+    name: Credentials
+    if: github.event_name != 'schedule' || github.repository == 'selkies-project/selkies'
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - id: check
+        env:
+          BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+          BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+        run: |
+          if [ -n "${BROWSERSTACK_USERNAME}" ] && [ -n "${BROWSERSTACK_ACCESS_KEY}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No BrowserStack credentials here (a fork of the repository): the smoke is skipped"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  wheel:
+    name: Build wheel
+    needs: [credentials]
+    if: needs.credentials.outputs.present == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-wheel.yaml
+
+  smoke:
+    name: Real browsers
+    needs: [wheel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        id: python-first
+        # A download GitHub fails is tried again after a wait, twice.
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Wait out a download outage
+        if: steps.python-first.outcome == 'failure'
+        run: sleep 120
+      - name: Set up Python, again
+        id: python-again
+        if: steps.python-first.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Wait out a longer download outage
+        if: steps.python-again.outcome == 'failure'
+        run: sleep 300
+      - name: Set up Python, a third time
+        if: steps.python-again.outcome == 'failure'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Download the selkies wheel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: selkies-wheel
+          path: dist/
+      # The display and sound server the cases stream (scripts/ci/test-stack.sh),
+      # xev and xdpyinfo to read the input back, and the libraries the server
+      # leaves to the host
+      - name: Install the display, audio and X tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            xvfb x11-utils xauth pulseaudio pulseaudio-utils libgbm1 libpixman-1-0
+      - name: Install the server
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/selkies-venv"
+          "${RUNNER_TEMP}/selkies-venv/bin/pip" install --no-index --find-links "$PWD/dist" --only-binary=:all: selkies
+          "${RUNNER_TEMP}/selkies-venv/bin/selkies" --version
+      - name: Install the suite
+        working-directory: tests/browserstack
+        run: npm ci --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000
+      # BrowserStack publishes no checksum for it, so the run logs the one it got
+      - name: Fetch BrowserStack Local
+        run: |
+          scripts/ci/retry.sh 5 60 curl -fsSL -o "${RUNNER_TEMP}/BrowserStackLocal.zip" \
+            https://www.browserstack.com/browserstack-local/BrowserStackLocal-linux-x64.zip
+          sha256sum "${RUNNER_TEMP}/BrowserStackLocal.zip"
+          unzip -q -o "${RUNNER_TEMP}/BrowserStackLocal.zip" -d "${RUNNER_TEMP}/browserstack-local"
+          "${RUNNER_TEMP}/browserstack-local/BrowserStackLocal" --version
+      - name: Run the smoke
+        env:
+          BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+          BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+          BROWSERSTACK_LOCAL: ${{ runner.temp }}/browserstack-local/BrowserStackLocal
+          SELKIES_TEST_SERVER: ${{ runner.temp }}/selkies-venv/bin/selkies
+          BROWSERSTACK_OUT: browserstack-out
+        run: node tests/browserstack/smoke.ts
+      # The report, the screenshots and the server logs; the tunnel's key file
+      # and log, and the certificate's key, stay in the suite's own directory
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browserstack
+          path: browserstack-out/
+          if-no-files-found: ignore
