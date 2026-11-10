@@ -73,9 +73,6 @@ const CENTER_SLACK = 0.05;
 // The client's long press (LONG_PRESS_MS in web/selkies-web-core/lib/input.ts): a lift its page
 // handles this long after the touch comes after the long press's right click (#565)
 const LONG_PRESS_MS = 750;
-// Its tap (_TAP_MAX_DURATION), and how many taps a case makes that the driver held longer
-const TAP_MAX_MS = 250;
-const TAP_ATTEMPTS = 3;
 
 // A plain script, not a promise: Safari's driver returns one unresolved
 const STATE = `const v = document.querySelector('#videoStream') || document.querySelector('video');
@@ -213,27 +210,18 @@ async function runCase(mode: Mode, name: string, server: stack.Server, watcher: 
     result.stream = describe(now) + (gesture ? ', after the Play Stream gesture' : '');
 
     const overlay = await browser.$('#overlayInput');
-    let press: stack.XEvent | undefined;
-    let seen: { heldMs?: number; handledMs?: number } = {};
-    let size: [number, number] = [0, 0];
-    // BrowserStack's driver holds a short tap anywhere from tens of milliseconds to a second,
-    // and a still press the client times past a tap and short of a long press clicks nothing
-    // by design: such a tap, as the page's own event timestamps measure it, is made again
-    for (let attempt = 1; ; attempt++) {
-      await browser.execute(COUNT_INPUT);
-      const since = Date.now();
-      if (platform.touch) {
-        await browser.action('pointer', { parameters: { pointerType: 'touch' } })
-          .move({ origin: overlay }).down().pause(60).up().perform();
-      } else {
-        await overlay.click();
-      }
-      press = await watcher.wait(since, (e) => e.kind === 'ButtonPress' && (e.button === 1 || platform.touch), INPUT_MS);
-      size = await stack.screenSize(server.display);
-      seen = JSON.parse((await browser.execute(INPUT_COUNTS)) as string);
-      const held = seen.heldMs ?? 0;
-      if (press || !platform.touch || held < TAP_MAX_MS || held >= LONG_PRESS_MS || attempt === TAP_ATTEMPTS) break;
+    await browser.execute(COUNT_INPUT);
+    const since = Date.now();
+    // BrowserStack's driver holds a short tap anywhere from tens of milliseconds to a second
+    if (platform.touch) {
+      await browser.action('pointer', { parameters: { pointerType: 'touch' } })
+        .move({ origin: overlay }).down().pause(60).up().perform();
+    } else {
+      await overlay.click();
     }
+    const press = await watcher.wait(since, (e) => e.kind === 'ButtonPress' && (e.button === 1 || platform.touch), INPUT_MS);
+    const size = await stack.screenSize(server.display);
+    const seen: { heldMs?: number; handledMs?: number } = JSON.parse((await browser.execute(INPUT_COUNTS)) as string);
     const tap = platform.touch ? `, a tap held ${seen.heldMs} ms and handled ${seen.handledMs} ms apart` : '';
     if (!press) {
       result.input = `no button press reached the display (${size[0]}x${size[1]}); the page got ${JSON.stringify(seen)}`;

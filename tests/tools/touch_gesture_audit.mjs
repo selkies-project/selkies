@@ -605,6 +605,49 @@ function pencilTap(input, x, y) {
     check('direct touch: a tap whose lift is handled late still clicks', all === 'down,up', all);
 }
 {
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    fire(input, 'touchstart', [t], [t]);
+    advance(500);
+    fire(input, 'touchend', [t], []);
+    advance(1000);
+    const all = leftTransitions(sent).map(([, s]) => s).join(',');
+    check('direct touch: a finger rested half a second and lifted clicks', all === 'down,up', all);
+}
+{
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    fire(input, 'touchstart', [t], [t]);
+    advance(900);
+    fire(input, 'touchend', [t], []);
+    advance(1000);
+    const left = leftTransitions(sent).map(([, s]) => s).join(',');
+    const right = leftTransitions(sent, 4).map(([, s]) => s).join(',');
+    check('direct touch: one rested past the long press is a right click, and no left one',
+        right === 'down,up' && left === '', `right ${right}, left ${left}`);
+}
+{
+    // A pinch anchored on a still finger, the moving one lifting first: the finger left behind
+    // lifts where it touched, short of a long press
+    const { input, sent } = makeInput(false);
+    const a = touch(1, 400, 300);
+    fire(input, 'touchstart', [a], [a]);
+    advance(5);
+    fire(input, 'touchstart', [touch(2, 500, 300)], [a, touch(2, 500, 300)]);
+    for (let i = 1; i <= 10; i++) {
+        advance(16);
+        const b = touch(2, 500 + 20 * i, 300);
+        fire(input, 'touchmove', [b], [a, b]);
+    }
+    advance(60);
+    fire(input, 'touchend', [touch(2, 700, 300)], [a]);
+    advance(200);
+    fire(input, 'touchend', [a], []);
+    advance(1000);
+    const all = leftTransitions(sent).map(([, s]) => s).join(',');
+    check('direct touch: the still finger of a pinch, lifted after the other, clicks nothing', all === '', all);
+}
+{
     const { input, sent } = makeInput(true);
     pencilTap(input, 400, 300);
     const all = leftTransitions(sent).map(([, s]) => s).join(',');
