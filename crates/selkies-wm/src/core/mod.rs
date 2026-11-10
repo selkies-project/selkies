@@ -3988,7 +3988,7 @@ struct TileGhost {
 const TILE_GHOST: Duration = Duration::from_millis(180);
 
 /// How long the pointer of a move drag rests in a zone before the zone is shown.
-const TILE_DWELL: Duration = Duration::from_millis(500);
+const TILE_DWELL: Duration = Duration::from_millis(100);
 
 /// How far, in logical pixels, the pointer may wander from where it entered a zone and still
 /// count as resting there.
