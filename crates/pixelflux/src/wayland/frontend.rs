@@ -1206,7 +1206,8 @@ impl XdgDecorationHandler for AppState {
 ///
 /// `new_layer_surface` resolves the requested output (or the first output), configures the surface
 /// to that output's full pixel size, and maps it into the output's layer map so the render loop
-/// composites it in the correct z-order. `layer_destroyed` needs no action here.
+/// composites it in the correct z-order. `layer_destroyed` drops the surface from every layer map
+/// and arranges them again, so the work areas give back what it reserved.
 impl WlrLayerShellHandler for AppState {
     fn shell_state(&mut self) -> &mut WlrLayerShellState {
         &mut self.layer_shell_state
@@ -1244,7 +1245,9 @@ impl WlrLayerShellHandler for AppState {
 
     fn layer_destroyed(&mut self, _surface: WlrLayerSurface) {
         for node in &self.output_nodes {
-            layer_map_for_output(&node.output).arrange();
+            let mut map = layer_map_for_output(&node.output);
+            map.cleanup();
+            map.arrange();
         }
         crate::wayland::wm::outputs_changed(self);
         crate::wayland::wm::sync_layer_keyboard(self);
