@@ -154,6 +154,9 @@ pub struct Config {
     pub show_desktop_button: bool,
     /// Desktop file IDs pinned at the top of the start menu.
     pub favorites: Vec<String>,
+    /// Whether no favorites setting was given, so the shell seeds the list from the
+    /// applications installed (`Desktop::seed_favorites`).
+    pub favorites_default: bool,
     /// Icon theme name, or `None` to detect one.
     pub icon_theme: Option<String>,
     /// Terminal command for entries that want one, or `None` to detect one.
@@ -200,6 +203,7 @@ impl Default for Config {
             show_volume: true,
             show_desktop_button: true,
             favorites: Vec::new(),
+            favorites_default: false,
             icon_theme: None,
             terminal: None,
             track_recent: true,
@@ -264,7 +268,8 @@ impl Config {
                 config.wallpaper.mode = WallpaperMode::Center;
             }
         }
-        if !values.contains_key("favorites") && config.files_manager {
+        config.favorites_default = !values.contains_key("favorites");
+        if config.favorites_default && config.files_manager {
             config.favorites = vec![FILES_ENTRY.to_string()];
         }
         config

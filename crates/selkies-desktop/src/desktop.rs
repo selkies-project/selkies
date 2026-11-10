@@ -380,7 +380,7 @@ impl Desktop {
     ///   as `new` does; without it nothing is written to the user's files
     ///   and no window manager is signaled, which is how tests build one.
     pub fn load(session: bool) -> Desktop {
-        let config = Config::load();
+        let mut config = Config::load();
         ui::set_theme(config.theme);
         ui::set_style(config.window);
         let mut portal = None;
@@ -399,6 +399,7 @@ impl Desktop {
             entries::ensure_settings_entry();
         }
         let apps = Apps::load(entries::find_terminal(&config).is_some());
+        seed_favorites(&mut config, &apps);
         let logo = crate::render::load_raster(std::path::Path::new(crate::config::LOGO_PATH), 0);
         let mut desktop = Desktop {
             config,
@@ -799,6 +800,7 @@ impl Desktop {
         }
         self.icons = Icons::new(self.config.icon_theme.as_deref());
         self.apps = Apps::load(entries::find_terminal(&self.config).is_some());
+        seed_favorites(&mut self.config, &self.apps);
         self.wallpapers.clear();
         self.load_desktop_items();
         for toplevel in &mut self.toplevels {
@@ -819,6 +821,8 @@ impl Desktop {
             self.config.panel_autohide,
         );
         self.config = Config::load();
+        seed_favorites(&mut self.config, &self.apps);
+        self.menu.invalidate();
         self.sync_panel(was_top, was_height, was_autohide);
         crate::wmtheme::apply(&self.config);
         let decision = crate::toolkits::apply(&self.config);
@@ -2581,4 +2585,51 @@ impl Desktop {
             grab: false,
         })
     }
+}
+
+/// The applications a first launch pins, a group at a time: the first installed entry of each
+/// group joins the favorites, so a browser installed under another packaging's name still
+/// counts once.
+const DEFAULT_FAVORITES: &[&[&str]] = &[
+    &[
+        "firefox.desktop",
+        "firefox-esr.desktop",
+        "org.mozilla.firefox.desktop",
+    ],
+    &["google-chrome.desktop", "com.google.Chrome.desktop"],
+    &[
+        "chromium.desktop",
+        "chromium-browser.desktop",
+        "org.chromium.Chromium.desktop",
+    ],
+    &[
+        "selkies-terminal.desktop",
+        "org.gnome.Console.desktop",
+        "org.gnome.Terminal.desktop",
+        "org.kde.konsole.desktop",
+        "xfce4-terminal.desktop",
+        "foot.desktop",
+        "kitty.desktop",
+        "Alacritty.desktop",
+        "xterm.desktop",
+    ],
+];
+
+/// Seeds the favorites of a session with no favorites setting: the default browsers and a
+/// terminal that are installed, ahead of the file manager the configuration already pins.
+///
+/// The seed is not written to the settings, so an application installed later joins it until
+/// the user pins or unpins something.
+fn seed_favorites(config: &mut Config, apps: &Apps) {
+    if !config.favorites_default {
+        return;
+    }
+    let mut seeded: Vec<String> = DEFAULT_FAVORITES
+        .iter()
+        .filter_map(|group| group.iter().find(|id| apps.find(id).is_some()))
+        .map(|id| id.to_string())
+        .collect();
+    seeded.retain(|id| !config.favorites.contains(id));
+    seeded.append(&mut config.favorites);
+    config.favorites = seeded;
 }

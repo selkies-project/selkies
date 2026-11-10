@@ -185,7 +185,7 @@ so an edit applies within a moment.
 | `show_clock` | `true` | Show the clock and its calendar |
 | `show_volume` | `true` | Show the volume control when PulseAudio answers |
 | `show_desktop_button` | `true` | Show the strip at the right end of the bar |
-| `favorites` | | Comma separated desktop file IDs (`foot`, `firefox-esr.desktop`) pinned at the top of the menu |
+| `favorites` | the installed browsers, a terminal, and Files | Comma separated desktop file IDs (`foot`, `firefox-esr.desktop`) pinned at the top of the menu; unset, the first installed of Firefox, Chrome, Chromium, and a terminal are pinned ahead of the file manager |
 | `background_style_2`, `background_2`, `wallpaper_2`, `wallpaper_mode_2` | | The same four keys with a `_N` suffix override them for monitor N, numbered from 1 with the primary first |
 | `launchers` | | Comma separated desktop file IDs shown as quick launch buttons beside the start button |
 | `show_tray` | `true` | Host the system tray beside the clock for the applications that dock an icon |
