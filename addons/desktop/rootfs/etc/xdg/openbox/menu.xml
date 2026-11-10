@@ -41,8 +41,8 @@
     <item label="Google Chrome" icon="google-chrome">
       <action name="Execute"><command>google-chrome</command></action>
     </item>
-    <item label="Text Editor" icon="org.xfce.mousepad">
-      <action name="Execute"><command>mousepad</command></action>
+    <item label="Text Editor" icon="ferrispad">
+      <action name="Execute"><command>FerrisPad</command></action>
     </item>
     <separator />
     <menu id="selkies-applications" />

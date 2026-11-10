@@ -6,7 +6,14 @@
 # Run by the window manager once it is up, as Openbox runs its own, installed
 # as /etc/xdg/openbox/autostart and read on both backends; a user's own file
 # under ~/.config/openbox replaces it. It readies the home for the desktop: the XDG user
-# directories the file manager and the desktop icons show, and proot-apps' links
-# in ~/.local/bin, which the shell's launches have on their PATH.
+# directories the file manager and the desktop icons show, proot-apps' links
+# in ~/.local/bin, which the shell's launches have on their PATH, and the text
+# editor's settings with its update checks off, which an editor the image
+# installs cannot act on, in a home that has none yet.
 xdg-user-dirs-update 2> /dev/null || true
 selkies-proot link 2> /dev/null || true
+ferrispad_settings="${XDG_CONFIG_HOME:-${HOME}/.config}/ferrispad/settings.json"
+if command -v FerrisPad > /dev/null 2>&1 && [ ! -e "${ferrispad_settings}" ]; then
+    mkdir -p "${ferrispad_settings%/*}" &&
+        printf '{\n  "auto_check_updates": false,\n  "auto_check_plugin_updates": false\n}\n' > "${ferrispad_settings}"
+fi

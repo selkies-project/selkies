@@ -76,13 +76,16 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # selkies-terminal picks between as the x-terminal-emulator below
         foot \
         xfce4-terminal \
-        # A text editor, image viewer, calculator, and archive manager for the
-        # files the desktop's file manager opens; they share xfce4-terminal's
-        # libraries, so together they add little to it
-        mousepad \
-        ristretto \
-        galculator \
-        xarchiver \
+        # What the desktop's file manager opens files with: an image viewer,
+        # a document viewer, a music player, an archive manager, and a
+        # calculator, libadwaita applications that take the shell's light or
+        # dark scheme and its accent from its settings portal; the text editor
+        # and the system monitor follow below
+        loupe \
+        papers \
+        amberol \
+        file-roller \
+        gnome-calculator \
         # The image's wallpaper: a package with light and dark pictures the
         # desktop switches between with its theme, linked below as the
         # wallpaper a session starts with, and four more of the same kind
@@ -116,6 +119,24 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # in; without it that refresh is a silent no-op and the cache a session
         # reads is whatever was there before the application arrived
         gtk-update-icon-cache && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
+
+# The text editor, FerrisPad, from its release's package, checked against the
+# digest GitHub records for it; it takes light or dark from the GSettings the
+# shell sets. Its build needs a newer C library than some bases carry, and apt
+# refuses it there, so GNOME Text Editor takes its place, in the right-click
+# menu too (below). Resources, the system monitor, comes where the
+# distribution carries it.
+RUN --mount=type=secret,id=github_token,uid=1000 set -eu; \
+    apt-get clean && apt-get update; \
+    fetch-verified release fedro86/ferrispad latest \
+        "FerrisPad-v{version}-ubuntu-$(dpkg --print-architecture).deb" /tmp/ferrispad.deb > /dev/null; \
+    if ! apt-get install --no-install-recommends -y /tmp/ferrispad.deb; then \
+        apt-get install --no-install-recommends -y gnome-text-editor; \
+    fi; \
+    if apt-cache show resources > /dev/null 2>&1; then \
+        apt-get install --no-install-recommends -y resources; \
+    fi; \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
 # The browsers, in one apt operation: Firefox from Mozilla's own APT repository,
@@ -239,6 +260,11 @@ RUN set -eu; \
 COPY --chown=1000:1000 addons/desktop/rootfs/ /
 COPY --chown=1000:1000 addons/desktop/selkies-terminal /usr/local/bin/
 RUN chmod -f 755 /usr/local/bin/selkies-terminal /etc/xdg/openbox/autostart && \
+    if ! command -v FerrisPad > /dev/null; then \
+        sed -i 's#icon="ferrispad"#icon="org.gnome.TextEditor"#;s#<command>FerrisPad</command>#<command>gnome-text-editor</command>#' \
+            /etc/xdg/openbox/menu.xml && \
+        grep -q '<command>gnome-text-editor</command>' /etc/xdg/openbox/menu.xml; \
+    fi && \
     update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/local/bin/selkies-terminal 50 && \
     [ "$(readlink -f /etc/alternatives/x-terminal-emulator)" = /usr/local/bin/selkies-terminal ] && \
     printf '%s\n' \
