@@ -50,6 +50,8 @@ pub struct Toplevel {
     pub own_icon: Option<Pixmap>,
     /// Window state flags.
     pub state: ToplevelState,
+    /// The display the window is on, by the backend's number for it.
+    pub display: Option<u32>,
     /// The themed icon resolved for the current scale.
     icon: Option<(i32, Option<Arc<Pixmap>>)>,
 }
@@ -138,6 +140,78 @@ impl BackgroundSurface {
             .first()
             .copied()
             .unwrap_or(Rect::new(0, 0, self.geometry.width, self.geometry.height))
+    }
+}
+
+/// The bar of a display other than the primary one: the state the panel's own fields hold for
+/// the primary bar, held here while another bar stands in for the panel.
+///
+/// Every bar runs the panel's code: the desktop swaps a bar's state into the panel's fields
+/// for as long as it renders the bar or handles an event on it ([`Desktop::with_bar`]), so
+/// the bar has the panel's items, popups, hover, and floating, and its taskbar lists the
+/// windows on its own display.
+pub struct DisplayBar {
+    /// The backend's number for the display the bar is on.
+    pub id: u32,
+    geometry: Geometry,
+    pix: Option<Pixmap>,
+    visible: Vec<Rect>,
+    dirty: bool,
+    attached: bool,
+    attach: f32,
+    attach_anim: Option<(f32, f32, Instant)>,
+    published_tasks: Vec<(u64, Rect)>,
+    offset: (i32, i32),
+    hover: Hover,
+    hover_since: Instant,
+    tooltip: Option<String>,
+    pointer: (f64, f64),
+}
+
+impl DisplayBar {
+    /// A bar not yet configured.
+    fn new(id: u32) -> DisplayBar {
+        DisplayBar {
+            id,
+            geometry: Geometry::default(),
+            pix: None,
+            visible: Vec::new(),
+            dirty: true,
+            attached: false,
+            attach: 0.0,
+            attach_anim: None,
+            published_tasks: Vec::new(),
+            offset: (0, 0),
+            hover: Hover::None,
+            hover_since: Instant::now(),
+            tooltip: None,
+            pointer: (-1.0, -1.0),
+        }
+    }
+}
+
+/// What rendering a bar produced, apart from its pixels.
+struct BarFrame {
+    scale: i32,
+    damage: Vec<Rect>,
+    input: Vec<Rect>,
+    visible: Vec<Rect>,
+    grab: bool,
+    bar: Option<(Rect, f32)>,
+}
+
+impl BarFrame {
+    /// The frame over a bar's pixels.
+    fn frame(self, pixmap: &Pixmap) -> Frame<'_> {
+        Frame {
+            pixmap,
+            scale: self.scale,
+            damage: self.damage,
+            input: self.input,
+            visible: self.visible,
+            grab: self.grab,
+            bar: self.bar,
+        }
     }
 }
 
@@ -290,6 +364,16 @@ pub struct Desktop {
     panel_dirty: bool,
     /// The task button rectangles last told to the backend.
     published_tasks: Vec<(u64, Rect)>,
+    /// The bars of the displays other than the primary one.
+    pub bars: Vec<DisplayBar>,
+    /// The bar standing in for the panel at the moment, `None` while the panel is itself.
+    current_bar: Option<u32>,
+    /// The bar the open popup belongs to, `None` for the panel's.
+    popup_bar: Option<u32>,
+    /// Where each display's top-left corner sits, by the backend's number for it, with
+    /// whether it is the primary one, which matches the window manager's word on a
+    /// display's bar edge to the bar there.
+    display_origins: Vec<(u32, (i32, i32), bool)>,
     /// Windows in order of appearance.
     pub toplevels: Vec<Toplevel>,
     /// The open popup.
@@ -439,6 +523,10 @@ impl Desktop {
             panel_visible: Vec::new(),
             panel_dirty: false,
             published_tasks: Vec::new(),
+            bars: Vec::new(),
+            current_bar: None,
+            popup_bar: None,
+            display_origins: Vec::new(),
             toplevels: Vec::new(),
             popup: Popup::None,
             hover: Hover::None,
@@ -489,6 +577,9 @@ impl Desktop {
         desktop.load_desktop_items();
         desktop.requests.push(desktop.panel_request());
         desktop
+            .requests
+            .push(Request::Bars(desktop.config.panel_every_display));
+        desktop
     }
 
     /// The space the bar reserves along its edge: its height and the margin
@@ -531,6 +622,122 @@ impl Desktop {
         let target = if attached { 1.0 } else { 0.0 };
         self.bar_attach_anim = Some((self.bar_attach, target, Instant::now()));
         self.panel_dirty = true;
+    }
+
+    /// Puts a bar's state into the panel's fields and the panel's into the bar's, both ways.
+    fn swap_bar(&mut self, index: usize) {
+        let bar = &mut self.bars[index];
+        std::mem::swap(&mut self.panel, &mut bar.geometry);
+        std::mem::swap(&mut self.panel_pix, &mut bar.pix);
+        std::mem::swap(&mut self.panel_visible, &mut bar.visible);
+        std::mem::swap(&mut self.panel_dirty, &mut bar.dirty);
+        std::mem::swap(&mut self.bar_attached, &mut bar.attached);
+        std::mem::swap(&mut self.bar_attach, &mut bar.attach);
+        std::mem::swap(&mut self.bar_attach_anim, &mut bar.attach_anim);
+        std::mem::swap(&mut self.published_tasks, &mut bar.published_tasks);
+        std::mem::swap(&mut self.panel_offset, &mut bar.offset);
+        std::mem::swap(&mut self.hover, &mut bar.hover);
+        std::mem::swap(&mut self.hover_since, &mut bar.hover_since);
+        std::mem::swap(&mut self.tooltip, &mut bar.tooltip);
+        std::mem::swap(&mut self.pointer, &mut bar.pointer);
+    }
+
+    /// Runs code with a display's bar standing in for the panel, `None` for a bar that is
+    /// not there. A popup that opens or closes meanwhile has every bar drawn again, since
+    /// a popup belongs to one bar and leaves the others.
+    ///
+    /// # Arguments
+    /// * `id` - The bar's display.
+    /// * `f` - What runs.
+    pub fn with_bar<R>(&mut self, id: u32, f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
+        let index = self.bars.iter().position(|b| b.id == id)?;
+        let popup = (self.popup, self.popup_bar);
+        self.swap_bar(index);
+        self.current_bar = Some(id);
+        let result = f(self);
+        self.current_bar = None;
+        self.swap_bar(index);
+        if (self.popup, self.popup_bar) != popup {
+            self.mark_bars_dirty();
+        }
+        Some(result)
+    }
+
+    /// Has the panel and every bar drawn again.
+    fn mark_bars_dirty(&mut self) {
+        self.panel_dirty = true;
+        for bar in &mut self.bars {
+            bar.dirty = true;
+        }
+    }
+
+    /// Whether the panel is itself rather than a display's bar standing in for it.
+    pub fn is_primary_bar(&self) -> bool {
+        self.current_bar.is_none()
+    }
+
+    /// Sets where a display's bar surface sits in its background's logical coordinates.
+    pub fn set_bar_offset(&mut self, id: u32, offset: (i32, i32)) {
+        if let Some(bar) = self.bars.iter_mut().find(|b| b.id == id) {
+            bar.offset = offset;
+        }
+    }
+
+    /// The surface of the bar standing in for the panel at the moment.
+    fn current_bar_surface(&self) -> SurfaceId {
+        self.current_bar.map_or(SurfaceId::Panel, SurfaceId::Bar)
+    }
+
+    /// Whether the bar standing in for the panel shows a window: the bar of the window's
+    /// display, the panel's for a window on a display without a bar of its own, and every
+    /// bar every window while displays other than the primary have none.
+    pub fn task_on_bar(&self, index: usize) -> bool {
+        if self.bars.is_empty() {
+            return true;
+        }
+        let display = self.toplevels.get(index).and_then(|t| t.display);
+        match self.current_bar {
+            Some(bar) => display == Some(bar),
+            None => !display.is_some_and(|d| self.bars.iter().any(|b| b.id == d)),
+        }
+    }
+
+    /// The displays whose bars are there, besides the primary one.
+    pub fn bar_ids(&self) -> Vec<u32> {
+        self.bars.iter().map(|b| b.id).collect()
+    }
+
+    /// Renders a display's bar when it changed.
+    ///
+    /// # Arguments
+    /// * `id` - The bar's display.
+    pub fn render_bar(&mut self, id: u32) -> Option<Frame<'_>> {
+        let parts = self.with_bar(id, |d| d.draw_panel()).flatten()?;
+        let bar = self.bars.iter().find(|b| b.id == id)?;
+        Some(parts.frame(bar.pix.as_ref()?))
+    }
+
+    /// Takes the window manager's word on which displays have a window at their bar's
+    /// edge, each display named by where its top-left corner sits; a display whose corner
+    /// matches none of the backend's is the primary one.
+    ///
+    /// # Arguments
+    /// * `edges` - Each display's corner and whether a window reaches its bar's edge.
+    pub fn set_bars_attached(&mut self, edges: &[((i32, i32), bool)]) {
+        for &(origin, attached) in edges {
+            let display = self
+                .display_origins
+                .iter()
+                .find(|(_, o, _)| *o == origin)
+                .map(|(d, _, primary)| (*d, *primary));
+            match display {
+                Some((id, false)) if self.bars.iter().any(|b| b.id == id) => {
+                    self.with_bar(id, |d| d.set_bar_attached(attached));
+                }
+                Some((_, false)) => {}
+                _ => self.set_bar_attached(attached),
+            }
+        }
     }
 
     /// Advances the bar's move toward or away from the edge.
@@ -887,7 +1094,11 @@ impl Desktop {
             self.reserved_height(),
             self.config.panel_autohide,
         );
+        let had_bars = self.config.panel_every_display;
         self.config = Config::load();
+        if self.config.panel_every_display != had_bars {
+            self.requests.push(Request::Bars(self.config.panel_every_display));
+        }
         self.sync_panel(was_top, was_height, was_autohide);
         crate::wmtheme::apply(&self.config);
         let decision = crate::toolkits::apply(&self.config);
@@ -916,7 +1127,11 @@ impl Desktop {
             self.reserved_height(),
             self.config.panel_autohide,
         );
+        let had_bars = self.config.panel_every_display;
         self.config = Config::load();
+        if self.config.panel_every_display != had_bars {
+            self.requests.push(Request::Bars(self.config.panel_every_display));
+        }
         seed_favorites(&mut self.config, &self.apps);
         self.menu.invalidate();
         self.sync_panel(was_top, was_height, was_autohide);
@@ -1470,11 +1685,47 @@ impl Desktop {
         self.launcher.invalidate();
     }
 
+    /// Handles an event on a display's bar with the bar standing in for the panel. A press on
+    /// a bar other than the one with the popup open closes the popup first, as a click
+    /// outside it would, and the bar sees nothing of that popup otherwise.
+    ///
+    /// # Arguments
+    /// * `bar` - The bar's display.
+    /// * `event` - The event, aimed at the panel.
+    fn handle_on_bar(&mut self, bar: u32, event: Event) {
+        if matches!(event, Event::Configured { .. }) && !self.bars.iter().any(|b| b.id == bar) {
+            self.bars.push(DisplayBar::new(bar));
+        }
+        self.with_bar(bar, |d| {
+            let foreign = d.popup != Popup::None && d.popup_bar != d.current_bar;
+            if !foreign {
+                d.handle(event);
+            } else if matches!(event, Event::PointerButton { pressed: true, .. }) {
+                d.close_popup();
+                d.handle(event);
+            } else {
+                let popup = d.popup;
+                d.popup = Popup::None;
+                d.handle(event);
+                if d.popup == Popup::None {
+                    d.popup = popup;
+                }
+            }
+        });
+    }
+
     /// Handles one event from the backend.
     ///
     /// # Arguments
     /// * `event` - The event.
     pub fn handle(&mut self, event: Event) {
+        let event = match event.for_bar() {
+            Ok((bar, event)) => {
+                self.handle_on_bar(bar, event);
+                return;
+            }
+            Err(event) => event,
+        };
         match event {
             Event::Configured {
                 surface,
@@ -1570,7 +1821,7 @@ impl Desktop {
                     ui::files::drop(self, id, copy);
                 }
                 SurfaceId::Background(_) => ui::files::drop_on_desktop(self, copy),
-                SurfaceId::Panel | SurfaceId::Notifications => {}
+                SurfaceId::Panel | SurfaceId::Bar(_) | SurfaceId::Notifications => {}
             },
             Event::DragEnd => {
                 self.files.drag = None;
@@ -1588,6 +1839,7 @@ impl Desktop {
                         app_id: String::new(),
                         own_icon: None,
                         state: ToplevelState::default(),
+                        display: None,
                         icon: None,
                     });
                     self.panel_dirty = true;
@@ -1620,6 +1872,36 @@ impl Desktop {
                     self.toplevels[i].state = state;
                     self.panel_dirty = true;
                 }
+            }
+            Event::ToplevelDisplay { id, display } => {
+                if let Some(i) = self.toplevel_index(id)
+                    && self.toplevels[i].display != display
+                {
+                    self.toplevels[i].display = display;
+                    self.mark_bars_dirty();
+                }
+            }
+            Event::BarRemoved { bar } => {
+                self.bars.retain(|b| b.id != bar);
+                if self.popup_bar == Some(bar) {
+                    self.popup_bar = None;
+                    self.popup = Popup::None;
+                }
+                self.mark_bars_dirty();
+            }
+            Event::DisplayOrigin {
+                display,
+                x,
+                y,
+                primary,
+            } => {
+                self.display_origins.retain(|(d, _, _)| *d != display);
+                if primary {
+                    for origin in &mut self.display_origins {
+                        origin.2 = false;
+                    }
+                }
+                self.display_origins.push((display, (x, y), primary));
             }
             Event::ToplevelClosed { id } => {
                 if let Some(i) = self.toplevel_index(id) {
@@ -1666,6 +1948,7 @@ impl Desktop {
             configured: width > 0 && height > 0,
         };
         match surface {
+            SurfaceId::Bar(_) => {}
             SurfaceId::Panel => {
                 let current = self.panel;
                 if current.width == width
@@ -1769,6 +2052,9 @@ impl Desktop {
     /// * `now` - The current time.
     pub fn tick(&mut self, now: Instant) {
         self.step_bar_attach(now);
+        for id in self.bar_ids() {
+            self.with_bar(id, |d| d.step_bar_attach(now));
+        }
         let clock = if self.config.show_clock {
             crate::clock::format_now(&self.config.clock_format)
         } else {
@@ -1836,7 +2122,7 @@ impl Desktop {
         if let Some(due) = self.hide_at {
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
-        if self.bar_attach_anim.is_some() {
+        if self.bar_attach_anim.is_some() || self.bars.iter().any(|b| b.attach_anim.is_some()) {
             let due = now + BAR_FRAME;
             deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
         }
@@ -1975,7 +2261,11 @@ impl Desktop {
             self.calendar_offset = 0;
         }
         if !was_open {
-            self.requests.push(Request::MenuOpen(true));
+            self.popup_bar = self.current_bar;
+            self.requests.push(Request::MenuOpen {
+                open: true,
+                surface: self.current_bar_surface(),
+            });
         }
         self.panel_dirty = true;
     }
@@ -1992,7 +2282,8 @@ impl Desktop {
         self.volume_drag = false;
         self.menu.close();
         self.launcher.close();
-        self.requests.push(Request::MenuOpen(false));
+        let surface = self.popup_bar.take().map_or(SurfaceId::Panel, SurfaceId::Bar);
+        self.requests.push(Request::MenuOpen { open: false, surface });
         self.set_hover(Hover::None);
         self.panel_dirty = true;
         if !self.bar_rect().contains(self.pointer.0, self.pointer.1) {
@@ -2140,6 +2431,7 @@ impl Desktop {
     /// Routes pointer motion to the surface's UI.
     fn pointer_motion(&mut self, surface: SurfaceId, x: f64, y: f64) {
         match surface {
+            SurfaceId::Bar(_) => {}
             SurfaceId::Panel => {
                 self.pointer = (x, y);
                 if self.config.panel_autohide {
@@ -2250,6 +2542,7 @@ impl Desktop {
             return;
         }
         match surface {
+            SurfaceId::Bar(_) => {}
             SurfaceId::Window(_) => {}
             SurfaceId::Notifications => {
                 self.close_popup();
@@ -2382,6 +2675,7 @@ impl Desktop {
     /// Clears hover state when the pointer leaves a surface.
     fn pointer_leave(&mut self, surface: SurfaceId) {
         match surface {
+            SurfaceId::Bar(_) => {}
             SurfaceId::Panel => {
                 self.pointer = (-1.0, -1.0);
                 self.schedule_hide();
@@ -2443,7 +2737,10 @@ impl Desktop {
             .collect();
         if rects != self.published_tasks {
             self.published_tasks = rects.clone();
-            self.requests.push(Request::TaskbarRects(rects));
+            self.requests.push(Request::TaskbarRects {
+                surface: self.current_bar_surface(),
+                rects,
+            });
         }
     }
 
@@ -2452,10 +2749,32 @@ impl Desktop {
     /// # Returns
     /// The frame to present, or `None` when nothing changed.
     pub fn render_panel(&mut self) -> Option<Frame<'_>> {
+        let parts = self.draw_panel()?;
+        for bar in &mut self.bars {
+            bar.dirty = true;
+        }
+        Some(parts.frame(self.panel_pix.as_ref()?))
+    }
+
+    /// Draws the panel, or the bar standing in for it, into its pixels when it changed, a
+    /// popup only on the bar it belongs to.
+    fn draw_panel(&mut self) -> Option<BarFrame> {
         if !self.panel.configured || !self.panel_dirty {
             return None;
         }
         self.panel_dirty = false;
+        let foreign = self.popup != Popup::None && self.popup_bar != self.current_bar;
+        let popup = self.popup;
+        if foreign {
+            self.popup = Popup::None;
+        }
+        let parts = self.draw_panel_pixels();
+        self.popup = popup;
+        parts
+    }
+
+    /// The drawing behind [`Desktop::draw_panel`].
+    fn draw_panel_pixels(&mut self) -> Option<BarFrame> {
         let geometry = self.panel;
         let (w, h) = (
             (geometry.width * geometry.scale) as u32,
@@ -2499,8 +2818,7 @@ impl Desktop {
         self.panel_visible = visible.clone();
         self.panel_pix = Some(pix);
         self.publish_task_rects();
-        Some(Frame {
-            pixmap: self.panel_pix.as_ref()?,
+        Some(BarFrame {
             scale: geometry.scale,
             damage,
             input,

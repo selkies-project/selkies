@@ -280,3 +280,4 @@ Float = Flutuante
 Mint = Menta
 Graphite = Grafite
 Flat icon = Ícone plano
+Bar on every display = Barra em cada tela

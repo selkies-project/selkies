@@ -179,7 +179,10 @@ pub fn layout(d: &mut Desktop) -> Layout {
     let pager_count = pager_count(d.desktops, d.config.show_pager);
     let pager_width = pager_width(pager_count, bar.h);
     let hidden: Vec<bool> = d.toplevels.iter().map(|t| t.state.hidden).collect();
-    let listed = listed_tasks(&hidden, d.config.tasks_all_desktops);
+    let listed: Vec<usize> = listed_tasks(&hidden, d.config.tasks_all_desktops)
+        .into_iter()
+        .filter(|&index| d.task_on_bar(index))
+        .collect();
     let mut right = bar.right() - GAP;
     let show_desktop = if d.config.show_desktop_button {
         let width = show_desktop_glyph_width(bar.h - 6) + 8;
@@ -215,7 +218,7 @@ pub fn layout(d: &mut Desktop) -> Layout {
     } else {
         None
     };
-    let tray = if d.config.show_tray && d.tray_icons > 0 {
+    let tray = if d.config.show_tray && d.tray_icons > 0 && d.is_primary_bar() {
         let size = d.panel_icon_size() + 4;
         let width = d.tray_icons as i32 * (size + GAP) + GAP;
         right -= width;

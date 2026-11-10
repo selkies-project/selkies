@@ -545,6 +545,9 @@ pub enum EffectKind {
     /// The window is gone: its last picture, kept by the compositor as a ghost, shrinks and
     /// fades where it stood.
     Close,
+    /// A virtual desktop switch: the window slides across its output, in from the side on the
+    /// desktop shown or out to the other side on the one left.
+    Slide,
 }
 
 /// A per-frame transform an effect applies to a window as it is presented: the client area is

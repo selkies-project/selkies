@@ -138,6 +138,9 @@ people reach for in a multi-application container:
   application hands it the paths on Wayland.  Hidden files toggle with
   Ctrl+H, the location field opens with Ctrl+L, and a folder that changes
   on disk refreshes on its own.
+* **Every display** gets a bar of its own while `panel_every_display` is on:
+  the same items and settings as the primary's, its start menu and popups
+  opening on that display, and its taskbar listing the windows there.
 * **Every monitor** gets the wallpaper: one layer surface per Wayland output,
   including the screens Selkies adds for extra displays, and each RandR
   monitor on X11.  The Wallpaper page lists the wallpapers installed in the
@@ -174,6 +177,7 @@ so an edit applies within a moment.
 | `panel_float` | `true` | Float the bar clear of the screen edges while no window needs the space; a maximized, tiled, full-height, or fullscreen window reaching the bar's edge attaches it there, and the bar floats again once none does. The band the bar reserves is the same either way, so no window moves |
 | `panel_margin` | `8` | Space between a floating bar and the screen edges in pixels, 0 to 16 |
 | `panel_corners` | `6` | Corner radius of a floating bar in pixels, 0 to 24 |
+| `panel_every_display` | `true` | Give every display but the primary one a bar of its own with the primary's settings, each listing the windows on its display; without, the primary bar lists them all |
 | `start_label` | | Text shown on the start button beside its icon |
 | `menu_layout` | `columns` | How the start menu lists applications: `columns` (categories and rows), `grid` (categories and a grid of icons) or `tiles` (every application in a list with the favorites as tiles beside it) |
 | `color_accent` | `#7967c5` | Color of markers, selections, switches and the chosen option |

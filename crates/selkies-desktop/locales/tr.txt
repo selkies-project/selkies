@@ -280,3 +280,4 @@ Float = Yüzen
 Mint = Nane
 Graphite = Grafit
 Flat icon = Düz simge
+Bar on every display = Her ekranda çubuk

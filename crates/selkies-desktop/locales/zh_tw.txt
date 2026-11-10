@@ -280,3 +280,4 @@ Float = 浮動
 Mint = 薄荷
 Graphite = 石墨
 Flat icon = 扁平圖示
+Bar on every display = 每個顯示器都有工作列

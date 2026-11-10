@@ -80,6 +80,12 @@ pub trait Backend {
     /// where the screen is physical pixels, and one under XWayland, whose
     /// screen is the compositor's logical layout.
     fn panel_origin(&self) -> (i32, i32, i32);
+
+    /// Where a display's bar surface sits in the background behind it, as
+    /// [`Backend::panel_origin`] gives the panel's.
+    fn bar_origin(&self, _bar: u32) -> (i32, i32, i32) {
+        (0, 0, 1)
+    }
 }
 
 /// Connects to the first display server that works.

@@ -222,14 +222,14 @@ const LANGUAGES: [(&str, &str); 19] = [
 /// grays, the bar the shade of a window's header and the menus a window's
 /// own; Ember is a copper accent on warm charcoal, dark enough to take
 /// white text; Mint is a green accent on pale sage, a light desktop of a
-/// warmer cast than Light; and Graphite is a rose accent on near black, a
-/// darker desktop than Dark.
+/// warmer cast than Light; and Graphite is flat neutral grays with a light
+/// gray accent, a dark desktop without a hue.
 const SCHEMES: [(&str, [&str; 4]); 5] = [
     ("Dark", ["#3daee9", "#292c30", "#202326", "#fcfcfc"]),
     ("Light", ["#3daee9", "#dee0e2", "#eff0f1", "#232629"]),
     ("Ember", ["#b9671b", "#1c1917", "#272220", "#f4ede4"]),
     ("Mint", ["#13866a", "#d8e9e2", "#f2f8f5", "#14302a"]),
-    ("Graphite", ["#e8557a", "#0c0c0e", "#16161a", "#f1f1f4"]),
+    ("Graphite", ["#cccccc", "#2c2c2c", "#303030", "#dfdfdf"]),
 ];
 
 /// A style: a name and the frame, bar and menu settings it bundles.
@@ -2336,6 +2336,11 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                     tr("Left")
                 },
             );
+            groups.switch(
+                tr("Bar on every display"),
+                "panel_every_display",
+                d.config.panel_every_display,
+            );
             groups.switch(tr("Float"), "panel_float", d.config.panel_float);
             if d.config.panel_float {
                 groups.slider(
@@ -4416,11 +4421,17 @@ mod tests {
         assert_eq!(Page::from_id(""), None);
     }
 
+    /// The text drawn on every scheme's accent stands well off it in luminance, white on the
+    /// colored accents and dark on a light gray one.
     #[test]
-    fn every_scheme_accent_takes_white_text() {
+    fn every_scheme_accent_takes_readable_text() {
         for (name, colors) in &SCHEMES {
             let accent = parse_color(colors[0]).unwrap();
-            assert_eq!(selkies_draw::style::on_color(accent), Color::WHITE, "{name}");
+            let text = selkies_draw::style::on_color(accent);
+            assert!(
+                (ui::luminance(accent) - ui::luminance(text)).abs() >= 0.35,
+                "{name}"
+            );
         }
     }
 

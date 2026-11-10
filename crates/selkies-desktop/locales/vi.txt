@@ -280,3 +280,4 @@ Float = Nổi
 Mint = Bạc hà
 Graphite = Than chì
 Flat icon = Biểu tượng phẳng
+Bar on every display = Thanh trên mọi màn hình

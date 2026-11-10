@@ -124,6 +124,14 @@ pub struct X11Backend {
     depth: u8,
     atoms: Atoms,
     panel: X11Surface,
+    /// The bars of the monitors other than the primary one, by monitor index.
+    bars: Vec<(u32, X11Surface)>,
+    /// Whether the monitors other than the primary one get bars.
+    bars_enabled: bool,
+    /// The monitor each listed window is on, by index, as last told to the desktop.
+    toplevel_displays: HashMap<xproto::Window, u32>,
+    /// The bar window holding the pointer and the keyboard while its popup is open.
+    grab_window: xproto::Window,
     desktop: X11Surface,
     screen_w: i32,
     screen_h: i32,
@@ -132,8 +140,8 @@ pub struct X11Backend {
     scale: i32,
     shm_works: bool,
     toplevels: HashMap<xproto::Window, u64>,
-    /// Where the bar shows each window, kept so the geometry is set again when the bar moves.
-    task_rects: Vec<(u64, Rect)>,
+    /// Where each bar shows its windows, kept so the geometry is set again when a bar moves.
+    task_rects: Vec<(SurfaceId, Vec<(u64, Rect)>)>,
     next_id: u64,
     /// The virtual desktops the window manager publishes on the root, and
     /// the current one.
@@ -239,7 +247,11 @@ impl X11Backend {
             root,
             depth,
             atoms,
+            grab_window: panel.window,
             panel,
+            bars: Vec::new(),
+            bars_enabled: false,
+            toplevel_displays: HashMap::new(),
             desktop,
             screen_w,
             screen_h,
@@ -425,9 +437,19 @@ impl X11Backend {
             self.screen_w,
             self.screen_h,
         );
-        self.update_struts(primary);
-        let task_rects = self.task_rects.clone();
-        self.publish_icon_geometry(&task_rects);
+        self.update_struts(self.panel.window, primary);
+        self.place_bars();
+        for (surface, rects) in self.task_rects.clone() {
+            self.publish_icon_geometry(surface, &rects);
+        }
+        for (index, monitor) in self.monitors.iter().enumerate() {
+            self.events.push(Event::DisplayOrigin {
+                display: index as u32,
+                x: monitor.x / s,
+                y: monitor.y / s,
+                primary: index == 0,
+            });
+        }
 
         // A surface keeping its size keeps its pixels: the shell presents only a size that
         // changed, and an expose of a moved panel is drawn from them.
@@ -463,6 +485,88 @@ impl X11Backend {
         });
         if let Some((width, height, top)) = self.notify_place {
             self.place_notifications(width, height, top);
+        }
+    }
+
+    /// Gives each monitor other than the primary one a bar while bars are on, laid along the
+    /// same edge as the panel at the panel's height with struts of its own on that monitor,
+    /// and takes away the bars of monitors that went or of all of them when bars go off.
+    fn place_bars(&mut self) {
+        let s = self.scale;
+        let wanted: Vec<(u32, Rect)> = if self.bars_enabled {
+            self.monitors
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(i, m)| (i as u32, *m))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let gone: Vec<u32> = self
+            .bars
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| !wanted.iter().any(|(w, _)| w == id))
+            .collect();
+        for id in gone {
+            if let Some(index) = self.bars.iter().position(|(b, _)| *b == id) {
+                let (_, surface) = self.bars.remove(index);
+                let _ = self.conn.destroy_window(surface.window);
+                self.task_rects
+                    .retain(|(surface, _)| *surface != SurfaceId::Bar(id));
+                self.events.push(Event::BarRemoved { bar: id });
+            }
+        }
+        for (id, monitor) in wanted {
+            if !self.bars.iter().any(|(b, _)| *b == id) {
+                let screen = &self.conn.setup().roots[self.screen];
+                let Ok(surface) = create_window(
+                    &self.conn,
+                    &self.atoms,
+                    screen,
+                    "selkies-desktop panel",
+                    self.atoms._NET_WM_WINDOW_TYPE_DOCK,
+                    xproto::EventMask::EXPOSURE
+                        | xproto::EventMask::BUTTON_PRESS
+                        | xproto::EventMask::BUTTON_RELEASE
+                        | xproto::EventMask::POINTER_MOTION
+                        | xproto::EventMask::LEAVE_WINDOW
+                        | xproto::EventMask::KEY_PRESS
+                        | xproto::EventMask::STRUCTURE_NOTIFY,
+                ) else {
+                    continue;
+                };
+                let _ = self.conn.map_window(surface.window);
+                self.bars.push((id, surface));
+            }
+            let height = (monitor.h + s - 1) / s;
+            let bar_h = (self.panel_height + ui::POPUP_AREA_HEIGHT).min(height);
+            let y = if self.panel_top {
+                monitor.y
+            } else {
+                monitor.bottom() - bar_h * s
+            };
+            let Some(window) = self.bars.iter().find(|(b, _)| *b == id).map(|(_, b)| b.window) else {
+                continue;
+            };
+            set_fixed_geometry(&self.conn, window, monitor.x, y, monitor.w, bar_h * s);
+            self.update_struts(window, monitor);
+            if let Some((_, surface)) = self.bars.iter_mut().find(|(b, _)| *b == id)
+                && (surface.width != monitor.w || surface.height != bar_h * s)
+            {
+                surface.width = monitor.w;
+                surface.height = bar_h * s;
+                surface.shm = None;
+                surface.pixels.clear();
+                surface.visible.clear();
+            }
+            self.events.push(Event::Configured {
+                surface: SurfaceId::Bar(id),
+                width: (monitor.w + s - 1) / s,
+                height: bar_h,
+                scale: s,
+            });
         }
     }
 
@@ -541,7 +645,7 @@ impl X11Backend {
     ///
     /// # Arguments
     /// * `primary` - The primary monitor in physical root coordinates.
-    fn update_struts(&self, primary: Rect) {
+    fn update_struts(&self, window: xproto::Window, primary: Rect) {
         let bar = if self.panel_autohide {
             0
         } else {
@@ -557,14 +661,14 @@ impl X11Backend {
         let partial = [0u32, 0, top, bottom, 0, 0, 0, 0, start, end, start, end];
         let _ = self.conn.change_property32(
             xproto::PropMode::REPLACE,
-            self.panel.window,
+            window,
             self.atoms._NET_WM_STRUT,
             xproto::AtomEnum::CARDINAL,
             &strut,
         );
         let _ = self.conn.change_property32(
             xproto::PropMode::REPLACE,
-            self.panel.window,
+            window,
             self.atoms._NET_WM_STRUT_PARTIAL,
             xproto::AtomEnum::CARDINAL,
             &partial,
@@ -573,10 +677,13 @@ impl X11Backend {
 
     /// Sets `_NET_WM_ICON_GEOMETRY` on each listed window: where the bar shows it, in root
     /// pixels, from the bar window's own position and scale.
-    fn publish_icon_geometry(&self, rects: &[(u64, Rect)]) {
+    fn publish_icon_geometry(&self, surface: SurfaceId, rects: &[(u64, Rect)]) {
+        let Some(window) = self.surface_ref(surface).map(|s| s.window) else {
+            return;
+        };
         let Some(geometry) = self
             .conn
-            .get_geometry(self.panel.window)
+            .get_geometry(window)
             .ok()
             .and_then(|cookie| cookie.reply().ok())
         else {
@@ -775,7 +882,10 @@ impl X11Backend {
             .unwrap_or_default();
         let mut eligible = Vec::new();
         for window in &list {
-            if *window == self.panel.window || *window == self.desktop.window {
+            if *window == self.panel.window
+                || *window == self.desktop.window
+                || self.bars.iter().any(|(_, b)| b.window == *window)
+            {
                 continue;
             }
             if self.windows.iter().any(|w| w.surface.window == *window) {
@@ -784,7 +894,8 @@ impl X11Backend {
             }
             let _ = self.conn.change_window_attributes(
                 *window,
-                &xproto::ChangeWindowAttributesAux::new().event_mask(xproto::EventMask::PROPERTY_CHANGE),
+                &xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(xproto::EventMask::PROPERTY_CHANGE | xproto::EventMask::STRUCTURE_NOTIFY),
             );
             if self.wants_button(*window) {
                 eligible.push(*window);
@@ -797,6 +908,7 @@ impl X11Backend {
             .copied()
             .collect();
         for window in gone {
+            self.toplevel_displays.remove(&window);
             if let Some(id) = self.toplevels.remove(&window) {
                 self.events.push(Event::ToplevelClosed { id });
             }
@@ -827,8 +939,43 @@ impl X11Backend {
                 id,
                 state: self.read_state(window),
             });
+            self.sync_display(window);
         }
         self.sync_active();
+    }
+
+    /// Tells the desktop which monitor a listed window is on when that changed: the one
+    /// holding the window's center, the primary where none does.
+    fn sync_display(&mut self, window: xproto::Window) {
+        let Some(&id) = self.toplevels.get(&window) else {
+            return;
+        };
+        let Some(geometry) = self.conn.get_geometry(window).ok().and_then(|c| c.reply().ok()) else {
+            return;
+        };
+        let Some(origin) = self
+            .conn
+            .translate_coordinates(window, self.root, 0, 0)
+            .ok()
+            .and_then(|c| c.reply().ok())
+        else {
+            return;
+        };
+        let center = (
+            i32::from(origin.dst_x) + i32::from(geometry.width) / 2,
+            i32::from(origin.dst_y) + i32::from(geometry.height) / 2,
+        );
+        let display = self
+            .monitors
+            .iter()
+            .position(|m| m.contains(center.0 as f64, center.1 as f64))
+            .unwrap_or(0) as u32;
+        if self.toplevel_displays.insert(window, display) != Some(display) {
+            self.events.push(Event::ToplevelDisplay {
+                id,
+                display: Some(display),
+            });
+        }
     }
 
     /// Refreshes the active flag of every window.
@@ -862,7 +1009,7 @@ impl X11Backend {
                 .conn
                 .grab_pointer(
                     false,
-                    self.panel.window,
+                    self.grab_window,
                     xproto::EventMask::BUTTON_PRESS
                         | xproto::EventMask::BUTTON_RELEASE
                         | xproto::EventMask::POINTER_MOTION,
@@ -877,7 +1024,7 @@ impl X11Backend {
                 .is_some_and(|r| r.status == xproto::GrabStatus::SUCCESS);
             let _ = self.conn.grab_keyboard(
                 false,
-                self.panel.window,
+                self.grab_window,
                 x11rb::CURRENT_TIME,
                 xproto::GrabMode::ASYNC,
                 xproto::GrabMode::ASYNC,
@@ -1000,6 +1147,7 @@ impl X11Backend {
         let cursor = cursor.unwrap_or(x11rb::NONE);
         let windows = [self.panel.window, self.desktop.window]
             .into_iter()
+            .chain(self.bars.iter().map(|(_, b)| b.window))
             .chain(self.notifications.as_ref().map(|s| s.window))
             .chain(self.windows.iter().map(|w| w.surface.window));
         for window in windows {
@@ -1014,6 +1162,7 @@ impl X11Backend {
         match id {
             SurfaceId::Background(_) => Some(&mut self.desktop),
             SurfaceId::Panel => Some(&mut self.panel),
+            SurfaceId::Bar(bar) => self.bars.iter_mut().find(|(b, _)| *b == bar).map(|(_, s)| s),
             SurfaceId::Notifications => self.notifications.as_mut(),
             SurfaceId::Window(w) => self
                 .windows
@@ -1028,6 +1177,7 @@ impl X11Backend {
         match id {
             SurfaceId::Background(_) => Some(&self.desktop),
             SurfaceId::Panel => Some(&self.panel),
+            SurfaceId::Bar(bar) => self.bars.iter().find(|(b, _)| *b == bar).map(|(_, s)| s),
             SurfaceId::Notifications => self.notifications.as_ref(),
             SurfaceId::Window(w) => self.windows.iter().find(|x| x.id == w).map(|x| &x.surface),
         }
@@ -1287,9 +1437,17 @@ impl X11Backend {
             if !rect.contains(root_x as f64, root_y as f64) {
                 continue;
             }
-            if *window == self.panel.window {
+            let bar = if *window == self.panel.window {
+                Some(&self.panel)
+            } else {
+                self.bars
+                    .iter()
+                    .find(|(_, b)| b.window == *window)
+                    .map(|(_, b)| b)
+            };
+            if let Some(bar) = bar {
                 let (px, py) = ((root_x - rect.x) as f64, (root_y - rect.y) as f64);
-                if self.panel.visible.iter().any(|r| r.contains(px, py)) {
+                if bar.visible.iter().any(|r| r.contains(px, py)) {
                     return None;
                 }
                 continue;
@@ -1461,6 +1619,8 @@ impl X11Backend {
             SurfaceId::Notifications
         } else if let Some(ours) = self.windows.iter().find(|w| w.surface.window == window) {
             SurfaceId::Window(ours.id)
+        } else if let Some((bar, _)) = self.bars.iter().find(|(_, b)| b.window == window) {
+            SurfaceId::Bar(*bar)
         } else {
             SurfaceId::Panel
         }
@@ -1578,6 +1738,8 @@ impl X11Backend {
             XEvent::ReparentNotify(e) => {
                 if e.window == self.panel.window {
                     self.apply_shape(&self.panel, &self.panel.input, self.scale, Shape::Panel);
+                } else if let Some((_, bar)) = self.bars.iter().find(|(_, b)| b.window == e.window) {
+                    self.apply_shape(bar, &bar.input, self.scale, Shape::Panel);
                 } else if e.window == self.desktop.window {
                     self.apply_shape(&self.desktop, &self.desktop.input, self.scale, Shape::Square);
                 }
@@ -1605,6 +1767,8 @@ impl X11Backend {
                         height: (e.height as i32 + s - 1) / s,
                         scale: s,
                     });
+                } else if self.toplevels.contains_key(&e.window) {
+                    self.sync_display(e.window);
                 }
             }
             XEvent::RandrScreenChangeNotify(_) | XEvent::RandrNotify(_) => self.sync_monitors(),
@@ -1846,6 +2010,23 @@ impl Backend for X11Backend {
         !self.events.is_empty()
     }
 
+    fn bar_origin(&self, bar: u32) -> (i32, i32, i32) {
+        let Some(monitor) = self.monitors.get(bar as usize).copied() else {
+            return (0, 0, self.scale);
+        };
+        let height = self
+            .bars
+            .iter()
+            .find(|(b, _)| *b == bar)
+            .map_or(0, |(_, s)| s.height);
+        let y = if self.panel_top {
+            monitor.y
+        } else {
+            monitor.bottom() - height
+        };
+        (monitor.x, y, self.scale)
+    }
+
     fn panel_origin(&self) -> (i32, i32, i32) {
         let primary = self
             .monitors
@@ -1941,7 +2122,7 @@ impl Backend for X11Backend {
                 .bar
                 .map(|(rect, radius)| (rect.scaled(scale), (radius * scale as f32).round() as i32));
             if !is_window {
-                surface.input = if id == SurfaceId::Panel && frame.grab {
+                surface.input = if matches!(id, SurfaceId::Panel | SurfaceId::Bar(_)) && frame.grab {
                     vec![Rect::new(0, 0, w / scale, h / scale)]
                 } else {
                     frame.input.clone()
@@ -1953,7 +2134,7 @@ impl Backend for X11Backend {
         };
         if !is_window {
             let shape = match id {
-                SurfaceId::Panel => Shape::Panel,
+                SurfaceId::Panel | SurfaceId::Bar(_) => Shape::Panel,
                 SurfaceId::Notifications => Shape::Cards,
                 _ => Shape::Square,
             };
@@ -1967,8 +2148,15 @@ impl Backend for X11Backend {
                 &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
             );
         }
-        if id == SurfaceId::Panel {
-            self.popup_open = frame.grab;
+        if matches!(id, SurfaceId::Panel | SurfaceId::Bar(_))
+            && let Some(window) = self.surface_ref(id).map(|s| s.window)
+        {
+            if frame.grab {
+                self.grab_window = window;
+                self.popup_open = true;
+            } else if self.grab_window == window {
+                self.popup_open = false;
+            }
             self.sync_grabs();
         }
         let Some(surface) = self.surface_ref(id) else {
@@ -2029,10 +2217,20 @@ impl Backend for X11Backend {
                 }
                 let _ = self.conn.flush();
             }
-            Request::MenuOpen(open) => {
+            Request::MenuOpen { open, surface } => {
+                if *open && let Some(window) = self.surface_ref(*surface).map(|s| s.window) {
+                    self.grab_window = window;
+                }
                 self.popup_open = *open;
                 self.sync_grabs();
                 let _ = self.conn.flush();
+            }
+            Request::Bars(enabled) => {
+                if self.bars_enabled != *enabled {
+                    self.bars_enabled = *enabled;
+                    self.place_bars();
+                    let _ = self.conn.flush();
+                }
             }
             Request::Cursor { pointer } => {
                 self.pointer_shape = *pointer;
@@ -2073,9 +2271,10 @@ impl Backend for X11Backend {
                 self.set_title(*id, title);
                 let _ = self.conn.flush();
             }
-            Request::TaskbarRects(rects) => {
-                self.task_rects = rects.clone();
-                self.publish_icon_geometry(rects);
+            Request::TaskbarRects { surface, rects } => {
+                self.task_rects.retain(|(s, _)| s != surface);
+                self.task_rects.push((*surface, rects.clone()));
+                self.publish_icon_geometry(*surface, rects);
                 let _ = self.conn.flush();
             }
             Request::GrabKeyboard { id, grab } => {

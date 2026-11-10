@@ -75,7 +75,10 @@
 - In scope but lower, too: the `selkies-desktop` shell (`crates/selkies-desktop`), its own process the server
   starts under `--desktop`, whose control socket sits in the session's `$XDG_RUNTIME_DIR` and whose file manager
   decodes images and scans directories under the session user's home; it is kept out of the stream's process for
-  that reason.
+  that reason. Besides the commands a session user's `selkies-desktop --menu` and the like send it, the window
+  manager writes one there itself, `bar-attached`, a list of display corners each with a flag (`ipc.rs`,
+  `parse_bar_edges`): a word that does not read is skipped, and what reads only moves the bars of the displays it
+  names.
 - Out of scope: `website/`, `docs/`, `infra/`, and the prebuilt third-party wheels and patches in `addons/base`.
 
 ## How to exercise it

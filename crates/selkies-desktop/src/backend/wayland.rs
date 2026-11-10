@@ -97,6 +97,8 @@ struct Output {
     /// A launchers frame that came before that layer was configured, shown
     /// once it is.
     pending_launchers: Option<PendingFrame>,
+    /// The output's own bar, on every output but the first while bars are on.
+    bar: Option<Surface>,
 }
 
 /// A frame kept until its surface can show it.
@@ -196,6 +198,8 @@ struct Handle {
     /// Whether the window has ever entered an output: one that never has is
     /// still mapping, not hidden on another desktop.
     entered: bool,
+    /// The output the desktop was last told the window is on.
+    display: Option<u32>,
 }
 
 impl Handle {
@@ -274,6 +278,8 @@ struct State {
     conn: Connection,
     outputs: Vec<Output>,
     panel: Option<Surface>,
+    /// Whether every output but the first gets a bar of its own.
+    bars_enabled: bool,
     /// The notification stack's layer surface, while it has cards.
     notifications: Option<Surface>,
     windows: Vec<Window>,
@@ -306,6 +312,13 @@ impl State {
     fn surface_id(&self, wl: &wl_surface::WlSurface) -> Option<SurfaceId> {
         if self.panel.as_ref().is_some_and(|s| s.wl == *wl) {
             return Some(SurfaceId::Panel);
+        }
+        if let Some(output) = self
+            .outputs
+            .iter()
+            .find(|o| o.bar.as_ref().is_some_and(|s| s.wl == *wl))
+        {
+            return Some(SurfaceId::Bar(output.name));
         }
         if self.notifications.as_ref().is_some_and(|s| s.wl == *wl) {
             return Some(SurfaceId::Notifications);
@@ -456,6 +469,7 @@ impl State {
     fn surface_mut(&mut self, id: SurfaceId) -> Option<&mut Surface> {
         match id {
             SurfaceId::Panel => self.panel.as_mut(),
+            SurfaceId::Bar(name) => self.outputs.iter_mut().find(|o| o.name == name)?.bar.as_mut(),
             SurfaceId::Notifications => self.notifications.as_mut(),
             SurfaceId::Background(name) => self
                 .outputs
@@ -749,6 +763,8 @@ impl State {
         if index == 0 {
             ids.push(SurfaceId::Panel);
             ids.push(SurfaceId::Notifications);
+        } else {
+            ids.push(SurfaceId::Bar(name));
         }
         for id in ids {
             if let Some(surface) = self.surface_mut(id)
@@ -772,8 +788,10 @@ impl State {
             background: None,
             launchers: None,
             pending_launchers: None,
+            bar: None,
         });
         self.create_background(qh, name);
+        self.sync_bars(qh);
     }
 
     /// Creates the wallpaper layer surface of an output and the launchers
@@ -849,6 +867,60 @@ impl State {
         });
     }
 
+    /// Gives every output but the first a bar of its own while bars are on, a layer surface
+    /// laid out the way the panel is, and takes the bars away when they go off.
+    fn sync_bars(&mut self, qh: &QueueHandle<State>) {
+        let (Some(compositor), Some(layer_shell)) = (self.compositor.clone(), self.layer_shell.clone())
+        else {
+            return;
+        };
+        let (enabled, version, top, height, autohide) = (
+            self.bars_enabled,
+            self.layer_shell_version,
+            self.panel_top,
+            self.panel_height,
+            self.panel_autohide,
+        );
+        for (index, output) in self.outputs.iter_mut().enumerate() {
+            let wanted = enabled && index > 0;
+            if !wanted {
+                if let Some(surface) = output.bar.take() {
+                    surface.destroy();
+                    self.events.push(Event::BarRemoved { bar: output.name });
+                }
+                continue;
+            }
+            if output.bar.is_some() {
+                continue;
+            }
+            let wl = compositor.create_surface(qh, ());
+            let layer = layer_shell.get_layer_surface(
+                &wl,
+                Some(&output.output),
+                zwlr_layer_shell_v1::Layer::Top,
+                "panel".to_string(),
+                qh,
+                SurfaceId::Bar(output.name),
+            );
+            anchor_panel(&layer, version, top, height.max(ui::PANEL_HEIGHT));
+            if autohide {
+                layer.set_exclusive_zone(0);
+            }
+            wl.commit();
+            output.bar = Some(Surface {
+                wl,
+                role: Role::Layer(layer),
+                buffers: Vec::new(),
+                width: 0,
+                height: 0,
+                scale: output.scale,
+                configured: false,
+                mapped: false,
+                input: Vec::new(),
+            });
+        }
+    }
+
     /// Forgets an output the compositor removed, with its wallpaper surface.
     fn remove_output(&mut self, name: u32) {
         let Some(index) = self.outputs.iter().position(|o| o.name == name) else {
@@ -857,6 +929,10 @@ impl State {
         let output = self.outputs.remove(index);
         if let Some(surface) = output.background {
             surface.destroy();
+        }
+        if let Some(surface) = output.bar {
+            surface.destroy();
+            self.events.push(Event::BarRemoved { bar: name });
         }
         if let Some(surface) = output.launchers {
             surface.destroy();
@@ -875,6 +951,12 @@ impl State {
         };
         let scale = match self.pointer_surface {
             Some(SurfaceId::Panel) => self.panel.as_ref().map_or(1, |s| s.scale),
+            Some(SurfaceId::Bar(name)) => self
+                .outputs
+                .iter()
+                .find(|o| o.name == name)
+                .and_then(|o| o.bar.as_ref())
+                .map_or(1, |s| s.scale),
             Some(SurfaceId::Notifications) => self.notifications.as_ref().map_or(1, |s| s.scale),
             Some(SurfaceId::Background(name)) => self
                 .outputs
@@ -973,6 +1055,7 @@ impl WaylandBackend {
             conn: conn.clone(),
             outputs: Vec::new(),
             panel: None,
+            bars_enabled: false,
             notifications: None,
             windows: Vec::new(),
             pointer_surface: None,
@@ -1325,6 +1408,22 @@ impl Backend for WaylandBackend {
         !self.state.events.is_empty()
     }
 
+    fn bar_origin(&self, bar: u32) -> (i32, i32, i32) {
+        let Some(output) = self.state.outputs.iter().find(|o| o.name == bar) else {
+            return (0, 0, 1);
+        };
+        let (height, output_height) = (
+            output.bar.as_ref().map_or(0, |s| s.height),
+            output.background.as_ref().map_or(0, |b| b.height),
+        );
+        let y = if self.state.panel_top {
+            0
+        } else {
+            output_height - height
+        };
+        (0, y, 1)
+    }
+
     fn panel_origin(&self) -> (i32, i32, i32) {
         let Some(panel) = self.state.panel.as_ref() else {
             return (0, 0, 1);
@@ -1397,12 +1496,12 @@ impl Backend for WaylandBackend {
                     WindowAction::Close => handle.handle.close(),
                 }
             }
-            Request::MenuOpen(open) => {
+            Request::MenuOpen { open, surface } => {
                 self.state.popup_open = *open;
                 if let Some(Surface {
                     role: Role::Layer(layer),
                     ..
-                }) = &self.state.panel
+                }) = self.state.surface_mut(*surface)
                 {
                     let interactivity = if *open {
                         zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive
@@ -1412,15 +1511,20 @@ impl Backend for WaylandBackend {
                     layer.set_keyboard_interactivity(interactivity);
                 }
             }
-            Request::TaskbarRects(rects) => {
-                if let Some(panel) = self.state.panel.as_ref() {
+            Request::TaskbarRects { surface, rects } => {
+                if let Some(bar) = self.state.surface_mut(*surface).map(|s| s.wl.clone()) {
                     for (id, rect) in rects {
                         if let Some(handle) = self.state.handles.values().find(|h| h.id == *id) {
-                            handle
-                                .handle
-                                .set_rectangle(&panel.wl, rect.x, rect.y, rect.w, rect.h);
+                            handle.handle.set_rectangle(&bar, rect.x, rect.y, rect.w, rect.h);
                         }
                     }
+                }
+            }
+            Request::Bars(enabled) => {
+                if self.state.bars_enabled != *enabled {
+                    self.state.bars_enabled = *enabled;
+                    let qh = self.queue.handle();
+                    self.state.sync_bars(&qh);
                 }
             }
             Request::Cursor { pointer } => {
@@ -1452,6 +1556,24 @@ impl Backend for WaylandBackend {
                     }
                     if *mapped {
                         wl.commit();
+                    }
+                }
+                let version = self.state.layer_shell_version;
+                for output in &self.state.outputs {
+                    if let Some(Surface {
+                        role: Role::Layer(layer),
+                        wl,
+                        mapped,
+                        ..
+                    }) = &output.bar
+                    {
+                        anchor_panel(layer, version, *top, *height);
+                        if *autohide {
+                            layer.set_exclusive_zone(0);
+                        }
+                        if *mapped {
+                            wl.commit();
+                        }
                     }
                 }
             }
@@ -1767,10 +1889,21 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_output::Event::Scale { factor } = event
-            && factor > 0
-        {
-            state.apply_scale(&output.id(), factor);
+        match event {
+            wl_output::Event::Scale { factor } if factor > 0 => {
+                state.apply_scale(&output.id(), factor);
+            }
+            wl_output::Event::Geometry { x, y, .. } => {
+                if let Some(index) = state.outputs.iter().position(|o| o.output.id() == output.id()) {
+                    state.events.push(Event::DisplayOrigin {
+                        display: state.outputs[index].name,
+                        x,
+                        y,
+                        primary: index == 0,
+                    });
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -1853,6 +1986,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, SurfaceId> for State {
                     scale,
                 });
             }
+            zwlr_layer_surface_v1::Event::Closed if matches!(id, SurfaceId::Bar(_)) => {}
             zwlr_layer_surface_v1::Event::Closed => {
                 state.events.push(Event::Quit);
             }
@@ -2146,6 +2280,7 @@ impl Dispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, ()
                     state: ToplevelState::default(),
                     outputs: Vec::new(),
                     entered: false,
+                    display: None,
                 },
             );
             state.events.push(Event::ToplevelAdded { id });
@@ -2205,6 +2340,15 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> 
                     id,
                     state: entry.reported_state(),
                 });
+                let display = entry
+                    .outputs
+                    .first()
+                    .and_then(|output| state.outputs.iter().find(|o| o.output.id() == *output))
+                    .map(|o| o.name);
+                if display.is_some() && display != entry.display {
+                    entry.display = display;
+                    state.events.push(Event::ToplevelDisplay { id, display });
+                }
             }
             zwlr_foreign_toplevel_handle_v1::Event::Closed => {
                 if let Some(h) = state.handles.remove(&handle.id()) {

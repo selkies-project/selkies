@@ -220,6 +220,13 @@ fn run() -> i32 {
         if let Some(frame) = desktop.render_panel() {
             backend.present(SurfaceId::Panel, &frame);
         }
+        for id in desktop.bar_ids() {
+            let (ox, oy, scale) = backend.bar_origin(id);
+            desktop.set_bar_offset(id, (ox / scale.max(1), oy / scale.max(1)));
+            if let Some(frame) = desktop.render_bar(id) {
+                backend.present(SurfaceId::Bar(id), &frame);
+            }
+        }
         if desktop.tray_moved
             && let Some(tray) = tray.as_mut()
         {
@@ -375,7 +382,7 @@ fn run() -> i32 {
                         desktop.open_settings(page.as_deref().and_then(ui::settings::Page::from_id));
                     }
                     ipc::Command::NewFolder => desktop.new_desktop_folder(),
-                    ipc::Command::BarAttached(attached) => desktop.set_bar_attached(attached),
+                    ipc::Command::BarsAttached(edges) => desktop.set_bars_attached(&edges),
                     ipc::Command::Quit => return 0,
                 }
             }

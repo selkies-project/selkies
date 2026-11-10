@@ -6,7 +6,8 @@
 
 //! The effects clock: a window fades in as it maps, glides between geometries on a maximize or
 //! a quick tile, shrinks and fades toward where its taskbar shows it on a minimize and comes
-//! back the same way, and shrinks and fades where it stood when it closes. An effect is a
+//! back the same way, shrinks and fades where it stood when it closes, and slides across its
+//! output when the virtual desktop it is on is shown or left. An effect is a
 //! per-frame [`Transform`] on the client area the backend presents the window through; the
 //! engine asks for a tick a frame while one runs and applies what follows (hiding a minimized
 //! window) when it ends. Every effect eases out with a cubic, so it moves fast first and
@@ -26,6 +27,7 @@ pub fn duration(kind: EffectKind) -> Duration {
         EffectKind::Map => Duration::from_millis(160),
         EffectKind::Close => Duration::from_millis(150),
         EffectKind::Shade => Duration::from_millis(120),
+        EffectKind::Slide => Duration::from_millis(200),
     }
 }
 
@@ -122,6 +124,7 @@ impl Effects {
             EffectKind::Close => (1.0, 0.0),
             EffectKind::Resize => (1.0, 1.0),
             EffectKind::Shade => (0.0, 0.0),
+            EffectKind::Slide => (1.0, 1.0),
         };
         self.running.insert(
             id,

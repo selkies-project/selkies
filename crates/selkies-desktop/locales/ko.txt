@@ -280,3 +280,4 @@ Float = 떠 있음
 Mint = 민트
 Graphite = 그래파이트
 Flat icon = 평면 아이콘
+Bar on every display = 모든 디스플레이에 막대

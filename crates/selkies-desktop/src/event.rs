@@ -9,8 +9,12 @@ use crate::xkb::Key;
 /// Identifies which desktop surface an event refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SurfaceId {
-    /// The bar along the bottom and the popups that open above it.
+    /// The bar along the bottom of the primary display and the popups that open above it.
     Panel,
+    /// The bar of another display and the popups that open above it, by the backend's
+    /// number for the display. The desktop handles a bar's events as the panel's while the
+    /// bar stands in for the panel, so it meets this only at the backends.
+    Bar(u32),
     /// A wallpaper layer, one per output, by the backend's output number.
     Background(u32),
     /// A window of the shell's own, a file manager window or the settings
@@ -78,6 +82,17 @@ pub enum Event {
     },
     /// A background surface's output went away.
     BackgroundRemoved { surface: u32 },
+    /// A display's bar went away, with its display or because bars on displays other than
+    /// the primary were turned off.
+    BarRemoved { bar: u32 },
+    /// Where a display's top-left corner sits in the window manager's layout, by the
+    /// backend's number for the display, and whether it is the primary one.
+    DisplayOrigin {
+        display: u32,
+        x: i32,
+        y: i32,
+        primary: bool,
+    },
     /// The pointer moved over a surface.
     PointerMotion { surface: SurfaceId, x: f64, y: f64 },
     /// A pointer button went down or up.
@@ -146,11 +161,50 @@ pub enum Event {
     ToplevelState { id: u64, state: ToplevelState },
     /// A toplevel closed.
     ToplevelClosed { id: u64 },
+    /// The display a toplevel is on, by the backend's number for the display; `None` while
+    /// it is on none.
+    ToplevelDisplay { id: u64, display: Option<u32> },
     /// The window manager's virtual desktops: how many, and the index of
     /// the current one.
     Desktops { count: u32, current: u32 },
     /// The display server went away.
     Quit,
+}
+
+impl Event {
+    /// The surface an input or configure event is for, where it names one.
+    fn surface_mut(&mut self) -> Option<&mut SurfaceId> {
+        match self {
+            Event::Configured { surface, .. }
+            | Event::PointerMotion { surface, .. }
+            | Event::PointerButton { surface, .. }
+            | Event::PointerAxis { surface, .. }
+            | Event::PointerLeave { surface }
+            | Event::Key { surface, .. }
+            | Event::KeySym { surface, .. }
+            | Event::KeyboardLeave { surface }
+            | Event::DragEnter { surface, .. }
+            | Event::DragMotion { surface, .. }
+            | Event::DragLeave { surface }
+            | Event::DragDrop { surface, .. } => Some(surface),
+            _ => None,
+        }
+    }
+
+    /// The display bar an event is for, if it is for one, and the same event aimed at the
+    /// panel, which the desktop handles while that bar stands in for the panel.
+    pub fn for_bar(mut self) -> Result<(u32, Event), Event> {
+        match self.surface_mut() {
+            Some(surface) => match *surface {
+                SurfaceId::Bar(bar) => {
+                    *surface = SurfaceId::Panel;
+                    Ok((bar, self))
+                }
+                _ => Err(self),
+            },
+            None => Err(self),
+        }
+    }
 }
 
 /// What the desktop asks of a window.
@@ -175,8 +229,10 @@ pub enum WindowAction {
 pub enum Request {
     /// Perform an action on a toplevel.
     Window { id: u64, action: WindowAction },
-    /// The menu opened or closed: adjust layer, grabs and keyboard focus.
-    MenuOpen(bool),
+    /// A popup opened or closed on a bar: adjust layer, grabs and keyboard focus there.
+    MenuOpen { open: bool, surface: SurfaceId },
+    /// Give every display but the primary one a bar of its own, or take them away.
+    Bars(bool),
     /// Use the pointer shape for a clickable or a plain area.
     Cursor { pointer: bool },
     /// Place the bar: along the top edge or the bottom, reserving a height
@@ -204,9 +260,12 @@ pub enum Request {
     },
     /// Destroy one of the shell's windows.
     CloseWindow { id: u32 },
-    /// Where the bar shows each window, in the bar surface's logical
+    /// Where a bar shows each of its windows, in the bar surface's logical
     /// coordinates, so the window manager's minimize heads for the button.
-    TaskbarRects(Vec<(u64, crate::geom::Rect)>),
+    TaskbarRects {
+        surface: SurfaceId,
+        rects: Vec<(u64, crate::geom::Rect)>,
+    },
     /// Hold the keyboard for one of the shell's windows, or let it go, so a
     /// shortcut being captured reaches the window rather than the window
     /// manager's grabs.

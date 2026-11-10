@@ -280,3 +280,4 @@ Float = Svævende
 Mint = Mynte
 Graphite = Grafit
 Flat icon = Flad ikon
+Bar on every display = Panel på hver skærm

@@ -1480,7 +1480,9 @@ impl Manager {
                 if let Some(mut overlay) = self.overlays.remove(&key) {
                     overlay.destroy(&self.conn);
                 }
-                if self.overlays.is_empty() {
+                // A drag still under way keeps the pointer: letting it go would leave the
+                // engine's move or resize the motion over its own frames alone.
+                if self.overlays.is_empty() && !self.engine.grabbing() {
                     self.set_grabbed(false);
                 }
             }
@@ -1757,6 +1759,7 @@ impl Manager {
                     pixelflux::wm::EffectKind::Map
                         | pixelflux::wm::EffectKind::Resize
                         | pixelflux::wm::EffectKind::Close
+                        | pixelflux::wm::EffectKind::Slide
                 ) => {}
             Some(t) if t.kind == pixelflux::wm::EffectKind::Shade => {
                 if shaded {
@@ -2036,6 +2039,9 @@ impl Manager {
         if self.moveresize_grab && !self.engine.grabbing() {
             self.moveresize_grab = false;
             let _ = self.conn.ungrab_pointer(time);
+        }
+        if self.grabbed && self.overlays.is_empty() && !self.engine.grabbing() {
+            self.set_grabbed(false);
         }
         if on_client && pressed {
             let mode = match verdict {

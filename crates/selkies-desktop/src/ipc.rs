@@ -25,9 +25,10 @@ pub enum Command {
     Settings(Option<String>),
     /// Ask for a name and make a folder on the desktop, on the cell last pointed at.
     NewFolder,
-    /// A window reaches the bar's edge, or none does any more: the window manager's word on
-    /// whether a floating bar attaches to the edge.
-    BarAttached(bool),
+    /// Which displays have a window at their bar's edge: the window manager's word on
+    /// whether each display's floating bar attaches to the edge, each display named by where
+    /// its top-left corner sits.
+    BarsAttached(Vec<((i32, i32), bool)>),
     /// Exit the desktop.
     Quit,
 }
@@ -53,7 +54,7 @@ impl Command {
             "files" => Some(Command::Files((!rest.is_empty()).then(|| PathBuf::from(rest)))),
             "settings" => Some(Command::Settings((!rest.is_empty()).then(|| rest.to_string()))),
             "new-folder" => Some(Command::NewFolder),
-            "bar-attached" => Some(Command::BarAttached(rest == "1")),
+            "bar-attached" => Some(Command::BarsAttached(parse_bar_edges(rest))),
             "quit" | "exit" => Some(Command::Quit),
             _ => None,
         }
@@ -71,10 +72,29 @@ impl Command {
             Command::Settings(None) => "settings".to_string(),
             Command::Settings(Some(page)) => format!("settings {page}"),
             Command::NewFolder => "new-folder".to_string(),
-            Command::BarAttached(attached) => format!("bar-attached {}", u8::from(*attached)),
+            Command::BarsAttached(edges) => {
+                let list: Vec<String> = edges
+                    .iter()
+                    .map(|((x, y), attached)| format!("{x},{y}:{}", u8::from(*attached)))
+                    .collect();
+                format!("bar-attached {}", list.join(" "))
+            }
             Command::Quit => "quit".to_string(),
         }
     }
+}
+
+/// The displays a `bar-attached` line names: `x,y:1` for a display whose corner sits at `x,y`
+/// with a window at its bar's edge, `x,y:0` for one without; a word that does not read is
+/// skipped.
+fn parse_bar_edges(text: &str) -> Vec<((i32, i32), bool)> {
+    text.split_whitespace()
+        .filter_map(|word| {
+            let (origin, flag) = word.split_once(':')?;
+            let (x, y) = origin.split_once(',')?;
+            Some(((x.parse().ok()?, y.parse().ok()?), flag == "1"))
+        })
+        .collect()
 }
 
 /// The socket path: under the runtime directory, named after the display so
@@ -154,6 +174,20 @@ pub fn send(command: Command) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window manager's word on the bars' edges reads back as it was sent, a word that
+    /// does not read left out.
+    #[test]
+    fn bar_edges_round_trip_through_the_line() {
+        let edges = vec![((0, 0), true), ((1920, -40), false)];
+        let line = Command::BarsAttached(edges.clone()).line();
+        assert_eq!(line, "bar-attached 0,0:1 1920,-40:0");
+        assert_eq!(Command::parse(&line), Some(Command::BarsAttached(edges)));
+        assert_eq!(
+            Command::parse("bar-attached 0,0:1 junk"),
+            Some(Command::BarsAttached(vec![((0, 0), true)]))
+        );
+    }
 
     #[test]
     fn parses_commands() {

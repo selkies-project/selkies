@@ -280,3 +280,4 @@ Float = عائم
 Mint = نعناع
 Graphite = جرافيت
 Flat icon = أيقونة مسطّحة
+Bar on every display = شريط على كل شاشة

@@ -280,3 +280,4 @@ Float = Zwevend
 Mint = Munt
 Graphite = Grafiet
 Flat icon = Plat pictogram
+Bar on every display = Balk op elk scherm

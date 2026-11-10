@@ -145,6 +145,9 @@ pub struct Config {
     pub panel_float: bool,
     /// Corner radius of a floating bar in logical pixels.
     pub panel_corners: i32,
+    /// Whether every display but the primary one has a bar of its own, each listing the
+    /// windows on its display; without, the primary bar lists them all.
+    pub panel_every_display: bool,
     /// How the start menu lays its applications out.
     pub menu_layout: MenuLayout,
     /// Language code of the interface, or `None` to follow the environment.
@@ -215,6 +218,7 @@ impl Default for Config {
             panel_margin: DEFAULT_PANEL_MARGIN,
             panel_float: true,
             panel_corners: DEFAULT_PANEL_CORNERS,
+            panel_every_display: true,
             menu_layout: MenuLayout::Columns,
             language: None,
             theme: crate::ui::Theme::default(),
@@ -469,6 +473,7 @@ impl Config {
         config.show_pager = truthy("show_pager", config.show_pager);
         config.start_icon_flat = truthy("start_icon_flat", config.start_icon_flat);
         config.panel_float = truthy("panel_float", config.panel_float);
+        config.panel_every_display = truthy("panel_every_display", config.panel_every_display);
         if let Some(variant) = values.get("wallpaper_variant") {
             config.wallpaper_variant = match variant.trim().to_ascii_lowercase().as_str() {
                 "light" => WallpaperVariant::Light,
@@ -510,7 +515,7 @@ impl Config {
 pub const WALLPAPER_KEYS: [&str; 4] = ["background_style", "background", "wallpaper", "wallpaper_mode"];
 
 /// The keys of the bar's and the start menu's settings, which share a page.
-pub const PANEL_KEYS: [&str; 24] = [
+pub const PANEL_KEYS: [&str; 25] = [
     "panel_position",
     "panel_height",
     "panel_width",
@@ -520,6 +525,7 @@ pub const PANEL_KEYS: [&str; 24] = [
     "panel_margin",
     "panel_float",
     "panel_corners",
+    "panel_every_display",
     "start_icon",
     "start_icon_flat",
     "start_label",

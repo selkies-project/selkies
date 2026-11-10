@@ -361,6 +361,9 @@ pub struct Engine {
     tile_ghost: Option<TileGhost>,
     /// The zone the pointer of a move drag rests in before it is shown, see [`TileDwell`].
     tile_dwell: Option<TileDwell>,
+    /// The windows of the desktop just left that slide out before the compositor is told
+    /// they are hidden.
+    sliding_out: HashSet<WindowId>,
     /// What the desktop shell was last told about the bar's edge, see [`BarLink`].
     bar_link: Arc<Mutex<BarLink>>,
     /// How many virtual desktops there are, and which one is shown.
@@ -448,6 +451,7 @@ impl Engine {
             pipes: Vec::new(),
             tile_preview: None,
             tile_dwell: None,
+            sliding_out: HashSet::new(),
             bar_link: Arc::new(Mutex::new(BarLink::default())),
             tile_ghost: None,
             desktop_count,
@@ -1346,7 +1350,9 @@ impl Engine {
     /// Show, move, or take back the ghost marking the zone a move drag would tile into: a
     /// translucent copy of the dragged window's frame that glides from where the window stands
     /// into the zone, and back to the window when the pointer leaves the zone's edge, while the
-    /// window itself keeps following the pointer.
+    /// window itself keeps following the pointer. An X server, which composites nothing, gets
+    /// the ghost at the zone at once and takes it down at once: each step of a glide there is
+    /// a window-sized overlay shaped and drawn anew.
     fn set_tile_preview(&mut self, preview: Option<(Zone, OutputId)>) {
         if self.tile_preview == preview {
             return;
@@ -1356,6 +1362,25 @@ impl Engine {
             self.clear_tile_ghost();
             return;
         };
+        if self.backend != Backend::Wayland {
+            match preview {
+                Some((zone, output)) => {
+                    let to = grab::zone_rect(zone, self.workarea(output));
+                    self.tile_ghost = Some(TileGhost {
+                        window: id,
+                        output,
+                        from: to,
+                        to,
+                        start: self.now,
+                        returning: false,
+                        settled: true,
+                    });
+                    self.draw_tile_ghost();
+                }
+                None => self.clear_tile_ghost(),
+            }
+            return;
+        }
         let standing = self
             .tile_ghost
             .as_ref()
@@ -1446,42 +1471,47 @@ impl Engine {
         self.set_tile_preview(Some(zone));
     }
 
-    /// Whether a window reaches a bar's edge: a shown window of the taskbar's whose frame
-    /// touches or crosses an edge of its output's workarea that something reserves, which
+    /// Each output with an edge something reserves, by where its top-left corner sits, and
+    /// whether a window reaches that edge there: a shown window of the taskbar's on the
+    /// output whose frame touches or crosses a reserved edge of the output's workarea, which
     /// is where a floating bar attaches to the edge to give it the space; a maximized, a
     /// tiled, a full-height, and a fullscreen window all do.
-    fn bar_edge_reached(&self) -> bool {
-        self.windows.iter().any(|(&id, win)| {
-            if !win.shown() || !win.listed() {
-                return false;
-            }
-            let Some(output) = self.output(win.output) else {
-                return false;
-            };
-            let (screen, area) = (output.rect, output.workarea);
-            let frame = if win.fullscreen {
-                win.rect
-            } else {
-                self.frame_rect(id)
-            };
-            let across = frame.x < area.right() && frame.right() > area.x;
-            across
-                && ((area.bottom() < screen.bottom() && frame.bottom() >= area.bottom())
-                    || (area.y > screen.y && frame.y <= area.y))
-        })
+    fn bar_edges(&self) -> Vec<((i32, i32), bool)> {
+        self.outputs
+            .iter()
+            .filter(|o| o.workarea.y > o.rect.y || o.workarea.bottom() < o.rect.bottom())
+            .map(|output| {
+                let (screen, area) = (output.rect, output.workarea);
+                let reached = self.windows.iter().any(|(&id, win)| {
+                    if !win.shown() || !win.listed() || win.output != output.id {
+                        return false;
+                    }
+                    let frame = if win.fullscreen {
+                        win.rect
+                    } else {
+                        self.frame_rect(id)
+                    };
+                    let across = frame.x < area.right() && frame.right() > area.x;
+                    across
+                        && ((area.bottom() < screen.bottom() && frame.bottom() >= area.bottom())
+                            || (area.y > screen.y && frame.y <= area.y))
+                });
+                ((screen.x, screen.y), reached)
+            })
+            .collect()
     }
 
-    /// Tells the desktop shell whether a window reaches the bar's edge when that changed
-    /// since it was last told, over the shell's command socket, which the window manager
-    /// finds from the environment it starts the shell with.
+    /// Tells the desktop shell which outputs have a window at their bar's edge when that
+    /// changed since it was last told, over the shell's command socket, which the window
+    /// manager finds from the environment it starts the shell with.
     ///
     /// The word goes out on a thread of its own, so a shell that is not up or not answering
     /// holds no compositor work; one that was not reached is tried again a second later.
     fn tell_bar_edge(&mut self) {
-        let attached = self.bar_edge_reached();
+        let edges = self.bar_edges();
         {
             let mut link = self.bar_link.lock().unwrap_or_else(|p| p.into_inner());
-            if link.told == Some(attached)
+            if link.told.as_ref() == Some(&edges)
                 || link.sending
                 || link.failed_at.is_some_and(|at| self.now < at + BAR_RETRY)
             {
@@ -1501,15 +1531,18 @@ impl Engine {
             .name("wm-bar-edge".to_string())
             .spawn(move || {
                 use std::io::Write;
+                let words: Vec<String> = edges
+                    .iter()
+                    .map(|((x, y), attached)| format!("{x},{y}:{}", u8::from(*attached)))
+                    .collect();
+                let line = format!("bar-attached {}\n", words.join(" "));
                 let delivered = std::os::unix::net::UnixStream::connect(&path)
-                    .and_then(|mut stream| {
-                        stream.write_all(format!("bar-attached {}\n", u8::from(attached)).as_bytes())
-                    })
+                    .and_then(|mut stream| stream.write_all(line.as_bytes()))
                     .is_ok();
                 let mut link = link.lock().unwrap_or_else(|p| p.into_inner());
                 link.sending = false;
                 if delivered {
-                    link.told = Some(attached);
+                    link.told = Some(edges);
                     link.failed_at = None;
                 } else {
                     link.failed_at = Some(now);
@@ -1653,19 +1686,58 @@ impl Engine {
 
     /// Show another desktop: the windows on the one left hide, the ones on the new one show,
     /// and the focus goes to the most recently focused window there.
+    /// Show a virtual desktop. On Wayland the switch slides: the windows of the desktop left
+    /// slide out to one side and those of the one shown in from the other, toward the left
+    /// for a desktop further on, each across its own output. A window sliding out is hidden
+    /// to the engine at once, so nothing focuses or hits it, and to the compositor once it
+    /// has gone. An X server, which composites nothing, switches at once.
     fn switch_desktop(&mut self, index: u32) {
         let index = index.min(self.desktop_count.saturating_sub(1));
         if index == self.current_desktop {
             return;
         }
         self.close_menu();
+        let forward = index > self.current_desktop;
         self.current_desktop = index;
+        let slide = self.backend == Backend::Wayland;
         let ids: Vec<WindowId> = self.windows.keys().copied().collect();
         for id in ids {
-            if self.refresh_hidden(id) {
-                self.configure(id);
-                self.render_frame(id);
+            let was_shown = self.win(id).is_some_and(|w| w.shown());
+            if !self.refresh_hidden(id) {
+                continue;
             }
+            let Some(win) = self.win(id) else {
+                continue;
+            };
+            let (rect, shown) = (win.rect, win.shown());
+            let width = self.output_rect(win.output).w;
+            let away = if forward { -width } else { width };
+            if slide && was_shown && !shown {
+                self.effects.start(
+                    id,
+                    EffectKind::Slide,
+                    rect,
+                    rect.at(rect.x + away, rect.y),
+                    self.now,
+                );
+                self.sliding_out.insert(id);
+                continue;
+            }
+            self.sliding_out.remove(&id);
+            if slide && shown {
+                self.effects.start(
+                    id,
+                    EffectKind::Slide,
+                    rect.at(rect.x - away, rect.y),
+                    rect,
+                    self.now,
+                );
+            }
+            self.configure(id);
+            self.render_frame(id);
+        }
+        if slide && self.effects.any() {
+            self.out.push(Command::WakeAt(self.now));
         }
         if self.cycle.is_some() {
             self.render_cycle();
@@ -3993,6 +4065,9 @@ impl Engine {
             if kind == EffectKind::Minimize {
                 self.finish_minimize(id);
             }
+            if kind == EffectKind::Slide && self.sliding_out.remove(&id) {
+                self.configure(id);
+            }
         }
         if let Some(ghost) = self.tile_ghost.as_ref()
             && !ghost.settled
@@ -4081,8 +4156,9 @@ const BAR_RETRY: Duration = Duration::from_secs(1);
 /// What the desktop shell knows about the bar's edge, shared with the thread that tells it.
 #[derive(Debug, Default)]
 struct BarLink {
-    /// Whether a window reaches the edge, as the shell was last told; `None` before it was.
-    told: Option<bool>,
+    /// Each output's corner and whether a window reaches its bar's edge, as the shell was last
+    /// told; `None` before it was.
+    told: Option<Vec<((i32, i32), bool)>>,
     /// Whether a word is on its way.
     sending: bool,
     /// When the shell last could not be reached.
@@ -4556,13 +4632,47 @@ mod tests {
     fn a_maximized_or_tiled_window_reaches_the_bar_edge() {
         let (mut engine, _) = engine();
         open(&mut engine, 1, 600, 400);
-        assert!(!engine.bar_edge_reached());
+        let reached = |engine: &Engine| engine.bar_edges().iter().any(|(_, r)| *r);
+        assert_eq!(engine.bar_edges().len(), 1);
+        assert!(!reached(&engine));
         engine.set_maximized(1, true);
-        assert!(engine.bar_edge_reached());
+        assert!(reached(&engine));
         engine.set_maximized(1, false);
-        assert!(!engine.bar_edge_reached());
+        assert!(!reached(&engine));
         engine.run_action(&Action::SnapToEdge(ResizeEdge::Left), Some(1), (0.0, 0.0));
-        assert!(engine.bar_edge_reached());
+        assert!(reached(&engine));
+    }
+
+    /// A desktop switch on Wayland slides the window left behind out and the one shown in, the
+    /// one left told it is hidden only once its slide ends.
+    #[test]
+    fn a_desktop_switch_slides_the_windows_out_and_in() {
+        let (mut engine, _) = engine();
+        engine.set_desktop_count(2);
+        open(&mut engine, 1, 400, 300);
+        open(&mut engine, 2, 400, 300);
+        engine.send_to_desktop(2, Some(1), false);
+        engine.now += Duration::from_secs(1);
+        engine.tick(engine.now);
+        engine.out.clear();
+        engine.switch_desktop(1);
+        let hidden = |out: &[Command], id: WindowId| {
+            out.iter()
+                .any(|c| matches!(c, Command::Configure { id: i, states, .. } if *i == id && states.hidden))
+        };
+        let out = std::mem::take(&mut engine.out);
+        assert!(
+            !hidden(&out, 1),
+            "the window left keeps showing while it slides out"
+        );
+        assert_eq!(engine.effects.kind(1), Some(EffectKind::Slide));
+        assert_eq!(engine.effects.kind(2), Some(EffectKind::Slide));
+        assert!(!engine.windows[&1].shown());
+        engine.now += Duration::from_secs(1);
+        engine.tick(engine.now);
+        let out = std::mem::take(&mut engine.out);
+        assert!(hidden(&out, 1), "the slide's end hides the window left");
+        assert!(!engine.effects.running(2));
     }
 
     /// A resize from the left edge configures with the right edge held, and a size the client
@@ -4668,7 +4778,7 @@ mod tests {
         assert!(engine.windows[&1].hidden && engine.windows[&2].hidden);
         assert_eq!(engine.focus, None);
         out.clear();
-        engine.handle(Event::Tick(engine.now), &mut out);
+        engine.handle(Event::Tick(engine.now + Duration::from_secs(1)), &mut out);
         let hidden_configures = engine
             .windows
             .values()

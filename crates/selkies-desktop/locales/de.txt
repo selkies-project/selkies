@@ -280,3 +280,4 @@ Float = Schwebend
 Mint = Minze
 Graphite = Graphit
 Flat icon = Flaches Symbol
+Bar on every display = Leiste auf jedem Bildschirm

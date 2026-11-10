@@ -280,3 +280,4 @@ Float = तैरता हुआ
 Mint = पुदीना
 Graphite = ग्रेफ़ाइट
 Flat icon = सपाट आइकन
+Bar on every display = हर डिस्प्ले पर बार

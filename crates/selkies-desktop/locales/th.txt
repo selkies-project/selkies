@@ -280,3 +280,4 @@ Float = ลอย
 Mint = มินต์
 Graphite = กราไฟต์
 Flat icon = ไอคอนแบบแบน
+Bar on every display = แถบบนทุกจอแสดงผล

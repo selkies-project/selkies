@@ -280,3 +280,4 @@ Float = フローティング
 Mint = ミント
 Graphite = グラファイト
 Flat icon = フラットなアイコン
+Bar on every display = すべてのディスプレイにバー
