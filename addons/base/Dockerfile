@@ -24,9 +24,7 @@
 #   - s6 service supervision, running as PID 1 or below a foreign init
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) and the
 #     V4L2 webcam interposer, all built in-tree and wired with LD_PRELOAD
-#   - GPU wiring: NVIDIA/VA-API/Vulkan runtime, Zink for hardware OpenGL, and
-#     the 32-bit graphics runtime on x86, which a 32-bit application needs a
-#     complete second copy of
+#   - GPU wiring: NVIDIA/VA-API/Vulkan runtime and Zink for hardware OpenGL
 #   - Audio: PipeWire with the PulseAudio, ALSA, JACK, and V4L2 interfaces,
 #     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
@@ -358,11 +356,6 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
         ucf \
         udev \
         tzdata && \
-    # The 32-bit compiler and runtime, on the architecture that has one. Here
-    # rather than in the rootless phase below, because libc6-i386 links /lib32
-    # from its preinst, and a session with no root can install neither it nor
-    # anything else that needs the same afterwards.
-    { [ "$(dpkg --print-architecture)" != "amd64" ] || apt-get install --no-install-recommends -y gcc-multilib; } && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
     # Debian's locale-gen takes no locale arguments and generates only what
     # /etc/locale.gen has uncommented, which Ubuntu's honors as well
@@ -416,8 +409,7 @@ SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
 ###
 # Debian packaging frontends: apt-get only, never dpkg
 ###
-RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architecture i386; fi && \
-    apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
         # Process supervision
         s6 \
         # Base utilities
@@ -601,26 +593,15 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         python3 \
         coturn \
         ssl-cert && \
-    # The Intel media stack and the 32-bit graphics runtime exist for amd64
-    # alone. A 32-bit application -- a Wine or Steam game, an old binary --
-    # loads its own copy of every graphics library, and finds none of the
-    # 64-bit ones: without these it falls back to software rendering, or does
-    # not start. Mesa's own VA-API and VDPAU drivers arrive with
-    # mesa-libgallium, which va-driver-all pulls in for that architecture.
-    # The non-free builds of the Intel drivers are the ones taken: they decode
-    # more formats than the free builds, which they conflict with, so both
-    # architectures have to agree on which of the two is installed.
+    # The Intel media stack exists for amd64 alone. The non-free builds of the
+    # Intel drivers are the ones taken: they decode more formats than the free
+    # builds, which they conflict with. A 32-bit application brings the 32-bit
+    # graphics runtime it needs in the container it runs in: proot-apps gives
+    # Steam its own.
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install --no-install-recommends -y \
             intel-media-va-driver-non-free i965-va-driver-shaders intel-gpu-tools \
-            rar \
-            libgl1:i386 libglx-mesa0:i386 libgl1-mesa-dri:i386 \
-            libegl1:i386 libgles2:i386 libglu1-mesa:i386 \
-            libvulkan1:i386 mesa-vulkan-drivers:i386 \
-            libva2:i386 libva-drm2:i386 libva-x11-2:i386 \
-            va-driver-all:i386 intel-media-va-driver-non-free:i386 \
-            i965-va-driver-shaders:i386 \
-            libvdpau1:i386; \
+            rar; \
     fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
@@ -632,9 +613,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
 RUN printf '/usr/local/nvidia/lib\n/usr/local/nvidia/lib64\n' > /etc/ld.so.conf.d/nvidia.conf && \
     mkdir -pm755 /etc/OpenCL/vendors /etc/vulkan/icd.d /usr/share/glvnd/egl_vendor.d && \
     echo 'libnvidia-opencl.so.1' > /etc/OpenCL/vendors/nvidia.icd && \
-    # Named with its architecture, because the 32-bit runtime installed above
-    # leaves two instances of it and an unqualified query is ambiguous
-    VULKAN_API_VERSION="$(dpkg -s "libvulkan1:$(dpkg --print-architecture)" | grep -oP 'Version: [0-9|\.]+' | grep -oP '[0-9]+(\.[0-9]+)(\.[0-9]+)')" && \
+    VULKAN_API_VERSION="$(dpkg -s libvulkan1 | grep -oP 'Version: [0-9|\.]+' | grep -oP '[0-9]+(\.[0-9]+)(\.[0-9]+)')" && \
     printf '{\n  "file_format_version": "1.0.0",\n  "ICD": {\n    "library_path": "libGLX_nvidia.so.0",\n    "api_version": "%s"\n  }\n}\n' "${VULKAN_API_VERSION}" > /etc/vulkan/icd.d/nvidia_icd.json && \
     printf '{\n  "file_format_version": "1.0.0",\n  "ICD": {\n    "library_path": "libEGL_nvidia.so.0"\n  }\n}\n' > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
 ENV PATH="/usr/local/nvidia/bin${PATH:+:${PATH}}"
