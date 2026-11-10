@@ -48,6 +48,16 @@ RUN selkies-privileged-files release
 USER 1000
 SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
 
+# The wallpaper packages the second set below installs are held to a few with
+# light and dark pictures, which dpkg keeps out on every later upgrade too.
+RUN printf '%s\n' \
+        'path-exclude=/usr/share/wallpapers/*' \
+        'path-include=/usr/share/wallpapers/Next/*' \
+        'path-include=/usr/share/wallpapers/Nuvole/*' \
+        'path-include=/usr/share/wallpapers/Mountain/*' \
+        'path-include=/usr/share/wallpapers/Flow/*' \
+        'path-include=/usr/share/wallpapers/Kay/*' \
+        > /etc/dpkg/dpkg.cfg.d/selkies-wallpapers
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
         # The icon sets selkies-desktop, the window manager's menus, and GTK
         # resolve names
@@ -75,8 +85,10 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         xarchiver \
         # The image's wallpaper: a package with light and dark pictures the
         # desktop switches between with its theme, linked below as the
-        # wallpaper a session starts with
+        # wallpaper a session starts with, and four more of the same kind
+        # to choose from out of the set the filter above trims
         breeze-wallpaper \
+        plasma-workspace-wallpapers \
         # What a terminal session is expected to have beyond the base's
         # editors: completion, remote shells and copies, and the network and
         # process tools
@@ -201,6 +213,9 @@ RUN set -eu; \
 # replaces it for GTK as well. The edit is checked, so an upstream file that no
 # longer matches fails the build rather than a session.
 COPY --chown=1000:1000 docs/assets/logo/mark-512x512.png /usr/share/selkies/www/icon.png
+# The logo as a vector, the start button's icon, which the desktop draws in one
+# color to suit the theme.
+COPY --chown=1000:1000 docs/assets/logo/selkies.svg /usr/share/selkies/www/icon.svg
 # The wallpaper a session starts with, where the desktop looks for the image's own.
 RUN test -d /usr/share/wallpapers/Next && ln -sfn /usr/share/wallpapers/Next /usr/share/selkies/wallpaper
 RUN set -eu; \

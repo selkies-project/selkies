@@ -46,9 +46,8 @@ people reach for in a multi-application container:
   dock, under openbox and under labwc through XWayland.
 * **Settings** in a window of their own, opened from the bar's right-click
   menu or by `selkies-desktop --settings [PAGE]`, with a sidebar of pages
-  under four captions and a search field that filters them by name or by
-  the rows they hold (Enter opens the first match).  Appearance: Theme, the
-  Selkies Dark (the default), Selkies Light, Dark, Light and Ember schemes
+  under four captions.  Appearance: Theme, the Dark (the default), Light,
+  Ember, Mint and Graphite schemes
   and the Linux, Fruit and Redmond styles as cards each showing the desktop
   as it would look, under a live preview that stays in place as the cards
   scroll; Colors, the four colors of the interface from presets or a
@@ -167,7 +166,7 @@ so an edit applies within a moment.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `panel_position` | `bottom` | `bottom` or `top` |
-| `panel_height` | `32` | Height of the bar in logical pixels, 24 to 64; icons grow with it |
+| `panel_height` | `44` | Height of the bar in logical pixels, 24 to 64; icons grow with it |
 | `panel_width` | `100` | Width of the bar as a percentage of the screen, centered with rounded corners when narrower |
 | `panel_opacity` | `95` | Opacity of the bar's background in percent |
 | `panel_autohide` | `false` | Hide the bar until the pointer touches the screen edge it sits on; it then reserves no space |
@@ -187,7 +186,8 @@ so an edit applies within a moment.
 | `window_glyphs` | `lines` | Shapes of the window buttons: `lines`, `circles` (colored, the Fruit style) or `wide` (wide flat buttons with the title at the left, the Redmond style) |
 | `window_corners` | `8` | Corner radius of windows and popups in pixels, 0 to 12; labwc rounds windows, openbox does not |
 | `language` | from `LC_ALL`, `LC_MESSAGES`, `LANG` | Interface language: `en`, `es`, `zh_cn`, `zh_tw`, `hi`, `pt`, `fr`, `ru`, `de`, `tr`, `it`, `nl`, `ar`, `ko`, `ja`, `vi`, `th`, `fil` or `da` |
-| `start_icon` | Selkies logo | Icon name from the theme, or the path of a PNG, JPEG or SVG, for the start button |
+| `start_icon` | Selkies logo | Icon name from the theme, or the path of a PNG, JPEG or SVG, for the start button; the logo's vector (`/usr/share/selkies/www/icon.svg`) where installed, else its PNG |
+| `start_icon_flat` | `true` | Draw an SVG start icon in one solid color, light on a dark theme and dark on a light one; a PNG or JPEG keeps its colors |
 | `background_style` | `solid` | `solid` or `gradient`, painted first |
 | `background` | black behind a dark wallpaper, the theme's window color behind a light one | Color of the solid background or the gradient |
 | `wallpaper` | first of `~/.config/selkies-desktop/wallpaper.{png,jpg}`, `/usr/share/selkies/wallpaper` (a wallpaper package or a link to one), `/usr/share/selkies/wallpaper.{png,jpg}`, the Selkies logo | PNG or JPEG, or a wallpaper package's folder, drawn over the background; `none` for no image |

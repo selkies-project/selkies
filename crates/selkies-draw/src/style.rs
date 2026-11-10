@@ -21,8 +21,8 @@ use tiny_skia::Color;
 
 use crate::render::{parse_color, rgb, rgba};
 
-/// The colors the user can set: the four the rest derive from. The defaults are the Selkies
-/// violet on deep indigo, the one the desktop's Selkies Dark preset names.
+/// The colors the user can set: the four the rest derive from. The defaults are the desktop's
+/// Dark preset: a sky-blue accent on neutral dark grays.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
     /// Markers, selections, switches, and the active choice.
@@ -38,10 +38,10 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Theme {
         Theme {
-            accent: rgb(0x79, 0x67, 0xc5),
-            panel: rgb(0x0a, 0x0e, 0x17),
-            popup: rgb(0x12, 0x18, 0x26),
-            text: rgb(0xee, 0xf2, 0xf8),
+            accent: rgb(0x3d, 0xae, 0xe9),
+            panel: rgb(0x29, 0x2c, 0x30),
+            popup: rgb(0x20, 0x23, 0x26),
+            text: rgb(0xfc, 0xfc, 0xfc),
         }
     }
 }
@@ -349,14 +349,14 @@ mod tests {
         assert_eq!(on_color(rgb(0, 0, 0)), Color::WHITE);
     }
 
-    /// The defaults are the Selkies Dark scheme, whose violet accent takes white text.
+    /// The defaults are the Dark scheme, whose sky-blue accent takes white text.
     #[test]
-    fn the_default_theme_is_selkies_dark() {
+    fn the_default_theme_is_the_dark_scheme() {
         let theme = Theme::default();
-        assert_eq!(theme.accent, rgb(0x79, 0x67, 0xc5));
-        assert_eq!(theme.panel, rgb(0x0a, 0x0e, 0x17));
-        assert_eq!(theme.popup, rgb(0x12, 0x18, 0x26));
-        assert_eq!(theme.text, rgb(0xee, 0xf2, 0xf8));
+        assert_eq!(theme.accent, rgb(0x3d, 0xae, 0xe9));
+        assert_eq!(theme.panel, rgb(0x29, 0x2c, 0x30));
+        assert_eq!(theme.popup, rgb(0x20, 0x23, 0x26));
+        assert_eq!(theme.text, rgb(0xfc, 0xfc, 0xfc));
         assert_eq!(on_color(theme.accent), Color::WHITE);
     }
 }

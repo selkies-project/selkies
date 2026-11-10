@@ -218,16 +218,18 @@ const LANGUAGES: [(&str, &str); 19] = [
 ];
 
 /// The color schemes: the four colors of each, as accent, bar, menus and
-/// text.  Selkies Dark, the default, is the brand's violet on deep indigo,
-/// and Selkies Light its day version; Dark and Light share a sky-blue
-/// accent on neutral grays; Ember is a copper accent on warm charcoal,
-/// dark enough to take white text.
+/// text.  Dark, the default, and Light share a sky-blue accent on neutral
+/// grays, the bar the shade of a window's header and the menus a window's
+/// own; Ember is a copper accent on warm charcoal, dark enough to take
+/// white text; Mint is a green accent on pale sage, a light desktop of a
+/// warmer cast than Light; and Graphite is a rose accent on near black, a
+/// darker desktop than Dark.
 const SCHEMES: [(&str, [&str; 4]); 5] = [
-    ("Selkies Dark", ["#7967c5", "#0a0e17", "#121826", "#eef2f8"]),
-    ("Selkies Light", ["#6b5bd6", "#e4e7ee", "#f5f6f9", "#1b2030"]),
-    ("Dark", ["#3daee9", "#31363b", "#2a2e32", "#fcfcfc"]),
-    ("Light", ["#3daee9", "#eff0f1", "#fcfcfc", "#232629"]),
+    ("Dark", ["#3daee9", "#292c30", "#202326", "#fcfcfc"]),
+    ("Light", ["#3daee9", "#dee0e2", "#eff0f1", "#232629"]),
     ("Ember", ["#b9671b", "#1c1917", "#272220", "#f4ede4"]),
+    ("Mint", ["#13866a", "#d8e9e2", "#f2f8f5", "#14302a"]),
+    ("Graphite", ["#e8557a", "#0c0c0e", "#16161a", "#f1f1f4"]),
 ];
 
 /// A style: a name and the frame, bar and menu settings it bundles.
@@ -356,18 +358,18 @@ const SWATCHES: [&str; 12] = [
 ];
 /// Preset accent colors, the default first.
 const ACCENTS: [&str; 12] = [
-    "#7967c5", "#3daee9", "#3d7dd6", "#2f9e6e", "#d5499a", "#e0803a", "#d64545", "#8a8f99", "#1fa8b8",
+    "#3daee9", "#7967c5", "#3d7dd6", "#2f9e6e", "#d5499a", "#e0803a", "#d64545", "#8a8f99", "#1fa8b8",
     "#c9a227", "#9d8cf0", "#b56576",
 ];
 /// Preset surface colors for the bar and the menus, the defaults first and
 /// the light ones last.
 const SURFACES: [&str; 12] = [
-    "#0a0e17", "#121826", "#31363b", "#2a2e32", "#000000", "#1d222b", "#2e3440", "#3b2d4a", "#eff0f1",
-    "#fcfcfc", "#e4e7ee", "#fdf6e3",
+    "#292c30", "#202326", "#0a0e17", "#121826", "#000000", "#1d222b", "#2e3440", "#3b2d4a", "#dee0e2",
+    "#eff0f1", "#fcfcfc", "#fdf6e3",
 ];
 /// Preset text colors, the default first and the dark ones last.
 const TEXTS: [&str; 12] = [
-    "#eef2f8", "#fcfcfc", "#ffffff", "#d0d4da", "#b6c0d2", "#f5e6c8", "#c8e6ff", "#93a1a1", "#586e75",
+    "#fcfcfc", "#eef2f8", "#ffffff", "#d0d4da", "#b6c0d2", "#f5e6c8", "#c8e6ff", "#93a1a1", "#586e75",
     "#333333", "#232629", "#111111",
 ];
 
@@ -1484,9 +1486,9 @@ fn preset_name(name: &str) -> &'static str {
     match name {
         "Dark" => tr("Dark"),
         "Light" => tr("Light"),
-        "Selkies Dark" => tr("Selkies Dark"),
-        "Selkies Light" => tr("Selkies Light"),
         "Ember" => tr("Ember"),
+        "Mint" => tr("Mint"),
+        "Graphite" => tr("Graphite"),
         "Linux" => tr("Linux"),
         "Fruit" => tr("Fruit"),
         _ => tr("Redmond"),
@@ -2314,6 +2316,7 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                     (tr("Default"), set("start_icon", "")),
                 ],
             );
+            groups.switch(tr("Flat icon"), "start_icon_flat", d.config.start_icon_flat);
             groups.field(
                 tr("Label"),
                 Field::StartLabel,
@@ -4374,8 +4377,8 @@ mod tests {
             assert_eq!(current_scheme(config_from(&changes).theme), Some(*name));
             assert_eq!(current_scheme(scheme_theme(colors)), Some(*name));
         }
-        assert_eq!(current_scheme(ui::Theme::default()), Some("Selkies Dark"));
-        assert_eq!(SCHEMES[0].0, "Selkies Dark");
+        assert_eq!(current_scheme(ui::Theme::default()), Some("Dark"));
+        assert_eq!(SCHEMES[0].0, "Dark");
         let defaults = &SCHEMES[0].1;
         assert_eq!(ACCENTS[0], defaults[0]);
         assert_eq!(&SURFACES[..2], &defaults[1..3]);

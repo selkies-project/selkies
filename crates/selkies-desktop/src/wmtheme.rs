@@ -369,6 +369,16 @@ pub fn bitmap(name: &str, glyphs: Glyphs) -> Bitmap {
                     dx * dx + dy * dy <= (c + 0.5) * (c + 0.5)
                 }
                 (_, "close") => (x - y).abs() <= 1 || (x + y - (n - 1)).abs() <= 1,
+                (Glyphs::Lines, "iconify" | "max" | "max_toggled") => {
+                    let c = (n - 1) as f32 / 2.0;
+                    let (dx, dy) = ((x as f32 - c).abs(), (y as f32 - c).abs());
+                    let reach = c - 1.0;
+                    match name {
+                        "iconify" => dx <= reach && (y as f32 - (c + reach / 2.0 - dx)).abs() <= 0.75,
+                        "max" => dx <= reach && (y as f32 - (c - reach / 2.0 + dx)).abs() <= 0.75,
+                        _ => (dx + dy - reach).abs() <= 0.75,
+                    }
+                }
                 (_, "iconify") => y >= n - 3 && y < n - 1 && x >= 1 && x < n - 1,
                 (_, "max") => {
                     let edge = x == 1 || x == n - 2 || y == 1 || y == n - 2;
@@ -855,8 +865,8 @@ mod tests {
         let flat = themerc(theme, WindowStyle::default());
         assert!(flat.starts_with(MARKER));
         assert!(flat.contains("window.active.title.bg: flat solid\n"));
-        assert!(flat.contains("window.active.title.bg.color: #0a0e17\n"));
-        assert!(flat.contains("menu.items.active.bg.color: #7967c5\n"));
+        assert!(flat.contains("window.active.title.bg.color: #292c30\n"));
+        assert!(flat.contains("menu.items.active.bg.color: #3daee9\n"));
         assert!(flat.contains("window.label.text.justify: center\n"));
         assert!(!flat.contains("button.close.unpressed"));
         let fruit = themerc(
@@ -998,7 +1008,13 @@ mod tests {
         let circle = bitmap("max", Glyphs::Circles);
         assert!(circle[5][5] && circle[0][5] && !circle[0][0]);
         let max = bitmap("max", Glyphs::Lines);
-        assert!(max[1][1] && max[10][10] && !max[5][5]);
+        assert!(max[3][5] && max[7][1] && !max[8][5] && !max[1][1]);
+        let iconify = bitmap("iconify", Glyphs::Lines);
+        assert!(iconify[8][5] && iconify[4][1] && !iconify[3][5]);
+        let restore = bitmap("max_toggled", Glyphs::Lines);
+        assert!(restore[1][5] && restore[5][1] && !restore[5][5]);
+        let square = bitmap("max", Glyphs::Wide);
+        assert!(square[1][1] && square[10][10] && !square[5][5]);
         let iconify = bitmap("iconify", Glyphs::Wide);
         assert!(iconify[10][5] && !iconify[1][5]);
     }

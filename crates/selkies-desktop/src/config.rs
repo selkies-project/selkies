@@ -130,6 +130,9 @@ pub struct Config {
     pub panel_autohide: bool,
     /// Icon name or image path of the start button, or `None` for the Selkies logo.
     pub start_icon: Option<String>,
+    /// Whether an SVG start icon is drawn in one solid color, light on a dark theme and dark
+    /// on a light one; a raster icon keeps its own colors either way.
+    pub start_icon_flat: bool,
     /// Text shown on the start button beside its icon, if any.
     pub start_label: Option<String>,
     /// Whether the start button, quick launch and taskbar sit in the middle
@@ -201,11 +204,12 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             panel_position: PanelPosition::Bottom,
-            panel_height: crate::ui::PANEL_HEIGHT,
+            panel_height: DEFAULT_PANEL_HEIGHT,
             panel_width: 100,
             panel_opacity: 95,
             panel_autohide: false,
             start_icon: None,
+            start_icon_flat: true,
             start_label: None,
             panel_centered: false,
             panel_margin: DEFAULT_PANEL_MARGIN,
@@ -252,6 +256,8 @@ pub fn state_dir() -> PathBuf {
 
 /// Shortest bar the settings accept.
 pub const MIN_PANEL_HEIGHT: i32 = 24;
+/// The bar's height by default.
+pub const DEFAULT_PANEL_HEIGHT: i32 = 44;
 /// Tallest bar the settings accept.
 pub const MAX_PANEL_HEIGHT: i32 = 64;
 /// Widest margin around the bar the settings accept.
@@ -461,6 +467,7 @@ impl Config {
             config.desktops = count.clamp(1, MAX_DESKTOPS);
         }
         config.show_pager = truthy("show_pager", config.show_pager);
+        config.start_icon_flat = truthy("start_icon_flat", config.start_icon_flat);
         config.panel_float = truthy("panel_float", config.panel_float);
         if let Some(variant) = values.get("wallpaper_variant") {
             config.wallpaper_variant = match variant.trim().to_ascii_lowercase().as_str() {
@@ -503,7 +510,7 @@ impl Config {
 pub const WALLPAPER_KEYS: [&str; 4] = ["background_style", "background", "wallpaper", "wallpaper_mode"];
 
 /// The keys of the bar's and the start menu's settings, which share a page.
-pub const PANEL_KEYS: [&str; 23] = [
+pub const PANEL_KEYS: [&str; 24] = [
     "panel_position",
     "panel_height",
     "panel_width",
@@ -514,6 +521,7 @@ pub const PANEL_KEYS: [&str; 23] = [
     "panel_float",
     "panel_corners",
     "start_icon",
+    "start_icon_flat",
     "start_label",
     "menu_layout",
     "show_clock",
@@ -546,6 +554,10 @@ pub const FILES_KEYS: [&str; 3] = ["files_view", "files_sort", "files_hidden"];
 
 /// The Selkies logo, the wallpaper when no other image is configured.
 pub const LOGO_PATH: &str = "/usr/share/selkies/www/icon.png";
+
+/// The Selkies logo as a vector, the start button's icon where it is installed, which a flat
+/// start icon draws in one color.
+pub const LOGO_SVG_PATH: &str = "/usr/share/selkies/www/icon.svg";
 
 /// Parses a list of desktop file IDs, the `.desktop` suffix added where missing.
 ///

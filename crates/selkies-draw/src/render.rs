@@ -909,6 +909,30 @@ pub fn decode_raster(bytes: &[u8], size: u32) -> Option<Pixmap> {
     pixmap_from_rgba(scaled.width(), scaled.height(), scaled.as_raw())
 }
 
+/// An image drawn in one solid color: every pixel the color at the pixel's own coverage, so a
+/// glyph's shape and its antialiased edge survive while its colors and shading go.
+///
+/// # Arguments
+/// * `image` - The source image, premultiplied.
+/// * `color` - The color drawn.
+pub fn flatten_pixmap(image: &Pixmap, color: Color) -> Pixmap {
+    let mut out = image.clone();
+    let c = color.to_color_u8();
+    for pixel in out.pixels_mut() {
+        let a = pixel.alpha() as u16;
+        let scale = |v: u8| ((v as u16 * a + 127) / 255) as u8;
+        if let Some(flat) = tiny_skia::PremultipliedColorU8::from_rgba(
+            scale(c.red()),
+            scale(c.green()),
+            scale(c.blue()),
+            a as u8,
+        ) {
+            *pixel = flat;
+        }
+    }
+    out
+}
+
 /// Scales a premultiplied pixmap so its longer side is `size` pixels.
 ///
 /// # Arguments

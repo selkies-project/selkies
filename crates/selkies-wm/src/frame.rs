@@ -468,6 +468,7 @@ impl Renderer {
                         inset,
                         selkies_draw::style::on_color(color),
                         appearance,
+                        false,
                     );
                 }
             }
@@ -496,13 +497,15 @@ impl Renderer {
                     side,
                 );
                 let color = if lit && close { Color::WHITE } else { glyph };
-                self.draw_glyph(canvas, context, inset, color, appearance);
+                let chevrons = look.style.glyphs == Glyphs::Lines;
+                self.draw_glyph(canvas, context, inset, color, appearance, chevrons);
             }
         }
     }
 
-    /// The line glyph of a button inside `rect`: a cross, a square (two for a maximized window),
-    /// or a line.
+    /// The line glyph of a button inside `rect`: a cross to close; with `chevrons`, a chevron
+    /// pointing down to minimize, one pointing up to maximize, and a diamond to restore a
+    /// maximized window, else a square (two for a maximized window) and a line.
     fn draw_glyph(
         &mut self,
         canvas: &mut Canvas<'_>,
@@ -510,18 +513,38 @@ impl Renderer {
         rect: DrawRect,
         color: Color,
         appearance: &Appearance<'_>,
+        chevrons: bool,
     ) {
         let x = rect.x as f32;
         let y = rect.y as f32;
         let w = rect.w as f32;
         let h = rect.h as f32;
         let mut path = PathBuilder::new();
+        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        let reach = w / 2.0 - 1.0;
         match context {
             Context::Close => {
                 path.move_to(x + 1.0, y + 1.0);
                 path.line_to(x + w - 1.0, y + h - 1.0);
                 path.move_to(x + w - 1.0, y + 1.0);
                 path.line_to(x + 1.0, y + h - 1.0);
+            }
+            Context::Maximize if chevrons && appearance.maximized => {
+                path.move_to(cx, cy - reach);
+                path.line_to(cx + reach, cy);
+                path.line_to(cx, cy + reach);
+                path.line_to(cx - reach, cy);
+                path.close();
+            }
+            Context::Maximize if chevrons => {
+                path.move_to(cx - reach, cy + reach / 2.0);
+                path.line_to(cx, cy - reach / 2.0);
+                path.line_to(cx + reach, cy + reach / 2.0);
+            }
+            Context::Iconify if chevrons => {
+                path.move_to(cx - reach, cy - reach / 2.0);
+                path.line_to(cx, cy + reach / 2.0);
+                path.line_to(cx + reach, cy - reach / 2.0);
             }
             Context::Maximize => {
                 if appearance.maximized {

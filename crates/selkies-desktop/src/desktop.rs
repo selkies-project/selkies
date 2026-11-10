@@ -103,9 +103,9 @@ const BAR_ATTACH: Duration = Duration::from_millis(220);
 const BAR_FRAME: Duration = Duration::from_millis(16);
 
 /// The color behind a light wallpaper under a dark theme, whose own window color is dark: the
-/// window color of the Selkies Light scheme.
+/// window color of the Light scheme.
 fn light_wallpaper() -> tiny_skia::Color {
-    crate::render::rgb(0xf5, 0xf6, 0xf9)
+    crate::render::rgb(0xef, 0xf0, 0xf1)
 }
 
 /// What a rendered wallpaper layer was made for: size, scale and monitors.
@@ -339,7 +339,7 @@ pub struct Desktop {
     /// The file manager.
     pub files: files::Manager,
     /// The start button icon resolved for the current setting and size.
-    start_icon: Option<(Option<String>, u32, Option<Arc<Pixmap>>)>,
+    start_icon: Option<(String, u32, Option<Arc<Pixmap>>)>,
     /// Whether an auto-hiding bar is tucked away.
     panel_hidden: bool,
     /// Whether the window manager said a window reaches the bar's edge, which attaches a
@@ -653,31 +653,48 @@ impl Desktop {
         (self.config.panel_height * ui::ICON_SIZE / ui::PANEL_HEIGHT).clamp(16, 36)
     }
 
-    /// The start button's icon at the current scale: the configured icon
-    /// name or image, else the Selkies logo.
+    /// The start button's icon at a size: the one the settings name, else the Selkies logo,
+    /// its vector where installed. An SVG is drawn in one solid color while the flat setting
+    /// is on, the theme's text color, so it is light on a dark theme and dark on a light one;
+    /// a raster icon keeps its colors.
     ///
     /// # Arguments
-    /// * `size` - Logical size wanted.
+    /// * `size` - Logical pixel size.
     pub fn start_icon(&mut self, size: i32) -> Option<Arc<Pixmap>> {
         let px = (size * self.panel.scale.max(1)) as u32;
-        let wanted = self.config.start_icon.clone();
-        if let Some((name, cached_px, icon)) = &self.start_icon
-            && *name == wanted
+        let source = self.config.start_icon.clone().or_else(|| {
+            std::path::Path::new(crate::config::LOGO_SVG_PATH)
+                .is_file()
+                .then(|| crate::config::LOGO_SVG_PATH.to_string())
+        });
+        let svg = source.as_deref().is_some_and(|name| {
+            self.icons
+                .locate(name, px)
+                .and_then(|path| path.extension().map(|e| e.eq_ignore_ascii_case("svg")))
+                .unwrap_or(false)
+        });
+        let flat = (self.config.start_icon_flat && svg).then(|| ui::theme().text);
+        let key = format!("{source:?}:{:?}", flat.map(|c| c.to_color_u8()));
+        if let Some((cached, cached_px, icon)) = &self.start_icon
+            && *cached == key
             && *cached_px == px
         {
             return icon.clone();
         }
-        let icon = match &wanted {
-            Some(name) => self.icons.get(name, px),
-            None => None,
-        }
-        .or_else(|| {
-            self.logo
-                .as_ref()
-                .and_then(|logo| crate::render::resize_pixmap(logo, px))
-                .map(Arc::new)
-        });
-        self.start_icon = Some((wanted, px, icon.clone()));
+        let icon = source
+            .as_deref()
+            .and_then(|name| self.icons.get(name, px))
+            .map(|icon| match flat {
+                Some(color) => Arc::new(crate::render::flatten_pixmap(&icon, color)),
+                None => icon,
+            })
+            .or_else(|| {
+                self.logo
+                    .as_ref()
+                    .and_then(|logo| crate::render::resize_pixmap(logo, px))
+                    .map(Arc::new)
+            });
+        self.start_icon = Some((key, px, icon.clone()));
         icon
     }
 
