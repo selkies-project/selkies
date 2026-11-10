@@ -150,8 +150,10 @@ inputs are hard to stumble on, and its source among the workflow's `pull_request
 their parser modules directly so the builder needs no media libraries. A crash is fixed at its cause, and its input
 joins the corpus.
 
-CodeQL's code scanning and the other checkers (clippy, rustfmt, ruff, codespell, eslint and tsc through
-pre-commit; cargo-deny's advisories, licenses and bans; Dependabot's alerts; the OSS Scanner's and the fuzzers'
+CodeQL's code scanning and the other checkers (clippy, rustfmt, ruff, codespell, eslint and tsc through pre-commit;
+cargo-deny's advisories, licenses and bans; Dependabot's alerts; Snyk's (its GitHub app's pull-request checks, daily
+tests and fix pull requests; `.github/workflows/snyk.yaml`'s Snyk Code alerts in code scanning and daily test of the
+Rust crates), whose license findings answer to the Licenses workflow's policy; the OSS Scanner's and the fuzzers'
 findings) are at least stylistic recommendations: a finding is fixed in the code and its alert closed by the next
 scan or update, never dismissed or closed by hand, and a lint is not silenced (`#[allow]`, `noqa`,
 `eslint-disable`) where the code can be written its way. Code that is safe through a check a checker cannot follow

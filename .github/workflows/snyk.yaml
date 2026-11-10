@@ -1,0 +1,119 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: Snyk
+
+# Once a day: Snyk Code's static analysis of the tree, uploaded to code scanning
+# beside CodeQL's, and Snyk's vulnerability test of the Rust crates, which its
+# GitHub app cannot import. The app imports the repository as well: it checks
+# every pull request (Snyk Code, the npm lockfiles, and secrets), tests the
+# lockfiles, the Dockerfiles, and the infrastructure files daily, and opens fix
+# pull requests, with its results in Snyk's dashboard. Its open-source results
+# stay there: the npm ones carry its license policy's findings, and code scanning
+# would hold those as alerts no change to the code closes.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  code:
+    name: Snyk Code
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - name: Check for the token
+        id: token
+        run: |
+          if [ -n "${SNYK_TOKEN}" ]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::notice::No SNYK_TOKEN secret here (a fork of the repository): Snyk Code is skipped"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.token.outputs.present
+        with:
+          persist-credentials: false
+
+      - name: Install the Snyk CLI
+        if: steps.token.outputs.present
+        # The stable release, checked against the SHA-256 Snyk publishes beside it
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL --retry 8 --retry-delay 30 -o snyk-linux https://downloads.snyk.io/cli/stable/snyk-linux
+          curl -fsSL --retry 8 --retry-delay 30 -o snyk-linux.sha256 https://downloads.snyk.io/cli/stable/snyk-linux.sha256
+          sha256sum -c snyk-linux.sha256
+          install -m 0755 snyk-linux snyk
+
+      - name: Analyze
+        if: steps.token.outputs.present
+        # Exit status 1 is findings, which go to code scanning; any other failure
+        # is an analysis that did not run
+        run: |
+          status=0
+          "${RUNNER_TEMP}/snyk" code test --org=selkies --sarif-file-output=snyk-code.sarif || status=$?
+          [ "${status}" -le 1 ]
+
+      - name: Upload to code scanning
+        if: steps.token.outputs.present
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: snyk-code.sarif
+          category: snyk-code
+
+  rust:
+    name: Snyk Open Source (Rust)
+    runs-on: ubuntu-latest
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - name: Check for the token
+        id: token
+        run: |
+          if [ -n "${SNYK_TOKEN}" ]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::notice::No SNYK_TOKEN secret here (a fork of the repository): the Rust test is skipped"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.token.outputs.present
+        with:
+          persist-credentials: false
+
+      - name: Install the Snyk CLI
+        if: steps.token.outputs.present
+        # The stable release, checked against the SHA-256 Snyk publishes beside it
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL --retry 8 --retry-delay 30 -o snyk-linux https://downloads.snyk.io/cli/stable/snyk-linux
+          curl -fsSL --retry 8 --retry-delay 30 -o snyk-linux.sha256 https://downloads.snyk.io/cli/stable/snyk-linux.sha256
+          sha256sum -c snyk-linux.sha256
+          install -m 0755 snyk-linux snyk
+
+      - name: Describe the crates
+        if: steps.token.outputs.present
+        # Snyk reads no Cargo manifest: each workspace crate's dependency graph,
+        # every feature on, goes to it as a CycloneDX SBOM beside the manifest
+        run: |
+          cargo install --locked cargo-cyclonedx --root "${RUNNER_TEMP}/cyclonedx"
+          PATH="${RUNNER_TEMP}/cyclonedx/bin:${PATH}" cargo cyclonedx --format json --spec-version 1.5 --all-features
+
+      - name: Test them
+        if: steps.token.outputs.present
+        # A vulnerable crate (exit status 1) fails the job as a failed test does
+        run: |
+          status=0
+          for sbom in $(git ls-files --others --exclude-standard -- '*.cdx.json'); do
+            "${RUNNER_TEMP}/snyk" sbom test --file="${sbom}" --org=selkies || status=1
+          done
+          exit "${status}"
