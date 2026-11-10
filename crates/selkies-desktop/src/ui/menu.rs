@@ -8,7 +8,11 @@
 //! shell's own settings open from a button beside the search box rather
 //! than from a category, so the categories list the applications alone.
 //! An application's right-click menu pins it to the favorites or the quick
-//! launch and puts its launcher on the desktop.
+//! launch and puts its launcher on the desktop.  A category opens on a
+//! click, so the pointer can cross the column to the applications without
+//! changing the list, and a column whose content overflows shows a thin
+//! scrollbar whose thumb drags and whose track jumps there, since a pointer
+//! may have no wheel.
 
 use crate::config::MenuLayout;
 use crate::desktop::{Desktop, Hover, Popup};
@@ -68,6 +72,19 @@ const FOOTER_HEIGHT: i32 = 30;
 const CONTEXT_WIDTH: i32 = 230;
 /// Row height of an application's right-click menu.
 const CONTEXT_ROW: i32 = 30;
+/// Width of a scrollbar's thumb, wide enough to survive the stream's chroma subsampling.
+const SCROLLBAR_W: i32 = 6;
+/// Width of the strip along a column's right edge that takes the scrollbar's clicks.
+const SCROLLBAR_HIT: i32 = 14;
+/// Shortest a scrollbar's thumb gets.
+const SCROLLBAR_MIN_THUMB: i32 = 28;
+
+/// A column of the menu that scrolls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollColumn {
+    Categories,
+    Apps,
+}
 
 /// Which list the application column shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +121,8 @@ pub struct MenuState {
     /// The right-click menu open on an application, with its entry index
     /// and where it opened.
     pub context: Option<(usize, i32, i32)>,
+    /// The scrollbar whose thumb is being dragged, with where in the thumb it was taken.
+    pub scroll_drag: Option<(ScrollColumn, f64)>,
     items: Vec<usize>,
     items_valid: bool,
     recent_ids: Vec<String>,
@@ -119,6 +138,7 @@ impl Default for MenuState {
             category_scroll: 0.0,
             app_scroll: 0.0,
             context: None,
+            scroll_drag: None,
             items: Vec::new(),
             items_valid: false,
             recent_ids: Vec::new(),
@@ -166,6 +186,7 @@ impl MenuState {
         self.query.clear();
         self.selected = None;
         self.context = None;
+        self.scroll_drag = None;
     }
 
     /// The application index shown at a row, when the list is current.
@@ -517,6 +538,83 @@ fn apps_content_height(d: &Desktop, apps: Rect) -> f64 {
     }
 }
 
+/// The rectangle a column scrolls in.
+fn column_rect(layout: &Layout, column: ScrollColumn) -> Rect {
+    match column {
+        ScrollColumn::Categories => layout.categories,
+        ScrollColumn::Apps => layout.apps,
+    }
+}
+
+/// How far a column's content reaches below its top, and how far it is scrolled.
+fn column_extent(d: &Desktop, layout: &Layout, column: ScrollColumn) -> (f64, f64) {
+    match column {
+        ScrollColumn::Categories => (
+            category_rows(d).len() as f64 * CATEGORY_ROW as f64,
+            d.menu.category_scroll,
+        ),
+        ScrollColumn::Apps => (apps_content_height(d, layout.apps), d.menu.app_scroll),
+    }
+}
+
+/// A column's scrollbar track and thumb, or `None` while its content fits.
+fn scrollbar(d: &Desktop, layout: &Layout, column: ScrollColumn) -> Option<(Rect, Rect)> {
+    let rect = column_rect(layout, column);
+    if rect.w <= 0 || rect.h <= 0 {
+        return None;
+    }
+    let (content, scroll) = column_extent(d, layout, column);
+    let max = content - rect.h as f64;
+    if max <= 0.0 {
+        return None;
+    }
+    let track = Rect::new(rect.right() - SCROLLBAR_W, rect.y, SCROLLBAR_W, rect.h);
+    let thumb_h =
+        ((rect.h as f64 * rect.h as f64 / content) as i32).clamp(SCROLLBAR_MIN_THUMB.min(rect.h), rect.h);
+    let travel = (track.h - thumb_h) as f64;
+    let thumb_y = track.y + (travel * (scroll / max).clamp(0.0, 1.0)).round() as i32;
+    Some((track, Rect::new(track.x, thumb_y, SCROLLBAR_W, thumb_h)))
+}
+
+/// Follows the pointer with the dragged scrollbar's thumb, scrolling its column to match.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `y` - Pointer Y.
+pub fn scroll_drag(d: &mut Desktop, y: f64) {
+    let Some((column, offset)) = d.menu.scroll_drag else {
+        return;
+    };
+    let layout = layout(d);
+    let Some((track, thumb)) = scrollbar(d, &layout, column) else {
+        return;
+    };
+    let rect = column_rect(&layout, column);
+    let max = column_extent(d, &layout, column).0 - rect.h as f64;
+    let travel = (track.h - thumb.h).max(1) as f64;
+    let scroll = ((y - offset - track.y as f64) / travel).clamp(0.0, 1.0) * max;
+    match column {
+        ScrollColumn::Categories => d.menu.category_scroll = scroll,
+        ScrollColumn::Apps => d.menu.app_scroll = scroll,
+    }
+    d.redraw_panel();
+}
+
+/// Draws the scrollbar of every column whose content overflows: the thumb over a faint track,
+/// brighter while hovered or dragged.
+fn draw_scrollbars(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
+    for column in [ScrollColumn::Categories, ScrollColumn::Apps] {
+        let Some((track, thumb)) = scrollbar(d, layout, column) else {
+            continue;
+        };
+        let active =
+            d.hover == Hover::MenuScrollbar(column) || d.menu.scroll_drag.is_some_and(|(c, _)| c == column);
+        let radius = SCROLLBAR_W as f32 / 2.0;
+        canvas.fill_rounded(track, radius, ui::text_alpha(0x14));
+        canvas.fill_rounded(thumb, radius, ui::text_alpha(if active { 0xa0 } else { 0x60 }));
+    }
+}
+
 /// The rows of an application's right-click menu: each toggles the
 /// application's place in a list setting.
 ///
@@ -601,20 +699,19 @@ pub fn hit(d: &mut Desktop, x: f64, y: f64) -> Option<Hover> {
     if layout.settings.contains(x, y) {
         return Some(Hover::MenuSettings);
     }
+    for column in [ScrollColumn::Categories, ScrollColumn::Apps] {
+        if let Some((track, _)) = scrollbar(d, &layout, column)
+            && Rect::new(track.right() - SCROLLBAR_HIT, track.y, SCROLLBAR_HIT, track.h).contains(x, y)
+        {
+            return Some(Hover::MenuScrollbar(column));
+        }
+    }
     if layout.categories.w > 0 && layout.categories.contains(x, y) {
         let row = ((y - layout.categories.y as f64 + d.menu.category_scroll) / CATEGORY_ROW as f64).floor();
-        if row >= 0.0 {
-            let rows = category_rows(d);
-            if let Some(CategoryRow::Section(section)) = rows.get(row as usize) {
-                if d.menu.section != *section && d.menu.query.trim().is_empty() {
-                    d.menu.section = *section;
-                    d.menu.app_scroll = 0.0;
-                    d.menu.selected = None;
-                    d.menu.items_valid = false;
-                    ensure_items(d);
-                }
-                return Some(Hover::MenuCategory(row as usize));
-            }
+        if row >= 0.0
+            && let Some(CategoryRow::Section(_)) = category_rows(d).get(row as usize)
+        {
+            return Some(Hover::MenuCategory(row as usize));
         }
         return Some(Hover::None);
     }
@@ -706,8 +803,29 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
                 d.launch_app(index);
             }
         }
-        Hover::MenuCategory(_) => {
+        Hover::MenuCategory(row) => {
+            if let Some(CategoryRow::Section(section)) = category_rows(d).get(row).copied()
+                && d.menu.section != section
+            {
+                d.menu.section = section;
+                d.menu.app_scroll = 0.0;
+                d.menu.selected = None;
+                d.menu.items_valid = false;
+                ensure_items(d);
+            }
             d.redraw_panel();
+        }
+        Hover::MenuScrollbar(column) => {
+            let layout = layout(d);
+            if let Some((_, thumb)) = scrollbar(d, &layout, column) {
+                let offset = if thumb.contains(x, y) {
+                    y - thumb.y as f64
+                } else {
+                    thumb.h as f64 / 2.0
+                };
+                d.menu.scroll_drag = Some((column, offset));
+                scroll_drag(d, y);
+            }
         }
         Hover::MenuSettings => {
             d.close_popup();
@@ -969,6 +1087,7 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
         Arrangement::Rows => draw_rows(d, canvas, &layout),
     }
     canvas.reset_clip();
+    draw_scrollbars(d, canvas, &layout);
     if layout.tiles.w > 0 {
         draw_tiles(d, canvas, &layout);
     }

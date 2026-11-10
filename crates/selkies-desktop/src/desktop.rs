@@ -209,6 +209,8 @@ pub enum Hover {
     MenuCategory(usize),
     /// The start menu's Settings button.
     MenuSettings,
+    /// A scrollbar of the start menu.
+    MenuScrollbar(menu::ScrollColumn),
     /// A menu application row, or a cell of the application grid.
     MenuApp(usize),
     /// A favorite's tile in the menu's tiles layout.
@@ -1952,6 +1954,10 @@ impl Desktop {
                     popups::volume_drag(self, x);
                     return;
                 }
+                if self.menu.scroll_drag.is_some() {
+                    menu::scroll_drag(self, y);
+                    return;
+                }
                 let hover = match self.popup {
                     Popup::Menu => menu::hit(self, x, y).unwrap_or(Hover::None),
                     Popup::Launcher => launcher::hit(self, x, y).unwrap_or(Hover::None),
@@ -2035,6 +2041,9 @@ impl Desktop {
         if !pressed {
             if self.volume_drag {
                 self.volume_drag = false;
+            }
+            if self.menu.scroll_drag.take().is_some() {
+                self.redraw_panel();
             }
             return;
         }

@@ -20,7 +20,8 @@ people reach for in a multi-application container:
 * **Start menu** with a search box (type to filter, arrows and Enter to
   launch), favorites, recently launched applications and the usual
   categories, read from the standard `.desktop` files, and a button beside
-  the search box that opens the shell's settings.  An application's
+  the search box that opens the shell's settings.  A category opens on a
+  click, and a list that overflows has a scrollbar to drag.  An application's
   right-click menu pins it to the favorites or the quick launch, or puts its
   launcher on the desktop.  Applications that
   appear or disappear, such as a [proot-apps](https://github.com/linuxserver/proot-apps)
