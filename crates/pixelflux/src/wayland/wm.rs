@@ -172,6 +172,8 @@ pub struct WmState {
     pub cursor: Option<CursorIcon>,
     /// Whether the policy took the last pointer event, so the clients saw the pointer leave.
     pub pointer_taken: bool,
+    /// Where the policy took the last pointer motion, while it keeps taking pointer events.
+    pub taken_at: Option<Point<f64, Logical>>,
     /// The outputs the policy was last told about.
     pub outputs: Vec<OutputInfo>,
     /// The focus the policy last asked for.
@@ -198,6 +200,7 @@ impl WmState {
             wake_at: None,
             cursor: None,
             pointer_taken: false,
+            taken_at: None,
             outputs: Vec::new(),
             focus: None,
             dirty: false,
@@ -717,6 +720,19 @@ fn modifiers(state: &AppState) -> Modifiers {
     }
 }
 
+/// Where a button or a scroll is judged: where the policy took the last motion while it keeps
+/// taking pointer events, else the seat's pointer. The seat's pointer follows a motion the policy
+/// takes only while no client holds a pointer grab, so with a client's popup grab held a click
+/// on the policy's menu would otherwise land where the pointer stood before the menu took it.
+pub fn judged_location(state: &AppState, seat: Point<f64, Logical>) -> Point<f64, Logical> {
+    state
+        .wm
+        .as_ref()
+        .filter(|wm| wm.pointer_taken)
+        .and_then(|wm| wm.taken_at)
+        .unwrap_or(seat)
+}
+
 /// What the compositor's hit test found, for the policy.
 pub fn under_of(_state: &AppState, target: &Option<(FocusTarget, Point<f64, Logical>)>) -> Under {
     match target {
@@ -764,6 +780,11 @@ pub fn pointer(
     let taken = verdict == Verdict::Consumed;
     if let Some(wm) = state.wm.as_mut() {
         wm.pointer_taken = taken;
+        if !taken {
+            wm.taken_at = None;
+        } else if kind == PointerKind::Motion {
+            wm.taken_at = Some(p);
+        }
     }
     if taken
         && let Some(pointer) = state.seat.get_pointer()

@@ -7624,7 +7624,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
 
                 state.refocus_pointer();
                 if let Some(pointer) = state.seat.get_pointer() {
-                    let pos = pointer.current_location();
+                    let pos = wayland::wm::judged_location(state, pointer.current_location());
                     let under = state.pointer_target_under(pos);
                     let kind = crate::wm::PointerKind::Button {
                         button: btn,
@@ -7672,7 +7672,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 let time = wayland_time();
                 state.refocus_pointer();
                 if let Some(pointer) = state.seat.get_pointer() {
-                    let pos = pointer.current_location();
+                    let pos = wayland::wm::judged_location(state, pointer.current_location());
                     let under = state.pointer_target_under(pos);
                     let kind = crate::wm::PointerKind::Axis {
                         horizontal: x,
@@ -7713,7 +7713,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 if let Some(pointer) = state.seat.get_pointer()
                     && (dx != 0.0 || dy != 0.0)
                 {
-                    let pos = pointer.current_location();
+                    let pos = wayland::wm::judged_location(state, pointer.current_location());
                     let under = state.pointer_target_under(pos);
                     let kind = crate::wm::PointerKind::Axis {
                         horizontal: dx,
