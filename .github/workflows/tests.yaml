@@ -72,7 +72,8 @@ jobs:
     if: >-
       ${{ always() && !inputs.suites && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
           && (github.event_name != 'schedule' || github.repository == 'selkies-project/selkies') }}
-    runs-on: ubuntu-latest
+    # GitHub builds no Python 3.9 for Ubuntu 26.04
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
