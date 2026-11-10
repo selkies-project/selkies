@@ -706,6 +706,21 @@ impl Desktop {
         }
     }
 
+    /// Whether a fullscreen window covers the primary bar: the active window, fullscreen on the
+    /// primary display or on none the backend named. The compositor draws such a window over the
+    /// bar, so the tray's icon strip, which the X server draws over the bar on its own, is taken
+    /// away with it rather than left floating over the window.
+    pub fn primary_bar_covered(&self) -> bool {
+        let primary = self.display_origins.first().map(|(id, _)| *id);
+        self.toplevels.iter().any(|t| {
+            t.state.fullscreen
+                && t.state.active
+                && !t.state.minimized
+                && !t.state.hidden
+                && (t.display.is_none() || t.display == primary)
+        })
+    }
+
     /// Whether the panel is itself rather than a display's bar standing in for it.
     pub fn is_primary_bar(&self) -> bool {
         self.current_bar.is_none()

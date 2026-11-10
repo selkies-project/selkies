@@ -1,12 +1,12 @@
 //! The system tray: a host for XEmbed icons, the protocol the applications
 //! that park an icon beside the clock still speak.  The host owns the
 //! `_NET_SYSTEM_TRAY_S<n>` selection on the X display of the session, which
-//! under labwc is XWayland, and reparents each docked icon window into a
+//! on Wayland is Xwayland, and reparents each docked icon window into a
 //! small override-redirect window placed over the bar's tray strip.  The X
-//! server paints and delivers input to the icons itself: under openbox the
-//! strip sits above the dock window, under labwc XWayland shows it above
-//! the panel layer, so no pixels are copied and the icons' own menus open
-//! where they expect.
+//! server paints and delivers input to the icons itself: on X11 the strip
+//! sits above the dock window, and on Wayland the compositor stacks Xwayland's
+//! override-redirect windows above the panel layer, so no pixels are copied
+//! and the icons' own menus open where they expect.
 
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 
@@ -24,6 +24,8 @@ const SYSTEM_TRAY_REQUEST_DOCK: u32 = 0;
 const XEMBED_EMBEDDED_NOTIFY: u32 = 0;
 /// Space between icons, in physical pixels at scale one.
 const GAP: i32 = 4;
+/// Where the strip waits while the bar is away, far outside every screen.
+const OFF_SCREEN: i32 = -32000;
 
 x11rb::atom_manager! {
     pub TrayAtoms: TrayAtomsCookie {
@@ -281,11 +283,24 @@ impl Tray {
     }
 
     /// Lays the icons out in the strip and shows or hides it.
+    ///
+    /// Without icons the strip is unmapped. Without a slot, while the bar is away (a fullscreen
+    /// window covers it), the strip is moved off the screen instead: an icon draws once when it
+    /// docks, and one mapped again would not draw again until it changed.
     fn arrange(&mut self) {
-        let Some(slot) = self.slot.filter(|_| !self.icons.is_empty()) else {
+        if self.icons.is_empty() {
             if self.mapped {
                 let _ = self.conn.unmap_window(self.holder);
                 self.mapped = false;
+            }
+            return;
+        }
+        let Some(slot) = self.slot else {
+            if self.mapped {
+                let _ = self.conn.configure_window(
+                    self.holder,
+                    &xproto::ConfigureWindowAux::new().x(OFF_SCREEN).y(OFF_SCREEN),
+                );
             }
             return;
         };

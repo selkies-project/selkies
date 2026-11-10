@@ -1,9 +1,9 @@
-//! The bar: start button, quick launch buttons, pager, taskbar, system tray
-//! slot, notifications bell, volume, clock and the show desktop button.  The
-//! start button, quick launch, pager and taskbar sit at the left, or in the
-//! middle of the bar when the layout is centered; the tray, bell, volume,
-//! clock and show desktop button stay at the right.  The bell is there while
-//! the shell serves notifications.
+//! The bar: start button, quick launch buttons, taskbar, system tray slot,
+//! pager, notifications bell, volume, clock and the show desktop button.  The
+//! start button, quick launch and taskbar sit at the left, or in the middle of
+//! the bar when the layout is centered; the tray, a separator, the pager, the
+//! bell, volume, clock and show desktop button stay at the right.  The bell is
+//! there while the shell serves notifications.
 //!
 //! The pager is one square per virtual desktop, shown when the window manager
 //! reports more than one; the taskbar lists the windows of the current
@@ -73,8 +73,6 @@ pub struct Layout {
     pub pager: Vec<Rect>,
     /// Each taskbar button with its window index.
     pub tasks: Vec<(usize, Rect)>,
-    /// The strip the system tray icons occupy, when any are docked.
-    pub tray: Option<Rect>,
     /// The volume button, when shown.
     pub volume: Option<Rect>,
     /// The notifications bell, when the shell serves notifications.
@@ -218,7 +216,17 @@ pub fn layout(d: &mut Desktop) -> Layout {
     } else {
         None
     };
-    let tray = if d.config.show_tray && d.tray_icons > 0 && d.is_primary_bar() {
+    // The pager sits between the tray and the bell, a separator at its left, so the status
+    // items read tray, desktops, notifications, volume, and clock.
+    let pager = if pager_count > 0 {
+        right -= pager_width - GAP;
+        let pills = pager_pills(right, bar, pager_count);
+        right -= GAP;
+        pills
+    } else {
+        Vec::new()
+    };
+    let tray = if d.config.show_tray && d.tray_icons > 0 && d.is_primary_bar() && !d.primary_bar_covered() {
         let size = d.panel_icon_size() + 4;
         let width = d.tray_icons as i32 * (size + GAP) + GAP;
         right -= width;
@@ -227,16 +235,6 @@ pub fn layout(d: &mut Desktop) -> Layout {
         Some(r)
     } else {
         None
-    };
-    // The pager sits at the tray's left, where the eye finds the desktop beside the status
-    // items, and leaves the left group to the start button, the launchers, and the tasks.
-    let pager = if pager_count > 0 {
-        right -= pager_width - GAP;
-        let pills = pager_pills(right, bar, pager_count);
-        right -= GAP;
-        pills
-    } else {
-        Vec::new()
     };
     let left_edge = bar.x + GAP;
     let fixed_width = start_width + GAP + launchers_width + GAP;
@@ -281,7 +279,6 @@ pub fn layout(d: &mut Desktop) -> Layout {
         launchers,
         pager,
         tasks,
-        tray,
         volume,
         notifications,
         clock,
@@ -567,13 +564,6 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
             canvas.fill_rounded(icon_rect.inflate(-3), 3.0, ui::field_bg());
         }
     }
-    if let Some(rect) = layout.tray {
-        canvas.fill_rect(
-            Rect::new(rect.right() + GAP / 2, rect.y + 4, 1, rect.h - 8),
-            ui::separator(),
-        );
-    }
-
     for (index, rect) in layout.pager.iter().copied().enumerate() {
         let current = index as u32 == d.current_desktop;
         let bg = if current {
