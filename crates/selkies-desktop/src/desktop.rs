@@ -370,10 +370,13 @@ pub struct Desktop {
     current_bar: Option<u32>,
     /// The bar the open popup belongs to, `None` for the panel's.
     popup_bar: Option<u32>,
-    /// Where each display's top-left corner sits, by the backend's number for it, with
-    /// whether it is the primary one, which matches the window manager's word on a
-    /// display's bar edge to the bar there.
-    display_origins: Vec<(u32, (i32, i32), bool)>,
+    /// Where each display's top-left corner sits, by the backend's number for it, the
+    /// primary one first, which matches the window manager's word on a display's bar edge
+    /// to the bar there.
+    display_origins: Vec<(u32, (i32, i32))>,
+    /// The window manager's last word on which displays have a window at their bar's edge,
+    /// read again whenever the displays or their bars change.
+    bar_edges: Vec<((i32, i32), bool)>,
     /// Windows in order of appearance.
     pub toplevels: Vec<Toplevel>,
     /// The open popup.
@@ -474,6 +477,22 @@ pub struct Desktop {
     notify_pix: Option<Pixmap>,
 }
 
+/// The display a bar edge the window manager names by its corner belongs to: `Some(None)`
+/// for the primary display, `Some(Some(id))` for another, and `None` for a corner no known
+/// display has. With no displays known at all, every corner is the primary one's.
+///
+/// # Arguments
+/// * `displays` - Every display's number and corner, the primary one first.
+/// * `origin` - The corner the window manager named.
+fn edge_display(displays: &[(u32, (i32, i32))], origin: (i32, i32)) -> Option<Option<u32>> {
+    match displays.iter().position(|(_, o)| *o == origin) {
+        Some(0) => Some(None),
+        Some(index) => Some(Some(displays[index].0)),
+        None if displays.is_empty() => Some(None),
+        None => None,
+    }
+}
+
 impl Desktop {
     /// Loads settings, fonts, icons and applications, and applies the
     /// settings to the session: the window manager's theme, and the file
@@ -527,6 +546,7 @@ impl Desktop {
             current_bar: None,
             popup_bar: None,
             display_origins: Vec::new(),
+            bar_edges: Vec::new(),
             toplevels: Vec::new(),
             popup: Popup::None,
             hover: Hover::None,
@@ -718,24 +738,29 @@ impl Desktop {
     }
 
     /// Takes the window manager's word on which displays have a window at their bar's
-    /// edge, each display named by where its top-left corner sits; a display whose corner
-    /// matches none of the backend's is the primary one.
+    /// edge, each display named by where its top-left corner sits.
     ///
     /// # Arguments
     /// * `edges` - Each display's corner and whether a window reaches its bar's edge.
     pub fn set_bars_attached(&mut self, edges: &[((i32, i32), bool)]) {
-        for &(origin, attached) in edges {
-            let display = self
-                .display_origins
-                .iter()
-                .find(|(_, o, _)| *o == origin)
-                .map(|(d, _, primary)| (*d, *primary));
-            match display {
-                Some((id, false)) if self.bars.iter().any(|b| b.id == id) => {
+        self.bar_edges = edges.to_vec();
+        self.apply_bar_edges();
+    }
+
+    /// Moves each bar to its edge or off it as the window manager's last word has it.
+    ///
+    /// The word and the displays it names reach the shell on separate connections, so it is
+    /// read again when the displays change: a corner no known display has waits for one
+    /// rather than going to the wrong bar. Only a backend that names no displays at all has
+    /// the word taken for the primary one.
+    fn apply_bar_edges(&mut self) {
+        for (origin, attached) in self.bar_edges.clone() {
+            match edge_display(&self.display_origins, origin) {
+                Some(None) => self.set_bar_attached(attached),
+                Some(Some(id)) => {
                     self.with_bar(id, |d| d.set_bar_attached(attached));
                 }
-                Some((_, false)) => {}
-                _ => self.set_bar_attached(attached),
+                None => {}
             }
         }
     }
@@ -1695,6 +1720,7 @@ impl Desktop {
     fn handle_on_bar(&mut self, bar: u32, event: Event) {
         if matches!(event, Event::Configured { .. }) && !self.bars.iter().any(|b| b.id == bar) {
             self.bars.push(DisplayBar::new(bar));
+            self.apply_bar_edges();
         }
         self.with_bar(bar, |d| {
             let foreign = d.popup != Popup::None && d.popup_bar != d.current_bar;
@@ -1889,19 +1915,11 @@ impl Desktop {
                 }
                 self.mark_bars_dirty();
             }
-            Event::DisplayOrigin {
-                display,
-                x,
-                y,
-                primary,
-            } => {
-                self.display_origins.retain(|(d, _, _)| *d != display);
-                if primary {
-                    for origin in &mut self.display_origins {
-                        origin.2 = false;
-                    }
+            Event::Displays(displays) => {
+                if self.display_origins != displays {
+                    self.display_origins = displays;
+                    self.apply_bar_edges();
                 }
-                self.display_origins.push((display, (x, y), primary));
             }
             Event::ToplevelClosed { id } => {
                 if let Some(i) = self.toplevel_index(id) {
@@ -3157,4 +3175,23 @@ fn seed_favorites(config: &mut Config, apps: &Apps) {
     seeded.retain(|id| !config.favorites.contains(id));
     seeded.append(&mut config.favorites);
     config.favorites = seeded;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_display;
+
+    #[test]
+    fn a_display_that_went_away_no_longer_claims_its_corner() {
+        let before = [(1, (2560, 0)), (3, (0, 0))];
+        assert_eq!(edge_display(&before, (0, 0)), Some(Some(3)));
+        let after = [(1, (0, 0))];
+        assert_eq!(edge_display(&after, (0, 0)), Some(None));
+    }
+
+    #[test]
+    fn an_unknown_corner_waits_for_the_display_rather_than_going_to_the_primary() {
+        assert_eq!(edge_display(&[(1, (0, 0))], (2560, 0)), None);
+        assert_eq!(edge_display(&[], (2560, 0)), Some(None));
+    }
 }

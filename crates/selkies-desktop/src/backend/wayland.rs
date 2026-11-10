@@ -99,6 +99,8 @@ struct Output {
     pending_launchers: Option<PendingFrame>,
     /// The output's own bar, on every output but the first while bars are on.
     bar: Option<Surface>,
+    /// Where the output's top-left corner sits in the compositor's layout, once it said.
+    origin: Option<(i32, i32)>,
 }
 
 /// A frame kept until its surface can show it.
@@ -789,6 +791,7 @@ impl State {
             launchers: None,
             pending_launchers: None,
             bar: None,
+            origin: None,
         });
         self.create_background(qh, name);
         self.sync_bars(qh);
@@ -939,6 +942,18 @@ impl State {
         }
         output.output.release();
         self.events.push(Event::BackgroundRemoved { surface: name });
+        self.publish_displays();
+    }
+
+    /// Tells the desktop every output whose position the compositor has given, the first
+    /// output first.
+    fn publish_displays(&mut self) {
+        let displays = self
+            .outputs
+            .iter()
+            .filter_map(|o| o.origin.map(|origin| (o.name, origin)))
+            .collect();
+        self.events.push(Event::Displays(displays));
     }
 
     /// Shows the pointer image for the hovered content on the entered surface.
@@ -1894,13 +1909,9 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
                 state.apply_scale(&output.id(), factor);
             }
             wl_output::Event::Geometry { x, y, .. } => {
-                if let Some(index) = state.outputs.iter().position(|o| o.output.id() == output.id()) {
-                    state.events.push(Event::DisplayOrigin {
-                        display: state.outputs[index].name,
-                        x,
-                        y,
-                        primary: index == 0,
-                    });
+                if let Some(known) = state.outputs.iter_mut().find(|o| o.output.id() == output.id()) {
+                    known.origin = Some((x, y));
+                    state.publish_displays();
                 }
             }
             _ => {}

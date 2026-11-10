@@ -85,14 +85,10 @@ pub enum Event {
     /// A display's bar went away, with its display or because bars on displays other than
     /// the primary were turned off.
     BarRemoved { bar: u32 },
-    /// Where a display's top-left corner sits in the window manager's layout, by the
-    /// backend's number for the display, and whether it is the primary one.
-    DisplayOrigin {
-        display: u32,
-        x: i32,
-        y: i32,
-        primary: bool,
-    },
+    /// Every display there is, sent whole whenever one moves, comes, or goes: the backend's
+    /// number for each and where its top-left corner sits in the window manager's layout,
+    /// the primary display first.
+    Displays(Vec<(u32, (i32, i32))>),
     /// The pointer moved over a surface.
     PointerMotion { surface: SurfaceId, x: f64, y: f64 },
     /// A pointer button went down or up.

@@ -442,14 +442,13 @@ impl X11Backend {
         for (surface, rects) in self.task_rects.clone() {
             self.publish_icon_geometry(surface, &rects);
         }
-        for (index, monitor) in self.monitors.iter().enumerate() {
-            self.events.push(Event::DisplayOrigin {
-                display: index as u32,
-                x: monitor.x / s,
-                y: monitor.y / s,
-                primary: index == 0,
-            });
-        }
+        self.events.push(Event::Displays(
+            self.monitors
+                .iter()
+                .enumerate()
+                .map(|(index, m)| (index as u32, (m.x / s, m.y / s)))
+                .collect(),
+        ));
 
         // A surface keeping its size keeps its pixels: the shell presents only a size that
         // changed, and an expose of a moved panel is drawn from them.
