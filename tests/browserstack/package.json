@@ -14,5 +14,8 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "readdir-glob": "^4.0.0"
   }
 }
