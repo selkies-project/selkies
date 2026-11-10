@@ -81,7 +81,7 @@ pub const FILES_ID: &str = "selkies-desktop-files.desktop";
 /// The app id the file manager's windows carry, the desktop entry's name.
 pub const FILES_APP_ID: &str = "selkies-desktop-files";
 /// The settings window's desktop entry, which lists it among the applications.
-pub const SETTINGS_ID: &str = "selkies-desktop-settings.desktop";
+pub const SETTINGS_ID: &str = selkies_draw::apps::SHELL_SETTINGS_ID;
 /// The app id the settings window carries, the desktop entry's name.
 pub const SETTINGS_APP_ID: &str = "selkies-desktop-settings";
 

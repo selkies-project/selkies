@@ -178,6 +178,9 @@ pub struct Apps {
     stamps: Vec<(PathBuf, Option<SystemTime>)>,
 }
 
+/// The desktop file ID of the desktop shell's settings window, which the shell writes.
+pub const SHELL_SETTINGS_ID: &str = "selkies-desktop-settings.desktop";
+
 impl Apps {
     /// Scans the applications directories and the Desktop directory; `terminal_available` says
     /// whether entries that need a terminal can run.
@@ -192,6 +195,12 @@ impl Apps {
         apps.build_categories();
         apps.desktop = load_desktop_dir(&locales);
         apps
+    }
+
+    /// Leave out the desktop shell's own settings window, for a session whose image keeps it
+    /// closed.
+    pub fn without_shell_settings(&mut self) {
+        self.without(SHELL_SETTINGS_ID);
     }
 
     /// Leave out the entry of a desktop file ID.

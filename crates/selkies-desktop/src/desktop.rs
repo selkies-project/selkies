@@ -502,7 +502,7 @@ fn load_apps(config: &Config) -> Apps {
         apps.without_terminals();
     }
     if !config.settings_window {
-        apps.without(entries::SETTINGS_ID);
+        apps.without_shell_settings();
     }
     apps
 }

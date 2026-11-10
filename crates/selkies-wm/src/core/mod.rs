@@ -3644,7 +3644,7 @@ impl Engine {
     /// The desktop entries, read on first use and again when an applications directory changed
     /// since, so an application installed in the session is listed the next time the menu opens;
     /// without terminals, or the entries that run in one, where the desktop's `terminals` setting
-    /// is off.
+    /// is off, and without the shell's settings window where its `settings` setting is.
     fn apps(&mut self) -> &Apps {
         if self.apps.as_ref().is_none_or(Apps::stale) {
             let values = selkies_draw::style::desktop_values();
@@ -3652,6 +3652,9 @@ impl Engine {
             let mut loaded = Apps::load(terminals && apps::find_terminal(None).is_some());
             if !terminals {
                 loaded.without_terminals();
+            }
+            if !selkies_draw::style::truthy(&values, "settings", true) {
+                loaded.without_shell_settings();
             }
             self.apps = Some(loaded);
         }
