@@ -139,6 +139,7 @@ jobs:
           pre-commit run --all-files --show-diff-on-failure clippy
           pre-commit run --all-files --show-diff-on-failure clippy-pixelflux-python
           pre-commit run --all-files --show-diff-on-failure clippy-pcmflux-python
+          pre-commit run --all-files --show-diff-on-failure clippy-fuzz
 
   native-tests:
     name: Native capture tests (${{ matrix.arch }})

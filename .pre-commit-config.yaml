@@ -54,6 +54,12 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+      - id: clippy-fuzz
+        name: clippy (fuzz targets)
+        entry: scripts/ci/clippy-fuzz.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
       - id: web-lint
         name: eslint and tsc (web client)
         # The flat configs are per package and their rules read across files, so

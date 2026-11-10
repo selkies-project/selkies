@@ -147,7 +147,9 @@ the webcam uplink runs on a client's bitstream before any decoder), and `red` fo
 the pinned `rtc-dtls` and `rtc-srtp` crates parse them, and a finding there is theirs to fix.
 Code that parses bytes a peer, a client, or another local account controls gets a target, a seed corpus where valid
 inputs are hard to stumble on, and its source among the workflow's `pull_request` paths. Native fuzz targets compile
-their parser modules directly so the builder needs no media libraries. A crash is fixed at its cause, and its input
+their parser modules directly so the builder needs no media libraries, standing in for what those modules reach
+elsewhere in their crate; the `clippy-fuzz` hook (`scripts/ci/clippy-fuzz.sh`) checks every target on each commit
+and push, with the `fuzzing` cfg `cargo fuzz` builds with. A crash is fixed at its cause, and its input
 joins the corpus.
 
 CodeQL's code scanning and the other checkers (clippy, rustfmt, ruff, codespell, eslint and tsc through pre-commit;

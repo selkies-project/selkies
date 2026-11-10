@@ -31,6 +31,11 @@ mod encoders {
     pub mod codec;
 }
 
+#[allow(dead_code)]
+mod ledger {
+    pub const REFRESH_FINER: u32 = 3;
+}
+
 use encoders::codec::{
     av1_is_key, h264_frame_type, h265_frame_type, parse_video_type, vp8_is_key, vp9_is_key,
 };
