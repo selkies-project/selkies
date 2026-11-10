@@ -14,6 +14,10 @@ set -eu
 
 test -f Cargo.toml
 
+# Under the workspace's target, which git and codespell already leave alone,
+# rather than in a target of each fuzz directory's own
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/fuzz-clippy}"
+
 for manifest in crates/*/fuzz/Cargo.toml; do
     cargo clippy --manifest-path "${manifest}" --bins \
         --config 'build.rustflags = ["--cfg", "fuzzing"]' -- -D warnings
