@@ -281,3 +281,5 @@ Mint = Мята
 Graphite = Графит
 Flat icon = Плоский значок
 Bar on every display = Панель на каждом экране
+Desktop mode = Режим рабочего стола
+Relaunch = Запустить снова

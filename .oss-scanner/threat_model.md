@@ -27,7 +27,13 @@
   openbox-format `rc.xml` and `menu.xml` the session user's configuration directory or `/etc/xdg` carries are
   parsed (`selkies-wm/src/config`), as is the user's key bind override file the desktop shell's shortcut editor
   writes (`~/.config/selkies-wm/keybinds`: a bind moved to another chord, disabled, or a command added on one,
-  read again within a second of a change, `Config::apply_overrides`), a pipe menu runs the command the menu names and parses what it prints, the
+  read again within a second of a change, `Config::apply_overrides`), the `autostart` file there is run as the
+  session's application (`selkies-wm/src/session.rs`, `start_autostart`) holding a lock on
+  `$XDG_RUNTIME_DIR/selkies-autostart.lock` that what it starts inherits, and run again when that lock frees under
+  `--app-restart`, the session's mode is read from `~/.config/selkies-wm/session` (the one word `desktop` or
+  `application`; anything else is the image's mode) and written when the root menu or the window menu switches
+  it, which they offer unless `--session-switch` is off or `--desktop` is locked; a locked mode only keeps the
+  window manager from starting the shell, since the session user can start any program, a pipe menu runs the command the menu names and parses what it prints, the
   key and pointer bindings start the commands they name in the session user's environment, the Xwayland socket
   the compositor starts for its X11 clients (`crates/pixelflux/src/wayland/xwm.rs`) is one more local socket in
   `/tmp/.X11-unix`, and `zwlr_foreign_toplevel_manager_v1` lets any Wayland client of the capture socket list,
@@ -71,7 +77,7 @@
   peer-controlled sizes in pixelflux and pcmflux; the interposers' C code; file upload and download confinement.
 - In scope but lower: the web client (origin checks on `postMessage`, token handling), CI workflows and release
   scripts, and what the images download at build time outside a signed apt repository: the desktop image takes the
-  proot-apps release checked against the digest GitHub records for it.
+  proot-apps release and the FerrisPad package checked against the digests GitHub records for them.
 - In scope but lower, too: the `selkies-desktop` shell (`crates/selkies-desktop`), its own process the server
   starts under `--desktop`, whose control socket sits in the session's `$XDG_RUNTIME_DIR` and whose file manager
   decodes images and scans directories under the session user's home; it is kept out of the stream's process for

@@ -70,6 +70,35 @@ pub trait Launcher: Send {
     fn env(&self) -> Vec<(String, String)>;
     /// The X server the compositor brought up for its X11 clients is on this display.
     fn set_x11_display(&mut self, _display: u32) {}
+    /// The session's mode; a launcher that runs no session reports the desktop, fixed.
+    fn session(&self) -> SessionMode {
+        SessionMode {
+            desktop: true,
+            switchable: false,
+            maximize: false,
+            application: None,
+        }
+    }
+    /// Switch the session to the desktop or to the application alone; asked only of a session
+    /// that reports itself switchable.
+    fn set_desktop(&mut self, _on: bool) {}
+    /// Run the session's application again, once everything it started has ended.
+    fn relaunch(&mut self) {}
+}
+
+/// The session's mode as the window manager meets it: whether the desktop shell runs or the
+/// application alone fills the screen, and what the user and the image allow of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionMode {
+    /// The desktop shell runs; otherwise the session is the application alone.
+    pub desktop: bool,
+    /// The menus offer the switch between the two.
+    pub switchable: bool,
+    /// The application alone has its windows maximized as they open and as the session
+    /// switches to it.
+    pub maximize: bool,
+    /// Whether what the session's autostart started runs; `None` where there is no autostart.
+    pub application: Option<bool>,
 }
 
 /// Linux event codes of the pointer buttons.
@@ -87,6 +116,8 @@ const MENU_KEY: u32 = 100;
 /// file says it executes, so the images' `menu.xml` names it for openbox and labwc and gets the
 /// same menu here without a pipe.
 pub const APPLICATIONS_MENU: &str = "selkies-applications";
+/// The menu id of the menu the application alone offers once nothing of it is on screen.
+const SESSION_MENU: &str = "selkies-session-menu";
 /// The menu id of the window menu's desktops submenu, built here.
 const SEND_TO_DESKTOP_MENU: &str = "client-send-to-desktop-menu";
 /// The ids of the applications menu's category submenus: the prefix and the category's name.
@@ -340,6 +371,8 @@ pub struct Engine {
     look_generation: u64,
     renderer: Renderer,
     launcher: Box<dyn Launcher>,
+    /// The session's mode as the launcher last reported it.
+    session: SessionMode,
     outputs: Vec<OutputInfo>,
     windows: HashMap<WindowId, Win>,
     /// Every shown window, bottom first, within and across layers.
@@ -391,7 +424,7 @@ impl Engine {
     /// An engine for a backend, its configuration and menus read from the files, its programs
     /// started through `launcher`.
     pub fn new(backend: Backend, launcher: Box<dyn Launcher>) -> Engine {
-        let config = Config::load();
+        let config = Config::load(backend);
         let menus = Menus::load(&config);
         let theme = ThemeWatch::new();
         crate::i18n::select(
@@ -435,6 +468,7 @@ impl Engine {
             theme,
             look_generation: 0,
             renderer,
+            session: launcher.session(),
             launcher,
             outputs: Vec::new(),
             windows: HashMap::new(),
@@ -566,7 +600,7 @@ impl Engine {
 
     /// Read the configuration and the menus again, as the `Reconfigure` action does.
     pub fn reconfigure(&mut self) {
-        let config = Config::load();
+        let config = Config::load(self.backend);
         self.menus = Menus::load(&config);
         self.apps = None;
         self.config = config;
@@ -792,7 +826,11 @@ impl Engine {
             tile: None,
             desktop: self.desktop_for_new(&info),
             hidden: false,
-            maximized: info.wants_maximized || rule.as_ref().and_then(|r| r.maximized).unwrap_or(false),
+            maximized: info.wants_maximized
+                || rule
+                    .as_ref()
+                    .and_then(|r| r.maximized)
+                    .unwrap_or(self.application_fills(&info)),
             fullscreen: info.wants_fullscreen || rule.as_ref().and_then(|r| r.fullscreen).unwrap_or(false),
             minimized: false,
             shaded: rule.as_ref().and_then(|r| r.shade).unwrap_or(false),
@@ -1248,6 +1286,68 @@ impl Engine {
         self.out.push(Command::WakeAt(self.now));
     }
 
+    /// Whether a window opens maximized for the session being the application alone: a
+    /// resizable top-level window, while the policy maximizes them.
+    fn application_fills(&self, info: &WindowInfo) -> bool {
+        !self.session.desktop && self.session.maximize && fills_application(info)
+    }
+
+    /// Switch the session to the desktop or to the application alone, where it is switchable:
+    /// the launcher starts or stops the shell, and the application alone has its top-level
+    /// windows on the current desktop shown again and maximized, as they are when they open,
+    /// since without the shell's taskbar a minimized window has no way back. A switch to the
+    /// desktop leaves every window where it is.
+    fn set_desktop(&mut self, on: bool) {
+        if !self.session.switchable || self.session.desktop == on {
+            return;
+        }
+        self.launcher.set_desktop(on);
+        self.session = self.launcher.session();
+        if self.session.desktop {
+            return;
+        }
+        if self.showing_desktop {
+            self.show_desktop(false);
+        }
+        let fill: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| w.mapped && !w.hidden && self.application_fills(&w.info))
+            .map(|(&id, _)| id)
+            .collect();
+        for &id in &fill {
+            self.set_minimized(id, false);
+            if self.win(id).is_some_and(|w| !w.maximized && !w.fullscreen) {
+                self.set_maximized(id, true);
+            }
+            self.configure(id);
+            self.render_frame(id);
+        }
+        let top = self.stack.iter().rev().copied().find(|id| fill.contains(id));
+        if top.is_some() {
+            self.set_focus(top);
+        }
+    }
+
+    /// The entry that switches the session between the desktop and the application alone, at
+    /// the foot of the root menu and the window menu, where the session is switchable.
+    fn desktop_mode_entries(&self, window: Option<WindowId>) -> Vec<Entry> {
+        if !self.session.switchable {
+            return Vec::new();
+        }
+        vec![
+            Entry::Separator { label: None },
+            Entry::Item {
+                label: tr("Desktop mode").to_string(),
+                icon: None,
+                actions: vec![Action::SetDesktop(None)],
+                window,
+                enabled: true,
+                checked: self.session.desktop,
+            },
+        ]
+    }
+
     fn set_maximized(&mut self, id: WindowId, on: bool) {
         let Some(win) = self.windows.get_mut(&id) else {
             return;
@@ -1270,14 +1370,31 @@ impl Engine {
             self.fit_maximized(id);
         } else {
             win.maximized = false;
-            let restored = win.saved.take().unwrap_or(win.rect);
+            let saved = win.saved.take();
             let extents = self.extents_of(id);
             let area = self.workarea(self.windows[&id].output);
-            let frame = place::clamp(restored.grown(extents), area);
+            let frame = match saved {
+                Some(restored) => place::clamp(restored.grown(extents), area),
+                None => self.first_restore_frame(id, area),
+            };
             self.set_rect(id, grab::client_of(frame, extents));
         }
         self.glide(id, from);
         self.render_frame(id);
+    }
+
+    /// Where a window restores to that was maximized from the moment it opened, as the
+    /// application alone opens its windows, and so has no geometry of its own to go back to:
+    /// two thirds of its output's work area, centered, and no smaller than the window allows.
+    fn first_restore_frame(&self, id: WindowId, area: Rect) -> Rect {
+        let extents = self.extents_of(id);
+        let min = self.win(id).and_then(|w| w.info.hints.min);
+        let w = (area.w * 2 / 3).max(min.map_or(0, |m| m.w + extents.left + extents.right));
+        let h = (area.h * 2 / 3).max(min.map_or(0, |m| m.h + extents.top + extents.bottom));
+        place::clamp(
+            Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h),
+            area,
+        )
     }
 
     /// Size a tiled window to its zone on its output's work area.
@@ -3134,6 +3251,11 @@ impl Engine {
                 self.show_desktop(on);
             }
             Action::Reconfigure => self.reconfigure(),
+            Action::SetDesktop(on) => {
+                let on = on.unwrap_or(!self.session.desktop);
+                self.set_desktop(on);
+            }
+            Action::Relaunch => self.launcher.relaunch(),
             Action::Unknown(name) => {
                 if self.unknown_logged.insert(name.clone()) {
                     log::warn!(target: "wm", "action {name:?} is not implemented");
@@ -3338,9 +3460,69 @@ impl Engine {
 
     // ---- menus ----------------------------------------------------------------------------------
 
+    /// The entries of a menu by id, with the switch between the desktop and the application
+    /// alone at the foot of the root menu and the window menu, whatever the files give them.
+    fn entries_for(&mut self, id: &str, window: Option<WindowId>) -> (Vec<Entry>, bool) {
+        if id == SESSION_MENU {
+            return (self.session_menu(), false);
+        }
+        let (mut entries, pending) = self.menu_entries(id, window);
+        if id == "root-menu" || (id == "client-menu" && !entries.is_empty()) {
+            entries.extend(self.desktop_mode_entries(window));
+        }
+        (entries, pending)
+    }
+
+    /// What the application alone offers once nothing of it is on screen: running it again,
+    /// where its autostart ended, and the desktop, where the session is switchable.
+    fn session_menu(&self) -> Vec<Entry> {
+        let item = |label: &'static str, action: Action| Entry::Item {
+            label: tr(label).to_string(),
+            icon: None,
+            actions: vec![action],
+            window: None,
+            enabled: true,
+            checked: false,
+        };
+        let mut entries = Vec::new();
+        if self.session.application == Some(false) {
+            entries.push(item("Relaunch", Action::Relaunch));
+        }
+        if self.session.switchable {
+            entries.push(item("Desktop mode", Action::SetDesktop(Some(true))));
+        }
+        entries
+    }
+
+    /// Offer the session menu in the middle of the primary output while the session is the
+    /// application alone, no window of it is on screen, and no other menu is open, so an
+    /// application that ended leaves a way on rather than an empty screen; checked on the
+    /// engine's second ticks, and opened again after a click elsewhere closed it.
+    fn offer_session_menu(&mut self) {
+        self.session = self.launcher.session();
+        if self.session.desktop || self.menu.is_some() || self.grab.is_some() {
+            return;
+        }
+        if self.windows.values().any(|w| w.shown() && w.listed()) {
+            return;
+        }
+        if self.session_menu().is_empty() {
+            return;
+        }
+        let Some(output) = self.primary_output().map(|o| o.id) else {
+            return;
+        };
+        let area = self.workarea(output);
+        self.open_menu(
+            SESSION_MENU,
+            (area.x + area.w / 2 - 80, area.y + area.h / 2 - 40),
+            None,
+        );
+    }
+
     /// The entries of a menu by id: the window menu and the window list built here, the others
     /// from the files, a pipe menu's from its command once it answered.
-    fn entries_for(&mut self, id: &str, window: Option<WindowId>) -> (Vec<Entry>, bool) {
+    fn menu_entries(&mut self, id: &str, window: Option<WindowId>) -> (Vec<Entry>, bool) {
         match id {
             "client-menu" => (self.client_menu(window), false),
             SEND_TO_DESKTOP_MENU => (self.send_to_desktop_menu(window), false),
@@ -4087,6 +4269,7 @@ impl Engine {
         self.poll_pipes();
         if now >= self.theme_poll {
             self.theme_poll = now + Duration::from_secs(1);
+            self.offer_session_menu();
             if self.config.overrides_changed() {
                 self.reconfigure();
             }
@@ -4124,6 +4307,13 @@ impl Engine {
 
 /// Whether a window's place is worth remembering for its application: a top-level normal window
 /// with an app id, not a dialog over a parent and not one that places itself.
+/// Whether a window is one the application alone fills the screen with: a top-level normal
+/// window that can be resized.
+fn fills_application(info: &WindowInfo) -> bool {
+    let fixed = matches!((info.hints.min, info.hints.max), (Some(min), Some(max)) if min == max);
+    info.window_type == WindowType::Normal && info.parent.is_none() && !fixed
+}
+
 fn remembers_place(info: &WindowInfo) -> bool {
     info.window_type == WindowType::Normal
         && info.parent.is_none()
@@ -4367,6 +4557,143 @@ mod tests {
             &mut out,
         );
         (engine, spawned)
+    }
+
+    /// A launcher whose session can be switched, starting in the mode given.
+    struct Switchable(Arc<Mutex<SessionMode>>);
+
+    impl Launcher for Switchable {
+        fn spawn(&mut self, _command: &str) {}
+        fn env(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn session(&self) -> SessionMode {
+            *self.0.lock().unwrap()
+        }
+        fn set_desktop(&mut self, on: bool) {
+            self.0.lock().unwrap().desktop = on;
+        }
+    }
+
+    /// An engine like [`engine`] whose session starts as the desktop or the application alone
+    /// and can be switched.
+    fn session_engine(desktop: bool) -> (Engine, Arc<Mutex<SessionMode>>) {
+        let mode = Arc::new(Mutex::new(SessionMode {
+            desktop,
+            switchable: true,
+            maximize: true,
+            application: None,
+        }));
+        let (mut engine, _) = engine();
+        engine.launcher = Box::new(Switchable(mode.clone()));
+        engine.session = engine.launcher.session();
+        (engine, mode)
+    }
+
+    /// The application alone fills the screen with its top-level windows as they open, and
+    /// leaves a dialog its own size.
+    #[test]
+    fn the_application_alone_maximizes_its_windows_but_not_its_dialogs() {
+        let (mut engine, _) = session_engine(false);
+        open(&mut engine, 1, 400, 300);
+        assert!(engine.win(1).unwrap().maximized);
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Added(WindowInfo {
+                parent: Some(1),
+                window_type: WindowType::Dialog,
+                ..info(2)
+            }),
+            &mut out,
+        );
+        engine.handle(
+            Event::Mapped {
+                id: 2,
+                size: Size { w: 200, h: 100 },
+            },
+            &mut out,
+        );
+        assert!(!engine.win(2).unwrap().maximized);
+    }
+
+    /// Switching to the application alone tells the launcher and maximizes the windows already
+    /// open; switching back leaves them as they are.
+    #[test]
+    fn switching_to_the_application_alone_maximizes_open_windows() {
+        let (mut engine, mode) = session_engine(true);
+        open(&mut engine, 1, 400, 300);
+        assert!(!engine.win(1).unwrap().maximized);
+        engine.run_action(&Action::SetDesktop(None), None, (0.0, 0.0));
+        assert!(!mode.lock().unwrap().desktop);
+        assert!(engine.win(1).unwrap().maximized);
+        engine.run_action(&Action::SetDesktop(None), None, (0.0, 0.0));
+        assert!(mode.lock().unwrap().desktop);
+        assert!(engine.win(1).unwrap().maximized);
+    }
+
+    /// The application alone whose autostart ended, with nothing on screen, offers to run it
+    /// again and the desktop.
+    #[test]
+    fn an_ended_application_offers_relaunch_and_the_desktop() {
+        let (mut engine, mode) = session_engine(false);
+        mode.lock().unwrap().application = Some(false);
+        let later = engine.now + Duration::from_secs(2);
+        engine.handle(Event::Tick(later), &mut Vec::new());
+        let menu = engine.menu.as_ref().expect("the session menu is open");
+        let actions: Vec<&Action> = menu.levels[0]
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Item { actions, .. } => actions.first(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actions, [&Action::Relaunch, &Action::SetDesktop(Some(true))]);
+    }
+
+    /// Switching to the application alone shows a minimized window again, since no taskbar is
+    /// left to bring it back from.
+    #[test]
+    fn switching_to_the_application_alone_shows_a_minimized_window() {
+        let (mut engine, _) = session_engine(true);
+        open(&mut engine, 1, 400, 300);
+        engine.run_action(&Action::Iconify, Some(1), (0.0, 0.0));
+        engine.handle(Event::Tick(engine.now + Duration::from_secs(1)), &mut Vec::new());
+        assert!(engine.win(1).unwrap().minimized);
+        engine.run_action(&Action::SetDesktop(Some(false)), None, (0.0, 0.0));
+        let win = engine.win(1).unwrap();
+        assert!(!win.minimized && win.maximized);
+        assert_eq!(engine.focus, Some(1));
+    }
+
+    /// A window the application alone opened maximized restores, on the desktop, to two thirds
+    /// of the work area centered rather than to the whole of it.
+    #[test]
+    fn a_window_opened_maximized_restores_to_a_size_of_its_own() {
+        let (mut engine, _) = session_engine(false);
+        open(&mut engine, 1, 400, 300);
+        engine.run_action(&Action::SetDesktop(Some(true)), None, (0.0, 0.0));
+        engine.run_action(&Action::Unmaximize(Direction::Both), Some(1), (0.0, 0.0));
+        let frame = engine.frame_rect(1);
+        assert_eq!((frame.w, frame.h), (1280 * 2 / 3, 768 * 2 / 3));
+        assert_eq!(frame.x, (1280 - frame.w) / 2);
+    }
+
+    /// The root menu ends with the switch, checked while the session is the desktop, only where
+    /// the session is switchable.
+    #[test]
+    fn the_root_menu_offers_the_switch_only_where_the_session_is_switchable() {
+        let (mut fixed, _) = engine();
+        let (entries, _) = fixed.entries_for("root-menu", None);
+        assert!(!entries.iter().any(
+            |e| matches!(e, Entry::Item { actions, .. } if actions.contains(&Action::SetDesktop(None)))
+        ));
+        let (mut switchable, _) = session_engine(true);
+        let (entries, _) = switchable.entries_for("root-menu", None);
+        assert!(matches!(
+            entries.last(),
+            Some(Entry::Item { actions, checked: true, .. }) if actions == &vec![Action::SetDesktop(None)]
+        ));
     }
 
     fn info(id: WindowId) -> WindowInfo {

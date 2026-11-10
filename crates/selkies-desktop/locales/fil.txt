@@ -281,3 +281,5 @@ Mint = Mint
 Graphite = Graphite
 Flat icon = Patag na icon
 Bar on every display = Bar sa bawat display
+Desktop mode = Mode ng desktop
+Relaunch = Buksan muli

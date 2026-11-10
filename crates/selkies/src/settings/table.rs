@@ -1577,7 +1577,49 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "desktop",
         kind: Kind::Bool,
         default: "False",
-        help: "Run the selkies-desktop shell (the panel, start menu, taskbar, wallpaper, and file manager) over the Selkies window manager, started and kept running by the server; implies --wm.",
+        help: "Start the session on the selkies-desktop shell (the panel, start menu, taskbar, wallpaper, and file manager) over the Selkies window manager, started and kept running by the server, rather than on the application alone; implies --wm. A user's switch from the window manager's menus is kept for the next session and wins over this unless it is locked.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "session_switch",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Offer the switch between the desktop and the application alone in the window manager's root menu and window menu, where the shell is installed and --desktop is not locked: the shell starts or stops, the application keeps running, and the choice is kept for the next session.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "app_restart",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Run the window manager's autostart file, the session's application, again once everything it started has exited, while the session is the application alone.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "wm_maximize",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Maximize the application's top-level windows while the session is the application alone, as they open and as the session switches to it; an rc.xml application rule that sets maximized wins.",
         env_vars: &[],
         allowed: &[],
         value_range: None,
@@ -2849,6 +2891,18 @@ impl Settings {
 
     pub fn desktop(&self) -> BoolSetting {
         self.bool_setting("desktop")
+    }
+
+    pub fn session_switch(&self) -> BoolSetting {
+        self.bool_setting("session_switch")
+    }
+
+    pub fn app_restart(&self) -> BoolSetting {
+        self.bool_setting("app_restart")
+    }
+
+    pub fn wm_maximize(&self) -> BoolSetting {
+        self.bool_setting("wm_maximize")
     }
 
     pub fn app_wayland_display(&self) -> &str {

@@ -9,13 +9,16 @@
 //! built-in defaults, the `<applications>` rules, and the menu file; `menu.xml` and the pipe menus
 //! it names for the root menu.
 //!
-//! The files are looked for where openbox looks, `openbox/` under the user's configuration
-//! directory first and then under the system ones, on both backends alike, so one set of files
-//! configures the desktop whichever backend runs it. labwc's dialect of the format is read too
-//! (a `<labwc_config>` root, `onRelease`, an action's `command` attribute, `<core><decoration>`),
-//! so a configuration written for it carries over. What neither dialect's users configure here
-//! (the full actions language, several desktops, chords) is not implemented; an action of a name
-//! this module does not know parses as [`Action::Unknown`] and is logged once when it would run.
+//! The files are looked for where openbox and labwc look, the user's configuration directory
+//! first and then the system ones, each under the backend's own window manager's name first
+//! (`labwc/` on Wayland, `openbox/` on X11) and the other's second: an image that configures one
+//! name configures the desktop on both backends, and one that configures each (the linuxserver
+//! images keep `labwc/` for Wayland and `openbox/` for X11 in one home) has each backend read its
+//! own. labwc's dialect of the format is read too (a `<labwc_config>` root, `onRelease`, an
+//! action's `command` attribute, `<core><decoration>`), so a configuration written for it carries
+//! over. What neither dialect's users configure here (the full actions language, several
+//! desktops, chords) is not implemented; an action of a name this module does not know parses as
+//! [`Action::Unknown`] and is logged once when it would run.
 //!
 //! The defaults are openbox's own bindings, the ones its stock `rc.xml` carries, with the
 //! Super-arrow quick tiles (`SnapToEdge`) in place of its edge moves, so a `<keyboard>` or
@@ -129,6 +132,13 @@ pub enum Action {
     ShowDesktop,
     ToggleShowDesktop,
     Reconfigure,
+    /// Switch the session to the desktop (`Some(true)`, `DesktopMode`), to the application
+    /// alone (`Some(false)`, `ApplicationMode`), or to the other one (`None`,
+    /// `ToggleDesktopMode`), where the session is switchable.
+    SetDesktop(Option<bool>),
+    /// Run the session's application, the autostart, again once everything it started ended
+    /// (`Relaunch`).
+    Relaunch,
     /// An action this manager does not implement, kept by name for the log.
     Unknown(String),
 }
@@ -448,14 +458,15 @@ impl Default for Config {
 /// The directories an `rc.xml` or a `menu.xml` is looked for in, in precedence order: the
 /// user's configuration directory and then the system ones, each under the backend's own
 /// window manager's name first and the other's second.
-pub fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![selkies_draw::dirs::config_home().join("openbox")];
-    dirs.extend(
-        selkies_draw::dirs::config_dirs()
-            .into_iter()
-            .map(|dir| dir.join("openbox")),
-    );
-    dirs
+pub fn search_dirs(backend: Backend) -> Vec<PathBuf> {
+    let names = match backend {
+        Backend::Wayland => ["labwc", "openbox"],
+        Backend::X11 => ["openbox", "labwc"],
+    };
+    std::iter::once(selkies_draw::dirs::config_home())
+        .chain(selkies_draw::dirs::config_dirs())
+        .flat_map(|base| names.map(|name| base.join(name)))
+        .collect()
 }
 
 /// The first existing file of this name along the search directories.
@@ -481,8 +492,8 @@ pub fn modified(path: &Path) -> Option<std::time::SystemTime> {
 impl Config {
     /// The configuration: the first `rc.xml` found along [`search_dirs`] over the defaults, or
     /// the defaults alone, with the user's key bind overrides applied over either.
-    pub fn load() -> Config {
-        let dirs = search_dirs();
+    pub fn load(backend: Backend) -> Config {
+        let dirs = search_dirs(backend);
         let mut config = Config::default();
         if let Some(path) = find_file(&dirs, "rc.xml") {
             match std::fs::read_to_string(&path) {
@@ -887,6 +898,8 @@ impl Action {
             Action::PreviousWindow => tr("Previous window").to_string(),
             Action::ShowDesktop | Action::ToggleShowDesktop => tr("Show the desktop").to_string(),
             Action::Reconfigure => tr("Reconfigure the window manager").to_string(),
+            Action::SetDesktop(_) => tr("Desktop mode").to_string(),
+            Action::Relaunch => tr("Relaunch").to_string(),
             Action::Unknown(name) => name.clone(),
         }
     }
@@ -1081,6 +1094,10 @@ pub fn parse_action(node: &Node) -> Option<Action> {
         "showdesktop" => Action::ShowDesktop,
         "toggleshowdesktop" => Action::ToggleShowDesktop,
         "reconfigure" | "restart" => Action::Reconfigure,
+        "desktopmode" => Action::SetDesktop(Some(true)),
+        "applicationmode" => Action::SetDesktop(Some(false)),
+        "toggledesktopmode" => Action::SetDesktop(None),
+        "relaunch" => Action::Relaunch,
         other => Action::Unknown(other.to_string()),
     })
 }
@@ -1420,6 +1437,27 @@ pub fn default_mousebinds() -> Vec<MouseBind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each backend looks under its own window manager's name first and the other's second,
+    /// the user's directory before the system ones.
+    #[test]
+    fn each_backend_reads_its_own_window_managers_files_first() {
+        let names = |backend| -> Vec<String> {
+            search_dirs(backend)
+                .iter()
+                .take(2)
+                .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(names(Backend::Wayland), ["labwc", "openbox"]);
+        assert_eq!(names(Backend::X11), ["openbox", "labwc"]);
+        let wayland = search_dirs(Backend::Wayland);
+        assert_eq!(wayland[0].parent(), wayland[1].parent());
+        assert_eq!(
+            wayland[0].parent(),
+            Some(selkies_draw::dirs::config_home().as_path())
+        );
+    }
 
     /// A chord is shown with its modifiers in one order and the key as a user names it, and an
     /// action describes itself for the shortcuts list.

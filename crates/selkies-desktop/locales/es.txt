@@ -281,3 +281,5 @@ Mint = Menta
 Graphite = Grafito
 Flat icon = Icono plano
 Bar on every display = Barra en cada pantalla
+Desktop mode = Modo escritorio
+Relaunch = Volver a abrir

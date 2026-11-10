@@ -66,7 +66,7 @@ use self::frame::{FrameWindow, OverlayWindow, Visual};
 use self::props::{Atoms, Props, Strut};
 use crate::config::Backend;
 use crate::core::Engine;
-use crate::session::{SessionEnv, ShellSupervisor};
+use crate::session::{SessionControl, SessionEnv, ShellSupervisor};
 
 /// Largest integer scale honored from `Xft.dpi`, the same cap the desktop shell applies.
 const MAX_SCALE: i32 = 4;
@@ -332,18 +332,16 @@ pub struct Manager {
 }
 
 /// Start the manager on `display`, with the session environment programs are started in and
-/// the shell binary to supervise where `SELKIES_DESKTOP` asks for one. Fails where the display
+/// the session's mode, which decides when the shell it supervises runs. Fails where the display
 /// cannot be reached or another window manager runs there.
 pub fn spawn(
     display: &str,
     env: Arc<Mutex<SessionEnv>>,
-    shell: Option<String>,
+    control: Arc<SessionControl>,
 ) -> Result<ManagerHandle, String> {
     let running = Arc::new(AtomicBool::new(true));
-    let mut manager = Manager::connect(display, env.clone(), running.clone())?;
-    if let Some(program) = shell {
-        manager.shell = Some(ShellSupervisor::new(env, &program));
-    }
+    let mut manager = Manager::connect(display, env.clone(), control.clone(), running.clone())?;
+    manager.shell = Some(ShellSupervisor::new(env, control));
     let flag = running.clone();
     let thread = std::thread::Builder::new()
         .name("selkies-wm-x11".to_string())
@@ -430,6 +428,7 @@ impl Manager {
     fn connect(
         display: &str,
         env: Arc<Mutex<SessionEnv>>,
+        control: Arc<SessionControl>,
         running: Arc<AtomicBool>,
     ) -> Result<Manager, String> {
         let (conn, screen) = RustConnection::connect(Some(display)).map_err(|e| format!("{display}: {e}"))?;
@@ -546,7 +545,7 @@ impl Manager {
                     .and_then(|c| c.reply().ok())
             });
         conn.flush().map_err(|e| e.to_string())?;
-        let launcher = Box::new(crate::session::ShellLauncher::new(env));
+        let launcher = Box::new(crate::session::ShellLauncher::new(env, control));
         let engine = Engine::new(Backend::X11, launcher);
         let visual = Visual {
             depth: screen_info.root_depth,

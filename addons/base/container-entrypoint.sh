@@ -218,11 +218,13 @@ fi
 # windows itself on either backend (no nested compositor), and under
 # SELKIES_DESKTOP, which implies it, starts and keeps the selkies-desktop shell
 # running on top. Canonicalized to "true" or unset so one spelling serves the
-# services and the server's own settings alike.
+# services and the server's own settings alike, except a value carrying a lock
+# (false|locked), which is passed on as given: it is the server's word that the
+# session stays in that mode.
 if is_true "${SELKIES_DESKTOP-}"; then
-  export SELKIES_DESKTOP=true
+  [[ "${SELKIES_DESKTOP}" == *"|"* ]] || export SELKIES_DESKTOP=true
   export SELKIES_WM=true
-else
+elif [[ "${SELKIES_DESKTOP-}" != *"|"* ]]; then
   unset SELKIES_DESKTOP
 fi
 if is_true "${SELKIES_WM-}"; then
