@@ -156,6 +156,8 @@ pub trait EngineHost: Send + Sync + 'static {
     async fn send_sdp(&self, _kind: &str, _sdp: &str, _peer: &str) -> Result<(), String> {
         Ok(())
     }
+    /// Send a local candidate over signaling, trickled after the description.
+    fn send_ice(&self, _candidate: &str, _peer: &str) {}
     /// Whether a pipeline starts on for a page, the one rule both transports read
     /// (`settings::pipeline_starts_on`).
     fn starts_on(&self, _pipeline: &str, _display: &str, _viewer: bool) -> bool {
@@ -1903,6 +1905,12 @@ impl RtcEngine {
 struct EngineEvents(Weak<RtcEngine>);
 
 impl PeerEvents for EngineEvents {
+    fn local_candidate(&self, peer: &str, candidate: &str) {
+        if let Some(engine) = self.0.upgrade() {
+            engine.host().send_ice(candidate, peer);
+        }
+    }
+
     fn state(&self, peer: &str, state: PeerState) {
         if let Some(engine) = self.0.upgrade() {
             let peer = peer.to_string();

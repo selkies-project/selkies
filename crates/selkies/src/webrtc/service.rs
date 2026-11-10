@@ -1852,6 +1852,17 @@ impl EngineHost for WebRtcService {
         client.send_sdp(kind, sdp, peer).map_err(|e| e.to_string())
     }
 
+    fn send_ice(&self, candidate: &str, peer: &str) {
+        let sent = self
+            .client
+            .lock()
+            .as_ref()
+            .map(|client| client.send_ice(0, candidate, peer));
+        if !matches!(sent, Some(Ok(()))) {
+            debug!(target: "webrtc", "A trickled candidate for {peer} found no signaling to ride");
+        }
+    }
+
     fn starts_on(&self, pipeline: &str, display: &str, viewer: bool) -> bool {
         settings().pipeline_starts_on(pipeline, display, viewer)
     }

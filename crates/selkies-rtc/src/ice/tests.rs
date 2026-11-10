@@ -1663,6 +1663,31 @@ async fn the_topology_binds_every_host_address_once_and_hands_it_to_every_peer()
     released.close().await;
 }
 
+/// A TURN server that answers nothing does not hold the gathering: the host candidates come
+/// back at once and the allocation is left running.
+#[tokio::test]
+async fn a_silent_turn_server_does_not_hold_the_gathering() {
+    let silent = std::net::UdpSocket::bind((LOOPBACK, 0)).unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let config = IceConfig {
+        servers: vec![IceServer {
+            urls: vec![format!("turn:127.0.0.1:{port}?transport=udp")],
+            username: Some("user".into()),
+            credential: Some("secret".into()),
+        }],
+        ..loopback_config(true, false)
+    };
+    let started = Instant::now();
+    let harness = Harness::new(config).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "gathered in {:?}",
+        started.elapsed()
+    );
+    assert!(!harness.host_candidates().is_empty());
+    assert!(harness.conn.relay_pending());
+}
+
 // --- a real TURN server ---------------------------------------------------------------------
 
 /// A coturn of this test's own on loopback, ended with the test.
@@ -1824,6 +1849,61 @@ async fn turn_relays_over_udp_tcp_and_tls() {
     coturn.stop().await;
 }
 
+/// A relay that lands after the checks began joins them: the server's host candidate and the
+/// client's are kept apart, so only the trickled relay can carry the pair, which the client
+/// learns as a candidate after the server's end of gathering.
+#[tokio::test]
+#[ignore = "needs coturn's turnserver on PATH"]
+async fn a_relay_trickled_after_the_checks_began_carries_the_pair() {
+    let coturn = Coturn::start().await;
+    let config = IceConfig {
+        servers: vec![IceServer {
+            urls: vec![format!("turn:127.0.0.1:{}?transport=udp", coturn.port)],
+            username: Some("selkies".into()),
+            credential: Some("turnpass".into()),
+        }],
+        addresses: Some(Vec::new()),
+        ..loopback_config(true, false)
+    };
+    let mut server = Harness::new(config).await;
+    assert!(
+        server.conn.relay_pending(),
+        "the allocation outlasts the gathering"
+    );
+    assert!(server.conn.local_candidates().is_empty());
+    let mut client = Harness::new(loopback_config(false, false)).await;
+    let now = Instant::now();
+    for c in client.conn.local_candidates().to_vec() {
+        server.conn.add_remote_candidate(now, Some(c));
+    }
+    server.conn.add_remote_candidate(now, None);
+    server
+        .conn
+        .set_remote_parameters(client.conn.local_parameters());
+    client
+        .conn
+        .set_remote_parameters(server.conn.local_parameters());
+    server.start();
+    client.start();
+    let relay = server.conn.late_relay().await.expect("the relay lands");
+    assert_eq!(relay.kind, CandidateType::Relay);
+    client
+        .conn
+        .add_remote_candidate(Instant::now(), Some(relay));
+    client.conn.add_remote_candidate(Instant::now(), None);
+    assert!(
+        both_complete(&mut server, &mut client, Duration::from_secs(15)).await,
+        "both complete"
+    );
+    assert_eq!(
+        server.conn.selected_pair().unwrap().0.kind,
+        CandidateType::Relay
+    );
+    server.conn.close();
+    client.conn.close();
+    coturn.stop().await;
+}
+
 /// ICE over nothing but the relay: the server's one candidate is `relay`, a full client reaches
 /// it, and data flows on the pair it nominates.
 #[tokio::test]
@@ -1850,6 +1930,12 @@ async fn ice_completes_over_a_relay_candidate() {
             ..loopback_config(true, false)
         };
         let mut server = Harness::new(config).await;
+        if server.conn.relay_pending() {
+            assert!(
+                server.conn.late_relay().await.is_some(),
+                "{label}: the relay lands"
+            );
+        }
         let relay = server.conn.local_candidates().to_vec();
         assert!(
             relay.len() == 1 && relay[0].kind == CandidateType::Relay,

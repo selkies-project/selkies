@@ -2326,18 +2326,17 @@ async fn owner_a_page_beside_it_is_held_back_until_it_owns_the_display() {
     rig.service.shutdown().await;
 }
 
-/// A TURN server that never answers, for the peers the engine starts from here on: their
-/// gathering waits out the ICE agent's timeout. It answers nothing once dropped either.
-fn silent_turn(rig: &Rig) -> std::net::UdpSocket {
+/// A STUN server that never answers, for the peers the engine starts from here on: their
+/// server-reflexive gathering waits out its bound, holding their start. It answers nothing once
+/// dropped either.
+fn silent_stun(rig: &Rig) -> std::net::UdpSocket {
     let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let addr = silent.local_addr().unwrap();
     rig.service
         .engine
-        .update_ice_servers(vec![selkies_rtc::ice::IceServer {
-            urls: vec![format!("turn:{addr}?transport=udp")],
-            username: Some("user".into()),
-            credential: Some("secret".into()),
-        }]);
+        .update_ice_servers(vec![selkies_rtc::ice::IceServer::new(&format!(
+            "stun:{addr}"
+        ))]);
     silent
 }
 
@@ -2350,7 +2349,7 @@ async fn a_peer_still_gathering_keeps_its_display_consumed() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     rig.peer("a", ClientType::Controller, "primary").await;
     let graph = rig.service.engine.displays.lock().get("primary").cloned();
-    let _silent = silent_turn(&rig);
+    let _silent = silent_stun(&rig);
     let engine = rig.service.engine.clone();
     tokio::spawn(async move {
         engine
@@ -2381,7 +2380,7 @@ async fn an_aborted_start_leaves_its_display_releasable() {
     rig.service.begin().await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     rig.peer("a", ClientType::Controller, "primary").await;
-    let _silent = silent_turn(&rig);
+    let _silent = silent_stun(&rig);
     let engine = rig.service.engine.clone();
     let start = tokio::spawn(async move {
         engine
@@ -2401,7 +2400,7 @@ async fn an_aborted_start_leaves_its_display_releasable() {
     );
 }
 
-/// The owner's reload keeps the display while its new connection gathers against a TURN server
+/// The owner's reload keeps the display while its new connection gathers against a STUN server
 /// that never answers, which outlasts the reconnect grace: its session has started, its peer
 /// connection is not in the engine yet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2417,7 +2416,7 @@ async fn owner_a_reload_still_gathering_keeps_the_display() {
         st.peer_tabs.insert("b".into(), Some("tab-b".into()));
         st.owner_tabs.insert("primary".into(), "tab-a".into());
     }
-    let _silent = silent_turn(&rig);
+    let _silent = silent_stun(&rig);
     rig.service
         .engine
         .stop_rtc_connection("a", "controller")
