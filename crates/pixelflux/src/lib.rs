@@ -429,8 +429,10 @@ pub struct CaptureSettings {
 /// The per-frame decision/quality knobs every encoder re-reads from the settings on each
 /// tick, so they retune a running capture: x264, x265, and libvpx reconfigure, NVENC and
 /// VA-API retarget their constant quantizer, kvazaar and SVT-AV1 re-open, JPEG is stateless.
-/// Applied on the thread that owns the settings copy. Structural switches (encoder, chroma,
-/// RC mode, device) still need a capture restart.
+/// A changed reference depth (`video_reference_frames`) re-opens an x264 session, on a key
+/// frame; a hardware session keeps the depth it opened with. Applied on the thread that owns
+/// the settings copy. Structural switches (encoder, chroma, RC mode, device) still need a
+/// capture restart.
 #[derive(Clone, Copy, Debug)]
 pub struct LiveTunables {
     pub jpeg_quality: i32,
@@ -444,6 +446,7 @@ pub struct LiveTunables {
     pub keyframe_interval_s: f64,
     pub capture_cursor: bool,
     pub cursor_size_cap: i32,
+    pub video_reference_frames: u32,
 }
 
 impl LiveTunables {
@@ -461,6 +464,7 @@ impl LiveTunables {
             keyframe_interval_s: s.keyframe_interval_s,
             capture_cursor: s.capture_cursor,
             cursor_size_cap: s.cursor_size_cap,
+            video_reference_frames: s.video_reference_frames,
         }
     }
 
@@ -477,6 +481,7 @@ impl LiveTunables {
         s.keyframe_interval_s = self.keyframe_interval_s;
         s.cursor_size_cap = self.cursor_size_cap;
         s.capture_cursor = self.capture_cursor;
+        s.video_reference_frames = self.video_reference_frames;
     }
 }
 

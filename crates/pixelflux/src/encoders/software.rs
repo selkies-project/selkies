@@ -2750,6 +2750,7 @@ pub fn encode_cpu_from(
                         || enc.height != actual_height as i32
                         || enc.is_i444 != video_fullcolor
                         || enc.bit_depth != bit_depth
+                        || enc.reference_frames != settings.video_reference_frames
                 } else {
                     true
                 };
@@ -5614,6 +5615,62 @@ mod qp_bound_sweep {
             &mut out
         ));
         assert_eq!(h264_frame_type(&out), FRAME_KEY, "nothing older is held");
+    }
+
+    /// A reference depth changed live (`LiveTunables::video_reference_frames`) reopens the
+    /// x264 session at it on a key frame, and an unchanged one codes on.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_reopens_at_a_changed_reference_depth() {
+        use crate::encoders::codec::{FRAME_DELTA, FRAME_KEY, h264_frame_type};
+        use crate::encoders::sps::h264_max_num_ref_frames;
+        let mut settings = CaptureSettings {
+            width: W as i32,
+            height: H as i32,
+            codec: Codec::H264,
+            target_fps: 60.0,
+            video_streaming_mode: true,
+            omit_stripe_headers: true,
+            video_reference_frames: 1,
+            ..Default::default()
+        };
+        let mut stripes = Vec::new();
+        let mut encode = |settings: &CaptureSettings, i: usize| {
+            let argb: Vec<u8> = text_luma(i).iter().flat_map(|&l| [l, l, l, 255]).collect();
+            let out = super::encode_cpu(
+                &mut stripes,
+                &argb,
+                W as i32,
+                H as i32,
+                &[],
+                settings,
+                i as u16,
+                false,
+                true,
+                i == 0,
+            );
+            assert_eq!(out.len(), 1, "frame {i} is one full-frame stripe");
+            out[0].data.to_vec()
+        };
+        let first = encode(&settings, 0);
+        assert_eq!(h264_max_num_ref_frames(&first), Some(1));
+        assert_eq!(h264_frame_type(&encode(&settings, 1)), FRAME_DELTA);
+        settings.video_reference_frames = 0;
+        let reopened = encode(&settings, 2);
+        assert_eq!(
+            h264_frame_type(&reopened),
+            FRAME_KEY,
+            "the reopen codes a key frame"
+        );
+        assert!(
+            h264_max_num_ref_frames(&reopened).is_some_and(|n| n > 1),
+            "at the session's own depth"
+        );
+        assert_eq!(
+            h264_frame_type(&encode(&settings, 3)),
+            FRAME_DELTA,
+            "and codes on"
+        );
     }
 
     /// x264 counts `frame_num` in sixteen values and the stream in 4096 (`WideFrameNum`): a loss
