@@ -523,6 +523,12 @@ impl VideoRelay {
         self.inner.lock().next_sync_req = now() + VIDEO_RELAY_SYNC_FLOOR_SECONDS;
     }
 
+    /// Whether a key frame for this client is asked for within the sync floor, by the relay's
+    /// own dropped deltas or `hold_sync`.
+    pub fn sync_pending(&self) -> bool {
+        now() < self.inner.lock().next_sync_req
+    }
+
     fn want_sync(inner: &mut Inner) -> bool {
         let at = now();
         if at >= inner.next_sync_req {

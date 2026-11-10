@@ -758,7 +758,7 @@ impl Connection {
             // Only the joining viewer is reset; the IDR opens its key frame gate now, since an
             // infinite GOP schedules none.
             say(&self.client, "PIPELINE_RESETTING primary").await;
-            service.schedule_idr(PRIMARY_DISPLAY);
+            service.schedule_idr_for_page(self.client.id, PRIMARY_DISPLAY);
             return Flow::Continue(());
         }
         let display_id = parsed.display_id.clone();
@@ -875,7 +875,7 @@ impl Connection {
         }
         service.broadcast_stream_resolution().await;
         say(&self.client, "PIPELINE_RESETTING primary").await;
-        service.schedule_idr(PRIMARY_DISPLAY);
+        service.schedule_idr_for_page(id, PRIMARY_DISPLAY);
         service.tell_display_settings(PRIMARY_DISPLAY, &[id]).await;
     }
 
@@ -981,7 +981,7 @@ impl Connection {
                 }
             }
             say(&self.client, format!("PIPELINE_RESETTING {display_id}")).await;
-            service.schedule_idr(display_id);
+            service.schedule_idr_for_page(id, display_id);
             return;
         }
         debug!(target: "ws", "Registering new client for display: {display_id}");
@@ -1182,7 +1182,7 @@ impl Connection {
             }
         }
         say(&self.client, "PIPELINE_RESETTING primary").await;
-        service.schedule_idr(PRIMARY_DISPLAY);
+        service.schedule_idr_for_page(self.client.id, PRIMARY_DISPLAY);
         service.send_current_cursor(&self.client).await;
     }
 

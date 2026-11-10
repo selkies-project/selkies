@@ -323,6 +323,26 @@ impl WsService {
         }
     }
 
+    /// The key frame a page starting on `display_id` decodes from. Its relay, made at the first
+    /// frame after the page connected, asks for one itself at the first delta it drops, and an
+    /// encoder that codes the two requests either side of a frame sends the page two key frames
+    /// back to back; so this asks only where the relay has not, and the relay waits for it.
+    pub(crate) fn schedule_idr_for_page(&self, client: ClientId, display_id: &str) {
+        let relay = self
+            .reg
+            .lock()
+            .relays
+            .get(display_id)
+            .and_then(|group| group.get(&client).cloned());
+        if relay.as_ref().is_some_and(|r| r.sync_pending()) {
+            return;
+        }
+        self.schedule_idr(display_id);
+        if let Some(relay) = relay {
+            relay.hold_sync();
+        }
+    }
+
     /// Tell the display's encoder a client lost `frame_id`, or a relay `withheld` it, so the
     /// frames after it stop predicting from it; logged once per display per five seconds with
     /// the count of the rest.
@@ -3612,7 +3632,7 @@ impl WsService {
                     // A controller tab-hide can tear the capture down mid-resume; an IDR request
                     // is then a no-op and the reset decoder would wait forever.
                     if service.reg.lock().running.contains(PRIMARY_DISPLAY) {
-                        service.schedule_idr(PRIMARY_DISPLAY);
+                        service.schedule_idr_for_page(id, PRIMARY_DISPLAY);
                     } else {
                         service.ensure_viewer_capture().await;
                     }

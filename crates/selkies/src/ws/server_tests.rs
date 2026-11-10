@@ -629,6 +629,39 @@ async fn another_tab_joins_beside_the_owner() {
     assert!(rig.primary_capture().has("tunables"), "a crf applies live");
 }
 
+/// A page joining beside the owner is sent one key frame: its relay asks for one at the first
+/// delta it drops, and the join asks only where the relay has not.
+#[tokio::test]
+async fn a_page_joining_beside_is_asked_one_key_frame() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    capture.deliver(1, 1, true);
+    settle().await;
+    let mut beside = rig.controller().await;
+    settle().await;
+    let idrs = capture.count("idr");
+    // The page's relay, made at the first frame since it connected, drops the delta and asks.
+    capture.deliver(2, 1, false);
+    settle().await;
+    assert_eq!(
+        capture.count("idr"),
+        idrs + 1,
+        "the relay asks for the page's key frame"
+    );
+    beside
+        .say(r#"SETTINGS,{"tabId":"b","initialClientWidth":640,"initialClientHeight":480}"#)
+        .await;
+    settle().await;
+    assert!(rig.service.reg.lock().is_beside(beside.id()));
+    assert_eq!(
+        capture.count("idr"),
+        idrs + 1,
+        "the join adds no second one"
+    );
+}
+
 #[tokio::test]
 async fn a_pick_needs_full_permissions_on_both_pages() {
     let rig = Rig::new();
