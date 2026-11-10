@@ -355,16 +355,26 @@ fn layout(d: &Desktop) -> Layout {
     let width = WIDTH.min(d.panel.width - 2 * ui::POPUP_MARGIN);
     let x = (bar.x + ui::POPUP_MARGIN).min(d.panel.width - ui::POPUP_MARGIN - width);
     let frame = Rect::new(x.max(ui::POPUP_MARGIN), y, width, height);
+    let settings_w = if d.config.settings_window {
+        SETTINGS_WIDTH
+    } else {
+        0
+    };
     let settings = Rect::new(
-        frame.right() - PAD - SETTINGS_WIDTH,
+        frame.right() - PAD - settings_w,
         frame.y + PAD,
-        SETTINGS_WIDTH,
+        settings_w,
         SEARCH_HEIGHT,
     );
+    let search_right = if settings_w > 0 {
+        settings.x - PAD / 2
+    } else {
+        frame.right() - PAD
+    };
     let search = Rect::new(
         frame.x + PAD,
         frame.y + PAD,
-        settings.x - PAD / 2 - frame.x - PAD,
+        search_right - frame.x - PAD,
         SEARCH_HEIGHT,
     );
     let footer = Rect::new(frame.x, frame.bottom() - FOOTER_HEIGHT, frame.w, FOOTER_HEIGHT);
@@ -1275,7 +1285,9 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
         );
     }
 
-    draw_settings_button(d, canvas, layout.settings);
+    if layout.settings.w > 0 {
+        draw_settings_button(d, canvas, layout.settings);
+    }
     if layout.categories.w > 0 {
         draw_categories(d, canvas, &layout);
     }

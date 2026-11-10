@@ -148,6 +148,13 @@ pub struct Config {
     /// Whether every display but the primary one has a bar of its own, each listing the
     /// windows on its display; without, the primary bar lists them all.
     pub panel_every_display: bool,
+    /// Whether terminals, and the entries that run in one, are listed and Control+Alt+T's
+    /// terminal offered; an image that keeps terminals out sets `terminals = false`.
+    pub terminals: bool,
+    /// Whether the quick launcher runs a typed command line.
+    pub run_command: bool,
+    /// Whether the settings window opens.
+    pub settings_window: bool,
     /// How the start menu lays its applications out.
     pub menu_layout: MenuLayout,
     /// Language code of the interface, or `None` to follow the environment.
@@ -182,6 +189,9 @@ pub struct Config {
     pub show_desktop_button: bool,
     /// Desktop file IDs pinned at the top of the start menu.
     pub favorites: Vec<String>,
+    /// Desktop file IDs whose launchers are put on the desktop once, the first time the shell
+    /// finds each installed, for an image to place its applications without copying files.
+    pub desktop_launchers: Vec<String>,
     /// Whether no favorites setting was given, so the shell seeds the list from the
     /// applications installed (`Desktop::seed_favorites`).
     pub favorites_default: bool,
@@ -219,6 +229,9 @@ impl Default for Config {
             panel_float: true,
             panel_corners: DEFAULT_PANEL_CORNERS,
             panel_every_display: true,
+            terminals: true,
+            run_command: true,
+            settings_window: true,
             menu_layout: MenuLayout::Columns,
             language: None,
             theme: crate::ui::Theme::default(),
@@ -236,6 +249,7 @@ impl Default for Config {
             show_volume: true,
             show_desktop_button: true,
             favorites: Vec::new(),
+            desktop_launchers: Vec::new(),
             favorites_default: false,
             icon_theme: None,
             terminal: None,
@@ -455,6 +469,9 @@ impl Config {
         if let Some(list) = values.get("favorites") {
             config.favorites = id_list(list);
         }
+        if let Some(list) = values.get("desktop_launchers") {
+            config.desktop_launchers = id_list(list);
+        }
         if let Some(theme) = values
             .get("icon_theme")
             .map(|v| v.trim())
@@ -474,6 +491,9 @@ impl Config {
         config.start_icon_flat = truthy("start_icon_flat", config.start_icon_flat);
         config.panel_float = truthy("panel_float", config.panel_float);
         config.panel_every_display = truthy("panel_every_display", config.panel_every_display);
+        config.terminals = truthy("terminals", config.terminals);
+        config.run_command = truthy("run_command", config.run_command);
+        config.settings_window = truthy("settings", config.settings_window);
         if let Some(variant) = values.get("wallpaper_variant") {
             config.wallpaper_variant = match variant.trim().to_ascii_lowercase().as_str() {
                 "light" => WallpaperVariant::Light,
@@ -684,6 +704,27 @@ use selkies_draw::style::parse_values as parse;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The policy keys an image sets turn the terminals, the typed command line, and the
+    /// settings window off, and name the launchers it places; each defaults to on or empty.
+    #[test]
+    fn the_policy_keys_turn_their_features_off() {
+        let on = Config::from_values(&HashMap::new());
+        assert!(on.terminals && on.run_command && on.settings_window);
+        assert!(on.desktop_launchers.is_empty());
+        let values: HashMap<String, String> = [
+            ("terminals", "false"),
+            ("run_command", "false"),
+            ("settings", "false"),
+            ("desktop_launchers", "a.desktop;b.desktop"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let off = Config::from_values(&values);
+        assert!(!off.terminals && !off.run_command && !off.settings_window);
+        assert_eq!(off.desktop_launchers, ["a.desktop", "b.desktop"]);
+    }
 
     #[test]
     fn parses_lines() {

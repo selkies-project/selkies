@@ -103,6 +103,8 @@ pub struct Entry {
     pub path: PathBuf,
     /// Whether the program runs in a terminal.
     pub terminal: bool,
+    /// Whether the program is a terminal itself (`TerminalEmulator` among its categories).
+    pub emulator: bool,
     /// Working directory for the program.
     pub working_dir: Option<String>,
     /// Menu category the entry is listed under.
@@ -190,6 +192,20 @@ impl Apps {
         apps.build_categories();
         apps.desktop = load_desktop_dir(&locales);
         apps
+    }
+
+    /// Leave out the entry of a desktop file ID.
+    pub fn without(&mut self, id: &str) {
+        self.entries.retain(|e| e.id != id);
+        self.build_categories();
+    }
+
+    /// Leave out every terminal and every entry that runs in one, for a session whose image
+    /// keeps terminals out of its menus.
+    pub fn without_terminals(&mut self) {
+        self.entries.retain(|e| !e.emulator && !e.terminal);
+        self.desktop.retain(|e| !e.emulator && !e.terminal);
+        self.build_categories();
     }
 
     /// Whether an applications directory changed since the scan, so a list built from it is
@@ -490,6 +506,9 @@ pub fn build_entry(
                 .collect()
         })
         .unwrap_or_default();
+    let emulator = group
+        .get("Categories")
+        .is_some_and(|cats| cats.split(';').any(|c| c.trim() == "TerminalEmulator"));
     let category = group
         .get("Categories")
         .and_then(|cats| {
@@ -519,6 +538,7 @@ pub fn build_entry(
         icon: group.get("Icon").filter(|i| !i.is_empty()).map(str::to_string),
         path: path.to_path_buf(),
         terminal,
+        emulator,
         working_dir: group.get("Path").filter(|p| !p.is_empty()).map(str::to_string),
         category,
         wm_class: group
@@ -895,6 +915,7 @@ mod tests {
             icon: Some(icon.to_string()),
             path: PathBuf::from("/tmp"),
             terminal: false,
+            emulator: false,
             working_dir: None,
             category: MISC.to_string(),
             wm_class: class.map(str::to_string),

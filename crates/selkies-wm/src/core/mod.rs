@@ -3642,10 +3642,18 @@ impl Engine {
     }
 
     /// The desktop entries, read on first use and again when an applications directory changed
-    /// since, so an application installed in the session is listed the next time the menu opens.
+    /// since, so an application installed in the session is listed the next time the menu opens;
+    /// without terminals, or the entries that run in one, where the desktop's `terminals` setting
+    /// is off.
     fn apps(&mut self) -> &Apps {
         if self.apps.as_ref().is_none_or(Apps::stale) {
-            self.apps = Some(Apps::load(apps::find_terminal(None).is_some()));
+            let values = selkies_draw::style::desktop_values();
+            let terminals = selkies_draw::style::truthy(&values, "terminals", true);
+            let mut loaded = Apps::load(terminals && apps::find_terminal(None).is_some());
+            if !terminals {
+                loaded.without_terminals();
+            }
+            self.apps = Some(loaded);
         }
         self.apps.as_ref().expect("the desktop entries were just read")
     }

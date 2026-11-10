@@ -122,7 +122,11 @@ fn ensure_items(d: &mut Desktop) {
             .split_whitespace()
             .next()
             .is_some_and(|word| entries::resolve_program(word).is_some());
-        items_for(&query, d.apps.search(&query), runnable)
+        let mut items = items_for(&query, d.apps.search(&query), runnable);
+        if !d.config.run_command {
+            items.retain(|item| !matches!(item, Item::Command(_)));
+        }
+        items
     };
     d.launcher.items = items;
     d.launcher.items_valid = true;

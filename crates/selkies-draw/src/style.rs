@@ -153,12 +153,36 @@ pub fn desktop_socket_path(var: impl Fn(&str) -> Option<String>) -> PathBuf {
     dir.join(format!("selkies-desktop-{safe}.sock"))
 }
 
-/// The desktop's settings as lowercase keys and raw values: the configuration file, with the
-/// `SELKIES_DESKTOP_<KEY>` environment over it.
+/// The desktop's settings as lowercase keys and raw values: an image's defaults in
+/// `selkies-desktop/config` under the system configuration directories (`/etc/xdg`, the first of
+/// `XDG_CONFIG_DIRS` winning), the user's configuration file over them, and the
+/// `SELKIES_DESKTOP_<KEY>` environment over both, which the shell's settings window writes to the
+/// user's file and so cannot change.
 pub fn desktop_values() -> HashMap<String, String> {
-    let text = std::fs::read_to_string(desktop_config_file()).unwrap_or_default();
-    let mut values = parse_values(&text);
-    for (key, value) in std::env::vars() {
+    layered_values(
+        &crate::dirs::config_dirs(),
+        &desktop_config_file(),
+        std::env::vars(),
+    )
+}
+
+/// The desktop's settings from the system directories (the first winning), the user's file
+/// over them, and the `SELKIES_DESKTOP_<KEY>` variables over both, as [`desktop_values`] reads
+/// them.
+fn layered_values(
+    system: &[std::path::PathBuf],
+    user: &std::path::Path,
+    env: impl Iterator<Item = (String, String)>,
+) -> HashMap<String, String> {
+    let mut values = HashMap::new();
+    for dir in system.iter().rev() {
+        if let Ok(text) = std::fs::read_to_string(dir.join("selkies-desktop/config")) {
+            values.extend(parse_values(&text));
+        }
+    }
+    let text = std::fs::read_to_string(user).unwrap_or_default();
+    values.extend(parse_values(&text));
+    for (key, value) in env {
         if let Some(name) = key.strip_prefix("SELKIES_DESKTOP_")
             && !name.is_empty()
         {
@@ -319,6 +343,33 @@ pub fn surface_shade_in(surface: Surface, base: Color, v: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An image's defaults under the system directories give way to the user's file, and both
+    /// to the environment; of two system directories the first wins.
+    #[test]
+    fn image_defaults_give_way_to_the_user_and_the_environment() {
+        let root = std::env::temp_dir().join(format!("selkies-draw-layers-{}", std::process::id()));
+        let (first, second) = (root.join("first"), root.join("second"));
+        for (dir, text) in [
+            (&first, "terminals = false\nfavorites = a.desktop\n"),
+            (
+                &second,
+                "terminals = true\nrun_command = false\nsettings = false\n",
+            ),
+        ] {
+            std::fs::create_dir_all(dir.join("selkies-desktop")).unwrap();
+            std::fs::write(dir.join("selkies-desktop/config"), text).unwrap();
+        }
+        let user = root.join("user-config");
+        std::fs::write(&user, "favorites = b.desktop\nsettings = true\n").unwrap();
+        let env = vec![("SELKIES_DESKTOP_SETTINGS".to_string(), "false".to_string())];
+        let values = layered_values(&[first, second], &user, env.into_iter());
+        assert_eq!(values["terminals"], "false");
+        assert_eq!(values["run_command"], "false");
+        assert_eq!(values["favorites"], "b.desktop");
+        assert_eq!(values["settings"], "false");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// The window style keys parse as the shell's settings page writes them, out-of-range values
     /// falling back to the defaults.

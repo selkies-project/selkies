@@ -44,6 +44,9 @@ const RECENT_LIMIT: usize = 12;
 /// # Arguments
 /// * `config` - The settings.
 pub fn find_terminal(config: &Config) -> Option<Vec<String>> {
+    if !config.terminals {
+        return None;
+    }
     selkies_draw::apps::find_terminal(config.terminal.as_deref())
 }
 

@@ -1163,7 +1163,22 @@ fn panel_menu_items(d: &Desktop) -> Vec<MenuEntry> {
         dnd: d.notifications.dnd,
         notifications: !d.notifications.is_empty(),
     };
-    panel_menu_entries(target, &facts)
+    let mut entries = panel_menu_entries(target, &facts);
+    if !d.config.settings_window {
+        entries.retain(|e| {
+            !matches!(
+                e,
+                MenuEntry::Item {
+                    action: Action::OpenSettings(_),
+                    ..
+                }
+            )
+        });
+        while matches!(entries.first(), Some(MenuEntry::Separator)) {
+            entries.remove(0);
+        }
+    }
+    entries
 }
 
 /// The rectangle of the right-click menu anchored at a bar X.

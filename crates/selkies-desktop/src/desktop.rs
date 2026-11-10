@@ -493,6 +493,20 @@ fn edge_display(displays: &[(u32, (i32, i32))], origin: (i32, i32)) -> Option<Op
     }
 }
 
+/// The installed applications as the settings allow them: without terminals, or the entries that
+/// run in one, where `terminals` is off, and without the settings window's entry where
+/// `settings` is.
+fn load_apps(config: &Config) -> Apps {
+    let mut apps = Apps::load(entries::find_terminal(config).is_some());
+    if !config.terminals {
+        apps.without_terminals();
+    }
+    if !config.settings_window {
+        apps.without(entries::SETTINGS_ID);
+    }
+    apps
+}
+
 impl Desktop {
     /// Loads settings, fonts, icons and applications, and applies the
     /// settings to the session: the window manager's theme, and the file
@@ -526,7 +540,7 @@ impl Desktop {
         if session {
             entries::ensure_settings_entry();
         }
-        let apps = Apps::load(entries::find_terminal(&config).is_some());
+        let apps = load_apps(&config);
         seed_favorites(&mut config, &apps);
         let logo = crate::render::load_raster(std::path::Path::new(crate::config::LOGO_PATH), 0);
         let mut desktop = Desktop {
@@ -595,6 +609,7 @@ impl Desktop {
             notify_pix: None,
         };
         desktop.load_desktop_items();
+        desktop.place_desktop_launchers();
         desktop.requests.push(desktop.panel_request());
         desktop
             .requests
@@ -1076,6 +1091,9 @@ impl Desktop {
     /// * `page` - The page to show, or `None` to keep the last one.
     pub fn open_settings(&mut self, page: Option<Page>) {
         self.close_popup();
+        if !self.config.settings_window {
+            return;
+        }
         if self.settings.id.is_some() {
             settings::close(self);
         }
@@ -1131,7 +1149,7 @@ impl Desktop {
             portal.update(&decision);
         }
         self.icons = Icons::new(self.config.icon_theme.as_deref());
-        self.apps = Apps::load(entries::find_terminal(&self.config).is_some());
+        self.apps = load_apps(&self.config);
         seed_favorites(&mut self.config, &self.apps);
         self.wallpapers.clear();
         self.load_desktop_items();
@@ -1576,6 +1594,46 @@ impl Desktop {
         }
         self.desktop_selection = Some(index);
         self.repaint_wallpapers();
+    }
+
+    /// Put the launchers the `desktop_launchers` setting names on the desktop, each once: an
+    /// application is placed the first time the shell finds it installed and noted in
+    /// `desktop-launchers-placed` beside the settings, so a launcher the user deleted stays
+    /// deleted and one installed later is placed when it arrives.
+    fn place_desktop_launchers(&mut self) {
+        if self.config.desktop_launchers.is_empty() {
+            return;
+        }
+        let record = crate::config::config_dir().join("desktop-launchers-placed");
+        let placed = std::fs::read_to_string(&record).unwrap_or_default();
+        let placed: Vec<&str> = placed.lines().map(str::trim).collect();
+        let new: Vec<String> = self
+            .config
+            .desktop_launchers
+            .iter()
+            .filter(|id| !placed.contains(&id.as_str()) && self.apps.find(id).is_some())
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        for id in &new {
+            self.add_to_desktop(id);
+        }
+        let mut text: String = placed
+            .iter()
+            .filter(|l| !l.is_empty())
+            .map(|l| format!("{l}\n"))
+            .collect();
+        for id in &new {
+            text.push_str(id);
+            text.push('\n');
+        }
+        if let Err(error) =
+            std::fs::create_dir_all(crate::config::config_dir()).and_then(|()| std::fs::write(&record, text))
+        {
+            eprintln!("selkies-desktop: cannot note the placed launchers: {error}");
+        }
     }
 
     /// Puts an application's launcher on the desktop: its desktop entry copied into the Desktop

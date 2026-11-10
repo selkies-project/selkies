@@ -161,10 +161,13 @@ run is left out.
 ## Configuration
 
 Settings live in `~/.config/selkies-desktop/config` as `key = value` lines,
-which the settings window (right click on the bar) writes, and every key can
-be set from the environment as `SELKIES_DESKTOP_<KEY>` (for example
-`SELKIES_DESKTOP_WALLPAPER`), which takes precedence.  The file is watched,
-so an edit applies within a moment.
+which the settings window (right click on the bar) writes, over an image's
+defaults in `/etc/xdg/selkies-desktop/config` (or the same path under each
+`XDG_CONFIG_DIRS` entry, the first winning), and every key can be set from
+the environment as `SELKIES_DESKTOP_<KEY>` (for example
+`SELKIES_DESKTOP_WALLPAPER`), which takes precedence over both and which the
+settings window therefore cannot change.  The file is watched, so an edit
+applies within a moment.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -215,6 +218,10 @@ so an edit applies within a moment.
 | `files_manager` | `true` | Offer the built-in file manager: write its desktop entry to `~/.local/share/applications`, make it the folder handler in `~/.config/mimeapps.list` when none is set, and pin it as the default favorite |
 | `icon_theme` | GTK setting, else Papirus, breeze or Adwaita | Icon theme name; hicolor is always the fallback |
 | `terminal` | `$TERMINAL`, else the first of foot, xterm, st, ... | Command that runs `Terminal=true` entries |
+| `terminals` | `true` | List terminals and the entries that run in one in the start menu, the launcher, and the window manager's Applications menu; `false` leaves them all out |
+| `run_command` | `true` | Let the quick launcher run a typed command line |
+| `settings` | `true` | Open the settings window; `false` leaves out the start menu's Settings button, the bar's settings entries, and the Settings application |
+| `desktop_launchers` | | Comma separated desktop file IDs whose launchers are put on the desktop once each, the first time the shell finds them installed (noted in `~/.config/selkies-desktop/desktop-launchers-placed`), so a launcher the user deletes stays deleted |
 
 ## Talking to the running panel
 

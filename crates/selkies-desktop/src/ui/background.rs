@@ -365,6 +365,7 @@ mod tests {
             icon: None,
             path: PathBuf::from(format!("/nonexistent/{name}.desktop")),
             terminal: false,
+            emulator: false,
             working_dir: None,
             category: String::new(),
             wm_class: None,
