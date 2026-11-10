@@ -3417,8 +3417,12 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				}, window.location.origin);
 			}
 
+			// Chromium refuses the track's autoplay before the connection is up, and
+			// the status turning connected shows the button; Safari refuses it once
+			// media flows, after that, so the refusal shows it as well
 			webrtc.onplaystreamrequired = (): any => {
 				showStart = true;
+				updateStatusDisplay();
 			}
 
 			/**
