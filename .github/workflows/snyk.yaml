@@ -5,8 +5,9 @@
 name: Snyk
 
 # Once a day: Snyk Code's static analysis of the tree, uploaded to code scanning
-# beside CodeQL's, and Snyk's vulnerability test of the Rust crates, which its
-# GitHub app cannot import. The app imports the repository as well: it checks
+# beside CodeQL's, and Snyk's vulnerability test of the Rust crates and of the
+# codec libraries each pixelflux build links (scripts/ci/native-sbom.sh), which
+# its GitHub app cannot import. The app imports the repository as well: it checks
 # every pull request (Snyk Code, the npm lockfiles, and secrets), tests the
 # lockfiles, the Dockerfiles, and the infrastructure files daily, and opens fix
 # pull requests, with its results in Snyk's dashboard. Its open-source results
@@ -71,7 +72,7 @@ jobs:
           category: snyk-code
 
   rust:
-    name: Snyk Open Source (Rust)
+    name: Snyk Open Source (Rust and codecs)
     runs-on: ubuntu-latest
     env:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -82,7 +83,7 @@ jobs:
           if [ -n "${SNYK_TOKEN}" ]; then
             echo "present=true" >> "${GITHUB_OUTPUT}"
           else
-            echo "::notice::No SNYK_TOKEN secret here (a fork of the repository): the Rust test is skipped"
+            echo "::notice::No SNYK_TOKEN secret here (a fork of the repository): the Rust and codec tests are skipped"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -108,9 +109,15 @@ jobs:
           cargo install --locked cargo-cyclonedx --root "${RUNNER_TEMP}/cyclonedx"
           PATH="${RUNNER_TEMP}/cyclonedx/bin:${PATH}" cargo cyclonedx --format json --spec-version 1.5 --all-features
 
+      - name: Describe the codec libraries
+        if: steps.token.outputs.present
+        # Cargo's graph names none of the C libraries codec-sys links or the
+        # crates compile: one SBOM per pixelflux build, the GPL and the non-GPL
+        run: scripts/ci/native-sbom.sh .
+
       - name: Test them
         if: steps.token.outputs.present
-        # A vulnerable crate (exit status 1) fails the job as a failed test does
+        # A vulnerable crate or library (exit status 1) fails the job as a failed test does
         run: |
           status=0
           for sbom in $(git ls-files --others --exclude-standard -- '*.cdx.json'); do

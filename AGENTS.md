@@ -153,10 +153,11 @@ joins the corpus.
 CodeQL's code scanning and the other checkers (clippy, rustfmt, ruff, codespell, eslint and tsc through pre-commit;
 cargo-deny's advisories, licenses and bans; Dependabot's alerts; Snyk's (its GitHub app's pull-request checks, daily
 tests and fix pull requests; `.github/workflows/snyk.yaml`'s Snyk Code alerts in code scanning and daily test of the
-Rust crates), whose license findings answer to the Licenses workflow's policy; the OSS Scanner's and the fuzzers'
-findings) are at least stylistic recommendations: a finding is fixed in the code and its alert closed by the next
-scan or update, never dismissed or closed by hand, and a lint is not silenced (`#[allow]`, `noqa`,
-`eslint-disable`) where the code can be written its way. Code that is safe through a check a checker cannot follow
+Rust crates and of each build's codec libraries), whose license findings answer to the Licenses workflow's policy;
+the OSS Scanner's and the fuzzers' findings) are at least stylistic recommendations: a finding is fixed in the code
+and its alert closed by the next scan or update, never dismissed or closed by hand, and a lint is not silenced
+(`#[allow]`, `noqa`, `eslint-disable`) where the code can be written its way. Code that is safe through a check a
+checker cannot follow
 (a validator in another function, a lookup in a table the code fills itself) is rewritten so the check sits where it
 is recognized (the language's models in github/codeql list the forms: for a path, canonicalized and then checked
 with `starts_with` against the root it must stay under; for a value from a fixed set, a comparison against
