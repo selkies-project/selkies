@@ -2601,12 +2601,7 @@ impl Engine {
                 };
                 self.begin_grab(id, GrabKind::Resize(edge), button);
             }
-            Request::Activate => {
-                if self.windows[&id].minimized {
-                    self.set_minimized(id, false);
-                }
-                self.set_focus(Some(id));
-            }
+            Request::Activate => self.activate(id),
             Request::Close => self.out.push(Command::Close(id)),
             Request::ShowMenu { x, y } => {
                 let rect = self.windows[&id].rect;
@@ -3314,6 +3309,11 @@ impl Engine {
                     && self.windows[&id].focusable
                 {
                     self.set_focus(Some(id));
+                }
+            }
+            Action::Activate => {
+                if let Some(id) = target {
+                    self.activate(id);
                 }
             }
             Action::Unfocus => {
@@ -4075,6 +4075,17 @@ impl Engine {
         entries
     }
 
+    /// Shows a window and focuses it, bringing it back first where it is minimized: a client's
+    /// or a taskbar's activation, and a pick from the window list, in either session mode.
+    fn activate(&mut self, id: WindowId) {
+        if self.windows.get(&id).is_some_and(|w| w.minimized) {
+            self.set_minimized(id, false);
+        }
+        self.set_focus(Some(id));
+    }
+
+    /// The window list: every listed window, the stack's top first and the minimized ones, in
+    /// parentheses, after; picking one activates it ([`Engine::activate`]).
     fn client_list(&self) -> Vec<Entry> {
         let mut entries = vec![Entry::Separator {
             label: Some(tr("Windows").to_string()),
@@ -4104,7 +4115,7 @@ impl Engine {
                     label
                 },
                 icon: self.config.show_menu_icons.then(|| icon_name(&win.info.app_id)),
-                actions: vec![Action::Focus],
+                actions: vec![Action::Activate],
                 window: Some(*id),
                 enabled: true,
                 checked: self.focus == Some(*id),
@@ -5167,6 +5178,37 @@ mod tests {
         );
         assert_eq!(engine.stack.last(), Some(&3));
         assert_eq!(engine.focus, Some(3));
+    }
+
+    /// Picking a minimized window from the window list brings it back and focuses it, on the
+    /// desktop and for the application alone alike.
+    #[test]
+    fn the_window_list_brings_a_minimized_window_back() {
+        for desktop in [true, false] {
+            let (mut engine, _) = session_engine(desktop);
+            open(&mut engine, 1, 400, 300);
+            open(&mut engine, 2, 400, 300);
+            engine.run_action(&Action::Iconify, Some(1), (0.0, 0.0));
+            engine.handle(Event::Tick(engine.now + Duration::from_secs(1)), &mut Vec::new());
+            assert!(engine.win(1).unwrap().minimized);
+            let entries = engine.client_list();
+            let pick = entries
+                .iter()
+                .find_map(|e| match e {
+                    Entry::Item {
+                        actions,
+                        window: Some(1),
+                        ..
+                    } => Some(actions.clone()),
+                    _ => None,
+                })
+                .expect("the minimized window is listed");
+            for action in &pick {
+                engine.run_action(action, Some(1), (0.0, 0.0));
+            }
+            assert!(!engine.win(1).unwrap().minimized, "desktop {desktop}");
+            assert_eq!(engine.focus, Some(1));
+        }
     }
 
     /// Two windows go side by side.

@@ -88,6 +88,9 @@ pub enum Action {
     Kill,
     Iconify,
     Focus,
+    /// Show the window, bringing it back where it is minimized, and focus it: what picking it
+    /// from the window list does, as a taskbar's activation does.
+    Activate,
     Unfocus,
     Raise,
     Lower,
@@ -930,7 +933,7 @@ impl Action {
             Action::ShowMenu(_) => tr("Desktop menu").to_string(),
             Action::Close | Action::Kill => tr("Close the window").to_string(),
             Action::Iconify => tr("Minimize the window").to_string(),
-            Action::Focus | Action::Raise => tr("Raise the window").to_string(),
+            Action::Focus | Action::Raise | Action::Activate => tr("Raise the window").to_string(),
             Action::Unfocus | Action::Lower | Action::RaiseLower | Action::FocusToBottom => {
                 tr("Send the window to the back").to_string()
             }
@@ -1114,6 +1117,7 @@ pub fn parse_action(node: &Node) -> Option<Action> {
         "kill" => Action::Kill,
         "iconify" => Action::Iconify,
         "focus" => Action::Focus,
+        "activate" => Action::Activate,
         "unfocus" => Action::Unfocus,
         "raise" => Action::Raise,
         "lower" => Action::Lower,
