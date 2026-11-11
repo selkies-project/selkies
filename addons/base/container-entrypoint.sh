@@ -218,21 +218,34 @@ fi
 # The Selkies window manager: under SELKIES_WM the server manages the session's
 # windows itself on either backend (no nested compositor), and under
 # SELKIES_DESKTOP, which implies it, starts and keeps the selkies-desktop shell
-# running on top. Canonicalized to "true" or unset so one spelling serves the
+# running on top. START_DESKTOP is SELKIES_DESKTOP's older name: the desktop
+# image sets SELKIES_DESKTOP itself, so a START_DESKTOP that is set can only be
+# the deployment's word, and it decides.
+if [ -n "${START_DESKTOP-}" ]; then
+  echo "START_DESKTOP is deprecated; it sets SELKIES_DESKTOP=${START_DESKTOP}, the name to use instead"
+  export SELKIES_DESKTOP="${START_DESKTOP}"
+fi
+
+# Canonicalizes a mode toggle to "true" or unset, so one spelling serves the
 # services and the server's own settings alike, except a value carrying a lock
 # (false|locked), which is passed on as given: it is the server's word that the
 # session stays in that mode.
-if is_true "${SELKIES_DESKTOP-}"; then
-  [[ "${SELKIES_DESKTOP}" == *"|"* ]] || export SELKIES_DESKTOP=true
+canonicalize_mode() {
+  local name="$1"
+  local value="${!1-}"
+  if [[ "${value}" == *"|"* ]]; then
+    return
+  elif is_true "${value}"; then
+    export "${name}=true"
+  else
+    unset "${name}"
+  fi
+}
+canonicalize_mode SELKIES_DESKTOP
+if is_true "${SELKIES_DESKTOP-}" && ! is_true "${SELKIES_WM-}"; then
   export SELKIES_WM=true
-elif [[ "${SELKIES_DESKTOP-}" != *"|"* ]]; then
-  unset SELKIES_DESKTOP
 fi
-if is_true "${SELKIES_WM-}"; then
-  export SELKIES_WM=true
-else
-  unset SELKIES_WM
-fi
+canonicalize_mode SELKIES_WM
 
 # Default display for the X11 backend. In Wayland mode the session compositor's
 # XWayland server owns it instead, and takes the first free number.
@@ -246,11 +259,11 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   # value, "none" included, is lower case.
   SELKIES_WAYLAND_COMPOSITOR="$(setting_value "${SELKIES_WAYLAND_COMPOSITOR-}")"
   SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"
-  if [ "${SELKIES_WM:-}" = "true" ]; then
+  if is_true "${SELKIES_WM-}"; then
     # The capture compositor manages its own windows and runs Xwayland, so no
     # compositor nests inside it; a compositor named beside the mode is set aside.
     if [ -n "${SELKIES_WAYLAND_COMPOSITOR}" ] && [ "${SELKIES_WAYLAND_COMPOSITOR}" != "none" ]; then
-      echo "SELKIES_WM=true: the Selkies window manager manages the windows; SELKIES_WAYLAND_COMPOSITOR=${SELKIES_WAYLAND_COMPOSITOR} is set aside"
+      echo "SELKIES_WM: the Selkies window manager manages the windows; SELKIES_WAYLAND_COMPOSITOR=${SELKIES_WAYLAND_COMPOSITOR} is set aside"
     fi
     SELKIES_WAYLAND_COMPOSITOR=none
   elif [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
@@ -400,8 +413,10 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
     drop_service wayland
     if [ -n "${SELKIES_WAYLAND_HOST_DISPLAY-}" ]; then
       echo "Wayland backend: capturing the operator's compositor at ${SELKIES_WAYLAND_HOST_DISPLAY}; it keeps its own window management"
-    elif [ "${SELKIES_WM:-}" = "true" ]; then
-      echo "Wayland backend: the Selkies window manager manages the capture compositor's windows and runs Xwayland${SELKIES_DESKTOP:+; it starts the desktop}"
+    elif is_true "${SELKIES_WM-}"; then
+      _desktop=""
+      is_true "${SELKIES_DESKTOP-}" && _desktop="; it starts the desktop"
+      echo "Wayland backend: the Selkies window manager manages the capture compositor's windows and runs Xwayland${_desktop}"
     else
       echo 'Wayland backend: applications connect to the capture compositor directly; no XWayland'
     fi
@@ -410,8 +425,10 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   fi
 else
   drop_service wayland
-  if [ "${SELKIES_WM:-}" = "true" ]; then
-    echo "X11 backend: the Selkies window manager manages the windows${SELKIES_DESKTOP:+ and starts the desktop}"
+  if is_true "${SELKIES_WM-}"; then
+    _desktop=""
+    is_true "${SELKIES_DESKTOP-}" && _desktop=" and starts the desktop"
+    echo "X11 backend: the Selkies window manager manages the windows${_desktop}"
   fi
 fi
 if ! is_true "${SELKIES_ENABLE_INTERNAL_TURN}"; then

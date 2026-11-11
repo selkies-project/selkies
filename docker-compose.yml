@@ -73,8 +73,8 @@ services:
       # Login password of the unprivileged user
       PASSWD: ${PASSWD:-mypasswd}
       # Start the desktop (selkies-desktop under the Selkies window manager), vs
-      # just the display server.
-      SELKIES_DESKTOP: ${SELKIES_DESKTOP:-true}
+      # just the display server; START_DESKTOP is its older name.
+      SELKIES_DESKTOP: ${SELKIES_DESKTOP:-${START_DESKTOP:-true}}
       # Use the headless Wayland backend instead of X11 (default: X11 Xvfb).
       SELKIES_WAYLAND: ${SELKIES_WAYLAND:-false}
       # Session compositor nested in the capture compositor without the desktop
