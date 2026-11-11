@@ -505,6 +505,16 @@ const KEY_STEPS: f64 = 10.0;
 #[cfg(feature = "gpl")]
 const OWED_FINER: u32 = crate::ledger::REFINE_FINER + 2;
 
+/// Quality index steps finer than the session's own a capped CRF refreshes its coarse blocks at
+/// (`ledger::BlockLedger::refresh`), one past `ledger::REFRESH_FINER`: refreshing a 720p page of
+/// text it coded at quantizer 51, x264 came to 37.7 dB three steps finer, 0.9 dB under the
+/// uncapped session's on one to three slice threads, and to 38.5-38.6 four steps finer, within
+/// 0.3 dB of it on any, for 3 % more bytes. The uncapped session's own picture moves with its
+/// slice threads (37.9-38.8 dB) rather than with the quantizers its scroll ends at, which are
+/// coarser than the refresh's (26-29 against 22).
+#[cfg(feature = "gpl")]
+const X264_REFRESH_FINER: u32 = crate::ledger::REFRESH_FINER + 1;
+
 /// The peak of a capped CRF x264 session (`video_vbv_multiplier`), held beside x264.
 ///
 /// x264's own cap, a VBV, changes how it codes every frame whether the peak binds or not (a 720p
@@ -1151,7 +1161,7 @@ impl H264EncoderWrapper {
 
     /// Code the next frame as a refresh of coarse blocks (`ledger::BlockLedger::refresh_keyed`):
     /// held at quantizer `qp` where one is named, the macroblocks `now` names `finer` steps finer
-    /// (`ledger::REFRESH_FINER`), the ones of them a key frame left coarse (`key`) `key_finer`
+    /// (`X264_REFRESH_FINER`), the ones of them a key frame left coarse (`key`) `key_finer`
     /// steps finer, and the ones `wait` names past the coarsest quantizer, where x264 codes a
     /// block its reference holds (`constant_blocks`) as a skip.
     #[allow(clippy::too_many_arguments)]
@@ -2884,7 +2894,7 @@ pub fn encode_cpu_from(
                                 OWED_FINER as i32,
                             )
                         } else {
-                            (x264_crf, crate::ledger::REFRESH_FINER as i32)
+                            (x264_crf, X264_REFRESH_FINER as i32)
                         };
                         let finer = if is_dirty {
                             (x264_crf - quality).max(0) + finer
@@ -5143,14 +5153,13 @@ mod qp_bound_sweep {
     /// A capped CRF stripe its peak bound while the page scrolled codes the still page it
     /// leaves again once the peak lets go, without a key frame: every coarse block is refreshed
     /// once, and the page comes to within `NEAR_DB` of the uncapped session's quality. The
-    /// refresh's held quantizer lands at 37.7 dB on any host; the uncapped rate factor's own
-    /// result moves with the host's cores, which set x264's slice threads (37.9 dB on four,
-    /// 38.6-38.8 on one to three), and a refresh no finer than the session's quantizer lands at
-    /// 35.1-35.3.
+    /// refresh lands at 38.5-38.6 dB on any host; the uncapped rate factor's own result moves
+    /// with the host's cores, which set x264's slice threads (37.9 dB on four, 38.6-38.8 on one
+    /// to three).
     #[cfg(feature = "gpl")]
     #[test]
     fn x264_capped_crf_refreshes_what_it_coded_bound_once_its_peak_lets_go() {
-        const NEAR_DB: f64 = 1.5;
+        const NEAR_DB: f64 = 0.5;
         const FRAMES: usize = 200;
         let page = still_page_luma();
         let (plain, _, _, _) = scroll_then_still(0, 0, FRAMES, false);
