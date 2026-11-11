@@ -28,6 +28,20 @@
 import { sessionAuthHeaders } from './session-token.ts';
 import { isMobileClient } from './util.ts';
 
+/** The blob URLs of the documents this page fetched, the only ones it prints. */
+const fetchedDocuments = new Set<string>();
+
+/**
+ * `url` when it names a document this page fetched, else null: no other
+ * address reaches a frame or a tab.
+ * @param url The address a print request names.
+ * @returns The blob URL, or null.
+ */
+function ownBlobUrl(url: unknown): string | null {
+    if (typeof url !== 'string' || !fetchedDocuments.has(url)) return null;
+    return url;
+}
+
 /**
  * Prints the PDF at `url`: on a desktop through a frame of no size, so the
  * document prints rather than the page around it, and the frame goes once
@@ -36,6 +50,12 @@ import { isMobileClient } from './util.ts';
  * @param url Blob URL of the PDF.
  */
 export function printDocument(url: string): void {
+    const own = ownBlobUrl(url);
+    if (own === null) {
+        console.warn('Print request ignored: not a document this page fetched.');
+        return;
+    }
+    url = own;
     if (isMobileClient) {
         window.open(url, '_blank');
         return;
@@ -96,6 +116,7 @@ export function createPrintJobs({ automatic }: PrintJobsOptions): PrintJobs {
                 return;
             }
             const objectUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }));
+            fetchedDocuments.add(objectUrl);
             window.postMessage({ type: 'printDocument', name, size: blob.size, url: objectUrl }, window.location.origin);
             if (auto && !isMobileClient) printDocument(objectUrl);
         },
