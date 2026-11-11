@@ -335,10 +335,12 @@ pub fn icon_for_app_id(entries: &[Entry], app_id: &str) -> Option<String> {
         .and_then(|(_, e)| e.icon.clone())
 }
 
-/// The icon of the application a command line starts: the entry whose Exec line runs the same
-/// program, by file name, else the one named like it. A menu item written without an icon
-/// gets the one its application carries this way.
-pub fn icon_for_command(entries: &[Entry], command: &str) -> Option<String> {
+/// The program the desktop shell runs as, whose command-line words talk to the running shell.
+pub const SHELL_PROGRAM: &str = "selkies-desktop";
+
+/// The program a command line starts, by lowercase file name, past any leading `NAME=value`
+/// assignments; `None` for a shell or `env`, which name no application of their own.
+fn command_program(command: &str) -> Option<String> {
     let program = split_exec(command)
         .into_iter()
         .find(|arg| !arg.contains('=') && !arg.is_empty())?;
@@ -346,6 +348,20 @@ pub fn icon_for_command(entries: &[Entry], command: &str) -> Option<String> {
     if name.is_empty() || matches!(name.as_str(), "sh" | "bash" | "env") {
         return None;
     }
+    Some(name)
+}
+
+/// Whether a command line runs the desktop shell's program, which with a command word only
+/// reaches a shell that is running ([`SHELL_PROGRAM`]).
+pub fn commands_shell(command: &str) -> bool {
+    command_program(command).is_some_and(|name| name == SHELL_PROGRAM)
+}
+
+/// The icon of the application a command line starts: the entry whose Exec line runs the same
+/// program, by file name, else the one named like it. A menu item written without an icon
+/// gets the one its application carries this way.
+pub fn icon_for_command(entries: &[Entry], command: &str) -> Option<String> {
+    let name = command_program(command)?;
     entries
         .iter()
         .find(|e| e.icon.is_some() && e.program().is_some_and(|p| p.to_lowercase() == name))

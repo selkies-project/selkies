@@ -124,6 +124,10 @@ pub const APPLICATIONS_MENU: &str = "selkies-applications";
 const SESSION_MENU: &str = "selkies-session-menu";
 /// The menu id of the window menu's desktops submenu, built here.
 const SEND_TO_DESKTOP_MENU: &str = "client-send-to-desktop-menu";
+
+/// The icon the window list's submenu takes where its menu file gives it none, as the
+/// applications' submenu takes its own.
+const WINDOWS_ICON: &str = "preferences-system-windows";
 /// The ids of the applications menu's category submenus: the prefix and the category's name.
 const APPLICATIONS_CATEGORY_PREFIX: &str = "selkies-applications/";
 
@@ -3503,6 +3507,7 @@ impl Engine {
     /// The entries of a menu by id, with the switch between the desktop and the application
     /// alone at the foot of the root menu and the window menu, whatever the files give them.
     fn entries_for(&mut self, id: &str, window: Option<WindowId>) -> (Vec<Entry>, bool) {
+        self.session = self.launcher.session();
         if id == SESSION_MENU {
             return (self.session_menu(), false);
         }
@@ -3561,7 +3566,9 @@ impl Engine {
     }
 
     /// The entries of a menu by id: the window menu and the window list built here, the others
-    /// from the files, a pipe menu's from its command once it answered.
+    /// from the files, a pipe menu's from its command once it answered. While the application
+    /// runs alone, a file's items that only command the desktop shell are left out
+    /// ([`commands_shell`]) and the separators around them tidied.
     fn menu_entries(&mut self, id: &str, window: Option<WindowId>) -> (Vec<Entry>, bool) {
         match id {
             "client-menu" => (self.client_menu(window), false),
@@ -3618,9 +3625,11 @@ impl Engine {
                 if wants_icon {
                     self.apps();
                 }
+                let desktop = self.session.desktop;
                 let entries = menu
                     .items
                     .iter()
+                    .filter(|item| desktop || !commands_shell(item))
                     .map(|item| match item {
                         MenuItem::Item { label, icon, actions } => Entry::Item {
                             label: label.clone(),
@@ -3661,12 +3670,21 @@ impl Engine {
                             icon: icon
                                 .clone()
                                 .or_else(|| self.menus.menus.get(id).and_then(|m| m.icon.clone()))
+                                .or_else(|| match id.as_str() {
+                                    "client-list-combined-menu" | "client-list-menu" => {
+                                        Some(WINDOWS_ICON.to_string())
+                                    }
+                                    _ => None,
+                                })
                                 .filter(|_| self.config.show_menu_icons),
                             target: Target::Menu(id.clone()),
                         },
                     })
                     .collect();
-                (entries, menu.execute.is_some() && menu.items.is_empty())
+                (
+                    tidy_separators(entries),
+                    menu.execute.is_some() && menu.items.is_empty(),
+                )
             }
         }
     }
@@ -3770,7 +3788,7 @@ impl Engine {
             },
             Entry::Submenu {
                 label: tr("Windows").to_string(),
-                icon: None,
+                icon: show_icons.then(|| WINDOWS_ICON.to_string()),
                 target: Target::Menu("client-list-combined-menu".to_string()),
             },
         ]
@@ -4482,6 +4500,39 @@ fn tile_ghost_image(
 }
 
 /// The icon name an app id resolves to in an icon theme: the id itself, else its last segment.
+/// Whether a menu file's item only commands the desktop shell: every action it takes runs the
+/// shell's program with a command word, which reaches nothing while the application runs alone,
+/// so the engine leaves such an item out of that session's menus.
+fn commands_shell(item: &MenuItem) -> bool {
+    match item {
+        MenuItem::Item { actions, .. } => {
+            !actions.is_empty()
+                && actions.iter().all(|action| match action {
+                    Action::Execute(command) => apps::commands_shell(command),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Drops the plain separators a menu left leading, trailing, or doubled, as one does once the
+/// items between them are left out; a labeled heading stays where the file put it.
+fn tidy_separators(entries: Vec<Entry>) -> Vec<Entry> {
+    let mut tidy: Vec<Entry> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let plain = matches!(entry, Entry::Separator { label: None });
+        if plain && tidy.last().is_none_or(|e| matches!(e, Entry::Separator { .. })) {
+            continue;
+        }
+        tidy.push(entry);
+    }
+    while matches!(tidy.last(), Some(Entry::Separator { label: None })) {
+        tidy.pop();
+    }
+    tidy
+}
+
 fn icon_name(app_id: &str) -> String {
     app_id.to_string()
 }
@@ -4709,6 +4760,52 @@ mod tests {
             })
             .collect();
         assert_eq!(actions, [&Action::Relaunch, &Action::SetDesktop(Some(true))]);
+    }
+
+    /// The application alone has no shell to take the desktop's commands, so its root menu opens
+    /// on the applications and keeps no separator the dropped items leave; the desktop's keeps
+    /// every item.
+    #[test]
+    fn the_application_alone_leaves_the_shells_commands_out_of_the_root_menu() {
+        let menu = r#"<openbox_menu>
+  <menu id="root-menu">
+    <item label="New Folder"><action name="Execute"><command>selkies-desktop --new-folder</command></action></item>
+    <item label="Desktop Settings"><action name="Execute"><command>/usr/local/bin/selkies-desktop --settings</command></action></item>
+    <separator />
+    <menu id="selkies-applications" />
+    <menu id="client-list-combined-menu" />
+    <separator />
+    <item label="Show Desktop"><action name="Execute"><command>selkies-desktop --show-desktop</command></action></item>
+  </menu>
+</openbox_menu>"#;
+        let labels = |entries: &[Entry]| -> Vec<String> {
+            entries
+                .iter()
+                .map(|e| match e {
+                    Entry::Item { label, .. } | Entry::Submenu { label, .. } => label.clone(),
+                    Entry::Separator { .. } => "-".to_string(),
+                })
+                .collect()
+        };
+        let (mut engine, mode) = session_engine(false);
+        mode.lock().unwrap().switchable = false;
+        engine.menus.apply(menu).unwrap();
+        let (entries, _) = engine.entries_for("root-menu", None);
+        assert_eq!(labels(&entries), ["Applications", "Windows"]);
+        mode.lock().unwrap().desktop = true;
+        let (entries, _) = engine.entries_for("root-menu", None);
+        assert_eq!(
+            labels(&entries),
+            [
+                "New Folder",
+                "Desktop Settings",
+                "-",
+                "Applications",
+                "Windows",
+                "-",
+                "Show Desktop"
+            ]
+        );
     }
 
     /// Switching to the application alone shows a minimized window again, since no taskbar is

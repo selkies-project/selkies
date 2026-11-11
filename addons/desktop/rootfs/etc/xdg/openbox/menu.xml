@@ -7,7 +7,8 @@
   The window manager's right-click menu on the desktop, installed as
   /etc/xdg/openbox/menu.xml, the file Openbox would read, and read on both
   backends; a user's ~/.config/openbox/menu.xml replaces it. It offers the
-  desktop's own commands, every installed application by category, and the
+  desktop's own commands, which the window manager leaves out while the
+  application runs alone, every installed application by category, and the
   open windows. The selkies-applications menu
   is the window manager's own, filled from the installed desktop entries with
   their icons, and an item written without an icon gets the one of the
@@ -35,12 +36,6 @@
     <separator />
     <item label="Show Desktop" icon="user-desktop">
       <action name="Execute"><command>selkies-desktop --show-desktop</command></action>
-    </item>
-    <item label="Reload Desktop" icon="view-refresh">
-      <action name="Execute"><command>selkies-desktop --reload</command></action>
-    </item>
-    <item label="Reconfigure Window Manager" icon="configure">
-      <action name="Reconfigure" />
     </item>
   </menu>
 </openbox_menu>
