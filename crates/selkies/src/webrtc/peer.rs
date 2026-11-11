@@ -147,6 +147,8 @@ pub struct PeerTick {
     pub room_bps: Option<f64>,
     pub pace_bps: Option<u64>,
     pub snapshot: Option<selkies_rtc::rtp::pacer::Snapshot>,
+    /// The video packets the pacer dropped since the last tick that carried feedback.
+    pub video_dropped: u64,
     pub rtt: Option<f64>,
     /// The payload octets the audio sender has sent, None without one.
     pub audio_octets: Option<u64>,
@@ -423,6 +425,8 @@ struct Media {
     pad_bps: f64,
     pad_until: f64,
     pad_at: Option<Instant>,
+    /// The pacer's count of dropped video packets at the last tick that carried feedback.
+    dropped_ticked: u64,
 }
 
 impl Peer {
@@ -527,6 +531,7 @@ impl Peer {
             pad_bps: 0.0,
             pad_until: 0.0,
             pad_at: None,
+            dropped_ticked: 0,
             remote_set: false,
             trickle_held: Vec::new(),
         };
@@ -966,6 +971,17 @@ impl Media {
                     ),
                     None => (None, None, None),
                 };
+                // A tick without feedback steers nothing, so its drops count with the next
+                // one that has some.
+                let video_dropped = match (&window, &snapshot) {
+                    (Some(_), Some(snapshot)) => {
+                        let dropped = snapshot.stats.video_dropped;
+                        let since = dropped.saturating_sub(self.dropped_ticked);
+                        self.dropped_ticked = dropped;
+                        since
+                    }
+                    _ => 0,
+                };
                 let (audio_octets, red_depth) = match self.audio.as_mut() {
                     Some(audio) => (Some(audio.octet_count()), audio.red_depth()),
                     None => (None, None),
@@ -975,6 +991,7 @@ impl Media {
                     room_bps,
                     pace_bps,
                     snapshot,
+                    video_dropped,
                     rtt: self.video.rtt(),
                     audio_octets,
                     red_depth,

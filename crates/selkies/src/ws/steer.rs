@@ -33,6 +33,9 @@ pub struct SteerTick {
     pub capacity_bps: Option<f64>,
     /// Whether the transport padded the tick's stream up to the target ([`PathProbe`]).
     pub probed: bool,
+    /// Whether the transport's pacer dropped video over the tick. What it dropped never reached
+    /// the path, so the tick's feedback covers less than the stream produced.
+    pub pacer_dropped: bool,
 }
 
 /// The steer of one display's rate over congestion ticks: a CBR display's target, and a CRF
@@ -62,9 +65,11 @@ pub struct SteerTick {
 /// capacity while it stands under `NEAR` of it, and by `STEP_NEAR` a second from there, where
 /// the climb probes the path's own rate rather than overshooting it; a path delivering clear past the capacity forgets
 /// it; a tick that offered under `APP_LIMITED`, or measured no offer, stops its step at the
-/// capacity (or the current target where none is known). A still screen the transport padded
-/// up to the target ([`PathProbe`], `probed`) has nothing to show but the path, and climbs
-/// `PROBE_STEP` a second until the first queue ends the probe.
+/// capacity (or the current target where none is known), and so does a tick the transport's
+/// pacer dropped video in (`pacer_dropped`): the path was not asked to carry what the pacer
+/// dropped, so a clean reading of the rest shows no room for more. A still screen the
+/// transport padded up to the target ([`PathProbe`], `probed`) has nothing to show but the
+/// path, and climbs `PROBE_STEP` a second until the first queue ends the probe.
 ///
 /// A stall is not a slower path, and interrupts a rate the path was carrying, one in force
 /// through `CARRIED_S` of ticks that read no queue: before any there is none to restore. A
@@ -171,6 +176,7 @@ impl CongestionSteer {
             acked_offered_bps,
             capacity_bps,
             probed,
+            pacer_dropped,
         } = tick;
         let dt = match self.tick_at {
             None => 1.0,
@@ -302,7 +308,8 @@ impl CongestionSteer {
             None if !self.congested => current * Self::START_STEP.powf(dt),
             None => current * Self::STEP.powf(dt),
         };
-        let filled = offered_bps.is_some_and(|o| o >= current * 1_000.0 * Self::APP_LIMITED);
+        let filled = !pacer_dropped
+            && offered_bps.is_some_and(|o| o >= current * 1_000.0 * Self::APP_LIMITED);
         if probed && filled {
             raised = raised.max(current * Self::PROBE_STEP.powf(dt));
         }
@@ -752,6 +759,7 @@ pub(crate) mod tests {
             acked_offered_bps,
             capacity_bps,
             probed: false,
+            pacer_dropped: false,
         }
     }
 
@@ -1200,6 +1208,46 @@ pub(crate) mod tests {
             )),
             5000.0
         );
+    }
+
+    /// A clean tick that filled its target raises it. One the pacer dropped video in stops at
+    /// the capacity the path showed, or where it stands with none known, as a trickle does.
+    #[test]
+    fn a_tick_the_pacer_dropped_video_in_raises_no_further_than_the_capacity() {
+        let clean = |steer: &mut CongestionSteer, current: f64, now: f64, pacer_dropped: bool| {
+            steer.target(SteerTick {
+                pacer_dropped,
+                ..tick_of(
+                    [current, CEILING, FLOOR, 4_000_000.0, 0.0, now],
+                    [Some(0.0), Some(5_000_000.0), None, None],
+                )
+            })
+        };
+        let cases = [(false, 5250.0, 8000.0), (true, 5000.0, 5000.0)];
+        for (pacer_dropped, at_capacity, uncut) in cases {
+            // A queue cuts the target to the headroom under the 5000 kbps the path delivered.
+            let mut steer = CongestionSteer::default();
+            let cut = tick(
+                &mut steer,
+                8000.0,
+                DELIVERED,
+                0.0,
+                0.0,
+                Some(0.1),
+                Some(7_600_000.0),
+            );
+            assert_eq!(cut.round(), 4250.0);
+            let cruise = clean(&mut steer, cut, 5.0, pacer_dropped);
+            assert_eq!(cruise.round(), 4250.0, "the drain's end");
+            let risen = clean(&mut steer, cruise, 6.0, pacer_dropped);
+            assert_eq!(risen.round(), 5000.0, "up to the capacity either way");
+            let next = clean(&mut steer, risen, 7.0, pacer_dropped);
+            assert_eq!(next.round(), at_capacity, "pacer_dropped {pacer_dropped}");
+
+            let mut steer = CongestionSteer::default();
+            let first = clean(&mut steer, 5000.0, 0.0, pacer_dropped);
+            assert_eq!(first.round(), uncut, "pacer_dropped {pacer_dropped}");
+        }
     }
 
     /// A pending cruise through a tick reading a backlog: a queue past `BACKLOG_S`, the one that
