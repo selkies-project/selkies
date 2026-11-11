@@ -1119,6 +1119,10 @@ dependencies = [
 [[package]]
 name = "nvcodec-sys"
 version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "regex",
+]
 
 [[package]]
 name = "once_cell"
@@ -2039,6 +2043,7 @@ dependencies = [
 name = "va-sys"
 version = "0.1.0"
 dependencies = [
+ "bindgen",
  "libloading 0.9.0",
 ]
 

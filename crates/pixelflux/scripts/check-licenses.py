@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from typing import Dict, List, Optional, Sequence, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -254,18 +255,48 @@ NATIVE: Dict[str, Dict[str, object]] = {
 NATIVE_NAME = re.compile(r"(-|_)sys\d*$|-ffi$|^lib.*-sys$")
 
 
-def run_cargo_metadata(extra: Sequence[str], target: Optional[str]) -> dict:
-    cmd = ["cargo", "metadata", "--format-version", "1", "--locked",
-           "--manifest-path", MANIFEST] + list(extra)
-    if target:
-        cmd += ["--filter-platform", target]
+def cargo(args: Sequence[str]) -> str:
     try:
-        out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+        return subprocess.run(["cargo"] + list(args), check=True, capture_output=True,
+                              text=True).stdout
     except FileNotFoundError:
         sys.exit("cargo not found on PATH")
     except subprocess.CalledProcessError as exc:
-        sys.exit("cargo metadata failed:\n" + exc.stderr)
-    return json.loads(out)
+        sys.exit("cargo %s failed:\n%s" % (args[0], exc.stderr))
+
+
+def run_cargo_metadata(extra: Sequence[str], target: Optional[str]) -> dict:
+    """Resolve one configuration's graph as the crate builds on its own.
+
+    Inside a larger workspace (the Selkies repository), cargo unifies the
+    features every member asks of a dependency, so the non-GPL graph would
+    carry the x264 and x265 features the Selkies server enables. The graph is
+    then resolved in a copy that is its own workspace, as the wheel builds it:
+    the manifest with an empty ``[workspace]`` table and the crate's own
+    Cargo.lock, beside links to the rest of the crate.
+    """
+    args = ["metadata", "--format-version", "1", "--locked"] + list(extra)
+    if target:
+        args += ["--filter-platform", target]
+    workspace = cargo(["locate-project", "--workspace", "--message-format", "plain",
+                       "--manifest-path", MANIFEST]).strip()
+    if os.path.realpath(workspace) == os.path.realpath(MANIFEST):
+        return json.loads(cargo(args + ["--manifest-path", MANIFEST]))
+    with tempfile.TemporaryDirectory(prefix="pixelflux-licenses-") as tmp:
+        for entry in os.listdir(REPO):
+            if entry not in ("Cargo.toml", "Cargo.lock", "target"):
+                os.symlink(os.path.join(REPO, entry), os.path.join(tmp, entry))
+        with open(MANIFEST, "r", encoding="utf-8") as handle:
+            manifest = handle.read()
+        with open(os.path.join(tmp, "Cargo.toml"), "w", encoding="utf-8") as handle:
+            handle.write(manifest.rstrip("\n") + "\n\n[workspace]\n")
+        with open(os.path.join(REPO, "Cargo.lock"), "rb") as src, \
+                open(os.path.join(tmp, "Cargo.lock"), "wb") as dst:
+            dst.write(src.read())
+        meta = json.loads(cargo(args + ["--manifest-path", os.path.join(tmp, "Cargo.toml")]))
+    if os.path.realpath(meta["workspace_root"]) != os.path.realpath(tmp):
+        sys.exit("cargo resolved %s in place of the crate's own workspace" % meta["workspace_root"])
+    return meta
 
 
 def host_triple() -> Optional[str]:
