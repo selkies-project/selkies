@@ -169,30 +169,32 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 COPY addons/input-interposer /build/input-interposer
 COPY addons/fake-udev /build/fake-udev
 COPY addons/v4l2-interposer /build/v4l2-interposer
+# They sit where the linuxserver.io images and proot-apps' app roots put theirs
+# (/usr/lib and /opt/lib, the 32-bit builds beside them with a _32 suffix), so
+# the preload an application inherits names the same files inside an app root
+# as here. fake-udev stays out of the system library directory: it is reached
+# only through the preload, as the interposers are.
 RUN set -e; \
-    LIBDIR="$(gcc -print-multiarch)"; \
-    mkdir -p "/opt/add-ons/lib/${LIBDIR}"; \
-    gcc -shared -fPIC -o /opt/add-ons/lib/${LIBDIR}/selkies_input_interposer.so /build/input-interposer/input_interposer.c -ldl -pthread; \
-    ln -sf selkies_input_interposer.so /opt/add-ons/lib/${LIBDIR}/selkies_joystick_interposer.so; \
+    mkdir -p /opt/add-ons/usr/lib /opt/add-ons/opt/lib; \
+    gcc -shared -fPIC -o /opt/add-ons/usr/lib/selkies_input_interposer.so /build/input-interposer/input_interposer.c -ldl -pthread; \
+    ln -sf selkies_input_interposer.so /opt/add-ons/usr/lib/selkies_joystick_interposer.so; \
     make -C /build/v4l2-interposer; \
-    cp /build/v4l2-interposer/selkies_v4l2_interposer.so "/opt/add-ons/lib/${LIBDIR}/"; \
+    cp /build/v4l2-interposer/selkies_v4l2_interposer.so /opt/add-ons/usr/lib/; \
     make -C /build/fake-udev; \
-    cp /build/fake-udev/libudev.so.1.0.0-fake /build/fake-udev/libudev.so.1 /build/fake-udev/libudev.so "/opt/add-ons/lib/${LIBDIR}/"; \
-    # Also build the 32-bit variants so 32-bit (Wine-era) applications see the
-    # virtual gamepads and webcam too (`/usr/$LIB` expands per process
-    # bitness); amd64 only
+    cp /build/fake-udev/libudev.so.1.0.0-fake /opt/add-ons/opt/lib/; \
+    # The 32-bit builds, for the launchers that preload them into 32-bit
+    # (Wine-era) processes, as Steam's does; amd64 only. fake-udev is built
+    # with the 64-bit build's SONAME, which a preload has to carry to stand
+    # in for libudev.so.1.
     if [ "$(uname -m)" = "x86_64" ]; then \
         apt-get update && apt-get install --no-install-recommends -y gcc-multilib; \
-        LIB32DIR="$(gcc -m32 -print-multiarch)"; \
-        mkdir -p "/opt/add-ons/lib/${LIB32DIR}"; \
-        gcc -m32 -shared -fPIC -o /opt/add-ons/lib/${LIB32DIR}/selkies_input_interposer.so /build/input-interposer/input_interposer.c -ldl -pthread; \
-        ln -sf selkies_input_interposer.so /opt/add-ons/lib/${LIB32DIR}/selkies_joystick_interposer.so; \
+        gcc -m32 -shared -fPIC -o /opt/add-ons/usr/lib/selkies_input_interposer_32.so /build/input-interposer/input_interposer.c -ldl -pthread; \
+        ln -sf selkies_input_interposer_32.so /opt/add-ons/usr/lib/selkies_joystick_interposer_32.so; \
         make -C /build/v4l2-interposer all32; \
-        cp /build/v4l2-interposer/selkies_v4l2_interposer_x86.so "/opt/add-ons/lib/${LIB32DIR}/selkies_v4l2_interposer.so"; \
-        make -C /build/fake-udev all32; \
-        cp /build/fake-udev/libudev_x86.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so.1.0.0-fake"; \
-        ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so.1"; \
-        ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so"; \
+        cp /build/v4l2-interposer/selkies_v4l2_interposer_x86.so /opt/add-ons/usr/lib/selkies_v4l2_interposer_32.so; \
+        make -C /build/fake-udev clean; \
+        make -C /build/fake-udev CC="gcc -m32"; \
+        cp /build/fake-udev/libudev.so.1.0.0-fake /opt/add-ons/opt/lib/libudev.so.1.0.0-fake_32; \
     fi
 
 # The web client, through scripts/ci/build-web.sh as every channel builds it, for
@@ -668,7 +670,8 @@ COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/lib/ /usr/lib/
 COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/share/egl/ /usr/share/egl/
 
 # Install the joystick and webcam interposers and fake-udev (container-only)
-COPY --from=add-ons --chown=1000:1000 /opt/add-ons/lib/ /usr/lib/
+COPY --from=add-ons --chown=1000:1000 /opt/add-ons/usr/lib/ /usr/lib/
+COPY --from=add-ons --chown=1000:1000 /opt/add-ons/opt/lib/ /opt/lib/
 
 # A PulseAudio client that leaves its buffer to pipewire-pulse gets 40 ms, not 2 s
 COPY --chown=1000:1000 addons/base/pipewire-pulse.conf.d/ /etc/pipewire/pipewire-pulse.conf.d/

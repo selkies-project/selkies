@@ -73,17 +73,18 @@ for dir in applications icons/hicolor; do
 done
 
 # Configure joystick interposer and fake-udev (container-only gamepad plumbing)
-# $LIB is a dynamic-loader token; the backslash keeps the shell off it.
-export LIB_PREFIX="/usr/\$LIB"
-export SELKIES_INTERPOSER="${LIB_PREFIX}/selkies_input_interposer.so"
+# Fixed paths, the ones proot-apps' app roots carry their own builds at, so the
+# preload reaches an application inside an app root too. The 32-bit builds
+# beside them (`_32`) are left to the launchers of 32-bit applications.
+export SELKIES_INTERPOSER="/usr/lib/selkies_input_interposer.so"
 export LIBUDEV_PACKAGE="${LIBUDEV_PACKAGE:-libudev}"
 export LIBUDEV_PKG_VERSION="${LIBUDEV_PKG_VERSION:-1.0.0}"
-export FAKE_UDEV_LIB="${LIB_PREFIX}/${LIBUDEV_PACKAGE}.so.${LIBUDEV_PKG_VERSION}-fake"
+export FAKE_UDEV_LIB="/opt/lib/${LIBUDEV_PACKAGE}.so.${LIBUDEV_PKG_VERSION}-fake"
 # The webcam interposer serves the client's camera as /dev/video0 to session
 # applications, with no kernel device and no privilege. The Selkies backend
 # feeds it and must keep seeing real device nodes, so selkies-entrypoint.sh
 # drops this entry again for its own process.
-export SELKIES_WEBCAM_INTERPOSER="${LIB_PREFIX}/selkies_v4l2_interposer.so"
+export SELKIES_WEBCAM_INTERPOSER="/usr/lib/selkies_v4l2_interposer.so"
 export LD_PRELOAD="${SELKIES_INTERPOSER}:${FAKE_UDEV_LIB}:${SELKIES_WEBCAM_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 # No SDL_JOYSTICK_DEVICE: fake-udev enumerates all four slots as their evdev
 # nodes, so a /dev/input/js0 hint would show slot 0 a second time.

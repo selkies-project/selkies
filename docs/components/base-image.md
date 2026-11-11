@@ -59,7 +59,7 @@ The services under `/etc/service` are, each a `run` script and a `finish` script
 | `/tmp/runtime-ubuntu` (`XDG_RUNTIME_DIR`) | The session's sockets, the environment file, the print queue's socket, the logs the services write |
 | `selkies`, `selkies gpu-probe`, `selkies resize` | The server's executable, `/usr/local/bin/selkies` with its web client compiled in, and two of its commands: the server, the GPU report, and the resize helper for a session with `--enable-resize=false` |
 | `/usr/local/bin/selkies-privileged-files` | The setuid bracket for package layers, and the `sudo-root ... run` path for in-session package management |
-| `/usr/$LIB/selkies_input_interposer.so`, `selkies_v4l2_interposer.so`, `libudev.so.1.0.0-fake` | The preloads the session's applications get, exported as `SELKIES_INTERPOSER`, `SELKIES_WEBCAM_INTERPOSER`, and `FAKE_UDEV_LIB` |
+| `/usr/lib/selkies_input_interposer.so`, `/usr/lib/selkies_v4l2_interposer.so`, `/opt/lib/libudev.so.1.0.0-fake` | The preloads the session's applications get, exported as `SELKIES_INTERPOSER`, `SELKIES_WEBCAM_INTERPOSER`, and `FAKE_UDEV_LIB`: the paths proot-apps' app roots carry their own builds at, so the same preload reaches an application in one. The 32-bit builds sit beside them with a `_32` suffix for the launchers of 32-bit applications to preload |
 | `/home/ubuntu` | The session user's home, uid 1000; mount a volume there to keep settings, downloads, and installed applications |
 
 ## Running a checkout inside it

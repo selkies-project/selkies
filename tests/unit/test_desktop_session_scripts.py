@@ -136,9 +136,9 @@ with tempfile.TemporaryDirectory() as tmp:
         fh.write('#!/bin/sh\nprintf %s "${LD_PRELOAD-unset}"\n')
     os.chmod(os.path.join(stub_bin, "selkies"), 0o755)
     shims = {
-        "SELKIES_INTERPOSER": "/usr/$LIB/selkies_input_interposer.so",
-        "FAKE_UDEV_LIB": "/usr/$LIB/libudev.so.1.0.0-fake",
-        "SELKIES_WEBCAM_INTERPOSER": "/usr/$LIB/selkies_v4l2_interposer.so",
+        "SELKIES_INTERPOSER": "/usr/lib/selkies_input_interposer.so",
+        "FAKE_UDEV_LIB": "/opt/lib/libudev.so.1.0.0-fake",
+        "SELKIES_WEBCAM_INTERPOSER": "/usr/lib/selkies_v4l2_interposer.so",
     }
     preload = ":".join([shims["SELKIES_INTERPOSER"], "/opt/operator.so",
                         shims["FAKE_UDEV_LIB"], shims["SELKIES_WEBCAM_INTERPOSER"]])
