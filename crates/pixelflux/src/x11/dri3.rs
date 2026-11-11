@@ -36,7 +36,11 @@
 //! blinking caret stays a small change and a still screen is cleaned up around it. The XFixes
 //! cursor is composited by the server through Render, on the GPU, so the `capture_cursor` overlay
 //! costs no readback either; the server keeps its own software cursor out of a copy from the
-//! screen, so the cursor is never drawn twice.
+//! screen, so the cursor is never drawn twice. Moving that cursor damages nothing on the root,
+//! so while it is captured the pointer is read on every tick and a move over a still screen is a
+//! change of its own, where the cursor was drawn and where it now goes
+//! ([`cursor_motion_rects`]); otherwise the stream's cursor would move only with something else
+//! drawn.
 //!
 //! Everything that can be checked is checked before a frame is delivered, and the path is
 //! declined otherwise: a codec no hardware engine serves, software encoding, a server without
@@ -770,6 +774,12 @@ impl GpuCapture {
         }
     }
 
+    /// Where the pointer is on the root, or `None` where the server does not answer.
+    fn pointer(&self) -> Option<(i16, i16)> {
+        let reply = self.x.conn.query_pointer(self.x.root).ok()?.reply().ok()?;
+        Some((reply.root_x, reply.root_y))
+    }
+
     /// Blit the capture region into the next pool buffer, composite the cursor if asked, and
     /// either have the server signal the blit semaphore after it or wait for it to land. Returns
     /// the buffer to encode and whether its encode has to wait on the semaphore.
@@ -1112,6 +1122,46 @@ fn open(settings: &CaptureSettings) -> Option<GpuCapture> {
     Some(gpu)
 }
 
+/// Half the side of the box a cursor not drawn yet is taken to fill around the pointer: an image
+/// up to that size, its hotspot anywhere in it, lies within the box.
+const UNDRAWN_CURSOR_REACH: i32 = 64;
+
+/// Where on the root a cursor moving from `from` to `to` changed the frame: the rectangle it was
+/// drawn in (`drawn`, root coordinates) and the same rectangle moved with the pointer, or boxes
+/// around both positions where it was not drawn or the pointer's earlier place is unknown. The
+/// exact rectangle the grab then draws is added to the frame's change beside these.
+fn cursor_motion_rects(
+    drawn: Option<(i32, i32, i32, i32)>,
+    from: Option<(i16, i16)>,
+    to: (i16, i16),
+) -> Vec<xproto::Rectangle> {
+    let rect = |x: i32, y: i32, w: i32, h: i32| xproto::Rectangle {
+        x: x.clamp(i16::MIN.into(), i16::MAX.into()) as i16,
+        y: y.clamp(i16::MIN.into(), i16::MAX.into()) as i16,
+        width: w.clamp(0, u16::MAX.into()) as u16,
+        height: h.clamp(0, u16::MAX.into()) as u16,
+    };
+    let around = |(px, py): (i16, i16)| {
+        let span = 2 * UNDRAWN_CURSOR_REACH;
+        rect(
+            i32::from(px) - UNDRAWN_CURSOR_REACH,
+            i32::from(py) - UNDRAWN_CURSOR_REACH,
+            span,
+            span,
+        )
+    };
+    match (drawn, from) {
+        (Some((x, y, w, h)), Some((fx, fy))) => {
+            let (dx, dy) = (
+                i32::from(to.0) - i32::from(fx),
+                i32::from(to.1) - i32::from(fy),
+            );
+            vec![rect(x, y, w, h), rect(x + dx, y + dy, w, h)]
+        }
+        (_, from) => from.into_iter().chain([to]).map(around).collect(),
+    }
+}
+
 /// Run the zero-copy X11 capture until `controls.stop` is set, or report that it cannot start.
 ///
 /// `None` means DRI3 cannot serve this session and nothing was delivered, which is the caller's
@@ -1156,8 +1206,9 @@ where
     let mut sent_frames: u64 = 0;
     let mut damaged_frames: u64 = 0;
     let mut first_frame = true;
-    // Where the cursor was drawn onto the last frame sent.
+    // Where the cursor was drawn onto the last frame sent, and where the pointer was then.
     let mut last_cursor = None;
+    let mut last_pointer = None;
     let mut tid_sent = false;
 
     while !controls.stop.load(Ordering::Relaxed) {
@@ -1169,9 +1220,9 @@ where
         // The report is spent where it is read, before the blit, so a change racing the blit
         // wakes the next frame rather than being cleared along with what the blit captured.
         let (dirty, changed) = take_tick(&gpu.x.damage, &gpu.x.conn, trigger);
-        let is_dirty = dirty || first_frame;
+        let mut is_dirty = dirty || first_frame;
         // Where the root changed, None where the server cannot say or the frame is the first.
-        let changed = changed.filter(|rects| !first_frame && !rects.is_empty());
+        let mut changed = changed.filter(|rects| !first_frame && !rects.is_empty());
         first_frame = false;
         damaged_frames += is_dirty as u64;
         if controls.stop.load(Ordering::Relaxed) {
@@ -1216,6 +1267,22 @@ where
         }
 
         let want_cursor = controls.capture_cursor.load(Ordering::Relaxed);
+        let pointer = if want_cursor { gpu.pointer() } else { None };
+        if let Some(now) = pointer
+            && last_pointer != Some(now)
+            && !is_dirty
+        {
+            is_dirty = true;
+            let cursor = last_cursor.map(|r: smithay::utils::Rectangle<i32, _>| {
+                (
+                    r.loc.x + i32::from(gpu.cap_x),
+                    r.loc.y + i32::from(gpu.cap_y),
+                    r.size.w,
+                    r.size.h,
+                )
+            });
+            changed = Some(cursor_motion_rects(cursor, last_pointer, now));
+        }
         let mut recheck_geometry = controls.region_dirty.swap(false, Ordering::Acquire);
         if recheck_geometry {
             let (nx, ny, nw, nh) = *controls.region.lock().unwrap();
@@ -1346,6 +1413,9 @@ where
                 }
             };
             let dmabuf = gpu.buffers[idx].dmabuf.clone();
+            if pointer.is_some() {
+                last_pointer = pointer;
+            }
             if gpu.cursor_drawn != last_cursor {
                 let moved = gpu.cursor_drawn.into_iter().chain(last_cursor);
                 frame_changed.get_or_insert_with(Vec::new).extend(moved);
@@ -1522,6 +1592,36 @@ mod modifier_tests {
         let mut mods = vec![CCS, Y_TILED];
         prune_modifier(&mut mods, 0x00ff_ffff_ffff_ffff);
         assert!(mods.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::cursor_motion_rects;
+
+    /// A drawn cursor that moved changes where it was drawn and the same rectangle moved with
+    /// the pointer.
+    #[test]
+    fn a_moved_cursor_changes_where_it_was_and_where_it_goes() {
+        let rects = cursor_motion_rects(Some((100, 200, 24, 24)), Some((110, 210)), (150, 190));
+        let got: Vec<_> = rects
+            .iter()
+            .map(|r| (r.x, r.y, r.width, r.height))
+            .collect();
+        assert_eq!(got, vec![(100, 200, 24, 24), (140, 180, 24, 24)]);
+    }
+
+    /// A cursor not drawn yet is taken to fill a box around the pointer, so the frame that
+    /// draws it is not judged unchanged.
+    #[test]
+    fn an_undrawn_cursor_changes_a_box_around_the_pointer() {
+        let rects = cursor_motion_rects(None, None, (10, 20));
+        let got: Vec<_> = rects
+            .iter()
+            .map(|r| (r.x, r.y, r.width, r.height))
+            .collect();
+        assert_eq!(got, vec![(-54, -44, 128, 128)]);
+        assert_eq!(cursor_motion_rects(None, Some((0, 0)), (10, 20)).len(), 2);
     }
 }
 
