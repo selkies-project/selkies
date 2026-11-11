@@ -11,9 +11,12 @@
 //! this module is the semantic one. `SessionDescription::parse` lifts the lines into typed
 //! media sections: a malformed attribute is skipped rather than refusing the whole offer, as is
 //! an `a=rtpmap` for a payload type already mapped, a payload type outside 0-255 or in the
-//! forbidden 72-76 refuses it, and a section past `MAX_CODECS`, `MAX_SSRCS`, or `MAX_RTCP_FB`
-//! is refused at once, since the parse runs on the task every session shares on what a page
-//! sends over signaling; `MAX_REMOTE_SDP` bounds what is parsed at all. `to_sdp` prints a
+//! forbidden 72-76 refuses it, and a section past `MAX_CODECS`, `MAX_SSRCS`, `MAX_RTCP_FB`, or
+//! `MAX_FINGERPRINTS`, or a description past `MAX_MEDIA_SECTIONS`, is refused at once, since
+//! the parse runs on the task every session shares on what a page sends over signaling;
+//! `MAX_REMOTE_SDP` bounds what is parsed at all. A fingerprint that is not RFC 8122's for a
+//! function DTLS verifies with, and an ICE value past `MAX_ICE_VALUE`, are skipped: every
+//! section carries the session's, so these bound what a description prints back. `to_sdp` prints a
 //! description in the line order browsers expect, through
 //! `rtc_sdp::SessionDescription::marshal`.
 //!
@@ -53,6 +56,42 @@ pub const MAX_RTCP_FB: usize = 512;
 /// The longest remote description read at all, in bytes: a browser's answer is a few
 /// kilobytes.
 pub const MAX_REMOTE_SDP: usize = 256 * 1024;
+/// The most media sections a remote description may hold: each one carries the session's ICE
+/// credentials and fingerprints, so their count bounds what a description prints back.
+pub const MAX_MEDIA_SECTIONS: usize = 64;
+/// The most DTLS fingerprints a media section may carry, its session's included.
+pub const MAX_FINGERPRINTS: usize = 8;
+/// The longest ICE username fragment, password, or options value read (RFC 8839: 256
+/// characters at most); a longer one is skipped as malformed.
+pub const MAX_ICE_VALUE: usize = 256;
+
+/// An `a=fingerprint` value as RFC 8122 writes it: a hash function DTLS verifies with
+/// (`dtls::FINGERPRINT_ALGORITHMS`) and its digest, as many colon-separated hex octets as the
+/// function yields. Anything else is skipped: no certificate could match it.
+fn parse_fingerprint(value: &str) -> Option<DtlsFingerprint> {
+    let mut bits = value.split_whitespace();
+    let (algorithm, digest) = (bits.next()?, bits.next()?);
+    if bits.next().is_some() {
+        return None;
+    }
+    let octets = match algorithm.to_ascii_lowercase().as_str() {
+        "sha-256" => 32,
+        "sha-384" => 48,
+        "sha-512" => 64,
+        _ => return None,
+    };
+    let mut count = 0;
+    for octet in digest.split(':') {
+        if octet.len() != 2 || !octet.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        count += 1;
+    }
+    (count == octets).then(|| DtlsFingerprint {
+        algorithm: algorithm.to_owned(),
+        value: digest.to_owned(),
+    })
+}
 
 /// RFC 3551 payload types no codec may claim (RTCP's range).
 pub const FORBIDDEN_PAYLOAD_TYPES: std::ops::Range<u8> = 72..77;
@@ -796,18 +835,19 @@ impl SessionDescription {
             let value = attribute_value(attribute);
             match attribute.key.as_str() {
                 "fingerprint" => {
-                    let bits: Vec<&str> = value.split_whitespace().collect();
-                    if bits.len() == 2 {
-                        fingerprints.push(DtlsFingerprint {
-                            algorithm: bits[0].to_owned(),
-                            value: bits[1].to_owned(),
-                        });
+                    if let Some(fingerprint) = parse_fingerprint(value) {
+                        if fingerprints.len() >= MAX_FINGERPRINTS {
+                            return Err(SdpError::Bound(MAX_FINGERPRINTS, "fingerprints"));
+                        }
+                        fingerprints.push(fingerprint);
                     }
                 }
                 "ice-lite" => ice_lite = true,
-                "ice-options" => ice_options = Some(value.to_owned()),
-                "ice-pwd" => ice_password = Some(value.to_owned()),
-                "ice-ufrag" => ice_ufrag = Some(value.to_owned()),
+                "ice-options" if value.len() <= MAX_ICE_VALUE => {
+                    ice_options = Some(value.to_owned())
+                }
+                "ice-pwd" if value.len() <= MAX_ICE_VALUE => ice_password = Some(value.to_owned()),
+                "ice-ufrag" if value.len() <= MAX_ICE_VALUE => ice_ufrag = Some(value.to_owned()),
                 "group" => parse_group(&mut session.group, value),
                 "msid-semantic" => parse_group(&mut session.msid_semantic, value),
                 "setup" => {
@@ -817,6 +857,9 @@ impl SessionDescription {
                 }
                 _ => {}
             }
+        }
+        if parsed.media_descriptions.len() > MAX_MEDIA_SECTIONS {
+            return Err(SdpError::Bound(MAX_MEDIA_SECTIONS, "media sections"));
         }
         for rtc_media in &parsed.media_descriptions {
             let name = &rtc_media.media_name;
@@ -884,19 +927,24 @@ impl SessionDescription {
                         }
                     }
                     "fingerprint" => {
-                        let bits: Vec<&str> = value.split_whitespace().collect();
-                        if bits.len() == 2
+                        if let Some(fingerprint) = parse_fingerprint(value)
                             && let Some(dtls) = media.dtls.as_mut()
                         {
-                            dtls.fingerprints.push(DtlsFingerprint {
-                                algorithm: bits[0].to_owned(),
-                                value: bits[1].to_owned(),
-                            });
+                            if dtls.fingerprints.len() >= MAX_FINGERPRINTS {
+                                return Err(SdpError::Bound(MAX_FINGERPRINTS, "fingerprints"));
+                            }
+                            dtls.fingerprints.push(fingerprint);
                         }
                     }
-                    "ice-options" => media.ice_options = Some(value.to_owned()),
-                    "ice-pwd" => media.ice.password = Some(value.to_owned()),
-                    "ice-ufrag" => media.ice.username_fragment = Some(value.to_owned()),
+                    "ice-options" if value.len() <= MAX_ICE_VALUE => {
+                        media.ice_options = Some(value.to_owned())
+                    }
+                    "ice-pwd" if value.len() <= MAX_ICE_VALUE => {
+                        media.ice.password = Some(value.to_owned())
+                    }
+                    "ice-ufrag" if value.len() <= MAX_ICE_VALUE => {
+                        media.ice.username_fragment = Some(value.to_owned())
+                    }
                     "max-message-size" => {
                         if let Ok(size) = value.parse::<u32>() {
                             media.sctp_capabilities = Some(SctpCapabilities {

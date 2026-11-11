@@ -27,8 +27,8 @@ use selkies_rtc::sdp::codecs::{
     webcam_preferences,
 };
 use selkies_rtc::sdp::{
-    Direction, DtlsFingerprint, IceCandidate, IceParameters, LocalTransport, SdpType, Session,
-    SessionDescription,
+    Direction, DtlsFingerprint, IceCandidate, IceParameters, LocalTransport, MAX_REMOTE_SDP,
+    SdpType, Session, SessionDescription,
 };
 
 /// The video ladder an offer lists, in the server's order.
@@ -84,15 +84,26 @@ fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
     if let Ok(parsed) = SessionDescription::parse(&text) {
         let printed = parsed.to_sdp();
-        let again = SessionDescription::parse(&printed)
-            .unwrap_or_else(|e| panic!("what was printed does not parse: {e}\n{printed}"));
-        let sections = |d: &SessionDescription| {
-            d.media
-                .iter()
-                .map(|m| (m.kind.clone(), m.mid.clone()))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(sections(&again), sections(&parsed), "{printed}");
+        // Every section prints its session's ICE values and fingerprints again, which the
+        // parse bounds: what is printed stays within twice what is read at all, and parses
+        // back wherever it is within that.
+        assert!(
+            printed.len() <= 2 * MAX_REMOTE_SDP,
+            "{} characters read printed {}",
+            text.len(),
+            printed.len()
+        );
+        if printed.len() <= MAX_REMOTE_SDP {
+            let again = SessionDescription::parse(&printed)
+                .unwrap_or_else(|e| panic!("what was printed does not parse: {e}\n{printed}"));
+            let sections = |d: &SessionDescription| {
+                d.media
+                    .iter()
+                    .map(|m| (m.kind.clone(), m.mid.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(sections(&again), sections(&parsed), "{printed}");
+        }
     }
     static OFFERED: OnceLock<Session> = OnceLock::new();
     let mut session = OFFERED.get_or_init(offered).clone();
