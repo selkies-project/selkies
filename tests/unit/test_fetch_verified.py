@@ -96,7 +96,7 @@ def release_responses(body: bytes, digest: str) -> dict:
 
 def file_responses(body: bytes, served: bytes) -> dict:
     commit = "c" * 40
-    blob = hashlib.sha1(b"blob %d\0" % len(body) + body).hexdigest()
+    blob = hashlib.sha1(b"blob %d\0" % len(body) + body, usedforsecurity=False).hexdigest()
     api = "https://api.github.com/repos/o/r"
     return {f"{api}/commits/main": json.dumps({"sha": commit}).encode(),
             f"{api}/contents/dir/f.sh?ref={commit}": json.dumps({"sha": blob}).encode(),
