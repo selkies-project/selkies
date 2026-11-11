@@ -118,7 +118,7 @@ import {
   digestedPayload
 } from './lib/clipboard-sync.ts';
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.ts';
-import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale } from './lib/stream-density.ts';
+import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale, capStreamSize, STREAM_SIDE_CAP } from './lib/stream-density.ts';
 import {
   createFileUploader
 } from './lib/file-upload.ts';
@@ -3722,10 +3722,8 @@ function getCurrentSettingsPayload(): Record<string, any> {
         const rect = videoContainer ? videoContainer.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
         settingsToSend['manual_resolution'] = false;
         
-        let initW = alignResolution(rect.width * dpr);
-        let initH = alignResolution(rect.height * dpr);
-        if (initW > 4080) initW = 4080;
-        if (initH > 4080) initH = 4080;
+        const [initW, initH] = capStreamSize(alignResolution(rect.width * dpr), alignResolution(rect.height * dpr))
+          .map(alignResolution);
 
         settingsToSend['initialClientWidth'] = initW;
         settingsToSend['initialClientHeight'] = initH;
@@ -3744,8 +3742,8 @@ function getCurrentSettingsPayload(): Record<string, any> {
 }
 
 /**
- * Sends `r,WxH,displayId` with the aligned, DPR-scaled, and 4080-capped stream
- * resolution; blocked in shared mode, where the viewer follows the controller.
+ * Sends `r,WxH,displayId` with the aligned, DPR-scaled stream resolution,
+ * scaled down on both sides together where one exceeds the 4080 cap; blocked in shared mode, where the viewer follows the controller.
  * @param width CSS pixels, or the exact size in manual mode.
  * @param height
  */
@@ -3778,9 +3776,10 @@ function sendResolutionToServer(width: number, height: number): any {
 
   // A capped request no longer equals the CSS size times the density, so the
   // realized size counts as a divergence for it.
-  const capped = realWidth > 4080 || realHeight > 4080;
-  if (realWidth > 4080) realWidth = 4080;
-  if (realHeight > 4080) realHeight = 4080;
+  const capped = realWidth > STREAM_SIDE_CAP || realHeight > STREAM_SIDE_CAP;
+  if (capped) {
+    [realWidth, realHeight] = capStreamSize(realWidth, realHeight).map(alignResolution);
+  }
   lastRequestedStreamRes = (window.manual_resolution || capped) ? null : [realWidth, realHeight, width, height];
 
   const resString = `${realWidth}x${realHeight}`;
@@ -4922,15 +4921,8 @@ const initializeInput = (): any => {
     const dpr = streamDensity();
     appliedStreamDensity = dpr;
     if (inputInstance && inputInstance.setStreamDensity) inputInstance.setStreamDensity(dpr);
-    const MAX_DIM = 4080;
-    
-    if (evenWidth * dpr > MAX_DIM) {
-        evenWidth = Math.floor(MAX_DIM / dpr);
-        evenWidth = alignResolution(evenWidth);
-    }
-    if (evenHeight * dpr > MAX_DIM) {
-        evenHeight = Math.floor(MAX_DIM / dpr);
-        evenHeight = alignResolution(evenHeight);
+    if (evenWidth * dpr > STREAM_SIDE_CAP || evenHeight * dpr > STREAM_SIDE_CAP) {
+        [evenWidth, evenHeight] = capStreamSize(evenWidth, evenHeight, STREAM_SIDE_CAP / dpr).map(alignResolution);
     }
 
     if (evenWidth <= 0 || evenHeight <= 0) {

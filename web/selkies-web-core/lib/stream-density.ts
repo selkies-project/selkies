@@ -95,6 +95,24 @@ export function resolutionScalingDpi(width: number, height: number): number {
   return snapDpi(96 * rows / DPI_UNITY_ROWS);
 }
 
+/** The largest stream width or height a page asks for: NVENC's H.264 limit of 4096, aligned to 16. */
+export const STREAM_SIDE_CAP = 4080;
+
+/**
+ * `width` x `height` scaled by one factor so that neither side exceeds `cap`,
+ * floored to whole pixels; a size within the cap comes back as it is. Both
+ * sides scale together, so the stream keeps the window's aspect ratio.
+ * @param width
+ * @param height
+ * @param cap The largest side, in the same units as the size.
+ * @returns The width and the height.
+ */
+export function capStreamSize(width: number, height: number, cap: number = STREAM_SIDE_CAP): [number, number] {
+  const scale = Math.min(1, cap / width, cap / height);
+  if (!(scale < 1)) return [width, height];
+  return [Math.floor(width * scale), Math.floor(height * scale)];
+}
+
 /** The stream box `publishedScale` measures. */
 export interface PublishedBox {
   stream: number[] | null;
