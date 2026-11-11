@@ -323,13 +323,20 @@ fn primary_first(layouts: &Layouts) -> Vec<(&String, &Layout)> {
 /// invisible to GTK apps.
 ///
 /// `mode`, prepared on this connection, is applied first in the same grab, and an error
-/// applying it leaves the monitors as they were (`replace_selkies_monitors_at`).
+/// applying it leaves the monitors as they were (`replace_selkies_monitors_at`). Its output
+/// stands in for `first_connected_output`, whose `GetScreenResources` has the server probe
+/// its outputs: a driver whose probe moves the configuration timestamp would have the
+/// prepared `SetCrtcConfig` refused as stale, sending every layout change to the two-grab
+/// fallback.
 fn replace_selkies_monitors_sync(
     x: &mut X11,
     layouts: &Layouts,
     mode: Option<&ModeSet>,
 ) -> Result<()> {
-    let out_id = x.first_connected_output()?;
+    let out_id = match mode {
+        Some(set) => Some(set.output()),
+        None => x.first_connected_output()?,
+    };
     let live = selkies_monitors(x)?;
     let names = monitor_names(layouts, &live);
     let desired: BTreeMap<String, Rect> = layouts
