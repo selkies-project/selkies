@@ -210,23 +210,15 @@ pub fn draw_launchers(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
     let area = icon_area(d);
     for target in drop_targets(d) {
         let target = cell_rect_in(area, target);
-        canvas.fill_rounded(target, 8.0, rgba(0xff, 0xff, 0xff, 0x18));
-        canvas.stroke_rounded(target, 8.0, 3.0, ui::accent_alpha(0xc0));
-    }
-    // Where the backend shows no ghost under the pointer, the dragged icons follow it here.
-    let follow = match (d.desktop_drag_at, d.desktop_press) {
-        (Some(at), Some(press)) if !d.drag_icon && !d.desktop_dragged.is_empty() => {
-            Some(((at.0 - press.start.0) as i32, (at.1 - press.start.1) as i32))
+        if canvas.clip_intersects(target.inflate(2)) {
+            canvas.fill_rounded(target, 8.0, rgba(0xff, 0xff, 0xff, 0x18));
+            canvas.stroke_rounded(target, 8.0, 3.0, ui::accent_alpha(0xc0));
         }
-        _ => None,
-    };
-    for (index, &home) in rects.iter().enumerate() {
-        let cell = match follow {
-            Some((dx, dy)) if d.desktop_dragged.contains(&index) => {
-                Rect::new(home.x + dx, home.y + dy, home.w, home.h)
-            }
-            _ => home,
-        };
+    }
+    for (index, cell) in drawn_cells(d).into_iter().enumerate() {
+        if !canvas.clip_intersects(cell) {
+            continue;
+        }
         let selected = d.desktop_selection.contains(&index);
         let hovered = d.hover == Hover::DesktopIcon(index);
         let name = d.desktop_items[index].name.clone();
@@ -265,6 +257,90 @@ pub fn draw_launchers(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
         canvas.fill_rect(rect, ui::accent_alpha(0x30));
         canvas.stroke_rounded(rect, 0.0, 1.0, ui::accent_alpha(0xc0));
     }
+}
+
+/// Where each icon is drawn: on its cell, or where the pointer takes it for the desktop's own
+/// dragged icons on a backend that shows no drag icon of its own.
+fn drawn_cells(d: &Desktop) -> Vec<Rect> {
+    let follow = match (d.desktop_drag_at, d.desktop_press) {
+        (Some(at), Some(press)) if !d.drag_icon && !d.desktop_dragged.is_empty() => {
+            Some(((at.0 - press.start.0) as i32, (at.1 - press.start.1) as i32))
+        }
+        _ => None,
+    };
+    cells(d)
+        .into_iter()
+        .enumerate()
+        .map(|(index, home)| match follow {
+            Some((dx, dy)) if d.desktop_dragged.contains(&index) => {
+                Rect::new(home.x + dx, home.y + dy, home.w, home.h)
+            }
+            _ => home,
+        })
+        .collect()
+}
+
+/// What the launcher layer shows, as far as telling one frame from the next: each icon's
+/// rectangle where it is drawn and whether it is selected and hovered, and the marks drawn
+/// over the icons, the cells a drag would drop on and the selection box.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LauncherScene {
+    icons: Vec<(Rect, bool, bool)>,
+    marks: Vec<Rect>,
+}
+
+/// The launcher layer's scene on a background surface, empty off the primary one.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `id` - The background surface.
+pub fn scene(d: &Desktop, id: u32) -> LauncherScene {
+    if !d.background(id).is_some_and(|b| b.primary) {
+        return LauncherScene::default();
+    }
+    let area = icon_area(d);
+    let icons = drawn_cells(d)
+        .into_iter()
+        .enumerate()
+        .map(|(index, cell)| {
+            (
+                cell,
+                d.desktop_selection.contains(&index),
+                d.hover == Hover::DesktopIcon(index),
+            )
+        })
+        .collect();
+    let mut marks: Vec<Rect> = drop_targets(d)
+        .into_iter()
+        .map(|c| cell_rect_in(area, c))
+        .collect();
+    marks.extend(d.desktop_band.as_ref().map(|band| band.rect()));
+    LauncherScene { icons, marks }
+}
+
+/// The rectangle a frame of the launcher layer draws again going from one scene to the next:
+/// around every icon that moved or changed its selection or hover, where it was and where it
+/// is, and every mark of either scene where the marks changed, grown by what a stroke reaches
+/// past its edge; `None` where nothing changed. A selection box dragged across the desktop
+/// redraws the box and the icons it reaches rather than the whole layer.
+pub fn damage(before: &LauncherScene, after: &LauncherScene) -> Option<Rect> {
+    let mut out: Option<Rect> = None;
+    let mut add = |rect: Rect| out = Some(out.map_or(rect, |o| o.union(&rect)));
+    let longest = before.icons.len().max(after.icons.len());
+    for index in 0..longest {
+        let (old, new) = (before.icons.get(index), after.icons.get(index));
+        if old != new {
+            old.into_iter().chain(new).for_each(|(rect, ..)| add(*rect));
+        }
+    }
+    if before.marks != after.marks {
+        before
+            .marks
+            .iter()
+            .chain(&after.marks)
+            .for_each(|rect| add(*rect));
+    }
+    out.map(|rect| rect.inflate(4))
 }
 
 /// The cells a drag over the desktop marks: a folder icon it would drop into, else the cells
@@ -498,9 +574,11 @@ mod tests {
         d.desktop_items = vec![item("one")];
         d.desktop_layout.clear();
         configure(&mut d, 7, true);
-        let (wallpaper, launchers) = d
+        let frames = d
             .render_background_layers(7)
             .expect("a configured background renders");
+        let wallpaper = frames.wallpaper.expect("the first frame draws the wallpaper");
+        let launchers = frames.launchers.expect("the first frame draws the launchers");
         assert!(wallpaper.input.is_empty(), "the wallpaper takes no input");
         assert_eq!(
             launchers.input,
@@ -534,8 +612,9 @@ mod tests {
         configure(&mut d, 1, true);
         configure(&mut d, 2, false);
         {
-            let (_, launchers) = d
+            let launchers = d
                 .render_background_layers(2)
+                .and_then(|frames| frames.launchers)
                 .expect("a configured background renders");
             assert!(launchers.input.is_empty());
             assert!(launchers.pixmap.pixels().iter().all(|p| p.alpha() == 0));
@@ -544,5 +623,53 @@ mod tests {
             d.render_background_layers(2).is_none(),
             "nothing changed, nothing to render"
         );
+    }
+
+    /// A selection box dragged across the desktop presents the part of the launcher layer the
+    /// box and the icons it reaches cover, and leaves the wallpaper as it was.
+    #[test]
+    fn a_selection_box_redraws_only_what_it_covers() {
+        let mut d = Desktop::load(false);
+        d.desktop_items = vec![item("one"), item("two")];
+        d.desktop_layout.clear();
+        d.handle(Event::Configured {
+            surface: SurfaceId::Background(7),
+            width: 1280,
+            height: 720,
+            scale: 1,
+        });
+        d.handle(Event::BackgroundLayout {
+            surface: 7,
+            monitors: vec![Rect::new(0, 0, 1280, 720)],
+            primary: true,
+        });
+        assert!(d.render_background_layers(7).is_some());
+        let press = |d: &mut Desktop, x: f64, y: f64, pressed: bool| {
+            d.handle(Event::PointerButton {
+                surface: SurfaceId::Background(7),
+                x,
+                y,
+                button: crate::event::Button::Left,
+                pressed,
+                time: 1000,
+                modifiers: crate::event::Modifiers::default(),
+            });
+        };
+        press(&mut d, 600.0, 400.0, true);
+        d.handle(Event::PointerMotion {
+            surface: SurfaceId::Background(7),
+            x: 640.0,
+            y: 440.0,
+        });
+        let frames = d.render_background_layers(7).expect("the box redraws");
+        assert!(frames.wallpaper.is_none(), "the wallpaper stays as it was");
+        let damage = frames.launchers.expect("the launchers redraw").damage;
+        assert_eq!(damage.len(), 1);
+        assert!(
+            damage[0].w < 200 && damage[0].h < 200,
+            "{:?} is the box, not the layer",
+            damage[0]
+        );
+        assert!(damage[0].contains(620.0, 420.0));
     }
 }

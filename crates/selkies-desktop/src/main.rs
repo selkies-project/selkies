@@ -206,9 +206,13 @@ fn run() -> i32 {
         let layered = backend.layered_desktop();
         for id in desktop.background_ids() {
             if layered {
-                if let Some((wallpaper, launchers)) = desktop.render_background_layers(id) {
-                    backend.present(SurfaceId::Background(id), &wallpaper);
-                    backend.present_launchers(id, &launchers);
+                if let Some(frames) = desktop.render_background_layers(id) {
+                    if let Some(wallpaper) = frames.wallpaper.as_ref() {
+                        backend.present(SurfaceId::Background(id), wallpaper);
+                    }
+                    if let Some(launchers) = frames.launchers.as_ref() {
+                        backend.present_launchers(id, launchers);
+                    }
                 }
             } else if let Some(frame) = desktop.render_background(id) {
                 backend.present(SurfaceId::Background(id), &frame);

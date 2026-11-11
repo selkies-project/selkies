@@ -98,6 +98,13 @@ pub struct DesktopPress {
     pub narrow: bool,
 }
 
+/// The frames a layered background presents: the wallpaper where it was drawn again, and the
+/// launchers where they changed, each `None` where its layer stays as it was.
+pub struct BackgroundFrames<'a> {
+    pub wallpaper: Option<Frame<'a>>,
+    pub launchers: Option<Frame<'a>>,
+}
+
 /// A box dragged across the desktop from an empty spot, selecting the icons it touches.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DesktopBand {
@@ -164,6 +171,9 @@ pub struct BackgroundSurface {
     pix: Option<Pixmap>,
     launchers_pix: Option<Pixmap>,
     dirty: bool,
+    /// What the launchers showed in the last frame, which the next draws only the changes of;
+    /// `None` where the whole surface, the wallpaper with it, is drawn again.
+    scene: Option<background::LauncherScene>,
     /// The wallpaper layer rendered for the geometry and monitors, drawn
     /// under the icons.
     pub wallpaper_cache: Option<(WallpaperKey, Pixmap)>,
@@ -1391,6 +1401,7 @@ impl Desktop {
     pub fn repaint_wallpapers(&mut self) {
         for background in &mut self.backgrounds {
             background.wallpaper_cache = None;
+            background.scene = None;
             background.dirty = true;
         }
     }
@@ -2173,6 +2184,7 @@ impl Desktop {
                     for background in &mut self.backgrounds {
                         if background.id != surface && background.primary {
                             background.primary = false;
+                            background.scene = None;
                             background.dirty = true;
                         }
                     }
@@ -2182,6 +2194,7 @@ impl Desktop {
                 {
                     background.monitors = monitors;
                     background.primary = primary;
+                    background.scene = None;
                     background.dirty = true;
                 }
             }
@@ -2410,6 +2423,7 @@ impl Desktop {
                         pix: None,
                         launchers_pix: None,
                         dirty: true,
+                        scene: None,
                         wallpaper_cache: None,
                     });
                     return;
@@ -2428,6 +2442,7 @@ impl Desktop {
                 }
                 background.pix = None;
                 background.launchers_pix = None;
+                background.scene = None;
                 background.dirty = true;
             }
             SurfaceId::Window(id) if self.is_dialog(id) => {
@@ -3376,25 +3391,32 @@ impl Desktop {
             (geometry.width * geometry.scale) as u32,
             (geometry.height * geometry.scale) as u32,
         );
-        let mut pix = match self.backgrounds[index].pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => pix,
-            _ => Pixmap::new(w, h)?,
-        };
-        {
-            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
-            background::draw(self, id, &mut canvas);
-        }
         let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        let (mut pix, fresh) = match self.backgrounds[index].pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
+            _ => (Pixmap::new(w, h)?, true),
+        };
+        let scene = background::scene(self, id);
+        let damage = match self.backgrounds[index].scene.as_ref() {
+            Some(before) if !fresh => background::damage(before, &scene).map(|r| r.intersect(&whole)),
+            _ => Some(whole),
+        };
+        if let Some(rect) = damage {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            canvas.clipped(rect, |canvas| background::draw(self, id, canvas));
+        }
         let input = if self.backgrounds[index].primary {
             vec![whole]
         } else {
             Vec::new()
         };
         self.backgrounds[index].pix = Some(pix);
+        self.backgrounds[index].scene = Some(scene);
+        let damage = damage?;
         Some(Frame {
             pixmap: self.backgrounds[index].pix.as_ref()?,
             scale: geometry.scale,
-            damage: vec![whole],
+            damage: vec![damage],
             input,
             visible: vec![whole],
             grab: false,
@@ -3412,7 +3434,7 @@ impl Desktop {
     /// # Returns
     /// The wallpaper frame, which takes no input, and the launchers frame,
     /// whose input is the launcher cells; `None` when nothing changed.
-    pub fn render_background_layers(&mut self, id: u32) -> Option<(Frame<'_>, Frame<'_>)> {
+    pub fn render_background_layers(&mut self, id: u32) -> Option<BackgroundFrames<'_>> {
         let index = self.backgrounds.iter().position(|b| b.id == id)?;
         let geometry = self.backgrounds[index].geometry;
         if !geometry.configured || !self.backgrounds[index].dirty {
@@ -3423,24 +3445,32 @@ impl Desktop {
             (geometry.width * geometry.scale) as u32,
             (geometry.height * geometry.scale) as u32,
         );
-        let mut pix = match self.backgrounds[index].pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => pix,
-            _ => Pixmap::new(w, h)?,
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        let (mut pix, pix_fresh) = match self.backgrounds[index].pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
+            _ => (Pixmap::new(w, h)?, true),
         };
-        let mut launchers = match self.backgrounds[index].launchers_pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => pix,
-            _ => Pixmap::new(w, h)?,
+        let (mut launchers, launchers_fresh) = match self.backgrounds[index].launchers_pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
+            _ => (Pixmap::new(w, h)?, true),
         };
-        launchers.fill(tiny_skia::Color::TRANSPARENT);
-        {
+        let full = pix_fresh || launchers_fresh || self.backgrounds[index].scene.is_none();
+        let scene = background::scene(self, id);
+        let damage = match self.backgrounds[index].scene.as_ref() {
+            Some(before) if !full => background::damage(before, &scene).map(|r| r.intersect(&whole)),
+            _ => Some(whole),
+        };
+        if full {
             let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
             background::draw_wallpaper_layer(self, id, &mut canvas);
         }
-        {
+        if let Some(rect) = damage {
             let mut canvas = Canvas::new(launchers.as_mut(), geometry.scale);
-            background::draw_launchers(self, id, &mut canvas);
+            canvas.clipped(rect, |canvas| {
+                canvas.clear(rect);
+                background::draw_launchers(self, id, canvas);
+            });
         }
-        let whole = Rect::new(0, 0, geometry.width, geometry.height);
         let (input, cells) = if self.backgrounds[index].primary {
             // A dragged icon, the cells a drag would land on, and a selection box are drawn
             // wherever the pointer takes them.
@@ -3455,27 +3485,33 @@ impl Desktop {
         };
         self.backgrounds[index].pix = Some(pix);
         self.backgrounds[index].launchers_pix = Some(launchers);
+        self.backgrounds[index].scene = Some(scene);
         let surface = &self.backgrounds[index];
-        Some((
-            Frame {
-                pixmap: surface.pix.as_ref()?,
-                scale: geometry.scale,
-                damage: vec![whole],
-                input: Vec::new(),
-                visible: vec![whole],
-                grab: false,
-                bar: None,
-            },
-            Frame {
-                pixmap: surface.launchers_pix.as_ref()?,
-                scale: geometry.scale,
-                damage: vec![whole],
-                input,
-                visible: cells,
-                grab: false,
-                bar: None,
-            },
-        ))
+        Some(BackgroundFrames {
+            wallpaper: full
+                .then_some(surface.pix.as_ref())
+                .flatten()
+                .map(|pixmap| Frame {
+                    pixmap,
+                    scale: geometry.scale,
+                    damage: vec![whole],
+                    input: Vec::new(),
+                    visible: vec![whole],
+                    grab: false,
+                    bar: None,
+                }),
+            launchers: damage
+                .zip(surface.launchers_pix.as_ref())
+                .map(|(rect, pixmap)| Frame {
+                    pixmap,
+                    scale: geometry.scale,
+                    damage: vec![rect],
+                    input,
+                    visible: cells,
+                    grab: false,
+                    bar: None,
+                }),
+        })
     }
 
     /// Renders one of the shell's windows when it changed: the settings

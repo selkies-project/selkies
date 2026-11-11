@@ -297,6 +297,13 @@ impl<'a> Canvas<'a> {
         out
     }
 
+    /// Whether a logical rectangle reaches into the current clip, so a caller can skip drawing
+    /// what the clip would discard: a path drawn under a clip smaller than the pixmap pays for
+    /// a mask of the whole pixmap.
+    pub fn clip_intersects(&self, rect: Rect) -> bool {
+        self.physical_area(rect).is_some()
+    }
+
     /// Whether the current clip leaves nothing to draw.
     fn clip_empty(&self) -> bool {
         self.clip.is_none()
