@@ -1274,6 +1274,7 @@ impl WaylandBackend {
         if surface.buffers.len() >= 3 {
             return Some(0);
         }
+        let whole = Rect::new(0, 0, surface.width, surface.height);
         let size = width as usize * height as usize * 4;
         let fd = create_memfd(size)?;
         let map = unsafe { memmap2::MmapMut::map_mut(&fd) }.ok()?;
@@ -1296,7 +1297,9 @@ impl WaylandBackend {
             width,
             height,
             busy,
-            missed: Vec::new(),
+            // A new buffer holds nothing of the surface, so its first present copies all of it
+            // rather than the frame's damage alone.
+            missed: vec![whole],
         });
         Some(surface.buffers.len() - 1)
     }
