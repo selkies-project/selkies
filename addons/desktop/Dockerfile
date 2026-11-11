@@ -139,11 +139,14 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
 # apps panel: portable per-user applications in a proot, installed and removed
 # through the selkies-proot wrapper without touching the image. The release
 # tarball is staged here and linked into each user's ~/.local/bin, because
-# proot-apps runs its tools from there by absolute path. proot traces every
-# process it starts, so a second copy carries CAP_SYS_PTRACE for the hosts that
-# restrict ptrace (set below as real root); it is kept apart because a file
-# capability the container's bounding set does not hold stops that binary from
-# execing at all, and the wrapper picks whichever of the two runs.
+# proot-apps runs its tools from there by absolute path. Its proot is proot-next
+# (https://proot.selkies.io/), which needs neither ptrace nor a capability: where
+# Yama refuses ptrace it runs in a restricted mode. A second copy carries
+# CAP_SYS_PTRACE (set below as real root), with which a container granted that
+# capability runs it in its ptrace mode, the one with the fewest known gaps; it
+# is kept apart because a file capability the container's bounding set does not
+# hold stops that binary from execing at all, and the wrapper picks the copy
+# that runs.
 # The release is checked against its digest, looked up with the build's token
 # where one is given (mounted for uid 1000, which these layers run as).
 RUN --mount=type=secret,id=github_token,uid=1000 mkdir -pm755 /opt/proot-apps && \
@@ -273,8 +276,8 @@ USER 0
 # file owned by uid 1000, which the kernel refuses to honor. The terminals' utempter
 # needs its setgid to record sessions. `restore` covers everything released
 # above, which is the base's own set rather than these. A file capability set
-# under fakeroot is lost the same way, so the apps panel's ptrace-capable proot
-# gets its CAP_SYS_PTRACE here.
+# under fakeroot is lost the same way, so the apps panel's second proot gets its
+# CAP_SYS_PTRACE here.
 SHELL ["/bin/sh", "-c"]
 RUN chown -R root:root /opt/proot-apps-cap && setcap cap_sys_ptrace+ep /opt/proot-apps-cap/proot && \
     selkies-privileged-files restore && \

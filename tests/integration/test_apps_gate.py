@@ -2,8 +2,8 @@
 """The apps panel is published only where its runner can work.
 
 Its buttons are `selkies-proot` calls over the command channel, so a session
-whose runner is missing or refuses the environment (proot cannot ptrace
-there) can offer nothing that succeeds; the server publishes
+whose runner is missing or refuses the environment (proot cannot start an
+app there) can offer nothing that succeeds; the server publishes
 ui_sidebar_show_apps as that effective availability, which is what both
 dashboards gate the panel on. A disabled command channel is permission, not
 availability: the panel still publishes and the client explains why its
@@ -30,7 +30,7 @@ def runner_stub(path: str, check_exit: int) -> None:
     with open(path, "w") as fh:
         fh.write('#!/bin/sh\n'
                  'if [ "$1" = check ]; then\n'
-                 '  [ %d -eq 0 ] || echo "selkies-proot: proot cannot ptrace here" >&2\n'
+                 '  [ %d -eq 0 ] || echo "selkies-proot: proot cannot start an app here" >&2\n'
                  '  exit %d\n'
                  'fi\n'
                  'exit 0\n' % (check_exit, check_exit))

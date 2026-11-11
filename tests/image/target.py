@@ -150,8 +150,6 @@ class KubePod(Target):
                 "env": [{"name": k, "value": v} for k, v in self.env.items()],
                 "ports": [{"containerPort": 8080}],
                 "resources": {"requests": requests, "limits": limits},
-                # The apps panel's runner (proot) needs ptrace, as the images' docs say.
-                "securityContext": {"capabilities": {"add": ["SYS_PTRACE"]}},
                 "volumeMounts": [{"name": "dshm", "mountPath": "/dev/shm"}],
             }],
             "volumes": [{"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "2Gi"}}],
@@ -272,8 +270,7 @@ class DockerContainer(Target):
 
     def up(self, timeout: float = 1800) -> None:
         self.docker("rm", "-f", self.name)
-        args = ["run", "-d", "--name", self.name, "--shm-size", "2g", "--cap-add", "SYS_PTRACE",
-                "-p", f"{self.port}:8080"]
+        args = ["run", "-d", "--name", self.name, "--shm-size", "2g", "-p", f"{self.port}:8080"]
         if self.gpus:
             args += ["--gpus", self.gpus]
         for k, v in self.env.items():

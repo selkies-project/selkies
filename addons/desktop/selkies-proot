@@ -31,8 +31,9 @@ if [ -d "${staging}" ]; then
     for tool in "${staging}"/*; do
         ln -sfn "${tool}" "${bin}/$(basename "${tool}")"
     done
-    # proot traces every process it starts, so on a host that restricts ptrace
-    # only the copy carrying CAP_SYS_PTRACE can run anything. That copy cannot
+    # proot (proot-next) runs without ptrace or capabilities, in its restricted
+    # mode where Yama refuses ptrace; the copy carrying CAP_SYS_PTRACE runs in
+    # its ptrace mode there, which has the fewest known gaps. That copy cannot
     # even exec where the container's bounding set lacks the capability, so
     # which one works is settled by running it.
     if [ -x "${capable}" ] && "${capable}" -0 /bin/true > /dev/null 2>&1; then
@@ -44,18 +45,23 @@ if [ -d "${staging}" ]; then
     fi
 fi
 
-# proot traces every process it starts, so a host that denies ptrace leaves
-# nothing for the panel to install or launch.
+# A proot that cannot start a guest here leaves nothing for the panel to
+# install or launch.
 proot_runs() {
     [ -x "${bin}/proot" ] && "${bin}/proot" -0 /bin/true > /dev/null 2>&1
 }
 
+# proot's own reason comes first: it names what this host refused.
 explain_denial() {
     scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo unknown)"
     bounding="$(grep CapBnd /proc/self/status 2>/dev/null | cut -f2)"
-    echo "selkies-proot: proot cannot ptrace here, so no app can install or run." >&2
+    echo "selkies-proot: proot cannot start an app here, so no app can install or run." >&2
+    if [ -x "${bin}/proot" ]; then
+        "${bin}/proot" -0 /bin/true 2>&1 > /dev/null | head -n 3 | sed 's/^/  /' >&2
+    else
+        echo "  no proot at ${bin}/proot" >&2
+    fi
     echo "  kernel.yama.ptrace_scope=${scope}, container CapBnd=${bounding}" >&2
-    echo "  Grant the container CAP_SYS_PTRACE, or lower the sysctl on the host." >&2
 }
 
 # A file manager will not launch a desktop entry it has not been told to trust,

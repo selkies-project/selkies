@@ -8,9 +8,8 @@
 //! session has installed.
 //!
 //! Availability is the wrapper plus an environment it can work in; where either is missing,
-//! dashboards are told to drop the panel rather than offer buttons that can never succeed. proot
-//! emulates its chroot by tracing every process it starts, so a host that denies ptrace (Yama
-//! restricted, no `CAP_SYS_PTRACE`) leaves the panel with nothing that can work, and only the
+//! dashboards are told to drop the panel rather than offer buttons that can never succeed. A
+//! proot that cannot start a guest here leaves the panel with nothing that can work, and only the
 //! wrapper knows how to decide that for the runner it ships, so it is asked (`check`) rather than
 //! reimplemented. The answer is assumed good until the probe has spoken, so a working session
 //! never flickers the panel.
