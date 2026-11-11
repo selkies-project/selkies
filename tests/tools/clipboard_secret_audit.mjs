@@ -111,11 +111,11 @@ let failed = 0;
 function check(label, ok, detail = '') {
     if (!ok) failed++;
     // A detail shows the page's state, which may hold the secret; the line never does.
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-secret-page] ${label}  ${String(detail).replaceAll(SECRET, '<the secret>')}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-secret-page] ${label}  ${String(detail).replaceAll(HIDDEN_TEXT, '<the secret>')}`);
 }
 const settle = () => new Promise((resolve) => realSetTimeout(resolve, 30));
 const b64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
-const SECRET = 'correct horse battery staple';
+const HIDDEN_TEXT = 'correct horse battery staple';
 
 /** A page: the clipboard state, the writer, and the receive path of one core. */
 function page({ isChromium = true, writeLocal = true } = {}) {
@@ -149,13 +149,13 @@ async function reset() {
 {
     await reset();
     const { incoming, previews } = page();
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     const last = previews[previews.length - 1];
     check('a secret reaches the dashboards as the flag alone',
           last.secret === true && last.text === '' && last.totalLength === 0
-          && !JSON.stringify(previews).includes(SECRET), JSON.stringify(last));
-    check('and still lands on the local clipboard', local.text === SECRET, local.text);
+          && !JSON.stringify(previews).includes(HIDDEN_TEXT), JSON.stringify(last));
+    check('and still lands on the local clipboard', local.text === HIDDEN_TEXT, local.text);
 }
 
 // A transport that marks the payload in a message of its own marks only the next one.
@@ -163,7 +163,7 @@ async function reset() {
     await reset();
     const { incoming, previews } = page();
     incoming.markSecret();
-    incoming.single('text/plain', b64(SECRET), false);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false);
     await settle();
     incoming.single('text/plain', b64('ordinary'), false);
     await settle();
@@ -182,7 +182,7 @@ async function reset() {
 {
     await reset();
     const { incoming } = page();
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     fireDeadlines();
     await settle();
@@ -190,9 +190,9 @@ async function reset() {
           local.text === '' && calls.includes('writeText:'), JSON.stringify(calls));
 
     calls.length = 0;
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
-    check('the session copying it again afterwards puts it back', local.text === SECRET,
+    check('the session copying it again afterwards puts it back', local.text === HIDDEN_TEXT,
           JSON.stringify(calls));
 
     local.text = 'a copy the user made since';
@@ -208,7 +208,7 @@ async function reset() {
 {
     await reset();
     const { incoming, previews } = page();
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     incoming.single('text/plain', '', false, true);
     await settle();
@@ -222,7 +222,7 @@ async function reset() {
 {
     await reset();
     const { incoming, options } = page();
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     calls.length = 0;
     incoming.single('text/plain', b64('the next copy'), false);
@@ -232,7 +232,7 @@ async function reset() {
     check('a later copy written locally replaces the secret, with nothing emptied',
           local.text === 'the next copy' && !calls.includes('writeText:'), JSON.stringify(calls));
 
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     options.writeLocal = false;
     calls.length = 0;
@@ -246,13 +246,13 @@ async function reset() {
 {
     await reset();
     const { incoming } = page();
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     const first = longTimers[0];
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     check('copying the same secret again restarts its term',
-          first.cleared && longTimers.length === 2 && !longTimers[1].cleared && local.text === SECRET,
+          first.cleared && longTimers.length === 2 && !longTimers[1].cleared && local.text === HIDDEN_TEXT,
           `${longTimers.length} timers`);
 }
 
@@ -261,18 +261,18 @@ async function reset() {
     await reset();
     const { incoming } = page();
     engine.permission = 'prompt';
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     calls.length = 0;
     fireDeadlines();
     await settle();
     check('without clipboard-read granted nothing is read, so no prompt is raised',
-          !calls.includes('readText') && local.text === SECRET, JSON.stringify(calls));
+          !calls.includes('readText') && local.text === HIDDEN_TEXT, JSON.stringify(calls));
 
     engine.permission = 'granted';
     incoming.single('text/plain', b64('reset'), false);
     await settle();
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     engine.focused = false;
     calls.length = 0;
@@ -283,13 +283,13 @@ async function reset() {
     dispatch('focus');
     await settle();
     check('an unfocused page takes it back when focused again',
-          whileAway === SECRET && local.text === '', JSON.stringify(calls));
+          whileAway === HIDDEN_TEXT && local.text === '', JSON.stringify(calls));
 }
 
 {
     await reset();
     const { incoming, previews } = page({ isChromium: false });
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     incoming.single('text/plain', '', false, true);
     await settle();
@@ -305,12 +305,12 @@ async function reset() {
     await reset();
     const { incoming, options } = page();
     options.writeLocal = false;
-    incoming.single('text/plain', b64(SECRET), false, true);
+    incoming.single('text/plain', b64(HIDDEN_TEXT), false, true);
     await settle();
     const before = local.text;
     const copied = await incoming.copySecret();
     check('the copy button writes the masked secret, which is then watched like any other',
-          before === 'what the user had' && copied === true && local.text === SECRET
+          before === 'what the user had' && copied === true && local.text === HIDDEN_TEXT
           && longTimers.length === 1, JSON.stringify(calls));
     incoming.single('text/plain', b64('ordinary'), false);
     await settle();
