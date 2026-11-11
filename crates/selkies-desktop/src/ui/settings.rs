@@ -3202,9 +3202,6 @@ fn draw_wallpaper_card(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Contr
             }
         }
     }
-    if let Some(clip) = control.clip {
-        canvas.clip(clip);
-    }
     canvas.stroke_rounded(image_rect, 3.0, 1.0, ui::popup_border());
     let name_rect = Rect::new(
         rect.x + PRESET_PAD,
@@ -3250,8 +3247,8 @@ fn draw_wallpaper_card(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Contr
 /// * `frame` - The card's thumbnail area, which the picture covers.
 /// * `part` - The part of it drawn.
 fn draw_thumbnail(d: &mut Desktop, canvas: &mut Canvas<'_>, path: &Path, size: u32, frame: Rect, part: Rect) {
-    canvas.clip(part);
-    match d.files.image_thumbnail(path, size) {
+    let thumbnail = d.files.image_thumbnail(path, size);
+    canvas.clipped(part, |canvas| match thumbnail {
         Some(image) => {
             let scale = canvas.scale().max(1) as f32;
             let native = (image.width() as f32 / scale, image.height() as f32 / scale);
@@ -3263,8 +3260,7 @@ fn draw_thumbnail(d: &mut Desktop, canvas: &mut Canvas<'_>, path: &Path, size: u
             );
         }
         None => canvas.fill_rect(part, ui::text_alpha(0x10)),
-    }
-    canvas.reset_clip();
+    });
 }
 
 /// Draws a shortcut's chord that a click captures anew: its caps flush
