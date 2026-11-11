@@ -271,9 +271,10 @@ def run_cargo_metadata(extra: Sequence[str], target: Optional[str]) -> dict:
     Inside a larger workspace (the Selkies repository), cargo unifies the
     features every member asks of a dependency, so the non-GPL graph would
     carry the x264 and x265 features the Selkies server enables. The graph is
-    then resolved in a copy that is its own workspace, as the wheel builds it:
-    the manifest with an empty ``[workspace]`` table and the crate's own
-    Cargo.lock, beside links to the rest of the crate.
+    then resolved in a copy of the crate outside it, as the wheel builds it
+    (scripts/ci/crate-licenses.sh does the same with `git archive`): the
+    manifest and the crate's own Cargo.lock, beside links to the rest of the
+    crate.
     """
     args = ["metadata", "--format-version", "1", "--locked"] + list(extra)
     if target:
@@ -286,13 +287,10 @@ def run_cargo_metadata(extra: Sequence[str], target: Optional[str]) -> dict:
         for entry in os.listdir(REPO):
             if entry not in ("Cargo.toml", "Cargo.lock", "target"):
                 os.symlink(os.path.join(REPO, entry), os.path.join(tmp, entry))
-        with open(MANIFEST, "r", encoding="utf-8") as handle:
-            manifest = handle.read()
-        with open(os.path.join(tmp, "Cargo.toml"), "w", encoding="utf-8") as handle:
-            handle.write(manifest.rstrip("\n") + "\n\n[workspace]\n")
-        with open(os.path.join(REPO, "Cargo.lock"), "rb") as src, \
-                open(os.path.join(tmp, "Cargo.lock"), "wb") as dst:
-            dst.write(src.read())
+        for name in ("Cargo.toml", "Cargo.lock"):
+            with open(os.path.join(REPO, name), "rb") as src, \
+                    open(os.path.join(tmp, name), "wb") as dst:
+                dst.write(src.read())
         meta = json.loads(cargo(args + ["--manifest-path", os.path.join(tmp, "Cargo.toml")]))
     if os.path.realpath(meta["workspace_root"]) != os.path.realpath(tmp):
         sys.exit("cargo resolved %s in place of the crate's own workspace" % meta["workspace_root"])
