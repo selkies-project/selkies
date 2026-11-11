@@ -1372,8 +1372,9 @@ impl Engine {
     /// Lays the application's windows out as the session switches to it alone, on each output
     /// its own: the [`APPLICATION_TILES`] used last fill the work area between them (one
     /// maximized, two side by side, three as a half and two quarters, four as quarters), and
-    /// any more keep their size and stack above the tiles, the one used last on top. An output
-    /// too narrow for halves maximizes each, and a fullscreen window stays as it is.
+    /// any more stack above the tiles on a slanted line of equal windows ([`cascade`]), the
+    /// one used last on top, so none hides behind the grid. An output too narrow for halves
+    /// maximizes each, and a fullscreen window stays as it is.
     ///
     /// # Arguments
     /// * `fill` - The windows, bottom of the stack first.
@@ -1403,7 +1404,14 @@ impl Engine {
                     self.set_tile(id, Some(*zone));
                 }
             }
-            for &id in stacked.iter().rev() {
+            let area = self.workarea(output);
+            for (&id, frame) in stacked.iter().rev().zip(cascade(area, stacked.len())) {
+                self.set_tile(id, None);
+                self.set_maximized(id, false);
+                let from = self.windows[&id].rect;
+                let extents = self.extents_of(id);
+                self.set_rect(id, grab::client_of(frame, extents));
+                self.glide(id, from);
                 self.raise(id);
             }
         }
@@ -4422,6 +4430,32 @@ impl Engine {
 /// How many windows the switch to the application alone tiles on an output.
 const APPLICATION_TILES: usize = 4;
 
+/// The frames of windows stacked on a slanted line across a work area: each half the area
+/// across and down, the first at its top-left corner and the last at its bottom-right, the
+/// rest evenly between, so every title bar shows; one alone is centered.
+fn cascade(area: Rect, count: usize) -> Vec<Rect> {
+    let (w, h) = (area.w / 2, area.h / 2);
+    if count == 1 {
+        return vec![Rect::new(
+            area.x + (area.w - w) / 2,
+            area.y + (area.h - h) / 2,
+            w,
+            h,
+        )];
+    }
+    let steps = count.saturating_sub(1).max(1) as i32;
+    (0..count as i32)
+        .map(|i| {
+            Rect::new(
+                area.x + (area.w - w) * i / steps,
+                area.y + (area.h - h) * i / steps,
+                w,
+                h,
+            )
+        })
+        .collect()
+}
+
 /// The zones [`Engine::tile_application`] gives a number of windows, the one used last first.
 fn application_zones(count: usize) -> &'static [Zone] {
     match count {
@@ -4818,19 +4852,19 @@ mod tests {
     }
 
     /// Switching to the application alone tiles the four windows used last, the latest at the
-    /// top left, and stacks a fifth above them at its own size.
+    /// top left, and stacks the rest above them on a slanted line of equal windows.
     #[test]
     fn switching_to_the_application_alone_tiles_four_windows_and_stacks_the_rest() {
         let (mut engine, _) = session_engine(true);
-        for id in 1..=5 {
+        for id in 0..=5 {
             open(&mut engine, id, 400, 300);
         }
-        let fifth_size = {
-            let rect = engine.win(1).unwrap().rect;
-            (rect.w, rect.h)
-        };
         engine.run_action(&Action::SetDesktop(Some(false)), None, (0.0, 0.0));
         let zones: Vec<Option<Zone>> = (2..=5).map(|id| engine.win(id).unwrap().tile).collect();
+        assert_eq!(
+            cascade(Rect::new(0, 0, 100, 100), 3)[1],
+            Rect::new(25, 25, 50, 50)
+        );
         assert_eq!(
             zones,
             [
@@ -4840,10 +4874,21 @@ mod tests {
                 Some(Zone::TopLeft)
             ]
         );
-        let oldest = engine.win(1).unwrap();
-        assert!(oldest.tile.is_none() && !oldest.maximized);
-        assert_eq!((oldest.rect.w, oldest.rect.h), fifth_size);
-        assert_eq!(engine.stack.last(), Some(&1), "the rest stack above the tiles");
+        let (older, newer) = (engine.win(0).unwrap().rect, engine.win(1).unwrap().rect);
+        assert!(engine.win(1).unwrap().tile.is_none() && !engine.win(1).unwrap().maximized);
+        assert_eq!(
+            (older.w, older.h),
+            (newer.w, newer.h),
+            "the stacked windows are one size"
+        );
+        assert!(
+            newer.x > older.x && newer.y > older.y,
+            "they step down a slanted line"
+        );
+        assert_eq!(engine.stack.last(), Some(&1), "the one used last is on top");
+        let stacked = engine.stack.iter().position(|w| *w == 0).unwrap();
+        let tiled = engine.stack.iter().position(|w| *w == 5).unwrap();
+        assert!(stacked > tiled, "the rest stack above the tiles");
     }
 
     /// Two windows go side by side.

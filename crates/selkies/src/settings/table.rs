@@ -1619,7 +1619,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "wm_maximize",
         kind: Kind::Bool,
         default: "True",
-        help: "Maximize the application's top-level windows as they open while the session is the application alone, and as the session switches to it tile the four used last and stack any more above them; an rc.xml application rule that sets maximized wins.",
+        help: "Maximize the application's top-level windows as they open while the session is the application alone, and as the session switches to it tile the four used last and stack any more above them on a slanted line of equal windows; an rc.xml application rule that sets maximized wins.",
         env_vars: &[],
         allowed: &[],
         value_range: None,
