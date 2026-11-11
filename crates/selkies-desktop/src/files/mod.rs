@@ -32,6 +32,10 @@ pub const STATUS_LINGER: Duration = Duration::from_secs(4);
 pub const DEFAULT_WIDTH: i32 = 860;
 /// Default window height.
 pub const DEFAULT_HEIGHT: i32 = 560;
+/// The number that stands for the desktop where a window's is expected: the source of a drag
+/// of its icons, and what its own copies, moves, and deletions report to. No window has it,
+/// since window numbers start at one, so what those fail on goes to the log.
+pub const DESKTOP: u32 = 0;
 
 /// One file or folder in a listing.
 #[derive(Clone, Debug)]
@@ -210,6 +214,10 @@ pub enum MenuAction {
     Sort(SortKey),
     /// Open the folder in a terminal.
     Terminal,
+    /// Carry the drop waiting in the window out: a move where set, else a copy.
+    Drop(bool),
+    /// Leave the drop waiting in the window undone.
+    CancelDrop,
 }
 
 /// One row of the context menu.
@@ -230,6 +238,18 @@ pub struct ContextMenu {
     pub y: i32,
     /// Its rows.
     pub rows: Vec<MenuRow>,
+}
+
+/// Files dropped on a new folder, waiting for the user to choose between copying and moving
+/// them there.
+#[derive(Clone, Debug)]
+pub struct PendingDrop {
+    /// The window the drag came from, or [`DESKTOP`] for the desktop's icons.
+    pub source: u32,
+    /// The files.
+    pub paths: Vec<PathBuf>,
+    /// The folder they were dropped on.
+    pub dest: PathBuf,
 }
 
 /// A deletion waiting for confirmation.
@@ -307,6 +327,8 @@ pub struct FilesWindow {
     pub menu: Option<ContextMenu>,
     /// The deletion awaiting confirmation.
     pub confirm: Option<Confirm>,
+    /// The drop whose menu is open, waiting for Copy here or Move here.
+    pub pending_drop: Option<PendingDrop>,
     /// The picker this window is, if it is one.
     pub picker: Option<Picker>,
     /// The path being typed into the location field.
@@ -517,6 +539,7 @@ impl Manager {
             rename: None,
             menu: None,
             confirm: None,
+            pending_drop: None,
             picker,
             path_edit: None,
             status: None,
@@ -714,7 +737,13 @@ impl Manager {
                     }
                 }
                 Message::Done { id, errors } => {
-                    if let Some(window_id) = self.operations.remove(&id)
+                    let window_id = self.operations.remove(&id);
+                    if window_id == Some(DESKTOP) {
+                        for error in &errors {
+                            eprintln!("selkies-desktop: {error}");
+                        }
+                    }
+                    if let Some(window_id) = window_id
                         && let Some(window) = self.window_mut(window_id)
                     {
                         window.progress = None;

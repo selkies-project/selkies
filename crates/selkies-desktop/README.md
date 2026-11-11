@@ -77,6 +77,19 @@ people reach for in a multi-application container:
   between them moves to the other edge, hides, adds a desktop or reloads
   the applications.  A right click on the desktop still opens the window
   manager's own menu.
+* **Desktop icons** for the Desktop folder, managed as the file manager
+  manages a folder: a click selects one, Control adds or removes one, Shift
+  adds a run of them in the grid's order, and a right click on one opens its
+  menu (Open, Open with, Cut, Copy, Paste into folder, Rename, and Delete)
+  for the icons selected.  Rename is grayed out on a launcher, whose name is
+  its application's, and Rename and Delete ask in a small window.  A box
+  dragged from an empty spot selects the icons it touches; the selected icons
+  drag together, keeping their arrangement on the grid, and the same drag
+  carries their files into a file manager window or another program's window
+  (a browser's upload), over the Wayland data device or XDND on X11.  A drop
+  that moves files to a folder other than their own, between file manager
+  windows, between them and the desktop, or onto a folder icon, asks with a
+  menu whether to copy or move them.
 * **Window frames** that follow the theme: a window manager theme is
   generated from the colors and the frame settings under `~/.themes`, where
   labwc and openbox both look before the system themes, and the running

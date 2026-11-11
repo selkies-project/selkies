@@ -161,6 +161,7 @@ fn run() -> i32 {
     };
     let debug = std::env::var_os("SELKIES_DESKTOP_DEBUG").is_some();
     desktop.opaque_output = backend.name() == "x11";
+    desktop.drag_icon = backend.shows_drag_icon();
     desktop.backend = backend.name().to_string();
     if debug {
         eprintln!(

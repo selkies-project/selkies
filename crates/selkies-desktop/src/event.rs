@@ -135,14 +135,9 @@ pub enum Event {
     DragMotion { surface: SurfaceId, x: f64, y: f64 },
     /// The drag left the surface it was in.
     DragLeave { surface: SurfaceId },
-    /// The drag was dropped on one of the desktop's surfaces; `copy` when the
-    /// user asked for a copy rather than a move.
-    DragDrop {
-        surface: SurfaceId,
-        x: f64,
-        y: f64,
-        copy: bool,
-    },
+    /// The drag was dropped on one of the desktop's surfaces, which asks
+    /// whether to copy or move what it carries.
+    DragDrop { surface: SurfaceId, x: f64, y: f64 },
     /// The drag ended, dropped elsewhere or cancelled.
     DragEnd,
     /// A new toplevel window appeared.
@@ -268,10 +263,11 @@ pub enum Request {
     GrabKeyboard { id: u32, grab: bool },
     /// Retitle one of the shell's windows.
     SetTitle { id: u32, title: String },
-    /// Start dragging files from a window, with a ghost image of the selection
-    /// at the output scale the window renders at.
+    /// Start dragging files from a surface, a file manager window or the
+    /// desktop's icons, with a ghost image of the selection at the output scale
+    /// the surface renders at.
     StartDrag {
-        window: u32,
+        surface: SurfaceId,
         uris: Vec<String>,
         icon: Option<Box<Pixmap>>,
         scale: i32,

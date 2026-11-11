@@ -164,9 +164,92 @@ pub fn place(items: &[DesktopItem], saved: &HashMap<String, Cell>, columns: i32,
         .collect()
 }
 
+/// Moves icons on the grid by a number of columns and rows, as a drag of them drops: the others
+/// keep their cells, and each moved icon takes the cell it lands on where that is inside the
+/// grid and free, else the first free cell in column order from there, wrapping to the grid's
+/// start. One icon dropped on another's cell trades places with it, as a single icon always
+/// has; of several, none displaces an icon that stays.
+///
+/// # Arguments
+/// * `cells` - Every item's cell, changed in place.
+/// * `moved` - The items dragged.
+/// * `by` - The columns and rows the drag moved them.
+/// * `columns` - How many columns fit on the screen.
+/// * `rows` - How many cells a column holds.
+pub fn move_cells(cells: &mut [Cell], moved: &[usize], by: (i32, i32), columns: i32, rows: i32) {
+    let (columns, rows) = (columns.max(1), rows.max(1));
+    let inside = |(c, r): Cell| (0..columns).contains(&c) && (0..rows).contains(&r);
+    let landing = |index: usize| (cells[index].0 + by.0, cells[index].1 + by.1);
+    if let [index] = moved {
+        let target = landing(*index);
+        if inside(target) {
+            if let Some(other) = cells.iter().position(|c| *c == target) {
+                cells[other] = cells[*index];
+            }
+            cells[*index] = target;
+        }
+        return;
+    }
+    let mut taken: HashSet<Cell> = cells
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !moved.contains(index))
+        .map(|(_, cell)| *cell)
+        .collect();
+    let mut order: Vec<usize> = moved.iter().copied().filter(|&i| i < cells.len()).collect();
+    order.sort_by_key(|&i| {
+        let (c, r) = landing(i);
+        (c, r)
+    });
+    let total = columns * rows;
+    let mut landed: Vec<(usize, Cell)> = Vec::new();
+    for index in order {
+        let (c, r) = landing(index);
+        let start = if inside((c, r)) {
+            c * rows + r
+        } else {
+            (c.clamp(0, columns - 1)) * rows + r.clamp(0, rows - 1)
+        };
+        let free = (0..total)
+            .map(|step| (start + step) % total)
+            .map(|n| (n / rows, n % rows))
+            .find(|cell| !taken.contains(cell));
+        let cell = free.unwrap_or(cells[index]);
+        taken.insert(cell);
+        landed.push((index, cell));
+    }
+    for (index, cell) in landed {
+        cells[index] = cell;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Icons dragged together keep their arrangement where the cells are free, one landing on
+    /// an icon that stays takes the next free cell, and a single icon trades places.
+    #[test]
+    fn moved_icons_keep_their_arrangement_around_the_icons_that_stay() {
+        let mut cells = vec![(0, 0), (0, 1), (0, 2), (2, 1)];
+        move_cells(&mut cells, &[0, 1], (2, 0), 4, 3);
+        assert_eq!(
+            cells,
+            vec![(2, 0), (2, 2), (0, 2), (2, 1)],
+            "the second lands on an icon"
+        );
+        let mut cells = vec![(0, 0), (0, 1)];
+        move_cells(&mut cells, &[0], (0, 1), 4, 3);
+        assert_eq!(cells, vec![(0, 1), (0, 0)], "one icon trades places");
+        let mut cells = vec![(0, 0), (0, 1)];
+        move_cells(&mut cells, &[0, 1], (9, 0), 4, 3);
+        assert!(
+            cells
+                .iter()
+                .all(|&(c, r)| (0..4).contains(&c) && (0..3).contains(&r))
+        );
+        assert_ne!(cells[0], cells[1]);
+    }
 
     fn item(name: &str, is_dir: bool) -> DesktopItem {
         DesktopItem {

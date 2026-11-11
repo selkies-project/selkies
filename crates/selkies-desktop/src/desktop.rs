@@ -4,7 +4,7 @@
 //! The backends feed [`Event`]s in and take [`Request`]s out; everything
 //! between is display server agnostic.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ use crate::notify::Notification;
 use crate::render::{Canvas, Fonts};
 use crate::ui::notifications::{self, CardPart, CenterPart, NotificationState};
 use crate::ui::settings::Page;
-use crate::ui::{self, background, launcher, menu, panel, popups, settings};
+use crate::ui::{self, background, desktop_menu, launcher, menu, panel, popups, settings};
 use crate::xkb::Key;
 
 /// Height of the strip that brings an auto-hidden bar back.
@@ -93,7 +93,43 @@ pub struct DesktopPress {
     pub at: (f64, f64),
     /// Whether the pointer moved far enough for a drag.
     pub dragging: bool,
+    /// Whether the icon was already selected among others, so a release without a drag
+    /// narrows the selection to it.
+    pub narrow: bool,
 }
+
+/// A box dragged across the desktop from an empty spot, selecting the icons it touches.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesktopBand {
+    /// Where the press was.
+    pub start: (f64, f64),
+    /// Where the pointer is.
+    pub at: (f64, f64),
+    /// The selection kept beneath the box: the one there was where Control or Shift was held,
+    /// else none.
+    pub base: BTreeSet<usize>,
+}
+
+impl DesktopBand {
+    /// The box's rectangle on the primary background.
+    pub fn rect(&self) -> Rect {
+        let (x0, y0) = (self.start.0.min(self.at.0), self.start.1.min(self.at.1));
+        let (x1, y1) = (self.start.0.max(self.at.0), self.start.1.max(self.at.1));
+        Rect::new(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32)
+    }
+}
+
+/// Files dropped on the desktop that land on a cell: the names still to arrive in the Desktop
+/// folder, the cell the next of them takes, and when they were dropped.
+#[derive(Clone, Debug)]
+struct Landing {
+    names: Vec<String>,
+    cell: crate::desktop_folder::Cell,
+    since: Instant,
+}
+
+/// How long after a drop its files are still placed where it landed as they arrive.
+const LANDING_WINDOW: Duration = Duration::from_secs(30);
 
 /// How far, in logical pixels, a held icon moves before it is dragged.
 const DESKTOP_DRAG_THRESHOLD: f64 = 6.0;
@@ -277,6 +313,8 @@ pub enum Popup {
     /// The bar's right-click menu, by the bar X it opened at and the item
     /// it was opened on.
     PanelMenu(i32, PanelTarget),
+    /// The desktop icons' right-click menu, by the point of the panel surface it opened at.
+    DesktopMenu(i32, i32),
 }
 
 /// What the pointer rests on, for hover highlights and tooltips.
@@ -312,8 +350,10 @@ pub enum Hover {
     Control(usize),
     /// An icon on the desktop, by its position in the Desktop folder's items.
     DesktopIcon(usize),
-    /// A button of the New Folder dialog.
+    /// A button of the desktop's dialog.
     Dialog(ui::dialog::Part),
+    /// An item of the desktop icons' right-click menu.
+    DesktopMenuItem(usize),
     /// A quick launch button, by position.
     Launcher(usize),
     /// A pill of the pager, by desktop index.
@@ -394,7 +434,7 @@ pub struct Desktop {
     pub launcher: launcher::LauncherState,
     /// The settings window and its state.
     pub settings: settings::SettingsState,
-    /// The New Folder dialog.
+    /// The desktop's dialog: a new folder's name, an item's new name, or a deletion.
     pub dialog: ui::dialog::DialogState,
     /// The Desktop folder's items, in listing order.
     pub desktop_items: Vec<crate::desktop_folder::DesktopItem>,
@@ -405,8 +445,33 @@ pub struct Desktop {
     pub desktop_press: Option<DesktopPress>,
     /// Where the pointer last was on the desktop, for the cell a new folder takes.
     pub desktop_pointer: (f64, f64),
-    /// Selected desktop icon.
-    pub desktop_selection: Option<usize>,
+    /// Selected desktop icons, by position in the Desktop folder's items.
+    pub desktop_selection: BTreeSet<usize>,
+    /// The icon a Shift click's range runs from: the last one clicked without Shift.
+    desktop_anchor: Option<usize>,
+    /// The entries of the desktop icons' right-click menu while it is open.
+    pub desktop_menu: Vec<desktop_menu::Entry>,
+    /// The box being dragged across the desktop to select icons.
+    pub desktop_band: Option<DesktopBand>,
+    /// The icons a drag from the desktop carries, while it lasts.
+    pub desktop_dragged: Vec<usize>,
+    /// Where a drag of files is over the primary background, while it is.
+    pub desktop_drag_at: Option<(f64, f64)>,
+    /// A drop on the desktop waiting for Copy here or Move here, with the cell it landed on.
+    pub desktop_drop: Option<(files::PendingDrop, Option<crate::desktop_folder::Cell>)>,
+    /// Files dropped on a cell, placed there as they arrive.
+    desktop_landing: Option<Landing>,
+    /// Whether the backend shows a drag's ghost image under the pointer; where it does not,
+    /// the desktop draws its dragged icons following the pointer while they are over it.
+    pub drag_icon: bool,
+    /// The file the icon cells are published in for the window manager, which only a
+    /// session's desktop writes.
+    icons_path: Option<std::path::PathBuf>,
+    /// Whether the icons' cells are kept in the layout file, as a session's desktop keeps
+    /// them; a desktop built for a test keeps them in memory only.
+    keeps_layout: bool,
+    /// The icon cells last published for the window manager.
+    published_icons: Option<Vec<Rect>>,
     last_click: Option<(u32, usize)>,
     /// Windows minimized by the show desktop button, to restore on the next press.
     pub shown_desktop: Vec<u64>,
@@ -575,7 +640,18 @@ impl Desktop {
             desktop_layout: HashMap::new(),
             desktop_press: None,
             desktop_pointer: (-1.0, -1.0),
-            desktop_selection: None,
+            desktop_selection: BTreeSet::new(),
+            desktop_anchor: None,
+            desktop_menu: Vec::new(),
+            desktop_band: None,
+            desktop_dragged: Vec::new(),
+            desktop_drag_at: None,
+            desktop_drop: None,
+            desktop_landing: None,
+            drag_icon: false,
+            icons_path: session.then(selkies_draw::desktop_icons::path).flatten(),
+            keeps_layout: session,
+            published_icons: None,
             last_click: None,
             shown_desktop: Vec::new(),
             volume: None,
@@ -1092,7 +1168,7 @@ impl Desktop {
         self.settings.id == Some(id)
     }
 
-    /// Whether a window number is the New Folder dialog's.
+    /// Whether a window number is the desktop dialog's.
     fn is_dialog(&self, id: u32) -> bool {
         self.dialog.id == Some(id)
     }
@@ -1551,17 +1627,292 @@ impl Desktop {
     /// and held for the old list.
     pub fn load_desktop_items(&mut self) {
         let dir = entries::desktop_dir();
-        let selected = self
+        let file_of = |items: &[crate::desktop_folder::DesktopItem], index: usize| {
+            items.get(index).map(|item| item.file.clone())
+        };
+        let selected: Vec<String> = self
             .desktop_selection
-            .and_then(|index| self.desktop_items.get(index))
-            .map(|item| item.file.clone());
+            .iter()
+            .filter_map(|&index| file_of(&self.desktop_items, index))
+            .collect();
+        let anchor = self
+            .desktop_anchor
+            .and_then(|index| file_of(&self.desktop_items, index));
         self.desktop_items = crate::desktop_folder::load(&dir, &self.apps.desktop, &self.files.mime);
         self.desktop_layout = crate::desktop_folder::read_layout();
         self.desktop_icons.clear();
         self.desktop_press = None;
-        self.desktop_selection =
-            selected.and_then(|file| self.desktop_items.iter().position(|item| item.file == file));
+        let index_of = |items: &[crate::desktop_folder::DesktopItem], file: &str| {
+            items.iter().position(|item| item.file == file)
+        };
+        self.desktop_selection = selected
+            .iter()
+            .filter_map(|file| index_of(&self.desktop_items, file))
+            .collect();
+        self.desktop_anchor = anchor.and_then(|file| index_of(&self.desktop_items, &file));
+        self.place_landing();
         self.repaint_wallpapers();
+    }
+
+    /// Puts the files a drop landed on a cell there as they arrive in the Desktop folder, the
+    /// first on the cell and the rest on the free cells after it in column order, each once;
+    /// what has not arrived within [`LANDING_WINDOW`] takes the first free cell as any new
+    /// file does.
+    fn place_landing(&mut self) {
+        let Some(mut landing) = self.desktop_landing.take() else {
+            return;
+        };
+        if landing.since.elapsed() > LANDING_WINDOW {
+            return;
+        }
+        let (columns, rows) = background::grid_size(self);
+        let total = (columns * rows).max(1);
+        let mut cells = background::item_cells(self);
+        let mut next = landing.cell.0 * rows + landing.cell.1;
+        let mut placed = false;
+        let mut waiting = Vec::new();
+        for name in landing.names {
+            let Some(index) = self.desktop_items.iter().position(|item| item.file == name) else {
+                waiting.push(name);
+                continue;
+            };
+            let free = (0..total).map(|step| (next + step) % total).find(|&n| {
+                let cell = (n / rows, n % rows);
+                cells.iter().enumerate().all(|(i, c)| i == index || *c != cell)
+            });
+            if let Some(n) = free {
+                cells[index] = (n / rows, n % rows);
+                next = n + 1;
+                placed = true;
+            }
+        }
+        if placed {
+            self.save_desktop_layout(&cells);
+        }
+        if !waiting.is_empty() {
+            landing.names = waiting;
+            landing.cell = (next / rows, next % rows);
+            self.desktop_landing = Some(landing);
+        }
+    }
+
+    /// Starts dragging the selected icons, or the one pressed where it is not among them: a
+    /// drag of their files any window can take, which the desktop takes back to move them on
+    /// its grid.
+    fn start_desktop_drag(&mut self, id: u32, press: DesktopPress) {
+        let dragged: Vec<usize> = if self.desktop_selection.contains(&press.index) {
+            self.desktop_selection.iter().copied().collect()
+        } else {
+            vec![press.index]
+        };
+        let paths: Vec<std::path::PathBuf> = dragged
+            .iter()
+            .filter_map(|&i| self.desktop_items.get(i).map(|item| item.item.path.clone()))
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let scale = self.background(id).map_or(1, |b| b.geometry.scale).max(1);
+        let icon = if self.drag_icon {
+            let picture = self.desktop_icon(press.index);
+            ui::files::drag_ghost(self, picture.as_deref(), paths.len(), scale)
+        } else {
+            None
+        };
+        self.desktop_dragged = dragged;
+        self.desktop_drag_at = Some(press.at);
+        let uris = paths.iter().map(|p| files::file_uri(p)).collect();
+        self.files.drag = Some((files::DESKTOP, paths));
+        self.requests.push(Request::StartDrag {
+            surface: SurfaceId::Background(id),
+            uris,
+            icon: icon.map(Box::new),
+            scale,
+        });
+        self.redraw_backgrounds();
+    }
+
+    /// Selects the icons a box dragged across the desktop touches, over the selection it kept.
+    fn select_in_band(&mut self) {
+        let Some(band) = self.desktop_band.as_ref() else {
+            return;
+        };
+        let rect = band.rect();
+        let mut selection = band.base.clone();
+        for (index, cell) in background::cells(self).iter().enumerate() {
+            if !cell.intersect(&rect).is_empty() {
+                selection.insert(index);
+            }
+        }
+        self.desktop_selection = selection;
+    }
+
+    /// Takes files dropped on the desktop: onto a folder icon, or from a window onto the
+    /// desktop, a menu asks whether to copy or move them there; the desktop's own icons
+    /// dropped on it move to the cells the drop takes them to.
+    fn drop_on_desktop(&mut self, id: u32, x: f64, y: f64) {
+        let Some((source, paths)) = self.files.drag.clone() else {
+            return;
+        };
+        let folder = background::hit(self, id, x, y)
+            .and_then(|i| self.desktop_items.get(i))
+            .filter(|item| item.item.is_dir && !paths.contains(&item.item.path))
+            .map(|item| item.item.path.clone());
+        if let Some(dest) = folder {
+            self.desktop_drop = Some((files::PendingDrop { source, paths, dest }, None));
+            desktop_menu::open_drop(self, x, y);
+            return;
+        }
+        let cell = background::cell_at(self, x, y);
+        if source == files::DESKTOP {
+            let (Some(cell), Some(press)) = (cell, self.desktop_press) else {
+                return;
+            };
+            let mut cells = background::item_cells(self);
+            let Some(&from) = cells.get(press.index) else {
+                return;
+            };
+            let (columns, rows) = background::grid_size(self);
+            let dragged = self.desktop_dragged.clone();
+            crate::desktop_folder::move_cells(
+                &mut cells,
+                &dragged,
+                (cell.0 - from.0, cell.1 - from.1),
+                columns,
+                rows,
+            );
+            self.save_desktop_layout(&cells);
+            self.desktop_selection = dragged.into_iter().collect();
+            self.desktop_anchor = Some(press.index);
+            return;
+        }
+        let dest = entries::desktop_dir();
+        if !dest.is_dir() || paths.iter().all(|p| p.parent() == Some(dest.as_path())) {
+            return;
+        }
+        self.desktop_drop = Some((files::PendingDrop { source, paths, dest }, cell));
+        desktop_menu::open_drop(self, x, y);
+    }
+
+    /// Carries out the drop waiting on the desktop, copying or moving its files; those copied
+    /// or moved into the Desktop folder land on the cell they were dropped on.
+    pub fn finish_desktop_drop(&mut self, moving: bool) {
+        let Some((drop, cell)) = self.desktop_drop.take() else {
+            return;
+        };
+        if let Some(cell) = cell {
+            self.desktop_landing = Some(Landing {
+                names: drop.paths.iter().map(|p| files::ops::file_name(p)).collect(),
+                cell,
+                since: Instant::now(),
+            });
+        }
+        ui::files::drop_into(self, drop.source, drop.paths, drop.dest, !moving);
+    }
+
+    /// Selects one desktop icon alone, the start of a later Shift click's range.
+    fn select_desktop_only(&mut self, index: usize) {
+        self.desktop_selection = BTreeSet::from([index]);
+        self.desktop_anchor = Some(index);
+    }
+
+    /// The selected desktop items, in listing order.
+    pub fn selected_desktop_items(&self) -> Vec<crate::desktop_folder::DesktopItem> {
+        self.desktop_selection
+            .iter()
+            .filter_map(|&index| self.desktop_items.get(index).cloned())
+            .collect()
+    }
+
+    /// The grid cell a desktop item stands on, by its file name.
+    pub fn desktop_cell_of(&self, file: &str) -> Option<crate::desktop_folder::Cell> {
+        let index = self.desktop_items.iter().position(|item| item.file == file)?;
+        background::item_cells(self).get(index).copied()
+    }
+
+    /// Opens every selected desktop item as a double click opens one, except that the files
+    /// of a type go to its application together, the way the file manager opens a selection.
+    pub fn open_desktop_selection(&mut self) {
+        let mut by_type: Vec<(String, Vec<std::path::PathBuf>)> = Vec::new();
+        for index in self.desktop_selection.clone() {
+            let Some(item) = self.desktop_items.get(index).cloned() else {
+                continue;
+            };
+            if item.launcher.is_some() || item.item.is_dir {
+                self.open_desktop_item(index);
+                continue;
+            }
+            match by_type.iter_mut().find(|(mime, _)| *mime == item.item.mime) {
+                Some((_, paths)) => paths.push(item.item.path),
+                None => by_type.push((item.item.mime, vec![item.item.path])),
+            }
+        }
+        for (mime, paths) in by_type {
+            if let Err(message) = ui::files::launch_default(self, &paths, &mime) {
+                eprintln!("selkies-desktop: {message}");
+            }
+        }
+    }
+
+    /// Pastes the clipboard the file manager's windows share into a folder; a cut is a move
+    /// and empties the clipboard.
+    pub fn paste_into(&mut self, dir: std::path::PathBuf) {
+        let Some(clipboard) = self.files.clipboard.clone() else {
+            return;
+        };
+        if !dir.is_dir() {
+            return;
+        }
+        self.files
+            .transfer(files::DESKTOP, clipboard.paths, dir, clipboard.cut);
+        if clipboard.cut {
+            self.files.clipboard = None;
+            for window in &mut self.files.windows {
+                window.dirty = true;
+            }
+        }
+    }
+
+    /// Deletes desktop items in the background, as the file manager does, once the dialog
+    /// asked; the Desktop folder's watch takes their icons away when they are gone.
+    pub fn delete_desktop_items(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.desktop_selection.clear();
+        self.desktop_anchor = None;
+        self.files.delete(files::DESKTOP, paths);
+        self.repaint_wallpapers();
+    }
+
+    /// Writes where the desktop's icons stand for the window manager, which leaves a click on
+    /// one to the shell (`selkies_draw::desktop_icons`), each cell from the primary monitor's
+    /// corner; written only when they moved.
+    ///
+    /// # Arguments
+    /// * `cells` - The icons' cells, in the primary background's coordinates.
+    pub fn publish_desktop_icons(&mut self, cells: &[Rect]) {
+        let origin = self
+            .primary_background()
+            .map(|b| b.icon_area())
+            .unwrap_or_default();
+        let cells: Vec<Rect> = cells
+            .iter()
+            .map(|c| Rect::new(c.x - origin.x, c.y - origin.y, c.w, c.h))
+            .collect();
+        if self.published_icons.as_ref() == Some(&cells) {
+            return;
+        }
+        let Some(path) = self.icons_path.clone() else {
+            return;
+        };
+        let staged = path.with_extension("new");
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&staged, selkies_draw::desktop_icons::format(&cells)))
+            .and_then(|()| std::fs::rename(&staged, &path));
+        match written {
+            Ok(()) => self.published_icons = Some(cells),
+            Err(error) => eprintln!("selkies-desktop: cannot publish the desktop icons: {error}"),
+        }
     }
 
     /// Opens a desktop item the way the file manager opens it: a launcher starts its
@@ -1589,11 +1940,11 @@ impl Desktop {
         ui::dialog::open_new_folder(self, cell);
     }
 
-    /// Reads the Desktop folder again once an item was made in it, putting the item on a cell
-    /// where one was chosen and free, and selecting it.
+    /// Reads the Desktop folder again once an item was made or renamed in it, putting the item
+    /// on a cell where one was chosen and free, and selecting it.
     ///
     /// # Arguments
-    /// * `file` - The new item's file name.
+    /// * `file` - The item's file name.
     /// * `cell` - The cell it takes, where one was chosen.
     pub fn place_new_desktop_item(&mut self, file: &str, cell: Option<crate::desktop_folder::Cell>) {
         self.load_desktop_items();
@@ -1607,7 +1958,7 @@ impl Desktop {
             cells[index] = cell;
             self.save_desktop_layout(&cells);
         }
-        self.desktop_selection = Some(index);
+        self.select_desktop_only(index);
         self.repaint_wallpapers();
     }
 
@@ -1695,7 +2046,9 @@ impl Desktop {
 
     /// Keeps the cells of every desktop item in the layout file.
     fn save_desktop_layout(&mut self, cells: &[crate::desktop_folder::Cell]) {
-        if let Err(error) = crate::desktop_folder::write_layout(&self.desktop_items, cells) {
+        if self.keeps_layout
+            && let Err(error) = crate::desktop_folder::write_layout(&self.desktop_items, cells)
+        {
             eprintln!("selkies-desktop: cannot write the desktop layout: {error}");
         }
         self.desktop_layout = self
@@ -1704,27 +2057,6 @@ impl Desktop {
             .zip(cells)
             .map(|(item, cell)| (item.file.clone(), *cell))
             .collect();
-    }
-
-    /// Ends a drag of a desktop icon on the cell under the pointer: the icon takes it, and an
-    /// icon already there takes the dragged one's old cell.
-    fn drop_desktop_icon(&mut self, press: DesktopPress) {
-        let Some(target) = background::cell_at(self, press.at.0, press.at.1) else {
-            return;
-        };
-        let mut cells = background::item_cells(self);
-        let Some(&from) = cells.get(press.index) else {
-            return;
-        };
-        if from == target {
-            return;
-        }
-        if let Some(other) = cells.iter().position(|c| *c == target) {
-            cells[other] = from;
-        }
-        cells[press.index] = target;
-        self.save_desktop_layout(&cells);
-        self.desktop_selection = Some(press.index);
     }
 
     /// The icon of an application at the menu's icon size.
@@ -1904,26 +2236,35 @@ impl Desktop {
                     ui::files::close(self, window);
                 }
             }
-            Event::DragEnter { surface, x, y } | Event::DragMotion { surface, x, y } => {
-                if let SurfaceId::Window(id) = surface {
-                    ui::files::drag_motion(self, id, x, y);
+            Event::DragEnter { surface, x, y } | Event::DragMotion { surface, x, y } => match surface {
+                SurfaceId::Window(id) => ui::files::drag_motion(self, id, x, y),
+                SurfaceId::Background(id) if self.background(id).is_some_and(|b| b.primary) => {
+                    self.desktop_drag_at = Some((x, y));
+                    self.redraw_backgrounds();
                 }
-            }
-            Event::DragLeave { surface } => {
-                if let SurfaceId::Window(id) = surface {
-                    ui::files::drag_leave(self, id);
+                _ => {}
+            },
+            Event::DragLeave { surface } => match surface {
+                SurfaceId::Window(id) => ui::files::drag_leave(self, id),
+                SurfaceId::Background(_) if self.desktop_drag_at.take().is_some() => {
+                    self.redraw_backgrounds();
                 }
-            }
-            Event::DragDrop { surface, x, y, copy } => match surface {
+                _ => {}
+            },
+            Event::DragDrop { surface, x, y, .. } => match surface {
                 SurfaceId::Window(id) => {
                     ui::files::drag_motion(self, id, x, y);
-                    ui::files::drop(self, id, copy);
+                    ui::files::drop(self, id, x, y);
                 }
-                SurfaceId::Background(_) => ui::files::drop_on_desktop(self, copy),
+                SurfaceId::Background(id) => self.drop_on_desktop(id, x, y),
                 SurfaceId::Panel | SurfaceId::Bar(_) | SurfaceId::Notifications => {}
             },
             Event::DragEnd => {
                 self.files.drag = None;
+                self.desktop_press = None;
+                self.desktop_dragged.clear();
+                self.desktop_drag_at = None;
+                self.redraw_backgrounds();
                 for window in &mut self.files.windows {
                     if window.drop_target.take().is_some() {
                         window.dirty = true;
@@ -2545,6 +2886,7 @@ impl Desktop {
                     Popup::Launcher => launcher::hit(self, x, y).unwrap_or(Hover::None),
                     Popup::TaskMenu(_) => popups::task_menu_hit(self, x, y).unwrap_or(Hover::None),
                     Popup::PanelMenu(..) => settings::panel_menu_hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::DesktopMenu(..) => desktop_menu::hit(self, x, y).unwrap_or(Hover::None),
                     Popup::Notifications => notifications::center_hit(self, x, y).unwrap_or(Hover::None),
                     _ => Hover::None,
                 };
@@ -2562,11 +2904,18 @@ impl Desktop {
                     let (dx, dy) = (x - press.start.0, y - press.start.1);
                     if !press.dragging && dx.hypot(dy) >= DESKTOP_DRAG_THRESHOLD {
                         press.dragging = true;
+                        let press = *press;
+                        self.start_desktop_drag(id, press);
                     }
-                    if press.dragging {
-                        self.redraw_backgrounds();
+                    if self.desktop_press.is_some_and(|p| p.dragging) {
                         return;
                     }
+                }
+                if let Some(band) = self.desktop_band.as_mut() {
+                    band.at = (x, y);
+                    self.select_in_band();
+                    self.redraw_backgrounds();
+                    return;
                 }
                 let hover = background::hit(self, id, x, y)
                     .map(Hover::DesktopIcon)
@@ -2610,12 +2959,17 @@ impl Desktop {
             }
             return;
         }
+        if !pressed && button == Button::Left && self.desktop_band.take().is_some() {
+            self.redraw_backgrounds();
+            return;
+        }
         if !pressed
             && button == Button::Left
-            && let Some(press) = self.desktop_press.take()
+            && let Some(press) = self.desktop_press.filter(|p| !p.dragging)
         {
-            if press.dragging {
-                self.drop_desktop_icon(press);
+            self.desktop_press = None;
+            if press.narrow {
+                self.select_desktop_only(press.index);
                 self.redraw_backgrounds();
             }
             return;
@@ -2643,7 +2997,7 @@ impl Desktop {
                     .unwrap_or(Hover::None);
                 self.set_hover(hover);
             }
-            SurfaceId::Background(id) => self.background_click(id, x, y, button, time),
+            SurfaceId::Background(id) => self.background_click(id, x, y, button, time, modifiers),
             SurfaceId::Panel => {
                 self.pointer = (x, y);
                 if self.popup != Popup::None {
@@ -2654,6 +3008,7 @@ impl Desktop {
                         Popup::Calendar => popups::calendar_click(self, x, y, button),
                         Popup::TaskMenu(_) => popups::task_menu_click(self, x, y, button),
                         Popup::PanelMenu(..) => settings::panel_menu_click(self, x, y, button),
+                        Popup::DesktopMenu(..) => desktop_menu::click(self, x, y, button),
                         Popup::Notifications => notifications::center_click(self, x, y, button),
                         Popup::None => false,
                     };
@@ -2694,43 +3049,81 @@ impl Desktop {
         }
     }
 
-    /// Handles a press on a background: selects a desktop icon and holds it for a drag, opens it
-    /// on a double click, or drops the selection on an empty spot.
-    fn background_click(&mut self, id: u32, x: f64, y: f64, button: Button, time: u32) {
+    /// Handles a press on a background, selecting the way the file manager does: a click
+    /// selects an icon alone and holds it for a drag of the selection, Control adds or removes
+    /// one, Shift adds the icons from the last one clicked in the grid's column order, a double
+    /// click opens it, and a press on an empty spot drops the selection unless a modifier keeps
+    /// it and starts a box that selects the icons it is dragged across. A right
+    /// click on an icon selects it unless it already is and opens the icons' menu; one on an
+    /// empty spot is the window manager's root menu.
+    fn background_click(&mut self, id: u32, x: f64, y: f64, button: Button, time: u32, modifiers: Modifiers) {
         if self.popup != Popup::None {
             self.close_popup();
         }
         let hit = background::hit(self, id, x, y);
+        let held = modifiers.ctrl || modifiers.shift;
         match hit {
             Some(index) if button == Button::Left => {
-                let double = self
-                    .last_click
-                    .is_some_and(|(t, i)| i == index && time.wrapping_sub(t) < ui::DOUBLE_CLICK_MS);
+                let double = !held
+                    && self
+                        .last_click
+                        .is_some_and(|(t, i)| i == index && time.wrapping_sub(t) < ui::DOUBLE_CLICK_MS);
                 if double {
                     self.open_desktop_item(index);
                     self.last_click = None;
-                    self.desktop_selection = None;
-                } else {
-                    self.last_click = Some((time, index));
-                    self.desktop_selection = Some(index);
-                    self.desktop_press = Some(DesktopPress {
-                        index,
-                        start: (x, y),
-                        at: (x, y),
-                        dragging: false,
-                    });
+                    self.desktop_selection.clear();
+                    self.redraw_backgrounds();
+                    return;
                 }
+                let was_selected = self.desktop_selection.contains(&index);
+                if modifiers.ctrl {
+                    if !self.desktop_selection.remove(&index) {
+                        self.desktop_selection.insert(index);
+                    }
+                    self.desktop_anchor = Some(index);
+                } else if modifiers.shift {
+                    let from = self.desktop_anchor.unwrap_or(index);
+                    self.desktop_selection
+                        .extend(background::grid_range(self, from, index));
+                } else if !was_selected {
+                    self.select_desktop_only(index);
+                }
+                self.last_click = Some((time, index));
+                self.desktop_press = Some(DesktopPress {
+                    index,
+                    start: (x, y),
+                    at: (x, y),
+                    dragging: false,
+                    narrow: was_selected && !held && self.desktop_selection.len() > 1,
+                });
                 self.redraw_backgrounds();
             }
             Some(index) => {
-                self.desktop_selection = Some(index);
+                if !self.desktop_selection.contains(&index) {
+                    self.select_desktop_only(index);
+                }
                 self.last_click = None;
                 self.redraw_backgrounds();
+                if button == Button::Right {
+                    desktop_menu::open(self, x, y);
+                }
             }
             None => {
                 self.last_click = None;
-                if self.desktop_selection.take().is_some() {
+                if !held && !self.desktop_selection.is_empty() {
+                    self.desktop_selection.clear();
                     self.redraw_backgrounds();
+                }
+                if button == Button::Left && background::cell_at(self, x, y).is_some() {
+                    self.desktop_band = Some(DesktopBand {
+                        start: (x, y),
+                        at: (x, y),
+                        base: if held {
+                            self.desktop_selection.clone()
+                        } else {
+                            BTreeSet::new()
+                        },
+                    });
                 }
             }
         }
@@ -3049,8 +3442,9 @@ impl Desktop {
         }
         let whole = Rect::new(0, 0, geometry.width, geometry.height);
         let (input, cells) = if self.backgrounds[index].primary {
-            // A dragged icon is drawn wherever the pointer takes it.
-            let visible = if self.desktop_press.is_some_and(|press| press.dragging) {
+            // A dragged icon, the cells a drag would land on, and a selection box are drawn
+            // wherever the pointer takes them.
+            let visible = if self.desktop_drag_at.is_some() || self.desktop_band.is_some() {
                 vec![whole]
             } else {
                 background::cells(self)
@@ -3135,7 +3529,7 @@ impl Desktop {
         })
     }
 
-    /// Renders the New Folder dialog when it changed.
+    /// Renders the desktop's dialog when it changed.
     fn render_dialog(&mut self) -> Option<Frame<'_>> {
         let geometry = self.dialog.geometry;
         if !geometry.configured || !self.dialog.dirty {

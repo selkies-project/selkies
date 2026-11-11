@@ -12,10 +12,12 @@
 //! icon theme lookup with [`xpm`] for the one legacy format themes still carry, [`geom`] the
 //! integer rectangle every drawing call takes, [`dirs`] the XDG base directories the lookups
 //! search, and [`apps`] the desktop entries both the shell's start menu and the window manager's
-//! applications menu list. Nothing here knows a display server: a caller presents the pixmaps it
-//! gets back.
+//! applications menu list, and [`desktop_icons`] where the shell's desktop icons stand, which
+//! the window manager reads to leave a click on one to the shell. Nothing here knows a display
+//! server: a caller presents the pixmaps it gets back.
 
 pub mod apps;
+pub mod desktop_icons;
 pub mod dirs;
 pub mod geom;
 pub mod icons;

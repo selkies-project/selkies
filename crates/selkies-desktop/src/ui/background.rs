@@ -1,6 +1,7 @@
 //! The wallpaper layers and the launchers placed on the desktop.  Every
 //! monitor gets the wallpaper, or the gradient with the logo, drawn for its
-//! own rectangle; the launchers sit on the primary monitor.
+//! own rectangle; the launchers sit on the primary monitor, whose cells are
+//! published for the window manager as they are drawn.
 
 use std::sync::Arc;
 
@@ -48,6 +49,15 @@ fn cell_rect_in(area: Rect, (column, row): Cell) -> Rect {
     )
 }
 
+/// How many columns and rows of cells the grid on the screen now has.
+///
+/// # Arguments
+/// * `d` - The desktop.
+pub fn grid_size(d: &Desktop) -> (i32, i32) {
+    let area = icon_area(d);
+    (columns(area), rows(area))
+}
+
 /// The grid cell each Desktop item stands on, as [`desktop_folder::place`] lays them out on
 /// the grid that fits the screen now.
 ///
@@ -69,6 +79,26 @@ pub fn cell_at(d: &Desktop, x: f64, y: f64) -> Option<Cell> {
     let column = ((x - (area.x + MARGIN) as f64) / ui::DESKTOP_CELL_WIDTH as f64).floor() as i32;
     let row = ((y - (area.y + MARGIN) as f64) / ui::DESKTOP_CELL_HEIGHT as f64).floor() as i32;
     ((0..columns(area)).contains(&column) && (0..rows(area)).contains(&row)).then_some((column, row))
+}
+
+/// The items a Shift click selects: those whose cells lie from one item's to another's in the
+/// grid's column order, both included, the order new items fill the grid in.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `from` - The item the range starts at.
+/// * `to` - The item clicked.
+pub fn grid_range(d: &Desktop, from: usize, to: usize) -> Vec<usize> {
+    let rows = rows(icon_area(d));
+    let cells = item_cells(d);
+    let order = |index: usize| cells.get(index).map(|&(column, row)| column * rows + row);
+    let (Some(a), Some(b)) = (order(from), order(to)) else {
+        return vec![to];
+    };
+    let (low, high) = (a.min(b), a.max(b));
+    (0..cells.len())
+        .filter(|&index| order(index).is_some_and(|o| (low..=high).contains(&o)))
+        .collect()
 }
 
 /// The rectangle of each Desktop item's cell, in the primary background's coordinates.
@@ -176,25 +206,28 @@ pub fn draw_launchers(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
     let font_px = ui::FONT_SMALL * scale;
     let line_h = 16;
     let rects = cells(d);
-    let dragging = d.desktop_press.filter(|press| press.dragging);
-    if let Some(press) = dragging
-        && let Some(target) = cell_at(d, press.at.0, press.at.1)
-    {
-        let target = cell_rect_in(icon_area(d), target);
+    d.publish_desktop_icons(&rects);
+    let area = icon_area(d);
+    for target in drop_targets(d) {
+        let target = cell_rect_in(area, target);
         canvas.fill_rounded(target, 8.0, rgba(0xff, 0xff, 0xff, 0x18));
         canvas.stroke_rounded(target, 8.0, 3.0, ui::accent_alpha(0xc0));
     }
+    // Where the backend shows no ghost under the pointer, the dragged icons follow it here.
+    let follow = match (d.desktop_drag_at, d.desktop_press) {
+        (Some(at), Some(press)) if !d.drag_icon && !d.desktop_dragged.is_empty() => {
+            Some(((at.0 - press.start.0) as i32, (at.1 - press.start.1) as i32))
+        }
+        _ => None,
+    };
     for (index, &home) in rects.iter().enumerate() {
-        let cell = match dragging {
-            Some(press) if press.index == index => Rect::new(
-                home.x + (press.at.0 - press.start.0) as i32,
-                home.y + (press.at.1 - press.start.1) as i32,
-                home.w,
-                home.h,
-            ),
+        let cell = match follow {
+            Some((dx, dy)) if d.desktop_dragged.contains(&index) => {
+                Rect::new(home.x + dx, home.y + dy, home.w, home.h)
+            }
             _ => home,
         };
-        let selected = d.desktop_selection == Some(index);
+        let selected = d.desktop_selection.contains(&index);
         let hovered = d.hover == Hover::DesktopIcon(index);
         let name = d.desktop_items[index].name.clone();
         let max_width = (cell.w - 6) as f32 * scale;
@@ -226,6 +259,55 @@ pub fn draw_launchers(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
         if let Some(line2) = line2 {
             draw_shadowed(canvas, &mut d.fonts, &line2, cell, text_top + line_h + line_h / 2);
         }
+    }
+    if let Some(band) = d.desktop_band.as_ref() {
+        let rect = band.rect();
+        canvas.fill_rect(rect, ui::accent_alpha(0x30));
+        canvas.stroke_rounded(rect, 0.0, 1.0, ui::accent_alpha(0xc0));
+    }
+}
+
+/// The cells a drag over the desktop marks: a folder icon it would drop into, else the cells
+/// the desktop's own dragged icons would land on, else the cell files from a window would.
+fn drop_targets(d: &Desktop) -> Vec<Cell> {
+    let Some(at) = d.desktop_drag_at else {
+        return Vec::new();
+    };
+    let Some(cell) = cell_at(d, at.0, at.1) else {
+        return Vec::new();
+    };
+    let mut cells = item_cells(d);
+    let dragged_paths: Vec<&std::path::Path> = d
+        .files
+        .drag
+        .as_ref()
+        .map(|(_, paths)| paths.iter().map(|p| p.as_path()).collect())
+        .unwrap_or_default();
+    let folder = cells.iter().position(|c| *c == cell).filter(|&i| {
+        d.desktop_items
+            .get(i)
+            .is_some_and(|item| item.item.is_dir && !dragged_paths.contains(&item.item.path.as_path()))
+    });
+    if folder.is_some() {
+        return vec![cell];
+    }
+    let pressed = d.desktop_press.map(|p| p.index);
+    match pressed.and_then(|i| cells.get(i).copied()) {
+        Some(from) if !d.desktop_dragged.is_empty() => {
+            let (columns, rows) = grid_size(d);
+            desktop_folder::move_cells(
+                &mut cells,
+                &d.desktop_dragged,
+                (cell.0 - from.0, cell.1 - from.1),
+                columns,
+                rows,
+            );
+            d.desktop_dragged
+                .iter()
+                .filter_map(|&i| cells.get(i).copied())
+                .collect()
+        }
+        _ => vec![cell],
     }
 }
 

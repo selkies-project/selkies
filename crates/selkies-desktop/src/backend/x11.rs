@@ -67,8 +67,23 @@ x11rb::atom_manager! {
         _NET_WM_STRUT,
         _NET_WM_STRUT_PARTIAL,
         _NET_WM_ICON_GEOMETRY,
+        TARGETS,
+        XdndAware,
+        XdndEnter,
+        XdndPosition,
+        XdndStatus,
+        XdndLeave,
+        XdndDrop,
+        XdndFinished,
+        XdndSelection,
+        XdndActionCopy,
+        TEXT_URI_LIST: b"text/uri-list",
     }
 }
+
+/// The newest XDND version the drag speaks; a target names its own in `XdndAware`, and the
+/// lower of the two is the one used.
+const XDND_VERSION: u32 = 5;
 
 /// A shared memory segment the server reads pixels from.
 struct ShmSegment {
@@ -164,7 +179,31 @@ struct X11Window {
 /// A file drag in progress.
 struct X11Drag {
     origin: xproto::Window,
+    /// The shell's own surface under the pointer, which the shell's drag events reach.
     target: Option<SurfaceId>,
+    /// The files dragged, which another program's window takes as `text/uri-list`.
+    uris: Vec<String>,
+    /// Another program's XDND-aware window under the pointer, while there is one.
+    foreign: Option<XdndTarget>,
+}
+
+/// Another program's window a drag is over, spoken to over XDND.
+struct XdndTarget {
+    window: xproto::Window,
+    /// Whether the window's last `XdndStatus` said it would take a drop.
+    accepted: bool,
+    /// Whether an `XdndPosition` is still unanswered, which holds the next one back.
+    awaiting_status: bool,
+    /// The newest position held back while the window answered the last.
+    pending: Option<(i32, i32)>,
+}
+
+/// The files a drop gave another program's window, served as the XDND selection until it
+/// says it has them.
+struct XdndOffer {
+    origin: xproto::Window,
+    target: xproto::Window,
+    uris: Vec<String>,
 }
 
 /// The X11 backend.
@@ -212,6 +251,8 @@ pub struct X11Backend {
     events: Vec<Event>,
     windows: Vec<X11Window>,
     drag: Option<X11Drag>,
+    /// The files dropped on another program's window, while it reads them.
+    xdnd_offer: Option<XdndOffer>,
     /// The notification stack's window, once it was first needed.
     notifications: Option<X11Surface>,
     /// The stack's logical size and top offset while it is shown.
@@ -328,6 +369,7 @@ impl X11Backend {
             events: Vec::new(),
             windows: Vec::new(),
             drag: None,
+            xdnd_offer: None,
             notifications: None,
             notify_place: None,
         };
@@ -450,11 +492,14 @@ impl X11Backend {
     }
 
     /// Lays both windows out for the current screen size and scale and tells
-    /// the desktop their sizes.  The panel sits along the bottom of the
-    /// primary monitor and spans the bar plus the popup area rather than the
-    /// full screen, which keeps its pixel buffer small; the desktop window
-    /// covers every monitor.  Runs at startup and whenever the screen or its
-    /// monitors change.
+    /// the desktop their sizes.  The panel covers the primary monitor, as the
+    /// Wayland panel covers its output, so a popup opens anywhere on it: the
+    /// desktop icons' menu opens where the icon was clicked.  Its shape keeps
+    /// it to the bar and the open popup, and only the damage is uploaded, so
+    /// the rest of the window costs memory and no drawing.  The bars of the
+    /// other monitors span the bar plus the popup area, whose popups open
+    /// above the bar.  The desktop window covers every monitor.  Runs at
+    /// startup and whenever the screen or its monitors change.
     fn apply_geometry(&mut self) {
         let s = self.scale;
         let primary = self
@@ -464,8 +509,7 @@ impl X11Backend {
             .unwrap_or(Rect::new(0, 0, self.screen_w, self.screen_h));
         let logical_w = (self.screen_w + s - 1) / s;
         let logical_h = (self.screen_h + s - 1) / s;
-        let primary_h = (primary.h + s - 1) / s;
-        let panel_h = (self.panel_height + ui::POPUP_AREA_HEIGHT).min(primary_h);
+        let panel_h = (primary.h + s - 1) / s;
 
         let panel_y = if self.panel_top {
             primary.y
@@ -1548,31 +1592,217 @@ impl X11Backend {
         if let Some(drag) = self.drag.as_mut() {
             drag.target = current;
         }
+        let foreign = if current.is_none() {
+            self.xdnd_target_at(root_x, root_y)
+        } else {
+            None
+        };
+        self.xdnd_track(foreign, root_x, root_y);
+    }
+
+    /// Another program's XDND-aware window at a root position, with the version it speaks:
+    /// the first window down from the root toward the pointer that names one in `XdndAware`,
+    /// which is a client's own window under its frame.
+    fn xdnd_target_at(&self, root_x: i32, root_y: i32) -> Option<(xproto::Window, u32)> {
+        let mut window = self.root;
+        for _ in 0..16 {
+            let child = self
+                .conn
+                .translate_coordinates(self.root, window, root_x as i16, root_y as i16)
+                .ok()?
+                .reply()
+                .ok()?
+                .child;
+            if child == x11rb::NONE {
+                return None;
+            }
+            let version = self
+                .conn
+                .get_property(false, child, self.atoms.XdndAware, xproto::AtomEnum::ATOM, 0, 1)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .and_then(|r| r.value32().and_then(|mut v| v.next()));
+            if let Some(version) = version {
+                return Some((child, version.min(XDND_VERSION)));
+            }
+            window = child;
+        }
+        None
+    }
+
+    /// Sends an XDND client message to a window.
+    fn xdnd_send(&self, window: xproto::Window, kind: xproto::Atom, data: [u32; 5]) {
+        let event = xproto::ClientMessageEvent::new(32, window, kind, data);
+        let _ = self
+            .conn
+            .send_event(false, window, xproto::EventMask::NO_EVENT, event);
+        let _ = self.conn.flush();
+    }
+
+    /// Follows the drag over other programs' windows: leaves the one it was over, enters the
+    /// one it is over now (one speaking XDND 3 or newer, offering `text/uri-list`), and tells
+    /// it where the pointer is, one position at a time as its answers come back.
+    fn xdnd_track(&mut self, foreign: Option<(xproto::Window, u32)>, root_x: i32, root_y: i32) {
+        let Some(drag) = self.drag.as_ref() else {
+            return;
+        };
+        let origin = drag.origin;
+        let current = drag.foreign.as_ref().map(|f| f.window);
+        let next = foreign.filter(|(_, version)| *version >= 3);
+        if current != next.map(|(w, _)| w) {
+            if let Some(window) = current {
+                self.xdnd_send(window, self.atoms.XdndLeave, [origin, 0, 0, 0, 0]);
+            }
+            let entered = next.map(|(window, version)| {
+                self.xdnd_send(
+                    window,
+                    self.atoms.XdndEnter,
+                    [origin, version << 24, self.atoms.TEXT_URI_LIST, 0, 0],
+                );
+                XdndTarget {
+                    window,
+                    accepted: false,
+                    awaiting_status: false,
+                    pending: None,
+                }
+            });
+            if let Some(drag) = self.drag.as_mut() {
+                drag.foreign = entered;
+            }
+        }
+        let waiting = self.drag.as_mut().and_then(|d| d.foreign.as_mut()).map(|f| {
+            let waiting = f.awaiting_status;
+            if waiting {
+                f.pending = Some((root_x, root_y));
+            } else {
+                f.awaiting_status = true;
+            }
+            (f.window, waiting)
+        });
+        if let Some((window, false)) = waiting {
+            self.xdnd_position(origin, window, root_x, root_y);
+        }
+    }
+
+    /// Tells a window where the drag is, asking it to copy.
+    fn xdnd_position(&self, origin: xproto::Window, window: xproto::Window, root_x: i32, root_y: i32) {
+        let at = ((root_x.max(0) as u32) << 16) | (root_y.max(0) as u32 & 0xffff);
+        self.xdnd_send(
+            window,
+            self.atoms.XdndPosition,
+            [origin, 0, at, self.last_time, self.atoms.XdndActionCopy],
+        );
+    }
+
+    /// Takes a window's answer to a position, sending the one held back meanwhile.
+    fn xdnd_status(&mut self, from: xproto::Window, accepted: bool) {
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        let origin = drag.origin;
+        let Some(foreign) = drag.foreign.as_mut().filter(|f| f.window == from) else {
+            return;
+        };
+        foreign.accepted = accepted;
+        foreign.awaiting_status = false;
+        if let Some((x, y)) = foreign.pending.take() {
+            foreign.awaiting_status = true;
+            self.xdnd_position(origin, from, x, y);
+        }
+    }
+
+    /// Answers a request for the XDND selection the files were dropped with: `text/uri-list`,
+    /// or the targets it offers, written to the requestor's property; anything else is refused.
+    fn xdnd_selection_request(&self, e: xproto::SelectionRequestEvent) {
+        let Some(offer) = self.xdnd_offer.as_ref().filter(|o| o.origin == e.owner) else {
+            return;
+        };
+        let property = if e.property == x11rb::NONE {
+            e.target
+        } else {
+            e.property
+        };
+        let served = if e.target == self.atoms.TEXT_URI_LIST {
+            let text: String = offer.uris.iter().map(|u| format!("{u}\r\n")).collect();
+            self.conn
+                .change_property8(
+                    xproto::PropMode::REPLACE,
+                    e.requestor,
+                    property,
+                    self.atoms.TEXT_URI_LIST,
+                    text.as_bytes(),
+                )
+                .is_ok()
+        } else if e.target == self.atoms.TARGETS {
+            self.conn
+                .change_property32(
+                    xproto::PropMode::REPLACE,
+                    e.requestor,
+                    property,
+                    xproto::AtomEnum::ATOM,
+                    &[self.atoms.TARGETS, self.atoms.TEXT_URI_LIST],
+                )
+                .is_ok()
+        } else {
+            false
+        };
+        let notify = xproto::SelectionNotifyEvent {
+            response_type: xproto::SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time: e.time,
+            requestor: e.requestor,
+            selection: e.selection,
+            target: e.target,
+            property: if served { property } else { x11rb::NONE },
+        };
+        let _ = self
+            .conn
+            .send_event(false, e.requestor, xproto::EventMask::NO_EVENT, notify);
+        let _ = self.conn.flush();
     }
 
     /// Ends a drag at a root position, dropping when a surface is under it.
-    fn drag_release(&mut self, root_x: i32, root_y: i32, copy: bool) {
+    fn drag_release(&mut self, root_x: i32, root_y: i32) {
         let Some(drag) = self.drag.take() else {
             return;
         };
         let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
-        let _ = drag.origin;
-        if let Some((surface, x, y)) = self.drag_target(root_x, root_y) {
-            self.events.push(Event::DragDrop { surface, x, y, copy });
+        if let Some(foreign) = drag.foreign {
+            if foreign.accepted {
+                self.xdnd_send(
+                    foreign.window,
+                    self.atoms.XdndDrop,
+                    [drag.origin, 0, self.last_time, 0, 0],
+                );
+                self.xdnd_offer = Some(XdndOffer {
+                    origin: drag.origin,
+                    target: foreign.window,
+                    uris: drag.uris,
+                });
+            } else {
+                self.xdnd_send(foreign.window, self.atoms.XdndLeave, [drag.origin, 0, 0, 0, 0]);
+            }
+        } else if let Some((surface, x, y)) = self.drag_target(root_x, root_y) {
+            self.events.push(Event::DragDrop { surface, x, y });
         }
         self.events.push(Event::DragEnd);
         self.apply_cursor();
     }
 
-    /// Starts a drag from a file manager window: takes the pointer with the
-    /// drag cursor until the button is released.
-    fn start_drag(&mut self, window: u32) {
-        let Some(origin) = self
-            .windows
-            .iter()
-            .find(|w| w.id == window)
-            .map(|w| w.surface.window)
-        else {
+    /// Starts a drag from a file manager window or the desktop's icons: takes the pointer
+    /// with the drag cursor until the button is released, and owns the XDND selection, which
+    /// another program's window the files are dropped on reads them from.
+    fn start_drag(&mut self, surface: SurfaceId, uris: Vec<String>) {
+        let origin = match surface {
+            SurfaceId::Window(window) => self
+                .windows
+                .iter()
+                .find(|w| w.id == window)
+                .map(|w| w.surface.window),
+            SurfaceId::Background(_) => Some(self.desktop.window),
+            _ => None,
+        };
+        let Some(origin) = origin else {
             self.events.push(Event::DragEnd);
             return;
         };
@@ -1602,7 +1832,15 @@ impl X11Backend {
             self.events.push(Event::DragEnd);
             return;
         }
-        self.drag = Some(X11Drag { origin, target: None });
+        let _ = self
+            .conn
+            .set_selection_owner(origin, self.atoms.XdndSelection, self.last_time);
+        self.drag = Some(X11Drag {
+            origin,
+            target: None,
+            uris,
+            foreign: None,
+        });
     }
 
     /// Handles a property change on the root window or a client.
@@ -1713,8 +1951,7 @@ impl X11Backend {
                 self.last_time = e.time;
                 let pressed = e.response_type & 0x7f == xproto::BUTTON_PRESS_EVENT;
                 if self.drag.is_some() && !pressed && e.detail == 1 {
-                    let copy = e.state.contains(xproto::KeyButMask::CONTROL);
-                    self.drag_release(e.root_x as i32, e.root_y as i32, copy);
+                    self.drag_release(e.root_x as i32, e.root_y as i32);
                     return;
                 }
                 let surface = self.surface_of(e.event);
@@ -1791,6 +2028,22 @@ impl X11Backend {
             XEvent::KeyRelease(e) => {
                 let surface = self.surface_of(e.event);
                 self.push_keysym(surface, e.detail, modifiers_of(e.state), false);
+            }
+            XEvent::ClientMessage(e) if e.type_ == self.atoms.XdndStatus => {
+                let data = e.data.as_data32();
+                self.xdnd_status(data[0], data[1] & 1 != 0);
+            }
+            XEvent::ClientMessage(e) if e.type_ == self.atoms.XdndFinished => {
+                if self
+                    .xdnd_offer
+                    .as_ref()
+                    .is_some_and(|o| o.target == e.data.as_data32()[0])
+                {
+                    self.xdnd_offer = None;
+                }
+            }
+            XEvent::SelectionRequest(e) if e.selection == self.atoms.XdndSelection => {
+                self.xdnd_selection_request(e);
             }
             XEvent::ClientMessage(e) => {
                 if e.type_ == self.atoms.WM_PROTOCOLS
@@ -2376,8 +2629,8 @@ impl Backend for X11Backend {
                 self.grab_window_keyboard(*id, *grab);
                 let _ = self.conn.flush();
             }
-            Request::StartDrag { window, .. } => {
-                self.start_drag(*window);
+            Request::StartDrag { surface, uris, .. } => {
+                self.start_drag(*surface, uris.clone());
                 let _ = self.conn.flush();
             }
             Request::SwitchDesktop(index) => {

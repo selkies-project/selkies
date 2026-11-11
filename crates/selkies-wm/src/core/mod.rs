@@ -381,6 +381,10 @@ pub struct Engine {
     launcher: Box<dyn Launcher>,
     /// The session's mode as the launcher last reported it.
     session: SessionMode,
+    /// The file the desktop shell publishes its icons in ([`selkies_draw::desktop_icons`]).
+    shell_icons_path: Option<std::path::PathBuf>,
+    /// The shell's icons as last read, with the file's modification time.
+    shell_icons: (Option<std::time::SystemTime>, Vec<selkies_draw::geom::Rect>),
     outputs: Vec<OutputInfo>,
     windows: HashMap<WindowId, Win>,
     /// Every shown window, bottom first, within and across layers.
@@ -477,6 +481,8 @@ impl Engine {
             look_generation: 0,
             renderer,
             session: launcher.session(),
+            shell_icons_path: selkies_draw::desktop_icons::path(),
+            shell_icons: (None, Vec::new()),
             launcher,
             outputs: Vec::new(),
             windows: HashMap::new(),
@@ -635,6 +641,28 @@ impl Engine {
             .iter()
             .find(|o| o.primary)
             .or_else(|| self.outputs.first())
+    }
+
+    /// Whether the pointer rests on one of the desktop shell's icons, which the shell
+    /// publishes from its primary monitor's corner (the [`selkies_draw::desktop_icons`]
+    /// module docblock) and the engine places on the primary output; the file is read again
+    /// only once its modification time moved, and a file that cannot be read means no icons.
+    fn over_shell_icon(&mut self) -> bool {
+        let path = self.shell_icons_path.as_ref();
+        let modified = path
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        if modified != self.shell_icons.0 {
+            let text = path
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            self.shell_icons = (modified, selkies_draw::desktop_icons::parse(&text));
+        }
+        let Some(origin) = self.primary_output().map(|o| (o.rect.x, o.rect.y)) else {
+            return false;
+        };
+        let (x, y) = (self.pointer.0 - origin.0 as f64, self.pointer.1 - origin.1 as f64);
+        self.shell_icons.1.iter().any(|cell| cell.contains(x, y))
     }
 
     fn output_at(&self, x: f64, y: f64) -> Option<&OutputInfo> {
@@ -2945,7 +2973,9 @@ impl Engine {
             }
             // The desktop stands in for the root it covers: a click on the shell's wallpaper
             // runs the root's bindings (the desktop menu) after any of its own, so the menu
-            // opens wherever the desktop is clicked while the shell still sees the click.
+            // opens wherever the desktop is clicked while the shell still sees the click; a
+            // click on one of its icons is the shell's alone.
+            Context::Desktop if self.over_shell_icon() => vec![Context::Desktop],
             Context::Desktop => vec![Context::Desktop, Context::Root],
             other => vec![other],
         };
@@ -4806,6 +4836,40 @@ mod tests {
                 "Show Desktop"
             ]
         );
+    }
+
+    /// A right click on the desktop opens the root menu, and one on an icon the shell publishes
+    /// is left to the shell; the icons stand from the primary output's corner.
+    #[test]
+    fn a_right_click_on_a_shell_icon_leaves_the_root_menu_closed() {
+        let (mut engine, _) = engine();
+        let path = std::env::temp_dir().join(format!("selkies-wm-icons-{}", std::process::id()));
+        std::fs::write(&path, "10 10 96 104\n").unwrap();
+        engine.shell_icons_path = Some(path.clone());
+        let origin = engine
+            .primary_output()
+            .map(|o| (o.rect.x as f64, o.rect.y as f64))
+            .unwrap();
+        let desktop = Under {
+            desktop: true,
+            ..Under::default()
+        };
+        let right = |x: f64, y: f64, pressed: bool| PointerEvent {
+            x: origin.0 + x,
+            y: origin.1 + y,
+            modifiers: Modifiers::default(),
+            kind: PointerKind::Button {
+                button: BTN_RIGHT,
+                pressed,
+            },
+            time: 0,
+        };
+        assert_eq!(engine.pointer(right(40.0, 40.0, true), desktop), Verdict::Pass);
+        engine.pointer(right(40.0, 40.0, false), desktop);
+        assert!(engine.menu.is_none(), "the icon's click is the shell's");
+        engine.pointer(right(400.0, 400.0, true), desktop);
+        assert!(engine.menu.is_some(), "the desktop around it opens the root menu");
+        std::fs::remove_file(path).unwrap();
     }
 
     /// Switching to the application alone shows a minimized window again, since no taskbar is

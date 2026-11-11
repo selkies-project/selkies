@@ -303,9 +303,9 @@ struct State {
     panel_top: bool,
     panel_autohide: bool,
     drag: Option<Drag>,
-    /// The offer of a drag over one of the surfaces, with the surface, the
-    /// action the compositor chose for it and the last position reported.
-    drag_offer: Option<(wl_data_offer::WlDataOffer, SurfaceId, bool, (f64, f64))>,
+    /// The offer of a drag over one of the surfaces, with the surface and the
+    /// last position reported.
+    drag_offer: Option<(wl_data_offer::WlDataOffer, SurfaceId, (f64, f64))>,
 }
 
 impl State {
@@ -634,13 +634,15 @@ impl State {
         }
     }
 
-    /// Starts a drag of file URIs from a window, with the ghost image as the
-    /// drag icon.  The wallpaper surfaces take input everywhere while it lasts
-    /// so a drop on empty desktop reaches them.
+    /// Starts a drag of file URIs from a surface, with the ghost image as the
+    /// drag icon: from a file manager window, or from the desktop's icons on
+    /// the launchers layer the press that began it landed on.  The wallpaper
+    /// surfaces take input everywhere while it lasts so a drop on empty
+    /// desktop reaches them.
     fn start_drag(
         &mut self,
         qh: &QueueHandle<State>,
-        window: u32,
+        surface: SurfaceId,
         uris: Vec<String>,
         icon: Option<&tiny_skia::Pixmap>,
         scale: i32,
@@ -654,12 +656,21 @@ impl State {
             self.events.push(Event::DragEnd);
             return;
         };
-        let Some(origin) = self
-            .windows
-            .iter()
-            .find(|w| w.id == window)
-            .map(|w| w.surface.wl.clone())
-        else {
+        let origin = match surface {
+            SurfaceId::Window(window) => self
+                .windows
+                .iter()
+                .find(|w| w.id == window)
+                .map(|w| w.surface.wl.clone()),
+            SurfaceId::Background(output) => self
+                .outputs
+                .iter()
+                .find(|o| o.name == output)
+                .and_then(|o| o.launchers.as_ref().or(o.background.as_ref()))
+                .map(|s| s.wl.clone()),
+            _ => None,
+        };
+        let Some(origin) = origin else {
             self.events.push(Event::DragEnd);
             return;
         };
@@ -1486,6 +1497,10 @@ impl Backend for WaylandBackend {
         true
     }
 
+    fn shows_drag_icon(&self) -> bool {
+        true
+    }
+
     fn present_launchers(&mut self, background: u32, frame: &Frame<'_>) {
         let qh = self.queue.handle();
         self.state
@@ -1628,14 +1643,14 @@ impl Backend for WaylandBackend {
                 }
             }
             Request::StartDrag {
-                window,
+                surface,
                 uris,
                 icon,
                 scale,
             } => {
                 let qh = self.queue.handle();
                 self.state
-                    .start_drag(&qh, *window, uris.clone(), icon.as_deref(), *scale);
+                    .start_drag(&qh, *surface, uris.clone(), icon.as_deref(), *scale);
             }
             Request::SwitchDesktop(index) => {
                 if let Some(manager) = &self.state.workspaces.manager
@@ -1763,7 +1778,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                             wl_data_device_manager::DndAction::Move,
                         );
                     }
-                    state.drag_offer = Some((offer, target, false, (x, y)));
+                    state.drag_offer = Some((offer, target, (x, y)));
                 }
                 if state.drag.is_some() {
                     state.events.push(Event::DragEnter {
@@ -1774,7 +1789,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                 }
             }
             wl_data_device::Event::Motion { x, y, .. } => {
-                if let Some((_, target, _, position)) = state.drag_offer.as_mut() {
+                if let Some((_, target, position)) = state.drag_offer.as_mut() {
                     *position = (x, y);
                     let surface = *target;
                     if state.drag.is_some() {
@@ -1783,7 +1798,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                 }
             }
             wl_data_device::Event::Leave => {
-                if let Some((offer, target, _, _)) = state.drag_offer.take() {
+                if let Some((offer, target, _)) = state.drag_offer.take() {
                     offer.destroy();
                     if state.drag.is_some() {
                         state.events.push(Event::DragLeave { surface: target });
@@ -1791,13 +1806,12 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                 }
             }
             wl_data_device::Event::Drop => {
-                if let Some((offer, target, copy, (x, y))) = state.drag_offer.take() {
+                if let Some((offer, target, (x, y))) = state.drag_offer.take() {
                     if state.drag.is_some() {
                         state.events.push(Event::DragDrop {
                             surface: target,
                             x,
                             y,
-                            copy: copy || state.modifiers.ctrl,
                         });
                     }
                     if offer.version() >= 3 {
@@ -1816,23 +1830,17 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
     ]);
 }
 
+/// A drop on the shell's own surfaces asks whether to copy or move, so the action an offer
+/// settles on is not read.
 impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
     fn event(
-        state: &mut Self,
-        offer: &wl_data_offer::WlDataOffer,
-        event: wl_data_offer::Event,
+        _: &mut Self,
+        _: &wl_data_offer::WlDataOffer,
+        _: wl_data_offer::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_data_offer::Event::Action {
-            dnd_action: WEnum::Value(action),
-        } = event
-            && let Some((current, _, copy, _)) = state.drag_offer.as_mut()
-            && current == offer
-        {
-            *copy = action == wl_data_device_manager::DndAction::Copy;
-        }
     }
 }
 

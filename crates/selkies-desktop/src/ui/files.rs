@@ -11,10 +11,10 @@ use tiny_skia::{Color, PathBuilder, Pixmap};
 
 use crate::desktop::{Desktop, Hover};
 use crate::entries;
-use crate::event::{Button, Modifiers, Request};
+use crate::event::{Button, Modifiers, Request, SurfaceId};
 use crate::files::{
-    self, Clipboard, Confirm, ContextMenu, DropTarget, FilesWindow, Item, MenuAction, MenuRow, PickTarget,
-    Press, Rename, ScrollArea, SortKey, View,
+    self, Clipboard, Confirm, ContextMenu, DropTarget, FilesWindow, Item, MenuAction, MenuRow, PendingDrop,
+    PickTarget, Press, Rename, ScrollArea, SortKey, View,
 };
 use crate::geom::Rect;
 use crate::i18n::{tr, trf};
@@ -547,20 +547,29 @@ fn start_drag(d: &mut Desktop, id: u32, item: usize) {
     let scale = w.geometry.scale;
     let first = w.items.get(item).cloned();
     let count = paths.len();
-    let icon = first.and_then(|item| ghost(d, id, &item, count));
+    let icon = first.and_then(|item| {
+        let (picture, _) = item_picture(d, &item, GRID_ICON, scale);
+        drag_ghost(d, picture.as_deref(), count, scale)
+    });
     d.files.drag = Some((id, paths.clone()));
     let uris = paths.iter().map(|p| files::file_uri(p)).collect();
     d.requests.push(Request::StartDrag {
-        window: id,
+        surface: SurfaceId::Window(id),
         uris,
         icon: icon.map(Box::new),
         scale,
     });
 }
 
-/// Draws the ghost that follows a drag: the item's icon with a count badge.
-fn ghost(d: &mut Desktop, id: u32, item: &Item, count: usize) -> Option<Pixmap> {
-    let scale = d.files.window(id)?.geometry.scale;
+/// Draws the ghost that follows a drag: the first item's picture with a count badge where
+/// the drag carries several.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `picture` - The first item's icon or thumbnail.
+/// * `count` - How many items the drag carries.
+/// * `scale` - The output scale the ghost is drawn at.
+pub fn drag_ghost(d: &mut Desktop, picture: Option<&Pixmap>, count: usize, scale: i32) -> Option<Pixmap> {
     let mut pix = Pixmap::new((GHOST * scale) as u32, (GHOST * scale) as u32)?;
     {
         let mut canvas = Canvas::new(pix.as_mut(), scale);
@@ -570,8 +579,8 @@ fn ghost(d: &mut Desktop, id: u32, item: &Item, count: usize) -> Option<Pixmap> 
             GRID_ICON,
             GRID_ICON,
         );
-        if let (Some(picture), _) = item_picture(d, item, GRID_ICON, scale) {
-            canvas.draw_image_fit(&picture, icon_rect);
+        if let Some(picture) = picture {
+            canvas.draw_image_fit(picture, icon_rect);
         }
         if count > 1 {
             let badge = Rect::new(GHOST - 26, 2, 24, 20);
@@ -649,6 +658,9 @@ pub fn pointer_button(
             && let Some(MenuRow::Action(_, action, true)) = menu.rows.get(row)
         {
             perform(d, id, action.clone());
+        }
+        if let Some(w) = d.files.window_mut(id) {
+            w.pending_drop = None;
         }
         update_hover(d, id, x, y);
         return;
@@ -1158,6 +1170,12 @@ fn perform(d: &mut Desktop, id: u32, action: MenuAction) {
             }
             w.refilter();
         }
+        MenuAction::Drop(moving) => {
+            if let Some(drop) = w.pending_drop.take() {
+                drop_into(d, drop.source, drop.paths, drop.dest, !moving);
+            }
+        }
+        MenuAction::CancelDrop => w.pending_drop = None,
         MenuAction::Terminal => {
             let dir = w.dir.to_string_lossy().to_string();
             if let Some(terminal) = entries::find_terminal(&d.config)
@@ -1557,13 +1575,17 @@ pub fn drag_leave(d: &mut Desktop, id: u32) {
     }
 }
 
-/// Drops the dragged files where the drag last hovered in the window.
+/// Drops the dragged files where the drag last hovered in the window: onto a folder they are
+/// not already in, a menu opens at the drop asking whether to copy or move them there, rather
+/// than the drop deciding, since a drag between windows or from the desktop is as often meant
+/// to copy as to move.
 ///
 /// # Arguments
 /// * `d` - The desktop.
 /// * `id` - The window.
-/// * `copy` - Whether to copy rather than move.
-pub fn drop(d: &mut Desktop, id: u32, copy: bool) {
+/// * `x` - The drop's X in the window.
+/// * `y` - The drop's Y in the window.
+pub fn drop(d: &mut Desktop, id: u32, x: f64, y: f64) {
     let Some((source, paths)) = d.files.drag.clone() else {
         return;
     };
@@ -1581,7 +1603,28 @@ pub fn drop(d: &mut Desktop, id: u32, copy: bool) {
     let Some(dest) = dest else {
         return;
     };
-    drop_into(d, source, paths, dest, copy);
+    if paths.iter().all(|p| p.parent() == Some(dest.as_path())) {
+        return;
+    }
+    let Some(w) = d.files.window_mut(id) else {
+        return;
+    };
+    w.pending_drop = Some(PendingDrop { source, paths, dest });
+    w.menu = Some(ContextMenu {
+        x: x as i32,
+        y: y as i32,
+        rows: drop_rows(),
+    });
+}
+
+/// The rows of the menu a drop opens: copy, move, or leave the files where they are.
+pub fn drop_rows() -> Vec<MenuRow> {
+    vec![
+        MenuRow::Action(tr("Copy here").to_string(), MenuAction::Drop(false), true),
+        MenuRow::Action(tr("Move here").to_string(), MenuAction::Drop(true), true),
+        MenuRow::Separator,
+        MenuRow::Action(tr("Cancel").to_string(), MenuAction::CancelDrop, true),
+    ]
 }
 
 /// Moves or copies dragged files into a folder, skipping a move onto the
@@ -2558,18 +2601,46 @@ fn draw_menu(d: &mut Desktop, index: usize, canvas: &mut Canvas<'_>, hover: Hit)
     }
 }
 
-/// The surface a drop on the wallpaper lands in: the Desktop folder.
-///
-/// # Arguments
-/// * `d` - The desktop.
-/// * `copy` - Whether to copy rather than move.
-pub fn drop_on_desktop(d: &mut Desktop, copy: bool) {
-    let Some((source, paths)) = d.files.drag.clone() else {
-        return;
-    };
-    let dest = entries::desktop_dir();
-    if !dest.is_dir() {
-        return;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Event;
+
+    /// A drop from elsewhere onto a window's folder opens the menu that asks whether to copy or
+    /// move, and one of files already in that folder asks nothing.
+    #[test]
+    fn a_drop_on_a_new_folder_asks_whether_to_copy_or_move() {
+        let dir = std::env::temp_dir().join(format!("selkies-desktop-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = Desktop::load(false);
+        let id = d.open_files(Some(dir.clone()), None);
+        d.handle(Event::Configured {
+            surface: SurfaceId::Window(id),
+            width: files::DEFAULT_WIDTH,
+            height: files::DEFAULT_HEIGHT,
+            scale: 1,
+        });
+        let drop_at = |d: &mut Desktop, paths: Vec<PathBuf>| {
+            d.files.drag = Some((99, paths));
+            let (x, y) = (600.0, 300.0);
+            d.handle(Event::DragMotion {
+                surface: SurfaceId::Window(id),
+                x,
+                y,
+            });
+            d.handle(Event::DragDrop {
+                surface: SurfaceId::Window(id),
+                x,
+                y,
+            });
+            d.handle(Event::DragEnd);
+        };
+        drop_at(&mut d, vec![dir.join("already-here.txt")]);
+        assert!(d.files.window(id).unwrap().menu.is_none(), "nothing moves");
+        drop_at(&mut d, vec![PathBuf::from("/nonexistent/elsewhere/a.txt")]);
+        let w = d.files.window(id).unwrap();
+        assert_eq!(w.menu.as_ref().map(|m| m.rows.clone()), Some(drop_rows()));
+        assert_eq!(w.pending_drop.as_ref().map(|p| p.dest.clone()), Some(dir.clone()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
-    drop_into(d, source, paths, dest, copy);
 }

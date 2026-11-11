@@ -58,6 +58,13 @@ pub trait Backend {
         false
     }
 
+    /// Whether a drag's ghost image follows the pointer, as the drag icon a
+    /// Wayland drag carries does; where it does not, the desktop draws the
+    /// icons it drags following the pointer itself.
+    fn shows_drag_icon(&self) -> bool {
+        false
+    }
+
     /// Shows a background's launchers on their own layer, where the backend
     /// keeps one (`layered_desktop`); input on that layer reaches the desktop
     /// as the background's.
