@@ -46,10 +46,10 @@ index c09214d..a035ef4 100755
      dst->rc.vbvMaxBitrate = src->rc.vbvMaxBitrate;
  
 diff --git a/source/encoder/encoder.cpp b/source/encoder/encoder.cpp
-index 0bd8c58..3473b33 100644
+index 4571310..2621207 100644
 --- a/source/encoder/encoder.cpp
 +++ b/source/encoder/encoder.cpp
-@@ -4099,7 +4099,7 @@ void Encoder::configure(x265_param *p)
+@@ -4106,7 +4106,7 @@ void Encoder::configure(x265_param *p)
          x265_log(p, X265_LOG_WARNING, "Max TU size should be less than or equal to max CU size, setting max TU size = %d\n", p->maxCUSize);
          p->maxTUSize = p->maxCUSize;
      }
@@ -59,10 +59,10 @@ index 0bd8c58..3473b33 100644
          p->rc.aqMode = X265_AQ_NONE;
          p->rc.hevcAq = 0;
 diff --git a/source/x265.h b/source/x265.h
-index 1f9d81d..47ae7a7 100644
+index faa0262..cebad6e 100644
 --- a/source/x265.h
 +++ b/source/x265.h
-@@ -1760,6 +1760,12 @@ typedef struct x265_param
+@@ -1761,6 +1761,12 @@ typedef struct x265_param
           * AQ is enabled. Default value: 1.0. Acceptable values between 0.0 and 3.0 */
          double    aqStrength;
  
