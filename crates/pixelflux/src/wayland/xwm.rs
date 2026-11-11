@@ -21,6 +21,11 @@
 //! `_NET_CLIENT_LIST_STACKING`, `_NET_FRAME_EXTENTS`) is written here over a second connection to
 //! the same server, since the manager's own is private to it. A crashed Xwayland is started
 //! again after a short wait, so an X11 client started later still finds a server.
+//!
+//! Where the host has no DRM render node, the EGL vendor library a GPU container runtime injects
+//! (NVIDIA's) segfaults inside Xwayland's EGL initialization, and glamor would have nothing to
+//! accelerate there anyway, so Xwayland starts pinned to Mesa's EGL vendor, loading no external
+//! EGL platform, with its buffers in shared memory (`-shm`, `no_render_node_launch`).
 
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
@@ -59,6 +64,8 @@ use crate::wm::{
 
 /// How long a crashed Xwayland waits before it is started again.
 const RESTART_DELAY: Duration = Duration::from_secs(2);
+/// The glvnd vendor file of Mesa's EGL, the vendor Xwayland is pinned to without a render node.
+const MESA_EGL_VENDOR: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
 
 /// The X11 side of the compositor.
 pub struct XwmState {
@@ -158,6 +165,26 @@ impl Extras {
     }
 }
 
+/// The environment and arguments Xwayland starts with: none where the host has a DRM render
+/// node, else Mesa's EGL vendor where it is installed, no external EGL platform, and `-shm`.
+fn no_render_node_launch() -> (Vec<(&'static str, &'static str)>, Vec<&'static str>) {
+    let has_render_node = std::fs::read_dir("/dev/dri").is_ok_and(|dir| {
+        dir.flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
+    });
+    if has_render_node {
+        return (Vec::new(), Vec::new());
+    }
+    println!(
+        "[Wayland] No DRM render node: Xwayland starts on Mesa's EGL with shared-memory buffers."
+    );
+    let mut env = vec![("__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", "")];
+    if std::path::Path::new(MESA_EGL_VENDOR).exists() {
+        env.push(("__EGL_VENDOR_LIBRARY_FILENAMES", MESA_EGL_VENDOR));
+    }
+    (env, vec!["-shm"])
+}
+
 /// Spawn Xwayland and arm the start of its window manager once it is ready. `notify` is
 /// told the display number when it is.
 pub fn start(
@@ -178,11 +205,12 @@ pub fn start(
         return;
     }
     ensure_x11_socket_dir();
+    let (env, args) = no_render_node_launch();
     let (xwayland, client) = match XWayland::spawn(
         &state.dh,
         None,
-        std::iter::empty::<(String, String)>(),
-        std::iter::empty::<String>(),
+        env,
+        args,
         true,
         std::process::Stdio::null(),
         std::process::Stdio::null(),
