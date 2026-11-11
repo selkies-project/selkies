@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: thelamer <ryankuba@gmail.com>
 Date: Sat, 7 Nov 2026 19:27:00 -0500
-Subject: [PATCH 2/2] Code the superblocks the caller marks constant as skips
+Subject: [PATCH 2/3] Code the superblocks the caller marks constant as skips
  without analysis
 
 A 64x64 superblock whose every 16x16 block the picture's constant-block map marks is the frame
