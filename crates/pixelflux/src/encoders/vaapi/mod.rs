@@ -2313,13 +2313,31 @@ impl VaapiEncoder {
         let api = self.device.api;
         let display = self.device.display;
         let (width, height) = (self.negotiated.width, self.negotiated.height);
-        let handles: Vec<i32> = dmabuf.handles().map(|h| h.as_raw_fd()).collect();
-        if handles.len() != 1 {
-            return Err("VA-API maps only a dmabuf made of a single object".into());
+        // One fd a plane; the planes of one buffer (a compressed layout's metadata beside its
+        // pixels, as radeonsi's DCC modifiers make) come as fds of the same object, which the
+        // descriptor names once.
+        let mut objects: Vec<(i32, (u64, u64), u32)> = Vec::new();
+        let mut plane_object: Vec<u32> = Vec::new();
+        for fd in dmabuf.handles().map(|h| h.as_raw_fd()) {
+            let id = object_identity(fd).ok_or("a dmabuf plane's object cannot be read")?;
+            let at = match objects.iter().position(|o| o.1 == id) {
+                Some(at) => at,
+                None => {
+                    let size = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
+                    if size <= 0 {
+                        return Err("the dmabuf object reports no size".into());
+                    }
+                    objects.push((fd, id, size as u32));
+                    objects.len() - 1
+                }
+            };
+            plane_object.push(at as u32);
         }
-        let size = unsafe { libc::lseek(handles[0], 0, libc::SEEK_END) };
-        if size <= 0 {
-            return Err("the dmabuf object reports no size".into());
+        if plane_object.is_empty() || plane_object.len() > 4 {
+            return Err(format!(
+                "VA-API maps a dmabuf of one to four planes, not {}",
+                plane_object.len()
+            ));
         }
         let drm_format = dmabuf.format().code as u32;
         let fourcc = match drm_format {
@@ -2354,15 +2372,17 @@ impl VaapiEncoder {
             desc.fourcc = fourcc;
             desc.width = width;
             desc.height = height;
-            desc.num_objects = 1;
-            desc.objects[0].fd = handles[0];
-            desc.objects[0].size = size as u32;
-            desc.objects[0].drm_format_modifier = modifier;
+            desc.num_objects = objects.len() as u32;
+            for (i, &(fd, _, size)) in objects.iter().enumerate() {
+                desc.objects[i].fd = fd;
+                desc.objects[i].size = size;
+                desc.objects[i].drm_format_modifier = modifier;
+            }
             desc.num_layers = 1;
             desc.layers[0].drm_format = drm_format;
             desc.layers[0].num_planes = planes.len() as u32;
             for (i, &(pitch, offset)) in planes.iter().enumerate().take(4) {
-                desc.layers[0].object_index[i] = 0;
+                desc.layers[0].object_index[i] = plane_object[i];
                 desc.layers[0].offset[i] = offset;
                 desc.layers[0].pitch[i] = pitch;
             }
@@ -2384,12 +2404,17 @@ impl VaapiEncoder {
                 return Ok(surface);
             }
         }
-        let mut handle = handles[0] as usize;
+        // The older descriptor carries one object.
+        if objects.len() != 1 {
+            return Err("this VA-API driver maps no dmabuf of several objects".into());
+        }
+        let (fd, _, size) = objects[0];
+        let mut handle = fd as usize;
         let mut desc: VASurfaceAttribExternalBuffers = unsafe { std::mem::zeroed() };
         desc.pixel_format = fourcc;
         desc.width = width;
         desc.height = height;
-        desc.data_size = size as u32;
+        desc.data_size = size;
         desc.buffers = &mut handle;
         desc.num_buffers = 1;
         desc.num_planes = planes.len() as u32;
@@ -2920,6 +2945,12 @@ fn image_format(device: &Device, fourcc: u32) -> Option<VAImageFormat> {
         .iter()
         .find(|f| f.fourcc == fourcc)
         .copied()
+}
+
+/// The dma-buf object `fd` names, as its device and inode: two fds of one buffer give the same.
+fn object_identity(fd: i32) -> Option<(u64, u64)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    (unsafe { libc::fstat(fd, &mut st) } == 0).then_some((st.st_dev, st.st_ino))
 }
 
 #[cfg(test)]

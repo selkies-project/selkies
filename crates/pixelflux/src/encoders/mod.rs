@@ -1153,6 +1153,16 @@ impl FrameEncoder {
         }
     }
 
+    /// The planes of one dmabuf the session imports as it stands: VA-API's descriptor maps up to
+    /// four, each to the object it lies in (a compressed layout's metadata is a plane beside the
+    /// pixels); NVENC imports the first plane through EGL, so a buffer of more is composited.
+    pub fn dmabuf_planes(&self) -> usize {
+        match self {
+            FrameEncoder::Vaapi(_) => 4,
+            _ => 1,
+        }
+    }
+
     /// Whether the session negotiated 4:4:4 chroma.
     pub fn is_fullcolor(&self) -> bool {
         each!(self, enc => enc.is_fullcolor())

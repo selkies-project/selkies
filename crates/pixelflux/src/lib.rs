@@ -1382,6 +1382,10 @@ pub struct WlEncodeControls {
     /// The zero-copy session refused a client's buffer handed to it as it stood (a layout
     /// its driver does not import), so the capture composites every frame from then on.
     scanout_refused: AtomicBool,
+    /// The planes of one client dmabuf the session's encoder imports as it stands
+    /// (`FrameEncoder::dmabuf_planes`), published by the encode thread; a buffer of more planes
+    /// is composited.
+    scanout_planes: AtomicU32,
     reference_reports: Mutex<Vec<encoders::reference::ReferenceReport>>,
     /// Pending per-frame tunables for the encode thread (mutex, not atomics: one struct, set
     /// rarely, read only when the dirty flag says so).
@@ -1399,6 +1403,7 @@ impl WlEncodeControls {
             link_kbps: AtomicI32::new(0),
             force_idr: AtomicBool::new(false),
             scanout_refused: AtomicBool::new(false),
+            scanout_planes: AtomicU32::new(1),
             reference_reports: Mutex::new(Vec::new()),
             tunables_dirty: AtomicBool::new(false),
             tunables: Mutex::new(None),
@@ -1698,6 +1703,10 @@ fn wayland_encode_loop<B: WlPayload>(
             pool.recycle(f.id, f.buf);
             break;
         }
+        let planes = video_encoder.as_ref().map_or(1, |e| e.dmabuf_planes());
+        cfg.controls
+            .scanout_planes
+            .store(planes as u32, Ordering::Relaxed);
         if cfg.controls.tunables_dirty.swap(false, Ordering::Acquire)
             && let Some(t) = cfg.controls.tunables.lock().unwrap().take()
         {
@@ -2708,21 +2717,23 @@ where
 
 /// A client's dmabuf the zero-copy session encodes as it stands, with its description for the
 /// log, and a hold on the buffer, or why the session cannot take it: both hardware sessions
-/// import a single object in one of the four packed 8-bit RGB formats, at their own width and
-/// height, so only a buffer of the capture's size qualifies. What the driver then makes of its
-/// modifier and pitch only the import says, and a refusal there ends the direct path for the
-/// capture (`WlEncodeControls::scanout_refused`).
+/// import one of the four packed 8-bit RGB formats at their own width and height, so only a
+/// buffer of the capture's size qualifies, and of no more planes than the session's encoder
+/// imports (`planes`: VA-API maps a compressed layout's metadata plane, NVENC one plane). What
+/// the driver then makes of its modifier and pitch only the import says, and a refusal there
+/// ends the direct path for the capture (`WlEncodeControls::scanout_refused`).
 fn scanout_dmabuf<R: smithay::backend::renderer::Renderer + ImportAll>(
     surface: &WaylandSurfaceRenderElement<R>,
     size: (i32, i32),
+    planes: usize,
 ) -> Result<(Dmabuf, SurfaceBuffer, String), &'static str> {
     let buffer = surface.buffer();
     let dmabuf = get_dmabuf(buffer).map_err(|_| "the window's buffer is in system memory")?;
     if (dmabuf.width() as i32, dmabuf.height() as i32) != size {
         return Err("the buffer is not the size of the capture");
     }
-    if dmabuf.handles().count() != 1 {
-        return Err("the buffer spans several objects");
+    if dmabuf.num_planes() > planes {
+        return Err("the buffer has more planes than the encoder imports");
     }
     let format = dmabuf.format();
     if !matches!(
@@ -5213,6 +5224,9 @@ fn render_node_tick(
     } else {
         Ok(())
     };
+    let scanout_planes = node.capture.as_ref().map_or(1, |c| {
+        c.encode_controls.scanout_planes.load(Ordering::Relaxed) as usize
+    });
     // The hold on a client buffer encoded as it stands this tick, kept until the encode is
     // done with it: a dmabuf a zero-copy session imports, or an shm buffer whose rows the
     // readback encode reads in place.
@@ -5257,7 +5271,7 @@ fn render_node_tick(
             let direct = match (direct_wanted, slot_id) {
                 (Ok(()), Some(_)) => {
                     scanout_candidate(&elements, (width, height), output_scale_val)
-                        .and_then(|s| scanout_dmabuf(s, (width, height)))
+                        .and_then(|s| scanout_dmabuf(s, (width, height), scanout_planes))
                 }
                 (Err(why), _) => Err(why),
                 (Ok(()), None) => Err("the readback path composites"),

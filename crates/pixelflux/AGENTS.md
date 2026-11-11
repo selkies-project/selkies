@@ -168,7 +168,8 @@ Only the picture type is codec-specific, because an H.265 NAL header is two byte
 output's frame on its own tick, a pass X11 never pays since its clients draw into the one framebuffer the capture
 reads, except where the frame's element list is one opaque surface over exactly the output with nothing drawn over
 it (`scanout_candidate`, decided every frame as a display compositor picks direct scanout): a zero-copy session is
-then handed the client's dmabuf itself, and the pixman path's encode thread reads the client's shm rows where they
+then handed the client's dmabuf itself (with a compressed layout's metadata plane on VA-API, a single plane on
+NVENC), and the pixman path's encode thread reads the client's shm rows where they
 lie, each held for the client until the encode is done; a session whose driver refuses one such buffer composites for
 the rest of the capture (`WlEncodeControls::scanout_refused`), and the readback path on the GL renderer composites,
 since its pool is RGBA and a client's shm buffer is not. Measured at 1920x936 on an RTX 3060 with a covering
