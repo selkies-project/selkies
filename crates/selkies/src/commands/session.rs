@@ -154,6 +154,44 @@ pub fn for_selkies(env: &Env, preload: &str) -> Env {
     out
 }
 
+/// The variables naming the libraries the session's applications preload, in the order the
+/// images preload them: the Input Interposer, fake-udev, and the V4L2 Interposer.
+pub const APPLICATION_PRELOADS: [&str; 3] = [
+    "SELKIES_INTERPOSER",
+    "FAKE_UDEV_LIB",
+    "SELKIES_WEBCAM_INTERPOSER",
+];
+
+/// The `LD_PRELOAD` the session's applications start with: the libraries
+/// [`APPLICATION_PRELOADS`] name ahead of the environment's own `LD_PRELOAD`, each once.
+///
+/// The images take these out of Selkies' own preload, since they answer for the devices its
+/// capture and gamepad backends must see as the kernel reports them, so whatever Selkies starts
+/// for the session puts them back from the variables that name them. A path holding a dynamic
+/// string token (`/usr/$LIB/...`) is kept as it stands, since the loader resolves it for each
+/// process's word size and only it can tell which file that process takes; any other path must
+/// name a file. `get` reads a variable of the environment the applications inherit; the result
+/// is empty where nothing is to be preloaded.
+pub fn application_preload(get: impl Fn(&str) -> Option<String>) -> String {
+    let named = APPLICATION_PRELOADS
+        .iter()
+        .filter_map(|var| get(var))
+        .filter(|path| path.contains('$') || Path::new(path).is_file());
+    let current = get("LD_PRELOAD").unwrap_or_default();
+    let mut preload: Vec<String> = Vec::new();
+    for entry in named.chain(
+        current
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    ) {
+        if !preload.contains(&entry) {
+            preload.push(entry);
+        }
+    }
+    preload.join(":")
+}
+
 /// Selkies' settings for `args` and the environment, as its own parser reads them.
 pub fn selkies_settings(args: &[String]) -> Settings {
     Settings::parse(args, &|name| std::env::var(name).ok())
@@ -531,23 +569,9 @@ impl Session {
             env.insert("XDG_SESSION_DESKTOP".to_string(), sid.to_string());
             env.insert("DESKTOP_SESSION".to_string(), sid.to_string());
         }
-        let mut preload: Vec<String> = ["SELKIES_INTERPOSER", "SELKIES_WEBCAM_INTERPOSER"]
-            .iter()
-            .filter_map(|v| env.get(*v).cloned())
-            .filter(|p| Path::new(p).is_file())
-            .collect();
-        preload.extend(
-            env.get("LD_PRELOAD")
-                .map(|p| {
-                    p.split(':')
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-        );
+        let preload = application_preload(|var| env.get(var).cloned());
         if !preload.is_empty() {
-            env.insert("LD_PRELOAD".to_string(), preload.join(":"));
+            env.insert("LD_PRELOAD".to_string(), preload);
         }
         let exec = entry.get("Exec").cloned().unwrap_or_default();
         let mut argv: Vec<String> = if which("dbus-run-session").is_some() {
@@ -1207,6 +1231,36 @@ mod tests {
         let plain = Env::from([("A".to_string(), "1".to_string())]);
         assert_eq!(for_selkies(&plain, ""), plain);
         assert_eq!(for_selkies(&plain, "/x.so")["LD_PRELOAD"], "/x.so");
+    }
+
+    #[test]
+    fn applications_preload_the_interposers_ahead_of_the_environment_once_each() {
+        let lib = tempfile::tempdir().unwrap();
+        let udev = lib.path().join("libudev.so.1.0.0-fake");
+        fs::write(&udev, b"").unwrap();
+        let udev = udev.to_str().unwrap().to_string();
+        let env = Env::from([
+            (
+                "SELKIES_INTERPOSER".to_string(),
+                "/usr/$LIB/selkies_input_interposer.so".to_string(),
+            ),
+            ("FAKE_UDEV_LIB".to_string(), udev.clone()),
+            (
+                "SELKIES_WEBCAM_INTERPOSER".to_string(),
+                "/nonexistent/selkies_v4l2_interposer.so".to_string(),
+            ),
+            (
+                "LD_PRELOAD".to_string(),
+                format!("/opt/operator.so::{udev}"),
+            ),
+        ]);
+        assert_eq!(
+            application_preload(|var| env.get(var).cloned()),
+            format!("/usr/$LIB/selkies_input_interposer.so:{udev}:/opt/operator.so"),
+            "a loader token is kept, a missing file dropped, and a library already preloaded listed once"
+        );
+        let plain = Env::from([("LD_PRELOAD".to_string(), String::new())]);
+        assert_eq!(application_preload(|var| plain.get(var).cloned()), "");
     }
 
     #[test]

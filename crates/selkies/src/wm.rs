@@ -15,8 +15,11 @@
 //! socket and Xwayland's display on Wayland, the X display on X11.
 //!
 //! Every program the manager starts, the shell included, shares one environment: the display
-//! sockets, the session bus (started here where the environment names none), and the session
-//! type, so what the menus and the shell launch finds the same desktop. The backend's
+//! sockets, the session bus (started here where the environment names none), the session
+//! type, and the device interposers the server keeps out of its own process
+//! ([`application_preload`]), so what the menus and the shell launch finds the same desktop and
+//! the session's gamepads and camera. The bus is started in that environment too, so an
+//! application it activates gets them as well. The backend's
 //! `autostart` file is the session's application: it runs once the manager is up, with that
 //! environment, and again when everything it started exited where `--app-restart` asks
 //! ([`selkies_wm::session::start_autostart`]). The handles live for the process, since the
@@ -39,6 +42,7 @@ use selkies_wm::session::{
     start_autostart,
 };
 
+use crate::commands::session::application_preload;
 use crate::settings::settings;
 
 /// The shell binary the server starts under `--desktop`.
@@ -104,6 +108,10 @@ pub fn start(is_wayland: bool) {
         .then(|| std::env::var("DISPLAY").ok())
         .flatten();
     let mut env = SessionEnv::new(wayland_display.as_deref(), x11_display.as_deref());
+    let preload = application_preload(|var| env.get(var).map(str::to_string));
+    if !preload.is_empty() {
+        env.set("LD_PRELOAD", &preload);
+    }
     let bus = SessionBus::ensure(&mut env);
     let env = Arc::new(Mutex::new(env));
     let x11 = if is_wayland {
