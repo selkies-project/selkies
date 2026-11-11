@@ -2503,6 +2503,12 @@ struct FrameScene<'a> {
     wm: Option<&'a wayland::wm::WmState>,
     /// `None` where the cursor is not drawn into the frame or the pointer is elsewhere.
     cursor: Option<SoftwareCursor<'a>>,
+    /// A drag's icon and where its top-left corner lies on the output, while a drag carries one
+    /// over it.
+    drag_icon: Option<(
+        &'a smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        Point<f64, Logical>,
+    )>,
     overlay: &'a OverlayState,
     output: &'a Output,
     /// The output's origin in the layout.
@@ -2512,8 +2518,8 @@ struct FrameScene<'a> {
     scale: f64,
 }
 
-/// The render elements of an output's frame, topmost first: the software cursor, the
-/// watermark, the window manager's overlays, the overlay and top wlr-layer layers, the windows
+/// The render elements of an output's frame, topmost first: the software cursor, a drag's icon,
+/// the watermark, the window manager's overlays, the overlay and top wlr-layer layers, the windows
 /// with their frames, and the bottom and background layers. One list for both renderers, read
 /// by `scanout_candidate` before anything is drawn.
 fn composition_elements<R>(
@@ -2570,6 +2576,21 @@ where
                 }
             }
         }
+    }
+    if let Some((surface, at)) = scene.drag_icon {
+        let at = at.to_physical(Scale::from(scale)).to_i32_round();
+        elements.extend(
+            smithay::backend::renderer::element::surface::render_elements_from_surface_tree(
+                renderer,
+                surface,
+                at,
+                scale,
+                1.0,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(CompositionElements::Surface),
+        );
     }
     if let Some(elem) = scene.overlay.get_watermark_element(renderer) {
         elements.push(CompositionElements::Cursor(elem));
@@ -5233,6 +5254,11 @@ fn render_node_tick(
     let mut scanout_hold: Option<SurfaceBuffer> = None;
     let mut shm_hold: Option<SurfaceBuffer> = None;
     let cursor_time = Duration::from_millis(state.clock.now().as_millis() as u64);
+    let drag_icon = state
+        .dnd_icon
+        .as_ref()
+        .zip(pointer_local)
+        .map(|((surface, offset), pointer)| (surface, pointer + offset.to_f64()));
     let software_cursor = |pos| SoftwareCursor {
         theme: &state.cursor_helper,
         icon: &state.current_cursor_icon,
@@ -5260,6 +5286,7 @@ fn render_node_tick(
                 cursor: pointer_local
                     .filter(|_| state.render_cursor_on_framebuffer)
                     .map(software_cursor),
+                drag_icon,
                 overlay: &node.overlay_state,
                 output: &output,
                 origin,
@@ -5503,6 +5530,7 @@ fn render_node_tick(
             cursor: pointer_local
                 .filter(|_| state.render_cursor_on_framebuffer)
                 .map(software_cursor),
+            drag_icon,
             overlay: &node.overlay_state,
             output: &output,
             origin,
@@ -6958,6 +6986,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         current_cursor_icon: None,
         cursor_surface_pending: false,
         cursor_buffer: None,
+        dnd_icon: None,
         render_cursor_on_framebuffer: false,
         render_node_path,
         auto_gpu_selected,

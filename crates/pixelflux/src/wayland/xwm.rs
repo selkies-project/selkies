@@ -33,8 +33,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use smithay::desktop::Window;
+use smithay::input::Seat;
 use smithay::reexports::calloop::LoopHandle;
-use smithay::utils::{Logical, Rectangle};
+use smithay::utils::{Logical, Point, Rectangle};
 use smithay::wayland::compositor::CompositorHandler;
 use smithay::wayland::selection::SelectionTarget;
 use smithay::wayland::selection::data_device::{
@@ -549,7 +550,23 @@ pub fn publish_frame(state: &mut AppState, id: WindowId) {
     extras.flush();
 }
 
-impl smithay::input::dnd::DndGrabHandler for AppState {}
+/// The end of a drag-and-drop grab, an X11 client's or a Wayland client's: the drag's icon is
+/// no longer drawn.
+impl smithay::input::dnd::DndGrabHandler for AppState {
+    fn dropped(
+        &mut self,
+        _target: Option<smithay::input::dnd::DndTarget<'_, Self>>,
+        _validated: bool,
+        _seat: Seat<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+        self.dnd_icon = None;
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
+        self.dnd_icon = None;
+    }
+}
 
 impl XWaylandShellHandler for AppState {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {

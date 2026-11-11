@@ -46,7 +46,7 @@ use smithay::wayland::image_copy_capture::{
     FrameRef as CopyFrameRef, ImageCopyCaptureHandler, ImageCopyCaptureState,
     Session as CopySession, SessionRef as CopySessionRef,
 };
-use smithay::input::dnd::{DndFocus, Source};
+use smithay::input::dnd::{DnDGrab, DndFocus, GrabType, Source};
 use std::sync::Arc;
 use crate::wayland::cursor::{Cursor, CursorJob};
 use crate::wayland::keymap::KeymapPolicy;
@@ -101,7 +101,7 @@ use smithay::{
         Seat, SeatHandler, SeatState,
         keyboard::{KeyboardTarget, KeysymHandle, ModifiersState},
         pointer::{
-            AxisFrame, ButtonEvent, CursorIcon, CursorImageAttributes, CursorImageStatus,
+            AxisFrame, ButtonEvent, CursorIcon, CursorImageAttributes, CursorImageStatus, Focus,
             GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
             GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
             GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData, MotionEvent,
@@ -1013,6 +1013,10 @@ pub struct AppState {
     /// shipping the surface's previous sprite under the new hotspot.
     pub cursor_surface_pending: bool,
     pub cursor_buffer: Option<WlBuffer>,
+    /// The icon a client's drag carries, drawn at the pointer into every frame while the drag
+    /// lasts (the cursor itself is the browser's to draw, a drag's icon is not), with the offset
+    /// from the pointer its commits moved it to.
+    pub dnd_icon: Option<(WlSurface, Point<i32, Logical>)>,
     pub render_cursor_on_framebuffer: bool,
     pub pointer_warp_state: PointerWarpManager,
     pub relative_pointer_state: RelativePointerManagerState,
@@ -1324,6 +1328,19 @@ impl CompositorHandler for AppState {
             }
         }
         smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
+        if let Some((icon, offset)) = self.dnd_icon.as_mut()
+            && icon == surface
+        {
+            let delta = with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .buffer_delta
+                    .take()
+            });
+            *offset += delta.unwrap_or_default();
+        }
         // A popup created without a parent, as a layer surface's always is, joins its parent's
         // popups when it maps.
         self.popups.commit(surface);
@@ -2646,8 +2663,50 @@ impl ExtDataControlHandler for AppState {
     }
 }
 
-/// Marker impl enabling Wayland drag-and-drop grabs with Smithay's default behavior.
-impl WaylandDndGrabHandler for AppState {}
+/// `wl_data_device.start_drag`: a client's drag becomes Smithay's drag-and-drop grab on the
+/// pointer or the touch point that started it, which offers the source to the surface under it,
+/// Wayland or X11 through the X11 window manager's bridge, and drops it on release; its icon is
+/// drawn at the pointer until then (`AppState::dnd_icon`). The trait's own default cancels every
+/// drag, which left a drag between two windows, or out of one, ending as it began.
+impl WaylandDndGrabHandler for AppState {
+    fn dnd_requested<S: Source>(
+        &mut self,
+        source: S,
+        icon: Option<WlSurface>,
+        seat: Seat<Self>,
+        serial: Serial,
+        type_: GrabType,
+    ) {
+        self.dnd_icon = icon.map(|surface| (surface, (0, 0).into()));
+        let display = self.dh.clone();
+        match type_ {
+            GrabType::Pointer => {
+                let Some(pointer) = seat.get_pointer() else {
+                    source.cancel();
+                    return;
+                };
+                let Some(start) = pointer.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                let grab = DnDGrab::new_pointer(&display, start, source, seat);
+                pointer.set_grab(self, grab, serial, Focus::Keep);
+            }
+            GrabType::Touch => {
+                let Some(touch) = seat.get_touch() else {
+                    source.cancel();
+                    return;
+                };
+                let Some(start) = touch.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                let grab = DnDGrab::new_touch(&display, start, source, seat);
+                touch.set_grab(self, grab, serial);
+            }
+        }
+    }
+}
 /// Buffer lifecycle hook: buffer destruction needs no bookkeeping here.
 impl BufferHandler for AppState {
     fn buffer_destroyed(&mut self, _buffer: &WlBuffer) {}
