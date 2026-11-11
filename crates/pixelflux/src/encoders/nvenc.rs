@@ -3469,9 +3469,11 @@ impl NvencEncoder {
 
     /// Drop every page-locked host registration, under the pushed CUDA context.
     ///
-    /// Called when the capture's shm segments are recreated at unchanged dimensions: the new
-    /// segments often reuse the old base addresses, so a stale registration would alias fresh memory.
-    /// Subsequent uploads re-pin lazily. A `0`-length entry marks a registration that failed and so
+    /// Called when the capture's shm segments are recreated at unchanged dimensions, and when a
+    /// Wayland encode thread hands its session on, before its pool is freed: new buffers often
+    /// reuse the old base addresses, so a stale registration would alias fresh memory, and one
+    /// freed while registered leaves CUDA the old length at that address. Subsequent uploads
+    /// re-pin lazily. A `0`-length entry marks a registration that failed and so
     /// is not unregistered.
     pub fn release_pinned_hosts(&mut self) {
         if self.pinned_hosts.is_empty() {
@@ -4983,9 +4985,20 @@ impl NvencEncoder {
                 Height: rows,
                 ..Default::default()
             };
-            if (self.cuda.cuMemcpy2DAsync_v2)(&copy, ptr::null_mut()) != CUresult::CUDA_SUCCESS {
+            let copied = (self.cuda.cuMemcpy2DAsync_v2)(&copy, ptr::null_mut());
+            if copied != CUresult::CUDA_SUCCESS {
                 (self.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
-                return Err("packed host->device upload failed".into());
+                return Err(format!(
+                    "packed host->device upload failed ({}; host {:#x}+{} at stride {}, {}x{}, device pitch {}, pinned {})",
+                    Self::get_error_string(&self.cuda, copied),
+                    pixels.as_ptr() as usize,
+                    pixels.len(),
+                    src_stride,
+                    self.width,
+                    self.height,
+                    self.input_pitch,
+                    self.pin_uploads
+                ));
             }
 
             let (mapped, submitted) =

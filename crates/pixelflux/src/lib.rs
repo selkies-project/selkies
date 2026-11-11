@@ -1834,11 +1834,17 @@ fn wayland_encode_loop<B: WlPayload>(
             break;
         }
     }
-    let video_encoder = if zero_copy.is_some() {
+    let mut video_encoder = if zero_copy.is_some() {
         None
     } else {
         session.lock().unwrap().take()
     };
+    // The host buffers NVENC pinned are this thread's pool's, freed once the thread ends. They
+    // are unregistered while still mapped: an address freed while registered stays known to CUDA
+    // at its old length, and a larger buffer a successor's pool gets there then fails its upload.
+    if let Some(FrameEncoder::Nvenc(enc)) = video_encoder.as_mut() {
+        enc.release_pinned_hosts();
+    }
     crate::log::debug!(
         "[Wayland] Encode thread exiting (hw={}, stripes={}).",
         video_encoder.is_some(),
