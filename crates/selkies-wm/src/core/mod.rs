@@ -702,6 +702,12 @@ impl Engine {
             .unwrap_or(1)
     }
 
+    /// Takes the outputs a change of displays left, keeping every window where it stood on its
+    /// own output: an output that stays moves its windows with it, as the primary does when a
+    /// display left of it comes or goes and the layout shifts, so they keep their place on the
+    /// screen; a window of an output that went takes the primary at the place it had from that
+    /// output's corner. A fullscreen, maximized, or tiled window fills its output's area anew,
+    /// and every window is kept inside its output's work area.
     fn outputs_changed(&mut self, outputs: Vec<OutputInfo>) {
         // A workarea that changed is a bar placed anew, as a shell starting does, which is told
         // where the edge stands again.
@@ -718,17 +724,22 @@ impl Engine {
             .map(|o| o.id)
             .filter(|id| !outputs.iter().any(|o| o.id == *id))
             .collect();
-        self.outputs = outputs;
+        let before = std::mem::replace(&mut self.outputs, outputs);
+        let origin_before = |id: OutputId| before.iter().find(|o| o.id == id).map(|o| (o.rect.x, o.rect.y));
         let primary = self.primary_output().map(|o| o.id).unwrap_or(0);
         let ids: Vec<WindowId> = self.windows.keys().copied().collect();
         for id in ids {
             let Some(win) = self.windows.get(&id) else {
                 continue;
             };
-            let mut output = win.output;
+            let from = win.output;
+            let mut output = from;
             if gone.contains(&output) || self.output(output).is_none() {
                 output = primary;
             }
+            let shift = origin_before(from)
+                .zip(self.output(output).map(|o| (o.rect.x, o.rect.y)))
+                .map_or((0, 0), |((bx, by), (nx, ny))| (nx - bx, ny - by));
             let (maximized, tile, fullscreen, placed, rect) =
                 (win.maximized, win.tile, win.fullscreen, win.placed, win.rect);
             let exact = places_itself(win.info.window_type);
@@ -744,10 +755,11 @@ impl Engine {
                 self.fit_tile(id, zone);
             } else if placed && !exact {
                 let extents = self.extents_of(id);
-                let frame = rect.grown(extents);
+                let moved = Rect::new(rect.x + shift.0, rect.y + shift.1, rect.w, rect.h);
+                let frame = moved.grown(extents);
                 let area = self.workarea(output);
                 let clamped = place::clamp(frame, area);
-                if clamped != frame || gone.contains(&win_output(&self.windows, id)) {
+                if clamped != rect.grown(extents) {
                     let client = grab::client_of(clamped, extents);
                     self.set_rect(id, client);
                 }
@@ -2707,6 +2719,10 @@ impl Engine {
             let restored = self.windows[&id].rect;
             let x = (pointer_x - ratio * restored.w as f64).round() as i32;
             self.set_rect(id, Rect::new(x, rect.y, restored.w, restored.h));
+            // The restore glides toward the saved place, which the drag has left behind.
+            if self.effects.cancel(id).is_some() {
+                self.out.push(Command::Effect { id, transform: None });
+            }
         }
         let rect = self.windows[&id].rect;
         let client_held = self
@@ -4780,10 +4796,6 @@ fn places_itself(window_type: WindowType) -> bool {
     )
 }
 
-fn win_output(windows: &HashMap<WindowId, Win>, id: WindowId) -> OutputId {
-    windows.get(&id).map(|w| w.output).unwrap_or(0)
-}
-
 fn menu_entry(engine: &Engine, depth: usize, index: usize) -> Option<&Entry> {
     engine.menu.as_ref()?.levels.get(depth)?.entries.get(index)
 }
@@ -5209,6 +5221,64 @@ mod tests {
             assert!(!engine.win(1).unwrap().minimized, "desktop {desktop}");
             assert_eq!(engine.focus, Some(1));
         }
+    }
+
+    /// A display added left of the primary and taken away again leaves the primary's windows
+    /// where they stood on it, and brings the left display's windows onto the primary at the
+    /// place they had on theirs.
+    #[test]
+    fn windows_keep_their_place_on_their_output_as_displays_come_and_go() {
+        let (mut engine, _) = engine();
+        let output = |id: OutputId, x: i32, primary: bool| OutputInfo {
+            id,
+            rect: Rect::new(x, 0, 1280, 800),
+            workarea: Rect::new(x, 0, 1280, 768),
+            scale: 1.0,
+            primary,
+        };
+        open(&mut engine, 1, 400, 300);
+        engine.set_rect(1, Rect::new(600, 200, 400, 300));
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Outputs(vec![output(1, 0, false), output(0, 1280, true)]),
+            &mut out,
+        );
+        assert_eq!(engine.win(1).unwrap().rect.x, 1880, "it moves with the primary");
+        open(&mut engine, 2, 400, 300);
+        if let Some(win) = engine.windows.get_mut(&2) {
+            win.output = 1;
+        }
+        engine.set_rect(2, Rect::new(100, 150, 400, 300));
+        engine.handle(Event::Outputs(vec![output(0, 0, true)]), &mut out);
+        let (kept, brought) = (engine.win(1).unwrap().rect, engine.win(2).unwrap().rect);
+        assert_eq!(
+            (kept.x, kept.y),
+            (600, 200),
+            "the primary's window stays where it was"
+        );
+        assert_eq!(
+            (brought.x, brought.y),
+            (100, 150),
+            "the left display's window lands alike"
+        );
+        assert_eq!(engine.win(2).unwrap().output, 0);
+    }
+
+    /// A drag out of a tile takes the window under the pointer at once, with no glide toward
+    /// the place it had before it was tiled.
+    #[test]
+    fn a_window_dragged_out_of_a_tile_does_not_glide_away() {
+        let (mut engine, _) = engine();
+        open(&mut engine, 1, 400, 300);
+        engine.set_rect(1, Rect::new(20, 100, 400, 300));
+        engine.set_tile(1, Some(Zone::Right));
+        engine.handle(Event::Tick(engine.now + Duration::from_secs(1)), &mut Vec::new());
+        let tile = engine.win(1).unwrap().rect;
+        engine.pointer = ((tile.x + tile.w / 2) as f64, (tile.y - 10) as f64);
+        engine.begin_grab(1, GrabKind::Move, Some(BTN_LEFT));
+        assert!(!engine.effects.running(1), "no glide toward the saved place");
+        let rect = engine.win(1).unwrap().rect;
+        assert!(rect.x as f64 <= engine.pointer.0 && engine.pointer.0 <= rect.right() as f64);
     }
 
     /// Two windows go side by side.
