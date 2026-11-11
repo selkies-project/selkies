@@ -29,6 +29,10 @@ PORTAL_VALUE = {True: "uint32 1", False: "uint32 2"}
 # session's. Qt reads a color scheme only through a platform theme that has one,
 # and its generic theme has none, so Qt runs on its GNOME theme, which reads the
 # portal (QT_QPA_PLATFORMTHEME=gnome, as a session selects it).
+# The Qt releases whose GNOME theme reads no color-scheme from the portal, only a GTK theme
+# name with "light" or "dark" in it (QGnomeThemePrivate::updateColorScheme in their
+# qgenericunixthemes.cpp); later ones read the portal's color-scheme first.
+QT_THEME_NAME_ONLY = ("6.8.",)
 PROBES = (("gtk3", "gtk3", ""), ("gtk4", "gtk4", ""), ("adw", "adw", ""),
           ("qt", "qt", "QT_QPA_PLATFORMTHEME=gnome "))
 
@@ -40,6 +44,9 @@ def probe_dark(reading: dict) -> Optional[bool]:
     scheme = str(reading.get("scheme", "")).lower()
     if scheme in ("dark", "light"):
         return scheme == "dark"
+    if "window_lightness" in reading:
+        # A Qt that names no scheme draws with its palette: what the user sees
+        return int(reading["window_lightness"]) < 128
     theme = str(reading.get("theme", ""))
     return theme.lower().endswith("-dark") if theme else None
 
@@ -95,6 +102,12 @@ def expect(cell: Any, running: list, want: bool, why: str, probes: tuple = ()) -
     for kind in probes:
         reading = cell.report(f"probe-{kind}", 20, where=lambda r: probe_dark(r) == want) \
             or cell.report(f"probe-{kind}", 1) or {}
+        if kind == "qt" and probe_dark(reading) != want and reading.get("scheme") == "Unknown" \
+                and str(reading.get("version", "")).startswith(QT_THEME_NAME_ONLY):
+            R.skip(f"{why}: a running qt application reads {scheme}",
+                   f"Qt {reading['version']}'s GNOME theme follows a GTK theme's name alone, "
+                   "never the portal's color-scheme")
+            continue
         R.check(f"{why}: a running {kind} application reads {scheme}", probe_dark(reading) == want, str(reading))
     reply = portal_reads(cell, want)
     R.check(f"{why}: the settings portal serves {scheme}", PORTAL_VALUE[want] in reply, reply[-200:])

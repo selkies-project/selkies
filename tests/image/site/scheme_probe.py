@@ -5,7 +5,8 @@ Started once in the session and left running, the probe writes the toolkit's
 own reading to a JSON file at once and again on every change it is told of,
 as a running application would restyle: GTK 3's theme name (`gtk3`), GTK 4's
 theme name and interface color scheme (`gtk4`), libadwaita's dark flag
-(`adw`), or Qt's color scheme (`qt`). A toolkit the session has no bindings
+(`adw`), or Qt's color scheme and the lightness of the window color its palette
+draws with (`qt`). A toolkit the session has no bindings
 for writes `{"missing": reason}` and ends.
 
     python3 scheme_probe.py gtk3|gtk4|adw|qt OUT.json
@@ -73,13 +74,18 @@ def adw(write: Callable[[dict], None]) -> None:
 
 
 def qt(write: Callable[[dict], None]) -> None:
-    from PyQt6.QtGui import QGuiApplication
+    from PyQt6.QtCore import qVersion
+    from PyQt6.QtGui import QGuiApplication, QPalette
     app = QGuiApplication(sys.argv[:1])
     hints = app.styleHints()
 
     def tell(*_: Any) -> None:
-        write({"scheme": hints.colorScheme().name})
+        # The scheme Qt names, and the lightness (0-255) of the window color it draws with,
+        # which is what a user sees where the platform theme names no scheme.
+        window = app.palette().color(QPalette.ColorRole.Window).lightness()
+        write({"scheme": hints.colorScheme().name, "window_lightness": window, "version": qVersion()})
     hints.colorSchemeChanged.connect(tell)
+    app.paletteChanged.connect(tell)
     tell()
     app.exec()
 
