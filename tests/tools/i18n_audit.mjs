@@ -29,24 +29,11 @@ function walk(dir, out = []) {
   return out;
 }
 
-// The dictionaries are plain object literals, so read them without a bundler.
-function literal(src, name) {
-  const start = src.search(new RegExp(`^const ${name}(?::\\s*Dictionary)? = \\{`, "m"));
-  if (start < 0) return null;
-  const open = src.indexOf("{", start);
-  let depth = 0, end = -1;
-  for (let j = open; j < src.length; j++) {
-    if (src[j] === "{") depth++;
-    else if (src[j] === "}" && --depth === 0) { end = j + 1; break; }
-  }
-  return end < 0 ? null : eval("(" + src.slice(open, end) + ")");
-}
-
 const statsView = await import(pathToFileURL(resolve(`${WEB}/selkies-web-core/lib/stream-stats-view.ts`)).href);
-// The translator is TypeScript, which Node strips the types from on import.
+// The translator and its dictionaries are TypeScript, which Node strips the types from on import.
 const { resolveLocale } = await import(pathToFileURL(resolve(`${DASHBOARD}/src/i18n.ts`)).href);
-const src = readFileSync(`${DASHBOARD}/src/translations.ts`, "utf8");
-const dict = Object.fromEntries(LOCALES.map((l) => [l, literal(src, l)]));
+const { translations } = await import(pathToFileURL(resolve(`${DASHBOARD}/src/translations.ts`)).href);
+const dict = Object.fromEntries(LOCALES.map((l) => [l, translations[l]]));
 
 const has = (table, key) => {
   let o = table;
