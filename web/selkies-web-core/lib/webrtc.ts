@@ -1218,10 +1218,12 @@ export class WebRTCClient {
 
 	/**
 	 * Starts playback of the element. Engines refuse autoplay before a user
-	 * gesture; that refusal is reported through `onplaystreamrequired`.
+	 * gesture; that refusal is reported through `onplaystreamrequired`. An
+	 * element whose source is the peer's stream is not reloaded: `load()` drops
+	 * what it decoded, and WebKit asks for no key frame to start again from.
 	 */
 	playStream(): void {
-		this.element.load();
+		if (!(this.element.srcObject instanceof MediaStream)) this.element.load();
 
 		var playPromise = this.element.play();
 		if (playPromise !== undefined) {

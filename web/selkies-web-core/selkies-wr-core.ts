@@ -837,11 +837,20 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		return HIDPI_SPEC.toServer(hidpi) as boolean;
 	}
 
-	/** Starts playback after the user's gesture and takes the wake lock. */
+	/**
+	 * Starts playback after the user's gesture and takes the wake lock. A video
+	 * with no picture yet asks for a key frame (`START_VIDEO`), since WebKit
+	 * requests none for a player that starts mid-stream, and the resume
+	 * watchdog, which stands down while the button waits, is armed again.
+	 */
 	function playStream(): any {
 		showStart = false;
 		if (playButtonElement) playButtonElement.classList.add('hidden');
 		webrtc.playStream();
+		if (videoElement && videoElement.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+			try { webrtc.sendDataChannelMessage('START_VIDEO'); } catch (_) {}
+		}
+		armResumeWatchdog();
 		requestWakeLock();
 	}
 
@@ -2997,6 +3006,14 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			videoElement.className = 'video';
 			videoElement.autoplay = true;
 			videoElement.playsInline = true;
+			// WebKit can refuse the track's play() and start the video by itself
+			// moments later; the button its refusal showed then has nothing to start.
+			videoElement.addEventListener('playing', (): any => {
+				if (!showStart) return;
+				showStart = false;
+				if (playButtonElement) playButtonElement.classList.add('hidden');
+				armResumeWatchdog();
+			});
 			videoElement.addEventListener('resize', (): any => {
 				// The track's intrinsic size is the realized resolution; a divergence from the
 				// request routes input through the video's fitted box instead of window math.
