@@ -128,7 +128,9 @@ before-all = """
 
     # x265 fixes its sample depth at compile time, so the 10-bit encoder is built
     # first as a static library and linked into the 8-bit one, which then answers
-    # x265_api_get(10) as well.
+    # x265_api_get(10) as well. The 8-bit static library is built before the
+    # shared one: on aarch64 both list the same assembly objects, whose rules
+    # two parallel targets would otherwise run at once into the same files.
     build_x265() {
         (cd /tmp && \
             clone_source e444744c03978c1fb4e037168967020cf2648427 4.2 x265 \
@@ -143,6 +145,7 @@ before-all = """
             cmake -S source -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
                 -DCMAKE_INSTALL_LIBDIR=lib -DENABLE_SHARED=ON -DENABLE_CLI=OFF \
                 -DEXTRA_LIB=x265_main10.a -DEXTRA_LINK_FLAGS=-L/tmp/x265/build -DLINKED_10BIT=ON && \
+            cmake --build build --target x265-static -j$(nproc) && \
             cmake --build build -j$(nproc) && \
             cmake --install build)
     }
