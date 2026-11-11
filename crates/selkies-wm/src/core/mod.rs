@@ -1372,8 +1372,10 @@ impl Engine {
     /// Switch the session to the desktop or to the application alone, where it is switchable:
     /// the launcher starts or stops the shell, and the application alone has its top-level
     /// windows on the current desktop shown again, since without the shell's taskbar a minimized
-    /// window has no way back, and laid out as [`Engine::tile_application`] tiles them. A switch
-    /// to the desktop leaves every window where it is.
+    /// window has no way back, and laid out as [`Engine::tile_application`] tiles them. The
+    /// shell's own windows, a file manager's among them, are closed rather than laid out, since
+    /// they leave with the shell and would leave their tiles empty. A switch to the desktop
+    /// leaves every window where it is.
     fn set_desktop(&mut self, on: bool) {
         if !self.session.switchable || self.session.desktop == on {
             return;
@@ -1386,10 +1388,19 @@ impl Engine {
         if self.showing_desktop {
             self.show_desktop(false);
         }
+        let shell: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| apps::shell_window(&w.info.app_id))
+            .map(|(&id, _)| id)
+            .collect();
+        for &id in &shell {
+            self.out.push(Command::Close(id));
+        }
         let mut fill: Vec<WindowId> = self
             .windows
             .iter()
-            .filter(|(_, w)| w.mapped && !w.hidden && self.application_fills(&w.info))
+            .filter(|(id, w)| w.mapped && !w.hidden && !shell.contains(id) && self.application_fills(&w.info))
             .map(|(&id, _)| id)
             .collect();
         for &id in &fill {
@@ -5016,6 +5027,38 @@ mod tests {
             let win = engine.win(id).unwrap();
             assert!(win.maximized && win.tile.is_none() && win.desktop.is_none());
         }
+    }
+
+    /// The shell's own windows are closed by the switch to the application alone, not tiled,
+    /// so the application's windows share the screen among themselves.
+    #[test]
+    fn switching_to_the_application_alone_closes_the_shells_windows() {
+        let (mut engine, _) = session_engine(true);
+        open(&mut engine, 1, 400, 300);
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Added(WindowInfo {
+                app_id: "selkies-desktop-files".to_string(),
+                ..info(2)
+            }),
+            &mut out,
+        );
+        engine.handle(
+            Event::Mapped {
+                id: 2,
+                size: Size { w: 400, h: 300 },
+            },
+            &mut out,
+        );
+        engine.out.clear();
+        engine.run_action(&Action::SetDesktop(Some(false)), None, (0.0, 0.0));
+        assert!(engine.out.iter().any(|c| matches!(c, Command::Close(2))));
+        let app = engine.win(1).unwrap();
+        assert!(
+            app.maximized && app.tile.is_none(),
+            "the application alone fills the screen"
+        );
+        assert!(engine.win(2).unwrap().tile.is_none());
     }
 
     /// Two windows go side by side.

@@ -254,6 +254,16 @@ fn record_recent(id: &str) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The shell's windows carry the app ids the window manager knows as the shell's, which it
+    /// closes rather than lays out as the session switches to the application alone.
+    #[test]
+    fn the_shells_windows_are_known_to_the_window_manager_as_its_own() {
+        for app_id in [FILES_APP_ID, SETTINGS_APP_ID] {
+            assert!(selkies_draw::apps::shell_window(app_id), "{app_id}");
+        }
+        assert!(!selkies_draw::apps::shell_window("selkies-desktopish"));
+    }
     use super::*;
 
     #[test]

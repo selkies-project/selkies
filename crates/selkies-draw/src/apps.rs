@@ -351,6 +351,14 @@ fn command_program(command: &str) -> Option<String> {
     Some(name)
 }
 
+/// Whether a window is the desktop shell's own, a file manager window, its settings, or a
+/// dialog of its: the shell names each by an app id its program's name begins.
+pub fn shell_window(app_id: &str) -> bool {
+    app_id
+        .strip_prefix(SHELL_PROGRAM)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+}
+
 /// Whether a command line runs the desktop shell's program, which with a command word only
 /// reaches a shell that is running ([`SHELL_PROGRAM`]).
 pub fn commands_shell(command: &str) -> bool {
