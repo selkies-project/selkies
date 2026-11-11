@@ -9589,7 +9589,7 @@ pub(crate) mod gpu_tests {
         // Byte order reaches the chroma convert as its own argument and the hardware conversion
         // as the packed surface's registered format, so both mechanisms are driven here: the
         // second pass is the path a GPU whose driver refuses the kernel takes.
-        let pass = |enc: &mut NvencEncoder, dec: &mut VideoDecoder, tag: &str| {
+        let check_stage = |enc: &mut NvencEncoder, dec: &mut VideoDecoder, tag: &str| {
             for (i, (buf, is_rgba)) in
                 [(&bgra, false), (&rgba, true), (&bgra, false), (&rgba, true)]
                     .into_iter()
@@ -9612,7 +9612,7 @@ pub(crate) mod gpu_tests {
                 assert_painted(&format!("{tag} frame {i} rgba={is_rgba}"), block, bg, 6.0);
             }
         };
-        pass(&mut enc, &mut dec, "convert");
+        check_stage(&mut enc, &mut dec, "convert");
         unsafe {
             let cu = enc.cuda.clone();
             (cu.cuCtxPushCurrent_v2)(enc.cuda_context);
@@ -9621,7 +9621,7 @@ pub(crate) mod gpu_tests {
             }
             (cu.cuCtxPopCurrent_v2)(ptr::null_mut());
         }
-        pass(&mut enc, &mut dec, "hardware");
+        check_stage(&mut enc, &mut dec, "hardware");
     }
 
     /// On a real GPU: per-frame wall time of every NVENC preset, rate-control pass mode, and

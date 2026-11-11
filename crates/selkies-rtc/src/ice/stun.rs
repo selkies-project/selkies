@@ -433,9 +433,9 @@ mod tests {
     fn mutated_checks_never_panic() {
         use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(0x5354_554E);
-        let pwd = "serverpasswordserverpass";
+        let key = "serverpasswordserverpass";
         let valid =
-            binding_request("serverfr", "clientfr", 7, Role::Controlling(9), true, pwd).unwrap();
+            binding_request("serverfr", "clientfr", 7, Role::Controlling(9), true, key).unwrap();
         for _ in 0..50_000 {
             let mut data = valid.raw.clone();
             for _ in 0..rng.random_range(1..6) {
@@ -459,8 +459,8 @@ mod tests {
                 let _ = mapped_address(&m);
                 let _ = error_code(&m);
                 let _ = tie_breaker(&m, ATTR_ICE_CONTROLLING);
-                let _ = authenticate_request(&mut m, "serverfr", pwd, None);
-                let _ = binding_success(&m, "127.0.0.1:9".parse().unwrap(), pwd);
+                let _ = authenticate_request(&mut m, "serverfr", key, None);
+                let _ = binding_success(&m, "127.0.0.1:9".parse().unwrap(), key);
             }
         }
     }
