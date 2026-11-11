@@ -958,9 +958,12 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
 }
 
 /// The Jupyter server configuration that offers this desktop: jupyter-server-proxy reads its
-/// servers from `ServerProxy.servers` in any file of a Jupyter configuration directory's
-/// `jupyter_server_config.d`, so `selkies session --jupyter-config` written there gives every
-/// Jupyter server of that environment a Selkies launcher item. The entry names this executable
+/// servers from `ServerProxy.servers` in a Jupyter server's configuration and from its
+/// `jupyter_serverproxy_servers` entry points. The wheel's entry point returns this entry, and
+/// `selkies session --jupyter-config` written as a configuration directory's
+/// `jupyter_server_config.json` gives every Jupyter server reading that directory a Selkies
+/// launcher item; Jupyter reads only extensions' switches from `jupyter_server_config.d`. The
+/// entry names this executable
 /// and the web client's `selkies.svg` as a file ([`jupyter_icon`]), `data_home` being the
 /// user's data directory.
 pub fn jupyter_config(data_home: Option<&Path>) -> Json {

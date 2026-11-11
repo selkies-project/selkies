@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The desktop through Jupyter's server proxy, as `selkies session --jupyter-config` offers it.
 
-The configuration it prints, placed in a Jupyter configuration directory's
-jupyter_server_config.d, registers a server process with jupyter-server-proxy, so a
+The configuration it prints, as the jupyter_server_config.json of the Jupyter
+server's configuration directory, registers a server process with
+jupyter-server-proxy ahead of any entry point an installed wheel adds, so a
 Jupyter server lists a Selkies item, its icon the web client's, and serves the desktop at /selkies/: it
 starts the launcher on a Unix socket of the proxy's own and carries the page,
 the API, and the data WebSocket behind Jupyter's token, its Xvfb screen
@@ -61,13 +62,15 @@ def registered() -> bool:
 
 
 def offer_selkies(config_dir: str) -> None:
-    """Register the server under test with jupyter-server-proxy the way an install does: the
-    configuration `selkies session --jupyter-config` prints, in jupyter_server_config.d."""
+    """Register the server under test with jupyter-server-proxy: the configuration `selkies
+    session --jupyter-config` prints, as the configuration directory's jupyter_server_config.json.
+    Jupyter reads only the extensions' switches from jupyter_server_config.d, and the proxy
+    registers the servers its configuration names before those of entry points."""
     printed = subprocess.run([H.SERVER, "session", "--jupyter-config"], capture_output=True, text=True,
                              timeout=30, check=True).stdout
     json.loads(printed)
-    os.makedirs(os.path.join(config_dir, "jupyter_server_config.d"))
-    with open(os.path.join(config_dir, "jupyter_server_config.d", "selkies.json"), "w") as fh:
+    os.makedirs(config_dir)
+    with open(os.path.join(config_dir, "jupyter_server_config.json"), "w") as fh:
         fh.write(printed)
 
 
