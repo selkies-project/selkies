@@ -136,9 +136,9 @@ with tempfile.TemporaryDirectory() as tmp:
         fh.write('#!/bin/sh\nprintf %s "${LD_PRELOAD-unset}"\n')
     os.chmod(os.path.join(stub_bin, "selkies"), 0o755)
     shims = {
-        "SELKIES_INTERPOSER": "/usr/$LIB/selkies_input_interposer.so",
-        "FAKE_UDEV_LIB": "/usr/$LIB/libudev.so.1.0.0-fake",
-        "SELKIES_WEBCAM_INTERPOSER": "/usr/$LIB/selkies_v4l2_interposer.so",
+        "SELKIES_INTERPOSER": "/usr/lib/selkies_input_interposer.so",
+        "FAKE_UDEV_LIB": "/opt/lib/libudev.so.1.0.0-fake",
+        "SELKIES_WEBCAM_INTERPOSER": "/usr/lib/selkies_v4l2_interposer.so",
     }
     preload = ":".join([shims["SELKIES_INTERPOSER"], "/opt/operator.so",
                         shims["FAKE_UDEV_LIB"], shims["SELKIES_WEBCAM_INTERPOSER"]])
@@ -160,8 +160,8 @@ check("the DPI ladder's XSETTINGS manager is a service",
       "xsettingsd" not in ladder or os.path.isfile(xsettingsd_service),
       os.path.relpath(xsettingsd_service, REPO))
 # The entrypoint holds services down by name, and a name no service carries is
-# a toggle that silently does nothing: the desktop keeps starting under
-# START_DESKTOP=false, or the X11 window manager under Wayland.
+# a toggle that silently does nothing: the framebuffer would keep starting
+# under Wayland, or the nested compositor on X11.
 services = {os.path.basename(os.path.dirname(p))
             for root in (BASE, DESKTOP)
             for p in glob.glob(os.path.join(root, "services", "*", "run"))}

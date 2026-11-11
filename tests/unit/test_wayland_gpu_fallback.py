@@ -161,12 +161,12 @@ check("a software verdict keeps Wayland", env.get("SELKIES_WAYLAND") == "true",
 check("a software Wayland session gets software GL",
       "GALLIUM_DRIVER" not in env and "MESA_LOADER_DRIVER_OVERRIDE" not in env,
       f"GALLIUM_DRIVER={env.get('GALLIUM_DRIVER', '(unset)')}")
-# The session compositor would otherwise render on the node the probe found
-# refusing allocations, and stream an empty output.
-check("and its session compositor renders in software",
-      env.get("SELKIES_WAYLAND_RENDERER") == "pixman" and env.get("KWIN_COMPOSE") == "Q",
-      f"SELKIES_WAYLAND_RENDERER={env.get('SELKIES_WAYLAND_RENDERER', '(unset)')} "
-      f"KWIN_COMPOSE={env.get('KWIN_COMPOSE', '(unset)')}")
+# The capture compositor would otherwise render on the node the probe found
+# refusing allocations, and stream an empty output; a desktop image that nests
+# a compositor maps this switch onto its own.
+check("and its capture compositor renders in software",
+      env.get("SELKIES_WAYLAND_RENDERER") == "pixman",
+      f"SELKIES_WAYLAND_RENDERER={env.get('SELKIES_WAYLAND_RENDERER', '(unset)')}")
 env, _ = run(facts(accelerated=False, node=""),
              env={"SELKIES_WAYLAND": "true", "SELKIES_WAYLAND_X11_FALLBACK": "false",
                   "SELKIES_WAYLAND_RENDERER": "vulkan"})

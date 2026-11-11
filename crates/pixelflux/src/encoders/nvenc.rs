@@ -511,6 +511,8 @@ fn nvenc_negotiate(lib: &NvencLibrary) {
 /// keyed by no longer names the same buffer (see `DmaBufIdentity`).
 struct CachedDmaBuf {
     identity: DmaBufIdentity,
+    /// The frame number that last encoded from the import, for evicting the stalest.
+    last_use: u64,
     egl_image: EGLImageKHR,
     cuda_resource: CUgraphicsResource,
     egl_frame: CUeglFrame,
@@ -522,6 +524,11 @@ struct CachedDmaBuf {
 
 /// External input registrations an encoder keeps at once (`register_external_input`).
 pub(crate) const EXTERNAL_INPUTS: usize = 3;
+
+/// Dmabuf imports a session keeps at once: a capture's own targets and the swapchain of the
+/// client whose buffers it encodes in place come to a handful, and past this the one longest
+/// unused is released, so a client allocating buffers freely never grows the cache.
+const DMABUF_IMPORTS: usize = 16;
 
 /// An input surface the session does not own: a device pointer produced by another component on
 /// the same CUDA context — the NvFBC capture buffer — registered and mapped with NVENC in place
@@ -4725,10 +4732,21 @@ impl NvencEncoder {
                 } else {
                     0
                 };
+                if self.dmabuf_cache.len() >= DMABUF_IMPORTS
+                    && let Some(&stalest) = self
+                        .dmabuf_cache
+                        .iter()
+                        .min_by_key(|(_, c)| c.last_use)
+                        .map(|(fd, _)| fd)
+                    && let Some(stale) = self.dmabuf_cache.remove(&stalest)
+                {
+                    self.release_dmabuf_import(stale);
+                }
                 self.dmabuf_cache.insert(
                     fd,
                     CachedDmaBuf {
                         identity,
+                        last_use: frame_number,
                         egl_image,
                         cuda_resource,
                         egl_frame,
@@ -4739,7 +4757,8 @@ impl NvencEncoder {
             }
 
             let (egl_frame, input, tex) = {
-                let cached = self.dmabuf_cache.get(&fd).unwrap();
+                let cached = self.dmabuf_cache.get_mut(&fd).unwrap();
+                cached.last_use = frame_number;
                 (cached.egl_frame, cached.input, cached.tex)
             };
             let (mapped, format) = match input {

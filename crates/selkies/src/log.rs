@@ -58,6 +58,7 @@ const OWN_TARGETS: &[&str] = &[
     "capture_demand",
     "access",
     "ice",
+    "wm",
 ];
 
 /// Whether a record's target is Selkies' own rather than a third-party crate's.

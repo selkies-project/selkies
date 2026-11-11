@@ -4,44 +4,38 @@
   License, v. 2.0. If a copy of the MPL was not distributed with this
   file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-  Openbox's right-click menu on the desktop, installed as
-  /etc/xdg/openbox/menu.xml; a user's ~/.config/openbox/menu.xml replaces it.
-  It mirrors labwc's (/etc/xdg/labwc/menu.xml), so the desktop offers the same
-  menu on either backend: the everyday applications, every installed one by
-  category through selkies-wm-menu, the open windows, and the desktop's own
-  commands. There is no Exit: the window manager is a service of the container,
+  The window manager's right-click menu on the desktop, installed as
+  /etc/xdg/openbox/menu.xml, the file Openbox would read, and read on both
+  backends; a user's ~/.config/openbox/menu.xml replaces it. It offers the
+  desktop's own commands, which the window manager leaves out while the
+  application runs alone, every installed application by category, and the
+  open windows. The selkies-applications menu
+  is the window manager's own, filled from the installed desktop entries with
+  their icons, and an item written without an icon gets the one of the
+  application it starts. There is no Exit: the window manager is the server's,
   and leaving it only has it started again.
 -->
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
-  <menu id="selkies-applications" label="Applications" execute="selkies-wm-menu" />
+  <menu id="selkies-applications" label="Applications" icon="applications-all" />
   <menu id="root-menu" label="Selkies">
-    <item label="Terminal">
-      <action name="Execute"><command>x-terminal-emulator</command></action>
+    <item label="New Folder" icon="folder-new">
+      <action name="Execute"><command>selkies-desktop --new-folder</command></action>
     </item>
-    <item label="Files">
-      <action name="Execute"><command>selkies-desktop --files</command></action>
+    <item label="Desktop Settings" icon="preferences-desktop">
+      <action name="Execute"><command>selkies-desktop --settings</command></action>
     </item>
-    <item label="Firefox">
-      <action name="Execute"><command>firefox</command></action>
+    <item label="Change Wallpaper" icon="preferences-desktop-wallpaper">
+      <action name="Execute"><command>selkies-desktop --settings wallpaper</command></action>
     </item>
-    <item label="Google Chrome">
-      <action name="Execute"><command>google-chrome</command></action>
-    </item>
-    <item label="Text Editor">
-      <action name="Execute"><command>mousepad</command></action>
+    <item label="Keyboard Shortcuts" icon="preferences-desktop-keyboard">
+      <action name="Execute"><command>selkies-desktop --settings shortcuts</command></action>
     </item>
     <separator />
     <menu id="selkies-applications" />
     <menu id="client-list-combined-menu" />
     <separator />
-    <item label="Show Desktop">
+    <item label="Show Desktop" icon="user-desktop">
       <action name="Execute"><command>selkies-desktop --show-desktop</command></action>
-    </item>
-    <item label="Reload Desktop">
-      <action name="Execute"><command>selkies-desktop --reload</command></action>
-    </item>
-    <item label="Reconfigure Window Manager">
-      <action name="Reconfigure" />
     </item>
   </menu>
 </openbox_menu>

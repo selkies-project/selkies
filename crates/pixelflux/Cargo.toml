@@ -28,7 +28,7 @@ wayland-backend = "0.3"
 bitflags = "2"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client", "server"] }
 memmap2 = "0.9"
 turbojpeg = "1.3" 
 rayon = "1.10"
@@ -107,6 +107,7 @@ features = [
     "use_system_lib",
     "desktop",
     "wayland_frontend",
+    "xwayland",
 ]
 
 [profile.release]

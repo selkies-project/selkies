@@ -73,17 +73,18 @@ for dir in applications icons/hicolor; do
 done
 
 # Configure joystick interposer and fake-udev (container-only gamepad plumbing)
-# $LIB is a dynamic-loader token; the backslash keeps the shell off it.
-export LIB_PREFIX="/usr/\$LIB"
-export SELKIES_INTERPOSER="${LIB_PREFIX}/selkies_input_interposer.so"
+# Fixed paths, the ones proot-apps' app roots carry their own builds at, so the
+# preload reaches an application inside an app root too. The 32-bit builds
+# beside them (`_32`) are left to the launchers of 32-bit applications.
+export SELKIES_INTERPOSER="/usr/lib/selkies_input_interposer.so"
 export LIBUDEV_PACKAGE="${LIBUDEV_PACKAGE:-libudev}"
 export LIBUDEV_PKG_VERSION="${LIBUDEV_PKG_VERSION:-1.0.0}"
-export FAKE_UDEV_LIB="${LIB_PREFIX}/${LIBUDEV_PACKAGE}.so.${LIBUDEV_PKG_VERSION}-fake"
+export FAKE_UDEV_LIB="/opt/lib/${LIBUDEV_PACKAGE}.so.${LIBUDEV_PKG_VERSION}-fake"
 # The webcam interposer serves the client's camera as /dev/video0 to session
 # applications, with no kernel device and no privilege. The Selkies backend
 # feeds it and must keep seeing real device nodes, so selkies-entrypoint.sh
 # drops this entry again for its own process.
-export SELKIES_WEBCAM_INTERPOSER="${LIB_PREFIX}/selkies_v4l2_interposer.so"
+export SELKIES_WEBCAM_INTERPOSER="/usr/lib/selkies_v4l2_interposer.so"
 export LD_PRELOAD="${SELKIES_INTERPOSER}:${FAKE_UDEV_LIB}:${SELKIES_WEBCAM_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 # No SDL_JOYSTICK_DEVICE: fake-udev enumerates all four slots as their evdev
 # nodes, so a /dev/input/js0 hint would show slot 0 a second time.
@@ -207,40 +208,70 @@ if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ] \
   else
     echo 'GPU: the compositor cannot reach it; compositing in software'
     unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 __GLX_VENDOR_LIBRARY_NAME
-    # The session compositor too, as with no GPU at all: its own renderer would
-    # allocate on the node that refused and leave its output empty.
-    export SELKIES_WAYLAND_RENDERER="${SELKIES_WAYLAND_RENDERER:-pixman}" KWIN_COMPOSE="${KWIN_COMPOSE:-Q}"
+    # A nested session compositor too, as with no GPU at all: its own renderer
+    # would allocate on the node that refused and leave its output empty. A
+    # desktop image that nests one maps this onto its compositor's own switch.
+    export SELKIES_WAYLAND_RENDERER="${SELKIES_WAYLAND_RENDERER:-pixman}"
   fi
 fi
 
-# With no DRM render node, the NVIDIA EGL/GBM vendor library the container
-# runtime injects segfaults inside Xwayland's EGL init, and glamor would have
-# nothing to accelerate anyway. wlroots honors WLR_XWAYLAND, so XWayland is
-# started through a wrapper pinning EGL to Mesa and shared-memory buffers, and
-# loading no EGL external platform for a driver libEGL that comes before glvnd's.
-if [ "${SELKIES_WAYLAND}" = "true" ] && ! ls /dev/dri/renderD* > /dev/null 2>&1; then
-  printf '#!/bin/sh\nexport __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json\nexport __EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES=\nexec /usr/bin/Xwayland -shm "$@"\n' > /tmp/selkies-xwayland
-  chmod 755 /tmp/selkies-xwayland
-  export WLR_XWAYLAND="/tmp/selkies-xwayland"
+# The Selkies window manager: under SELKIES_WM the server manages the session's
+# windows itself on either backend (no nested compositor), and under
+# SELKIES_DESKTOP, which implies it, starts and keeps the selkies-desktop shell
+# running on top. START_DESKTOP is SELKIES_DESKTOP's older name: the desktop
+# image sets SELKIES_DESKTOP itself, so a START_DESKTOP that is set can only be
+# the deployment's word, and it decides.
+if [ -n "${START_DESKTOP-}" ]; then
+  echo "START_DESKTOP is deprecated; it sets SELKIES_DESKTOP=${START_DESKTOP}, the name to use instead"
+  export SELKIES_DESKTOP="${START_DESKTOP}"
 fi
+
+# Canonicalizes a mode toggle to "true" or unset, so one spelling serves the
+# services and the server's own settings alike, except a value carrying a lock
+# (false|locked), which is passed on as given: it is the server's word that the
+# session stays in that mode.
+canonicalize_mode() {
+  local name="$1"
+  local value="${!1-}"
+  if [[ "${value}" == *"|"* ]]; then
+    return
+  elif is_true "${value}"; then
+    export "${name}=true"
+  else
+    unset "${name}"
+  fi
+}
+canonicalize_mode SELKIES_DESKTOP
+if is_true "${SELKIES_DESKTOP-}" && ! is_true "${SELKIES_WM-}"; then
+  export SELKIES_WM=true
+fi
+canonicalize_mode SELKIES_WM
 
 # Default display for the X11 backend. In Wayland mode the session compositor's
 # XWayland server owns it instead, and takes the first free number.
 if [ "${SELKIES_WAYLAND}" = "true" ]; then
   export DISPLAY="${DISPLAY:-:0}"
-  # Session compositor for the Wayland backend: it nests inside the capture
-  # compositor, which provides neither window management nor XWayland. "none"
-  # leaves applications on the capture compositor — Wayland clients only,
-  # unmanaged. Lowercased because every value, "none" included, is lower case.
+  # Session compositor for the Wayland backend, one a desktop built on this
+  # image installs: it nests inside the capture compositor, which without the
+  # Selkies window manager provides neither window management nor XWayland.
+  # "none", the base's own default, leaves applications on the capture
+  # compositor — Wayland clients only, unmanaged. Lowercased because every
+  # value, "none" included, is lower case.
   SELKIES_WAYLAND_COMPOSITOR="$(setting_value "${SELKIES_WAYLAND_COMPOSITOR-}")"
   SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"
-  if [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
+  if is_true "${SELKIES_WM-}"; then
+    # The capture compositor manages its own windows and runs Xwayland, so no
+    # compositor nests inside it; a compositor named beside the mode is set aside.
+    if [ -n "${SELKIES_WAYLAND_COMPOSITOR}" ] && [ "${SELKIES_WAYLAND_COMPOSITOR}" != "none" ]; then
+      echo "SELKIES_WM: the Selkies window manager manages the windows; SELKIES_WAYLAND_COMPOSITOR=${SELKIES_WAYLAND_COMPOSITOR} is set aside"
+    fi
+    SELKIES_WAYLAND_COMPOSITOR=none
+  elif [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
     # A WAYLAND_DISPLAY set before this script ran names an operator's own
     # session (the capture display is exported later), so capture it rather
     # than nest in it; connect-probed, since a stale socket file outlives its
-    # compositor. Otherwise labwc, which decorates windows and honors the
-    # maximize and minimize a Wayland taskbar sends. An absolute
-    # WAYLAND_DISPLAY is legal, and prefixing it would build a bogus path.
+    # compositor. Otherwise nothing nests. An absolute WAYLAND_DISPLAY is
+    # legal, and prefixing it would build a bogus path.
     case "${WAYLAND_DISPLAY-}" in
       /*) _wl_sock="${WAYLAND_DISPLAY}" ;;
       *)  _wl_sock="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY-}" ;;
@@ -257,8 +288,6 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
       echo "Wayland compositor detected at ${_wl_sock}: capturing it directly"
       export SELKIES_WAYLAND_HOST_DISPLAY="${_wl_sock}"
       SELKIES_WAYLAND_COMPOSITOR=none
-    else
-      command -v labwc >/dev/null 2>&1 && SELKIES_WAYLAND_COMPOSITOR=labwc
     fi
     unset _wl_sock
   elif [ "${SELKIES_WAYLAND_COMPOSITOR}" != "none" ] && ! command -v "${SELKIES_WAYLAND_COMPOSITOR}" >/dev/null 2>&1; then
@@ -372,20 +401,22 @@ for service in /etc/service/*/; do
   rm -f "${service}down" 2>/dev/null || sudo-root rm -f "${service}down" 2>/dev/null || true
 done
 
-# A desktop layered on this image supplies its shell as the `desktop` service
-# and, where X11 needs one, its window manager as `openbox`; on Wayland the
-# nested compositor manages the windows.
+# A desktop layered on this image runs under the server's window manager
+# (SELKIES_DESKTOP); without it, the nested compositor manages the windows on
+# Wayland and nothing does on X11.
 if [ "${SELKIES_WAYLAND}" = "true" ]; then
   drop_service xvfb
-  drop_service openbox
   if [ "${SELKIES_WAYLAND_COMPOSITOR}" = "none" ]; then
     # No nested session compositor either way: host capture leaves window
     # management (and any XWayland) to the operator's own compositor, while
     # a bare none leaves applications on the capture compositor with neither.
     drop_service wayland
-    drop_service desktop
     if [ -n "${SELKIES_WAYLAND_HOST_DISPLAY-}" ]; then
       echo "Wayland backend: capturing the operator's compositor at ${SELKIES_WAYLAND_HOST_DISPLAY}; it keeps its own window management"
+    elif is_true "${SELKIES_WM-}"; then
+      _desktop=""
+      is_true "${SELKIES_DESKTOP-}" && _desktop="; it starts the desktop"
+      echo "Wayland backend: the Selkies window manager manages the capture compositor's windows and runs Xwayland${_desktop}"
     else
       echo 'Wayland backend: applications connect to the capture compositor directly; no XWayland'
     fi
@@ -394,11 +425,11 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   fi
 else
   drop_service wayland
-fi
-START_DESKTOP="$(setting_value "${START_DESKTOP-}")"
-if ! is_true "${START_DESKTOP:-true}"; then
-  drop_service desktop
-  drop_service openbox
+  if is_true "${SELKIES_WM-}"; then
+    _desktop=""
+    is_true "${SELKIES_DESKTOP-}" && _desktop=" and starts the desktop"
+    echo "X11 backend: the Selkies window manager manages the windows${_desktop}"
+  fi
 fi
 if ! is_true "${SELKIES_ENABLE_INTERNAL_TURN}"; then
   drop_service coturn

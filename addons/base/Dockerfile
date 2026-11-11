@@ -18,14 +18,13 @@
 # and any other desktop can be built the same way.
 #
 #   - X11 display server (XLibre's Xvfb, with glamor and DRI3) and the headless Wayland backend
-#     with SELKIES_WAYLAND=true, whose nested labwc supplies window management,
-#     decorations, and XWayland
+#     with SELKIES_WAYLAND=true; the Selkies window manager manages either under
+#     SELKIES_WM, and a desktop built on the image may nest a session compositor
+#     of its own instead (SELKIES_WAYLAND_COMPOSITOR)
 #   - s6 service supervision, running as PID 1 or below a foreign init
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) and the
 #     V4L2 webcam interposer, all built in-tree and wired with LD_PRELOAD
-#   - GPU wiring: NVIDIA/VA-API/Vulkan runtime, Zink for hardware OpenGL, and
-#     the 32-bit graphics runtime on x86, which a 32-bit application needs a
-#     complete second copy of
+#   - GPU wiring: NVIDIA/VA-API/Vulkan runtime and Zink for hardware OpenGL
 #   - Audio: PipeWire with the PulseAudio, ALSA, JACK, and V4L2 interfaces,
 #     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
@@ -57,8 +56,6 @@ ARG DISTRIB_RELEASE="26.04"
 # addons/base/patches/xvfb-zero-copy-shared-framebuffer.patch, which keeps a
 # system-memory screen in a memfd the capture reads in place, told where it
 # changed without a round trip.
-ARG WLROOTS_VERSION="0.19.3"
-ARG LABWC_VERSION="0.9.7"
 # Both come as the archives GitHub generates for their tags, with no tarball
 # of the project's own beside them, so each tag carries the checksum of the
 # archive the build has to receive.
@@ -172,102 +169,33 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 COPY addons/input-interposer /build/input-interposer
 COPY addons/fake-udev /build/fake-udev
 COPY addons/v4l2-interposer /build/v4l2-interposer
+# They sit where the linuxserver.io images and proot-apps' app roots put theirs
+# (/usr/lib and /opt/lib, the 32-bit builds beside them with a _32 suffix), so
+# the preload an application inherits names the same files inside an app root
+# as here. fake-udev stays out of the system library directory: it is reached
+# only through the preload, as the interposers are.
 RUN set -e; \
-    LIBDIR="$(gcc -print-multiarch)"; \
-    mkdir -p "/opt/add-ons/lib/${LIBDIR}"; \
-    gcc -shared -fPIC -o /opt/add-ons/lib/${LIBDIR}/selkies_input_interposer.so /build/input-interposer/input_interposer.c -ldl -pthread; \
-    ln -sf selkies_input_interposer.so /opt/add-ons/lib/${LIBDIR}/selkies_joystick_interposer.so; \
+    mkdir -p /opt/add-ons/usr/lib /opt/add-ons/opt/lib; \
+    gcc -shared -fPIC -o /opt/add-ons/usr/lib/selkies_input_interposer.so /build/input-interposer/input_interposer.c -ldl -pthread; \
+    ln -sf selkies_input_interposer.so /opt/add-ons/usr/lib/selkies_joystick_interposer.so; \
     make -C /build/v4l2-interposer; \
-    cp /build/v4l2-interposer/selkies_v4l2_interposer.so "/opt/add-ons/lib/${LIBDIR}/"; \
+    cp /build/v4l2-interposer/selkies_v4l2_interposer.so /opt/add-ons/usr/lib/; \
     make -C /build/fake-udev; \
-    cp /build/fake-udev/libudev.so.1.0.0-fake /build/fake-udev/libudev.so.1 /build/fake-udev/libudev.so "/opt/add-ons/lib/${LIBDIR}/"; \
-    # Also build the 32-bit variants so 32-bit (Wine-era) applications see the
-    # virtual gamepads and webcam too (`/usr/$LIB` expands per process
-    # bitness); amd64 only
+    cp /build/fake-udev/libudev.so.1.0.0-fake /opt/add-ons/opt/lib/; \
+    # The 32-bit builds, for the launchers that preload them into 32-bit
+    # (Wine-era) processes, as Steam's does; amd64 only. fake-udev is built
+    # with the 64-bit build's SONAME, which a preload has to carry to stand
+    # in for libudev.so.1.
     if [ "$(uname -m)" = "x86_64" ]; then \
         apt-get update && apt-get install --no-install-recommends -y gcc-multilib; \
-        LIB32DIR="$(gcc -m32 -print-multiarch)"; \
-        mkdir -p "/opt/add-ons/lib/${LIB32DIR}"; \
-        gcc -m32 -shared -fPIC -o /opt/add-ons/lib/${LIB32DIR}/selkies_input_interposer.so /build/input-interposer/input_interposer.c -ldl -pthread; \
-        ln -sf selkies_input_interposer.so /opt/add-ons/lib/${LIB32DIR}/selkies_joystick_interposer.so; \
+        gcc -m32 -shared -fPIC -o /opt/add-ons/usr/lib/selkies_input_interposer_32.so /build/input-interposer/input_interposer.c -ldl -pthread; \
+        ln -sf selkies_input_interposer_32.so /opt/add-ons/usr/lib/selkies_joystick_interposer_32.so; \
         make -C /build/v4l2-interposer all32; \
-        cp /build/v4l2-interposer/selkies_v4l2_interposer_x86.so "/opt/add-ons/lib/${LIB32DIR}/selkies_v4l2_interposer.so"; \
-        make -C /build/fake-udev all32; \
-        cp /build/fake-udev/libudev_x86.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so.1.0.0-fake"; \
-        ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so.1"; \
-        ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so"; \
+        cp /build/v4l2-interposer/selkies_v4l2_interposer_x86.so /opt/add-ons/usr/lib/selkies_v4l2_interposer_32.so; \
+        make -C /build/fake-udev clean; \
+        make -C /build/fake-udev CC="gcc -m32"; \
+        cp /build/fake-udev/libudev.so.1.0.0-fake /opt/add-ons/opt/lib/libudev.so.1.0.0-fake_32; \
     fi
-
-# Session compositor for the Wayland backend, built from source so it carries
-# the Selkies patches: a control socket at `$XDG_RUNTIME_DIR/labwc.sock`, served
-# unconditionally, over which Selkies adds a screen when a second display
-# attaches and removes it when that display disconnects (window queries ride the
-# same socket), and a cursor path that carries a held drag across the screen
-# boundary instead of clamping it at the edge. wlroots is built first at the
-# version this labwc pins, with whichever of its dependencies the distribution
-# carries too old; everything built installs under /usr/lib unqualified, which
-# holds nothing else, so the copy into the runtime stage is the same on every
-# architecture and distribution.
-FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS labwc
-ARG DEBIAN_FRONTEND="noninteractive"
-ARG WLROOTS_VERSION
-ARG LABWC_VERSION
-RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
-        > /etc/apt/apt.conf.d/99-selkies-retries
-RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
-        bison \
-        build-essential \
-        ca-certificates \
-        gettext \
-        git \
-        glslang-tools \
-        hwdata \
-        libexpat1-dev \
-        libffi-dev \
-        meson \
-        ninja-build \
-        pkg-config \
-        libcairo2-dev \
-        libdisplay-info-dev \
-        libdrm-dev \
-        libgbm-dev \
-        libglib2.0-dev \
-        libglvnd-dev \
-        libinput-dev \
-        liblcms2-dev \
-        libliftoff-dev \
-        libpango1.0-dev \
-        libpixman-1-dev \
-        libpng-dev \
-        librsvg2-dev \
-        libseat-dev \
-        libsfdo-dev \
-        libudev-dev \
-        libvulkan-dev \
-        libwayland-dev \
-        libxcb1-dev \
-        libxcb-composite0-dev \
-        libxcb-dri3-dev \
-        libxcb-errors-dev \
-        libxcb-ewmh-dev \
-        libxcb-icccm4-dev \
-        libxcb-present-dev \
-        libxcb-randr0-dev \
-        libxcb-render0-dev \
-        libxcb-render-util0-dev \
-        libxcb-res0-dev \
-        libxcb-shape0-dev \
-        libxcb-shm0-dev \
-        libxcb-sync-dev \
-        libxcb-xfixes0-dev \
-        libxcb-xinput-dev \
-        libxkbcommon-dev \
-        wayland-protocols \
-        xwayland && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-screens.patch /build/patches/
-COPY addons/base/build-labwc.sh /build/
-RUN /build/build-labwc.sh && mkdir -p /build-out/lib && cp -a /usr/lib/*.so* /build-out/lib/
 
 # The web client, through scripts/ci/build-web.sh as every channel builds it, for
 # the server stage to compile in. The controller database's GitHub lookups use
@@ -283,17 +211,46 @@ COPY web/universal-touch-gamepad ./web/universal-touch-gamepad
 COPY docs/assets/logo ./docs/assets/logo
 RUN --mount=type=secret,id=github_token sh scripts/ci/build-web.sh
 
+# The software encoders pixelflux links statically, each built in a stage of its
+# own so the four build beside one another and beside the server stage's own
+# toolchain and dependency fetch: libx264, x265, libvpx, and SVT-AV1 from
+# pixelflux's scripts/build-x264.sh, build-x265.sh, build-libvpx.sh, and
+# build-svtav1.sh, with the patches it carries for them (pixelflux reads the API
+# those patches add, so none comes from a distribution). Each installs under its
+# stage's /usr/local, which the server stage lays over its own, so the
+# pkg-config files name the prefix the libraries are found at.
+FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS codec-tools
+ARG DEBIAN_FRONTEND="noninteractive"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates git build-essential pkg-config cmake nasm && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /build/pixelflux
+COPY crates/pixelflux/pyproject.toml ./
+COPY crates/pixelflux/patches ./patches
+COPY crates/pixelflux/scripts ./scripts
+
+FROM codec-tools AS codec-x264
+RUN sh scripts/build-x264.sh /usr/local
+
+FROM codec-tools AS codec-x265
+RUN sh scripts/build-x265.sh /usr/local
+
+FROM codec-tools AS codec-libvpx
+RUN sh scripts/build-libvpx.sh /usr/local
+
+FROM codec-tools AS codec-svtav1
+RUN sh scripts/build-svtav1.sh /usr/local
+
 # The server, built on the image's own distribution so it links the sonames the
 # final stage installs, with the toolchain pinned and its installer checked
 # against the hash rustup publishes beside it. The packages behind every
 # library the binary links are recorded for the final stage, so the image
 # declares what the server needs rather than inheriting it from whatever else
 # happens to pull those libraries in. pixelflux and pcmflux build from local
-# workspace path dependencies. libx264, x265, libvpx, and SVT-AV1 are built
-# from pixelflux's scripts/build-x264.sh, build-x265.sh, build-libvpx.sh, and
-# build-svtav1.sh, with the patches it carries for them, and linked statically.
-# The web client is compiled in from the web stage's dist/web, which
-# SELKIES_WEB_DIST names so a build that finds none fails.
+# workspace path dependencies; the encoders come from the stages above and are
+# linked statically. The dependency fetch runs before those stages are waited
+# for, so it overlaps their builds. The web client is compiled in from the web
+# stage's dist/web, which SELKIES_WEB_DIST names so a build that finds none fails.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS server
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG RUST_TOOLCHAIN="1.99.1"
@@ -316,31 +273,32 @@ RUN set -e; \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY --from=web /build/dist/web ./dist/web
-ENV SELKIES_WEB_DIST="/src/dist/web"
 COPY infra/packaging/version.sh infra/packaging/stamp-version.sh /tmp/packaging/
 # A release's build passes its version (images.yaml), which every public crate
 # then carries as the packages' builds stamp it; any other build keeps the
 # tree's 0.0.0
 ARG SELKIES_VERSION=""
 RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
-    --mount=type=cache,target=/src/target \
     set -e; \
     if [ -n "${SELKIES_VERSION}" ]; then sh /tmp/packaging/stamp-version.sh /src "${SELKIES_VERSION}"; fi; \
-    cargo fetch --locked; \
-    pixelflux="$(cargo metadata --locked --format-version 1 \
-        | grep -o '"manifest_path":"[^"]*/pixelflux/Cargo.toml"' | head -1 | cut -d'"' -f4)"; \
-    sh "$(dirname "${pixelflux}")/scripts/build-x264.sh" /usr/local; \
-    sh "$(dirname "${pixelflux}")/scripts/build-x265.sh" /usr/local; \
-    sh "$(dirname "${pixelflux}")/scripts/build-libvpx.sh" /usr/local; \
-    sh "$(dirname "${pixelflux}")/scripts/build-svtav1.sh" /usr/local; \
+    cargo fetch --locked
+COPY --from=codec-x264 /usr/local/ /usr/local/
+COPY --from=codec-x265 /usr/local/ /usr/local/
+COPY --from=codec-libvpx /usr/local/ /usr/local/
+COPY --from=codec-svtav1 /usr/local/ /usr/local/
+COPY --from=web /build/dist/web ./dist/web
+ENV SELKIES_WEB_DIST="/src/dist/web"
+RUN --mount=type=cache,target=/opt/cargo/registry --mount=type=cache,target=/opt/cargo/git \
+    --mount=type=cache,target=/src/target \
+    set -e; \
     # codec-sys binds the installed headers without watching them, so the cached
     # target would keep bindings and link lines from before a change to the
     # patches or the libraries they build
     cargo clean --release -p codec-sys; \
     X264_STATIC=1 X265_STATIC=1 VPX_STATIC=1 SVTAV1ENC_STATIC=1 \
-        cargo build --release --locked -p selkies; \
+        cargo build --release --locked -p selkies -p selkies-desktop; \
     install -Dm755 target/release/selkies /out/selkies; \
+    install -Dm755 target/release/selkies-desktop /out/selkies-desktop; \
     version="$(. /tmp/packaging/version.sh && crate_version "${SELKIES_VERSION:-0.0.0}")"; \
     /out/selkies --version | grep -F "selkies ${version} (pixelflux ${version} ("; \
     /out/selkies --version | grep -F ", pcmflux ${version})"; \
@@ -352,7 +310,7 @@ FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 LABEL org.opencontainers.image.title="Selkies Base Container"
-LABEL org.opencontainers.image.description="Selkies session without a desktop environment: X11 (Xvfb) and the headless Wayland backend (labwc), PipeWire audio, GPU wiring, s6 service supervision, embedded coTURN"
+LABEL org.opencontainers.image.description="Selkies session without a desktop environment: X11 (Xvfb) and the headless Wayland backend, PipeWire audio, GPU wiring, s6 service supervision, embedded coTURN"
 LABEL org.opencontainers.image.source="https://github.com/selkies-project/selkies"
 LABEL org.opencontainers.image.licenses="MPL-2.0"
 
@@ -400,11 +358,6 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
         ucf \
         udev \
         tzdata && \
-    # The 32-bit compiler and runtime, on the architecture that has one. Here
-    # rather than in the rootless phase below, because libc6-i386 links /lib32
-    # from its preinst, and a session with no root can install neither it nor
-    # anything else that needs the same afterwards.
-    { [ "$(dpkg --print-architecture)" != "amd64" ] || apt-get install --no-install-recommends -y gcc-multilib; } && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
     # Debian's locale-gen takes no locale arguments and generates only what
     # /etc/locale.gen has uncommented, which Ubuntu's honors as well
@@ -430,7 +383,15 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     # setuid file it does not own, and an archive update to util-linux, shadow,
     # sudo, fuse3, or dbus would fail the layer taking it.
     selkies-privileged-files release && \
-    { chown -R -f -h --no-preserve-root ubuntu:ubuntu / || echo 'Failed to set filesystem ownership in some paths to ubuntu user'; }
+    # The chown copies each file of the layers below into this one once per
+    # name, so a file the distribution hardlinks lands here as that many
+    # copies (its Rust coreutils is one 11.8 MB program under 116 names, 1.3 GB
+    # copied). The links are recorded first and made again after it.
+    find / -xdev -type f -links +1 -printf '%i %p\n' | sort -n > /tmp/selkies-hardlinks && \
+    { chown -R -f -h --no-preserve-root ubuntu:ubuntu / || echo 'Failed to set filesystem ownership in some paths to ubuntu user'; } && \
+    awk '{ path = substr($0, index($0, " ") + 1) } $1 == inode { print first "\t" path; next } { inode = $1; first = path }' /tmp/selkies-hardlinks | \
+        while IFS="$(printf '\t')" read -r first path; do ln -f "${first}" "${path}" || echo "Failed to relink ${path}"; done && \
+    rm -f /tmp/selkies-hardlinks
 
 # Set locales
 ENV LANG="${LOCALE}"
@@ -450,8 +411,7 @@ SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
 ###
 # Debian packaging frontends: apt-get only, never dpkg
 ###
-RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architecture i386; fi && \
-    apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
         # Process supervision
         s6 \
         # Base utilities
@@ -634,37 +594,16 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         # coTURN server (WebRTC mode)
         python3 \
         coturn \
-        ssl-cert \
-        # Session compositor for the Wayland backend: labwc, which draws
-        # server-side titlebars with the iconify/maximize/close buttons a desktop
-        # session is expected to have and performs the maximize and minimize
-        # requests a Wayland taskbar sends over wlr-foreign-toplevel. The
-        # distribution package supplies the runtime libraries; the binary itself
-        # is replaced below by the source build carrying the Selkies patches,
-        # whose control socket grows and shrinks the screen count as displays
-        # come and go. Not wayfire: it demands a DRM file descriptor the nested
-        # Wayland backend has none of without a GPU
-        labwc && \
-    # The Intel media stack and the 32-bit graphics runtime exist for amd64
-    # alone. A 32-bit application -- a Wine or Steam game, an old binary --
-    # loads its own copy of every graphics library, and finds none of the
-    # 64-bit ones: without these it falls back to software rendering, or does
-    # not start. Mesa's own VA-API and VDPAU drivers arrive with
-    # mesa-libgallium, which va-driver-all pulls in for that architecture.
-    # The non-free builds of the Intel drivers are the ones taken: they decode
-    # more formats than the free builds, which they conflict with, so both
-    # architectures have to agree on which of the two is installed.
+        ssl-cert && \
+    # The Intel media stack exists for amd64 alone. The non-free builds of the
+    # Intel drivers are the ones taken: they decode more formats than the free
+    # builds, which they conflict with. A 32-bit application brings the 32-bit
+    # graphics runtime it needs in the container it runs in: proot-apps gives
+    # Steam its own.
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install --no-install-recommends -y \
             intel-media-va-driver-non-free i965-va-driver-shaders intel-gpu-tools \
-            rar \
-            libgl1:i386 libglx-mesa0:i386 libgl1-mesa-dri:i386 \
-            libegl1:i386 libgles2:i386 libglu1-mesa:i386 \
-            libvulkan1:i386 mesa-vulkan-drivers:i386 \
-            libva2:i386 libva-drm2:i386 libva-x11-2:i386 \
-            va-driver-all:i386 intel-media-va-driver-non-free:i386 \
-            i965-va-driver-shaders:i386 \
-            libvdpau1:i386; \
+            rar; \
     fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
@@ -676,9 +615,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
 RUN printf '/usr/local/nvidia/lib\n/usr/local/nvidia/lib64\n' > /etc/ld.so.conf.d/nvidia.conf && \
     mkdir -pm755 /etc/OpenCL/vendors /etc/vulkan/icd.d /usr/share/glvnd/egl_vendor.d && \
     echo 'libnvidia-opencl.so.1' > /etc/OpenCL/vendors/nvidia.icd && \
-    # Named with its architecture, because the 32-bit runtime installed above
-    # leaves two instances of it and an unqualified query is ambiguous
-    VULKAN_API_VERSION="$(dpkg -s "libvulkan1:$(dpkg --print-architecture)" | grep -oP 'Version: [0-9|\.]+' | grep -oP '[0-9]+(\.[0-9]+)(\.[0-9]+)')" && \
+    VULKAN_API_VERSION="$(dpkg -s libvulkan1 | grep -oP 'Version: [0-9|\.]+' | grep -oP '[0-9]+(\.[0-9]+)(\.[0-9]+)')" && \
     printf '{\n  "file_format_version": "1.0.0",\n  "ICD": {\n    "library_path": "libGLX_nvidia.so.0",\n    "api_version": "%s"\n  }\n}\n' "${VULKAN_API_VERSION}" > /etc/vulkan/icd.d/nvidia_icd.json && \
     printf '{\n  "file_format_version": "1.0.0",\n  "ICD": {\n    "library_path": "libEGL_nvidia.so.0"\n  }\n}\n' > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
 ENV PATH="/usr/local/nvidia/bin${PATH:+:${PATH}}"
@@ -706,6 +643,8 @@ RUN apt-get update && \
     apt-get install --no-install-recommends -y $(cat /tmp/selkies-runtime-packages) && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/selkies-runtime-packages
 COPY --from=server --chown=1000:1000 /out/selkies /usr/local/bin/selkies
+# The desktop shell the server starts under SELKIES_DESKTOP, built from the same tree.
+COPY --from=server --chown=1000:1000 /out/selkies-desktop /usr/local/bin/selkies-desktop
 
 # Fails the image build rather than publishing one whose payload cannot start:
 # the server carries its web client, every library it links resolves, and the
@@ -730,20 +669,9 @@ COPY --from=xvfb --chown=1000:1000 /build-out/usr/bin/Xvfb /usr/bin/Xvfb
 COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/lib/ /usr/lib/
 COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/share/egl/ /usr/share/egl/
 
-# The patched labwc replaces the distribution binary, and the wlroots it was
-# built against comes along with any dependency built beside it, found through
-# the compositor's rpath; the distribution labwc package above keeps every
-# other runtime library in place
-COPY --from=labwc --chown=1000:1000 /usr/bin/labwc /usr/bin/labwc
-COPY --from=labwc --chown=1000:1000 /build-out/lib/ /usr/lib/
-
 # Install the joystick and webcam interposers and fake-udev (container-only)
-COPY --from=add-ons --chown=1000:1000 /opt/add-ons/lib/ /usr/lib/
-
-# Makes the session look like the Openbox one: floating windows with their usual
-# titlebar buttons, no bar of the compositor's own, and XWayland for the X11-only
-# applications
-COPY --chown=1000:1000 addons/base/labwc-rc.xml /etc/xdg/labwc/rc.xml
+COPY --from=add-ons --chown=1000:1000 /opt/add-ons/usr/lib/ /usr/lib/
+COPY --from=add-ons --chown=1000:1000 /opt/add-ons/opt/lib/ /opt/lib/
 
 # A PulseAudio client that leaves its buffer to pipewire-pulse gets 40 ms, not 2 s
 COPY --chown=1000:1000 addons/base/pipewire-pulse.conf.d/ /etc/pipewire/pipewire-pulse.conf.d/
@@ -804,10 +732,11 @@ ENV DBUS_SYSTEM_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/dbus-system-bus"
 # PIXELFLUX_WAYLAND spelling — for the headless Wayland backend. Deliberately
 # not baked as an ENV: in the resolution order every reader follows, a set
 # SELKIES_WAYLAND would shadow the legacy spelling for good.
-# Session compositor nested inside the Wayland capture compositor: empty picks
-# labwc, "none" leaves applications on the capture compositor with no window
-# management and no XWayland, and any other name runs that compositor as it is
-# installed
+# Session compositor nested inside the Wayland capture compositor, for a desktop
+# built on this image that installs one and runs without the Selkies window
+# manager: its command name, run as installed. Empty or "none" leaves
+# applications on the capture compositor, with no window management and no
+# XWayland unless SELKIES_WM supplies them
 ENV SELKIES_WAYLAND_COMPOSITOR=""
 # Run X11 instead when a GPU is present but the Wayland compositor cannot reach
 # it, so the session keeps hardware acceleration. Without a GPU both backends

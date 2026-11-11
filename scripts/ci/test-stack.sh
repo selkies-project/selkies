@@ -21,7 +21,7 @@ if [ ! -S "${socket}" ]; then
   Xvfb "${E2E_DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms \
     +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" \
     +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" \
-    +extension "XFIXES" +extension "XTEST" +iglx +render \
+    +extension "XFIXES" +extension "XTEST" +render \
     -nolisten "tcp" -ac -noreset > "${TMPDIR:-/tmp}/Xvfb${E2E_DISPLAY#*:}.log" 2>&1 &
   until [ -S "${socket}" ]; do sleep 0.5; done
 fi

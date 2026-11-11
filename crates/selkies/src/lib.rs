@@ -31,6 +31,7 @@ pub mod settings;
 pub mod stats;
 pub mod webcam;
 pub mod webrtc;
+pub mod wm;
 pub mod ws;
 
 /// The pixelflux and pcmflux this build links, as `selkies --version` names them.

@@ -492,14 +492,21 @@ impl FramePace {
     /// still to open whether or not a change waits on it yet: a change landing later has nothing
     /// else to wake it, since a client that draws on frame callbacks goes quiet after its commit.
     /// A window already open takes a change as it lands, so only a change that could not be
-    /// rendered keeps the timer close.
+    /// rendered keeps the timer close. It never sleeps past the next boundary unless a tick
+    /// deferred it (`Self::defer`): a boundary is where the clients' frame callbacks go out, and
+    /// a wake for something else landing after a change's pull would otherwise sleep to the end
+    /// of the next window, costing a client that draws on those callbacks a frame.
     pub fn next_wake(&self, period: Duration, now: Instant, change_pending: bool) -> Instant {
         let due = self.next_due(period, now);
         let pull = self.pull_at(TickTrigger::Damage, period, now);
-        if change_pending || pull > now {
+        let wake = if change_pending || pull > now {
             due.min(pull)
         } else {
             due
+        };
+        match self.window_opened(period, now) {
+            Some(opened) if self.deferred_until.is_none() => wake.min(opened + period),
+            _ => wake,
         }
     }
 }
@@ -844,6 +851,19 @@ mod pacing_tests {
         pace.defer(at(base, 70));
         assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 13));
         assert_eq!(pace.next_wake(PERIOD, at(base, 21), false), at(base, 70));
+    }
+
+    /// A wake for something else, landing after a change's pull and before the next boundary,
+    /// still wakes the timer at that boundary, where the clients' frame callbacks go out.
+    #[test]
+    fn a_wake_between_the_pull_and_the_boundary_still_wakes_at_the_boundary() {
+        let base = Instant::now();
+        let mut pace = FramePace::windowed();
+        pace.ticked(TickTrigger::Timer, PERIOD, base, false);
+        pace.ticked(TickTrigger::Damage, PERIOD, at(base, 3), false);
+        assert_eq!(pace.next_wake(PERIOD, at(base, 4), false), at(base, 13));
+        assert_eq!(pace.next_wake(PERIOD, at(base, 14), false), at(base, 20));
+        assert_eq!(pace.next_wake(PERIOD, at(base, 19), false), at(base, 20));
     }
 
     /// A timer that fires late, as a busy capture or compositor thread makes it, still ends the

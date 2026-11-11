@@ -148,7 +148,7 @@ The [All-In-One Desktop Containers](start.md#desktop-container) support unprivil
 
 **NOTE: STUN/TURN is only relevant to the opt-in WebRTC transport (`--mode=webrtc`). The default WebSocket transport uses a single TCP port. If you use WebRTC mode and both your server and client have closed ports or a restrictive firewall, you will need an external STUN/TURN server capable of `srflx` or `relay` type ICE connections; either open the UDP and TCP port ranges 49152-65535 of your server, or follow the instructions from [WebRTC and Firewall Issues](firewall.md).**
 
-`selkies session` does all of this from one command where no desktop is already on the screen: it starts a sound server unless one answers, an Xvfb of its own (or, with `SELKIES_WAYLAND=true`, Selkies' compositor), the machine's default desktop, and Selkies with every argument it is given, and it preloads the interposers `SELKIES_INTERPOSER` and `SELKIES_WEBCAM_INTERPOSER` name into that desktop. [Jupyter, Coder, and Open OnDemand](platforms.md) describes it in full:
+`selkies session` does all of this from one command where no desktop is already on the screen: it starts a sound server unless one answers, an Xvfb of its own (or, with `SELKIES_WAYLAND=true`, Selkies' compositor), the machine's default desktop, and Selkies with every argument it is given, and it preloads the libraries `SELKIES_INTERPOSER`, `FAKE_UDEV_LIB`, and `SELKIES_WEBCAM_INTERPOSER` name into that desktop. [Jupyter, Coder, and Open OnDemand](platforms.md) describes it in full:
 
 ```bash
 selkies session --session=xfce --public --port=8080 --basic-auth-password=mypasswd

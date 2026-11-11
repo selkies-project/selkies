@@ -2,15 +2,27 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# The Rust Selkies: one workspace for the server and its capture and encode libraries.
+# The Rust Selkies: one workspace for the server, its capture and encode libraries, its window
+# manager, and the desktop shell.
 [workspace]
 resolver = "3"
-members = ["crates/selkies", "crates/selkies-rtc", "crates/pixelflux", "crates/pcmflux"]
-default-members = ["crates/selkies", "crates/selkies-rtc"]
+members = [
+    "crates/selkies",
+    "crates/selkies-rtc",
+    "crates/pixelflux",
+    "crates/pcmflux",
+    "crates/selkies-wm",
+    "crates/selkies-draw",
+    "crates/selkies-desktop",
+]
+default-members = ["crates/selkies", "crates/selkies-rtc", "crates/selkies-desktop"]
 exclude = [
     "crates/pixelflux/codec-sys",
     "crates/pixelflux/va-sys",
     "crates/pixelflux/nvcodec-sys",
+    # The shell's end-to-end tools, each a workspace of its own built where the checks run.
+    "crates/selkies-desktop/tests/driver",
+    "crates/selkies-desktop/tests/trayicon",
 ]
 
 [workspace.package]

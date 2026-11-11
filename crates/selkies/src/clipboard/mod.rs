@@ -315,10 +315,12 @@ pub trait Session: Send + Sync + 'static {
     /// is a rootful (or unmanaged) client of the capture compositor hosting an X11 desktop,
     /// and Xwayland bridges no selection by itself. A nested compositor's own XWM bridges its
     /// Xwayland into the selection already watched, and on the X11 backend the display is the
-    /// session itself, so both answer None. The server must be an Xwayland, not a leftover
-    /// Xvfb or Xorg that merely holds the display number.
+    /// session itself, so both answer None; so does the capture compositor's own Xwayland under
+    /// the Selkies window manager, whose X window manager bridges it. The server must be an
+    /// Xwayland, not a leftover Xvfb or Xorg that merely holds the display number.
     fn x11_session_display(&self) -> Option<String> {
-        if !self.is_wayland() || self.has_separate_app_compositor() {
+        if !self.is_wayland() || self.has_separate_app_compositor() || crate::wm::owns_x11_session()
+        {
             return None;
         }
         let name = self.x11_display()?;

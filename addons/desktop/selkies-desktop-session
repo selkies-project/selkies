@@ -4,11 +4,9 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # The image's desktop as one session, for a session file or the
-# x-session-manager to start: the window manager for the backend the session
-# is started on, with selkies-desktop as its startup command. The session
-# lasts as long as the window manager does, as a display manager expects, and
-# the image's own services run the same pair under s6 instead.
-if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
-  exec labwc --startup selkies-desktop
-fi
-exec openbox --startup selkies-desktop
+# x-session-manager to start. The server runs the window manager and the
+# selkies-desktop shell itself under SELKIES_DESKTOP, so the session has
+# nothing of its own to start: it lasts as long as the shell the server runs,
+# which is the session's end as a display manager expects one.
+until pgrep -x selkies-desktop > /dev/null 2>&1; do sleep 0.5; done
+while pgrep -x selkies-desktop > /dev/null 2>&1; do sleep 2; done

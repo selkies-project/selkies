@@ -88,19 +88,20 @@ use smithay::{
             Bind, ExportMem, Frame as _, ImportAll, ImportDma, ImportEgl, ImportMem, Renderer as _,
             damage::OutputDamageTracker,
             element::{
-                AsRenderElements, Element, RenderElement, Wrap,
+                AsRenderElements, Element, Kind, RenderElement, Wrap,
                 memory::MemoryRenderBufferRenderElement, surface::WaylandSurfaceRenderElement,
             },
             gles::GlesRenderer,
             pixman::PixmanRenderer,
             sync::SyncPoint,
+            utils::Buffer as SurfaceBuffer,
         },
     },
     desktop::{LayerMap, PopupManager, layer_map_for_output},
     desktop::{Space, space::SpaceRenderElements},
     input::{
         SeatState,
-        keyboard::{FilterResult, XkbConfig},
+        keyboard::XkbConfig,
         pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent, RelativeMotionEvent},
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale as OutputScale, Subpixel},
@@ -113,13 +114,13 @@ use smithay::{
         pixman,
         wayland_server::{Display, DisplayHandle},
     },
-    utils::{Clock, Physical, Point, Rectangle, Scale, Transform},
+    utils::{Clock, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
     wayland::selection::primary_selection::PrimarySelectionState,
     wayland::shell::wlr_layer::WlrLayerShellState,
     wayland::xdg_activation::XdgActivationState,
     wayland::{
         compositor::{CompositorState, with_states},
-        dmabuf::{DmabufFeedbackBuilder, DmabufState},
+        dmabuf::{DmabufFeedbackBuilder, DmabufState, get_dmabuf},
         foreign_toplevel_list::ForeignToplevelListState,
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
@@ -130,7 +131,7 @@ use smithay::{
         selection::data_device::DataDeviceState,
         shell::xdg::XdgShellState,
         shell::xdg::decoration::XdgDecorationState,
-        shm::ShmState,
+        shm::{ShmState, with_buffer_contents},
         socket::ListeningSocketSource,
     },
 };
@@ -166,6 +167,8 @@ pub mod sink;
 pub mod uinput;
 /// Headless Wayland compositor and cursor rendering.
 pub mod wayland;
+/// The window policy interface a window manager implements for the compositor.
+pub mod wm;
 
 #[cfg(test)]
 mod cleanup_bench;
@@ -228,6 +231,133 @@ smithay::backend::renderer::element::render_elements! {
     Window=Wrap<E>,
     Cursor=MemoryRenderBufferRenderElement<R>,
     Surface=WaylandSurfaceRenderElement<R>,
+    Scaled=smithay::backend::renderer::element::utils::RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
+    Ghost=smithay::backend::renderer::element::texture::TextureRenderElement<<R as smithay::backend::renderer::RendererSuper>::TextureId>,
+}
+
+/// Push a window's elements for an output at `origin` and `scale`: through the window policy's
+/// effect where one runs on it (the surface tree scaled into the effect's rectangle and blended
+/// at its alpha, the frame parts scaled and blended with it), else as the window stands with its
+/// frame parts beside it.
+fn push_window_elements<R>(
+    space: &smithay::desktop::Space<smithay::desktop::Window>,
+    wm: Option<&wayland::wm::WmState>,
+    renderer: &mut R,
+    elements: &mut Vec<CompositionElements<R, WaylandSurfaceRenderElement<R>>>,
+    window: &smithay::desktop::Window,
+    origin: Point<i32, smithay::utils::Logical>,
+    scale: f64,
+) where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + Send + 'static,
+{
+    use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
+    use smithay::backend::renderer::element::utils::RescaleRenderElement;
+    let window_loc = space.element_location(window).unwrap_or_default() - origin;
+    let id = wayland::frontend::window_meta(window).map(|m| m.id);
+    let effect = id.and_then(|id| wm.and_then(|wm| wm.effects.get(&id).copied()));
+    if let Some(effect) = effect {
+        if effect.alpha <= 0.0 || effect.rect.w <= 0 || effect.rect.h <= 0 {
+            return;
+        }
+        let geometry = window.geometry();
+        if let Some(id) = id {
+            // The frame was drawn for the client area the policy configured, which the buffer
+            // on screen reaches only once the client commits it, so the parts scale from that
+            // area rather than from the buffer's size.
+            let client_loc = space.element_location(window).unwrap_or_default();
+            let client = wm
+                .and_then(|wm| wm.rects.get(&id).copied())
+                .unwrap_or(wm::Rect::new(
+                    client_loc.x,
+                    client_loc.y,
+                    geometry.size.w,
+                    geometry.size.h,
+                ));
+            elements.extend(
+                wayland::wm::frame_elements_through(
+                    wm, renderer, id, client, &effect, origin, scale,
+                )
+                .into_iter()
+                .map(CompositionElements::Cursor),
+            );
+        }
+        let sx = effect.rect.w as f64 / geometry.size.w.max(1) as f64;
+        let sy = effect.rect.h as f64 / geometry.size.h.max(1) as f64;
+        let target: Point<i32, smithay::utils::Logical> =
+            (effect.rect.x - origin.x, effect.rect.y - origin.y).into();
+        let origin_phys = target.to_physical_precise_round(scale);
+        let surface_loc = (target - geometry.loc).to_physical_precise_round(scale);
+        if let Some(surface) = window.wl_surface() {
+            let surface_elements: Vec<WaylandSurfaceRenderElement<R>> =
+                render_elements_from_surface_tree(
+                    renderer,
+                    &surface,
+                    surface_loc,
+                    Scale::from(scale),
+                    effect.alpha,
+                    smithay::backend::renderer::element::Kind::Unspecified,
+                );
+            elements.extend(surface_elements.into_iter().map(|element| {
+                CompositionElements::Scaled(RescaleRenderElement::from_element(
+                    element,
+                    origin_phys,
+                    Scale::from((sx, sy)),
+                ))
+            }));
+        }
+        return;
+    }
+    // The space places a window's geometry; the surface is drawn geometry offset to the left
+    // and up of it, where a client-side shadow lives, as the space's own render and its hit
+    // test agree.
+    let surface_loc = window_loc - window.geometry().loc;
+    elements.extend(
+        window
+            .render_elements(
+                renderer,
+                surface_loc.to_physical_precise_round(scale),
+                Scale::from(scale),
+                1.0,
+            )
+            .into_iter()
+            .map(CompositionElements::Space),
+    );
+    if let Some(id) = id {
+        let client_loc = space.element_location(window).unwrap_or_default();
+        elements.extend(
+            wayland::wm::frame_elements(wm, renderer, id, client_loc, origin, scale, 1.0)
+                .into_iter()
+                .map(CompositionElements::Cursor),
+        );
+    }
+}
+
+/// Push the ghosts of closing windows the policy animates, over the windows: each its last
+/// picture and frame scaled and blended through its effect.
+fn push_ghost_elements<R>(
+    renderer: &mut R,
+    elements: &mut Vec<CompositionElements<R, WaylandSurfaceRenderElement<R>>>,
+    wm: Option<&wayland::wm::WmState>,
+    origin: Point<i32, smithay::utils::Logical>,
+    scale: f64,
+) where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + Send + 'static,
+{
+    let Some(state) = wm else {
+        return;
+    };
+    for id in state.ghosts.keys().copied() {
+        let ghost = wayland::wm::ghost_elements(wm, renderer, id, origin, scale);
+        elements.extend(ghost.frame.into_iter().map(CompositionElements::Cursor));
+        if let Some(element) = ghost.texture {
+            elements.push(CompositionElements::Ghost(element));
+        }
+        if let Some(element) = ghost.memory {
+            elements.push(CompositionElements::Cursor(element));
+        }
+    }
 }
 
 /// Push an output's wlr-layer surfaces on `target_layer` into `elements`, top-most first, the
@@ -670,6 +800,12 @@ pub enum ThreadCommand {
     },
     SetCursorCallback(Option<Arc<dyn crate::sink::CursorSink>>),
     SetClipboardCallback(Arc<dyn crate::sink::ClipboardSink>),
+    /// Install the window policy that manages the compositor's windows from here on.
+    InstallWindowPolicy(Box<dyn crate::wm::WindowPolicy>),
+    /// Start Xwayland for the compositor's X11 clients; `notify` is told its display number.
+    StartXwayland {
+        notify: Option<std::sync::mpsc::Sender<u32>>,
+    },
     /// Server-side clipboard offer: the compositor owns the selection and serves one payload
     /// per `(mime, data)` entry (plus text aliases), so a paste takes the flavor it asks for.
     SetClipboard {
@@ -1107,8 +1243,17 @@ pub struct WlFrame<B = Vec<u8>> {
     id: usize,
     buf: B,
     /// Zero-copy: a buffer encoded in place of the slot's own, the host frame the host
-    /// compositor blitted into; the slot's buffer then only holds the place in flight.
+    /// compositor blitted into or a client's own buffer (`scanout`); the slot's buffer then
+    /// only holds the place in flight.
     source: Option<Dmabuf>,
+    /// `source` is a client's buffer encoded as it stands (`scanout_candidate`): the encode
+    /// thread waits out the client's GPU work on it first, and a session that cannot import
+    /// it refuses the direct path for the capture rather than failing the session.
+    scanout: bool,
+    /// Readback: a client's shm buffer whose rows are encoded in place of the slot's
+    /// (`scanout_shm`), read inside its pool's mapping on the encode thread; the slot's buffer
+    /// then only holds the place in flight.
+    shm: Option<SurfaceBuffer>,
     frame_id: u16,
     damage: Vec<Rectangle<i32, Physical>>,
     is_animated: bool,
@@ -1234,6 +1379,13 @@ pub struct WlEncodeControls {
     /// The rate the path carries (`CaptureSettings::video_link_kbps`), read every frame.
     link_kbps: AtomicI32,
     force_idr: AtomicBool,
+    /// The zero-copy session refused a client's buffer handed to it as it stood (a layout
+    /// its driver does not import), so the capture composites every frame from then on.
+    scanout_refused: AtomicBool,
+    /// The planes of one client dmabuf the session's encoder imports as it stands
+    /// (`FrameEncoder::dmabuf_planes`), published by the encode thread; a buffer of more planes
+    /// is composited.
+    scanout_planes: AtomicU32,
     reference_reports: Mutex<Vec<encoders::reference::ReferenceReport>>,
     /// Pending per-frame tunables for the encode thread (mutex, not atomics: one struct, set
     /// rarely, read only when the dirty flag says so).
@@ -1250,6 +1402,8 @@ impl WlEncodeControls {
             fps_bits: AtomicU64::new(0),
             link_kbps: AtomicI32::new(0),
             force_idr: AtomicBool::new(false),
+            scanout_refused: AtomicBool::new(false),
+            scanout_planes: AtomicU32::new(1),
             reference_reports: Mutex::new(Vec::new()),
             tunables_dirty: AtomicBool::new(false),
             tunables: Mutex::new(None),
@@ -1549,6 +1703,10 @@ fn wayland_encode_loop<B: WlPayload>(
             pool.recycle(f.id, f.buf);
             break;
         }
+        let planes = video_encoder.as_ref().map_or(1, |e| e.dmabuf_planes());
+        cfg.controls
+            .scanout_planes
+            .store(planes as u32, Ordering::Relaxed);
         if cfg.controls.tunables_dirty.swap(false, Ordering::Acquire)
             && let Some(t) = cfg.controls.tunables.lock().unwrap().take()
         {
@@ -1643,15 +1801,34 @@ fn wayland_encode_loop<B: WlPayload>(
                 decision.prepare(encoder);
                 let encode_start_ns = wayland::host::now_ns();
                 let outcome = if decision.send {
-                    f.buf.encode(
-                        f.source.as_ref(),
-                        encoder,
-                        width,
-                        cfg.use_gpu,
-                        f.frame_id as u64,
-                        decision.target_qp,
-                        force_idr,
-                    )
+                    // A client's buffer may still be drawn into on the GPU when its commit
+                    // arrives, and neither encoder waits on its fences itself.
+                    if f.scanout
+                        && let Some(client) = f.source.as_ref()
+                    {
+                        wayland::host::wait_gpu_done(client);
+                    }
+                    match f.shm.as_ref() {
+                        Some(shm) => encode_shm_rows(shm, width, height, |rows| {
+                            encoder.encode_host(
+                                rows,
+                                (width.max(0) as usize) * 4,
+                                cfg.use_gpu,
+                                f.frame_id as u64,
+                                decision.target_qp,
+                                force_idr,
+                            )
+                        }),
+                        None => f.buf.encode(
+                            f.source.as_ref(),
+                            encoder,
+                            width,
+                            cfg.use_gpu,
+                            f.frame_id as u64,
+                            decision.target_qp,
+                            force_idr,
+                        ),
+                    }
                 } else {
                     encoder.push_held(f.frame_id as u64)
                 };
@@ -1695,6 +1872,23 @@ fn wayland_encode_loop<B: WlPayload>(
                                 });
                             }
                         }
+                    }
+                    Err(e) if e == SHM_GONE => {
+                        // The client took its pool away under the frame; the next frame
+                        // composites whole and a key frame carries what this one held.
+                        crate::log::debug!("[Wayland] Output {}: {e}.", cfg.display_id);
+                        cfg.controls.force_idr.store(true, Ordering::Relaxed);
+                    }
+                    Err(e) if f.scanout => {
+                        // The session is sound; the client's buffer is one its driver does
+                        // not import, so the capture composites from here on. The frame it
+                        // carried is lost, and a key frame puts its changes into the stream.
+                        println!(
+                            "[Wayland] Output {}: the encoder does not take the client's buffers in place ({e}); compositing.",
+                            cfg.display_id
+                        );
+                        cfg.controls.scanout_refused.store(true, Ordering::Relaxed);
+                        cfg.controls.force_idr.store(true, Ordering::Relaxed);
                     }
                     Err(e) => {
                         // One line per recovery window: a session failing at frame rate would
@@ -1795,18 +1989,32 @@ fn wayland_encode_loop<B: WlPayload>(
                 damage.push(Rectangle::new((0, 0).into(), (width, height).into()));
             }
             let encode_start_ns = wayland::host::now_ns();
-            out = encoders::software::encode_cpu(
-                &mut stripes,
-                rows,
-                width,
-                height,
-                &damage,
-                &settings,
-                f.frame_id,
-                cfg.use_gpu,
-                false,
-                requested_idr,
-            );
+            let frame_id = f.frame_id;
+            let mut run = |rows: &[u8]| {
+                encoders::software::encode_cpu(
+                    &mut stripes,
+                    rows,
+                    width,
+                    height,
+                    &damage,
+                    &settings,
+                    frame_id,
+                    cfg.use_gpu,
+                    false,
+                    requested_idr,
+                )
+            };
+            out = match f.shm.as_ref() {
+                Some(shm) => match encode_shm_rows(shm, width, height, |rows| Ok(run(rows))) {
+                    Ok(out) => out,
+                    Err(e) => {
+                        crate::log::debug!("[Wayland] Output {}: {e}.", cfg.display_id);
+                        cfg.controls.force_idr.store(true, Ordering::Relaxed);
+                        Vec::new()
+                    }
+                },
+                None => run(rows),
+            };
             FrameTiming::stamp(&mut out, f.captured_ns, encode_start_ns);
         }
         drop(guard);
@@ -2103,6 +2311,7 @@ fn teardown_capture(
         drop(tx);
     }
     let join = cap.deliver_join.take();
+    release_scanout_inflight(cap, true);
     // The last strong reference: dropping it here, before a following start binds its own
     // sink, is what keeps the outgoing sink's unlink from stripping the successor's socket
     // path. The encode thread holds only a Weak.
@@ -2120,6 +2329,7 @@ fn end_zero_copy(cap: &mut wayland::frontend::WlCapture) -> bool {
     cap.zero_copy = None;
     cap.gpu_ring.clear();
     cap.host_still = None;
+    release_scanout_inflight(cap, true);
     true
 }
 
@@ -2248,6 +2458,379 @@ fn release_host_inflight(
             host.release_frame(display_id, frame);
         }
     }
+}
+
+/// Let go of the client buffers encoded as they stood that no frame in flight reads anymore
+/// (`WlCapture::scanout_inflight`), or all of them (`all`) where the capture or its zero-copy
+/// session is going away: the last hold on one releases it to its client.
+fn release_scanout_inflight(cap: &mut wayland::frontend::WlCapture, all: bool) {
+    if cap.scanout_inflight.is_empty() {
+        return;
+    }
+    let done = cap.encode_stats.recycled.load(Ordering::Acquire);
+    cap.scanout_inflight
+        .retain(|(last_use, _)| !all && *last_use > done);
+}
+
+/// Say, at debug, that a display's frames moved between compositing and a client's buffer,
+/// or are composited for a new reason: the choice is made every frame, so only its change is
+/// worth a line.
+fn note_direct(
+    cap: &mut wayland::frontend::WlCapture,
+    display_id: u32,
+    direct: &Result<String, &'static str>,
+) {
+    let now = direct.as_ref().map(|_| ()).map_err(|why| *why);
+    if cap.direct == Some(now) {
+        return;
+    }
+    cap.direct = Some(now);
+    match direct {
+        Ok(what) => crate::log::debug!(
+            "[Wayland] Output {display_id}: encoding the covering client's {what} as it stands."
+        ),
+        Err(why) => crate::log::debug!("[Wayland] Output {display_id}: compositing: {why}."),
+    }
+}
+
+/// The software cursor an output's frame draws, where it does: the theme that resolves a
+/// named cursor, what the client set, where the pointer is on the output, and the time for
+/// an animated cursor's frame.
+struct SoftwareCursor<'a> {
+    theme: &'a Cursor,
+    icon: &'a Option<CursorImageStatus>,
+    pos: Point<f64, Logical>,
+    time: Duration,
+}
+
+/// What an output's frame is composed of, for `composition_elements`.
+struct FrameScene<'a> {
+    space: &'a Space<smithay::desktop::Window>,
+    wm: Option<&'a wayland::wm::WmState>,
+    /// `None` where the cursor is not drawn into the frame or the pointer is elsewhere.
+    cursor: Option<SoftwareCursor<'a>>,
+    /// A drag's icon and where its top-left corner lies on the output, while a drag carries one
+    /// over it.
+    drag_icon: Option<(
+        &'a smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        Point<f64, Logical>,
+    )>,
+    overlay: &'a OverlayState,
+    output: &'a Output,
+    /// The output's origin in the layout.
+    origin: Point<i32, Logical>,
+    /// The frame's size in pixels.
+    size: (i32, i32),
+    scale: f64,
+}
+
+/// The render elements of an output's frame, topmost first: the software cursor, a drag's icon,
+/// the watermark, the window manager's overlays, the overlay and top wlr-layer layers, the windows
+/// with their frames, and the bottom and background layers. One list for both renderers, read
+/// by `scanout_candidate` before anything is drawn.
+fn composition_elements<R>(
+    renderer: &mut R,
+    scene: &FrameScene<'_>,
+) -> Vec<CompositionElements<R, WaylandSurfaceRenderElement<R>>>
+where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + Send + 'static,
+{
+    use smithay::wayland::shell::wlr_layer::Layer;
+    let mut elements = Vec::new();
+    let scale = scene.scale;
+    if let Some(cursor) = scene.cursor.as_ref() {
+        let theme_scale = scale.round() as u32;
+        match cursor.icon {
+            Some(CursorImageStatus::Named(icon)) => {
+                let name = wayland::frontend::cursor_icon_to_str(icon);
+                if let Some(image) = cursor
+                    .theme
+                    .get_image_by_name(name, theme_scale, cursor.time)
+                    && let Some(elem) = scene
+                        .overlay
+                        .get_cursor_element(renderer, image, cursor.pos, scale)
+                {
+                    elements.push(CompositionElements::Cursor(elem));
+                }
+            }
+            Some(CursorImageStatus::Surface(surface)) => {
+                let hot = cursor_surface_hotspot(surface).to_f64();
+                let phys_pos = (cursor.pos - hot).to_physical(Scale::from(scale));
+                let elem_result = with_states(surface, |states| {
+                    WaylandSurfaceRenderElement::from_surface(
+                        renderer,
+                        surface,
+                        states,
+                        phys_pos,
+                        1.0,
+                        Kind::Cursor,
+                    )
+                });
+                if let Ok(Some(cursor_elem)) = elem_result {
+                    elements.push(CompositionElements::Surface(cursor_elem));
+                }
+            }
+            Some(CursorImageStatus::Hidden) => {}
+            None => {
+                let image = cursor.theme.get_image(theme_scale, cursor.time);
+                if let Some(elem) = scene
+                    .overlay
+                    .get_cursor_element(renderer, image, cursor.pos, scale)
+                {
+                    elements.push(CompositionElements::Cursor(elem));
+                }
+            }
+        }
+    }
+    if let Some((surface, at)) = scene.drag_icon {
+        let at = at.to_physical(Scale::from(scale)).to_i32_round();
+        elements.extend(
+            smithay::backend::renderer::element::surface::render_elements_from_surface_tree(
+                renderer,
+                surface,
+                at,
+                scale,
+                1.0,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(CompositionElements::Surface),
+        );
+    }
+    if let Some(elem) = scene.overlay.get_watermark_element(renderer) {
+        elements.push(CompositionElements::Cursor(elem));
+    }
+    let logical: Size<i32, Logical> = (
+        (scene.size.0 as f64 / scale).round() as i32,
+        (scene.size.1 as f64 / scale).round() as i32,
+    )
+        .into();
+    elements.extend(
+        wayland::wm::overlay_elements(scene.wm, renderer, scene.origin, logical, scale)
+            .into_iter()
+            .map(CompositionElements::Cursor),
+    );
+    // The top layer (a desktop's panel) lies over the windows, except under a window the policy
+    // shows fullscreen on top: a video or a game covers the panel, as it does on every desktop,
+    // and the panel is back once the window leaves fullscreen. X11 override-redirect windows
+    // (menus, tooltips, a tray's icon strip, a game's own full-screen window) lie over the top
+    // layer, as Xwayland compositors stack them, since they place themselves; under a fullscreen
+    // window they keep their place in the stacking, so a tray's strip stays under the game with
+    // the panel it sits on.
+    let fullscreen_on_top = scene
+        .space
+        .elements_for_output(scene.output)
+        .rfind(|window| !wayland::frontend::is_override_redirect(window))
+        .and_then(|window| wayland::frontend::window_meta(window).map(|m| m.id))
+        .and_then(|id| scene.wm.and_then(|wm| wm.states.get(&id)))
+        .is_some_and(|states| states.fullscreen);
+    {
+        let layer_map = layer_map_for_output(scene.output);
+        push_layer_elements(renderer, &mut elements, &layer_map, Layer::Overlay, scale);
+    }
+    let lifted = |window: &&smithay::desktop::Window| {
+        !fullscreen_on_top && wayland::frontend::is_override_redirect(window)
+    };
+    for window in scene
+        .space
+        .elements_for_output(scene.output)
+        .rev()
+        .filter(lifted)
+    {
+        push_window_elements(
+            scene.space,
+            scene.wm,
+            renderer,
+            &mut elements,
+            window,
+            scene.origin,
+            scale,
+        );
+    }
+    if !fullscreen_on_top {
+        let layer_map = layer_map_for_output(scene.output);
+        push_layer_elements(renderer, &mut elements, &layer_map, Layer::Top, scale);
+    }
+    push_ghost_elements(renderer, &mut elements, scene.wm, scene.origin, scale);
+    for window in scene
+        .space
+        .elements_for_output(scene.output)
+        .rev()
+        .filter(|window| !lifted(window))
+    {
+        push_window_elements(
+            scene.space,
+            scene.wm,
+            renderer,
+            &mut elements,
+            window,
+            scene.origin,
+            scale,
+        );
+    }
+    {
+        let layer_map = layer_map_for_output(scene.output);
+        if fullscreen_on_top {
+            push_layer_elements(renderer, &mut elements, &layer_map, Layer::Top, scale);
+        }
+        push_layer_elements(renderer, &mut elements, &layer_map, Layer::Bottom, scale);
+        push_layer_elements(
+            renderer,
+            &mut elements,
+            &layer_map,
+            Layer::Background,
+            scale,
+        );
+    }
+    elements
+}
+
+/// The surface whose buffer is an output's frame as it stands, or why there is none.
+///
+/// Decided from the frame's element list every frame, as a display compositor picks direct
+/// scanout: the topmost element on the output has to be a surface drawn over exactly the
+/// output, unscaled, uncropped, untransformed, at full alpha, and opaque throughout, so its
+/// buffer holds the frame pixel for pixel and hides everything under it. A cursor drawn into
+/// the frame, a watermark, an overlay or frame of the window manager, a layer surface, a
+/// popup, or a second window on the output is on top of it or beside it, and ends the direct
+/// path the frame it appears. The client whose buffer qualifies is the usual full-screen
+/// case: a game, a kiosk browser, a maximized window under a policy that frames none.
+fn scanout_candidate<R>(
+    elements: &[CompositionElements<R, WaylandSurfaceRenderElement<R>>],
+    size: (i32, i32),
+    scale: f64,
+) -> Result<&WaylandSurfaceRenderElement<R>, &'static str>
+where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + 'static,
+{
+    let full = Rectangle::<i32, Physical>::from_size(size.into());
+    let scale = Scale::from(scale);
+    let Some(top) = elements.iter().find(|e| e.geometry(scale).overlaps(full)) else {
+        return Err("nothing is on the output");
+    };
+    let surface = match top {
+        CompositionElements::Space(SpaceRenderElements::Surface(s))
+        | CompositionElements::Surface(s)
+            if s.kind() != Kind::Cursor =>
+        {
+            s
+        }
+        _ => return Err("something is drawn over the window"),
+    };
+    if surface.alpha() < 1.0 {
+        return Err("the window is translucent");
+    }
+    if surface.geometry(scale) != full {
+        return Err("the window does not cover the output");
+    }
+    if surface.transform() != Transform::Normal {
+        return Err("the buffer is transformed");
+    }
+    let buffer_full =
+        Rectangle::<f64, smithay::utils::Buffer>::from_size((size.0 as f64, size.1 as f64).into());
+    if surface.src() != buffer_full {
+        return Err("the buffer is scaled or cropped");
+    }
+    if !full
+        .subtract_rects(surface.opaque_regions(scale).iter().copied())
+        .is_empty()
+    {
+        return Err("the window is not opaque throughout");
+    }
+    Ok(surface)
+}
+
+/// A client's dmabuf the zero-copy session encodes as it stands, with its description for the
+/// log, and a hold on the buffer, or why the session cannot take it: both hardware sessions
+/// import one of the four packed 8-bit RGB formats at their own width and height, so only a
+/// buffer of the capture's size qualifies, and of no more planes than the session's encoder
+/// imports (`planes`: VA-API maps a compressed layout's metadata plane, NVENC one plane). What
+/// the driver then makes of its modifier and pitch only the import says, and a refusal there
+/// ends the direct path for the capture (`WlEncodeControls::scanout_refused`).
+fn scanout_dmabuf<R: smithay::backend::renderer::Renderer + ImportAll>(
+    surface: &WaylandSurfaceRenderElement<R>,
+    size: (i32, i32),
+    planes: usize,
+) -> Result<(Dmabuf, SurfaceBuffer, String), &'static str> {
+    let buffer = surface.buffer();
+    let dmabuf = get_dmabuf(buffer).map_err(|_| "the window's buffer is in system memory")?;
+    if (dmabuf.width() as i32, dmabuf.height() as i32) != size {
+        return Err("the buffer is not the size of the capture");
+    }
+    if dmabuf.num_planes() > planes {
+        return Err("the buffer has more planes than the encoder imports");
+    }
+    let format = dmabuf.format();
+    if !matches!(
+        format.code,
+        Fourcc::Argb8888 | Fourcc::Xrgb8888 | Fourcc::Abgr8888 | Fourcc::Xbgr8888
+    ) {
+        return Err("the buffer's format is not one the encoder imports");
+    }
+    let what = format!(
+        "{:?} dmabuf (modifier {:#x})",
+        format.code,
+        u64::from(format.modifier)
+    );
+    Ok((dmabuf.clone(), buffer.clone(), what))
+}
+
+/// A client's shm buffer the readback path encodes where it lies, with its description for
+/// the log, or why not: the rows have to be what the pool's are, B,G,R,A (`ARGB8888` or
+/// `XRGB8888`) packed at the capture's width, since the encoders read them at that pitch.
+fn scanout_shm<R: smithay::backend::renderer::Renderer + ImportAll>(
+    surface: &WaylandSurfaceRenderElement<R>,
+    size: (i32, i32),
+) -> Result<(SurfaceBuffer, String), &'static str> {
+    use smithay::reexports::wayland_server::protocol::wl_shm;
+    let buffer = surface.buffer();
+    let layout = with_buffer_contents(buffer, |_, len, data| {
+        let fits = matches!(
+            data.format,
+            wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888
+        ) && (data.width, data.height) == size
+            && data.stride == size.0.saturating_mul(4)
+            && data.offset >= 0
+            && (data.offset as usize).saturating_add(
+                (data.height.max(0) as usize).saturating_mul(data.stride.max(0) as usize),
+            ) <= len;
+        fits.then(|| format!("{:?} shm buffer", data.format))
+    })
+    .map_err(|_| "the window's buffer is on the GPU")?;
+    layout
+        .map(|what| (buffer.clone(), what))
+        .ok_or("the buffer's format or layout is not the pool's")
+}
+
+/// The error `encode_shm_rows` returns where the client's pool no longer holds the frame.
+const SHM_GONE: &str = "the client's shm buffer is gone";
+
+/// Run `encode` on the rows of a client's shm buffer a frame names (`WlFrame::shm`), `height`
+/// rows of `width` pixels packed four bytes each: the pool's mapping is valid only inside this
+/// call, so the encode runs inside it. `SHM_GONE` where the pool was resized or destroyed under
+/// the frame.
+fn encode_shm_rows<T>(
+    buffer: &SurfaceBuffer,
+    width: i32,
+    height: i32,
+    encode: impl FnOnce(&[u8]) -> Result<T, String>,
+) -> Result<T, String> {
+    with_buffer_contents(buffer, |ptr, len, data| {
+        let stride = (width.max(0) as usize) * 4;
+        let offset = data.offset.max(0) as usize;
+        let needed = (height.max(0) as usize) * stride;
+        if data.stride.max(0) as usize != stride || offset.saturating_add(needed) > len {
+            return Err(SHM_GONE.to_string());
+        }
+        // SAFETY: smithay maps the pool for `len` bytes for the span of this closure, the
+        // rows lie within them, and the SIGBUS of a pool shrunk under the read becomes the
+        // error mapped below.
+        let rows = unsafe { std::slice::from_raw_parts(ptr.add(offset), needed) };
+        encode(rows)
+    })
+    .map_err(|_| SHM_GONE.to_string())?
 }
 
 /// Drop a host-capture session whose compositor connection has ended, stopping every
@@ -3101,6 +3684,8 @@ fn start_capture_on_display(
         gpu_ring: Vec::new(),
         host_still: None,
         host_inflight: Vec::new(),
+        scanout_inflight: Vec::new(),
+        direct: None,
         published: 0,
         host_retained_use: 0,
         recording_sink,
@@ -4107,6 +4692,21 @@ fn drives_screen(
     })
 }
 
+/// One display's frame: decide whether this tick produces one, reserve a pool buffer, take
+/// the host's frame or compose the output's own, publish it to the encode thread, and answer
+/// the clients' frame callbacks and presentation feedback. True where the encoder still holds
+/// every pool buffer and the tick is skipped.
+///
+/// The output's own frame is its element list (`composition_elements`), rendered by the GL
+/// renderer into a zero-copy target or read back, or by pixman straight into a pool buffer.
+/// Where that list is one opaque surface over exactly the output and nothing else
+/// (`scanout_candidate`), the frame is the client's buffer and nothing is drawn: a zero-copy
+/// session is handed the dmabuf itself and the pixman path's encode thread reads the shm
+/// buffer's rows where they lie, each held for the client until the encode is done
+/// (`WlCapture::scanout_inflight`); the damage trackers record the frame either way, so a
+/// later composite repaints what changed meanwhile. Wayland otherwise costs a render pass X11
+/// never pays, since X11 clients draw into the one framebuffer the capture reads, and this is
+/// the one case where the compositor can skip its own.
 fn render_node_tick(
     state: &mut AppState,
     node: &mut wayland::frontend::OutputNode,
@@ -4331,9 +4931,10 @@ fn render_node_tick(
         cancel_slots(node, &mut pool_slot, &mut gpu_slot);
         return false;
     }
-    // Dmabuf handed to the GPU encoder in host mode (from the new or retained frame), and
-    // whether it is the retained frame itself rather than a composite of it.
-    let mut host_enc_dmabuf: Option<Dmabuf> = None;
+    // A dmabuf handed to the GPU encoder in place of the slot's own: in host mode the new or
+    // retained host frame, else a covering client's buffer (`scanout_candidate`); and whether
+    // it is the retained host frame itself rather than a composite of it.
+    let mut source_dmabuf: Option<Dmabuf> = None;
     let mut host_enc_retained = false;
     let mut new_stamp: Option<i64> = None;
     // Host software frames arrive BGRA, so anything reading this display's frame buffer
@@ -4501,13 +5102,13 @@ fn render_node_tick(
                 if !gpu_encoder {
                     return RETAINED_GPU_FRAME;
                 }
-                host_enc_dmabuf = Some(dmabuf.clone());
+                source_dmabuf = Some(dmabuf.clone());
                 host_enc_retained = true;
             }
             RETAINED_OK
         });
         // A fresh blit may still be in flight on the GPU when the compositor announces it.
-        if have_new && let Some(src) = host_enc_dmabuf.as_ref() {
+        if have_new && let Some(src) = source_dmabuf.as_ref() {
             wayland::host::wait_gpu_done(src);
         }
         // GPU path: composite the watermark and serve screenshot readbacks with
@@ -4515,7 +5116,7 @@ fn render_node_tick(
         // this display's offscreen target every tick (drawing in place would
         // trail); anchored watermarks are stamped once onto each fresh blit and
         // ride along with retained re-encodes.
-        if let Some(src) = host_enc_dmabuf.clone() {
+        if let Some(src) = source_dmabuf.clone() {
             if take_screenshot && matches!(src.format().code, Fourcc::Xrgb8888 | Fourcc::Xbgr8888) {
                 screenshot_format = computer_use::ScreenshotPixelFormat::Rgbx;
             }
@@ -4535,7 +5136,7 @@ fn render_node_tick(
                         ) {
                             Ok(sync) => {
                                 render_sync = Some(sync);
-                                host_enc_dmabuf = Some(target.clone());
+                                source_dmabuf = Some(target.clone());
                                 host_enc_retained = false;
                                 wm_drawn = true;
                             }
@@ -4559,7 +5160,7 @@ fn render_node_tick(
                 }
             }
             if take_screenshot && let Some(renderer) = state.gles_renderer.as_mut() {
-                let mut shot = host_enc_dmabuf.clone().unwrap_or(src);
+                let mut shot = source_dmabuf.clone().unwrap_or(src);
                 screenshot_result = Some((|| {
                     let fb = renderer
                         .bind(&mut shot)
@@ -4626,6 +5227,51 @@ fn render_node_tick(
         render_success = true;
     }
 
+    if !host_mode && let Some(cap) = node.capture.as_mut() {
+        release_scanout_inflight(cap, false);
+    }
+    // Whether a covering client's buffer may stand in for the composite this tick: a
+    // screenshot and a copy-capture client read a composited target, a held frame is
+    // composited to be dropped, and a session that refused one client buffer composites for
+    // good. A zero-copy session takes a dmabuf and the pixman path an shm buffer; the readback
+    // path on the GL renderer composites, since its pool is RGBA and a client's shm buffer is
+    // not.
+    let direct_wanted: Result<(), &'static str> = if take_screenshot {
+        Err("a screenshot reads the composite")
+    } else if copy_frame_wanted {
+        Err("a copy-capture client reads the composite")
+    } else if hold_frame {
+        Err("the frames are held")
+    } else if node
+        .capture
+        .as_ref()
+        .is_some_and(|c| c.encode_controls.scanout_refused.load(Ordering::Relaxed))
+    {
+        Err("the encoder refused a client's buffer")
+    } else {
+        Ok(())
+    };
+    let scanout_planes = node.capture.as_ref().map_or(1, |c| {
+        c.encode_controls.scanout_planes.load(Ordering::Relaxed) as usize
+    });
+    // The hold on a client buffer encoded as it stands this tick, kept until the encode is
+    // done with it: a dmabuf a zero-copy session imports, or an shm buffer whose rows the
+    // readback encode reads in place.
+    let mut scanout_hold: Option<SurfaceBuffer> = None;
+    let mut shm_hold: Option<SurfaceBuffer> = None;
+    let cursor_time = Duration::from_millis(state.clock.now().as_millis() as u64);
+    let drag_icon = state
+        .dnd_icon
+        .as_ref()
+        .zip(pointer_local)
+        .map(|((surface, offset), pointer)| (surface, pointer + offset.to_f64()));
+    let software_cursor = |pos| SoftwareCursor {
+        theme: &state.cursor_helper,
+        icon: &state.current_cursor_icon,
+        pos,
+        time: cursor_time,
+    };
+
     if !host_mode && state.use_gpu {
         if let Some(renderer) = state.gles_renderer.as_mut() {
             let mut cap = node.capture.as_mut();
@@ -4640,220 +5286,199 @@ fn render_node_tick(
                     }
                 })
             });
-            let target = match gpu_slot.as_mut() {
-                Some((_, dmabuf)) => Some(dmabuf),
-                // A screen resized ahead of the capture restart that follows has a target for
-                // the frame the restart will ask for, not for this one.
-                None => node
-                    .offscreen_buffer
-                    .as_mut()
-                    .filter(|(bo, _)| (bo.width() as i32, bo.height() as i32) == (width, height))
-                    .map(|(_, dmabuf)| dmabuf),
+            let scene = FrameScene {
+                space: &state.space,
+                wm: state.wm.as_ref(),
+                cursor: pointer_local
+                    .filter(|_| state.render_cursor_on_framebuffer)
+                    .map(software_cursor),
+                drag_icon,
+                overlay: &node.overlay_state,
+                output: &output,
+                origin,
+                size: (width, height),
+                scale: output_scale_val,
             };
-            if let Some(dmabuf) = target {
-                let render_age = if node.overlay_state.is_animated() || needs_full {
-                    0
-                } else {
-                    slot_age.unwrap_or(1)
-                };
-                match renderer.bind(dmabuf) {
-                    Ok(mut frame) => {
-                        let mut elements: Vec<
-                            CompositionElements<
-                                GlesRenderer,
-                                WaylandSurfaceRenderElement<GlesRenderer>,
-                            >,
-                        > = Vec::new();
-
-                        if state.render_cursor_on_framebuffer
-                            && let Some(pos) = pointer_local
-                        {
-                            let scale = Scale::from(output_scale_val);
-
-                            if let Some(CursorImageStatus::Named(icon)) = &state.current_cursor_icon
-                            {
-                                let name = wayland::frontend::cursor_icon_to_str(icon);
-                                let time =
-                                    Duration::from_millis(state.clock.now().as_millis() as u64);
-                                if let Some(image) = state.cursor_helper.get_image_by_name(
-                                    name,
-                                    output_scale_val.round() as u32,
-                                    time,
-                                ) && let Some(elem) = node.overlay_state.get_cursor_element(
-                                    renderer,
-                                    image,
-                                    pos,
-                                    output_scale_val,
-                                ) {
-                                    elements.push(CompositionElements::Cursor(elem));
-                                }
-                            } else if let Some(CursorImageStatus::Surface(surface)) =
-                                &state.current_cursor_icon
-                            {
-                                let hot = cursor_surface_hotspot(surface).to_f64();
-                                let phys_pos = (pos - hot).to_physical(scale);
-                                let elem_result = with_states(surface, |states| {
-                                    WaylandSurfaceRenderElement::from_surface(
-                                        renderer,
-                                        surface,
-                                        states,
-                                        phys_pos,
-                                        1.0,
-                                        smithay::backend::renderer::element::Kind::Cursor,
-                                    )
-                                });
-                                if let Ok(Some(cursor_elem)) = elem_result {
-                                    elements.push(CompositionElements::Surface(cursor_elem));
-                                }
-                            } else if state.current_cursor_icon.is_none() {
-                                let time =
-                                    Duration::from_millis(state.clock.now().as_millis() as u64);
-                                let image = state
-                                    .cursor_helper
-                                    .get_image(output_scale_val.round() as u32, time);
-                                if let Some(elem) = node.overlay_state.get_cursor_element(
-                                    renderer,
-                                    image,
-                                    pos,
-                                    output_scale_val,
-                                ) {
-                                    elements.push(CompositionElements::Cursor(elem));
-                                }
-                            }
-                        }
-
-                        if let Some(elem) = node.overlay_state.get_watermark_element(renderer) {
-                            elements.push(CompositionElements::Cursor(elem));
-                        }
-
-                        {
-                            let layer_map = layer_map_for_output(&output);
-
-                            push_layer_elements(
-                                renderer,
-                                &mut elements,
-                                &layer_map,
-                                smithay::wayland::shell::wlr_layer::Layer::Overlay,
-                                output_scale_val,
-                            );
-                            push_layer_elements(
-                                renderer,
-                                &mut elements,
-                                &layer_map,
-                                smithay::wayland::shell::wlr_layer::Layer::Top,
-                                output_scale_val,
-                            );
-                        }
-
-                        for window in state.space.elements_for_output(&output).rev() {
-                            let window_loc =
-                                state.space.element_location(window).unwrap_or_default() - origin;
-
-                            elements.extend(
-                                window
-                                    .render_elements(
-                                        renderer,
-                                        window_loc.to_physical_precise_round(output_scale_val),
-                                        Scale::from(output_scale_val),
-                                        1.0,
-                                    )
-                                    .into_iter()
-                                    .map(CompositionElements::Space),
-                            );
-                        }
-
-                        {
-                            let layer_map = layer_map_for_output(&output);
-
-                            push_layer_elements(
-                                renderer,
-                                &mut elements,
-                                &layer_map,
-                                smithay::wayland::shell::wlr_layer::Layer::Bottom,
-                                output_scale_val,
-                            );
-                            push_layer_elements(
-                                renderer,
-                                &mut elements,
-                                &layer_map,
-                                smithay::wayland::shell::wlr_layer::Layer::Background,
-                                output_scale_val,
-                            );
-                        }
-                        // What changed since the last frame, for the encoder, whatever the
-                        // target's age.
-                        let changed = slot_id
-                            .and_then(|_| {
-                                node.content_tracker
-                                    .get_or_insert_with(|| {
-                                        OutputDamageTracker::from_mode_source(
-                                            node.damage_tracker.mode().clone(),
-                                        )
-                                    })
-                                    .damage_output(1, &elements)
-                                    .ok()
+            let elements = composition_elements(renderer, &scene);
+            // Only a zero-copy session imports a client's buffer; the readback path composites.
+            let direct = match (direct_wanted, slot_id) {
+                (Ok(()), Some(_)) => {
+                    scanout_candidate(&elements, (width, height), output_scale_val)
+                        .and_then(|s| scanout_dmabuf(s, (width, height), scanout_planes))
+                }
+                (Err(why), _) => Err(why),
+                (Ok(()), None) => Err("the readback path composites"),
+            };
+            if let Some(c) = cap.as_deref_mut() {
+                let said = direct
+                    .as_ref()
+                    .map(|(_, _, what)| what.clone())
+                    .map_err(|why| *why);
+                note_direct(c, node.id, &said);
+            }
+            match direct {
+                Ok((client, hold, _)) => {
+                    let full = Rectangle::<i32, Physical>::from_size((width, height).into());
+                    // The client's own damage is the frame's, read through the same tracker
+                    // the composite reads it from; the output's tracker records the frame as
+                    // well, so a slot composited later is repainted for everything since the
+                    // frame it last took.
+                    damage_rects = node
+                        .content_tracker
+                        .get_or_insert_with(|| {
+                            OutputDamageTracker::from_mode_source(
+                                node.damage_tracker.mode().clone(),
+                            )
+                        })
+                        .damage_output(1, &elements)
+                        .map_or_else(
+                            |_| vec![full],
+                            |(damage, _)| damage.cloned().unwrap_or_default(),
+                        );
+                    let _ = node.damage_tracker.damage_output(1, &elements);
+                    render_success = true;
+                    source_dmabuf = Some(client);
+                    scanout_hold = Some(hold);
+                    if let (Some(id), Some(c)) = (slot_id, cap.as_deref_mut()) {
+                        c.render_seq += 1;
+                        // The slot took no render, so its next one draws it whole.
+                        c.pool_last_render[id] = 0;
+                    }
+                }
+                Err(_) => {
+                    let target = match gpu_slot.as_mut() {
+                        Some((_, dmabuf)) => Some(dmabuf),
+                        // A screen resized ahead of the capture restart that follows has a
+                        // target for the frame the restart will ask for, not for this one.
+                        None => node
+                            .offscreen_buffer
+                            .as_mut()
+                            .filter(|(bo, _)| {
+                                (bo.width() as i32, bo.height() as i32) == (width, height)
                             })
-                            .map(|(damage, _)| damage.cloned().unwrap_or_default());
-                        match node.damage_tracker.render_output(
-                            renderer,
-                            &mut frame,
-                            render_age,
-                            &elements,
-                            [0.1, 0.1, 0.1, 1.0],
-                        ) {
-                            Ok(result) => {
-                                render_success = true;
-                                if let Some(damage) = result.damage {
-                                    damage_rects = damage.clone();
-                                    node.undrawn_ticks = 0;
-                                } else {
-                                    node.undrawn_ticks += 1;
-                                    if node.undrawn_ticks >= UNDRAWN_TICKS_PER_FRAME {
-                                        node.undrawn_ticks = 0;
-                                        let _ = renderer
-                                            .render(
+                            .map(|(_, dmabuf)| dmabuf),
+                    };
+                    if let Some(dmabuf) = target {
+                        let render_age = if node.overlay_state.is_animated() || needs_full {
+                            0
+                        } else {
+                            slot_age.unwrap_or(1)
+                        };
+                        match renderer.bind(dmabuf) {
+                            Ok(mut frame) => {
+                                // What changed since the last frame, for the encoder,
+                                // whatever the target's age.
+                                let changed = slot_id
+                                    .and_then(|_| {
+                                        node.content_tracker
+                                            .get_or_insert_with(|| {
+                                                OutputDamageTracker::from_mode_source(
+                                                    node.damage_tracker.mode().clone(),
+                                                )
+                                            })
+                                            .damage_output(1, &elements)
+                                            .ok()
+                                    })
+                                    .map(|(damage, _)| damage.cloned().unwrap_or_default());
+                                match node.damage_tracker.render_output(
+                                    renderer,
+                                    &mut frame,
+                                    render_age,
+                                    &elements,
+                                    [0.1, 0.1, 0.1, 1.0],
+                                ) {
+                                    Ok(result) => {
+                                        render_success = true;
+                                        if let Some(damage) = result.damage {
+                                            damage_rects = damage.clone();
+                                            node.undrawn_ticks = 0;
+                                        } else {
+                                            node.undrawn_ticks += 1;
+                                            if node.undrawn_ticks >= UNDRAWN_TICKS_PER_FRAME {
+                                                node.undrawn_ticks = 0;
+                                                let _ = renderer
+                                                    .render(
+                                                        &mut frame,
+                                                        (width, height).into(),
+                                                        Transform::Normal,
+                                                    )
+                                                    .and_then(|f| f.finish());
+                                            }
+                                        }
+                                        if wait_render_fence(&result.sync, node.id) {
+                                            if let Some(c) = cap.as_deref_mut() {
+                                                c.needs_full_render = false;
+                                            }
+                                        } else {
+                                            // The tracker counts the unfinished frame as
+                                            // drawn, so the target is published to nobody
+                                            // and redrawn whole next tick.
+                                            render_success = false;
+                                            damage_rects.clear();
+                                            if let Some(c) = cap.as_deref_mut() {
+                                                c.needs_full_render = true;
+                                            }
+                                        }
+                                        if render_success
+                                            && let Some(changed) =
+                                                changed.filter(|_| render_age > 1)
+                                        {
+                                            damage_rects = changed;
+                                        }
+                                    }
+                                    Err(e) => eprintln!("Render error: {:?}", e),
+                                }
+                                if let (Some(id), Some(c)) = (slot_id, cap.as_deref_mut()) {
+                                    c.render_seq += 1;
+                                    c.pool_last_render[id] =
+                                        if render_success { c.render_seq } else { 0 };
+                                }
+                                if let Some(c) = cap {
+                                    if !damage_rects.is_empty() {
+                                        c.content_gen += 1;
+                                    }
+                                    if let Some((id, ref mut buf)) = pool_slot {
+                                        // No-damage ticks skip the readback, so a pooled
+                                        // buffer can lag the offscreen target whenever the
+                                        // encoder held the other slot across a tick; one
+                                        // catch-up readback keeps every published buffer
+                                        // current.
+                                        if render_success && take_screenshot {
+                                            screenshot_result = read_back_rgba_async(
+                                                renderer,
+                                                &mut state.screenshot_readbacks,
                                                 &mut frame,
-                                                (width, height).into(),
-                                                Transform::Normal,
+                                                width,
+                                                height,
                                             )
-                                            .and_then(|f| f.finish());
+                                            .map(|readback| readback.map(ShotPixels::Gpu));
+                                        }
+                                        if render_success
+                                            && take_screenshot
+                                            && screenshot_result.is_none()
+                                        {
+                                            let result = read_back_rgba_result(
+                                                renderer, &mut frame, width, height, buf, true,
+                                            );
+                                            if result.is_ok() {
+                                                c.pool_content_gen[id] = c.content_gen;
+                                            } else {
+                                                render_success = false;
+                                                c.needs_full_render = true;
+                                            }
+                                            screenshot_result =
+                                                Some(result.map(|()| ShotPixels::Rendered));
+                                        } else if render_success
+                                            && c.pool_content_gen[id] != c.content_gen
+                                        {
+                                            read_back_rgba(
+                                                renderer, &mut frame, width, height, buf,
+                                            );
+                                            c.pool_content_gen[id] = c.content_gen;
+                                        }
                                     }
                                 }
-                                if wait_render_fence(&result.sync, node.id) {
-                                    if let Some(c) = cap.as_deref_mut() {
-                                        c.needs_full_render = false;
-                                    }
-                                } else {
-                                    // The tracker counts the unfinished frame as drawn, so the
-                                    // target is published to nobody and redrawn whole next tick.
-                                    render_success = false;
-                                    damage_rects.clear();
-                                    if let Some(c) = cap.as_deref_mut() {
-                                        c.needs_full_render = true;
-                                    }
-                                }
-                                if render_success
-                                    && let Some(changed) = changed.filter(|_| render_age > 1)
-                                {
-                                    damage_rects = changed;
-                                }
-                            }
-                            Err(e) => eprintln!("Render error: {:?}", e),
-                        }
-                        if let (Some(id), Some(c)) = (slot_id, cap.as_deref_mut()) {
-                            c.render_seq += 1;
-                            c.pool_last_render[id] = if render_success { c.render_seq } else { 0 };
-                        }
-                        if let Some(c) = cap {
-                            if !damage_rects.is_empty() {
-                                c.content_gen += 1;
-                            }
-                            if let Some((id, ref mut buf)) = pool_slot {
-                                // No-damage ticks skip the readback, so a pooled buffer can
-                                // lag the offscreen target whenever the encoder held the
-                                // other slot across a tick; one catch-up readback keeps
-                                // every published buffer current.
-                                if render_success && take_screenshot {
+                                if render_success && pool_slot.is_none() && take_screenshot {
                                     screenshot_result = read_back_rgba_async(
                                         renderer,
                                         &mut state.screenshot_readbacks,
@@ -4863,252 +5488,157 @@ fn render_node_tick(
                                     )
                                     .map(|readback| readback.map(ShotPixels::Gpu));
                                 }
-                                if render_success && take_screenshot && screenshot_result.is_none()
+                                if render_success
+                                    && pool_slot.is_none()
+                                    && take_screenshot
+                                    && screenshot_result.is_none()
                                 {
-                                    let result = read_back_rgba_result(
-                                        renderer, &mut frame, width, height, buf, true,
+                                    let mut pixels = computer_use::ScreenshotBuffer::with_len(
+                                        screenshot_len(width, height).unwrap_or(0),
                                     );
-                                    if result.is_ok() {
-                                        c.pool_content_gen[id] = c.content_gen;
-                                    } else {
-                                        render_success = false;
-                                        c.needs_full_render = true;
-                                    }
-                                    screenshot_result = Some(result.map(|()| ShotPixels::Rendered));
-                                } else if render_success && c.pool_content_gen[id] != c.content_gen
-                                {
-                                    read_back_rgba(renderer, &mut frame, width, height, buf);
-                                    c.pool_content_gen[id] = c.content_gen;
+                                    screenshot_result = Some(
+                                        read_back_rgba_result(
+                                            renderer,
+                                            &mut frame,
+                                            width,
+                                            height,
+                                            &mut pixels,
+                                            true,
+                                        )
+                                        .map(|()| ShotPixels::Owned(pixels)),
+                                    );
                                 }
                             }
-                        }
-                        if render_success && pool_slot.is_none() && take_screenshot {
-                            screenshot_result = read_back_rgba_async(
-                                renderer,
-                                &mut state.screenshot_readbacks,
-                                &mut frame,
-                                width,
-                                height,
-                            )
-                            .map(|readback| readback.map(ShotPixels::Gpu));
-                        }
-                        if render_success
-                            && pool_slot.is_none()
-                            && take_screenshot
-                            && screenshot_result.is_none()
-                        {
-                            let mut pixels = computer_use::ScreenshotBuffer::with_len(
-                                screenshot_len(width, height).unwrap_or(0),
-                            );
-                            screenshot_result = Some(
-                                read_back_rgba_result(
-                                    renderer,
-                                    &mut frame,
-                                    width,
-                                    height,
-                                    &mut pixels,
-                                    true,
-                                )
-                                .map(|()| ShotPixels::Owned(pixels)),
-                            );
+                            Err(e) => eprintln!("Failed to bind buffer: {:?}", e),
                         }
                     }
-                    Err(e) => eprintln!("Failed to bind buffer: {:?}", e),
                 }
             }
         }
     } else if !host_mode && let Some(renderer) = state.pixman_renderer.as_mut() {
         let mut cap = node.capture.as_mut();
-        let (ptr, buf_age) = match pool_slot {
-            Some((id, ref mut buf)) => {
-                let age = cap
-                    .as_ref()
-                    .map(|c| {
-                        if c.pool_last_render[id] == 0 {
-                            0
-                        } else {
-                            (c.render_seq + 1 - c.pool_last_render[id]) as usize
-                        }
-                    })
-                    .unwrap_or(0);
-                (buf.as_mut_ptr() as *mut u32, age)
-            }
-            None => (node.frame_buffer.as_mut_ptr() as *mut u32, 0),
-        };
-        let mut image = unsafe {
-            pixman::Image::from_raw_mut(
-                pixman::FormatCode::A8R8G8B8,
-                width as usize,
-                height as usize,
-                ptr,
-                (width as usize) * 4,
-                false,
-            )
-            .expect("Failed to create pixman image")
-        };
-        match renderer.bind(&mut image) {
-            Ok(mut frame) => {
-                let mut elements: Vec<
-                    CompositionElements<
-                        PixmanRenderer,
-                        WaylandSurfaceRenderElement<PixmanRenderer>,
-                    >,
-                > = Vec::new();
-
-                if state.render_cursor_on_framebuffer
-                    && let Some(pos) = pointer_local
-                {
-                    let scale = Scale::from(output_scale_val);
-
-                    if let Some(CursorImageStatus::Named(icon)) = &state.current_cursor_icon {
-                        let name = wayland::frontend::cursor_icon_to_str(icon);
-                        let time = Duration::from_millis(state.clock.now().as_millis() as u64);
-                        if let Some(image) = state.cursor_helper.get_image_by_name(
-                            name,
-                            output_scale_val.round() as u32,
-                            time,
-                        ) && let Some(elem) = node.overlay_state.get_cursor_element(
-                            renderer,
-                            image,
-                            pos,
-                            output_scale_val,
-                        ) {
-                            elements.push(CompositionElements::Cursor(elem));
-                        }
-                    } else if let Some(CursorImageStatus::Surface(surface)) =
-                        &state.current_cursor_icon
-                    {
-                        let hot = cursor_surface_hotspot(surface).to_f64();
-                        let phys_pos = (pos - hot).to_physical(scale);
-                        let elem_result = with_states(surface, |states| {
-                            WaylandSurfaceRenderElement::from_surface(
-                                renderer,
-                                surface,
-                                states,
-                                phys_pos,
-                                1.0,
-                                smithay::backend::renderer::element::Kind::Cursor,
-                            )
-                        });
-                        if let Ok(Some(cursor_elem)) = elem_result {
-                            elements.push(CompositionElements::Surface(cursor_elem));
-                        }
-                    } else if state.current_cursor_icon.is_none() {
-                        let time = Duration::from_millis(state.clock.now().as_millis() as u64);
-                        let image = state
-                            .cursor_helper
-                            .get_image(output_scale_val.round() as u32, time);
-                        if let Some(elem) = node.overlay_state.get_cursor_element(
-                            renderer,
-                            image,
-                            pos,
-                            output_scale_val,
-                        ) {
-                            elements.push(CompositionElements::Cursor(elem));
-                        }
+        let buf_age = match pool_slot {
+            Some((id, _)) => cap
+                .as_ref()
+                .map(|c| {
+                    if c.pool_last_render[id] == 0 {
+                        0
+                    } else {
+                        (c.render_seq + 1 - c.pool_last_render[id]) as usize
                     }
-                }
-
-                if let Some(elem) = node.overlay_state.get_watermark_element(renderer) {
-                    elements.push(CompositionElements::Cursor(elem));
-                }
-
-                {
-                    let layer_map = layer_map_for_output(&output);
-
-                    push_layer_elements(
-                        renderer,
-                        &mut elements,
-                        &layer_map,
-                        smithay::wayland::shell::wlr_layer::Layer::Overlay,
-                        output_scale_val,
-                    );
-                    push_layer_elements(
-                        renderer,
-                        &mut elements,
-                        &layer_map,
-                        smithay::wayland::shell::wlr_layer::Layer::Top,
-                        output_scale_val,
-                    );
-                }
-
-                for window in state.space.elements_for_output(&output).rev() {
-                    let loc = state.space.element_location(window).unwrap_or_default() - origin;
-
-                    elements.extend(
-                        window
-                            .render_elements(
-                                renderer,
-                                loc.to_physical_precise_round(output_scale_val),
-                                Scale::from(output_scale_val),
-                                1.0,
-                            )
-                            .into_iter()
-                            .map(CompositionElements::Space),
-                    );
-                }
-
-                {
-                    let layer_map = layer_map_for_output(&output);
-
-                    push_layer_elements(
-                        renderer,
-                        &mut elements,
-                        &layer_map,
-                        smithay::wayland::shell::wlr_layer::Layer::Bottom,
-                        output_scale_val,
-                    );
-                    push_layer_elements(
-                        renderer,
-                        &mut elements,
-                        &layer_map,
-                        smithay::wayland::shell::wlr_layer::Layer::Background,
-                        output_scale_val,
-                    );
-                }
-
-                let render_age = if node.overlay_state.is_animated() || needs_full {
-                    0
-                } else {
-                    buf_age
-                };
-                let changed = node
-                    .content_tracker
-                    .get_or_insert_with(|| {
-                        OutputDamageTracker::from_mode_source(node.damage_tracker.mode().clone())
-                    })
-                    .damage_output(1, &elements)
-                    .ok()
-                    .map(|(damage, _)| damage.cloned().unwrap_or_default());
-                match node.damage_tracker.render_output(
-                    renderer,
-                    &mut frame,
-                    render_age,
-                    &elements,
-                    [0.1, 0.1, 0.1, 1.0],
-                ) {
-                    Ok(result) => {
-                        render_success = true;
-                        if let Some(c) = cap.as_deref_mut() {
-                            c.needs_full_render = false;
-                        }
-                        if let Some(damage) = result.damage {
-                            damage_rects = damage.clone();
-                        }
-                        if let Some(changed) = changed.filter(|_| render_age > 1) {
-                            damage_rects = changed;
-                        }
-                    }
-                    Err(e) => eprintln!("Render error: {:?}", e),
-                }
-                if let Some(c) = cap {
+                })
+                .unwrap_or(0),
+            None => 0,
+        };
+        let scene = FrameScene {
+            space: &state.space,
+            wm: state.wm.as_ref(),
+            cursor: pointer_local
+                .filter(|_| state.render_cursor_on_framebuffer)
+                .map(software_cursor),
+            drag_icon,
+            overlay: &node.overlay_state,
+            output: &output,
+            origin,
+            size: (width, height),
+            scale: output_scale_val,
+        };
+        let elements = composition_elements(renderer, &scene);
+        let render_age = if node.overlay_state.is_animated() || needs_full {
+            0
+        } else {
+            buf_age
+        };
+        let changed = node
+            .content_tracker
+            .get_or_insert_with(|| {
+                OutputDamageTracker::from_mode_source(node.damage_tracker.mode().clone())
+            })
+            .damage_output(1, &elements)
+            .ok()
+            .map(|(damage, _)| damage.cloned().unwrap_or_default());
+        // A client's shm buffer stands in for the composite only where a pool buffer would
+        // take it, since the encode thread reads the rows the frame names.
+        let direct = match (direct_wanted, pool_slot.as_ref()) {
+            (Ok(()), Some(_)) => scanout_candidate(&elements, (width, height), output_scale_val)
+                .and_then(|s| scanout_shm(s, (width, height))),
+            (Err(why), _) => Err(why),
+            (Ok(()), None) => Err("no pool buffer takes the frame"),
+        };
+        if let Some(c) = cap.as_deref_mut() {
+            let said = direct
+                .as_ref()
+                .map(|(_, what)| what.clone())
+                .map_err(|why| *why);
+            note_direct(c, node.id, &said);
+        }
+        match direct {
+            Ok((client, _)) => {
+                let full = Rectangle::<i32, Physical>::from_size((width, height).into());
+                // The client's own damage is the frame's; the output's tracker records the
+                // frame too, so a slot composited later is repainted for everything since
+                // the frame it last took.
+                damage_rects = changed.unwrap_or_else(|| vec![full]);
+                let _ = node.damage_tracker.damage_output(1, &elements);
+                render_success = true;
+                shm_hold = Some(client);
+                if let Some(c) = cap.as_deref_mut() {
                     c.render_seq += 1;
-                    if render_success && let Some((id, _)) = pool_slot {
-                        c.pool_last_render[id] = c.render_seq;
+                    if let Some((id, _)) = pool_slot {
+                        // The slot took no render, so its next one draws it whole.
+                        c.pool_last_render[id] = 0;
                     }
                 }
             }
-            Err(e) => eprintln!("Failed to bind pixman image: {:?}", e),
+            Err(_) => {
+                let ptr = match pool_slot {
+                    Some((_, ref mut buf)) => buf.as_mut_ptr() as *mut u32,
+                    None => node.frame_buffer.as_mut_ptr() as *mut u32,
+                };
+                let mut image = unsafe {
+                    pixman::Image::from_raw_mut(
+                        pixman::FormatCode::A8R8G8B8,
+                        width as usize,
+                        height as usize,
+                        ptr,
+                        (width as usize) * 4,
+                        false,
+                    )
+                    .expect("Failed to create pixman image")
+                };
+                match renderer.bind(&mut image) {
+                    Ok(mut frame) => {
+                        match node.damage_tracker.render_output(
+                            renderer,
+                            &mut frame,
+                            render_age,
+                            &elements,
+                            [0.1, 0.1, 0.1, 1.0],
+                        ) {
+                            Ok(result) => {
+                                render_success = true;
+                                if let Some(c) = cap.as_deref_mut() {
+                                    c.needs_full_render = false;
+                                }
+                                if let Some(damage) = result.damage {
+                                    damage_rects = damage.clone();
+                                }
+                                if let Some(changed) = changed.filter(|_| render_age > 1) {
+                                    damage_rects = changed;
+                                }
+                            }
+                            Err(e) => eprintln!("Render error: {:?}", e),
+                        }
+                        if let Some(c) = cap {
+                            c.render_seq += 1;
+                            if render_success && let Some((id, _)) = pool_slot {
+                                c.pool_last_render[id] = c.render_seq;
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to bind pixman image: {:?}", e),
+                }
+            }
         }
     }
 
@@ -5199,10 +5729,16 @@ fn render_node_tick(
     {
         if let Some(pool) = cap.encode_pool.as_ref() {
             if let Some((id, buf)) = pool_slot.take() {
+                cap.published += 1;
+                if let Some(hold) = shm_hold.as_ref() {
+                    cap.scanout_inflight.push((cap.published, hold.clone()));
+                }
                 pool.publish(WlFrame {
                     id,
                     buf,
                     source: None,
+                    scanout: false,
+                    shm: shm_hold.take(),
                     frame_id: cap.frame_counter,
                     damage: std::mem::take(&mut damage_rects),
                     is_animated: node.overlay_state.is_animated(),
@@ -5224,10 +5760,16 @@ fn render_node_tick(
                 if host_enc_retained {
                     cap.host_retained_use = cap.published;
                 }
+                let scanout = scanout_hold.is_some();
+                if let Some(hold) = scanout_hold.take() {
+                    cap.scanout_inflight.push((cap.published, hold));
+                }
                 pool.publish(WlFrame {
                     id,
                     buf: dmabuf,
-                    source: host_enc_dmabuf.take(),
+                    source: source_dmabuf.take(),
+                    scanout,
+                    shm: None,
                     frame_id: cap.frame_counter,
                     damage: std::mem::take(&mut damage_rects),
                     is_animated: node.overlay_state.is_animated(),
@@ -5486,7 +6028,9 @@ fn create_output_on(
                 counts.iter().any(|(o, c)| *o == oid && *c >= 2)
             })
         });
-    if let Some(window) = adopt {
+    if let Some(window) = adopt
+        && !wayland::wm::active(state)
+    {
         state.place_window_on_output(&window, id);
         crate::log::debug!(
             "[Wayland] Output {id}: adopted waiting window {}.",
@@ -5495,6 +6039,9 @@ fn create_output_on(
                 .unwrap_or(0)
         );
     }
+    wayland::workspace::outputs_changed(state);
+    wayland::wm::outputs_changed(state);
+    wayland::xwm::publish_workarea(state);
     true
 }
 
@@ -5606,14 +6153,18 @@ fn reposition_output_on(state: &mut AppState, id: u32, x: i32, y: i32) -> bool {
         .filter(|w| wayland::frontend::window_output_id(w) == id)
         .cloned()
         .collect();
-    for window in &windows {
-        state.space.map_element(window.clone(), (x, y), false);
+    if !wayland::wm::active(state) {
+        for window in &windows {
+            state.space.map_element(window.clone(), (x, y), false);
+        }
     }
     state.refocus_pointer();
     if let Some(cap) = state.output_nodes[idx].capture.as_mut() {
         cap.needs_full_render = true;
     }
     println!("[Wayland] Output {id} repositioned to ({x}, {y}).");
+    wayland::wm::outputs_changed(state);
+    wayland::xwm::publish_workarea(state);
     true
 }
 
@@ -5642,6 +6193,12 @@ fn destroy_output_on(state: &mut AppState, id: u32) -> bool {
         .cloned()
         .collect();
     for window in &windows {
+        if wayland::wm::active(state) {
+            if let Some(meta) = wayland::frontend::window_meta(window) {
+                meta.output.store(0, Ordering::Relaxed);
+            }
+            continue;
+        }
         // The primary keeps whichever screen it already shows: a nested session's
         // second screen parks again rather than covering the first, tagged with
         // the output it came from so recreating that output takes it back.
@@ -5681,6 +6238,9 @@ fn destroy_output_on(state: &mut AppState, id: u32) -> bool {
         "[Wayland] Output {id} destroyed; {} window(s) relocated to primary.",
         windows.len()
     );
+    wayland::workspace::outputs_changed(state);
+    wayland::wm::outputs_changed(state);
+    wayland::xwm::publish_workarea(state);
     true
 }
 /// Resize a screen's output, keeping its position, so the displays cut out of it can be
@@ -5692,30 +6252,43 @@ fn destroy_output_on(state: &mut AppState, id: u32) -> bool {
 /// Send every non-parked window on `display_id`'s output a fullscreen configure
 /// for the new mode, with the scale each surface should render at. Without this
 /// a live session keeps drawing at the old size under the resized screen.
-fn configure_windows_for_mode(
+/// The windows a mode change on an output reaches: under the window policy the ones the
+/// policy placed on it, else the ones tagged for the display. A parked screen's windows are
+/// left out either way: they are tagged for a display but composited on none, holding
+/// PARKED_LOGICAL_SIZE until `create_output` gives them a screen, and resizing them would
+/// double the session's coordinate space onto a screen nobody watches, which is where a window
+/// that centers itself then lands.
+fn windows_on_display(
     state: &AppState,
     display_id: u32,
     output: &Output,
-    width: i32,
-    height: i32,
-    scale: f64,
-) {
+) -> Vec<smithay::desktop::Window> {
+    let on_output: Vec<smithay::desktop::Window> = if wayland::wm::active(state) {
+        state.space.elements_for_output(output).cloned().collect()
+    } else {
+        state
+            .space
+            .elements()
+            .filter(|window| wayland::frontend::window_output_id(window) == display_id)
+            .cloned()
+            .collect()
+    };
+    on_output
+        .into_iter()
+        .filter(|window| {
+            !wayland::frontend::window_meta(window)
+                .is_some_and(|meta| meta.parked.load(Ordering::Relaxed))
+        })
+        .collect()
+}
+
+/// Tell every window on an output the output's scale: the surface's preferred buffer scale
+/// and fractional scale, so a client draws at the new density rather than being stretched to
+/// it. The size a client keeps is the policy's business where one runs, and the fullscreen
+/// configure's otherwise.
+fn announce_scale_to_windows(state: &AppState, display_id: u32, output: &Output, scale: f64) {
     let scale = scale.max(0.1);
-    let logical_width = (width as f64 / scale).round() as i32;
-    let logical_height = (height as f64 / scale).round() as i32;
-    for window in state.space.elements() {
-        if wayland::frontend::window_output_id(window) != display_id {
-            continue;
-        }
-        // A parked screen is tagged for this display but composited on none: it
-        // holds PARKED_LOGICAL_SIZE until `create_output` gives it one. Resizing it
-        // here would double the session's coordinate space onto a screen nobody
-        // watches, which is where a window that centers itself then lands.
-        if wayland::frontend::window_meta(window)
-            .is_some_and(|meta| meta.parked.load(Ordering::Relaxed))
-        {
-            continue;
-        }
+    for window in windows_on_display(state, display_id, output) {
         if let Some(surface) = window.wl_surface() {
             output.enter(&surface);
             with_states(&surface, |states| {
@@ -5730,6 +6303,22 @@ fn configure_windows_for_mode(
                 });
             });
         }
+    }
+}
+
+fn configure_windows_for_mode(
+    state: &AppState,
+    display_id: u32,
+    output: &Output,
+    width: i32,
+    height: i32,
+    scale: f64,
+) {
+    let scale = scale.max(0.1);
+    let logical_width = (width as f64 / scale).round() as i32;
+    let logical_height = (height as f64 / scale).round() as i32;
+    announce_scale_to_windows(state, display_id, output, scale);
+    for window in windows_on_display(state, display_id, output) {
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
                 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
@@ -5845,8 +6434,19 @@ fn resize_output_on(state: &mut AppState, id: u32, width: i32, height: i32, scal
             cap.needs_full_render = true;
         }
     }
-    configure_windows_for_mode(state, id, &output, width, height, scale);
+    if wayland::wm::active(state) {
+        announce_scale_to_windows(state, id, &output, scale);
+    } else {
+        configure_windows_for_mode(state, id, &output, width, height, scale);
+    }
+    // The layer surfaces (a desktop's wallpaper and panel) are laid out for the mode they were
+    // mapped on; the arrangement sends each its new size, and the frame that follows is
+    // rendered without waiting for a client to commit something.
+    layer_map_for_output(&output).arrange();
+    wayland::wm::mark_dirty(state);
     println!("[Wayland] Output {id} resized to {width}x{height} scale {scale:.2}.");
+    wayland::wm::outputs_changed(state);
+    wayland::xwm::publish_workarea(state);
     true
 }
 
@@ -6296,6 +6896,10 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
     let shell_state = XdgShellState::new::<AppState>(&dh);
     let space = Space::default();
     let layer_shell_state = WlrLayerShellState::new::<AppState>(&dh);
+    let keyboard_shortcuts_inhibit_state =
+        smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState::new::<AppState>(
+            &dh,
+        );
     let data_device_state = DataDeviceState::new::<AppState>(&dh);
     let data_control_state = DataControlState::new::<AppState, _>(&dh, None, |_| true);
     let ext_data_control_state = ExtDataControlState::new::<AppState, _>(&dh, None, |_| true);
@@ -6353,6 +6957,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         output_nodes: Vec::new(),
         pending_windows: Vec::new(),
         foreign_toplevel_list,
+        keyboard_shortcuts_inhibit_state,
         xdg_decoration_state,
         xdg_activation_state,
         primary_selection_state,
@@ -6387,6 +6992,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         current_cursor_icon: None,
         cursor_surface_pending: false,
         cursor_buffer: None,
+        dnd_icon: None,
         render_cursor_on_framebuffer: false,
         render_node_path,
         auto_gpu_selected,
@@ -6402,6 +7008,14 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         last_idle_service_at: None,
         deliver_reaper: Vec::new(),
         encode_reaper: Vec::new(),
+        wm: None,
+        foreign_toplevel: wayland::foreign_toplevel::ForeignToplevelState::new(&dh),
+        workspace: wayland::workspace::WorkspaceState::new(&dh),
+        xwm: wayland::xwm::XwmState::new(
+            smithay::wayland::xwayland_shell::XWaylandShellState::new::<AppState>(&dh),
+        ),
+        loop_handle: event_loop.handle(),
+        keyboard_focus: None,
     };
     // Seed the keymap policy with the seat's initial keymap so overlay binds splice onto
     // the exact text clients received.
@@ -6704,6 +7318,13 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 }
                 let _ = reply.send(list);
             }
+            ThreadCommand::InstallWindowPolicy(policy) => {
+                wayland::wm::install(state, policy);
+            }
+            ThreadCommand::StartXwayland { notify } => {
+                let handle = state.loop_handle.clone();
+                wayland::xwm::start(state, handle, notify);
+            }
             ThreadCommand::SetClipboardCallback(cb) => {
                 state.clipboard_callback = Some(cb);
                 // Re-stage a read of the CURRENT selection so a copy made before this
@@ -6780,13 +7401,14 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     let serial = next_serial();
                     let time = wayland_time();
                     if let Some(keyboard) = state.seat.get_keyboard() {
+                        let pressed = key_state == KeyState::Pressed;
                         keyboard.input(
                             state,
                             Keycode::new(scancode),
                             key_state,
                             serial,
                             time,
-                            |_, _, _| FilterResult::<()>::Forward,
+                            |state, _, handle| wayland::wm::key_filter(state, handle, pressed),
                         );
                     }
                 }
@@ -6807,13 +7429,14 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 let serial = next_serial();
                 let time = wayland_time();
                 if let Some(keyboard) = state.seat.get_keyboard() {
+                    let pressed = key_state == KeyState::Pressed;
                     keyboard.input(
                         state,
                         Keycode::new(scancode),
                         key_state,
                         serial,
                         time,
-                        |_, _, _| FilterResult::<()>::Forward,
+                        |state, _, handle| wayland::wm::key_filter(state, handle, pressed),
                     );
                 }
             }
@@ -6932,6 +7555,15 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
 
                 if let Some(pointer) = state.seat.get_pointer() {
                     let under = state.pointer_target_under(p);
+                    if wayland::wm::pointer(
+                        state,
+                        crate::wm::PointerKind::Motion,
+                        p,
+                        wayland::wm::under_of(state, &under),
+                    ) == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
 
                     state.release_grab_across_screens(&pointer, &under, serial, time);
                     let entered = pointer.current_focus() != under.as_ref().map(|(t, _)| t.clone());
@@ -7009,6 +7641,15 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                         .space
                         .element_under(new_pos)
                         .map(|(window, loc)| (FocusTarget::Window(window.clone()), loc.to_f64()));
+                    if wayland::wm::pointer(
+                        state,
+                        crate::wm::PointerKind::Motion,
+                        new_pos,
+                        wayland::wm::under_of(state, &under),
+                    ) == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
 
                     state.release_grab_across_screens(&pointer, &under, serial, time);
                     let entered = pointer.current_focus() != under.as_ref().map(|(t, _)| t.clone());
@@ -7061,8 +7702,20 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
 
                 state.refocus_pointer();
                 if let Some(pointer) = state.seat.get_pointer() {
-                    if button_state == smithay::backend::input::ButtonState::Pressed {
-                        let pos = pointer.current_location();
+                    let pos = wayland::wm::judged_location(state, pointer.current_location());
+                    let under = state.pointer_target_under(pos);
+                    let kind = crate::wm::PointerKind::Button {
+                        button: btn,
+                        pressed: btn_state_val > 0,
+                    };
+                    if wayland::wm::pointer(state, kind, pos, wayland::wm::under_of(state, &under))
+                        == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
+                    if button_state == smithay::backend::input::ButtonState::Pressed
+                        && !wayland::wm::active(state)
+                    {
                         let target_window = state.space.element_under(pos).map(|(w, _)| w.clone());
 
                         if let Some(window) = target_window {
@@ -7097,6 +7750,17 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 let time = wayland_time();
                 state.refocus_pointer();
                 if let Some(pointer) = state.seat.get_pointer() {
+                    let pos = wayland::wm::judged_location(state, pointer.current_location());
+                    let under = state.pointer_target_under(pos);
+                    let kind = crate::wm::PointerKind::Axis {
+                        horizontal: x,
+                        vertical: y,
+                    };
+                    if wayland::wm::pointer(state, kind, pos, wayland::wm::under_of(state, &under))
+                        == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
                     let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
 
                     if x != 0.0 {
@@ -7127,6 +7791,17 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 if let Some(pointer) = state.seat.get_pointer()
                     && (dx != 0.0 || dy != 0.0)
                 {
+                    let pos = wayland::wm::judged_location(state, pointer.current_location());
+                    let under = state.pointer_target_under(pos);
+                    let kind = crate::wm::PointerKind::Axis {
+                        horizontal: dx,
+                        vertical: dy,
+                    };
+                    if wayland::wm::pointer(state, kind, pos, wayland::wm::under_of(state, &under))
+                        == crate::wm::Verdict::Consumed
+                    {
+                        return;
+                    }
                     let (_, _, scale) =
                         state.layout_logical_to_physical_scaled(pointer.current_location());
                     let mut frame = AxisFrame::new(time).source(AxisSource::Finger);
@@ -7337,6 +8012,9 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         .handle()
         .insert_source(wake_rx, |_, _, state| {
             let had_input = drain_thread_commands(state);
+            if wayland::wm::tick_due(state, Instant::now()) {
+                wayland::wm::tick(state, Instant::now());
+            }
             // Input landing while the frame timer sits on its long idle
             // deadline must not wait it out: service the frame callbacks now
             // (at most at frame pace) so the app's echo repaint starts with
@@ -7449,6 +8127,14 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             reap_dead_host(state);
             drain_thread_commands(state);
             reconcile_host_layouts(state);
+            {
+                let now = Instant::now();
+                let handle = state.loop_handle.clone();
+                wayland::xwm::maintain(state, &handle, now);
+                if wayland::wm::tick_due(state, now) {
+                    wayland::wm::tick(state, now);
+                }
+            }
             // Deliver and deferred encode threads of stopped captures are
             // joined only once they report finished (a plain atomic load), so
             // the tick never waits on one; whatever remains at shutdown, the
@@ -7534,6 +8220,10 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 } else {
                     IDLE_FRAME_INTERVAL
                 };
+                let idle = match wayland::wm::next_wake(state) {
+                    Some(at) => idle.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))),
+                    None => idle,
+                };
                 state.frame_idle_long = idle == IDLE_FRAME_INTERVAL;
                 return TimeoutAction::ToDuration(idle);
             }
@@ -7557,6 +8247,10 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 .map(|cap| cap.pace.next_wake(capture_period(cap), now, cap.change_pending))
                 .min()
                 .unwrap_or(loop_start_time + frame_period(state.settings.target_fps));
+            let next_due = match wayland::wm::next_wake(state) {
+                Some(at) => next_due.min(at),
+                None => next_due,
+            };
             let wait = next_due.saturating_duration_since(now);
             // A zero wait is a change no render could take yet (a busy encoder): retry shortly
             // rather than spin. Shorter waits stand, a boundary being a fraction of a millisecond
@@ -7584,7 +8278,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
     crate::computer_use::spawn_cu_from_env();
     crate::wayland::ficlient::arm(crate::computer_use::app_wayland_socket_path());
 
-    let _ = event_loop.run(None, &mut state, |state| {
+    let ran = event_loop.run(None, &mut state, |state| {
         serve_changes(state);
         state.process_pending_clipboard_read();
         state.flush_pending_cursor();
@@ -7603,6 +8297,9 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         }
         let _ = state.dh.flush_clients();
     });
+    if let Err(e) = ran {
+        eprintln!("[Wayland] compositor event loop ended: {e}");
+    }
 }
 
 /// The handle to the one long-lived compositor thread. Because calloop, EGL/GBM, and the
@@ -7637,6 +8334,26 @@ impl Compositor {
     ) -> Result<(), Error> {
         self.send(ThreadCommand::SetCursorCallback(sink))
             .map_err(|e| Error::Compositor(format!("Failed to set cursor callback: {e}")))
+    }
+
+    /// Install the window policy: from here on it decides placement, focus, stacking, frames,
+    /// and bindings for every window.
+    pub fn install_window_policy(
+        &self,
+        policy: Box<dyn crate::wm::WindowPolicy>,
+    ) -> Result<(), Error> {
+        self.send(ThreadCommand::InstallWindowPolicy(policy))
+            .map_err(|e| Error::Compositor(format!("Failed to install the window policy: {e}")))
+    }
+
+    /// Start Xwayland for X11 clients, managed with the Wayland ones; `notify` receives the
+    /// display number once the server is up.
+    pub fn start_xwayland(
+        &self,
+        notify: Option<std::sync::mpsc::Sender<u32>>,
+    ) -> Result<(), Error> {
+        self.send(ThreadCommand::StartXwayland { notify })
+            .map_err(|e| Error::Compositor(format!("Failed to start Xwayland: {e}")))
     }
 
     /// Register the consumer of what client applications copy to the clipboard.
@@ -8548,6 +9265,20 @@ pub fn ensure_compositor(
         *g = Some(be);
     }
     Ok(g.as_ref().unwrap().clone())
+}
+
+/// Install a window policy on the running compositor; an error where none runs.
+pub fn install_window_policy(policy: Box<dyn crate::wm::WindowPolicy>) -> Result<(), Error> {
+    running_compositor()
+        .ok_or_else(|| Error::Compositor("no compositor is running".to_string()))?
+        .install_window_policy(policy)
+}
+
+/// Start Xwayland on the running compositor; `notify` is told the display number.
+pub fn start_xwayland(notify: Option<std::sync::mpsc::Sender<u32>>) -> Result<(), Error> {
+    running_compositor()
+        .ok_or_else(|| Error::Compositor("no compositor is running".to_string()))?
+        .start_xwayland(notify)
 }
 
 /// The live Wayland backend, if any — never creates one. The pre-capture entry points
@@ -9592,6 +10323,7 @@ impl ScreenCapture {
         settings: CaptureSettings,
     ) -> Result<(), Error> {
         let rs = settings;
+        crate::log::set_debug(rs.debug_logging);
         let display_id = rs.display_id;
         let wants_wayland = rs.wants_wayland();
         let live_wayland_restart = wants_wayland
@@ -10409,6 +11141,8 @@ mod wl_frame_pool_tests {
             id,
             buf,
             source: None,
+            scanout: false,
+            shm: None,
             frame_id: n,
             damage: Vec::new(),
             is_animated: false,

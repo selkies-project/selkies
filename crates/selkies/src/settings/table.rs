@@ -1560,6 +1560,132 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "wm",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Manage the session's windows in the selkies process, on whichever backend runs: on Wayland the capture compositor places, frames, focuses, and stacks its clients itself and runs Xwayland for the X11 ones, so no labwc nests inside it; on X11 selkies claims the screen's window manager selection, so no openbox runs. The openbox-format rc.xml and menu.xml the images configure are read as they stand.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "desktop",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Start the session on the selkies-desktop shell (the panel, start menu, taskbar, wallpaper, and file manager) over the Selkies window manager, started and kept running by the server, rather than on the application alone; implies --wm. A user's switch from the window manager's menus is kept for the next session and wins over this unless it is locked.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "session_switch",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Offer the switch between the desktop and the application alone in the window manager's root menu and window menu, where the shell is installed and --desktop is not locked: the shell starts or stops, the application keeps running, and the choice is kept for the next session.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "app_restart",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Run the window manager's autostart file, the session's application, again once everything it started has exited, while the session is the application alone.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "wm_maximize",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Maximize the application's top-level windows as they open while the session is the application alone, and as the session switches to it tile the four used last and stack any more above them in a cascade of equal windows; an rc.xml application rule that sets maximized wins. Locked on (true|locked), for a kiosk, the application alone keeps those windows maximized on every virtual desktop whatever a rule says: switching to it maximizes each, and no request from the application or the user unmaximizes, minimizes, tiles, shades, moves, resizes, or sends one to another desktop, their frames losing the minimize and maximize buttons; fullscreen is let through. Pair it with --desktop=false|locked so the session cannot switch to the desktop.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "wm_decorations",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Frame windows with the window manager's title bar and border; false frames none, as openbox's decor rule set to no does for every window. Windows that draw their own title bar keep it.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "wm_buttons",
+        kind: Kind::Str,
+        default: "minimize,maximize,close",
+        help: "The buttons the window manager's title bars show, a comma-separated list of minimize, maximize, and close, or none for no buttons.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "wm_menus",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Let the mouse open the window manager's menus: the root menu, the window list, and the window menu. False takes those bindings away and stops the window manager from reading the user's rc.xml, menu.xml, and key bind overrides, only the system's.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "wm_keybinds",
+        kind: Kind::Bool,
+        default: "True",
+        help: "Keep the key binds that close or kill a window, open a menu, or start a program. False takes them away and stops the window manager from reading the user's rc.xml, menu.xml, and key bind overrides, only the system's.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "app_wayland_display",
         kind: Kind::Str,
         default: "",
@@ -2813,6 +2939,42 @@ impl Settings {
 
     pub fn wayland(&self) -> BoolSetting {
         self.bool_setting("wayland")
+    }
+
+    pub fn wm(&self) -> BoolSetting {
+        self.bool_setting("wm")
+    }
+
+    pub fn desktop(&self) -> BoolSetting {
+        self.bool_setting("desktop")
+    }
+
+    pub fn session_switch(&self) -> BoolSetting {
+        self.bool_setting("session_switch")
+    }
+
+    pub fn app_restart(&self) -> BoolSetting {
+        self.bool_setting("app_restart")
+    }
+
+    pub fn wm_maximize(&self) -> BoolSetting {
+        self.bool_setting("wm_maximize")
+    }
+
+    pub fn wm_decorations(&self) -> BoolSetting {
+        self.bool_setting("wm_decorations")
+    }
+
+    pub fn wm_buttons(&self) -> &str {
+        self.str_value("wm_buttons")
+    }
+
+    pub fn wm_menus(&self) -> BoolSetting {
+        self.bool_setting("wm_menus")
+    }
+
+    pub fn wm_keybinds(&self) -> BoolSetting {
+        self.bool_setting("wm_keybinds")
     }
 
     pub fn app_wayland_display(&self) -> &str {

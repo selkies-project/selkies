@@ -17,6 +17,8 @@ pub mod dcclient;
 pub mod eiclient;
 /// Fake-input client delivering relative pointer motion into a nested KWin session.
 pub mod ficlient;
+/// `zwlr_foreign_toplevel_manager_v1`, the window list a taskbar reads and acts on.
+pub mod foreign_toplevel;
 /// Headless Smithay compositor, protocol handlers, and input routing.
 pub mod frontend;
 /// Host-capture mode: capture/inject as a client of an external compositor.
@@ -38,6 +40,12 @@ pub mod pwcapture;
 pub mod vkclient;
 /// Shared plumbing for outbound Wayland client connections.
 pub mod wlclient;
+/// The installed window policy's seat in the compositor: events out, commands applied.
+pub mod wm;
+/// `ext_workspace_manager_v1`, the virtual desktops a pager reads and switches.
+pub mod workspace;
+/// XWayland and Smithay's X11 window manager, driven by the window policy.
+pub mod xwm;
 
 /// An enabled screen as clients see it: name, layout position, and the size of
 /// the mode it currently holds.

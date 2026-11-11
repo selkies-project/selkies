@@ -23,6 +23,53 @@
   points include browser webcam bitstreams and H.264 SPS input in `crates/pixelflux/src/{webcam,encoders/sps.rs}`,
   microphone Opus and RED in `crates/pcmflux/src/red.rs`, the token-gated Computer-Use HTTP server in
   `crates/pixelflux/src/computer_use.rs`, and untrusted Wayland buffers and local recording, webcam, and Ogg sockets.
+- Under `--wm` (`crates/selkies-wm`, installed in the compositor through `crates/pixelflux/src/wm.rs`): the
+  openbox-format `rc.xml` and `menu.xml` the session user's configuration directory or `/etc/xdg` carries are
+  parsed (`selkies-wm/src/config`), as is the user's key bind override file the desktop shell's shortcut editor
+  writes (`~/.config/selkies-wm/keybinds`: a bind moved to another chord, disabled, or a command added on one,
+  read again within a second of a change, `Config::apply_overrides`), the `autostart` file there is run as the
+  session's application (`selkies-wm/src/session.rs`, `start_autostart`) holding a lock on
+  `$XDG_RUNTIME_DIR/selkies-autostart.lock` that what it starts inherits, and run again when that lock frees under
+  `--app-restart`, the session's mode is read from `~/.config/selkies-wm/session` (the one word `desktop` or
+  `application`; anything else is the image's mode) and written when the root menu or the window menu switches
+  it, which they offer unless `--session-switch` is off or `--desktop` is locked; a locked mode only keeps the
+  window manager from starting the shell, since the session user can start any program; `--wm-menus` or
+  `--wm-keybinds` turned off take the menu, close, kill, and run bindings away and have the window manager read
+  only the system's `rc.xml`, `menu.xml`, and no key bind overrides, which narrows what a session user reaches
+  through the window manager and nothing else, since the session user can still run programs and write files; a
+  locked `--wm-maximize` (`true|locked`) has the application alone keep its top-level windows maximized on every
+  virtual desktop, refusing the client's and the user's requests to unmaximize, minimize, tile, shade, move, resize,
+  or send one elsewhere (`Engine::keeps_maximized`), a kiosk's layout rather than a boundary for the same reason; a pipe menu runs the command the menu names and parses what it prints, the
+  key and pointer bindings start the commands they name in the session user's environment, the Xwayland socket
+  the compositor starts for its X11 clients (`crates/pixelflux/src/wayland/xwm.rs`) is one more local socket in
+  `/tmp/.X11-unix`, and `zwlr_foreign_toplevel_manager_v1` lets any Wayland client of the capture socket list,
+  activate, minimize, and close windows (`crates/pixelflux/src/wayland/foreign_toplevel.rs`), and
+  `ext_workspace_manager_v1` lets any such client read the virtual desktops and ask the window policy for a switch
+  (`crates/pixelflux/src/wayland/workspace.rs`), and `zwp_keyboard_shortcuts_inhibit_manager_v1` lets the client
+  whose window holds the keyboard have the policy's binds stand aside while it reads keys (the desktop shell's
+  shortcut editor; an inhibitor on any other window is left inactive, `KeyboardShortcutsInhibitHandler` in
+  `crates/pixelflux/src/wayland/frontend.rs`); all three carry no bytes to parse beyond the protocol's typed
+  arguments.
+  Everything there runs as the session user, who may already do each of these; the boundary it keeps is the
+  stream's: a panic in the window manager is caught at the policy boundary and the compositor carries on without it.
+- Under `--desktop`, the `selkies-desktop` shell serves the desktop Settings portal
+  (`crates/selkies-desktop/src/portal.rs`): `org.freedesktop.portal.Settings` on the session bus under
+  `org.freedesktop.portal.Desktop`, taken only while no other process owns that name. Any process of the session
+  user's bus may call it; it answers `ReadAll`, `ReadOne`, `Read`, and its `version` property from the shell's own
+  theme decision, takes no writes, and runs nothing a caller names, so a caller learns only the scheme, accent, and
+  theme names every window of the session is drawn with.
+- Under `--desktop` the shell is also the session's notification server (`crates/selkies-desktop/src/notify.rs`):
+  `org.freedesktop.Notifications` on the session bus, taken only while no other process owns that name. Any
+  process of the session user's bus may call `Notify`, `CloseNotification`, `GetCapabilities`, and
+  `GetServerInformation`, and every one hears the `NotificationClosed` and `ActionInvoked` signals. What a caller
+  sends is bounded on the server's own thread before the shell draws it: texts are cut to a length (application
+  name 64 characters, summary 256, body 2048 after its markup is stripped to text), actions to eight, the hints
+  are read as typed fields with every other key skipped, an `image-data` hint is dropped unless its sides are
+  1 to 1024, its samples 8 bits, its channels 3 or 4, and its rows fit the bytes sent, an `image-path` or icon
+  path is a file the session user can read of at most 16 MiB, decoded under the image crate's allocation limits,
+  a `desktop-entry` hint naming a path is ignored, every image is shrunk to 128 pixels, and the shell keeps at
+  most 64 notifications, closing the oldest. A caller can show text and an image on the user's screen and learn
+  when the user invoked one of its actions; nothing it sends is run, opened, or written.
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
   `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
   write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose
@@ -36,11 +83,20 @@
   peer-controlled sizes in pixelflux and pcmflux; the interposers' C code; file upload and download confinement.
 - In scope but lower: the web client (origin checks on `postMessage`, token handling), CI workflows and release
   scripts, and what the images download at build time outside a signed apt repository: the desktop image takes the
-  `selkies-desktop` binary at the release tag `SELKIES_DESKTOP_VERSION` pins, checked against the `.sha256` that
-  release publishes beside it, and proot-apps checked against the digest GitHub records for it.
-- Out of scope: `website/`, `docs/`, `infra/`, the prebuilt third-party wheels and patches in `addons/base`, and the
-  `selkies-desktop` program itself, a separate project, whose control socket sits in the session's
-  `$XDG_RUNTIME_DIR`.
+  proot-apps release and the FerrisPad package checked against the digests GitHub records for them.
+- In scope but lower, too: the `selkies-desktop` shell (`crates/selkies-desktop`), its own process the server
+  starts under `--desktop`, whose control socket sits in the session's `$XDG_RUNTIME_DIR` and whose file manager
+  decodes images and scans directories under the session user's home; it is kept out of the stream's process for
+  that reason. Besides the commands a session user's `selkies-desktop --menu` and the like send it, the window
+  manager writes one there itself, `bar-attached`, a list of display corners each with a flag (`ipc.rs`,
+  `parse_bar_edges`): a word that does not read is skipped, and what reads only moves the bars of the displays it
+  names. The other way, the shell writes where its desktop icons stand to `$XDG_RUNTIME_DIR/selkies-desktop/icons`,
+  which the window manager reads on a click over the desktop (`selkies-draw/src/desktop_icons.rs`): a line that
+  does not read is skipped, and what reads only decides whether that click also runs the root's bindings. Its settings layer an image's `/etc/xdg/selkies-desktop/config` under the user's file and the
+  `SELKIES_DESKTOP_<KEY>` environment over both; the `terminals`, `run_command`, and `settings` keys only leave
+  entries out of its menus and its launcher, which the session user can still get around by running a program
+  any other way, so an image that must keep a user from a terminal removes the binaries' permissions as well.
+- Out of scope: `website/`, `docs/`, `infra/`, and the prebuilt third-party wheels and patches in `addons/base`.
 
 ## How to exercise it
 - `cargo test --workspace` runs the server's own tests in process, and they show how to drive the token table

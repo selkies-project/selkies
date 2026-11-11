@@ -1,0 +1,16 @@
+[package]
+name = "selkies-desktop-driver"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Drives a wlroots compositor's pointer for the desktop's end to end checks."
+license = "MPL-2.0"
+
+[workspace]
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[profile.release]
+opt-level = 2

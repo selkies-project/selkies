@@ -58,7 +58,7 @@ Full desktop containers that can be used out-of-the-box are available in separat
 
 ## Minimal Container
 
-The [Desktop Container](https://github.com/selkies-project/selkies/tree/main/addons/desktop) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. Selkies' own desktop shell, [selkies-desktop](https://github.com/selkies-project/selkies-desktop), is installed over the Openbox window manager on X11 and the labwc compositor on Wayland, together with Firefox and Google Chrome, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
+The [Desktop Container](https://github.com/selkies-project/selkies/tree/main/addons/desktop) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. Selkies' own desktop shell, [selkies-desktop](https://github.com/selkies-project/selkies-desktop), runs over the Selkies window manager on X11 and Wayland, together with Firefox and Google Chrome, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
 
 Instructions are available in the [Desktop Container](components/desktop-image.md) section.
 

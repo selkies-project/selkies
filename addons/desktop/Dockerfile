@@ -8,14 +8,14 @@
 # The base (addons/base) is the whole session apart from what it looks like —
 # X11 and the Wayland backend, audio, GPU wiring, s6, coTURN, and Selkies
 # itself. This layer adds only the desktop: selkies-desktop, Selkies' own
-# panel, start menu, and desktop, over the Openbox window manager on X11 and
-# the nested labwc compositor under SELKIES_WAYLAND=true, the browsers, and the
-# proot-apps runner behind the dashboards' apps panel.
+# panel, start menu, and desktop, which the server runs under its own window
+# manager on either backend (SELKIES_DESKTOP, set here), the browsers, and the
+# proot-apps runner behind the dashboards' apps panel. No other window manager
+# runs in this image: the window manager is the server's, on X11 and on Wayland.
 #
 # BASE_IMAGE is a whole reference — tag or digest — so this layer follows
 # whichever base container it is pointed at: the published Ubuntu 26.04 one by
 # default, a Debian Trixie one, or the exact digest a CI run just built.
-# SELKIES_DESKTOP_VERSION is the selkies-desktop release the image installs.
 
 ARG BASE_IMAGE="ghcr.io/selkies-project/selkies/base:main-ubuntu26.04"
 
@@ -23,7 +23,7 @@ FROM ${BASE_IMAGE}
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 LABEL org.opencontainers.image.title="Selkies Desktop Container"
-LABEL org.opencontainers.image.description="Reference minimal Selkies container: selkies-desktop over Openbox on X11 by default, the same desktop over labwc on headless Wayland with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
+LABEL org.opencontainers.image.description="Reference minimal Selkies container: selkies-desktop under the Selkies window manager on X11 by default and on headless Wayland with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
 LABEL org.opencontainers.image.source="https://github.com/selkies-project/selkies"
 LABEL org.opencontainers.image.licenses="MPL-2.0"
 
@@ -48,26 +48,50 @@ RUN selkies-privileged-files release
 USER 1000
 SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
 
+# The wallpaper packages the second set below installs are held to a few with
+# light and dark pictures, which dpkg keeps out on every later upgrade too.
+RUN printf '%s\n' \
+        'path-exclude=/usr/share/wallpapers/*' \
+        'path-include=/usr/share/wallpapers/Next/*' \
+        'path-include=/usr/share/wallpapers/Nuvole/*' \
+        'path-include=/usr/share/wallpapers/Mountain/*' \
+        'path-include=/usr/share/wallpapers/Flow/*' \
+        'path-include=/usr/share/wallpapers/Kay/*' \
+        > /etc/dpkg/dpkg.cfg.d/selkies-wallpapers
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
-        # The window manager under selkies-desktop on X11; on Wayland the base's
-        # labwc is, and it reads Openbox's stock themes as well
-        openbox \
-        # The icon sets selkies-desktop, labwc's titlebar, and GTK resolve names
+        # The icon sets selkies-desktop, the window manager's menus, and GTK
+        # resolve names
         # in: breeze ships the full-color glyph groups the slim Adwaita build
         # lacks, and both bring hicolor, every icon theme's fallback
         breeze-icon-theme \
         adwaita-icon-theme \
+        # The GTK theme pair selkies-desktop switches applications between
+        # with its light and dark scheme, and the platform themes Qt 5 and
+        # Qt 6 draw through to follow GTK's theme and dark preference
+        # (QT_QPA_PLATFORMTHEME below)
+        breeze-gtk-theme \
+        qt5-gtk-platformtheme \
+        qt6-gtk-platformtheme \
         # The terminals: foot on Wayland, xfce4-terminal on X11, which
         # selkies-terminal picks between as the x-terminal-emulator below
         foot \
         xfce4-terminal \
-        # A text editor, image viewer, calculator, and archive manager for the
-        # files the desktop's file manager opens; they share xfce4-terminal's
-        # libraries, so together they add little to it
-        mousepad \
-        ristretto \
-        galculator \
-        xarchiver \
+        # What the desktop's file manager opens files with: an image viewer,
+        # a document viewer, a music player, an archive manager, and a
+        # calculator, libadwaita applications that take the shell's light or
+        # dark scheme and its accent from its settings portal; the text editor
+        # and the system monitor follow below
+        loupe \
+        papers \
+        amberol \
+        file-roller \
+        gnome-calculator \
+        # The image's wallpaper: a package with light and dark pictures the
+        # desktop switches between with its theme, linked below as the
+        # wallpaper a session starts with, and four more of the same kind
+        # to choose from out of the set the filter above trims
+        breeze-wallpaper \
+        plasma-workspace-wallpapers \
         # What a terminal session is expected to have beyond the base's
         # editors: completion, remote shells and copies, and the network and
         # process tools
@@ -80,10 +104,6 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         iputils-ping \
         # pactl, which selkies-desktop's volume control drives the sink through
         pulseaudio-utils \
-        # The notification server applications call over the session bus,
-        # started on the first notification by D-Bus activation on either
-        # backend
-        dunst \
         # A file manager keeps whether a desktop entry may be launched in GIO
         # metadata: gvfs carries the client module that implements that
         # attribute namespace, gvfs-daemons the store behind it. Without both,
@@ -99,6 +119,23 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # in; without it that refresh is a silent no-op and the cache a session
         # reads is whatever was there before the application arrived
         gtk-update-icon-cache && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
+
+# The text editor, FerrisPad, from its release's package, checked against the
+# digest GitHub records for it; it takes light or dark from the GSettings the
+# shell sets. Its build needs a newer C library than some bases carry, and apt
+# refuses it there, so GNOME Text Editor takes its place. Resources, the system monitor, comes where the
+# distribution carries it.
+RUN --mount=type=secret,id=github_token,uid=1000 set -eu; \
+    apt-get clean && apt-get update; \
+    fetch-verified release fedro86/ferrispad latest \
+        "FerrisPad-v{version}-ubuntu-$(dpkg --print-architecture).deb" /tmp/ferrispad.deb > /dev/null; \
+    if ! apt-get install --no-install-recommends -y /tmp/ferrispad.deb; then \
+        apt-get install --no-install-recommends -y gnome-text-editor; \
+    fi; \
+    if apt-cache show resources > /dev/null 2>&1; then \
+        apt-get install --no-install-recommends -y resources; \
+    fi; \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
 # The browsers, in one apt operation: Firefox from Mozilla's own APT repository,
@@ -186,68 +223,47 @@ RUN set -eu; \
         printf '[Settings]\ngtk-decoration-layout=:minimize,maximize,close\n' > /etc/gtk-3.0/settings.ini; \
     fi
 
-# The desktop itself: selkies-desktop (https://github.com/selkies-project/selkies-desktop)
-# draws the panel, start menu, taskbar, wallpaper, and file manager, and
-# generates the window manager's theme from its own settings. It is one static
-# binary per architecture that links no system library, taken at the release
-# SELKIES_DESKTOP_VERSION names and checked against the digest GitHub records
-# for it (`fetch-verified`, with the build's token where one is given).
-ARG SELKIES_DESKTOP_VERSION="1.0.0"
-RUN --mount=type=secret,id=github_token,uid=1000 set -eu; \
-    arch="$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/aarch64/')"; \
-    fetch-verified release selkies-project/selkies-desktop "${SELKIES_DESKTOP_VERSION}" \
-        "selkies-desktop-${arch}" /tmp/selkies-desktop > /dev/null; \
-    install -m 0755 /tmp/selkies-desktop /usr/bin/selkies-desktop; \
-    rm -f /tmp/selkies-desktop
+# The desktop itself, selkies-desktop, is the base image's /usr/local/bin/selkies-desktop:
+# built from the workspace's crates/selkies-desktop beside the server, so the shell and
+# the window manager that frames its windows under SELKIES_DESKTOP come from one tree.
 
 # What the desktop finds in place of settings of its own. Its start button and
-# default wallpaper are the Selkies logo it reads from a fixed path: the bare
+# its application-icon wallpaper are the Selkies logo it reads from a fixed path: the bare
 # mark, not the PWA icon's white plate, which only a launcher's mask needs;
 # without it the start button is a blank strip. Its icon theme is GTK's
 # setting, which Ubuntu's file names as Yaru, not installed here, leaving every
 # themed glyph to hicolor's few and the volume control blank; breeze, which is,
-# replaces it for GTK as well. labwc names Openbox's stock Clearlooks theme, as
-# the Openbox configuration below does, the name selkies-desktop writes its
-# generated theme under ~/.themes as, so a frame looks the same on both
-# backends with or without that theme. Super alone opens the start menu on its
-# release, so a Super chord still reaches its own binding, with `<default />`
-# keeping labwc's stock keybindings beside it; the terminal on Control+Alt+T is
-# Openbox's as well. The bare desktop answers clicks as Openbox's does: its menu
-# on a right click only, where labwc's stock bindings open it on any button so
-# a stray left click pops it up, and the window list on a middle click; an
-# empty binding is how labwc removes a stock one. Each edit is checked, so an
-# upstream file that no longer matches fails the build rather than a session.
+# replaces it for GTK as well. The edit is checked, so an upstream file that no
+# longer matches fails the build rather than a session.
 COPY --chown=1000:1000 docs/assets/logo/mark-512x512.png /usr/share/selkies/www/icon.png
+# The logo as a vector, the start button's icon, which the desktop draws in one
+# color to suit the theme.
+COPY --chown=1000:1000 docs/assets/logo/selkies.svg /usr/share/selkies/www/icon.svg
+# The wallpaper a session starts with, where the desktop looks for the image's own.
+RUN test -d /usr/share/wallpapers/Next && ln -sfn /usr/share/wallpapers/Next /usr/share/selkies/wallpaper
 RUN set -eu; \
     if grep -q '^gtk-icon-theme-name' /etc/gtk-3.0/settings.ini; then \
         sed -i 's/^gtk-icon-theme-name.*/gtk-icon-theme-name = breeze/' /etc/gtk-3.0/settings.ini; \
     else \
         sed -i '/^\[Settings\]/a gtk-icon-theme-name = breeze' /etc/gtk-3.0/settings.ini; \
     fi; \
-    grep -q '^gtk-icon-theme-name = breeze$' /etc/gtk-3.0/settings.ini; \
-    [ -d /usr/share/themes/Clearlooks/openbox-3 ]; \
-    sed -i 's|<theme>|<theme>\n    <name>Clearlooks</name>|' /etc/xdg/labwc/rc.xml; \
-    sed -i 's|</labwc_config>|  <keyboard>\n    <default />\n    <keybind key="Super_L" onRelease="yes"><action name="Execute" command="selkies-desktop --toggle-menu" /></keybind>\n    <keybind key="C-A-t"><action name="Execute" command="x-terminal-emulator" /></keybind>\n    <keybind key="W-e"><action name="Execute" command="selkies-desktop --files" /></keybind>\n    <keybind key="W-d"><action name="Execute" command="selkies-desktop --show-desktop" /></keybind>\n  </keyboard>\n  <mouse>\n    <default />\n    <context name="Root">\n      <mousebind button="Left" action="Press" />\n      <mousebind button="Middle" action="Press"><action name="ShowMenu" menu="client-list-combined-menu" /></mousebind>\n    </context>\n  </mouse>\n</labwc_config>|' /etc/xdg/labwc/rc.xml; \
-    grep -q '<name>Clearlooks</name>' /etc/xdg/labwc/rc.xml; \
-    grep -q 'command="selkies-desktop --toggle-menu"' /etc/xdg/labwc/rc.xml; \
-    grep -q 'command="selkies-desktop --show-desktop"' /etc/xdg/labwc/rc.xml; \
-    grep -q '<mousebind button="Left" action="Press" />' /etc/xdg/labwc/rc.xml
+    grep -q '^gtk-icon-theme-name = breeze$' /etc/gtk-3.0/settings.ini
 
-# The desktop's defaults, each documented in its own file: Openbox's settings
-# and right-click menu and labwc's menu, which selkies-wm-menu fills with the
-# installed applications; the terminals' look, shared between foot and
-# xfce4-terminal; the applications files and links open with; and the one
-# Terminal entry in the start menu, which selkies-terminal backs as the
-# x-terminal-emulator on either backend, in place of each terminal's own.
-# Copied over what the packages above installed at the same paths. An
-# interactive shell also gets proot-apps on its PATH with its completion, as
-# the desktop's own session does (services/desktop/run).
+# The desktop's defaults, each documented in its own file: the window
+# manager's settings and right-click menu in the openbox format it reads, under
+# /etc/xdg/openbox on both backends; the autostart that prepares the home; the
+# terminals' look,
+# shared between foot and xfce4-terminal; the applications files and links
+# open with; and the one Terminal entry in the start menu, which
+# selkies-terminal backs as the x-terminal-emulator on either backend, in place
+# of each terminal's own. Copied over what the packages above installed at the
+# same paths. An interactive shell also gets proot-apps on its PATH with its
+# completion, as the desktop's own session does.
 COPY --chown=1000:1000 addons/desktop/rootfs/ /
-COPY --chown=1000:1000 addons/desktop/selkies-terminal addons/desktop/selkies-wm-menu /usr/local/bin/
-RUN chmod -f 755 /usr/local/bin/selkies-terminal /usr/local/bin/selkies-wm-menu && \
+COPY --chown=1000:1000 addons/desktop/selkies-terminal /usr/local/bin/
+RUN chmod -f 755 /usr/local/bin/selkies-terminal /etc/xdg/openbox/autostart && \
     update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/local/bin/selkies-terminal 50 && \
     [ "$(readlink -f /etc/alternatives/x-terminal-emulator)" = /usr/local/bin/selkies-terminal ] && \
-    grep -q '<name>Clearlooks</name>' /etc/xdg/openbox/rc.xml && \
     printf '%s\n' \
         '' \
         '# proot-apps from a terminal: its tools on the PATH and its completion' \
@@ -255,18 +271,14 @@ RUN chmod -f 755 /usr/local/bin/selkies-terminal /usr/local/bin/selkies-wm-menu 
         'command -v proot-apps > /dev/null 2>&1 && . <(proot-apps completion bash)' \
         >> /etc/bash.bashrc
 
-# The desktop's s6 services, supervised beside the base container's: the shell
-# on either backend, and the window manager X11 needs
-COPY --chown=1000:1000 addons/desktop/services/ /etc/service/
-# The same desktop for what starts one from a session file or as the
-# x-session-manager, `selkies session` among them. The alternative outranks
-# Openbox's own, which would start the window manager with no desktop on it.
+# The desktop as a session, for what starts one from a session file or as the
+# x-session-manager, `selkies session` among them: the server runs the window
+# manager and the shell, so the session lasts as long as the shell does.
 COPY --chown=1000:1000 addons/desktop/selkies-desktop-session /usr/local/bin/selkies-desktop-session
 COPY --chown=1000:1000 addons/desktop/selkies-desktop.desktop /usr/share/xsessions/selkies-desktop.desktop
 COPY --chown=1000:1000 addons/desktop/selkies-desktop.desktop /usr/share/wayland-sessions/selkies-desktop.desktop
 RUN chmod -f 755 /usr/local/bin/selkies-desktop-session && \
-    update-alternatives --install /usr/bin/x-session-manager x-session-manager /usr/local/bin/selkies-desktop-session 100 && \
-    find /etc/service \( -name run -o -name finish \) -exec chmod -f 755 {} +
+    update-alternatives --install /usr/bin/x-session-manager x-session-manager /usr/local/bin/selkies-desktop-session 100
 
 RUN printf "==============================================\n=         Selkies Desktop Container          =\n==============================================\n" > /etc/motd
 
@@ -293,6 +305,10 @@ USER 1000
 # terminal, so the desktop image enables the channel; disable with
 # -e SELKIES_COMMAND_ENABLED=false.
 ENV SELKIES_COMMAND_ENABLED="true"
-# Start the desktop: selkies-desktop, and Openbox under it on X11 (set to false
-# to run only the display server)
-ENV START_DESKTOP="true"
+# Qt applications take GTK's theme, which selkies-desktop sets from its colors,
+# so they follow the shell's scheme with the GTK ones
+ENV QT_QPA_PLATFORMTHEME="gtk3"
+# The desktop: the server manages the windows itself on either backend and
+# starts and keeps the selkies-desktop shell (set to false to run only the
+# display server)
+ENV SELKIES_DESKTOP="true"

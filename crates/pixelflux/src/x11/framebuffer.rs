@@ -543,10 +543,21 @@ impl SharedFramebuffer {
 
 /// The capture's watch, the tiles each pool surface is missing (module docblock), and those
 /// drawn since the last frame said where it changed (`changed`).
+///
+/// A frame's change is the tiles its read took from the watch: a read takes them before it
+/// copies, and again before each copy it repeats, so every tile it took is in the surface. A
+/// tile the server draws after the read is left in the watch for the frame that will hold it,
+/// since a change named with a frame that does not hold it is never named with the one that
+/// does, and an encoder told the tile held still then keeps the stale picture until the tile
+/// is drawn again. A surface grabbed through XShm instead ([`Self::grabbed`]) takes the watch
+/// after the server answered, so a tile drawn in between is named with that frame and the
+/// next, which is the first that holds it.
 pub(crate) struct FramebufferGrab {
     pub fb: SharedFramebuffer,
     pending: Vec<Vec<u64>>,
     drawn: Vec<u64>,
+    /// The tiles the last XShm grab took, named again with the frame after it.
+    carry: Vec<u64>,
 }
 
 impl FramebufferGrab {
@@ -557,6 +568,7 @@ impl FramebufferGrab {
             fb,
             pending: vec![vec![u64::MAX; words]; surfaces],
             drawn: vec![u64::MAX; words],
+            carry: vec![0; words],
         }
     }
 
@@ -571,16 +583,18 @@ impl FramebufferGrab {
         });
     }
 
-    /// Where the screen was drawn since the last call, within the region at (`x`, `y`) of
-    /// `width` x `height`, in its coordinates: a rectangle a run of tiles along a row of them.
+    /// Where the frame just read differs from the one before, within the region at (`x`, `y`)
+    /// of `width` x `height`, in its coordinates: a rectangle a run of tiles along a row of
+    /// them. The tiles are those the reads since the last call took (the type's docblock), so
+    /// this is called once after each frame's read.
     pub(crate) fn changed(
         &mut self,
         (x, y, width, height): (u32, u32, u32, u32),
     ) -> Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>> {
-        self.take();
         let tile = self.fb.tile;
         let tiles_x = self.fb.tiles_x as usize;
-        let drawn = std::mem::replace(&mut self.drawn, vec![0; self.fb.words()]);
+        let drawn = std::mem::replace(&mut self.drawn, std::mem::take(&mut self.carry));
+        self.carry = vec![0; self.fb.words()];
         let set = |tx: u32, ty: u32| {
             let t = ty as usize * tiles_x + tx as usize;
             drawn[t / 64] >> (t % 64) & 1 != 0
@@ -718,10 +732,19 @@ impl FramebufferGrab {
         false
     }
 
-    /// Surface `idx` was grabbed whole through XShm: it misses nothing.
+    /// Surface `idx` was grabbed whole through XShm: it misses nothing drawn before the server
+    /// answered. The tiles taken here may have been drawn after that answer, so they stay
+    /// missing from the surface and are named with the next frame as well (`carry`).
     pub(crate) fn grabbed(&mut self, idx: usize) {
-        self.take();
         self.pending[idx].fill(0);
+        let (pending, drawn, carry) = (&mut self.pending, &mut self.drawn, &mut self.carry);
+        self.fb.take(|i, bits| {
+            for p in pending.iter_mut() {
+                p[i] |= bits;
+            }
+            drawn[i] |= bits;
+            carry[i] |= bits;
+        });
     }
 }
 
@@ -900,6 +923,8 @@ mod tests {
     #[test]
     fn a_frame_says_where_the_screen_was_drawn_within_its_region() {
         let mut grab = FramebufferGrab::new(fake(64, 64, 16), 1);
+        let mut dst = vec![0u8; 64 * 64 * 4];
+        assert!(grab.read(0, &mut dst, 256, (8, 8, 48, 48)));
         assert_eq!(
             grab.changed((8, 8, 48, 48)).len(),
             4,
@@ -909,6 +934,7 @@ mod tests {
             .watch
             .word64(WATCH_BITS)
             .store(0b0110 << 4, Ordering::Relaxed);
+        assert!(grab.read(0, &mut dst, 256, (8, 8, 48, 48)));
         let rects = grab.changed((8, 8, 48, 48));
         assert_eq!(
             rects,
@@ -918,7 +944,74 @@ mod tests {
             )],
             "tiles (1,1) and (2,1), at 16..48 by 16..32, in the region's coordinates"
         );
+        assert!(grab.read(0, &mut dst, 256, (8, 8, 48, 48)));
         assert!(grab.changed((8, 8, 48, 48)).is_empty());
+    }
+
+    #[test]
+    fn a_tile_taken_with_an_xshm_grab_is_named_with_the_next_frame_too() {
+        let mut grab = FramebufferGrab::new(fake(64, 64, 16), 2);
+        let region = (0, 0, 64, 64);
+        let mut b = vec![0u8; 64 * 64 * 4];
+        grab.grabbed(0);
+        grab.changed(region);
+        grab.fb
+            .watch
+            .word64(WATCH_BITS)
+            .store(1 << 5, Ordering::Relaxed);
+        grab.grabbed(0);
+        let with_grab = grab.changed(region);
+        assert!(grab.read(1, &mut b, 256, region));
+        let after = grab.changed(region);
+        let covers = |rects: &[smithay::utils::Rectangle<i32, smithay::utils::Physical>]| {
+            rects.iter().any(|r| {
+                r.loc.x <= 24 && 24 < r.loc.x + r.size.w && r.loc.y <= 24 && 24 < r.loc.y + r.size.h
+            })
+        };
+        assert!(covers(&with_grab), "named with the grabbed frame");
+        assert!(
+            covers(&after),
+            "and with the next, the first the tile is known to be in"
+        );
+        assert!(
+            grab.pending[0][0] >> 5 & 1 != 0,
+            "the grabbed surface still misses it, as the grab may predate it"
+        );
+        assert!(grab.read(0, &mut b, 256, region));
+        assert!(
+            grab.changed(region).is_empty(),
+            "and it is named no further"
+        );
+    }
+
+    #[test]
+    fn a_tile_drawn_after_a_read_is_reported_with_the_frame_that_holds_it() {
+        let mut grab = FramebufferGrab::new(fake(64, 64, 16), 2);
+        let region = (0, 0, 64, 64);
+        let mut a = vec![0u8; 64 * 64 * 4];
+        let mut b = vec![0u8; 64 * 64 * 4];
+        assert!(grab.read(0, &mut a, 256, region));
+        grab.changed(region);
+        assert!(grab.read(1, &mut b, 256, region));
+        grab.changed(region);
+        assert!(grab.read(0, &mut a, 256, region));
+        grab.fb
+            .watch
+            .word64(WATCH_BITS)
+            .store(1 << 5, Ordering::Relaxed);
+        let before = grab.changed(region);
+        assert!(grab.read(1, &mut b, 256, region));
+        let after = grab.changed(region);
+        let covers = |rects: &[smithay::utils::Rectangle<i32, smithay::utils::Physical>]| {
+            rects.iter().any(|r| {
+                r.loc.x <= 24 && 24 < r.loc.x + r.size.w && r.loc.y <= 24 && 24 < r.loc.y + r.size.h
+            })
+        };
+        assert!(
+            covers(&after),
+            "tile (1,1), drawn after surface 0 was read, is reported with surface 1, which holds it"
+        );
+        assert!(!covers(&before), "and not with surface 0, which does not");
     }
 
     #[test]

@@ -74,5 +74,6 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The smithay commit pixelflux pins.
-allow-git = ["https://github.com/Smithay/smithay"]
+# The smithay commit pixelflux pins, and the cosmic-text commit selkies-draw pins (the first on
+# fontdb 0.24, unreleased).
+allow-git = ["https://github.com/Smithay/smithay", "https://github.com/pop-os/cosmic-text"]

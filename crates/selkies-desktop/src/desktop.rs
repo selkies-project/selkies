@@ -1,0 +1,3700 @@
+//! The desktop's state: the window list, the loaded applications, what is
+//! open and hovered, and the frames it renders for the backend to present.
+//!
+//! The backends feed [`Event`]s in and take [`Request`]s out; everything
+//! between is display server agnostic.
+
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tiny_skia::Pixmap;
+
+use crate::config::Config;
+use crate::entries::{self, Apps};
+use crate::event::{Button, Event, Modifiers, Request, SurfaceId, ToplevelState, WindowAction};
+use crate::files;
+use crate::geom::Rect;
+use crate::i18n::{tr, trf};
+use crate::icons::Icons;
+use crate::notify::Notification;
+use crate::render::{Canvas, Fonts};
+use crate::ui::notifications::{self, CardPart, CenterPart, NotificationState};
+use crate::ui::settings::Page;
+use crate::ui::{self, background, desktop_menu, launcher, menu, panel, popups, settings};
+use crate::xkb::Key;
+
+/// Height of the strip that brings an auto-hidden bar back.
+const REVEAL_STRIP: i32 = 3;
+/// Milliseconds the pointer is away from the bar before it hides.
+const HIDE_DELAY_MS: u64 = 500;
+/// How long the height and opacity sliders rest before their value is
+/// applied to the bar, so a drag does not resize the bar, and every window
+/// with it, at every pointer step; the width follows the pointer live.
+const PREVIEW_DELAY_MS: u64 = 150;
+/// Logical pixels cleared and damaged around what the bar and its popups
+/// draw, as the narrow bar's outline is stroked on its edge and so reaches
+/// a pixel outside it.
+const CLEAR_MARGIN: i32 = 2;
+
+/// A window the window manager reports.
+#[derive(Debug)]
+pub struct Toplevel {
+    /// Backend assigned identifier.
+    pub id: u64,
+    /// Window title.
+    pub title: String,
+    /// Application ID or window class.
+    pub app_id: String,
+    /// Icon the window published itself, at its native size.
+    pub own_icon: Option<Pixmap>,
+    /// Window state flags.
+    pub state: ToplevelState,
+    /// The display the window is on, by the backend's number for it.
+    pub display: Option<u32>,
+    /// The themed icon resolved for the current scale.
+    icon: Option<(i32, Option<Arc<Pixmap>>)>,
+}
+
+impl Toplevel {
+    /// The text the taskbar shows for the window.
+    pub fn label(&self) -> &str {
+        if !self.title.is_empty() {
+            &self.title
+        } else if !self.app_id.is_empty() {
+            &self.app_id
+        } else {
+            tr("Window")
+        }
+    }
+}
+
+/// Size and scale of one surface.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Geometry {
+    /// Logical width.
+    pub width: i32,
+    /// Logical height.
+    pub height: i32,
+    /// Output scale.
+    pub scale: i32,
+    /// Whether the surface has been given a size.
+    pub configured: bool,
+}
+
+/// A desktop icon held down, until its button is released.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DesktopPress {
+    /// The item pressed.
+    pub index: usize,
+    /// Where the press was.
+    pub start: (f64, f64),
+    /// Where the pointer is.
+    pub at: (f64, f64),
+    /// Whether the pointer moved far enough for a drag.
+    pub dragging: bool,
+    /// Whether the icon was already selected among others, so a release without a drag
+    /// narrows the selection to it.
+    pub narrow: bool,
+}
+
+/// The frames a layered background presents: the wallpaper where it was drawn again, and the
+/// launchers where they changed, each `None` where its layer stays as it was.
+pub struct BackgroundFrames<'a> {
+    pub wallpaper: Option<Frame<'a>>,
+    pub launchers: Option<Frame<'a>>,
+}
+
+/// A box dragged across the desktop from an empty spot, selecting the icons it touches.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesktopBand {
+    /// Where the press was.
+    pub start: (f64, f64),
+    /// Where the pointer is.
+    pub at: (f64, f64),
+    /// The selection kept beneath the box: the one there was where Control or Shift was held,
+    /// else none.
+    pub base: BTreeSet<usize>,
+}
+
+impl DesktopBand {
+    /// The box's rectangle on the primary background.
+    pub fn rect(&self) -> Rect {
+        let (x0, y0) = (self.start.0.min(self.at.0), self.start.1.min(self.at.1));
+        let (x1, y1) = (self.start.0.max(self.at.0), self.start.1.max(self.at.1));
+        Rect::new(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32)
+    }
+}
+
+/// Files dropped on the desktop that land on a cell: the names still to arrive in the Desktop
+/// folder, the cell the next of them takes, and when they were dropped.
+#[derive(Clone, Debug)]
+struct Landing {
+    names: Vec<String>,
+    cell: crate::desktop_folder::Cell,
+    since: Instant,
+}
+
+/// How long after a drop its files are still placed where it landed as they arrive.
+const LANDING_WINDOW: Duration = Duration::from_secs(30);
+
+/// How far, in logical pixels, a held icon moves before it is dragged.
+const DESKTOP_DRAG_THRESHOLD: f64 = 6.0;
+
+/// How long a floating bar takes to attach to the edge or come off it.
+const BAR_ATTACH: Duration = Duration::from_millis(220);
+
+/// How often the bar is drawn while it moves.
+const BAR_FRAME: Duration = Duration::from_millis(16);
+
+/// The color behind a light wallpaper under a dark theme, whose own window color is dark: the
+/// window color of the Light scheme.
+fn light_wallpaper() -> tiny_skia::Color {
+    crate::render::rgb(0xef, 0xf0, 0xf1)
+}
+
+/// What a rendered wallpaper layer was made for: size, scale and monitors.
+pub type WallpaperKey = (i32, i32, i32, Vec<Rect>);
+
+/// One wallpaper surface: an output on Wayland, the whole screen on X11,
+/// with the monitors it spans.
+pub struct BackgroundSurface {
+    /// The backend's number for the surface.
+    pub id: u32,
+    /// Size and scale.
+    pub geometry: Geometry,
+    /// The monitors the surface spans, in its logical coordinates; the first
+    /// one carries the desktop icons when the surface is primary.
+    pub monitors: Vec<Rect>,
+    /// Whether this surface shows the desktop icons.
+    pub primary: bool,
+    pix: Option<Pixmap>,
+    launchers_pix: Option<Pixmap>,
+    dirty: bool,
+    /// What the launchers showed in the last frame, which the next draws only the changes of;
+    /// `None` where the whole surface, the wallpaper with it, is drawn again.
+    scene: Option<background::LauncherScene>,
+    /// The wallpaper layer rendered for the geometry and monitors, drawn
+    /// under the icons.
+    pub wallpaper_cache: Option<(WallpaperKey, Pixmap)>,
+}
+
+impl BackgroundSurface {
+    /// The monitor rectangle the desktop icons are laid out in.
+    pub fn icon_area(&self) -> Rect {
+        self.monitors
+            .first()
+            .copied()
+            .unwrap_or(Rect::new(0, 0, self.geometry.width, self.geometry.height))
+    }
+}
+
+/// The bar of a display other than the primary one: the state the panel's own fields hold for
+/// the primary bar, held here while another bar stands in for the panel.
+///
+/// Every bar runs the panel's code: the desktop swaps a bar's state into the panel's fields
+/// for as long as it renders the bar or handles an event on it ([`Desktop::with_bar`]), so
+/// the bar has the panel's items, popups, hover, and floating, and its taskbar lists the
+/// windows on its own display.
+pub struct DisplayBar {
+    /// The backend's number for the display the bar is on.
+    pub id: u32,
+    geometry: Geometry,
+    pix: Option<Pixmap>,
+    visible: Vec<Rect>,
+    dirty: bool,
+    attached: bool,
+    attach: f32,
+    attach_anim: Option<(f32, f32, Instant)>,
+    published_tasks: Vec<(u64, Rect)>,
+    offset: (i32, i32),
+    hover: Hover,
+    hover_since: Instant,
+    tooltip: Option<String>,
+    pointer: (f64, f64),
+}
+
+impl DisplayBar {
+    /// A bar not yet configured.
+    fn new(id: u32) -> DisplayBar {
+        DisplayBar {
+            id,
+            geometry: Geometry::default(),
+            pix: None,
+            visible: Vec::new(),
+            dirty: true,
+            attached: false,
+            attach: 0.0,
+            attach_anim: None,
+            published_tasks: Vec::new(),
+            offset: (0, 0),
+            hover: Hover::None,
+            hover_since: Instant::now(),
+            tooltip: None,
+            pointer: (-1.0, -1.0),
+        }
+    }
+}
+
+/// What rendering a bar produced, apart from its pixels.
+struct BarFrame {
+    scale: i32,
+    damage: Vec<Rect>,
+    input: Vec<Rect>,
+    visible: Vec<Rect>,
+    grab: bool,
+    bar: Option<(Rect, f32)>,
+}
+
+impl BarFrame {
+    /// The frame over a bar's pixels.
+    fn frame(self, pixmap: &Pixmap) -> Frame<'_> {
+        Frame {
+            pixmap,
+            scale: self.scale,
+            damage: self.damage,
+            input: self.input,
+            visible: self.visible,
+            grab: self.grab,
+            bar: self.bar,
+        }
+    }
+}
+
+/// A rendered surface handed to the backend.
+pub struct Frame<'a> {
+    /// The pixels, premultiplied RGBA, logical size times scale.
+    pub pixmap: &'a Pixmap,
+    /// Output scale the pixmap was rendered at.
+    pub scale: i32,
+    /// Logical rectangles that changed since the previous frame.
+    pub damage: Vec<Rect>,
+    /// Logical rectangles that take input; everything else falls through.
+    pub input: Vec<Rect>,
+    /// Logical rectangles with content; the rest is transparent.
+    pub visible: Vec<Rect>,
+    /// Whether the surface wants every click on the screen while a popup is open.
+    pub grab: bool,
+    /// The bar's background and its corner radius, which a backend that shapes the panel's
+    /// window rounds it to; `None` on every other surface.
+    pub bar: Option<(Rect, f32)>,
+}
+
+/// What a right click on the bar landed on, which decides the menu it gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelTarget {
+    /// The bar itself, between its items.
+    Bar,
+    /// The start button.
+    Start,
+    /// A quick launch button, by position.
+    Launcher(usize),
+    /// The pager.
+    Pager,
+    /// The clock.
+    Clock,
+    /// The volume control.
+    Volume,
+    /// The system tray strip.
+    Tray,
+    /// The show desktop button.
+    ShowDesktop,
+    /// The notifications bell.
+    Notifications,
+}
+
+/// Which popup is open above the bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Popup {
+    /// Nothing is open.
+    None,
+    /// The start menu.
+    Menu,
+    /// The quick launcher.
+    Launcher,
+    /// The volume slider.
+    Volume,
+    /// The month calendar.
+    Calendar,
+    /// The notification center.
+    Notifications,
+    /// The context menu of a taskbar button, by toplevel index.
+    TaskMenu(usize),
+    /// The bar's right-click menu, by the bar X it opened at and the item
+    /// it was opened on.
+    PanelMenu(i32, PanelTarget),
+    /// The desktop icons' right-click menu, by the point of the panel surface it opened at.
+    DesktopMenu(i32, i32),
+}
+
+/// What the pointer rests on, for hover highlights and tooltips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hover {
+    /// Nothing interactive.
+    None,
+    /// The start button.
+    Start,
+    /// A taskbar button, by toplevel index.
+    Task(usize),
+    /// The volume control.
+    Volume,
+    /// The clock.
+    Clock,
+    /// The show desktop button.
+    ShowDesktop,
+    /// A menu category row.
+    MenuCategory(usize),
+    /// The start menu's Settings button.
+    MenuSettings,
+    /// A scrollbar of the start menu.
+    MenuScrollbar(menu::ScrollColumn),
+    /// A menu application row, or a cell of the application grid.
+    MenuApp(usize),
+    /// A favorite's tile in the menu's tiles layout.
+    MenuTile(usize),
+    /// An item of the task context menu.
+    TaskMenuItem(usize),
+    /// An item of the bar's right-click menu.
+    PanelMenuItem(usize),
+    /// A control of the settings window.
+    Control(usize),
+    /// An icon on the desktop, by its position in the Desktop folder's items.
+    DesktopIcon(usize),
+    /// A button of the desktop's dialog.
+    Dialog(ui::dialog::Part),
+    /// An item of the desktop icons' right-click menu.
+    DesktopMenuItem(usize),
+    /// A quick launch button, by position.
+    Launcher(usize),
+    /// A pill of the pager, by desktop index.
+    Pager(usize),
+    /// An item of the start menu's right-click menu.
+    MenuContextItem(usize),
+    /// A result row of the quick launcher.
+    LauncherRow(usize),
+    /// Something in a file manager window.
+    Files(u32, ui::files::Hit),
+    /// The notifications bell on the bar.
+    Bell,
+    /// A part of a notification card, by the notification's id.
+    Card(u32, CardPart),
+    /// A part of the notification center.
+    Center(CenterPart),
+}
+
+/// Current volume as the audio module reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Volume {
+    /// Percent, may exceed 100.
+    pub percent: u8,
+    /// Whether the sink is muted.
+    pub muted: bool,
+}
+
+/// The whole desktop.
+pub struct Desktop {
+    /// Settings.
+    pub config: Config,
+    /// Font system.
+    pub fonts: Fonts,
+    /// Icon lookup.
+    pub icons: Icons,
+    /// Loaded applications.
+    pub apps: Apps,
+    /// The Selkies logo, if the image ships one.
+    pub logo: Option<Pixmap>,
+    /// Wallpaper images at native size, by path; `None` for files that did not decode.
+    pub wallpapers: HashMap<std::path::PathBuf, Option<Arc<Pixmap>>>,
+    /// Geometry of the panel surface.
+    pub panel: Geometry,
+    /// The wallpaper surfaces, one per output.
+    pub backgrounds: Vec<BackgroundSurface>,
+    panel_pix: Option<Pixmap>,
+    panel_visible: Vec<Rect>,
+    panel_dirty: bool,
+    /// The task button rectangles last told to the backend.
+    published_tasks: Vec<(u64, Rect)>,
+    /// The bars of the displays other than the primary one.
+    pub bars: Vec<DisplayBar>,
+    /// The bar standing in for the panel at the moment, `None` while the panel is itself.
+    current_bar: Option<u32>,
+    /// The bar the open popup belongs to, `None` for the panel's.
+    popup_bar: Option<u32>,
+    /// Where each display's top-left corner sits, by the backend's number for it, the
+    /// primary one first, which matches the window manager's word on a display's bar edge
+    /// to the bar there.
+    display_origins: Vec<(u32, (i32, i32))>,
+    /// The window manager's last word on which displays have a window at their bar's edge,
+    /// read again whenever the displays or their bars change.
+    bar_edges: Vec<((i32, i32), bool)>,
+    /// Windows in order of appearance.
+    pub toplevels: Vec<Toplevel>,
+    /// The open popup.
+    pub popup: Popup,
+    /// What the pointer is over.
+    pub hover: Hover,
+    hover_since: Instant,
+    /// Tooltip text shown at the moment, if any.
+    pub tooltip: Option<String>,
+    /// Last pointer position on the panel.
+    pub pointer: (f64, f64),
+    /// Start menu state.
+    pub menu: menu::MenuState,
+    /// Quick launcher state.
+    pub launcher: launcher::LauncherState,
+    /// The settings window and its state.
+    pub settings: settings::SettingsState,
+    /// The desktop's dialog: a new folder's name, an item's new name, or a deletion.
+    pub dialog: ui::dialog::DialogState,
+    /// The Desktop folder's items, in listing order.
+    pub desktop_items: Vec<crate::desktop_folder::DesktopItem>,
+    /// The cells the layout file keeps, by file name.
+    pub desktop_layout: HashMap<String, crate::desktop_folder::Cell>,
+    /// A desktop icon held down: its item, where the press was, where the pointer is, and
+    /// whether it is being dragged to another cell.
+    pub desktop_press: Option<DesktopPress>,
+    /// Where the pointer last was on the desktop, for the cell a new folder takes.
+    pub desktop_pointer: (f64, f64),
+    /// Selected desktop icons, by position in the Desktop folder's items.
+    pub desktop_selection: BTreeSet<usize>,
+    /// The icon a Shift click's range runs from: the last one clicked without Shift.
+    desktop_anchor: Option<usize>,
+    /// The entries of the desktop icons' right-click menu while it is open.
+    pub desktop_menu: Vec<desktop_menu::Entry>,
+    /// The box being dragged across the desktop to select icons.
+    pub desktop_band: Option<DesktopBand>,
+    /// The icons a drag from the desktop carries, while it lasts.
+    pub desktop_dragged: Vec<usize>,
+    /// Where a drag of files is over the primary background, while it is.
+    pub desktop_drag_at: Option<(f64, f64)>,
+    /// A drop on the desktop waiting for Copy here or Move here, with the cell it landed on.
+    pub desktop_drop: Option<(files::PendingDrop, Option<crate::desktop_folder::Cell>)>,
+    /// Files dropped on a cell, placed there as they arrive.
+    desktop_landing: Option<Landing>,
+    /// Whether the backend shows a drag's ghost image under the pointer; where it does not,
+    /// the desktop draws its dragged icons following the pointer while they are over it.
+    pub drag_icon: bool,
+    /// The file the icon cells are published in for the window manager, which only a
+    /// session's desktop writes.
+    icons_path: Option<std::path::PathBuf>,
+    /// Whether the icons' cells are kept in the layout file, as a session's desktop keeps
+    /// them; a desktop built for a test keeps them in memory only.
+    keeps_layout: bool,
+    /// The icon cells last published for the window manager.
+    published_icons: Option<Vec<Rect>>,
+    last_click: Option<(u32, usize)>,
+    /// Windows minimized by the show desktop button, to restore on the next press.
+    pub shown_desktop: Vec<u64>,
+    /// Volume, or `None` while audio is unavailable.
+    pub volume: Option<Volume>,
+    /// Whether the volume slider is being dragged.
+    pub volume_drag: bool,
+    /// The clock text.
+    pub clock: String,
+    /// The month the calendar shows, offset in months from the current one.
+    pub calendar_offset: i32,
+    /// Requests for the backend, taken by the main loop.
+    pub requests: Vec<Request>,
+    cursor_pointer: bool,
+    /// Which desktop launcher icons are resolved, by index and scale.
+    desktop_icons: HashMap<(usize, i32), Option<Arc<Pixmap>>>,
+    /// The file manager.
+    pub files: files::Manager,
+    /// The start button icon resolved for the current setting and size.
+    start_icon: Option<(String, u32, Option<Arc<Pixmap>>)>,
+    /// Whether an auto-hiding bar is tucked away.
+    panel_hidden: bool,
+    /// Whether the window manager said a window reaches the bar's edge, which attaches a
+    /// floating bar to it.
+    bar_attached: bool,
+    /// How far a floating bar has gone toward the edge: 0 floating, 1 attached.
+    bar_attach: f32,
+    /// The bar's move toward or away from the edge: where it started, where it goes, and
+    /// when it began.
+    bar_attach_anim: Option<(f32, f32, Instant)>,
+    /// When a hiding bar goes away, after the pointer left it.
+    hide_at: Option<Instant>,
+    /// A slider value not yet applied to the bar, with the key it is for and
+    /// when the drag has rested long enough to apply it.
+    preview: Option<(String, i32, Instant)>,
+    /// Whether the display cannot show alpha, so the bar is blended over
+    /// the wallpaper before it is handed over, as on X11 without a
+    /// compositing manager.
+    pub opaque_output: bool,
+    /// Where the panel surface's top-left corner sits in the primary
+    /// background's logical coordinates, for that blending.
+    pub panel_offset: (i32, i32),
+    /// The wallpaper pictures shrunk for the settings window's previews, by
+    /// the path and the length of the longer side in pixels each was made
+    /// for: a light and a dark picture, at the theme cards' size and the
+    /// Wallpaper page's.
+    pub preview_wallpaper: HashMap<(std::path::PathBuf, u32), Arc<Pixmap>>,
+    /// Icons docked in the system tray.
+    pub tray_icons: usize,
+    /// The strip of the bar the tray icons occupy, in panel coordinates.
+    pub tray_slot: Option<Rect>,
+    /// Whether the tray strip moved since the tray was last placed.
+    pub tray_moved: bool,
+    /// The desktop Settings portal the shell serves, when it holds the name.
+    pub portal: Option<crate::portal::Portal>,
+    /// How many virtual desktops the window manager reports.
+    pub desktops: u32,
+    /// The index of the current virtual desktop.
+    pub current_desktop: u32,
+    /// The name of the display backend the shell runs on, for the About page.
+    pub backend: String,
+    /// The notifications, their popups, and Do not disturb.
+    pub notifications: NotificationState,
+    /// Whether the shell serves notifications, which puts the bell on the bar.
+    pub notifications_served: bool,
+    /// Geometry of the notification stack's surface.
+    notify_geometry: Geometry,
+    notify_pix: Option<Pixmap>,
+}
+
+/// The display a bar edge the window manager names by its corner belongs to: `Some(None)`
+/// for the primary display, `Some(Some(id))` for another, and `None` for a corner no known
+/// display has. With no displays known at all, every corner is the primary one's.
+///
+/// # Arguments
+/// * `displays` - Every display's number and corner, the primary one first.
+/// * `origin` - The corner the window manager named.
+fn edge_display(displays: &[(u32, (i32, i32))], origin: (i32, i32)) -> Option<Option<u32>> {
+    match displays.iter().position(|(_, o)| *o == origin) {
+        Some(0) => Some(None),
+        Some(index) => Some(Some(displays[index].0)),
+        None if displays.is_empty() => Some(None),
+        None => None,
+    }
+}
+
+/// The installed applications as the settings allow them: without terminals, or the entries that
+/// run in one, where `terminals` is off, and without the settings window's entry where
+/// `settings` is.
+fn load_apps(config: &Config) -> Apps {
+    let mut apps = Apps::load(entries::find_terminal(config).is_some());
+    if !config.terminals {
+        apps.without_terminals();
+    }
+    if !config.settings_window {
+        apps.without_shell_settings();
+    }
+    apps
+}
+
+impl Desktop {
+    /// Loads settings, fonts, icons and applications, and applies the
+    /// settings to the session: the window manager's theme, and the file
+    /// manager's desktop entry and folder default.
+    pub fn new() -> Desktop {
+        Desktop::load(true)
+    }
+
+    /// Loads settings, fonts, icons and applications.
+    ///
+    /// # Arguments
+    /// * `session` - Whether to apply the settings to the session as well,
+    ///   as `new` does; without it nothing is written to the user's files
+    ///   and no window manager is signaled, which is how tests build one.
+    pub fn load(session: bool) -> Desktop {
+        let mut config = Config::load();
+        ui::set_theme(config.theme);
+        ui::set_style(config.window);
+        let mut portal = None;
+        if session {
+            crate::i18n::select(config.language.as_deref());
+            crate::wmtheme::apply(&config);
+            let decision = crate::toolkits::apply(&config);
+            portal = crate::portal::Portal::start(&decision);
+        }
+        let fonts = Fonts::new();
+        let icons = Icons::new(config.icon_theme.as_deref());
+        if session && config.files_manager {
+            entries::ensure_files_entry();
+        }
+        if session {
+            entries::ensure_settings_entry();
+        }
+        let apps = load_apps(&config);
+        seed_favorites(&mut config, &apps);
+        let logo = crate::render::load_raster(std::path::Path::new(crate::config::LOGO_PATH), 0);
+        let mut desktop = Desktop {
+            config,
+            fonts,
+            icons,
+            apps,
+            logo,
+            wallpapers: HashMap::new(),
+            panel: Geometry::default(),
+            backgrounds: Vec::new(),
+            panel_pix: None,
+            panel_visible: Vec::new(),
+            panel_dirty: false,
+            published_tasks: Vec::new(),
+            bars: Vec::new(),
+            current_bar: None,
+            popup_bar: None,
+            display_origins: Vec::new(),
+            bar_edges: Vec::new(),
+            toplevels: Vec::new(),
+            popup: Popup::None,
+            hover: Hover::None,
+            hover_since: Instant::now(),
+            tooltip: None,
+            pointer: (-1.0, -1.0),
+            menu: menu::MenuState::default(),
+            launcher: launcher::LauncherState::default(),
+            settings: settings::SettingsState::default(),
+            dialog: ui::dialog::DialogState::default(),
+            desktop_items: Vec::new(),
+            desktop_layout: HashMap::new(),
+            desktop_press: None,
+            desktop_pointer: (-1.0, -1.0),
+            desktop_selection: BTreeSet::new(),
+            desktop_anchor: None,
+            desktop_menu: Vec::new(),
+            desktop_band: None,
+            desktop_dragged: Vec::new(),
+            desktop_drag_at: None,
+            desktop_drop: None,
+            desktop_landing: None,
+            drag_icon: false,
+            icons_path: session.then(selkies_draw::desktop_icons::path).flatten(),
+            keeps_layout: session,
+            published_icons: None,
+            last_click: None,
+            shown_desktop: Vec::new(),
+            volume: None,
+            volume_drag: false,
+            clock: String::new(),
+            calendar_offset: 0,
+            requests: Vec::new(),
+            cursor_pointer: false,
+            desktop_icons: HashMap::new(),
+            files: files::Manager::new(),
+            start_icon: None,
+            panel_hidden: false,
+            bar_attached: false,
+            bar_attach: 0.0,
+            bar_attach_anim: None,
+            hide_at: None,
+            preview: None,
+            opaque_output: false,
+            panel_offset: (0, 0),
+            preview_wallpaper: HashMap::new(),
+            tray_icons: 0,
+            tray_slot: None,
+            tray_moved: false,
+            portal,
+            desktops: 1,
+            current_desktop: 0,
+            backend: String::new(),
+            notifications: NotificationState::default(),
+            notifications_served: false,
+            notify_geometry: Geometry::default(),
+            notify_pix: None,
+        };
+        desktop.load_desktop_items();
+        desktop.place_desktop_launchers();
+        desktop.requests.push(desktop.panel_request());
+        desktop
+            .requests
+            .push(Request::Bars(desktop.config.panel_every_display));
+        desktop
+    }
+
+    /// The space the bar reserves along its edge: its height and the margin
+    /// that floats it, whether it floats at the moment or not, so attaching
+    /// it moves no window.
+    pub fn reserved_height(&self) -> i32 {
+        self.config.panel_height + self.float_margin()
+    }
+
+    /// The margin a floating bar keeps from the screen edges: none when the
+    /// bar does not float.
+    pub fn float_margin(&self) -> i32 {
+        if self.config.panel_float {
+            self.config.panel_margin
+        } else {
+            0
+        }
+    }
+
+    /// How far the bar has gone toward the edge, 0 floating and 1 attached;
+    /// a bar that does not float is attached.
+    fn attach_progress(&self) -> f32 {
+        if self.float_margin() == 0 {
+            1.0
+        } else {
+            self.bar_attach
+        }
+    }
+
+    /// Takes the window manager's word on whether a window reaches the
+    /// bar's edge, moving a floating bar to the edge or back off it.
+    ///
+    /// # Arguments
+    /// * `attached` - Whether a window reaches the edge.
+    pub fn set_bar_attached(&mut self, attached: bool) {
+        if self.bar_attached == attached {
+            return;
+        }
+        self.bar_attached = attached;
+        let target = if attached { 1.0 } else { 0.0 };
+        self.bar_attach_anim = Some((self.bar_attach, target, Instant::now()));
+        self.panel_dirty = true;
+    }
+
+    /// Puts a bar's state into the panel's fields and the panel's into the bar's, both ways.
+    fn swap_bar(&mut self, index: usize) {
+        let bar = &mut self.bars[index];
+        std::mem::swap(&mut self.panel, &mut bar.geometry);
+        std::mem::swap(&mut self.panel_pix, &mut bar.pix);
+        std::mem::swap(&mut self.panel_visible, &mut bar.visible);
+        std::mem::swap(&mut self.panel_dirty, &mut bar.dirty);
+        std::mem::swap(&mut self.bar_attached, &mut bar.attached);
+        std::mem::swap(&mut self.bar_attach, &mut bar.attach);
+        std::mem::swap(&mut self.bar_attach_anim, &mut bar.attach_anim);
+        std::mem::swap(&mut self.published_tasks, &mut bar.published_tasks);
+        std::mem::swap(&mut self.panel_offset, &mut bar.offset);
+        std::mem::swap(&mut self.hover, &mut bar.hover);
+        std::mem::swap(&mut self.hover_since, &mut bar.hover_since);
+        std::mem::swap(&mut self.tooltip, &mut bar.tooltip);
+        std::mem::swap(&mut self.pointer, &mut bar.pointer);
+    }
+
+    /// Runs code with a display's bar standing in for the panel, `None` for a bar that is
+    /// not there. A popup that opens or closes meanwhile has every bar drawn again, since
+    /// a popup belongs to one bar and leaves the others.
+    ///
+    /// # Arguments
+    /// * `id` - The bar's display.
+    /// * `f` - What runs.
+    pub fn with_bar<R>(&mut self, id: u32, f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
+        let index = self.bars.iter().position(|b| b.id == id)?;
+        let popup = (self.popup, self.popup_bar);
+        self.swap_bar(index);
+        self.current_bar = Some(id);
+        let result = f(self);
+        self.current_bar = None;
+        self.swap_bar(index);
+        if (self.popup, self.popup_bar) != popup {
+            self.mark_bars_dirty();
+        }
+        Some(result)
+    }
+
+    /// Has the panel and every bar drawn again.
+    fn mark_bars_dirty(&mut self) {
+        self.panel_dirty = true;
+        for bar in &mut self.bars {
+            bar.dirty = true;
+        }
+    }
+
+    /// Whether a fullscreen window covers the primary bar: the active window, fullscreen on the
+    /// primary display or on none the backend named. The compositor draws such a window over the
+    /// bar, so the tray's icon strip, which the X server draws over the bar on its own, is taken
+    /// away with it rather than left floating over the window.
+    pub fn primary_bar_covered(&self) -> bool {
+        let primary = self.display_origins.first().map(|(id, _)| *id);
+        self.toplevels.iter().any(|t| {
+            t.state.fullscreen
+                && t.state.active
+                && !t.state.minimized
+                && !t.state.hidden
+                && (t.display.is_none() || t.display == primary)
+        })
+    }
+
+    /// Whether the panel is itself rather than a display's bar standing in for it.
+    pub fn is_primary_bar(&self) -> bool {
+        self.current_bar.is_none()
+    }
+
+    /// Sets where a display's bar surface sits in its background's logical coordinates.
+    pub fn set_bar_offset(&mut self, id: u32, offset: (i32, i32)) {
+        if let Some(bar) = self.bars.iter_mut().find(|b| b.id == id) {
+            bar.offset = offset;
+        }
+    }
+
+    /// The surface of the bar standing in for the panel at the moment.
+    fn current_bar_surface(&self) -> SurfaceId {
+        self.current_bar.map_or(SurfaceId::Panel, SurfaceId::Bar)
+    }
+
+    /// Whether the bar standing in for the panel shows a window: the bar of the window's
+    /// display, the panel's for a window on a display without a bar of its own, and every
+    /// bar every window while displays other than the primary have none.
+    pub fn task_on_bar(&self, index: usize) -> bool {
+        if self.bars.is_empty() {
+            return true;
+        }
+        let display = self.toplevels.get(index).and_then(|t| t.display);
+        match self.current_bar {
+            Some(bar) => display == Some(bar),
+            None => !display.is_some_and(|d| self.bars.iter().any(|b| b.id == d)),
+        }
+    }
+
+    /// The displays whose bars are there, besides the primary one.
+    pub fn bar_ids(&self) -> Vec<u32> {
+        self.bars.iter().map(|b| b.id).collect()
+    }
+
+    /// Renders a display's bar when it changed.
+    ///
+    /// # Arguments
+    /// * `id` - The bar's display.
+    pub fn render_bar(&mut self, id: u32) -> Option<Frame<'_>> {
+        let parts = self.with_bar(id, |d| d.draw_panel()).flatten()?;
+        let bar = self.bars.iter().find(|b| b.id == id)?;
+        Some(parts.frame(bar.pix.as_ref()?))
+    }
+
+    /// Takes the window manager's word on which displays have a window at their bar's
+    /// edge, each display named by where its top-left corner sits.
+    ///
+    /// # Arguments
+    /// * `edges` - Each display's corner and whether a window reaches its bar's edge.
+    pub fn set_bars_attached(&mut self, edges: &[((i32, i32), bool)]) {
+        self.bar_edges = edges.to_vec();
+        self.apply_bar_edges();
+    }
+
+    /// Moves each bar to its edge or off it as the window manager's last word has it.
+    ///
+    /// The word and the displays it names reach the shell on separate connections, so it is
+    /// read again when the displays change: a corner no known display has waits for one
+    /// rather than going to the wrong bar. Only a backend that names no displays at all has
+    /// the word taken for the primary one.
+    fn apply_bar_edges(&mut self) {
+        for (origin, attached) in self.bar_edges.clone() {
+            match edge_display(&self.display_origins, origin) {
+                Some(None) => self.set_bar_attached(attached),
+                Some(Some(id)) => {
+                    self.with_bar(id, |d| d.set_bar_attached(attached));
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Advances the bar's move toward or away from the edge.
+    fn step_bar_attach(&mut self, now: Instant) {
+        let Some((from, to, start)) = self.bar_attach_anim else {
+            return;
+        };
+        let t = (now.saturating_duration_since(start).as_secs_f32() / BAR_ATTACH.as_secs_f32()).min(1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        self.bar_attach = from + (to - from) * eased;
+        if t >= 1.0 {
+            self.bar_attach = to;
+            self.bar_attach_anim = None;
+        }
+        self.panel_dirty = true;
+    }
+
+    /// The request that places the bar as the settings have it.
+    fn panel_request(&self) -> Request {
+        Request::Panel {
+            top: self.panel_top(),
+            height: self.reserved_height(),
+            autohide: self.config.panel_autohide,
+        }
+    }
+
+    /// Whether the bar is tucked away at the moment.
+    pub fn panel_hidden(&self) -> bool {
+        self.config.panel_autohide && self.panel_hidden && self.popup == Popup::None
+    }
+
+    /// The strip along the edge that brings a hidden bar back.
+    pub fn reveal_strip(&self) -> Rect {
+        let bar = self.bar_rect();
+        if self.panel_top() {
+            Rect::new(bar.x, 0, bar.w, REVEAL_STRIP)
+        } else {
+            Rect::new(bar.x, self.panel.height - REVEAL_STRIP, bar.w, REVEAL_STRIP)
+        }
+    }
+
+    /// Shows a hidden bar and cancels a pending hide.
+    fn reveal_panel(&mut self) {
+        self.hide_at = None;
+        if self.panel_hidden {
+            self.panel_hidden = false;
+            self.panel_dirty = true;
+        }
+    }
+
+    /// Starts the timer that hides the bar once the pointer has left it.
+    fn schedule_hide(&mut self) {
+        if self.config.panel_autohide && self.popup == Popup::None && !self.panel_hidden {
+            self.hide_at = Some(Instant::now() + Duration::from_millis(HIDE_DELAY_MS));
+        }
+    }
+
+    /// Records how many icons the system tray holds.
+    ///
+    /// # Arguments
+    /// * `count` - The number of docked icons.
+    pub fn set_tray_icons(&mut self, count: usize) {
+        if self.tray_icons != count {
+            self.tray_icons = count;
+            self.panel_dirty = true;
+        }
+    }
+
+    /// Applies a bar or window setting on screen without writing it, while
+    /// a slider is dragged.
+    ///
+    /// # Arguments
+    /// * `key` - `panel_height`, `panel_width`, `panel_opacity`,
+    ///   `panel_margin`, `panel_corners` or `window_corners`.
+    /// * `value` - The value.
+    pub fn preview_panel(&mut self, key: &str, value: i32) {
+        let rest = if key == "panel_width" {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(PREVIEW_DELAY_MS)
+        };
+        self.preview = Some((key.to_string(), value, Instant::now() + rest));
+        if rest.is_zero() {
+            self.apply_preview();
+        }
+        self.panel_dirty = true;
+    }
+
+    /// Forgets a slider value not yet applied, when the drag ends and the
+    /// setting is written instead.
+    pub fn cancel_preview(&mut self) {
+        self.preview = None;
+    }
+
+    /// Applies the slider value whose rest time has passed.
+    fn apply_preview(&mut self) {
+        let Some((key, value, _)) = self.preview.take() else {
+            return;
+        };
+        let (was_top, was_height, was_autohide) = (
+            self.panel_top(),
+            self.reserved_height(),
+            self.config.panel_autohide,
+        );
+        match key.as_str() {
+            "panel_height" => self.config.panel_height = value,
+            "panel_width" => self.config.panel_width = value,
+            "panel_opacity" => self.config.panel_opacity = value,
+            "panel_margin" => self.config.panel_margin = value,
+            "panel_corners" => self.config.panel_corners = value,
+            "window_corners" => self.config.window.corners = value,
+            _ => return,
+        }
+        self.sync_panel(was_top, was_height, was_autohide);
+        self.panel_dirty = true;
+    }
+
+    /// Icon size of the bar's items, grown with the bar.
+    pub fn panel_icon_size(&self) -> i32 {
+        (self.config.panel_height * ui::ICON_SIZE / ui::PANEL_HEIGHT).clamp(16, 36)
+    }
+
+    /// The start button's icon at a size: the one the settings name, else the Selkies logo,
+    /// its vector where installed. An SVG is drawn in one solid color while the flat setting
+    /// is on, the theme's text color, so it is light on a dark theme and dark on a light one;
+    /// a raster icon keeps its colors.
+    ///
+    /// # Arguments
+    /// * `size` - Logical pixel size.
+    pub fn start_icon(&mut self, size: i32) -> Option<Arc<Pixmap>> {
+        let px = (size * self.panel.scale.max(1)) as u32;
+        let source = self.config.start_icon.clone().or_else(|| {
+            std::path::Path::new(crate::config::LOGO_SVG_PATH)
+                .is_file()
+                .then(|| crate::config::LOGO_SVG_PATH.to_string())
+        });
+        let svg = source.as_deref().is_some_and(|name| {
+            self.icons
+                .locate(name, px)
+                .and_then(|path| path.extension().map(|e| e.eq_ignore_ascii_case("svg")))
+                .unwrap_or(false)
+        });
+        let flat = (self.config.start_icon_flat && svg).then(|| ui::theme().text);
+        let key = format!("{source:?}:{:?}", flat.map(|c| c.to_color_u8()));
+        if let Some((cached, cached_px, icon)) = &self.start_icon
+            && *cached == key
+            && *cached_px == px
+        {
+            return icon.clone();
+        }
+        let icon = source
+            .as_deref()
+            .and_then(|name| self.icons.get(name, px))
+            .map(|icon| match flat {
+                Some(color) => Arc::new(crate::render::flatten_pixmap(&icon, color)),
+                None => icon,
+            })
+            .or_else(|| {
+                self.logo
+                    .as_ref()
+                    .and_then(|logo| crate::render::resize_pixmap(logo, px))
+                    .map(Arc::new)
+            });
+        self.start_icon = Some((key, px, icon.clone()));
+        icon
+    }
+
+    /// Tells the backend where the bar goes when the edge, reserved height
+    /// or hiding changed.
+    ///
+    /// # Arguments
+    /// * `was_top` - Whether the bar sat along the top edge before.
+    /// * `was_height` - The height it reserved before, margin included.
+    /// * `was_autohide` - Whether it hid before.
+    fn sync_panel(&mut self, was_top: bool, was_height: i32, was_autohide: bool) {
+        if self.panel_top() != was_top
+            || self.reserved_height() != was_height
+            || self.config.panel_autohide != was_autohide
+        {
+            self.requests.push(self.panel_request());
+            self.redraw_backgrounds();
+        }
+        if !self.config.panel_autohide {
+            self.panel_hidden = false;
+            self.hide_at = None;
+        }
+        crate::i18n::select(self.config.language.as_deref());
+        ui::set_theme(self.config.theme);
+        ui::set_style(self.config.window);
+        self.fonts.clear_cache();
+        self.menu.invalidate();
+        self.launcher.invalidate();
+        self.notifications.invalidate();
+        self.redraw_backgrounds();
+        for window in &mut self.files.windows {
+            window.dirty = true;
+        }
+        self.settings.dirty = true;
+        self.start_icon = None;
+        for toplevel in &mut self.toplevels {
+            toplevel.icon = None;
+        }
+    }
+
+    /// Opens a picker for the start button icon, starting in the pictures folder.
+    pub fn pick_start_icon(&mut self) {
+        self.close_popup();
+        let start = self
+            .files
+            .places
+            .iter()
+            .find(|p| p.icon == "folder-pictures")
+            .map(|p| p.path.clone());
+        self.open_files(
+            start,
+            Some(files::Picker {
+                target: files::PickTarget::StartIcon,
+                mimes: vec!["image/png", "image/jpeg", "image/svg+xml"],
+            }),
+        );
+    }
+
+    /// Opens a file manager window.
+    ///
+    /// # Arguments
+    /// * `dir` - The folder to show, or `None` for the home directory.
+    /// * `picker` - What the window picks for, when it is a picker.
+    ///
+    /// # Returns
+    /// The window's number.
+    pub fn open_files(&mut self, dir: Option<std::path::PathBuf>, picker: Option<files::Picker>) -> u32 {
+        let defaults = files::Defaults {
+            view: if self.config.files_list {
+                files::View::List
+            } else {
+                files::View::Icons
+            },
+            sort: match self.config.files_sort.as_str() {
+                "size" => files::SortKey::Size,
+                "modified" => files::SortKey::Modified,
+                "type" => files::SortKey::Kind,
+                _ => files::SortKey::Name,
+            },
+            show_hidden: self.config.files_hidden,
+        };
+        let id = self.files.open(dir, picker, defaults);
+        let title = self.files.window(id).map(|w| w.title()).unwrap_or_default();
+        let icon = self
+            .icons
+            .get("system-file-manager", 48)
+            .map(|icon| Box::new((*icon).clone()));
+        self.requests.push(Request::OpenWindow {
+            id,
+            title,
+            width: files::DEFAULT_WIDTH,
+            height: files::DEFAULT_HEIGHT,
+            app_id: entries::FILES_APP_ID,
+            icon_name: "system-file-manager",
+            icon,
+        });
+        id
+    }
+
+    /// Opens a picker for a wallpaper image, starting in the pictures folder.
+    ///
+    /// # Arguments
+    /// * `key` - The config key the chosen path is written to.
+    /// * `monitor` - The monitor the settings window showed, restored afterwards.
+    pub fn pick_wallpaper(&mut self, key: &'static str, monitor: Option<u32>) {
+        self.close_popup();
+        let start = self
+            .files
+            .places
+            .iter()
+            .find(|p| p.icon == "folder-pictures")
+            .map(|p| p.path.clone());
+        self.open_files(
+            start,
+            Some(files::Picker {
+                target: files::PickTarget::Wallpaper { key, monitor },
+                mimes: vec!["image/png", "image/jpeg"],
+            }),
+        );
+    }
+
+    /// The numbers of every window of the shell's own, the file manager's
+    /// and the settings window, for rendering them in turn.
+    pub fn window_ids(&self) -> Vec<u32> {
+        let mut ids = self.files.ids();
+        ids.extend(self.settings.id);
+        ids.extend(self.dialog.id);
+        ids
+    }
+
+    /// Whether a window number is the settings window's.
+    fn is_settings(&self, id: u32) -> bool {
+        self.settings.id == Some(id)
+    }
+
+    /// Whether a window number is the desktop dialog's.
+    fn is_dialog(&self, id: u32) -> bool {
+        self.dialog.id == Some(id)
+    }
+
+    /// Opens the settings window, on a page when one is asked for, as a
+    /// toplevel of the shell's own sized for the screen.  A window already
+    /// open is closed first and opened again, since the shell cannot ask
+    /// the window manager to raise one of its own windows.
+    ///
+    /// # Arguments
+    /// * `page` - The page to show, or `None` to keep the last one.
+    pub fn open_settings(&mut self, page: Option<Page>) {
+        self.close_popup();
+        if !self.config.settings_window {
+            return;
+        }
+        if self.settings.id.is_some() {
+            settings::close(self);
+        }
+        let id = self.files.allocate_id();
+        self.settings.open(page);
+        self.settings.id = Some(id);
+        let screen_h = self
+            .primary_background()
+            .filter(|b| b.geometry.configured)
+            .map_or(self.panel.height, |b| b.geometry.height);
+        let width = settings::WIDTH
+            .min(self.panel.width - 2 * ui::POPUP_MARGIN)
+            .max(ui::WINDOW_MIN_WIDTH);
+        let height = settings::HEIGHT
+            .min(screen_h - self.reserved_height() - 2 * ui::POPUP_MARGIN)
+            .max(ui::WINDOW_MIN_HEIGHT);
+        let icon = self
+            .icons
+            .get("preferences-system", 48)
+            .map(|icon| Box::new((*icon).clone()));
+        self.requests.push(Request::OpenWindow {
+            id,
+            title: tr("Settings").to_string(),
+            width,
+            height,
+            app_id: entries::SETTINGS_APP_ID,
+            icon_name: "preferences-system",
+            icon,
+        });
+    }
+
+    /// Marks the settings window for redraw.
+    pub fn redraw_settings(&mut self) {
+        self.settings.dirty = true;
+    }
+
+    /// Reads the applications, icons and settings again.
+    pub fn reload(&mut self) {
+        let (was_top, was_height, was_autohide) = (
+            self.panel_top(),
+            self.reserved_height(),
+            self.config.panel_autohide,
+        );
+        let had_bars = self.config.panel_every_display;
+        self.config = Config::load();
+        if self.config.panel_every_display != had_bars {
+            self.requests.push(Request::Bars(self.config.panel_every_display));
+        }
+        self.sync_panel(was_top, was_height, was_autohide);
+        crate::wmtheme::apply(&self.config);
+        let decision = crate::toolkits::apply(&self.config);
+        if let Some(portal) = self.portal.as_mut() {
+            portal.update(&decision);
+        }
+        self.icons = Icons::new(self.config.icon_theme.as_deref());
+        self.apps = load_apps(&self.config);
+        seed_favorites(&mut self.config, &self.apps);
+        self.wallpapers.clear();
+        self.load_desktop_items();
+        for toplevel in &mut self.toplevels {
+            toplevel.icon = None;
+        }
+        self.menu.invalidate();
+        self.launcher.invalidate();
+        self.panel_dirty = true;
+        self.repaint_wallpapers();
+    }
+
+    /// Reads the settings again and applies what changed on screen, without
+    /// rescanning the applications.
+    pub fn apply_config(&mut self) {
+        let (was_top, was_height, was_autohide) = (
+            self.panel_top(),
+            self.reserved_height(),
+            self.config.panel_autohide,
+        );
+        let had_bars = self.config.panel_every_display;
+        self.config = Config::load();
+        if self.config.panel_every_display != had_bars {
+            self.requests.push(Request::Bars(self.config.panel_every_display));
+        }
+        seed_favorites(&mut self.config, &self.apps);
+        self.menu.invalidate();
+        self.sync_panel(was_top, was_height, was_autohide);
+        crate::wmtheme::apply(&self.config);
+        let decision = crate::toolkits::apply(&self.config);
+        if let Some(portal) = self.portal.as_mut() {
+            portal.update(&decision);
+        }
+        self.wallpapers.retain(|_, image| image.is_some());
+        self.repaint_wallpapers();
+        self.panel_dirty = true;
+    }
+
+    /// Whether the wallpapers show their dark pictures: as the variant setting says, else as
+    /// the theme being drawn is dark, its text light, which a theme preview sets for its own.
+    pub fn wallpaper_dark(&self) -> bool {
+        match self.config.wallpaper_variant {
+            crate::config::WallpaperVariant::Light => false,
+            crate::config::WallpaperVariant::Dark => true,
+            crate::config::WallpaperVariant::Automatic => ui::luminance(ui::theme().text) > 0.5,
+        }
+    }
+
+    /// A wallpaper as a monitor paints it: a color nobody chose is black behind a dark
+    /// wallpaper and the theme's window color behind a light one, the light scheme's under a
+    /// dark theme, and a wallpaper package is the picture of its variant for the size.
+    ///
+    /// # Arguments
+    /// * `wallpaper` - The wallpaper settings.
+    /// * `size` - The size in physical pixels the picture fills.
+    pub fn painted_wallpaper(
+        &self,
+        mut wallpaper: crate::config::Wallpaper,
+        size: (u32, u32),
+    ) -> crate::config::Wallpaper {
+        let dark = self.wallpaper_dark();
+        if !wallpaper.color_set {
+            let theme = ui::theme();
+            wallpaper.color = if dark {
+                crate::render::rgb(0, 0, 0)
+            } else if ui::luminance(theme.popup) > 0.5 {
+                theme.popup
+            } else {
+                light_wallpaper()
+            };
+        }
+        wallpaper.image = wallpaper
+            .image
+            .and_then(|path| crate::wallpapers::resolve(&path, dark, size));
+        wallpaper
+    }
+
+    /// A wallpaper image at its native size, decoded once per path.
+    ///
+    /// # Arguments
+    /// * `path` - The image file.
+    pub fn wallpaper_image(&mut self, path: &std::path::Path) -> Option<Arc<Pixmap>> {
+        if let Some(image) = self.wallpapers.get(path) {
+            return image.clone();
+        }
+        let image = crate::render::load_raster(path, 0).map(Arc::new);
+        self.wallpapers.insert(path.to_path_buf(), image.clone());
+        image
+    }
+
+    /// The monitors in the order the settings number them: the primary
+    /// background's monitors first, then each other background's, as
+    /// (background id, monitor index) pairs.
+    pub fn monitor_list(&self) -> Vec<(u32, usize)> {
+        let mut list = Vec::new();
+        for background in self.backgrounds.iter().filter(|b| b.primary) {
+            for index in 0..background.monitors.len().max(1) {
+                list.push((background.id, index));
+            }
+        }
+        for background in self.backgrounds.iter().filter(|b| !b.primary) {
+            for index in 0..background.monitors.len().max(1) {
+                list.push((background.id, index));
+            }
+        }
+        list
+    }
+
+    /// The settings number of a monitor, starting at 1.
+    ///
+    /// # Arguments
+    /// * `background` - The background surface.
+    /// * `index` - The monitor's index within the surface.
+    pub fn monitor_number(&self, background: u32, index: usize) -> u32 {
+        self.monitor_list()
+            .iter()
+            .position(|(b, i)| *b == background && *i == index)
+            .map_or(1, |p| p as u32 + 1)
+    }
+
+    /// The background surface with a backend number.
+    ///
+    /// # Arguments
+    /// * `id` - The backend's number for the surface.
+    pub fn background(&self, id: u32) -> Option<&BackgroundSurface> {
+        self.backgrounds.iter().find(|b| b.id == id)
+    }
+
+    /// The background surface that carries the desktop icons.
+    pub fn primary_background(&self) -> Option<&BackgroundSurface> {
+        self.backgrounds.iter().find(|b| b.primary)
+    }
+
+    /// The numbers of every background surface, for rendering them in turn.
+    pub fn background_ids(&self) -> Vec<u32> {
+        self.backgrounds.iter().map(|b| b.id).collect()
+    }
+
+    /// Marks every background for redraw.
+    fn redraw_backgrounds(&mut self) {
+        for background in &mut self.backgrounds {
+            background.dirty = true;
+        }
+    }
+
+    /// Paints the wallpapers again from the settings, dropping the layers
+    /// cached with the old color and image.
+    pub fn repaint_wallpapers(&mut self) {
+        for background in &mut self.backgrounds {
+            background.wallpaper_cache = None;
+            background.scene = None;
+            background.dirty = true;
+        }
+    }
+
+    /// Takes the requests the handled events produced, the notification
+    /// server's signals among them.
+    pub fn take_requests(&mut self) -> Vec<Request> {
+        self.requests.extend(self.notifications.take_signals());
+        std::mem::take(&mut self.requests)
+    }
+
+    /// Takes in a notification the server received.
+    ///
+    /// # Arguments
+    /// * `note` - The notification.
+    pub fn notify(&mut self, note: Notification) {
+        self.notifications.receive(note, Instant::now());
+        self.panel_dirty = true;
+    }
+
+    /// Closes a notification its sender withdrew.
+    ///
+    /// # Arguments
+    /// * `id` - The notification.
+    pub fn withdraw_notification(&mut self, id: u32) {
+        self.notifications
+            .close(id, crate::notify::CloseReason::Closed, Instant::now());
+    }
+
+    /// Turns Do not disturb on or off.
+    ///
+    /// # Arguments
+    /// * `on` - Whether popups are held back.
+    pub fn set_dnd(&mut self, on: bool) {
+        self.notifications.dnd = on;
+        self.panel_dirty = true;
+    }
+
+    /// Removes every notification, closing the open ones as dismissed.
+    pub fn clear_notifications(&mut self) {
+        self.notifications.clear(Instant::now());
+        self.set_hover(Hover::None);
+        self.panel_dirty = true;
+    }
+
+    /// Renders the notification stack when it changed, asking the backend
+    /// first for the surface size the stack needs, and for none when it is
+    /// empty.
+    ///
+    /// # Returns
+    /// The frame to present, or `None` when nothing changed or the surface
+    /// is not configured yet.
+    pub fn render_notifications(&mut self) -> Option<Frame<'_>> {
+        let (width, height) = self.notifications.surface_size();
+        let top = notifications::EDGE
+            + if self.panel_top() {
+                self.reserved_height()
+            } else {
+                0
+            };
+        let wanted = (width, height, if height > 0 { top } else { 0 });
+        if wanted != self.notifications.requested {
+            self.notifications.requested = wanted;
+            self.requests.push(Request::Notifications { width, height, top });
+            if height == 0 {
+                self.notify_geometry = Geometry::default();
+                self.notify_pix = None;
+            }
+        }
+        let geometry = self.notify_geometry;
+        if height == 0 || !geometry.configured {
+            return None;
+        }
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let mut pix = match self.notify_pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => pix,
+            _ => Pixmap::new(w, h)?,
+        };
+        let opaque = self.opaque_output;
+        let drawn = notifications::render(self, &mut pix, geometry.scale, Instant::now(), opaque);
+        self.notify_pix = Some(pix);
+        let (visible, input, damage) = drawn?;
+        Some(Frame {
+            pixmap: self.notify_pix.as_ref()?,
+            scale: geometry.scale,
+            damage,
+            input,
+            visible,
+            grab: false,
+            bar: None,
+        })
+    }
+
+    /// Whether the bar sits along the top edge.
+    pub fn panel_top(&self) -> bool {
+        self.config.panel_position == crate::config::PanelPosition::Top
+    }
+
+    /// The rectangle of the bar's items in panel surface coordinates: its
+    /// width a share of the screen's, centered, pulled in from the edges by
+    /// the margin while the bar floats, and spread to the screen's share and
+    /// centered in the band the bar reserves once it is attached, the move
+    /// between the two following the bar's progress toward the edge.
+    pub fn bar_rect(&self) -> Rect {
+        let height = self.config.panel_height;
+        let margin = self.float_margin() as f32;
+        let t = self.attach_progress();
+        let (x, width) = self.bar_span(t);
+        let inset = (margin * (1.0 - t / 2.0)).round() as i32;
+        if self.panel_top() {
+            return Rect::new(x, inset, width, height);
+        }
+        Rect::new(x, self.panel.height - height - inset, width, height)
+    }
+
+    /// Where the bar runs along its edge at a progress toward it: the
+    /// floating span inside the margin and the attached one at the screen's
+    /// edges, the share of the width each.
+    fn bar_span(&self, t: f32) -> (i32, i32) {
+        let margin = self.float_margin();
+        let share = |usable: i32| (usable * self.config.panel_width / 100).max(1);
+        let float_usable = (self.panel.width - 2 * margin).max(1);
+        let float_w = share(float_usable);
+        let float_x = margin + (float_usable - float_w) / 2;
+        let attached_w = share(self.panel.width.max(1));
+        let attached_x = (self.panel.width - attached_w) / 2;
+        let lerp = |a: i32, b: i32| (a as f32 + (b - a) as f32 * t).round() as i32;
+        (lerp(float_x, attached_x), lerp(float_w, attached_w))
+    }
+
+    /// The bar's background in panel surface coordinates with its corner
+    /// radius: the items' rectangle while the bar floats, growing to fill
+    /// the band the bar reserves as it attaches, its corners easing square
+    /// where it then spans the screen. A background that reaches the edge
+    /// runs past it by its radius, so only the corners away from the edge
+    /// are round.
+    pub fn bar_shape(&self) -> (Rect, f32) {
+        let height = self.config.panel_height;
+        let margin = self.float_margin() as f32;
+        let t = self.attach_progress();
+        let (x, width) = self.bar_span(t);
+        let corners = self.config.panel_corners as f32;
+        let radius = if width >= self.panel.width {
+            corners * (1.0 - t)
+        } else {
+            corners
+        };
+        let inset = (margin * (1.0 - t)).round() as i32;
+        let thickness = height + (margin * t).round() as i32;
+        let past = if inset == 0 { radius.ceil() as i32 } else { 0 };
+        let rect = if self.panel_top() {
+            Rect::new(x, inset - past, width, thickness + past)
+        } else {
+            Rect::new(
+                x,
+                self.panel.height - height - margin as i32,
+                width,
+                thickness + past,
+            )
+        };
+        (rect, radius)
+    }
+
+    /// Whether the window at an index exists.
+    fn toplevel_index(&self, id: u64) -> Option<usize> {
+        self.toplevels.iter().position(|t| t.id == id)
+    }
+
+    /// The themed or self-published icon of a window at the current scale.
+    ///
+    /// # Arguments
+    /// * `index` - Index into the window list.
+    pub fn toplevel_icon(&mut self, index: usize) -> Option<Arc<Pixmap>> {
+        let scale = self.panel.scale.max(1);
+        if let Some((cached_scale, icon)) = &self.toplevels[index].icon
+            && *cached_scale == scale
+        {
+            return icon.clone();
+        }
+        let size = (self.panel_icon_size() * scale) as u32;
+        let app_id = self.toplevels[index].app_id.clone();
+        let mut icon = if app_id.is_empty() {
+            None
+        } else {
+            self.icons.get(&app_id, size)
+        };
+        if icon.is_none()
+            && !app_id.is_empty()
+            && let Some(name) = entries::icon_for_app_id(&self.apps.entries, &app_id)
+                .or_else(|| entries::load_entry(&format!("{app_id}.desktop")).and_then(|e| e.icon))
+        {
+            icon = self.icons.get(&name, size);
+        }
+        if icon.is_none() {
+            let lower = app_id.to_lowercase();
+            let short = lower.rsplit('.').next().unwrap_or("").to_string();
+            if !short.is_empty() && short != lower {
+                icon = self.icons.get(&short, size);
+            }
+        }
+        if icon.is_none()
+            && let Some(own) = &self.toplevels[index].own_icon
+        {
+            icon = crate::render::resize_pixmap(own, size).map(Arc::new);
+        }
+        self.toplevels[index].icon = Some((scale, icon.clone()));
+        icon
+    }
+
+    /// The icon of a desktop item at the current scale: a launcher's application icon, else the
+    /// icon the file manager shows for the file.
+    ///
+    /// # Arguments
+    /// * `index` - Index into the Desktop folder's items.
+    pub fn desktop_icon(&mut self, index: usize) -> Option<Arc<Pixmap>> {
+        let scale = self.primary_background().map_or(1, |b| b.geometry.scale).max(1);
+        if let Some(icon) = self.desktop_icons.get(&(index, scale)) {
+            return icon.clone();
+        }
+        let px = (ui::DESKTOP_ICON_SIZE * scale) as u32;
+        let item = self.desktop_items.get(index).cloned()?;
+        let icon = match item.launcher.as_ref().and_then(|e| e.icon.clone()) {
+            Some(name) => self.icons.get(&name, px),
+            None => ui::files::item_icon_px(self, &item.item, px),
+        };
+        self.desktop_icons.insert((index, scale), icon.clone());
+        icon
+    }
+
+    /// Reads the Desktop folder's items and the saved layout again, dropping what was cached
+    /// and held for the old list.
+    pub fn load_desktop_items(&mut self) {
+        let dir = entries::desktop_dir();
+        let file_of = |items: &[crate::desktop_folder::DesktopItem], index: usize| {
+            items.get(index).map(|item| item.file.clone())
+        };
+        let selected: Vec<String> = self
+            .desktop_selection
+            .iter()
+            .filter_map(|&index| file_of(&self.desktop_items, index))
+            .collect();
+        let anchor = self
+            .desktop_anchor
+            .and_then(|index| file_of(&self.desktop_items, index));
+        self.desktop_items = crate::desktop_folder::load(&dir, &self.apps.desktop, &self.files.mime);
+        self.desktop_layout = crate::desktop_folder::read_layout();
+        self.desktop_icons.clear();
+        self.desktop_press = None;
+        let index_of = |items: &[crate::desktop_folder::DesktopItem], file: &str| {
+            items.iter().position(|item| item.file == file)
+        };
+        self.desktop_selection = selected
+            .iter()
+            .filter_map(|file| index_of(&self.desktop_items, file))
+            .collect();
+        self.desktop_anchor = anchor.and_then(|file| index_of(&self.desktop_items, &file));
+        self.place_landing();
+        self.repaint_wallpapers();
+    }
+
+    /// Puts the files a drop landed on a cell there as they arrive in the Desktop folder, the
+    /// first on the cell and the rest on the free cells after it in column order, each once;
+    /// what has not arrived within [`LANDING_WINDOW`] takes the first free cell as any new
+    /// file does.
+    fn place_landing(&mut self) {
+        let Some(mut landing) = self.desktop_landing.take() else {
+            return;
+        };
+        if landing.since.elapsed() > LANDING_WINDOW {
+            return;
+        }
+        let (columns, rows) = background::grid_size(self);
+        let total = (columns * rows).max(1);
+        let mut cells = background::item_cells(self);
+        let mut next = landing.cell.0 * rows + landing.cell.1;
+        let mut placed = false;
+        let mut waiting = Vec::new();
+        for name in landing.names {
+            let Some(index) = self.desktop_items.iter().position(|item| item.file == name) else {
+                waiting.push(name);
+                continue;
+            };
+            let free = (0..total).map(|step| (next + step) % total).find(|&n| {
+                let cell = (n / rows, n % rows);
+                cells.iter().enumerate().all(|(i, c)| i == index || *c != cell)
+            });
+            if let Some(n) = free {
+                cells[index] = (n / rows, n % rows);
+                next = n + 1;
+                placed = true;
+            }
+        }
+        if placed {
+            self.save_desktop_layout(&cells);
+        }
+        if !waiting.is_empty() {
+            landing.names = waiting;
+            landing.cell = (next / rows, next % rows);
+            self.desktop_landing = Some(landing);
+        }
+    }
+
+    /// Starts dragging the selected icons, or the one pressed where it is not among them: a
+    /// drag of their files any window can take, which the desktop takes back to move them on
+    /// its grid.
+    fn start_desktop_drag(&mut self, id: u32, press: DesktopPress) {
+        let dragged: Vec<usize> = if self.desktop_selection.contains(&press.index) {
+            self.desktop_selection.iter().copied().collect()
+        } else {
+            vec![press.index]
+        };
+        let paths: Vec<std::path::PathBuf> = dragged
+            .iter()
+            .filter_map(|&i| self.desktop_items.get(i).map(|item| item.item.path.clone()))
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let scale = self.background(id).map_or(1, |b| b.geometry.scale).max(1);
+        let icon = if self.drag_icon {
+            let picture = self.desktop_icon(press.index);
+            ui::files::drag_ghost(self, picture.as_deref(), paths.len(), scale)
+        } else {
+            None
+        };
+        self.desktop_dragged = dragged;
+        self.desktop_drag_at = Some(press.at);
+        let uris = paths.iter().map(|p| files::file_uri(p)).collect();
+        self.files.drag = Some((files::DESKTOP, paths));
+        self.requests.push(Request::StartDrag {
+            surface: SurfaceId::Background(id),
+            uris,
+            icon: icon.map(Box::new),
+            scale,
+        });
+        self.redraw_backgrounds();
+    }
+
+    /// Selects the icons a box dragged across the desktop touches, over the selection it kept.
+    fn select_in_band(&mut self) {
+        let Some(band) = self.desktop_band.as_ref() else {
+            return;
+        };
+        let rect = band.rect();
+        let mut selection = band.base.clone();
+        for (index, cell) in background::cells(self).iter().enumerate() {
+            if !cell.intersect(&rect).is_empty() {
+                selection.insert(index);
+            }
+        }
+        self.desktop_selection = selection;
+    }
+
+    /// Takes files dropped on the desktop: onto a folder icon, or from a window onto the
+    /// desktop, a menu asks whether to copy or move them there; the desktop's own icons
+    /// dropped on it move to the cells the drop takes them to.
+    fn drop_on_desktop(&mut self, id: u32, x: f64, y: f64) {
+        let Some((source, paths)) = self.files.drag.clone() else {
+            return;
+        };
+        let folder = background::hit(self, id, x, y)
+            .and_then(|i| self.desktop_items.get(i))
+            .filter(|item| item.item.is_dir && !paths.contains(&item.item.path))
+            .map(|item| item.item.path.clone());
+        if let Some(dest) = folder {
+            self.desktop_drop = Some((files::PendingDrop { source, paths, dest }, None));
+            desktop_menu::open_drop(self, x, y);
+            return;
+        }
+        let cell = background::cell_at(self, x, y);
+        if source == files::DESKTOP {
+            let (Some(cell), Some(press)) = (cell, self.desktop_press) else {
+                return;
+            };
+            let mut cells = background::item_cells(self);
+            let Some(&from) = cells.get(press.index) else {
+                return;
+            };
+            let (columns, rows) = background::grid_size(self);
+            let dragged = self.desktop_dragged.clone();
+            crate::desktop_folder::move_cells(
+                &mut cells,
+                &dragged,
+                (cell.0 - from.0, cell.1 - from.1),
+                columns,
+                rows,
+            );
+            self.save_desktop_layout(&cells);
+            self.desktop_selection = dragged.into_iter().collect();
+            self.desktop_anchor = Some(press.index);
+            return;
+        }
+        let dest = entries::desktop_dir();
+        if !dest.is_dir() || paths.iter().all(|p| p.parent() == Some(dest.as_path())) {
+            return;
+        }
+        self.desktop_drop = Some((files::PendingDrop { source, paths, dest }, cell));
+        desktop_menu::open_drop(self, x, y);
+    }
+
+    /// Carries out the drop waiting on the desktop, copying or moving its files; those copied
+    /// or moved into the Desktop folder land on the cell they were dropped on.
+    pub fn finish_desktop_drop(&mut self, moving: bool) {
+        let Some((drop, cell)) = self.desktop_drop.take() else {
+            return;
+        };
+        if let Some(cell) = cell {
+            self.desktop_landing = Some(Landing {
+                names: drop.paths.iter().map(|p| files::ops::file_name(p)).collect(),
+                cell,
+                since: Instant::now(),
+            });
+        }
+        ui::files::drop_into(self, drop.source, drop.paths, drop.dest, !moving);
+    }
+
+    /// Selects one desktop icon alone, the start of a later Shift click's range.
+    fn select_desktop_only(&mut self, index: usize) {
+        self.desktop_selection = BTreeSet::from([index]);
+        self.desktop_anchor = Some(index);
+    }
+
+    /// The selected desktop items, in listing order.
+    pub fn selected_desktop_items(&self) -> Vec<crate::desktop_folder::DesktopItem> {
+        self.desktop_selection
+            .iter()
+            .filter_map(|&index| self.desktop_items.get(index).cloned())
+            .collect()
+    }
+
+    /// The grid cell a desktop item stands on, by its file name.
+    pub fn desktop_cell_of(&self, file: &str) -> Option<crate::desktop_folder::Cell> {
+        let index = self.desktop_items.iter().position(|item| item.file == file)?;
+        background::item_cells(self).get(index).copied()
+    }
+
+    /// Opens every selected desktop item as a double click opens one, except that the files
+    /// of a type go to its application together, the way the file manager opens a selection.
+    pub fn open_desktop_selection(&mut self) {
+        let mut by_type: Vec<(String, Vec<std::path::PathBuf>)> = Vec::new();
+        for index in self.desktop_selection.clone() {
+            let Some(item) = self.desktop_items.get(index).cloned() else {
+                continue;
+            };
+            if item.launcher.is_some() || item.item.is_dir {
+                self.open_desktop_item(index);
+                continue;
+            }
+            match by_type.iter_mut().find(|(mime, _)| *mime == item.item.mime) {
+                Some((_, paths)) => paths.push(item.item.path),
+                None => by_type.push((item.item.mime, vec![item.item.path])),
+            }
+        }
+        for (mime, paths) in by_type {
+            if let Err(message) = ui::files::launch_default(self, &paths, &mime) {
+                eprintln!("selkies-desktop: {message}");
+            }
+        }
+    }
+
+    /// Pastes the clipboard the file manager's windows share into a folder; a cut is a move
+    /// and empties the clipboard.
+    pub fn paste_into(&mut self, dir: std::path::PathBuf) {
+        let Some(clipboard) = self.files.clipboard.clone() else {
+            return;
+        };
+        if !dir.is_dir() {
+            return;
+        }
+        self.files
+            .transfer(files::DESKTOP, clipboard.paths, dir, clipboard.cut);
+        if clipboard.cut {
+            self.files.clipboard = None;
+            for window in &mut self.files.windows {
+                window.dirty = true;
+            }
+        }
+    }
+
+    /// Deletes desktop items in the background, as the file manager does, once the dialog
+    /// asked; the Desktop folder's watch takes their icons away when they are gone.
+    pub fn delete_desktop_items(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.desktop_selection.clear();
+        self.desktop_anchor = None;
+        self.files.delete(files::DESKTOP, paths);
+        self.repaint_wallpapers();
+    }
+
+    /// Writes where the desktop's icons stand for the window manager, which leaves a click on
+    /// one to the shell (`selkies_draw::desktop_icons`), each cell from the primary monitor's
+    /// corner; written only when they moved.
+    ///
+    /// # Arguments
+    /// * `cells` - The icons' cells, in the primary background's coordinates.
+    pub fn publish_desktop_icons(&mut self, cells: &[Rect]) {
+        let origin = self
+            .primary_background()
+            .map(|b| b.icon_area())
+            .unwrap_or_default();
+        let cells: Vec<Rect> = cells
+            .iter()
+            .map(|c| Rect::new(c.x - origin.x, c.y - origin.y, c.w, c.h))
+            .collect();
+        if self.published_icons.as_ref() == Some(&cells) {
+            return;
+        }
+        let Some(path) = self.icons_path.clone() else {
+            return;
+        };
+        let staged = path.with_extension("new");
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&staged, selkies_draw::desktop_icons::format(&cells)))
+            .and_then(|()| std::fs::rename(&staged, &path));
+        match written {
+            Ok(()) => self.published_icons = Some(cells),
+            Err(error) => eprintln!("selkies-desktop: cannot publish the desktop icons: {error}"),
+        }
+    }
+
+    /// Opens a desktop item the way the file manager opens it: a launcher starts its
+    /// application, a folder opens in the file manager, and a file in its type's application.
+    fn open_desktop_item(&mut self, index: usize) {
+        let Some(item) = self.desktop_items.get(index).cloned() else {
+            return;
+        };
+        if let Some(entry) = item.launcher.as_ref() {
+            entries::launch(entry, &self.config);
+        } else if item.item.is_dir {
+            self.open_files(Some(item.item.path.clone()), None);
+        } else if let Err(message) =
+            ui::files::launch_default(self, std::slice::from_ref(&item.item.path), &item.item.mime)
+        {
+            eprintln!("selkies-desktop: {message}");
+        }
+    }
+
+    /// Opens the New Folder dialog, the folder to take the cell last pointed at on the desktop.
+    pub fn new_desktop_folder(&mut self) {
+        self.close_popup();
+        let (x, y) = self.desktop_pointer;
+        let cell = background::cell_at(self, x, y);
+        ui::dialog::open_new_folder(self, cell);
+    }
+
+    /// Reads the Desktop folder again once an item was made or renamed in it, putting the item
+    /// on a cell where one was chosen and free, and selecting it.
+    ///
+    /// # Arguments
+    /// * `file` - The item's file name.
+    /// * `cell` - The cell it takes, where one was chosen.
+    pub fn place_new_desktop_item(&mut self, file: &str, cell: Option<crate::desktop_folder::Cell>) {
+        self.load_desktop_items();
+        let mut cells = background::item_cells(self);
+        let Some(index) = self.desktop_items.iter().position(|i| i.file == file) else {
+            return;
+        };
+        if let Some(cell) = cell
+            && !cells.contains(&cell)
+        {
+            cells[index] = cell;
+            self.save_desktop_layout(&cells);
+        }
+        self.select_desktop_only(index);
+        self.repaint_wallpapers();
+    }
+
+    /// Put the launchers the `desktop_launchers` setting names on the desktop, each once: an
+    /// application is placed the first time the shell finds it installed and noted in
+    /// `desktop-launchers-placed` beside the settings, so a launcher the user deleted stays
+    /// deleted and one installed later is placed when it arrives.
+    fn place_desktop_launchers(&mut self) {
+        if self.config.desktop_launchers.is_empty() {
+            return;
+        }
+        let record = crate::config::config_dir().join("desktop-launchers-placed");
+        let placed = std::fs::read_to_string(&record).unwrap_or_default();
+        let placed: Vec<&str> = placed.lines().map(str::trim).collect();
+        let new: Vec<String> = self
+            .config
+            .desktop_launchers
+            .iter()
+            .filter(|id| !placed.contains(&id.as_str()) && self.apps.find(id).is_some())
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        for id in &new {
+            self.add_to_desktop(id);
+        }
+        let mut text: String = placed
+            .iter()
+            .filter(|l| !l.is_empty())
+            .map(|l| format!("{l}\n"))
+            .collect();
+        for id in &new {
+            text.push_str(id);
+            text.push('\n');
+        }
+        if let Err(error) =
+            std::fs::create_dir_all(crate::config::config_dir()).and_then(|()| std::fs::write(&record, text))
+        {
+            eprintln!("selkies-desktop: cannot note the placed launchers: {error}");
+        }
+    }
+
+    /// Puts an application's launcher on the desktop: its desktop entry copied into the Desktop
+    /// folder under the entry's own file name, marked executable as launchers there are, and
+    /// selected on the first free cell.
+    ///
+    /// The copy is registered as a Desktop launcher at once, so it shows the application's
+    /// name and icon before the folder's watch reloads the applications.
+    ///
+    /// # Arguments
+    /// * `id` - The application's desktop file ID.
+    pub fn add_to_desktop(&mut self, id: &str) {
+        let Some(entry) = self
+            .apps
+            .find(id)
+            .and_then(|index| self.apps.entries.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(file) = entry
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let dir = entries::desktop_dir();
+        let target = dir.join(&file);
+        if !target.exists() {
+            let copied = std::fs::create_dir_all(&dir).and_then(|()| std::fs::copy(&entry.path, &target));
+            if let Err(error) = copied {
+                eprintln!("selkies-desktop: cannot put {file} on the desktop: {error}");
+                return;
+            }
+            let _ = std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+            self.apps.desktop.push(selkies_draw::apps::Entry {
+                path: target,
+                ..entry
+            });
+        }
+        self.place_new_desktop_item(&file, None);
+    }
+
+    /// Keeps the cells of every desktop item in the layout file.
+    fn save_desktop_layout(&mut self, cells: &[crate::desktop_folder::Cell]) {
+        if self.keeps_layout
+            && let Err(error) = crate::desktop_folder::write_layout(&self.desktop_items, cells)
+        {
+            eprintln!("selkies-desktop: cannot write the desktop layout: {error}");
+        }
+        self.desktop_layout = self
+            .desktop_items
+            .iter()
+            .zip(cells)
+            .map(|(item, cell)| (item.file.clone(), *cell))
+            .collect();
+    }
+
+    /// The icon of an application at the menu's icon size.
+    ///
+    /// # Arguments
+    /// * `index` - Index into the application list.
+    pub fn app_icon(&mut self, index: usize) -> Option<Arc<Pixmap>> {
+        self.app_icon_sized(index, ui::ICON_SIZE)
+    }
+
+    /// The icon of an application at a logical size.
+    ///
+    /// # Arguments
+    /// * `index` - Index into the application list.
+    /// * `size` - Logical size wanted.
+    pub fn app_icon_sized(&mut self, index: usize, size: i32) -> Option<Arc<Pixmap>> {
+        let scale = self.panel.scale.max(1);
+        let name = self.apps.entries.get(index).and_then(|e| e.icon.clone())?;
+        self.icons.get(&name, (size * scale) as u32)
+    }
+
+    /// Writes a setting and applies it, the way the settings window does.
+    ///
+    /// # Arguments
+    /// * `changes` - Keys and their new values; an empty value removes the key.
+    pub fn write_config(&mut self, changes: &[(&str, String)]) {
+        if let Err(error) = crate::config::save(changes) {
+            eprintln!("selkies-desktop: cannot write the config file: {error}");
+        }
+        self.apply_config();
+    }
+
+    /// Adds a desktop file ID to a list setting, or removes it when present.
+    ///
+    /// # Arguments
+    /// * `key` - The setting: `favorites` or `launchers`.
+    /// * `id` - The desktop file ID.
+    pub fn toggle_list_entry(&mut self, key: &'static str, id: &str) {
+        let mut list = if key == "favorites" {
+            self.config.favorites.clone()
+        } else {
+            self.config.launchers.clone()
+        };
+        if let Some(pos) = list.iter().position(|e| e == id) {
+            list.remove(pos);
+        } else {
+            list.push(id.to_string());
+        }
+        let value = if list.is_empty() && key == "favorites" {
+            "none".to_string()
+        } else {
+            list.join(", ")
+        };
+        self.write_config(&[(key, value)]);
+        self.menu.invalidate();
+        self.launcher.invalidate();
+    }
+
+    /// Handles an event on a display's bar with the bar standing in for the panel. A press on
+    /// a bar other than the one with the popup open closes the popup first, as a click
+    /// outside it would, and the bar sees nothing of that popup otherwise.
+    ///
+    /// # Arguments
+    /// * `bar` - The bar's display.
+    /// * `event` - The event, aimed at the panel.
+    fn handle_on_bar(&mut self, bar: u32, event: Event) {
+        if matches!(event, Event::Configured { .. }) && !self.bars.iter().any(|b| b.id == bar) {
+            self.bars.push(DisplayBar::new(bar));
+            self.apply_bar_edges();
+        }
+        self.with_bar(bar, |d| {
+            let foreign = d.popup != Popup::None && d.popup_bar != d.current_bar;
+            if !foreign {
+                d.handle(event);
+            } else if matches!(event, Event::PointerButton { pressed: true, .. }) {
+                d.close_popup();
+                d.handle(event);
+            } else {
+                let popup = d.popup;
+                d.popup = Popup::None;
+                d.handle(event);
+                if d.popup == Popup::None {
+                    d.popup = popup;
+                }
+            }
+        });
+    }
+
+    /// Handles one event from the backend.
+    ///
+    /// # Arguments
+    /// * `event` - The event.
+    pub fn handle(&mut self, event: Event) {
+        let event = match event.for_bar() {
+            Ok((bar, event)) => {
+                self.handle_on_bar(bar, event);
+                return;
+            }
+            Err(event) => event,
+        };
+        match event {
+            Event::Configured {
+                surface,
+                width,
+                height,
+                scale,
+            } => self.configure(surface, width, height, scale),
+            Event::BackgroundLayout {
+                surface,
+                monitors,
+                primary,
+            } => {
+                if primary {
+                    for background in &mut self.backgrounds {
+                        if background.id != surface && background.primary {
+                            background.primary = false;
+                            background.scene = None;
+                            background.dirty = true;
+                        }
+                    }
+                }
+                if let Some(background) = self.backgrounds.iter_mut().find(|b| b.id == surface)
+                    && (background.monitors != monitors || background.primary != primary)
+                {
+                    background.monitors = monitors;
+                    background.primary = primary;
+                    background.scene = None;
+                    background.dirty = true;
+                }
+            }
+            Event::BackgroundRemoved { surface } => {
+                self.backgrounds.retain(|b| b.id != surface);
+            }
+            Event::PointerMotion { surface, x, y } => self.pointer_motion(surface, x, y),
+            Event::PointerButton {
+                surface,
+                x,
+                y,
+                button,
+                pressed,
+                time,
+                modifiers,
+            } => self.pointer_button(surface, x, y, button, pressed, time, modifiers),
+            Event::PointerAxis { surface, x, y, delta } => self.pointer_axis(surface, x, y, delta),
+            Event::PointerLeave { surface } => self.pointer_leave(surface),
+            Event::Key {
+                surface,
+                key,
+                modifiers,
+            } => match surface {
+                SurfaceId::Window(id) if self.is_settings(id) => settings::key(self, key),
+                SurfaceId::Window(id) if self.is_dialog(id) => ui::dialog::key(self, key),
+                SurfaceId::Window(id) => ui::files::key(self, id, key, modifiers),
+                _ => self.key(key),
+            },
+            Event::KeySym {
+                surface: SurfaceId::Window(id),
+                keysym,
+                modifiers,
+                pressed,
+            } if self.is_settings(id) => settings::key_sym(self, keysym, modifiers, pressed),
+            Event::KeySym { .. } => {}
+            Event::KeyboardLeave { surface } => {
+                if surface == SurfaceId::Panel && matches!(self.popup, Popup::Menu | Popup::Launcher) {
+                    self.close_popup();
+                }
+                if let SurfaceId::Window(id) = surface
+                    && self.is_settings(id)
+                {
+                    settings::cancel_capture(self);
+                }
+            }
+            Event::WindowCloseRequested { window } => {
+                if self.is_settings(window) {
+                    settings::close(self);
+                } else if self.is_dialog(window) {
+                    ui::dialog::close(self);
+                } else {
+                    ui::files::close(self, window);
+                }
+            }
+            Event::DragEnter { surface, x, y } | Event::DragMotion { surface, x, y } => match surface {
+                SurfaceId::Window(id) => ui::files::drag_motion(self, id, x, y),
+                SurfaceId::Background(id) if self.background(id).is_some_and(|b| b.primary) => {
+                    self.desktop_drag_at = Some((x, y));
+                    self.redraw_backgrounds();
+                }
+                _ => {}
+            },
+            Event::DragLeave { surface } => match surface {
+                SurfaceId::Window(id) => ui::files::drag_leave(self, id),
+                SurfaceId::Background(_) if self.desktop_drag_at.take().is_some() => {
+                    self.redraw_backgrounds();
+                }
+                _ => {}
+            },
+            Event::DragDrop { surface, x, y, .. } => match surface {
+                SurfaceId::Window(id) => {
+                    ui::files::drag_motion(self, id, x, y);
+                    ui::files::drop(self, id, x, y);
+                }
+                SurfaceId::Background(id) => self.drop_on_desktop(id, x, y),
+                SurfaceId::Panel | SurfaceId::Bar(_) | SurfaceId::Notifications => {}
+            },
+            Event::DragEnd => {
+                self.files.drag = None;
+                self.desktop_press = None;
+                self.desktop_dragged.clear();
+                self.desktop_drag_at = None;
+                self.redraw_backgrounds();
+                for window in &mut self.files.windows {
+                    if window.drop_target.take().is_some() {
+                        window.dirty = true;
+                    }
+                }
+            }
+            Event::ToplevelAdded { id } => {
+                if self.toplevel_index(id).is_none() {
+                    self.toplevels.push(Toplevel {
+                        id,
+                        title: String::new(),
+                        app_id: String::new(),
+                        own_icon: None,
+                        state: ToplevelState::default(),
+                        display: None,
+                        icon: None,
+                    });
+                    self.panel_dirty = true;
+                }
+            }
+            Event::ToplevelTitle { id, title } => {
+                if let Some(i) = self.toplevel_index(id) {
+                    self.toplevels[i].title = title;
+                    self.panel_dirty = true;
+                }
+            }
+            Event::ToplevelAppId { id, app_id } => {
+                if let Some(i) = self.toplevel_index(id) {
+                    self.toplevels[i].app_id = app_id;
+                    self.toplevels[i].icon = None;
+                    self.panel_dirty = true;
+                }
+            }
+            Event::ToplevelIcon { id, icon } => {
+                if let Some(i) = self.toplevel_index(id) {
+                    self.toplevels[i].own_icon = Some(*icon);
+                    self.toplevels[i].icon = None;
+                    self.panel_dirty = true;
+                }
+            }
+            Event::ToplevelState { id, state } => {
+                if let Some(i) = self.toplevel_index(id)
+                    && self.toplevels[i].state != state
+                {
+                    self.toplevels[i].state = state;
+                    self.panel_dirty = true;
+                }
+            }
+            Event::ToplevelDisplay { id, display } => {
+                if let Some(i) = self.toplevel_index(id)
+                    && self.toplevels[i].display != display
+                {
+                    self.toplevels[i].display = display;
+                    self.mark_bars_dirty();
+                }
+            }
+            Event::BarRemoved { bar } => {
+                self.bars.retain(|b| b.id != bar);
+                if self.popup_bar == Some(bar) {
+                    self.popup_bar = None;
+                    self.popup = Popup::None;
+                }
+                self.mark_bars_dirty();
+            }
+            Event::Displays(displays) => {
+                if self.display_origins != displays {
+                    self.display_origins = displays;
+                    self.apply_bar_edges();
+                }
+            }
+            Event::ToplevelClosed { id } => {
+                if let Some(i) = self.toplevel_index(id) {
+                    self.toplevels.remove(i);
+                    self.shown_desktop.retain(|w| *w != id);
+                    if let Popup::TaskMenu(t) = self.popup
+                        && t >= i
+                    {
+                        self.close_popup();
+                    }
+                    if let Hover::Task(t) = self.hover
+                        && t >= i
+                    {
+                        self.set_hover(Hover::None);
+                    }
+                    self.panel_dirty = true;
+                }
+            }
+            Event::Desktops { count, current } => {
+                let count = count.max(1);
+                let current = current.min(count - 1);
+                if (self.desktops, self.current_desktop) != (count, current) {
+                    self.desktops = count;
+                    self.current_desktop = current;
+                    if let Hover::Pager(_) = self.hover {
+                        self.set_hover(Hover::None);
+                    }
+                    self.panel_dirty = true;
+                }
+            }
+            Event::Quit => {}
+        }
+    }
+
+    /// Records the size of a surface and schedules its redraw.  A background
+    /// surface seen for the first time is created, primary when it is the
+    /// first one.
+    fn configure(&mut self, surface: SurfaceId, width: i32, height: i32, scale: i32) {
+        let scale = scale.max(1);
+        let geometry = Geometry {
+            width,
+            height,
+            scale,
+            configured: width > 0 && height > 0,
+        };
+        match surface {
+            SurfaceId::Bar(_) => {}
+            SurfaceId::Panel => {
+                let current = self.panel;
+                if current.width == width
+                    && current.height == height
+                    && current.scale == scale
+                    && current.configured
+                {
+                    return;
+                }
+                if self.panel.scale != scale {
+                    self.fonts.clear_cache();
+                    self.menu.invalidate();
+                }
+                self.panel = geometry;
+                self.panel_pix = None;
+                self.panel_visible.clear();
+                self.panel_dirty = true;
+            }
+            SurfaceId::Background(id) => {
+                let first = self.backgrounds.is_empty();
+                let Some(background) = self.backgrounds.iter_mut().find(|b| b.id == id) else {
+                    self.backgrounds.push(BackgroundSurface {
+                        id,
+                        geometry,
+                        monitors: vec![Rect::new(0, 0, width, height)],
+                        primary: first,
+                        pix: None,
+                        launchers_pix: None,
+                        dirty: true,
+                        scene: None,
+                        wallpaper_cache: None,
+                    });
+                    return;
+                };
+                let current = background.geometry;
+                if current.width == width
+                    && current.height == height
+                    && current.scale == scale
+                    && current.configured
+                {
+                    return;
+                }
+                background.geometry = geometry;
+                if background.monitors.len() <= 1 {
+                    background.monitors = vec![Rect::new(0, 0, width, height)];
+                }
+                background.pix = None;
+                background.launchers_pix = None;
+                background.scene = None;
+                background.dirty = true;
+            }
+            SurfaceId::Window(id) if self.is_dialog(id) => {
+                self.dialog.geometry = geometry;
+                self.dialog.pix = None;
+                self.dialog.dirty = true;
+            }
+            SurfaceId::Window(id) if self.is_settings(id) => {
+                let current = self.settings.geometry;
+                if current.width == width
+                    && current.height == height
+                    && current.scale == scale
+                    && current.configured
+                {
+                    return;
+                }
+                self.settings.geometry = geometry;
+                self.settings.pix = None;
+                self.settings.dirty = true;
+            }
+            SurfaceId::Window(id) => {
+                if let Some(window) = self.files.window_mut(id) {
+                    let current = window.geometry;
+                    if current.width == width
+                        && current.height == height
+                        && current.scale == scale
+                        && current.configured
+                    {
+                        return;
+                    }
+                    window.geometry = geometry;
+                    window.pix = None;
+                    window.dirty = true;
+                }
+            }
+            SurfaceId::Notifications => {
+                if self.notify_geometry.scale != scale {
+                    self.notifications.invalidate();
+                }
+                if !geometry.configured {
+                    self.notifications.requested = (0, 0, 0);
+                }
+                self.notify_geometry = geometry;
+                self.notify_pix = None;
+                self.notifications.touch();
+            }
+        }
+    }
+
+    /// Updates the clock text and tooltip timers, and reads the published
+    /// shortcuts again while the settings window shows them.
+    ///
+    /// # Arguments
+    /// * `now` - The current time.
+    pub fn tick(&mut self, now: Instant) {
+        self.step_bar_attach(now);
+        for id in self.bar_ids() {
+            self.with_bar(id, |d| d.step_bar_attach(now));
+        }
+        let clock = if self.config.show_clock {
+            crate::clock::format_now(&self.config.clock_format)
+        } else {
+            String::new()
+        };
+        if clock != self.clock {
+            self.clock = clock;
+            self.panel_dirty = true;
+        }
+        if self.preview.as_ref().is_some_and(|(_, _, at)| now >= *at) {
+            self.apply_preview();
+        }
+        if let Some(at) = self.hide_at
+            && now >= at
+        {
+            self.hide_at = None;
+            if self.config.panel_autohide
+                && self.popup == Popup::None
+                && !self.bar_rect().contains(self.pointer.0, self.pointer.1)
+            {
+                self.panel_hidden = true;
+                self.panel_dirty = true;
+            }
+        }
+        if self.tooltip.is_none()
+            && self.popup == Popup::None
+            && now.duration_since(self.hover_since) >= Duration::from_millis(ui::TOOLTIP_DELAY_MS)
+            && let Some(text) = self.tooltip_for(self.hover)
+        {
+            self.tooltip = Some(text);
+            self.panel_dirty = true;
+        }
+        self.files.tick(now);
+        let scale = if self.notify_geometry.configured {
+            self.notify_geometry.scale
+        } else {
+            self.panel.scale
+        };
+        let fonts = &mut self.fonts;
+        self.notifications
+            .advance(now, |record| notifications::measure(fonts, record, scale));
+        if self.popup == Popup::Notifications && self.notifications.center_due(now) {
+            self.panel_dirty = true;
+        }
+        settings::tick(self, now);
+    }
+
+    /// When `tick` next has something to do.
+    ///
+    /// # Arguments
+    /// * `now` - The current time.
+    pub fn next_deadline(&self, now: Instant) -> Option<Instant> {
+        let mut deadline = if self.config.show_clock {
+            Some(crate::clock::next_minute(now))
+        } else {
+            None
+        };
+        if self.tooltip.is_none() && self.popup == Popup::None && self.tooltip_for(self.hover).is_some() {
+            let due = self.hover_since + Duration::from_millis(ui::TOOLTIP_DELAY_MS);
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        if let Some(due) = self.files.next_deadline() {
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        if let Some(due) = self.hide_at {
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        if self.bar_attach_anim.is_some() || self.bars.iter().any(|b| b.attach_anim.is_some()) {
+            let due = now + BAR_FRAME;
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        if let Some((_, _, due)) = &self.preview {
+            let due = *due;
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        if let Some(due) = self.notifications.next_deadline(now) {
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        if let Some(due) = self.settings.next_poll() {
+            deadline = Some(deadline.map_or(due, |d: Instant| d.min(due)));
+        }
+        deadline
+    }
+
+    /// The tooltip for a hover target.
+    fn tooltip_for(&self, hover: Hover) -> Option<String> {
+        match hover {
+            Hover::Task(i) => self.toplevels.get(i).map(|t| t.label().to_string()),
+            Hover::Volume => self.volume.map(|v| {
+                if v.muted {
+                    tr("Muted").to_string()
+                } else {
+                    trf("Volume {n}%", &[("n", &v.percent.to_string())])
+                }
+            }),
+            Hover::Clock => Some(crate::clock::format_now("%A, %B %-d, %Y")),
+            Hover::ShowDesktop => Some(tr("Show desktop").to_string()),
+            Hover::Bell => Some(notifications::bell_tooltip(self)),
+            Hover::Pager(i) => Some(trf("Desktop {n}", &[("n", &(i + 1).to_string())])),
+            Hover::Start => Some(tr("Applications (Super: quick launcher)").to_string()),
+            Hover::Launcher(i) => self
+                .config
+                .launchers
+                .get(i)
+                .and_then(|id| self.apps.find(id))
+                .map(|index| self.apps.entries[index].name.clone()),
+            Hover::MenuApp(i) => {
+                let entry = self.menu.visible_entry(self, i)?;
+                let entry = &self.apps.entries[entry];
+                entry.comment.clone().filter(|c| c != &entry.name)
+            }
+            Hover::MenuTile(i) => {
+                let entry = *menu::favorite_entries(self).get(i)?;
+                let entry = &self.apps.entries[entry];
+                entry.comment.clone().filter(|c| c != &entry.name)
+            }
+            _ => None,
+        }
+    }
+
+    /// Changes the hover target, restarting the tooltip timer.
+    pub fn set_hover(&mut self, hover: Hover) {
+        if self.hover != hover {
+            if matches!(hover, Hover::DesktopIcon(_)) || matches!(self.hover, Hover::DesktopIcon(_)) {
+                self.redraw_backgrounds();
+            }
+            for previous in [self.hover, hover] {
+                if let Hover::Files(id, _) = previous
+                    && let Some(window) = self.files.window_mut(id)
+                {
+                    window.dirty = true;
+                }
+                if let Hover::Control(_) = previous {
+                    self.settings.dirty = true;
+                }
+                if let Hover::Card(..) = previous {
+                    self.notifications.touch();
+                }
+            }
+            let panel_changed = !matches!(
+                (self.hover, hover),
+                (
+                    Hover::Files(..) | Hover::Control(_) | Hover::Card(..) | Hover::None,
+                    Hover::Files(..) | Hover::Control(_) | Hover::Card(..) | Hover::None
+                )
+            );
+            self.hover = hover;
+            self.hover_since = Instant::now();
+            if self.tooltip.take().is_some() || panel_changed {
+                self.panel_dirty = true;
+            }
+        }
+        let pointer = match hover {
+            Hover::None => false,
+            Hover::Files(_, hit) => hit.clickable(),
+            _ => true,
+        };
+        if pointer != self.cursor_pointer {
+            self.cursor_pointer = pointer;
+            self.requests.push(Request::Cursor { pointer });
+        }
+    }
+
+    /// Sets the volume the audio module reports.
+    ///
+    /// # Arguments
+    /// * `volume` - The new volume, or `None` when audio is unavailable.
+    pub fn set_volume(&mut self, volume: Option<Volume>) {
+        if self.volume != volume {
+            self.volume = volume;
+            if volume.is_none() && self.popup == Popup::Volume {
+                self.close_popup();
+            }
+            self.panel_dirty = true;
+        }
+    }
+
+    /// Opens a popup, closing whatever was open.
+    ///
+    /// # Arguments
+    /// * `popup` - The popup to open.
+    pub fn open_popup(&mut self, popup: Popup) {
+        if self.popup == popup {
+            return;
+        }
+        let was_open = self.popup != Popup::None;
+        if self.popup == Popup::Notifications {
+            self.notifications.close_center();
+        }
+        self.popup = popup;
+        self.tooltip = None;
+        if popup == Popup::Notifications {
+            self.notifications.open_center(Instant::now());
+        }
+        if popup == Popup::Menu {
+            let mut menu = std::mem::take(&mut self.menu);
+            menu.open(self);
+            self.menu = menu;
+        }
+        if popup == Popup::Launcher {
+            self.launcher.open();
+        }
+        if popup == Popup::Calendar {
+            self.calendar_offset = 0;
+        }
+        if !was_open {
+            self.popup_bar = self.current_bar;
+            self.requests.push(Request::MenuOpen {
+                open: true,
+                surface: self.current_bar_surface(),
+            });
+        }
+        self.panel_dirty = true;
+    }
+
+    /// Closes the open popup.
+    pub fn close_popup(&mut self) {
+        if self.popup == Popup::None {
+            return;
+        }
+        if self.popup == Popup::Notifications {
+            self.notifications.close_center();
+        }
+        self.popup = Popup::None;
+        self.volume_drag = false;
+        self.menu.close();
+        self.launcher.close();
+        let surface = self.popup_bar.take().map_or(SurfaceId::Panel, SurfaceId::Bar);
+        self.requests.push(Request::MenuOpen { open: false, surface });
+        self.set_hover(Hover::None);
+        self.panel_dirty = true;
+        if !self.bar_rect().contains(self.pointer.0, self.pointer.1) {
+            self.schedule_hide();
+        }
+    }
+
+    /// Toggles the start menu, from a click on the start button.
+    pub fn toggle_menu(&mut self) {
+        if self.popup == Popup::Menu {
+            self.close_popup();
+        } else {
+            self.open_popup(Popup::Menu);
+        }
+    }
+
+    /// Toggles the quick launcher, from the `--launcher` command the window
+    /// manager sends on a release of the Super key.
+    pub fn toggle_launcher(&mut self) {
+        if self.popup == Popup::Launcher {
+            self.close_popup();
+        } else {
+            self.open_popup(Popup::Launcher);
+        }
+    }
+
+    /// Launches an application and closes the menu.
+    ///
+    /// # Arguments
+    /// * `index` - Index into the application list.
+    pub fn launch_app(&mut self, index: usize) {
+        if let Some(entry) = self.apps.entries.get(index) {
+            entries::launch(entry, &self.config);
+        }
+        self.close_popup();
+    }
+
+    /// Acts on a window.
+    ///
+    /// # Arguments
+    /// * `index` - Index into the window list.
+    /// * `action` - What to do.
+    pub fn window_action(&mut self, index: usize, action: WindowAction) {
+        if let Some(toplevel) = self.toplevels.get(index) {
+            self.requests.push(Request::Window {
+                id: toplevel.id,
+                action,
+            });
+        }
+    }
+
+    /// Activates a window, restoring it when it is minimized, or minimizes it
+    /// when it is already active.
+    ///
+    /// # Arguments
+    /// * `index` - Index into the window list.
+    pub fn task_click(&mut self, index: usize) {
+        let Some(toplevel) = self.toplevels.get(index) else {
+            return;
+        };
+        if toplevel.state.active && !toplevel.state.minimized {
+            self.window_action(index, WindowAction::Minimize);
+        } else {
+            if toplevel.state.minimized {
+                self.window_action(index, WindowAction::Unminimize);
+            }
+            self.window_action(index, WindowAction::Activate);
+        }
+        self.shown_desktop.clear();
+    }
+
+    /// Asks the window manager for a virtual desktop.
+    ///
+    /// # Arguments
+    /// * `index` - The desktop, from 0; the current one or one past the
+    ///   last is ignored.
+    pub fn switch_desktop(&mut self, index: u32) {
+        if index < self.desktops && index != self.current_desktop {
+            self.requests.push(Request::SwitchDesktop(index));
+        }
+    }
+
+    /// Whether a window is listed on the taskbar: one on the current desktop,
+    /// or any when the taskbar shows every desktop.
+    ///
+    /// # Arguments
+    /// * `index` - Index into the window list.
+    pub fn task_listed(&self, index: usize) -> bool {
+        self.config.tasks_all_desktops || !self.toplevels[index].state.hidden
+    }
+
+    /// Minimizes every window of the current desktop, or restores the ones
+    /// the previous press hid.
+    pub fn show_desktop(&mut self) {
+        if !self.shown_desktop.is_empty() {
+            let ids = std::mem::take(&mut self.shown_desktop);
+            for id in ids {
+                if let Some(i) = self.toplevel_index(id) {
+                    self.window_action(i, WindowAction::Unminimize);
+                }
+            }
+            return;
+        }
+        let visible: Vec<usize> = self
+            .toplevels
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.state.minimized && !t.state.hidden)
+            .map(|(i, _)| i)
+            .collect();
+        for i in visible {
+            self.shown_desktop.push(self.toplevels[i].id);
+            self.window_action(i, WindowAction::Minimize);
+        }
+    }
+
+    /// Changes the volume by a number of percent points.
+    ///
+    /// # Arguments
+    /// * `delta` - Points to add, negative to lower.
+    pub fn adjust_volume(&mut self, delta: i32) {
+        if let Some(volume) = self.volume {
+            let target = (volume.percent as i32 + delta).clamp(0, 150) as u8;
+            self.requests.push(Request::SetVolume(target));
+        }
+    }
+
+    /// Sets the volume to an absolute percentage.
+    ///
+    /// # Arguments
+    /// * `percent` - The level.
+    pub fn set_volume_target(&mut self, percent: u8) {
+        if self.volume.is_some() {
+            self.requests.push(Request::SetVolume(percent.min(150)));
+        }
+    }
+
+    /// Toggles mute.
+    pub fn toggle_mute(&mut self) {
+        if self.volume.is_some() {
+            self.requests.push(Request::ToggleMute);
+        }
+    }
+
+    /// Routes pointer motion to the surface's UI.
+    fn pointer_motion(&mut self, surface: SurfaceId, x: f64, y: f64) {
+        match surface {
+            SurfaceId::Bar(_) => {}
+            SurfaceId::Panel => {
+                self.pointer = (x, y);
+                if self.config.panel_autohide {
+                    self.reveal_panel();
+                }
+                if self.volume_drag {
+                    popups::volume_drag(self, x);
+                    return;
+                }
+                if self.menu.scroll_drag.is_some() {
+                    menu::scroll_drag(self, y);
+                    return;
+                }
+                if self.menu.favorite_drag.is_some() {
+                    menu::favorite_motion(self, x, y);
+                    return;
+                }
+                let hover = match self.popup {
+                    Popup::Menu => menu::hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::Launcher => launcher::hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::TaskMenu(_) => popups::task_menu_hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::PanelMenu(..) => settings::panel_menu_hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::DesktopMenu(..) => desktop_menu::hit(self, x, y).unwrap_or(Hover::None),
+                    Popup::Notifications => notifications::center_hit(self, x, y).unwrap_or(Hover::None),
+                    _ => Hover::None,
+                };
+                let hover = if hover == Hover::None {
+                    panel::hit(self, x, y)
+                } else {
+                    hover
+                };
+                self.set_hover(hover);
+            }
+            SurfaceId::Background(id) => {
+                self.desktop_pointer = (x, y);
+                if let Some(press) = self.desktop_press.as_mut() {
+                    press.at = (x, y);
+                    let (dx, dy) = (x - press.start.0, y - press.start.1);
+                    if !press.dragging && dx.hypot(dy) >= DESKTOP_DRAG_THRESHOLD {
+                        press.dragging = true;
+                        let press = *press;
+                        self.start_desktop_drag(id, press);
+                    }
+                    if self.desktop_press.is_some_and(|p| p.dragging) {
+                        return;
+                    }
+                }
+                if let Some(band) = self.desktop_band.as_mut() {
+                    band.at = (x, y);
+                    self.select_in_band();
+                    self.redraw_backgrounds();
+                    return;
+                }
+                let hover = background::hit(self, id, x, y)
+                    .map(Hover::DesktopIcon)
+                    .unwrap_or(Hover::None);
+                if hover != self.hover {
+                    self.set_hover(hover);
+                    self.panel_dirty = false;
+                }
+            }
+            SurfaceId::Window(id) if self.is_settings(id) => settings::pointer_motion(self, x, y),
+            SurfaceId::Window(id) if self.is_dialog(id) => ui::dialog::pointer_motion(self, x, y),
+            SurfaceId::Window(id) => ui::files::pointer_motion(self, id, x, y),
+            SurfaceId::Notifications => {
+                let hover = notifications::hit(self, x, y)
+                    .map(|(id, part)| Hover::Card(id, part))
+                    .unwrap_or(Hover::None);
+                self.set_hover(hover);
+            }
+        }
+    }
+
+    /// Routes a button press or release.
+    #[allow(clippy::too_many_arguments)]
+    fn pointer_button(
+        &mut self,
+        surface: SurfaceId,
+        x: f64,
+        y: f64,
+        button: Button,
+        pressed: bool,
+        time: u32,
+        modifiers: Modifiers,
+    ) {
+        if let SurfaceId::Window(id) = surface {
+            if self.is_settings(id) {
+                settings::pointer_button(self, x, y, button, pressed);
+            } else if self.is_dialog(id) {
+                ui::dialog::pointer_button(self, x, y, button, pressed);
+            } else {
+                ui::files::pointer_button(self, id, x, y, button, pressed, time, modifiers);
+            }
+            return;
+        }
+        if !pressed && button == Button::Left && self.desktop_band.take().is_some() {
+            self.redraw_backgrounds();
+            return;
+        }
+        if !pressed
+            && button == Button::Left
+            && let Some(press) = self.desktop_press.filter(|p| !p.dragging)
+        {
+            self.desktop_press = None;
+            if press.narrow {
+                self.select_desktop_only(press.index);
+                self.redraw_backgrounds();
+            }
+            return;
+        }
+        if !pressed {
+            if self.volume_drag {
+                self.volume_drag = false;
+            }
+            if self.menu.scroll_drag.take().is_some() {
+                self.redraw_panel();
+            }
+            if surface == SurfaceId::Panel && button == Button::Left {
+                menu::favorite_release(self, x, y);
+            }
+            return;
+        }
+        match surface {
+            SurfaceId::Bar(_) => {}
+            SurfaceId::Window(_) => {}
+            SurfaceId::Notifications => {
+                self.close_popup();
+                notifications::click(self, x, y, button);
+                let hover = notifications::hit(self, x, y)
+                    .map(|(id, part)| Hover::Card(id, part))
+                    .unwrap_or(Hover::None);
+                self.set_hover(hover);
+            }
+            SurfaceId::Background(id) => self.background_click(id, x, y, button, time, modifiers),
+            SurfaceId::Panel => {
+                self.pointer = (x, y);
+                if self.popup != Popup::None {
+                    let inside_popup = match self.popup {
+                        Popup::Menu => menu::click(self, x, y, button),
+                        Popup::Launcher => launcher::click(self, x, y, button),
+                        Popup::Volume => popups::volume_click(self, x, y, button),
+                        Popup::Calendar => popups::calendar_click(self, x, y, button),
+                        Popup::TaskMenu(_) => popups::task_menu_click(self, x, y, button),
+                        Popup::PanelMenu(..) => settings::panel_menu_click(self, x, y, button),
+                        Popup::DesktopMenu(..) => desktop_menu::click(self, x, y, button),
+                        Popup::Notifications => notifications::center_click(self, x, y, button),
+                        Popup::None => false,
+                    };
+                    if inside_popup {
+                        return;
+                    }
+                    let was = self.popup;
+                    self.close_popup();
+                    if !self.bar_rect().contains(x, y) {
+                        return;
+                    }
+                    if let Hover::Start = panel::hit(self, x, y)
+                        && was == Popup::Menu
+                    {
+                        return;
+                    }
+                    if let Hover::Volume = panel::hit(self, x, y)
+                        && was == Popup::Volume
+                        && button == Button::Left
+                    {
+                        return;
+                    }
+                    if let Hover::Clock = panel::hit(self, x, y)
+                        && was == Popup::Calendar
+                        && button == Button::Left
+                    {
+                        return;
+                    }
+                    if let Hover::Bell = panel::hit(self, x, y)
+                        && was == Popup::Notifications
+                        && button == Button::Left
+                    {
+                        return;
+                    }
+                }
+                panel::click(self, x, y, button, time);
+            }
+        }
+    }
+
+    /// Handles a press on a background, selecting the way the file manager does: a click
+    /// selects an icon alone and holds it for a drag of the selection, Control adds or removes
+    /// one, Shift adds the icons from the last one clicked in the grid's column order, a double
+    /// click opens it, and a press on an empty spot drops the selection unless a modifier keeps
+    /// it and starts a box that selects the icons it is dragged across. A right
+    /// click on an icon selects it unless it already is and opens the icons' menu; one on an
+    /// empty spot is the window manager's root menu.
+    fn background_click(&mut self, id: u32, x: f64, y: f64, button: Button, time: u32, modifiers: Modifiers) {
+        if self.popup != Popup::None {
+            self.close_popup();
+        }
+        let hit = background::hit(self, id, x, y);
+        let held = modifiers.ctrl || modifiers.shift;
+        match hit {
+            Some(index) if button == Button::Left => {
+                let double = !held
+                    && self
+                        .last_click
+                        .is_some_and(|(t, i)| i == index && time.wrapping_sub(t) < ui::DOUBLE_CLICK_MS);
+                if double {
+                    self.open_desktop_item(index);
+                    self.last_click = None;
+                    self.desktop_selection.clear();
+                    self.redraw_backgrounds();
+                    return;
+                }
+                let was_selected = self.desktop_selection.contains(&index);
+                if modifiers.ctrl {
+                    if !self.desktop_selection.remove(&index) {
+                        self.desktop_selection.insert(index);
+                    }
+                    self.desktop_anchor = Some(index);
+                } else if modifiers.shift {
+                    let from = self.desktop_anchor.unwrap_or(index);
+                    self.desktop_selection
+                        .extend(background::grid_range(self, from, index));
+                } else if !was_selected {
+                    self.select_desktop_only(index);
+                }
+                self.last_click = Some((time, index));
+                self.desktop_press = Some(DesktopPress {
+                    index,
+                    start: (x, y),
+                    at: (x, y),
+                    dragging: false,
+                    narrow: was_selected && !held && self.desktop_selection.len() > 1,
+                });
+                self.redraw_backgrounds();
+            }
+            Some(index) => {
+                if !self.desktop_selection.contains(&index) {
+                    self.select_desktop_only(index);
+                }
+                self.last_click = None;
+                self.redraw_backgrounds();
+                if button == Button::Right {
+                    desktop_menu::open(self, x, y);
+                }
+            }
+            None => {
+                self.last_click = None;
+                if !held && !self.desktop_selection.is_empty() {
+                    self.desktop_selection.clear();
+                    self.redraw_backgrounds();
+                }
+                if button == Button::Left && background::cell_at(self, x, y).is_some() {
+                    self.desktop_band = Some(DesktopBand {
+                        start: (x, y),
+                        at: (x, y),
+                        base: if held {
+                            self.desktop_selection.clone()
+                        } else {
+                            BTreeSet::new()
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    /// Routes wheel scrolling.
+    fn pointer_axis(&mut self, surface: SurfaceId, x: f64, y: f64, delta: f64) {
+        if let SurfaceId::Window(id) = surface {
+            if self.is_settings(id) {
+                settings::pointer_axis(self, x, y, delta);
+            } else if !self.is_dialog(id) {
+                ui::files::pointer_axis(self, id, x, y, delta);
+            }
+            return;
+        }
+        if surface != SurfaceId::Panel {
+            return;
+        }
+        self.pointer = (x, y);
+        let handled = match self.popup {
+            Popup::Menu => menu::scroll(self, x, y, delta),
+            Popup::Launcher => launcher::scroll(self, x, y, delta),
+            Popup::Volume => popups::volume_scroll(self, x, y, delta),
+            Popup::Calendar => popups::calendar_scroll(self, x, y, delta),
+            Popup::Notifications => notifications::center_scroll(self, x, y, delta),
+            _ => false,
+        };
+        if !handled {
+            panel::scroll(self, x, y, delta);
+        }
+    }
+
+    /// Clears hover state when the pointer leaves a surface.
+    fn pointer_leave(&mut self, surface: SurfaceId) {
+        match surface {
+            SurfaceId::Bar(_) => {}
+            SurfaceId::Panel => {
+                self.pointer = (-1.0, -1.0);
+                self.schedule_hide();
+                if self.popup == Popup::None
+                    || !matches!(
+                        self.hover,
+                        Hover::MenuApp(_) | Hover::MenuTile(_) | Hover::MenuCategory(_)
+                    )
+                {
+                    self.set_hover(Hover::None);
+                }
+            }
+            SurfaceId::Background(_) => {
+                if matches!(self.hover, Hover::DesktopIcon(_)) {
+                    self.set_hover(Hover::None);
+                }
+            }
+            SurfaceId::Window(id) if self.is_settings(id) => settings::pointer_leave(self),
+            SurfaceId::Window(id) if self.is_dialog(id) => ui::dialog::pointer_leave(self),
+            SurfaceId::Window(id) => ui::files::pointer_leave(self, id),
+            SurfaceId::Notifications => {
+                if matches!(self.hover, Hover::Card(..)) {
+                    self.set_hover(Hover::None);
+                }
+            }
+        }
+    }
+
+    /// Routes a key press to the open popup.  The Super key is the window
+    /// manager's: it runs `selkies-desktop --launcher` on the release, so a
+    /// press that reaches the panel does nothing here.
+    fn key(&mut self, key: Key) {
+        match key {
+            Key::Super => {}
+            Key::Escape => self.close_popup(),
+            _ => match self.popup {
+                Popup::Menu => menu::key(self, key),
+                Popup::Launcher => launcher::key(self, key),
+                Popup::Calendar => popups::calendar_key(self, key),
+                Popup::Volume => popups::volume_key(self, key),
+                _ => {}
+            },
+        }
+    }
+
+    /// Marks the panel for redraw.
+    pub fn redraw_panel(&mut self) {
+        self.panel_dirty = true;
+    }
+
+    /// Tells the backend where the bar shows each window when that changed, so a minimize
+    /// shrinks toward the window's own button.
+    fn publish_task_rects(&mut self) {
+        let layout = ui::panel::layout(self);
+        let rects: Vec<(u64, Rect)> = layout
+            .tasks
+            .iter()
+            .filter_map(|(index, rect)| self.toplevels.get(*index).map(|t| (t.id, *rect)))
+            .collect();
+        if rects != self.published_tasks {
+            self.published_tasks = rects.clone();
+            self.requests.push(Request::TaskbarRects {
+                surface: self.current_bar_surface(),
+                rects,
+            });
+        }
+    }
+
+    /// Renders the panel when it changed.
+    ///
+    /// # Returns
+    /// The frame to present, or `None` when nothing changed.
+    pub fn render_panel(&mut self) -> Option<Frame<'_>> {
+        let parts = self.draw_panel()?;
+        for bar in &mut self.bars {
+            bar.dirty = true;
+        }
+        Some(parts.frame(self.panel_pix.as_ref()?))
+    }
+
+    /// Draws the panel, or the bar standing in for it, into its pixels when it changed, a
+    /// popup only on the bar it belongs to.
+    fn draw_panel(&mut self) -> Option<BarFrame> {
+        if !self.panel.configured || !self.panel_dirty {
+            return None;
+        }
+        self.panel_dirty = false;
+        let foreign = self.popup != Popup::None && self.popup_bar != self.current_bar;
+        let popup = self.popup;
+        if foreign {
+            self.popup = Popup::None;
+        }
+        let parts = self.draw_panel_pixels();
+        self.popup = popup;
+        parts
+    }
+
+    /// The drawing behind [`Desktop::draw_panel`].
+    fn draw_panel_pixels(&mut self) -> Option<BarFrame> {
+        let geometry = self.panel;
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let mut pix = match self.panel_pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => pix,
+            _ => Pixmap::new(w, h)?,
+        };
+        let previous = std::mem::take(&mut self.panel_visible);
+        let hidden = self.panel_hidden();
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        let shape = self.bar_shape();
+        let mut visible = vec![if hidden {
+            self.reveal_strip()
+        } else {
+            shape.0.intersect(&whole)
+        }];
+        {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            let clear = previous.iter().fold(visible[0], |acc, r| acc.union(r));
+            canvas.clear(clear.inflate(CLEAR_MARGIN));
+            if hidden {
+                canvas.fill_rect(self.reveal_strip(), ui::panel_bg(self.config.panel_opacity / 2));
+            } else {
+                panel::draw(self, &mut canvas);
+                visible.extend(popups::draw(self, &mut canvas));
+            }
+        }
+        if self.opaque_output {
+            self.flatten_over_wallpaper(&mut pix, &visible);
+        }
+        let mut damage: Vec<Rect> = previous.iter().map(|r| r.inflate(CLEAR_MARGIN)).collect();
+        damage.extend(visible.iter().map(|r| r.inflate(CLEAR_MARGIN)));
+        let grab = self.popup != Popup::None;
+        let input = if grab {
+            vec![Rect::new(0, 0, geometry.width, geometry.height)]
+        } else {
+            visible.clone()
+        };
+        self.panel_visible = visible.clone();
+        self.panel_pix = Some(pix);
+        self.publish_task_rects();
+        Some(BarFrame {
+            scale: geometry.scale,
+            damage,
+            input,
+            visible,
+            grab,
+            bar: (!hidden).then_some(shape),
+        })
+    }
+
+    /// Blends the panel's pixels over the wallpaper behind them and makes
+    /// them opaque, for a display that drops alpha.  Pixels the wallpaper
+    /// does not reach are left as they are.
+    ///
+    /// # Arguments
+    /// * `pix` - The panel pixmap, premultiplied.
+    /// * `rects` - The logical rectangles to blend.
+    fn flatten_over_wallpaper(&self, pix: &mut Pixmap, rects: &[Rect]) {
+        let Some((_, layer)) = self.primary_background().and_then(|b| b.wallpaper_cache.as_ref()) else {
+            return;
+        };
+        let scale = self.panel.scale.max(1);
+        let (ox, oy) = (self.panel_offset.0 * scale, self.panel_offset.1 * scale);
+        let (pw, ph) = (pix.width() as i32, pix.height() as i32);
+        let (lw, lh) = (layer.width() as i32, layer.height() as i32);
+        let layer_data = layer.data();
+        let data = pix.data_mut();
+        for rect in rects {
+            let r = rect.scaled(scale).intersect(&Rect::new(0, 0, pw, ph));
+            for y in r.y..r.bottom() {
+                let by = y + oy;
+                if by < 0 || by >= lh {
+                    continue;
+                }
+                for x in r.x..r.right() {
+                    let bx = x + ox;
+                    if bx < 0 || bx >= lw {
+                        continue;
+                    }
+                    let d = (y as usize * pw as usize + x as usize) * 4;
+                    let s = (by as usize * lw as usize + bx as usize) * 4;
+                    let a = data[d + 3] as u32;
+                    if a == 255 {
+                        continue;
+                    }
+                    let inv = 255 - a;
+                    for c in 0..3 {
+                        data[d + c] =
+                            (data[d + c] as u32 + layer_data[s + c] as u32 * inv / 255).min(255) as u8;
+                    }
+                    data[d + 3] = 255;
+                }
+            }
+        }
+    }
+
+    /// Renders a background surface when it changed.
+    ///
+    /// # Arguments
+    /// * `id` - The backend's number for the surface.
+    ///
+    /// # Returns
+    /// The frame to present, or `None` when nothing changed.
+    pub fn render_background(&mut self, id: u32) -> Option<Frame<'_>> {
+        let index = self.backgrounds.iter().position(|b| b.id == id)?;
+        let geometry = self.backgrounds[index].geometry;
+        if !geometry.configured || !self.backgrounds[index].dirty {
+            return None;
+        }
+        self.backgrounds[index].dirty = false;
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        let (mut pix, fresh) = match self.backgrounds[index].pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
+            _ => (Pixmap::new(w, h)?, true),
+        };
+        let scene = background::scene(self, id);
+        let damage = match self.backgrounds[index].scene.as_ref() {
+            Some(before) if !fresh => background::damage(before, &scene).map(|r| r.intersect(&whole)),
+            _ => Some(whole),
+        };
+        if let Some(rect) = damage {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            canvas.clipped(rect, |canvas| background::draw(self, id, canvas));
+        }
+        let input = if self.backgrounds[index].primary {
+            vec![whole]
+        } else {
+            Vec::new()
+        };
+        self.backgrounds[index].pix = Some(pix);
+        self.backgrounds[index].scene = Some(scene);
+        let damage = damage?;
+        Some(Frame {
+            pixmap: self.backgrounds[index].pix.as_ref()?,
+            scale: geometry.scale,
+            damage: vec![damage],
+            input,
+            visible: vec![whole],
+            grab: false,
+            bar: None,
+        })
+    }
+
+    /// Renders a background surface as two layers when it changed: the
+    /// wallpaper alone, and the launchers over a transparent canvas, for a
+    /// backend that shows them above the wallpaper layers of other programs.
+    ///
+    /// # Arguments
+    /// * `id` - The background surface.
+    ///
+    /// # Returns
+    /// The wallpaper frame, which takes no input, and the launchers frame,
+    /// whose input is the launcher cells; `None` when nothing changed.
+    pub fn render_background_layers(&mut self, id: u32) -> Option<BackgroundFrames<'_>> {
+        let index = self.backgrounds.iter().position(|b| b.id == id)?;
+        let geometry = self.backgrounds[index].geometry;
+        if !geometry.configured || !self.backgrounds[index].dirty {
+            return None;
+        }
+        self.backgrounds[index].dirty = false;
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        let (mut pix, pix_fresh) = match self.backgrounds[index].pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
+            _ => (Pixmap::new(w, h)?, true),
+        };
+        let (mut launchers, launchers_fresh) = match self.backgrounds[index].launchers_pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
+            _ => (Pixmap::new(w, h)?, true),
+        };
+        let full = pix_fresh || launchers_fresh || self.backgrounds[index].scene.is_none();
+        let scene = background::scene(self, id);
+        let damage = match self.backgrounds[index].scene.as_ref() {
+            Some(before) if !full => background::damage(before, &scene).map(|r| r.intersect(&whole)),
+            _ => Some(whole),
+        };
+        if full {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            background::draw_wallpaper_layer(self, id, &mut canvas);
+        }
+        if let Some(rect) = damage {
+            let mut canvas = Canvas::new(launchers.as_mut(), geometry.scale);
+            canvas.clipped(rect, |canvas| {
+                canvas.clear(rect);
+                background::draw_launchers(self, id, canvas);
+            });
+        }
+        let (input, cells) = if self.backgrounds[index].primary {
+            // A dragged icon, the cells a drag would land on, and a selection box are drawn
+            // wherever the pointer takes them.
+            let visible = if self.desktop_drag_at.is_some() || self.desktop_band.is_some() {
+                vec![whole]
+            } else {
+                background::cells(self)
+            };
+            (vec![whole], visible)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        self.backgrounds[index].pix = Some(pix);
+        self.backgrounds[index].launchers_pix = Some(launchers);
+        self.backgrounds[index].scene = Some(scene);
+        let surface = &self.backgrounds[index];
+        Some(BackgroundFrames {
+            wallpaper: full
+                .then_some(surface.pix.as_ref())
+                .flatten()
+                .map(|pixmap| Frame {
+                    pixmap,
+                    scale: geometry.scale,
+                    damage: vec![whole],
+                    input: Vec::new(),
+                    visible: vec![whole],
+                    grab: false,
+                    bar: None,
+                }),
+            launchers: damage
+                .zip(surface.launchers_pix.as_ref())
+                .map(|(rect, pixmap)| Frame {
+                    pixmap,
+                    scale: geometry.scale,
+                    damage: vec![rect],
+                    input,
+                    visible: cells,
+                    grab: false,
+                    bar: None,
+                }),
+        })
+    }
+
+    /// Renders one of the shell's windows when it changed: the settings
+    /// window, or a file manager window.
+    ///
+    /// # Arguments
+    /// * `id` - The window's number.
+    ///
+    /// # Returns
+    /// The frame to present, or `None` when nothing changed.
+    pub fn render_window(&mut self, id: u32) -> Option<Frame<'_>> {
+        if self.is_settings(id) {
+            return self.render_settings();
+        }
+        if self.is_dialog(id) {
+            return self.render_dialog();
+        }
+        let index = self.files.windows.iter().position(|w| w.id == id)?;
+        let geometry = self.files.windows[index].geometry;
+        if !geometry.configured || !self.files.windows[index].dirty {
+            return None;
+        }
+        self.files.windows[index].dirty = false;
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let mut pix = match self.files.windows[index].pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => pix,
+            _ => Pixmap::new(w, h)?,
+        };
+        {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            ui::files::draw(self, id, &mut canvas);
+        }
+        let title = self.files.windows[index].title();
+        if self.files.windows[index].shown_title != title {
+            self.files.windows[index].shown_title = title.clone();
+            self.requests.push(Request::SetTitle { id, title });
+        }
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        self.files.windows[index].pix = Some(pix);
+        Some(Frame {
+            pixmap: self.files.windows[index].pix.as_ref()?,
+            scale: geometry.scale,
+            damage: vec![whole],
+            input: vec![whole],
+            visible: vec![whole],
+            grab: false,
+            bar: None,
+        })
+    }
+
+    /// Renders the desktop's dialog when it changed.
+    fn render_dialog(&mut self) -> Option<Frame<'_>> {
+        let geometry = self.dialog.geometry;
+        if !geometry.configured || !self.dialog.dirty {
+            return None;
+        }
+        self.dialog.dirty = false;
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let mut pix = match self.dialog.pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => pix,
+            _ => Pixmap::new(w, h)?,
+        };
+        {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            ui::dialog::draw(self, &mut canvas);
+        }
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        self.dialog.pix = Some(pix);
+        Some(Frame {
+            pixmap: self.dialog.pix.as_ref()?,
+            scale: geometry.scale,
+            damage: vec![whole],
+            input: vec![whole],
+            visible: vec![whole],
+            grab: false,
+            bar: None,
+        })
+    }
+
+    /// Renders the settings window when it changed.
+    ///
+    /// # Returns
+    /// The frame to present, or `None` when nothing changed.
+    fn render_settings(&mut self) -> Option<Frame<'_>> {
+        let geometry = self.settings.geometry;
+        if !geometry.configured || !self.settings.dirty {
+            return None;
+        }
+        self.settings.dirty = false;
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let mut pix = match self.settings.pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => pix,
+            _ => Pixmap::new(w, h)?,
+        };
+        {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            settings::draw(self, &mut canvas);
+        }
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        self.settings.pix = Some(pix);
+        Some(Frame {
+            pixmap: self.settings.pix.as_ref()?,
+            scale: geometry.scale,
+            damage: vec![whole],
+            input: vec![whole],
+            visible: vec![whole],
+            grab: false,
+            bar: None,
+        })
+    }
+}
+
+/// The applications a first launch pins, a group at a time: the first installed entry of each
+/// group joins the favorites, so a browser installed under another packaging's name still
+/// counts once.
+const DEFAULT_FAVORITES: &[&[&str]] = &[
+    &[
+        "firefox.desktop",
+        "firefox-esr.desktop",
+        "org.mozilla.firefox.desktop",
+    ],
+    &["google-chrome.desktop", "com.google.Chrome.desktop"],
+    &[
+        "chromium.desktop",
+        "chromium-browser.desktop",
+        "org.chromium.Chromium.desktop",
+    ],
+    &[
+        "selkies-terminal.desktop",
+        "org.gnome.Console.desktop",
+        "org.gnome.Terminal.desktop",
+        "org.kde.konsole.desktop",
+        "xfce4-terminal.desktop",
+        "foot.desktop",
+        "kitty.desktop",
+        "Alacritty.desktop",
+        "xterm.desktop",
+    ],
+];
+
+/// Seeds the favorites of a session with no favorites setting: the default browsers and a
+/// terminal that are installed, ahead of the file manager the configuration already pins.
+///
+/// The seed is not written to the settings, so an application installed later joins it until
+/// the user pins or unpins something.
+fn seed_favorites(config: &mut Config, apps: &Apps) {
+    if !config.favorites_default {
+        return;
+    }
+    let mut seeded: Vec<String> = DEFAULT_FAVORITES
+        .iter()
+        .filter_map(|group| group.iter().find(|id| apps.find(id).is_some()))
+        .map(|id| id.to_string())
+        .collect();
+    seeded.retain(|id| !config.favorites.contains(id));
+    seeded.append(&mut config.favorites);
+    config.favorites = seeded;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_display;
+
+    #[test]
+    fn a_display_that_went_away_no_longer_claims_its_corner() {
+        let before = [(1, (2560, 0)), (3, (0, 0))];
+        assert_eq!(edge_display(&before, (0, 0)), Some(Some(3)));
+        let after = [(1, (0, 0))];
+        assert_eq!(edge_display(&after, (0, 0)), Some(None));
+    }
+
+    #[test]
+    fn an_unknown_corner_waits_for_the_display_rather_than_going_to_the_primary() {
+        assert_eq!(edge_display(&[(1, (0, 0))], (2560, 0)), None);
+        assert_eq!(edge_display(&[], (2560, 0)), Some(None));
+    }
+}

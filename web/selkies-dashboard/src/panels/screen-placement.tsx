@@ -7,6 +7,10 @@
 /**
  * The arrows that ask which side a second display goes, drawn over the whole
  * page while `placements` holds the sides; a click outside them dismisses it.
+ * Each arrow is placed by a wrapper and neither animates nor shifts while
+ * pressed: the shared button's press shift replaces the translate that
+ * centers an arrow, so it would jump away under the pointer and the release
+ * would miss it.
  * @module
  */
 import { Button } from "@/components/ui/button";
@@ -26,10 +30,12 @@ export function ScreenPlacement() {
   return (
     <div className="screen-placement-overlay fixed inset-0 z-[2150]" onClick={dismissPlacements}>
       {SIDES.filter(({ side }) => placements[side] !== undefined).map(({ side, glyph, className }) => (
-        <Button key={side} className={`absolute size-24 text-4xl ${className}`}
-          onClick={(event) => { event.stopPropagation(); launchWindow(side, placements[side]); }}>
-          {glyph}
-        </Button>
+        <div key={side} className={`absolute ${className}`}>
+          <Button className="size-24 text-4xl transition-none active:not-aria-[haspopup]:translate-y-0"
+            onClick={(event) => { event.stopPropagation(); launchWindow(side, placements[side]); }}>
+            {glyph}
+          </Button>
+        </div>
       ))}
     </div>
   );
