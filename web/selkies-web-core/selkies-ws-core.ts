@@ -7671,8 +7671,24 @@ class WorkerWebSocket {
     socketOpenedAt = performance.now();
     reconnectUnopened = 0;
     initialSettingsSent = false;
-    // Before the probes below: the server's MODE, and what follows it, can land while they
-    // run, and the status they leave must stand.
+    // Each connection starts over: the server registers it by the start
+    // policy, applied here again by its first server_settings payload. A
+    // reconnect in place keeps what the user chose (`resumeCarriedPipelines`).
+    const carried = carriedPipelines;
+    pipelinesToggledByUser = carried ? new Set(carried.toggled) : new Set();
+    serverSettingsReceived = false;
+    pendingInitialAudioStart = false;
+    isVideoPipelineActive = carried && carried.toggled.has('video') ? carried.video : true;
+    isAudioPipelineActive = carried && carried.toggled.has('audio') ? carried.audio : (displayId === 'primary');
+    if (!isSharedMode) isMicrophoneActive = false;
+    window.postMessage({
+      type: 'pipelineStatusUpdate',
+      video: isVideoPipelineActive,
+      audio: isAudioPipelineActive
+    }, window.location.origin);
+    // This start and the status before the probes below: the server's MODE, and the
+    // server_settings that follows it without waiting for this page's SETTINGS, can land
+    // while they run, and the state they leave must stand.
     status = 'connected_waiting_mode';
     loadingText = 'Connection established. Waiting for server mode...';
     updateStatusDisplay();
@@ -7794,27 +7810,12 @@ class WorkerWebSocket {
     websocket.send('cr');
     console.log('[websockets] Sent initial clipboard request (cr) to server (cache-only).');
     flushHeldInput();
-    // Each connection starts over: the server registers it by the start
-    // policy, applied here again by its first server_settings payload. A
-    // reconnect in place keeps what the user chose (`resumeCarriedPipelines`).
-    const carried = carriedPipelines;
-    pipelinesToggledByUser = carried ? new Set(carried.toggled) : new Set();
-    serverSettingsReceived = false;
-    pendingInitialAudioStart = false;
-    isVideoPipelineActive = carried && carried.toggled.has('video') ? carried.video : true;
-    isAudioPipelineActive = carried && carried.toggled.has('audio') ? carried.audio : (displayId === 'primary');
-    window.postMessage({
-      type: 'pipelineStatusUpdate',
-      video: isVideoPipelineActive,
-      audio: isAudioPipelineActive
-    }, window.location.origin);
 
     if (metricsIntervalId === null) {
       metricsIntervalId = setInterval(sendClientMetrics, METRICS_INTERVAL_MS);
       console.log(`[websockets] Started client metrics every ${METRICS_INTERVAL_MS}ms.`);
     }
     if (!isSharedMode) {
-        isMicrophoneActive = false;
         if (backpressureIntervalId === null) {
           backpressureIntervalId = setInterval(sendBackpressureAck, BACKPRESSURE_INTERVAL_MS);
           console.log(`[websockets] Started sending backpressure ACKs every ${BACKPRESSURE_INTERVAL_MS}ms.`);
