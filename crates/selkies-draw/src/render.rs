@@ -980,12 +980,58 @@ fn svg_fonts() -> &'static std::sync::Arc<resvg::usvg::fontdb::Database> {
 /// * `path` - The SVG file.
 /// * `size` - Side of the square in pixels.
 pub fn load_svg(path: &std::path::Path, size: u32) -> Option<Pixmap> {
+    render_svg(&std::fs::read(path).ok()?, size, None)
+}
+
+/// The classes a color-scheme stylesheet gives the foreground of a monochrome glyph, which
+/// an icon theme draws in `currentColor` and the toolkit recolors to the palette it is shown on.
+const SCHEME_TEXT_CLASSES: [&str; 3] = [
+    "ColorScheme-Text",
+    "ColorScheme-ViewText",
+    "ColorScheme-ButtonText",
+];
+
+/// Renders an SVG file as [`load_svg`] does, its color-scheme foreground drawn in `color`.
+///
+/// Monochrome theme glyphs carry an embedded `current-color-scheme` stylesheet fixing their
+/// foreground to the light palette's text, so on a dark surface they vanish. The toolkits
+/// that ship such themes rewrite that stylesheet with the palette's color; here an injected
+/// `!important` rule outranks the embedded one, which an injected rule alone does not. A file
+/// without the stylesheet's classes renders as it is.
+///
+/// # Returns
+/// The pixmap, and whether the color applied: `false` for a file that names no color-scheme
+/// class, whose rendering is the plain one.
+pub fn load_svg_colored(path: &std::path::Path, size: u32, color: Color) -> Option<(Pixmap, bool)> {
     let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    if !SCHEME_TEXT_CLASSES.iter().any(|class| text.contains(class)) {
+        return render_svg(&bytes, size, None).map(|pix| (pix, false));
+    }
+    let c = color.to_color_u8();
+    let css = format!(
+        "rgba({}, {}, {}, {:.3})",
+        c.red(),
+        c.green(),
+        c.blue(),
+        c.alpha() as f32 / 255.0
+    );
+    let sheet: String = SCHEME_TEXT_CLASSES
+        .iter()
+        .map(|class| format!(".{class} {{ color: {css} !important; }}\n"))
+        .collect();
+    render_svg(&bytes, size, Some(sheet)).map(|pix| (pix, true))
+}
+
+/// Renders SVG bytes into a square pixmap, the drawing fitted and centered, with an injected
+/// stylesheet where one is given.
+fn render_svg(bytes: &[u8], size: u32, style_sheet: Option<String>) -> Option<Pixmap> {
     let options = resvg::usvg::Options {
         fontdb: svg_fonts().clone(),
+        style_sheet,
         ..resvg::usvg::Options::default()
     };
-    let tree = resvg::usvg::Tree::from_data(&bytes, &options).ok()?;
+    let tree = resvg::usvg::Tree::from_data(bytes, &options).ok()?;
     let tree_size = tree.size();
     if tree_size.width() <= 0.0 || tree_size.height() <= 0.0 || size == 0 {
         return None;
@@ -1076,5 +1122,46 @@ mod tests {
         let mut dst = [10u8, 20, 30, 255];
         blend_pixel(&mut dst, 200, 100, 50, 255);
         assert_eq!(dst, [200, 100, 50, 255]);
+    }
+
+    /// Writes an SVG of a square filled through a class into the temporary directory.
+    fn square_svg(name: &str, style: &str, class: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("selkies-draw-{name}-{}.svg", std::process::id()));
+        let svg = format!(
+            "<svg version=\"1.1\" viewBox=\"0 0 16 16\" xmlns=\"http://www.w3.org/2000/svg\">\
+             <defs><style type=\"text/css\" id=\"current-color-scheme\">{style}</style></defs>\
+             <rect width=\"16\" height=\"16\" class=\"{class}\" fill=\"currentColor\"/></svg>"
+        );
+        std::fs::write(&path, svg).unwrap();
+        path
+    }
+
+    /// The center pixel of a pixmap, premultiplied.
+    fn center(pix: &Pixmap) -> (u8, u8, u8, u8) {
+        let c = pix.pixel(pix.width() / 2, pix.height() / 2).unwrap();
+        (c.red(), c.green(), c.blue(), c.alpha())
+    }
+
+    #[test]
+    fn a_color_scheme_glyph_takes_the_color_it_is_drawn_in() {
+        let path = square_svg(
+            "scheme",
+            ".ColorScheme-Text { color:#232629; }",
+            "ColorScheme-Text",
+        );
+        assert_eq!(center(&load_svg(&path, 16).unwrap()), (0x23, 0x26, 0x29, 255));
+        let (pix, applied) = load_svg_colored(&path, 16, rgb(0xee, 0xf0, 0xf2)).unwrap();
+        assert!(applied);
+        assert_eq!(center(&pix), (0xee, 0xf0, 0xf2, 255));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_full_color_icon_keeps_its_colors() {
+        let path = square_svg("full", ".accent { color:#3daee9; }", "accent");
+        let (pix, applied) = load_svg_colored(&path, 16, rgb(255, 255, 255)).unwrap();
+        assert!(!applied);
+        assert_eq!(center(&pix), (0x3d, 0xae, 0xe9, 255));
+        std::fs::remove_file(path).unwrap();
     }
 }

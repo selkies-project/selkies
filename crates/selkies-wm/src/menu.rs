@@ -283,7 +283,8 @@ impl Level {
     }
 }
 
-/// One selectable row: the highlight, the icon or the check mark, the label, and the submenu arrow.
+/// One selectable row: the highlight, the icon or the check mark, the label, and the submenu arrow;
+/// a monochrome theme glyph takes the label's color, so it reads on the row as the label does.
 #[allow(clippy::too_many_arguments)]
 fn draw_row(
     canvas: &mut Canvas<'_>,
@@ -309,7 +310,9 @@ fn draw_row(
     };
     let icon_rect = DrawRect::new(row.x + LABEL_PAD, row.y + (row.h - ICON) / 2, ICON, ICON);
     if let Some(name) = icon
-        && let Some(pixmap) = renderer.icons.get(name, (ICON * scale) as u32)
+        && let Some(pixmap) = renderer
+            .icons
+            .get_colored(name, (ICON * scale) as u32, text_color)
     {
         canvas.draw_image_fit(&pixmap, icon_rect);
     } else if checked {

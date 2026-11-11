@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tiny_skia::Pixmap;
+use tiny_skia::{Color, Pixmap};
 
 use crate::dirs;
 use crate::render;
@@ -92,6 +92,8 @@ pub struct Icons {
     chain: Vec<Theme>,
     pixmap_dirs: Vec<PathBuf>,
     cache: HashMap<(String, u32), Option<Arc<Pixmap>>>,
+    /// [`Icons::get_colored`]'s icons by name, pixel size, and the color they were drawn in.
+    colored: HashMap<(String, u32, [u8; 4]), Option<Arc<Pixmap>>>,
     other_themes: Option<Vec<PathBuf>>,
 }
 
@@ -117,6 +119,7 @@ impl Icons {
             chain: Vec::new(),
             pixmap_dirs,
             cache: HashMap::new(),
+            colored: HashMap::new(),
             other_themes: None,
         };
         let selected = theme.map(|t| t.to_string()).or_else(gtk_icon_theme).or_else(|| {
@@ -192,6 +195,40 @@ impl Icons {
         }
         let found = self.lookup(name, size).map(Arc::new);
         self.cache.insert(key, found.clone());
+        found
+    }
+
+    /// Finds and loads an icon as [`Icons::get`] does, a monochrome theme glyph drawn in the
+    /// color of the text beside it so it reads on any surface ([`render::load_svg_colored`]);
+    /// a full-color icon is the one `get` returns.
+    ///
+    /// # Arguments
+    /// * `name` - An icon name, with or without extension, or an absolute path.
+    /// * `size` - Physical pixel size of the longer side.
+    /// * `color` - The foreground the glyph takes.
+    pub fn get_colored(&mut self, name: &str, size: u32, color: Color) -> Option<Arc<Pixmap>> {
+        let name = name.trim();
+        if name.is_empty() || size == 0 {
+            return None;
+        }
+        let c = color.to_color_u8();
+        let key = (name.to_string(), size, [c.red(), c.green(), c.blue(), c.alpha()]);
+        if let Some(cached) = self.colored.get(&key) {
+            return cached.clone();
+        }
+        let path = self.locate(name, size);
+        let svg = path
+            .as_ref()
+            .and_then(|p| p.extension())
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"));
+        let found = match path {
+            Some(path) if svg => match render::load_svg_colored(&path, size, color) {
+                Some((pix, true)) => Some(Arc::new(pix)),
+                _ => self.get(name, size),
+            },
+            _ => self.get(name, size),
+        };
+        self.colored.insert(key, found.clone());
         found
     }
 
@@ -560,6 +597,7 @@ mod tests {
             ],
             pixmap_dirs: Vec::new(),
             cache: HashMap::new(),
+            colored: HashMap::new(),
             other_themes: Some(Vec::new()),
         };
         assert_eq!(
