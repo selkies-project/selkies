@@ -276,6 +276,11 @@ pub fn dispatch(state: &mut AppState, event: Event) -> Verdict {
 }
 
 /// Drop the policy and show every window the way the frontend does without one.
+///
+/// Beside the windows, everything the policy set outside its own state goes back to the
+/// frontend's: the client's cursor in place of one the policy showed, a single virtual desktop
+/// for the pagers, since every window is now shown, and the keyboard on the topmost window where
+/// the policy left it on nothing or on a window no longer shown.
 fn uninstall(state: &mut AppState) {
     let Some(mut wm) = state.wm.take() else {
         return;
@@ -298,6 +303,26 @@ fn uninstall(state: &mut AppState) {
         }
     }
     state.wm = None;
+    if wm.cursor.is_some() {
+        let image = state
+            .current_cursor_icon
+            .clone()
+            .unwrap_or(CursorImageStatus::Named(CursorIcon::Default));
+        state.send_cursor_image(&image);
+    }
+    crate::wayland::workspace::set_desktops(state, 1, 0);
+    if let Some(keyboard) = state.seat.get_keyboard() {
+        let kept = match keyboard.current_focus() {
+            Some(FocusTarget::Window(window)) => state.space.elements().any(|w| *w == window),
+            Some(_) => true,
+            None => false,
+        };
+        if !kept {
+            let top = state.space.elements().last().cloned();
+            keyboard.set_focus(state, top.map(FocusTarget::Window), next_serial());
+        }
+    }
+    state.refocus_pointer();
 }
 
 /// Every window the compositor has by id: shown, pending, or hidden.
