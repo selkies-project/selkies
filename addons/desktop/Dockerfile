@@ -140,13 +140,13 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
 # through the selkies-proot wrapper without touching the image. The release
 # tarball is staged here and linked into each user's ~/.local/bin, because
 # proot-apps runs its tools from there by absolute path. Its proot is proot-next
-# (https://proot.selkies.io/), which needs neither ptrace nor a capability: where
-# Yama refuses ptrace it runs in a restricted mode. A second copy carries
+# (https://proot.selkies.io/), which needs neither ptrace nor a capability: at
+# Yama's ptrace_scope 2 it runs in a restricted mode. A second copy carries
 # CAP_SYS_PTRACE (set below as real root), with which a container granted that
-# capability runs it in its ptrace mode, the one with the fewest known gaps; it
-# is kept apart because a file capability the container's bounding set does not
-# hold stops that binary from execing at all, and the wrapper picks the copy
-# that runs.
+# capability runs it in its ptrace mode there, the one with the fewest known
+# gaps; it is kept apart because a file capability the container's bounding set
+# does not hold stops that binary from execing at all, and the wrapper picks the
+# copy that runs.
 # The release is checked against its digest, looked up with the build's token
 # where one is given (mounted for uid 1000, which these layers run as).
 RUN --mount=type=secret,id=github_token,uid=1000 mkdir -pm755 /opt/proot-apps && \

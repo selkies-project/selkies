@@ -31,8 +31,8 @@ if [ -d "${staging}" ]; then
     for tool in "${staging}"/*; do
         ln -sfn "${tool}" "${bin}/$(basename "${tool}")"
     done
-    # proot (proot-next) runs without ptrace or capabilities, in its restricted
-    # mode where Yama refuses ptrace; the copy carrying CAP_SYS_PTRACE runs in
+    # At Yama's ptrace_scope 2 proot (proot-next) runs in a restricted mode,
+    # without ptrace or capabilities; the copy carrying CAP_SYS_PTRACE runs in
     # its ptrace mode there, which has the fewest known gaps. That copy cannot
     # even exec where the container's bounding set lacks the capability, so
     # which one works is settled by running it.
