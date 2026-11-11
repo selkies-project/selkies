@@ -32,7 +32,7 @@
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { exportTag, git, referenceAsset, repoRoot, run, siteDir } from './version-tree.mjs';
 
 // What GitHub accepts as one release asset.
@@ -43,8 +43,9 @@ function option(name) {
   return at === -1 ? undefined : process.argv[at + 1];
 }
 
+// The version is part of the archive's file name, never a path of its own.
 const version = process.argv[2];
-if (!version || version.startsWith('--')) {
+if (!version || version.startsWith('--') || basename(version) !== version) {
   console.error('Usage: node build-reference-archive.mjs <version> [--tag <tag>] [--out <dir>]');
   process.exit(2);
 }
