@@ -1255,6 +1255,8 @@ impl Engine {
         }
         win.sent = Some((rect, states));
         self.out.push(Command::Configure { id, rect, states });
+        // A window's layer can follow its rectangle (`stands_in_for_fullscreen`).
+        self.emit_stack();
     }
 
     fn fit_maximized(&mut self, id: WindowId) {
@@ -2142,6 +2144,21 @@ impl Engine {
         self.emit_stack();
     }
 
+    /// Whether a window stands in for a fullscreen one on X11 without asking to be: a normal
+    /// window the engine draws no frame on whose client area is exactly one output's. A game
+    /// or an older toolkit can make the screen its own that way, a borderless window the size
+    /// of the output, rather than through `_NET_WM_STATE_FULLSCREEN`, and like a fullscreen
+    /// window it goes above the docks while it has the focus, or the bar would be drawn over
+    /// it. Wayland's bar is a layer surface the compositor stacks itself, so the rule is X11's.
+    fn stands_in_for_fullscreen(&self, win: &Win) -> bool {
+        self.backend == Backend::X11
+            && win.info.window_type == WindowType::Normal
+            && !win.decorated
+            && !win.maximized
+            && win.tile.is_none()
+            && self.outputs.iter().any(|o| o.rect == win.rect)
+    }
+
     /// The stacking order in layers, bottom first.
     fn ordered_stack(&self) -> Vec<WindowId> {
         let mut ordered: Vec<(Layer, usize, WindowId)> = self
@@ -2149,9 +2166,15 @@ impl Engine {
             .iter()
             .enumerate()
             .filter_map(|(i, id)| {
-                self.win(*id)
-                    .filter(|w| w.shown())
-                    .map(|w| (w.kind_layer(self.focus == Some(*id)), i, *id))
+                self.win(*id).filter(|w| w.shown()).map(|w| {
+                    let focused = self.focus == Some(*id);
+                    let layer = if focused && self.stands_in_for_fullscreen(w) {
+                        Layer::Fullscreen
+                    } else {
+                        w.kind_layer(focused)
+                    };
+                    (layer, i, *id)
+                })
             })
             .collect();
         ordered.sort_by_key(|(layer, i, _)| (*layer, *i));
@@ -5260,6 +5283,66 @@ mod tests {
                 transform: None
             }
         )));
+    }
+
+    /// On X11 a borderless window the size of its output that never asked for fullscreen goes
+    /// above the bar while it has the focus, as a fullscreen one does, and back under it once
+    /// another window takes the focus.
+    #[test]
+    fn a_borderless_window_the_size_of_its_output_covers_the_bar_while_focused() {
+        let mut engine = Engine::new(Backend::X11, Box::new(Recorder(Arc::new(Mutex::new(Vec::new())))));
+        engine.config = Config::default();
+        engine.menus = Menus::default();
+        engine.memory = WindowMemory::transient();
+        let mut out = Vec::new();
+        engine.handle(
+            Event::Outputs(vec![OutputInfo {
+                id: 0,
+                rect: Rect::new(0, 0, 1280, 800),
+                workarea: Rect::new(0, 0, 1280, 768),
+                scale: 1.0,
+                primary: true,
+            }]),
+            &mut out,
+        );
+        let mut dock = info(1);
+        dock.window_type = WindowType::Dock;
+        engine.handle(Event::Added(dock), &mut out);
+        engine.handle(
+            Event::Mapped {
+                id: 1,
+                size: Size { w: 1280, h: 32 },
+            },
+            &mut out,
+        );
+        let mut game = info(2);
+        game.decoration = pixelflux::wm::Decoration::None;
+        engine.handle(Event::Added(game), &mut out);
+        engine.handle(
+            Event::Mapped {
+                id: 2,
+                size: Size { w: 1280, h: 800 },
+            },
+            &mut out,
+        );
+        engine.handle(
+            Event::Request {
+                id: 2,
+                request: Request::Geometry(Rect::new(0, 0, 1280, 800)),
+            },
+            &mut out,
+        );
+        assert_eq!(engine.windows[&2].rect, Rect::new(0, 0, 1280, 800));
+        assert_eq!(engine.focus, Some(2));
+        assert_eq!(engine.ordered_stack(), vec![1, 2]);
+        open(&mut engine, 3, 400, 300);
+        assert_eq!(engine.focus, Some(3));
+        let order = engine.ordered_stack();
+        let position = |id| order.iter().position(|w| *w == id).unwrap();
+        assert!(
+            position(2) < position(1),
+            "the game goes back under the bar: {order:?}"
+        );
     }
 
     /// A window drawing its own frame covers the framed window under it: a click inside the
