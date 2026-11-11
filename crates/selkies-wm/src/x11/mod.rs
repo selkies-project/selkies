@@ -38,12 +38,20 @@
 //! menus at that scale, so the decorations keep pace with the applications where openbox
 //! leaves them a quarter their size. A scale change keeps every client's pixel size and
 //! re-dresses it, since only the applications that read the resource rescale themselves.
+//!
+//! A panic in the engine or the manager would end the thread and, with it, the shell's
+//! supervision, so the thread catches it as the Wayland compositor catches a panic in its policy:
+//! every client is handed back to the root as it stands, the connection closes (which releases
+//! `WM_S0` and every grab, and maps what the save-set still holds), and the thread goes on
+//! supervising the shell alone, so a window-manager bug leaves the session unmanaged rather than
+//! without its desktop.
 
 pub mod frame;
 pub mod props;
 
 use std::collections::{BTreeMap, HashMap};
 use std::os::fd::AsRawFd;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -346,7 +354,19 @@ pub fn spawn(
     let thread = std::thread::Builder::new()
         .name("selkies-wm-x11".to_string())
         .spawn(move || {
-            manager.run();
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| manager.run())) {
+                log::error!(
+                    target: "wm",
+                    "the window manager panicked ({}); windows are left unmanaged from here on",
+                    panic_message(payload.as_ref())
+                );
+                let shell = manager.shell.take();
+                let _ = catch_unwind(AssertUnwindSafe(|| manager.shutdown()));
+                drop(manager);
+                if let Some(shell) = shell {
+                    supervise_shell(shell, &flag);
+                }
+            }
             flag.store(false, Ordering::Relaxed);
         })
         .map_err(|e| e.to_string())?;
@@ -354,6 +374,24 @@ pub fn spawn(
         running,
         thread: Some(thread),
     })
+}
+
+/// What a panic said, for its log line.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("no message")
+}
+
+/// Keep the shell running once the manager is gone, until the handle stops the thread.
+fn supervise_shell(mut shell: ShellSupervisor, running: &AtomicBool) {
+    while running.load(Ordering::Relaxed) {
+        let next = shell.poll(Instant::now());
+        let wait = next.saturating_duration_since(Instant::now());
+        std::thread::sleep(wait.clamp(Duration::from_millis(200), Duration::from_secs(1)));
+    }
 }
 
 /// Everything the manager publishes in `_NET_SUPPORTED`.
