@@ -76,9 +76,12 @@ fi
 # screen Selkies sets, so the server takes no -screen. `-verbose 1` is what
 # makes the server say which EGL vendor glamor came up on and whether the
 # screen pixmap is on the GPU; both are startup lines, and both are the first
-# thing to look at when a session renders in software.
+# thing to look at when a session renders in software. Indirect GLX stays off:
+# with it on, glamor's GL provider declines the screen and the swrast one takes
+# it, whose Mesa driver is a stub that creates no context, and the first
+# indirect glXMakeCurrent (a 32-bit client with no 32-bit driver) kills the server.
 # shellcheck disable=SC2086  # VFB_DEVICE is an option pair or empty
-/usr/bin/Xvfb "${DISPLAY}" -verbose 1 +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -noreset -s 0 -dpms ${VFB_DEVICE} &
+/usr/bin/Xvfb "${DISPLAY}" -verbose 1 +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +render -nolisten "tcp" -noreset -s 0 -dpms ${VFB_DEVICE} &
 XVFB_PID=$!
 trap 'kill "${XVFB_PID}" 2>/dev/null' TERM INT
 
