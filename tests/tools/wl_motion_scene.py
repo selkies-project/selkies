@@ -91,13 +91,12 @@ class Canvas:
         self.w, self.h, self.stride = w, h, w * 4
         self.noise_h = min(NOISE_H, h)
         self.size = self.stride * h
-        fd, path = tempfile.mkstemp(dir=os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
-        os.unlink(path)
-        os.ftruncate(fd, BUFFERS * self.size)
-        self.mm = mmap.mmap(fd, BUFFERS * self.size)
-        self.mm[:] = BACKGROUND * (w * h * BUFFERS)
-        self.pool = g["shm"].create_pool(fd, BUFFERS * self.size)
-        os.close(fd)
+        with tempfile.TemporaryFile(dir=os.environ.get("XDG_RUNTIME_DIR", "/tmp")) as backing:
+            fd = backing.fileno()
+            os.ftruncate(fd, BUFFERS * self.size)
+            self.mm = mmap.mmap(fd, BUFFERS * self.size)
+            self.mm[:] = BACKGROUND * (w * h * BUFFERS)
+            self.pool = g["shm"].create_pool(fd, BUFFERS * self.size)
         self.buffers = [self.pool.create_buffer(b * self.size, w, h, self.stride, WlShm.format.xrgb8888.value)
                         for b in range(BUFFERS)]
         self.free = [True] * BUFFERS
