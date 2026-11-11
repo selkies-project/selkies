@@ -1619,7 +1619,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "wm_maximize",
         kind: Kind::Bool,
         default: "True",
-        help: "Maximize the application's top-level windows as they open while the session is the application alone, and as the session switches to it tile the four used last and stack any more above them on a slanted line of equal windows; an rc.xml application rule that sets maximized wins. Locked on (true|locked), for a kiosk, the application alone keeps those windows maximized on every virtual desktop whatever a rule says: switching to it maximizes each, and no request from the application or the user unmaximizes, minimizes, tiles, shades, moves, resizes, or sends one to another desktop, their frames losing the minimize and maximize buttons; fullscreen is let through. Pair it with --desktop=false|locked so the session cannot switch to the desktop.",
+        help: "Maximize the application's top-level windows as they open while the session is the application alone, and as the session switches to it tile the four used last and stack any more above them in a cascade of equal windows; an rc.xml application rule that sets maximized wins. Locked on (true|locked), for a kiosk, the application alone keeps those windows maximized on every virtual desktop whatever a rule says: switching to it maximizes each, and no request from the application or the user unmaximizes, minimizes, tiles, shades, moves, resizes, or sends one to another desktop, their frames losing the minimize and maximize buttons; fullscreen is let through. Pair it with --desktop=false|locked so the session cannot switch to the desktop.",
         env_vars: &[],
         allowed: &[],
         value_range: None,

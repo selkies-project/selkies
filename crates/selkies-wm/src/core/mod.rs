@@ -1374,8 +1374,8 @@ impl Engine {
     /// windows on the current desktop shown again, since without the shell's taskbar a minimized
     /// window has no way back, and laid out as [`Engine::tile_application`] tiles them. The
     /// shell's own windows, a file manager's among them, are closed rather than laid out, since
-    /// they leave with the shell and would leave their tiles empty. A switch to the desktop
-    /// leaves every window where it is.
+    /// they leave with the shell and would leave their tiles empty. A switch to the desktop lays
+    /// the application's windows out as [`Engine::cascade_for_desktop`] does.
     fn set_desktop(&mut self, on: bool) {
         if !self.session.switchable || self.session.desktop == on {
             return;
@@ -1383,6 +1383,7 @@ impl Engine {
         self.launcher.set_desktop(on);
         self.session = self.launcher.session();
         if self.session.desktop {
+            self.cascade_for_desktop();
             return;
         }
         if self.showing_desktop {
@@ -1431,8 +1432,8 @@ impl Engine {
     /// Lays the application's windows out as the session switches to it alone, on each output
     /// its own: the [`APPLICATION_TILES`] used last fill the work area between them (one
     /// maximized, two side by side, three as a half and two quarters, four as quarters), and
-    /// any more stack above the tiles on a slanted line of equal windows ([`cascade`]), the
-    /// one used last on top, so none hides behind the grid. An output too narrow for halves
+    /// any more stack above the tiles as a [`cascade`], the one used last on top, so none hides
+    /// behind the grid. An output too narrow for halves
     /// maximizes each, and a fullscreen window stays as it is.
     ///
     /// # Arguments
@@ -1463,16 +1464,62 @@ impl Engine {
                     self.set_tile(id, Some(*zone));
                 }
             }
-            let area = self.workarea(output);
-            for (&id, frame) in stacked.iter().rev().zip(cascade(area, stacked.len())) {
-                self.set_tile(id, None);
-                self.set_maximized(id, false);
-                let from = self.windows[&id].rect;
-                let extents = self.extents_of(id);
-                self.set_rect(id, grab::client_of(frame, extents));
-                self.glide(id, from);
-                self.raise(id);
+            let oldest_first: Vec<WindowId> = stacked.iter().rev().copied().collect();
+            self.place_cascade(&oldest_first, output);
+        }
+    }
+
+    /// Lays windows on an output out as a [`cascade`], the first at the back: each leaves any
+    /// tile or maximize, takes its frame, glides there, and is raised over the one before.
+    fn place_cascade(&mut self, oldest_first: &[WindowId], output: OutputId) {
+        let area = self.workarea(output);
+        for (&id, frame) in oldest_first.iter().zip(cascade(area, oldest_first.len())) {
+            self.set_tile(id, None);
+            self.set_maximized(id, false);
+            let from = self.windows[&id].rect;
+            let extents = self.extents_of(id);
+            self.set_rect(id, grab::client_of(frame, extents));
+            self.glide(id, from);
+            self.render_frame(id);
+            self.raise(id);
+        }
+    }
+
+    /// Lays the application's windows out as a [`cascade`] on each output as the session
+    /// switches back to the desktop, the one used last on top and focused, so the desktop shows
+    /// around them rather than under a maximized window or a grid of tiles. A fullscreen window
+    /// and one of a fixed size stay as they are.
+    fn cascade_for_desktop(&mut self) {
+        let mut windows: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| {
+                w.shown()
+                    && !w.fullscreen
+                    && fills_application(&w.info)
+                    && !apps::shell_window(&w.info.app_id)
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        windows.sort_by_key(|id| self.stack.iter().position(|w| w == id));
+        let mut outputs: Vec<OutputId> = Vec::new();
+        for id in &windows {
+            let output = self.windows[id].output;
+            if !outputs.contains(&output) {
+                outputs.push(output);
             }
+        }
+        for output in outputs {
+            let on: Vec<WindowId> = windows
+                .iter()
+                .copied()
+                .filter(|id| self.windows[id].output == output)
+                .collect();
+            self.place_cascade(&on, output);
+        }
+        let top = windows.last().copied();
+        if top.is_some() {
+            self.set_focus(top);
         }
     }
 
@@ -4509,29 +4556,36 @@ impl Engine {
 /// How many windows the switch to the application alone tiles on an output.
 const APPLICATION_TILES: usize = 4;
 
-/// The frames of windows stacked on a slanted line across a work area: each half the area
-/// across and down, the first at its top-left corner and the last at its bottom-right, the
-/// rest evenly between, so every title bar shows; one alone is centered.
+/// How far, in logical pixels, a cascade keeps from its work area's edges.
+const STACK_PADDING: i32 = 100;
+/// The most a cascade steps from one window's top-left corner to the next's, across and down.
+const STACK_STEP: i32 = 60;
+
+/// The frames of windows stacked as a cascade across a work area, the first at the back: every
+/// window the same size, a little over half the area, each stepped down and across at 45
+/// degrees from the one before by [`STACK_STEP`] or less, as little as it takes for the
+/// stack to fit inside [`STACK_PADDING`] of the edges, and the stack centered in the area so
+/// every title bar shows. A window alone sits at the padded top-left corner, the start of a
+/// cascade, leaving the desktop around it in view.
 fn cascade(area: Rect, count: usize) -> Vec<Rect> {
-    let (w, h) = (area.w / 2, area.h / 2);
-    if count == 1 {
-        return vec![Rect::new(
-            area.x + (area.w - w) / 2,
-            area.y + (area.h - h) / 2,
-            w,
-            h,
-        )];
+    let inner = Rect::new(
+        area.x + STACK_PADDING,
+        area.y + STACK_PADDING,
+        (area.w - 2 * STACK_PADDING).max(1),
+        (area.h - 2 * STACK_PADDING).max(1),
+    );
+    let (w, h) = ((area.w * 11 / 20).min(inner.w), (area.h * 11 / 20).min(inner.h));
+    if count <= 1 {
+        return (0..count).map(|_| Rect::new(inner.x, inner.y, w, h)).collect();
     }
-    let steps = count.saturating_sub(1).max(1) as i32;
+    let gaps = count as i32 - 1;
+    let travel = (inner.w - w).min(inner.h - h).max(0);
+    let step = (travel / gaps).min(STACK_STEP);
+    let extent = step * gaps;
+    let x0 = area.x + (area.w - w - extent) / 2;
+    let y0 = area.y + (area.h - h - extent) / 2;
     (0..count as i32)
-        .map(|i| {
-            Rect::new(
-                area.x + (area.w - w) * i / steps,
-                area.y + (area.h - h) * i / steps,
-                w,
-                h,
-            )
-        })
+        .map(|i| Rect::new(x0 + i * step, y0 + i * step, w, h))
         .collect()
 }
 
@@ -4897,7 +4951,7 @@ mod tests {
     }
 
     /// Switching to the application alone tells the launcher and maximizes the windows already
-    /// open; switching back leaves them as they are.
+    /// open; switching back lays them out as a cascade, a window alone at its padded corner.
     #[test]
     fn switching_to_the_application_alone_maximizes_open_windows() {
         let (mut engine, mode) = session_engine(true);
@@ -4908,7 +4962,9 @@ mod tests {
         assert!(engine.win(1).unwrap().maximized);
         engine.run_action(&Action::SetDesktop(None), None, (0.0, 0.0));
         assert!(mode.lock().unwrap().desktop);
-        assert!(engine.win(1).unwrap().maximized);
+        assert!(!engine.win(1).unwrap().maximized);
+        let frame = engine.frame_rect(1);
+        assert_eq!((frame.x, frame.y), (STACK_PADDING, STACK_PADDING));
     }
 
     /// The application alone whose autostart ended opens no menu of its own: its root menu
@@ -4942,10 +4998,6 @@ mod tests {
         engine.run_action(&Action::SetDesktop(Some(false)), None, (0.0, 0.0));
         let zones: Vec<Option<Zone>> = (2..=5).map(|id| engine.win(id).unwrap().tile).collect();
         assert_eq!(
-            cascade(Rect::new(0, 0, 100, 100), 3)[1],
-            Rect::new(25, 25, 50, 50)
-        );
-        assert_eq!(
             zones,
             [
                 Some(Zone::BottomRight),
@@ -4961,9 +5013,10 @@ mod tests {
             (newer.w, newer.h),
             "the stacked windows are one size"
         );
-        assert!(
-            newer.x > older.x && newer.y > older.y,
-            "they step down a slanted line"
+        assert_eq!(
+            (newer.x - older.x, newer.y - older.y),
+            (STACK_STEP, STACK_STEP),
+            "they step down at 45 degrees"
         );
         assert_eq!(engine.stack.last(), Some(&1), "the one used last is on top");
         let stacked = engine.stack.iter().position(|w| *w == 0).unwrap();
@@ -5059,6 +5112,61 @@ mod tests {
             "the application alone fills the screen"
         );
         assert!(engine.win(2).unwrap().tile.is_none());
+    }
+
+    /// A cascade keeps its windows one size, steps at 45 degrees no more than its step and less
+    /// as it grows so it stays inside the padding, is centered, and puts a window alone at the
+    /// padded top-left corner.
+    #[test]
+    fn a_cascade_steps_evenly_shrinks_its_steps_and_stays_centered() {
+        let area = Rect::new(0, 0, 1920, 1040);
+        assert_eq!(
+            cascade(area, 1),
+            [Rect::new(STACK_PADDING, STACK_PADDING, 1056, 572)]
+        );
+        for count in [2, 3, 8, 30] {
+            let frames = cascade(area, count);
+            let step = frames[1].x - frames[0].x;
+            assert!(step > 0 && step <= STACK_STEP, "{count}: step {step}");
+            assert!(
+                frames
+                    .windows(2)
+                    .all(|p| p[1].x - p[0].x == step && p[1].y - p[0].y == step)
+            );
+            assert!(frames.iter().all(|f| (f.w, f.h) == (frames[0].w, frames[0].h)));
+            let (first, last) = (frames[0], frames[count - 1]);
+            assert!(first.x >= STACK_PADDING && first.y >= STACK_PADDING, "{count}");
+            assert!(last.right() <= area.w - STACK_PADDING && last.bottom() <= area.h - STACK_PADDING);
+            let (left, right) = (first.x, area.w - last.right());
+            assert!(
+                (left - right).abs() <= 1,
+                "{count}: centered across, {left} and {right}"
+            );
+        }
+        assert!(cascade(area, 30)[1].x - cascade(area, 30)[0].x < STACK_STEP);
+    }
+
+    /// Switching back to the desktop lays the application's tiles out as a cascade, the one
+    /// used last on top.
+    #[test]
+    fn switching_back_to_the_desktop_cascades_the_windows() {
+        let (mut engine, _) = session_engine(false);
+        for id in 1..=3 {
+            open(&mut engine, id, 400, 300);
+        }
+        engine.run_action(&Action::SetDesktop(Some(true)), None, (0.0, 0.0));
+        let rects: Vec<Rect> = (1..=3).map(|id| engine.win(id).unwrap().rect).collect();
+        for id in 1..=3 {
+            let win = engine.win(id).unwrap();
+            assert!(!win.maximized && win.tile.is_none());
+        }
+        assert!(
+            rects
+                .windows(2)
+                .all(|p| p[1].x > p[0].x && p[1].y > p[0].y && p[1].w == p[0].w)
+        );
+        assert_eq!(engine.stack.last(), Some(&3));
+        assert_eq!(engine.focus, Some(3));
     }
 
     /// Two windows go side by side.
@@ -5167,13 +5275,12 @@ mod tests {
         assert_eq!(engine.focus, Some(1));
     }
 
-    /// A window the application alone opened maximized restores, on the desktop, to two thirds
-    /// of the work area centered rather than to the whole of it.
+    /// A window the application alone opened maximized restores to two thirds of the work area
+    /// centered rather than to the whole of it.
     #[test]
     fn a_window_opened_maximized_restores_to_a_size_of_its_own() {
         let (mut engine, _) = session_engine(false);
         open(&mut engine, 1, 400, 300);
-        engine.run_action(&Action::SetDesktop(Some(true)), None, (0.0, 0.0));
         engine.run_action(&Action::Unmaximize(Direction::Both), Some(1), (0.0, 0.0));
         let frame = engine.frame_rect(1);
         assert_eq!((frame.w, frame.h), (1280 * 2 / 3, 768 * 2 / 3));
