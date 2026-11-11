@@ -558,15 +558,10 @@ static bool udyn_read_desc(int num, udyn_desc_t *out) {
     snprintf(path, sizeof(path), "%s/selkies_event%d.desc", dir, num);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return false;
-    size_t got = 0;
-    char *p = (char *)out;
-    while (got < sizeof(*out)) {
-        ssize_t r = read(fd, p + got, sizeof(*out) - got);
-        if (r <= 0) break;
-        got += (size_t)r;
-    }
+    // A regular file reads whole in one call, short only at its end.
+    ssize_t got = read(fd, out, sizeof(*out));
     close(fd);
-    return got == sizeof(*out) && out->magic == UDYN_DESC_MAGIC;
+    return got == (ssize_t)sizeof(*out) && out->magic == UDYN_DESC_MAGIC;
 }
 
 /* The dynamic slot already holding event<num>, or -1. Holds dyn_mutex. */
