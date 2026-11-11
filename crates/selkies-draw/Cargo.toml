@@ -15,8 +15,10 @@ repository.workspace = true
 # tiny-skia rasterizes, cosmic-text shapes and renders text from the system
 # fonts, resvg renders SVG icons, image decodes PNG and JPEG.
 tiny-skia = "0.12"
-cosmic-text = "0.19"
-resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts"] }
+# cosmic-text's main, the first on fontdb 0.24 (fontations, no ttf-parser, RUSTSEC-2026-0192),
+# until a release carries it.
+cosmic-text = { git = "https://github.com/pop-os/cosmic-text", rev = "b07cb90a872cb9fec7fea1c72d734f81907fe3ad" }
+resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # The desktop entries' executable checks and detached launches.
 libc = "0.2"
