@@ -26,11 +26,11 @@ PORTAL = ("gdbus call --session -d org.freedesktop.portal.Desktop -o /org/freede
 # org.freedesktop.appearance's values: 0 no preference, 1 dark, 2 light.
 PORTAL_VALUE = {True: "uint32 1", False: "uint32 2"}
 # Each probe: its name, the toolkit, and the environment it starts in beside the
-# session's. Qt reads a color scheme only through a platform theme that has one:
-# the session's own, else none (Qt's generic theme reports Unknown), and its GNOME
-# theme, which reads the portal, wherever QT_QPA_PLATFORMTHEME picks it.
-PROBES = (("gtk3", "gtk3", ""), ("gtk4", "gtk4", ""), ("adw", "adw", ""), ("qt", "qt", ""),
-          ("qt-gnome", "qt", "QT_QPA_PLATFORMTHEME=gnome "))
+# session's. Qt reads a color scheme only through a platform theme that has one,
+# and its generic theme has none, so Qt runs on its GNOME theme, which reads the
+# portal (QT_QPA_PLATFORMTHEME=gnome, as a session selects it).
+PROBES = (("gtk3", "gtk3", ""), ("gtk4", "gtk4", ""), ("adw", "adw", ""),
+          ("qt", "qt", "QT_QPA_PLATFORMTHEME=gnome "))
 
 
 def probe_dark(reading: dict) -> Optional[bool]:
@@ -45,7 +45,8 @@ def probe_dark(reading: dict) -> Optional[bool]:
 
 
 def start_probes(cell: Any) -> list:
-    """Start every toolkit probe the session has bindings for; the ones reading a scheme."""
+    """Start every toolkit probe the session has bindings for; the ones running. A first
+    reading naming no scheme is a session that has none yet, not a toolkit that reads none."""
     running = []
     for name, kind, env in PROBES:
         cell.clear_report(f"probe-{name}")
@@ -55,8 +56,6 @@ def start_probes(cell: Any) -> list:
         reading = cell.report(f"probe-{name}", 20)
         if reading is None or "missing" in reading:
             cell.res.skip(f"the {name} probe", (reading or {}).get("missing", "no reading"))
-        elif probe_dark(reading) is None:
-            cell.res.skip(f"the {name} probe", f"its toolkit reads no color scheme here: {reading}")
         else:
             running.append(name)
     return running
