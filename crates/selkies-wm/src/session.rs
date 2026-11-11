@@ -207,6 +207,9 @@ pub struct SessionPolicy {
     pub switch: bool,
     /// The application alone has its windows maximized.
     pub maximize: bool,
+    /// The application alone keeps its windows maximized: nothing it or the user does takes
+    /// one out of it, for a kiosk.
+    pub keep_maximized: bool,
     /// The autostart runs again when everything it started has exited, while the session is
     /// the application alone.
     pub restart_app: bool,
@@ -233,6 +236,7 @@ pub struct SessionControl {
     relaunch: AtomicBool,
     switchable: bool,
     maximize: bool,
+    keep_maximized: bool,
     restart_app: bool,
     shell: String,
     wm: crate::config::Policy,
@@ -276,6 +280,7 @@ impl SessionControl {
             relaunch: AtomicBool::new(false),
             switchable: policy.switch && !policy.locked && installed,
             maximize: policy.maximize,
+            keep_maximized: policy.maximize && policy.keep_maximized,
             restart_app: policy.restart_app,
             shell: policy.shell,
             wm: policy.wm,
@@ -294,6 +299,7 @@ impl SessionControl {
             desktop: self.desktop(),
             switchable: self.switchable,
             maximize: self.maximize,
+            keep_maximized: self.keep_maximized,
             application: match self.application.load(Ordering::Relaxed) {
                 AUTOSTART_RUNNING => Some(true),
                 AUTOSTART_ENDED => Some(false),
@@ -754,6 +760,7 @@ mod tests {
             locked: false,
             switch: true,
             maximize: true,
+            keep_maximized: false,
             restart_app: false,
             shell: shell.to_string(),
             wm: crate::config::Policy::default(),

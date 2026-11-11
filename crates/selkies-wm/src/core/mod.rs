@@ -76,6 +76,7 @@ pub trait Launcher: Send {
             desktop: true,
             switchable: false,
             maximize: false,
+            keep_maximized: false,
             application: None,
         }
     }
@@ -101,6 +102,9 @@ pub struct SessionMode {
     /// The application alone has its windows maximized as they open, and tiled as the session
     /// switches to it.
     pub maximize: bool,
+    /// The application alone keeps the windows it maximizes maximized, on every virtual
+    /// desktop, for a kiosk ([`Engine::keeps_maximized`]).
+    pub keep_maximized: bool,
     /// Whether what the session's autostart started runs; `None` where there is no autostart.
     pub application: Option<bool>,
 }
@@ -861,9 +865,14 @@ impl Engine {
             resize_anchor: None,
             saved: None,
             tile: None,
-            desktop: self.desktop_for_new(&info),
+            desktop: if self.keeps_maximized(&info) {
+                None
+            } else {
+                self.desktop_for_new(&info)
+            },
             hidden: false,
             maximized: info.wants_maximized
+                || self.keeps_maximized(&info)
                 || rule
                     .as_ref()
                     .and_then(|r| r.maximized)
@@ -1331,6 +1340,35 @@ impl Engine {
         !self.session.desktop && self.session.maximize && fills_application(info)
     }
 
+    /// Whether the session keeps a window maximized: the application alone under a locked
+    /// maximize (`SELKIES_WM_MAXIMIZE=true|locked`), for a window it maximizes as it opens.
+    ///
+    /// Such a window is a kiosk's: it opens maximized on every virtual desktop, whatever a
+    /// window rule says, and the engine refuses every way out of it, from the client or from
+    /// the user (unmaximizing, minimizing, tiling, shading, moving or resizing, sending it to
+    /// another desktop), and draws no minimize or maximize button on its frame. Fullscreen
+    /// still fills the screen and is let through, returning to maximized; dialogs and fixed-size
+    /// windows keep their own size as they always do.
+    fn keeps_maximized(&self, info: &WindowInfo) -> bool {
+        self.session.keep_maximized && self.application_fills(info)
+    }
+
+    /// [`Engine::keeps_maximized`] for a managed window.
+    fn kept_maximized(&self, id: WindowId) -> bool {
+        self.win(id).is_some_and(|w| self.keeps_maximized(&w.info))
+    }
+
+    /// The title bar buttons a window's frame draws: the policy's, less minimize and maximize
+    /// on a window the session keeps maximized.
+    fn buttons_of(&self, id: WindowId) -> frame::Buttons {
+        let mut buttons = self.config.policy.buttons;
+        if self.kept_maximized(id) {
+            buttons.minimize = false;
+            buttons.maximize = false;
+        }
+        buttons
+    }
+
     /// Switch the session to the desktop or to the application alone, where it is switchable:
     /// the launcher starts or stops the shell, and the application alone has its top-level
     /// windows on the current desktop shown again, since without the shell's taskbar a minimized
@@ -1358,7 +1396,17 @@ impl Engine {
             self.set_minimized(id, false);
         }
         fill.sort_by_key(|id| self.stack.iter().position(|w| w == id));
-        self.tile_application(&fill);
+        if self.session.keep_maximized {
+            for &id in &fill {
+                self.set_tile(id, None);
+                self.set_maximized(id, true);
+                if let Some(win) = self.windows.get_mut(&id) {
+                    win.desktop = None;
+                }
+            }
+        } else {
+            self.tile_application(&fill);
+        }
         for &id in &fill {
             self.configure(id);
             self.render_frame(id);
@@ -1456,6 +1504,11 @@ impl Engine {
     }
 
     fn set_maximized(&mut self, id: WindowId, on: bool) {
+        if !on && self.kept_maximized(id) {
+            // A client that asked to leave is told again that it is maximized.
+            self.configure(id);
+            return;
+        }
         let Some(win) = self.windows.get_mut(&id) else {
             return;
         };
@@ -1519,6 +1572,9 @@ impl Engine {
     /// had before, as a maximize is undone. A tile saves the geometry only where no maximize or
     /// tile already did, so a window tiled from its maximized state restores to its own size.
     fn set_tile(&mut self, id: WindowId, zone: Option<Zone>) {
+        if zone.is_some() && self.kept_maximized(id) {
+            return;
+        }
         let Some(win) = self.windows.get_mut(&id) else {
             return;
         };
@@ -1980,6 +2036,9 @@ impl Engine {
     /// Put a window on a desktop, or on every desktop with `None`, its transient children with
     /// it; `follow` switches there as well.
     fn send_to_desktop(&mut self, id: WindowId, desktop: Option<u32>, follow: bool) {
+        if self.kept_maximized(id) {
+            return;
+        }
         let desktop = desktop.map(|d| d.min(self.desktop_count.saturating_sub(1)));
         let Some(win) = self.windows.get_mut(&id) else {
             return;
@@ -2101,6 +2160,9 @@ impl Engine {
     }
 
     fn set_minimized(&mut self, id: WindowId, on: bool) {
+        if on && self.kept_maximized(id) {
+            return;
+        }
         let Some(win) = self.win(id) else {
             return;
         };
@@ -2168,6 +2230,9 @@ impl Engine {
     }
 
     fn set_shaded(&mut self, id: WindowId, on: bool) {
+        if on && self.kept_maximized(id) {
+            return;
+        }
         let Some(win) = self.windows.get_mut(&id) else {
             return;
         };
@@ -2432,7 +2497,7 @@ impl Engine {
             pressed,
             scale,
             shadow: self.backend == Backend::Wayland && !maximized,
-            buttons: self.config.policy.buttons,
+            buttons: self.buttons_of(id),
         };
         let look = self.theme.look;
         let frame: Frame = self.renderer.render(&look, client, &appearance);
@@ -2558,6 +2623,9 @@ impl Engine {
     // ---- grabs -------------------------------------------------------------------------------
 
     fn begin_grab(&mut self, id: WindowId, kind: GrabKind, button: Option<u32>) {
+        if self.kept_maximized(id) {
+            return;
+        }
         let Some(win) = self.win(id) else {
             return;
         };
@@ -2735,7 +2803,7 @@ impl Engine {
                 },
                 win.maximized,
                 win.shaded,
-                self.config.policy.buttons,
+                self.buttons_of(id),
             );
             let lx = x as i32 - frame.x;
             let ly = y as i32 - frame.y;
@@ -3316,7 +3384,7 @@ impl Engine {
                 }
             }
             Action::MoveResizeTo { x, y, width, height } => {
-                if let Some(id) = target {
+                if let Some(id) = target.filter(|id| !self.kept_maximized(*id)) {
                     let win = &self.windows[&id];
                     let extents = self.extents_of(id);
                     let area = self.workarea(win.output);
@@ -3338,7 +3406,7 @@ impl Engine {
                 }
             }
             Action::MoveToEdge(edge) => {
-                if let Some(id) = target {
+                if let Some(id) = target.filter(|id| !self.kept_maximized(*id)) {
                     let extents = self.extents_of(id);
                     let area = self.workarea(self.windows[&id].output);
                     let mut frame = self.windows[&id].rect.grown(extents);
@@ -4773,6 +4841,7 @@ mod tests {
             desktop,
             switchable: true,
             maximize: true,
+            keep_maximized: false,
             application: None,
         }));
         let (mut engine, _) = engine();
@@ -4889,6 +4958,64 @@ mod tests {
         let stacked = engine.stack.iter().position(|w| *w == 0).unwrap();
         let tiled = engine.stack.iter().position(|w| *w == 5).unwrap();
         assert!(stacked > tiled, "the rest stack above the tiles");
+    }
+
+    /// An engine whose session is the application alone, keeping its windows maximized.
+    fn kiosk_engine() -> Engine {
+        let (mut engine, mode) = session_engine(false);
+        mode.lock().unwrap().keep_maximized = true;
+        engine.session = engine.launcher.session();
+        engine
+    }
+
+    /// A kiosk's window opens maximized on every desktop and nothing the client or the user
+    /// asks takes it out of that: not unmaximizing, minimizing, tiling, moving, sending it to a
+    /// desktop, or showing the desktop; its frame has no minimize or maximize button.
+    #[test]
+    fn a_kiosk_keeps_its_window_maximized_whatever_is_asked() {
+        let mut engine = kiosk_engine();
+        open(&mut engine, 1, 400, 300);
+        let maximized = engine.win(1).unwrap().rect;
+        assert!(engine.win(1).unwrap().maximized);
+        assert_eq!(engine.win(1).unwrap().desktop, None);
+        let mut out = Vec::new();
+        for request in [Request::Unmaximize, Request::Minimize, Request::Move] {
+            engine.handle(Event::Request { id: 1, request }, &mut out);
+        }
+        for action in [
+            Action::ToggleMaximize(Direction::Both),
+            Action::Iconify,
+            Action::SnapToEdge(ResizeEdge::Left),
+            Action::MoveToEdge(ResizeEdge::Right),
+            Action::ToggleOmnipresent,
+            Action::ShowDesktop,
+            Action::Move,
+        ] {
+            engine.run_action(&action, Some(1), (10.0, 10.0));
+        }
+        let win = engine.win(1).unwrap();
+        assert!(win.maximized && !win.minimized && win.tile.is_none());
+        assert!(engine.grab.is_none(), "no move starts");
+        assert_eq!(win.desktop, None);
+        assert_eq!(win.rect, maximized);
+        let buttons = engine.buttons_of(1);
+        assert!(!buttons.minimize && !buttons.maximize && buttons.close);
+    }
+
+    /// Switching a kiosk from the desktop to the application alone maximizes every window
+    /// rather than tiling them.
+    #[test]
+    fn a_kiosk_switch_maximizes_every_window_instead_of_tiling() {
+        let (mut engine, mode) = session_engine(true);
+        mode.lock().unwrap().keep_maximized = true;
+        engine.session = engine.launcher.session();
+        open(&mut engine, 1, 400, 300);
+        open(&mut engine, 2, 400, 300);
+        engine.run_action(&Action::SetDesktop(Some(false)), None, (0.0, 0.0));
+        for id in [1, 2] {
+            let win = engine.win(id).unwrap();
+            assert!(win.maximized && win.tile.is_none() && win.desktop.is_none());
+        }
     }
 
     /// Two windows go side by side.

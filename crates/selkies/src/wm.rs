@@ -86,6 +86,7 @@ pub fn start(is_wayland: bool) {
             locked: desktop.locked,
             switch: s.session_switch().on,
             maximize: s.wm_maximize().on,
+            keep_maximized: s.wm_maximize().locked,
             restart_app: s.app_restart().on,
             shell: SHELL.to_string(),
             wm: Policy {

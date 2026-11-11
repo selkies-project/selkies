@@ -1629,7 +1629,7 @@ mod tests {
 
     /// The session and window manager settings read their environment variables: the
     /// defaults leave everything on but the restart, and each can be turned off, a locked
-    /// desktop mode keeping its lock.
+    /// desktop mode and a locked maximize keeping their locks.
     #[test]
     fn the_session_settings_read_their_environment() {
         let s = parse(&[], &[]);
@@ -1656,6 +1656,15 @@ mod tests {
         assert_eq!(s.wm_buttons(), "close");
         let s = parse(&[], &[("SELKIES_WM_BUTTONS", "none")]);
         assert_eq!(s.wm_buttons(), "none");
+        assert!(
+            !s.wm_maximize().locked,
+            "maximizing is not kept unless locked"
+        );
+        let kiosk = parse(&[], &[("SELKIES_WM_MAXIMIZE", "true|locked")]).wm_maximize();
+        assert!(
+            kiosk.on && kiosk.locked,
+            "a kiosk keeps the windows maximized"
+        );
     }
 
     #[test]
