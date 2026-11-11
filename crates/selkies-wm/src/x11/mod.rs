@@ -1169,6 +1169,7 @@ impl Manager {
         ) else {
             return;
         };
+        self.stack_new_frame(frame.window);
         let _ = self.conn.change_save_set(SetMode::INSERT, window);
         let _ = self.conn.change_window_attributes(
             window,
@@ -1633,6 +1634,27 @@ impl Manager {
             self.set_wm_state(window, props::WM_STATE_NORMAL);
         }
         self.publish_states(window);
+    }
+
+    /// Stack a frame just created, which the server put at the top of the stack, just above the
+    /// topmost frame, or at the bottom where there is none yet, so the override-redirect windows
+    /// above the frames (a menu, a tray's strip) stay above it as [`Self::restack`] keeps them.
+    fn stack_new_frame(&self, frame: Window) {
+        let frames: std::collections::HashSet<Window> =
+            self.clients.values().map(|c| c.frame.window).collect();
+        let top = self
+            .conn
+            .query_tree(self.root)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .and_then(|tree| tree.children.iter().rev().find(|w| frames.contains(w)).copied());
+        let aux = match top {
+            Some(top) => ConfigureWindowAux::new()
+                .sibling(top)
+                .stack_mode(StackMode::ABOVE),
+            None => ConfigureWindowAux::new().stack_mode(StackMode::BELOW),
+        };
+        let _ = self.conn.configure_window(frame, &aux);
     }
 
     /// Order the frames as the policy says, among themselves: the top of the order goes just
