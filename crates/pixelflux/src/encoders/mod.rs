@@ -430,6 +430,12 @@ pub(crate) fn held_key_start(crf: u32, last: Option<(usize, u32)>, cap: usize) -
 /// the fixed-QP encoders cannot disagree about how long a drop must persist.
 pub(crate) const QP_HYSTERESIS_LIMIT: u32 = 60;
 
+/// The buffer, in frames of its peak, a capped constant-quality session takes
+/// (`CaptureSettings::video_vbv_multiplier`): software H.264's constant-rate buffer, so a cap
+/// that binds codes a frame as the constant rate congestion control steers does, and a cap
+/// that does not leaves the rate factor its picture.
+pub const CAPPED_VBV_FRAMES: f64 = software::CBR_VBV_FRAMES;
+
 /// Size the CBR VBV/HRD buffer so rate control has enough slack to hold quality steady
 /// without letting end-to-end latency drift upward.
 ///
@@ -492,12 +498,16 @@ pub fn colorspace_desc(fullcolor: bool, full_range: bool) -> &'static str {
 
 /// The rate-control field of a video stream's log line, as the session applies it: a backend
 /// with one rate control (`fixed`, from `FrameEncoder::fixed_rate_control`) runs it at the
-/// bitrate target whatever the mode, and every other session runs its mode, a CRF one with no
-/// bitrate cap.
-pub fn rate_desc(settings: &CaptureSettings, fixed: Option<&str>) -> String {
+/// bitrate target whatever the mode, and every other session runs its mode, a CRF one under the
+/// peak of its bitrate where it is `capped` (`session_capped`) and with no bitrate cap otherwise.
+pub fn rate_desc(settings: &CaptureSettings, fixed: Option<&str>, capped: bool) -> String {
     match fixed {
         Some(mode) => format!("{mode} {}", settings.video_bitrate_kbps),
         None if settings.video_cbr_mode => format!("CBR {}", settings.video_bitrate_kbps),
+        None if capped => format!(
+            "CRF: {} (Peak {})",
+            settings.video_crf, settings.video_bitrate_kbps
+        ),
         None => format!("CRF: {}", settings.video_crf),
     }
 }
@@ -551,7 +561,8 @@ mod tests {
     use super::*;
 
     /// The rate field says what the session runs: a backend with one rate control runs it at the
-    /// bitrate target in either mode, and every other session runs its mode, CRF naming no bitrate.
+    /// bitrate target in either mode, and every other session runs its mode, CRF naming its peak
+    /// where the session takes one and no bitrate otherwise.
     #[test]
     fn the_rate_field_names_what_the_backend_applies() {
         let crf = CaptureSettings {
@@ -564,12 +575,46 @@ mod tests {
             video_cbr_mode: true,
             ..crf.clone()
         };
-        assert_eq!(rate_desc(&crf, None), "CRF: 25");
-        assert_eq!(rate_desc(&cbr, None), "CBR 8000");
+        assert_eq!(rate_desc(&crf, None, false), "CRF: 25");
+        assert_eq!(rate_desc(&crf, None, true), "CRF: 25 (Peak 8000)");
+        assert_eq!(rate_desc(&cbr, None, false), "CBR 8000");
         for settings in [&crf, &cbr] {
-            assert_eq!(rate_desc(settings, Some("VBR")), "VBR 8000");
-            assert_eq!(rate_desc(settings, Some("CBR")), "CBR 8000");
+            assert_eq!(rate_desc(settings, Some("VBR"), false), "VBR 8000");
+            assert_eq!(rate_desc(settings, Some("CBR"), false), "CBR 8000");
         }
+    }
+
+    /// A session reports the peak it takes: the CPU path's H.264 where x264 carries it, libvpx
+    /// where asked, and x265 never; a constant rate is no capped quality.
+    #[test]
+    fn a_session_reports_whether_it_takes_its_peak() {
+        let capped = CaptureSettings {
+            codec: Codec::H264,
+            width: 64,
+            height: 48,
+            target_fps: 30.0,
+            video_crf: 25,
+            video_bitrate_kbps: 4000,
+            video_vbv_multiplier: CAPPED_VBV_FRAMES,
+            ..Default::default()
+        };
+        assert_eq!(session_capped(None, &capped), cfg!(feature = "gpl"));
+        let cbr = CaptureSettings {
+            video_cbr_mode: true,
+            ..capped.clone()
+        };
+        assert!(!session_capped(None, &cbr));
+        let vpx = |codec| CaptureSettings {
+            codec,
+            ..capped.clone()
+        };
+        for codec in [Codec::Vp8, Codec::Vp9] {
+            let enc = FrameEncoder::Vpx(vpx::VpxEncoder::new(&vpx(codec), codec, false).unwrap());
+            assert!(session_capped(Some(&enc), &vpx(codec)), "{codec:?}");
+        }
+        let hevc = vpx(Codec::H265);
+        let enc = FrameEncoder::Hevc(hevc::HevcEncoder::new(&hevc, false).unwrap());
+        assert!(!session_capped(Some(&enc), &hevc));
     }
 
     /// Paint-over is named where the cleanup acts, Turbo or not: its CRF where the session codes
@@ -1411,6 +1456,65 @@ impl FrameEncoder {
             #[cfg(target_arch = "aarch64")]
             FrameEncoder::Tegra(_) => false,
             FrameEncoder::V4l2m2m(_) => false,
+        }
+    }
+
+    /// Whether the session runs its constant quality under the peak it was asked for: NVENC and
+    /// libvpx where asked; x265, kvazaar, SVT-AV1, and VA-API never, and the V4L2 and Tegra
+    /// devices run at the rate whatever the mode (their module docblocks).
+    pub fn capped(&self) -> bool {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.capped(),
+            FrameEncoder::Vpx(enc) => enc.capped(),
+            FrameEncoder::Vaapi(_) | FrameEncoder::Hevc(_) | FrameEncoder::Av1(_) => false,
+            #[cfg(target_arch = "aarch64")]
+            FrameEncoder::Tegra(_) => false,
+            FrameEncoder::V4l2m2m(_) => false,
+        }
+    }
+
+    /// Whether a rate binds the session: a constant rate, or a constant quality whose peak bound
+    /// its last frame (NVENC through its constant rate, libvpx above its pinned quantizer), each
+    /// of which codes a frame coarser than its quality, so its refinement and block ledger follow
+    /// what its rate control coded (`pipeline::plan_refinement`). Under a peak that does not bind,
+    /// a capped session refines as its uncapped quality does.
+    pub fn rate_bound(&self, cbr: bool) -> bool {
+        cbr || match self {
+            FrameEncoder::Nvenc(enc) => enc.peak_bound(),
+            FrameEncoder::Vpx(enc) => enc.peak_bound(),
+            _ => false,
+        }
+    }
+
+    /// Whether the frame just coded was coded under a capped constant quality's binding peak,
+    /// coarser than the rate factor would have chosen (`ledger::BlockLedger::coded`): NVENC
+    /// through its constant rate, libvpx above its pinned quantizer.
+    pub fn coded_capped(&self) -> bool {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.coded_capped(),
+            FrameEncoder::Vpx(enc) => enc.coded_capped(),
+            _ => false,
+        }
+    }
+
+    /// A tick that codes no frame: a capped constant quality's peak drains for it as for an
+    /// empty frame, so a still screen lets the peak go and its refresh starts
+    /// (`ledger::BlockLedger::refresh`).
+    pub fn idle(&mut self) {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.idle(),
+            FrameEncoder::Vpx(enc) => enc.idle(),
+            _ => {}
+        }
+    }
+
+    /// Hold the blocks `plan` names as skips in the next frame: the coarse blocks a capped
+    /// constant quality's refresh leaves for later frames (`ledger::BlockLedger::refresh`).
+    /// NVENC, which takes no skips, holds them at its coarsest quantizer through its QP delta
+    /// map; an encoder that takes skips (`constant_blocks`) has them among those.
+    pub fn defer_blocks(&mut self, plan: Option<&crate::ledger::BlockPlan>) {
+        if let FrameEncoder::Nvenc(enc) = self {
+            enc.defer_blocks(plan);
         }
     }
 
@@ -2946,6 +3050,22 @@ mod software_tests {
     }
 }
 
+/// The fixture the capped-quality checks share: a `w` x `h` BGRA page of glyphs scrolled `t` steps
+/// of 4 rows, which costs its quantizer's bits every frame.
+#[cfg(test)]
+pub(crate) fn scrolled_text(w: usize, h: usize, t: usize) -> Vec<u8> {
+    let mut f = vec![18u8; w * h * 4];
+    for (i, px) in f.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i % w, i / w + t * 4);
+        let cell =
+            ((x / 8) as u32).wrapping_mul(2654435761) ^ ((y / 12) as u32).wrapping_mul(40503);
+        if x % 8 < 7 && y % 12 < 10 && (cell >> (((y % 12) * 3 + x % 8) % 29)) & 1 == 1 {
+            px.copy_from_slice(&[224, 224, 224, 255]);
+        }
+    }
+    f
+}
+
 /// The fixture the constant-block checks of every software encoder share: a screen of text
 /// with one box of it changing every frame, at a size that is no multiple of a block.
 #[cfg(test)]
@@ -3257,6 +3377,20 @@ pub fn session_bit_depth(encoder: Option<&FrameEncoder>, settings: &CaptureSetti
     match encoder {
         Some(enc) => enc.bit_depth(),
         None => software::h264_bit_depth(settings),
+    }
+}
+
+/// Whether a session runs its constant quality under the peak it was asked for
+/// (`RateSettings::capped`): a full-frame session's own answer, and for the CPU path (`None`)
+/// x264's, which caps, where the build carries it.
+pub fn session_capped(encoder: Option<&FrameEncoder>, settings: &CaptureSettings) -> bool {
+    match encoder {
+        Some(enc) => enc.capped(),
+        None => {
+            cfg!(feature = "gpl")
+                && settings.codec == Codec::H264
+                && session::RateSettings::new(settings).capped
+        }
     }
 }
 

@@ -44,15 +44,41 @@ pub(crate) fn parse_settings(msg: &str) -> Option<Map<String, Json>> {
 }
 
 impl WebRtcService {
-    /// The tabs of the peers streaming a display, leaving out peer `but`.
+    /// The tabs of the peers streaming a display, or connecting to stream it, leaving out peer
+    /// `but`.
+    ///
+    /// A peer's tab is recorded when its session starts, and its connection joins the engine
+    /// only once ICE has gathered, which waits out an unanswered TURN server (the ICE agent's
+    /// gather timeout, longer than the reconnect grace). A page between the two, such as an
+    /// owner's reload, counts on the display its signaling registration names, so the grace
+    /// sees it back.
     pub(crate) fn display_tabs(&self, display: &str, but: Option<&str>) -> HashSet<String> {
         let tabs = self.st.lock().peer_tabs.clone();
-        let peers = self.engine.peers.lock();
-        tabs.iter()
-            .filter(|(pid, _)| Some(pid.as_str()) != but)
-            .filter(|(pid, _)| peers.get(pid).is_some_and(|p| p.display_id == display))
-            .filter_map(|(_, tab)| tab.clone())
-            .collect()
+        let mut found = HashSet::new();
+        let mut connecting = Vec::new();
+        {
+            let peers = self.engine.peers.lock();
+            for (pid, tab) in tabs {
+                let Some(tab) = tab.filter(|_| Some(pid.as_str()) != but) else {
+                    continue;
+                };
+                match peers.get(&pid) {
+                    Some(peer) if peer.display_id == display => {
+                        found.insert(tab);
+                    }
+                    Some(_) => {}
+                    None => connecting.push((pid, tab)),
+                }
+            }
+        }
+        if let Some(registry) = self.registry.read().clone() {
+            for (pid, tab) in connecting {
+                if registry.peer(&pid).is_some_and(|p| p.display_id == display) {
+                    found.insert(tab);
+                }
+            }
+        }
+        found
     }
 
     /// Whether a peer holds a display's full permissions: a controller that may drive keyboard and

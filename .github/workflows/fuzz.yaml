@@ -3,9 +3,9 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # Fuzzes the parsers of what a peer sends in selkies-rtc (rtp, sctp, sdp,
-# stun), pixelflux (sps), and pcmflux (red) with ClusterFuzzLite: changed code
-# for five minutes on a pull request, and every fuzzer for an hour a day,
-# whose corpus is then pruned. Corpora and crashes are kept as artifacts.
+# stun), pixelflux (sps, keyframe), and pcmflux (red) with ClusterFuzzLite:
+# changed code for five minutes on a pull request, and every fuzzer for an
+# hour a day, whose corpus is then pruned. Corpora and crashes are kept as artifacts.
 name: Fuzz
 
 on:

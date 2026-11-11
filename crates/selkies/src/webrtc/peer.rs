@@ -108,6 +108,9 @@ pub trait PeerEvents: Send + Sync + 'static {
     fn message(&self, peer: &str, kind: ChannelKind, message: Message);
     /// A frame of an uplink completed.
     fn uplink_frame(&self, peer: &str, uplink: Uplink, frame: ReceivedFrame);
+    /// A local candidate gathered after the offer (`a=candidate` text, `candidate:` included),
+    /// for the page to hear by trickle.
+    fn local_candidate(&self, _peer: &str, _candidate: &str) {}
 }
 
 /// The sender hooks the service gives a peer's video sender.
@@ -275,7 +278,7 @@ fn local_transport(transport: &Transport) -> Result<LocalTransport, PeerError> {
             .iter()
             .map(to_sdp_candidate)
             .collect::<Result<_, _>>()?,
-        candidates_complete: true,
+        candidates_complete: transport.candidates_complete(),
         fingerprints: transport
             .dtls_parameters()
             .fingerprints
@@ -412,6 +415,9 @@ struct Media {
     drain_at: Option<Instant>,
     report_at: Instant,
     remote_set: bool,
+    /// Candidates gathered after the offer and held until the answer shows the page has it: a
+    /// candidate reaching the page before the offer is refused there.
+    trickle_held: Vec<String>,
     /// The padding asked of the video stream, in bits per second, until `pad_until`
     /// (`clock::monotonic`), and when its next step is due.
     pad_bps: f64,
@@ -522,6 +528,7 @@ impl Peer {
             pad_until: 0.0,
             pad_at: None,
             remote_set: false,
+            trickle_held: Vec::new(),
         };
         let running = tokio::spawn(media.run(
             MediaChannels {
@@ -992,6 +999,9 @@ impl Media {
     ) -> Result<Settled, SdpError> {
         let negotiated = self.session.set_remote_description(SdpType::Answer, sdp)?;
         self.remote_set = true;
+        for candidate in std::mem::take(&mut self.trickle_held) {
+            self.events.local_candidate(&self.peer_id, &candidate);
+        }
 
         let cname = self.session.cname().to_string();
         let video = &self.session.transceivers[self.video_index];
@@ -1154,6 +1164,15 @@ impl Media {
             }
             TransportEvent::SelectedPair { local, remote } => {
                 info!(target: "webrtc", "Peer {} rides {} {}:{} to {}:{}", self.peer_id, local.transport.as_str(), local.host, local.port, remote.host, remote.port);
+            }
+            TransportEvent::LocalCandidate(candidate) => {
+                debug!(target: "webrtc", "Peer {} gathered its {} candidate after the offer; trickling it.", self.peer_id, candidate.kind.as_str());
+                let line = format!("candidate:{}", candidate.to_sdp());
+                if self.remote_set {
+                    self.events.local_candidate(&self.peer_id, &line);
+                } else {
+                    self.trickle_held.push(line);
+                }
             }
             TransportEvent::Closed => self.set_state(PeerState::Closed),
         }

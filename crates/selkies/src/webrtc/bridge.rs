@@ -30,15 +30,18 @@
 //! and reopens it, and a queued key frame is never evicted by a delta frame. A gate no key frame
 //! answers within `GATE_TIMEOUT_S` reopens on its own.
 //!
-//! A bridge given its display's steered rate (`set_budget`) also holds the stream to it. An encoder
-//! meets a rate by coarser quantizers, down to the coarsest it has, and content the coarsest
-//! cannot fit (noise, film grain) overshoots, which a path sized for the rate queues and loses,
-//! and whatever repairs the loss adds more. The frames let through fill a bucket that drains at
-//! the rate, and while it holds more than `BUDGET_WINDOW_S` of the rate a delta frame that names
-//! what it predicts from is dropped with the word to the encoder, so the frame rate falls instead
-//! of the latency rising, by no more than `BUDGET_RUN_MAX` frames in a row from an encoder that has
-//! sent no anchor: one predicting from its last frames only codes a key frame past a longer run,
-//! and the key frame overshoots the rate again, so the stream is thinned, not cut. Key frames pass
+//! A bridge given its display's steered rate (`set_budget`) keeps account of the stream against
+//! it, and holds the stream to it once told to. An encoder meets a rate by coarser quantizers,
+//! down to the coarsest it has, and content the coarsest cannot fit (noise, film grain)
+//! overshoots, which a path sized for the rate queues and loses, and whatever repairs the loss
+//! adds more. The frames let through fill a bucket that drains at the rate, and while it holds
+//! more than `BUDGET_WINDOW_S` of the rate a delta frame that names what it predicts from is
+//! dropped with the word to the encoder, so the frame rate falls instead of the latency rising,
+//! by no more than `BUDGET_RUN_MAX` frames in a row from an encoder that has sent no anchor: one
+//! predicting from its last frames only codes a key frame past a longer run, and the key frame
+//! overshoots the rate again, so the stream is thinned, not cut. A bridge not holding the stream
+//! lets such a frame through, counting it over the budget and leaving it out of the bucket as
+//! though dropped, so its fill and counts read as a holding bridge's would. Key frames pass
 //! uncharged: charged, a large one would drop the delta
 //! frames behind it for as long as it takes on a slow path. Neither is a frame `FRAME_NUM_WRAP`
 //! frames or a multiple of it past a key frame dropped: an H.264 decoder that misses the frame
@@ -151,6 +154,8 @@ struct State<T> {
     dropped: u64,
     invalidated: u64,
     budget_bps: Option<f64>,
+    /// Whether a frame over the budget is dropped, or only counted (`set_budget`).
+    budget_hold: bool,
     budget_bytes: f64,
     budget_at: f64,
     over_budget: u64,
@@ -186,6 +191,7 @@ impl<T: BridgeItem> PipelineBridge<T> {
                 dropped: 0,
                 invalidated: 0,
                 budget_bps: None,
+                budget_hold: false,
                 budget_bytes: 0.0,
                 budget_at: 0.0,
                 over_budget: 0,
@@ -198,10 +204,11 @@ impl<T: BridgeItem> PipelineBridge<T> {
         }
     }
 
-    /// Hold the frames let through to `bps`, the display's steered rate; `None` lets every
-    /// frame through.
-    pub fn set_budget(&self, bps: Option<f64>) {
+    /// Account the frames let through against `bps`, the display's steered rate, holding them to
+    /// it where `hold`; `None` lets every frame through and keeps no account.
+    pub fn set_budget(&self, bps: Option<f64>, hold: bool) {
         let mut s = self.state.lock();
+        s.budget_hold = hold;
         match bps.filter(|b| *b > 0.0) {
             None => {
                 s.budget_bps = None;
@@ -237,7 +244,8 @@ impl<T: BridgeItem> PipelineBridge<T> {
         Some(s.budget_level(bps) / (bps / 8.0 * BUDGET_WINDOW_S))
     }
 
-    /// Frames dropped for the steered rate.
+    /// Frames over the steered rate: dropped where the bridge holds the stream to it, let
+    /// through otherwise.
     pub fn over_budget(&self) -> u64 {
         self.state.lock().over_budget
     }
@@ -348,13 +356,18 @@ impl<T: BridgeItem> State<T> {
         let at_wrap = self.since_key.is_multiple_of(FRAME_NUM_WRAP);
         let kept = data.is_h264() && at_wrap;
         self.anchored |= data.anchor();
-        if !at_wrap && self.budget_full() && (self.anchored || self.budget_run < BUDGET_RUN_MAX) {
+        let over =
+            !at_wrap && self.budget_full() && (self.anchored || self.budget_run < BUDGET_RUN_MAX);
+        if over {
             self.over_budget += 1;
             self.budget_run += 1;
-            self.drop_item(frame_id);
-            return;
+            if self.budget_hold {
+                self.drop_item(frame_id);
+                return;
+            }
+        } else {
+            self.budget_run = 0;
         }
-        self.budget_run = 0;
         if self.queue.len() >= self.maxsize {
             if self.queued_keyframe {
                 self.drop_item(frame_id);
@@ -373,8 +386,10 @@ impl<T: BridgeItem> State<T> {
         }
         let bytes = data.byte_len();
         self.queue.push_back(data);
-        self.charge(bytes);
-        self.passed += 1;
+        if !over {
+            self.charge(bytes);
+            self.passed += 1;
+        }
         self.queued_keyframe = kept;
         self.held = 0;
         if !self.lost.is_empty()
@@ -880,7 +895,7 @@ mod tests {
                 .unwrap_or(0)
         };
         let bridge = rig.bridge(true);
-        bridge.set_budget(Some(rate));
+        bridge.set_budget(Some(rate), true);
         bridge.set_data(
             F {
                 size: 100,
@@ -896,7 +911,7 @@ mod tests {
              no more than BUDGET_RUN_MAX frames dropped in a row"
         );
         let anchored = rig.bridge(true);
-        anchored.set_budget(Some(rate));
+        anchored.set_budget(Some(rate), true);
         anchored.set_data(
             F {
                 size: 100,
@@ -916,7 +931,7 @@ mod tests {
         let rig = Rig::new();
         let bridge = rig.bridge(true);
         assert_eq!(bridge.budget_fill(), None);
-        bridge.set_budget(Some(80_000.0));
+        bridge.set_budget(Some(80_000.0), true);
         assert_eq!(bridge.budget_fill(), Some(0.0));
 
         bridge.set_data(tracked(0, None), true);
@@ -933,8 +948,60 @@ mod tests {
         assert!(fill > 1.5 && fill < 1.7, "one filling frame: {fill}");
         rig.step(0.5);
         assert_eq!(bridge.budget_fill(), Some(0.0), "idle time refunds it");
-        bridge.set_budget(None);
+        bridge.set_budget(None, true);
         assert_eq!(bridge.budget_fill(), None);
+    }
+
+    /// A bridge that keeps account of its budget without holding the stream to it lets every
+    /// frame through, and reads the fill and counts a holding bridge fed the same stream reads.
+    #[test]
+    fn an_unheld_budget_counts_what_it_lets_through() {
+        let rig = Rig::new();
+        let rate = 80_000.0;
+        let held = rig.bridge(true);
+        let unheld = rig.bridge(true);
+        held.set_budget(Some(rate), true);
+        unheld.set_budget(Some(rate), false);
+        for bridge in [&held, &unheld] {
+            bridge.set_data(
+                F {
+                    size: 100,
+                    ..tracked(0, None)
+                },
+                true,
+            );
+            drain(bridge);
+        }
+        let (mut last, mut through) = (0, 0);
+        for fid in 1..=600u32 {
+            rig.step(1.0 / 60.0);
+            held.set_data(
+                F {
+                    size: 500,
+                    ..timed(fid, Some(last), rig.at())
+                },
+                false,
+            );
+            if held.try_take().is_some() {
+                last = fid;
+            }
+            unheld.set_data(
+                F {
+                    size: 500,
+                    ..timed(fid, Some(fid - 1), rig.at())
+                },
+                false,
+            );
+            through += usize::from(unheld.try_take().is_some());
+            assert_eq!(held.budget_fill(), unheld.budget_fill(), "frame {fid}");
+            assert_eq!(
+                (held.over_budget(), held.passed()),
+                (unheld.over_budget(), unheld.passed()),
+                "frame {fid}"
+            );
+        }
+        assert_eq!(through, 600, "every frame let through");
+        assert!(unheld.over_budget() > 300, "{}", unheld.over_budget());
     }
 
     #[test]
@@ -961,7 +1028,7 @@ mod tests {
             }
             (sent, passed, fid, last)
         };
-        bridge.set_budget(Some(rate));
+        bridge.set_budget(Some(rate), true);
         bridge.set_data(
             F {
                 size: 100,
@@ -1020,7 +1087,7 @@ mod tests {
             );
         }
         assert_eq!(rig.forgotten().len(), dropped);
-        bridge.set_budget(None);
+        bridge.set_budget(None, true);
         let (_, passed, ..) = stream(key + 3, 500, 2.0, key + 2);
         assert_eq!(
             passed.len(),
@@ -1030,7 +1097,7 @@ mod tests {
         let _ = last;
 
         let plain_bridge = rig.bridge(false);
-        plain_bridge.set_budget(Some(rate));
+        plain_bridge.set_budget(Some(rate), true);
         plain_bridge.set_data(
             F {
                 size: 100,

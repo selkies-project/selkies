@@ -4,9 +4,8 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # ESLint over the dashboard, the web core, the touch gamepad and the scripts
-# outside them, plus the TypeScript check of the dashboard and of the web
-# core. Run from the
-# repository root; requires npm.
+# outside them, plus the TypeScript check of the dashboard, the web core and
+# the BrowserStack smoke. Run from the repository root; requires npm.
 #
 # The CI lint gate and the pre-commit hook both call this, so the two cannot
 # drift apart.
@@ -31,11 +30,11 @@ echo "eslint: web/selkies-web-core web/universal-touch-gamepad"
 (cd web && selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
     selkies-web-core universal-touch-gamepad)
 
-# The Node audits, the site's scripts and the image tier's tester pages:
-# eslint.config.mjs at the root, with the same ESLint.
-echo "eslint: tests/tools website/scripts tests/image/site"
+# The Node audits, the BrowserStack smoke, the site's scripts and the image
+# tier's tester pages: eslint.config.mjs at the root, with the same ESLint.
+echo "eslint: tests/tools tests/browserstack website/scripts tests/image/site"
 web/selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
-    'tests/tools/**/*.mjs' 'website/scripts/**/*.mjs' 'tests/image/site/**/*.js'
+    'tests/tools/**/*.mjs' 'tests/browserstack/*.ts' 'website/scripts/**/*.mjs' 'tests/image/site/**/*.js'
 
 # The dashboard's own build runs tsc as well, but that is downstream of this gate.
 echo "tsc: web/selkies-dashboard"
@@ -50,3 +49,13 @@ if [ ! -x "${core}/node_modules/.bin/tsc" ]; then
         --fetch-retries=5 --fetch-retry-maxtimeout=120000)
 fi
 (cd "${core}" && npm run --silent typecheck)
+
+# The BrowserStack smoke checks itself with the TypeScript it declares, against
+# the WebdriverIO and Node types its own dependencies carry.
+echo "tsc: tests/browserstack"
+smoke=tests/browserstack
+if [ ! -x "${smoke}/node_modules/.bin/tsc" ]; then
+    (cd "${smoke}" && npm ci --no-audit --no-fund \
+        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
+fi
+(cd "${smoke}" && npm run --silent typecheck)

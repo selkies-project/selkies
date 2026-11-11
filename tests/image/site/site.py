@@ -15,6 +15,7 @@ path is built from it.
 """
 import json
 import os
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -75,6 +76,8 @@ class Handler(BaseHTTPRequestHandler):
             json.loads(body)
         except ValueError:
             return self.reply(400)
+        if not re.fullmatch(r"/[^\0]*", dest) or ".." in dest.split("/"):
+            return self.reply(500)
         os.makedirs(OUT, exist_ok=True)
         tmp = f"{dest}.{threading.get_ident()}.tmp"
         with open(tmp, "wb") as f:

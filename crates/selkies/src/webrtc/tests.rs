@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 use selkies_rtc::ice::IceTopology;
 use selkies_rtc::sctp::Message;
 use selkies_rtc::signaling::{ClientType, Inbound, Outbound, socket};
-use serde_json::{Value as Json, json};
+use serde_json::{Map, Value as Json, json};
 use tokio::sync::broadcast;
 
 use crate::audio::AudioPacket;
@@ -61,6 +61,8 @@ struct FakePipeline {
     video: AtomicBool,
     audio: AtomicBool,
     bitrate: Mutex<f64>,
+    rc_mode: Mutex<String>,
+    watch: Mutex<Option<Arc<StreamWatch>>>,
     fail_start: AtomicBool,
 }
 
@@ -82,6 +84,8 @@ impl FakePipeline {
             video: AtomicBool::new(false),
             audio: AtomicBool::new(false),
             bitrate: Mutex::new(8000.0),
+            rc_mode: Mutex::new("cbr".into()),
+            watch: Mutex::new(None),
             fail_start: AtomicBool::new(false),
         })
     }
@@ -198,7 +202,7 @@ impl MediaPipeline for FakePipeline {
     }
 
     fn rc_mode(&self) -> String {
-        "cbr".into()
+        self.rc_mode.lock().clone()
     }
 
     async fn apply_setting(&self, key: &str, value: &Json) {
@@ -243,7 +247,7 @@ impl MediaPipeline for FakePipeline {
     fn refresh_tunables(&self) {}
 
     fn stream_watch(&self) -> Option<Arc<StreamWatch>> {
-        None
+        self.watch.lock().clone()
     }
 
     async fn realized_geometry(&self, _output: u32) -> Option<(i32, i32, f64)> {
@@ -410,6 +414,7 @@ impl PipelineFactory for FakeFactory {
             config.height,
             config.capture_region,
         );
+        *pipeline.rc_mode.lock() = config.rc_mode;
         self.made
             .lock()
             .insert(config.display_id.clone(), pipeline.clone());
@@ -795,7 +800,7 @@ async fn signaling_client(
     let (peer_socket, outbox) = socket();
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let registry = registry.clone();
-    tokio::spawn(async move { registry.serve(peer_socket, rx, "test", None).await });
+    tokio::spawn(async move { registry.serve(peer_socket, rx, "test", None, None).await });
     let hello = json!({"client_type": "controller", "client_slot": 1, "display_id": display});
     tx.send(Inbound::Text(format!("HELLO client {hello}")))
         .await
@@ -1197,17 +1202,34 @@ fn start_rate_hold_and_remembered_rate() {
 }
 
 async fn seeded(remembered: Option<Json>, others: usize, ceiling: f64, cc: bool) -> Vec<String> {
+    seeded_in("cbr", 8000.0, remembered, others, ceiling, cc).await
+}
+
+/// The bitrate steps seeding a display in `mode` asks of its pipeline, which holds `current`.
+async fn seeded_in(
+    mode: &str,
+    current: f64,
+    remembered: Option<Json>,
+    others: usize,
+    ceiling: f64,
+    cc: bool,
+) -> Vec<String> {
     let rig = Rig::new((1920, 1080), quick());
     rig.service.begin().await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     rig.service.policy.lock().congestion_control = cc;
-    rig.service
-        .st
-        .lock()
-        .displays
-        .get_mut("primary")
-        .unwrap()
-        .video_bitrate = ceiling;
+    {
+        let mut st = rig.service.st.lock();
+        let d = st.displays.get_mut("primary").unwrap();
+        d.video_bitrate = ceiling;
+        d.rate_control_mode = mode.into();
+    }
+    {
+        let made = rig.factory.made.lock();
+        let pipeline = made.get("primary").unwrap();
+        *pipeline.rc_mode.lock() = mode.into();
+        *pipeline.bitrate.lock() = current;
+    }
     rig.peer("me", ClientType::Controller, "primary").await;
     for i in 0..others {
         rig.peer(&format!("other{i}"), ClientType::Controller, "primary")
@@ -1252,6 +1274,87 @@ async fn start_rate_seeds_the_only_controller() {
         seeded(None, 0, 8000.0, true).await,
         [format!("bitrate {START_KBPS:.0}")],
         "nothing remembered climbs from the start rate"
+    );
+}
+
+/// A CRF pipeline under congestion control opens capped at the steer's start, never at the range's
+/// high end; a CBR one at the bitrate its client chose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crf_pipeline_opens_at_the_steers_start() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    let opened = |mode: &str| {
+        let mut st = rig.service.st.lock();
+        let d = st.displays.get_mut("primary").unwrap();
+        d.rate_control_mode = mode.into();
+        d.video_bitrate = 12000.0;
+        WebRtcService::pipeline_config(&st, "primary", 1280, 720, None).video_bitrate
+    };
+    assert_eq!(opened("cbr"), 12000.0);
+    if crate::settings::settings().congestion_control().on {
+        assert_eq!(opened("crf"), START_KBPS);
+    }
+    rig.service.shutdown().await;
+}
+
+/// Congestion control steers a CBR display, and a CRF one unless its capture says its encoder
+/// reads no peak; a capture not described yet is taken to take one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crf_display_is_steered_unless_its_encoder_reads_no_peak() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    let pipeline = rig.factory.made.lock().get("primary").unwrap().clone();
+    assert!(rig.service.steers("primary", true));
+    assert!(!rig.service.steers("primary", false));
+    *pipeline.rc_mode.lock() = "crf".into();
+    assert!(rig.service.steers("primary", true));
+    let described = |capped: bool| {
+        let watch = StreamWatch::new(
+            "primary",
+            Arc::new(|_: String, _: Map<String, Json>| Box::pin(async {})),
+        );
+        let mut info = Map::new();
+        info.insert("capped".into(), json!(capped));
+        watch.describe(info);
+        watch
+    };
+    *pipeline.watch.lock() = Some(described(false));
+    assert!(!rig.service.steers("primary", true));
+    *pipeline.watch.lock() = Some(described(true));
+    assert!(rig.service.steers("primary", true));
+    *pipeline.rc_mode.lock() = "cbr".into();
+    *pipeline.watch.lock() = Some(described(false));
+    assert!(
+        rig.service.steers("primary", true),
+        "a constant rate is steered whatever it says of a peak"
+    );
+    rig.service.shutdown().await;
+}
+
+/// A capped CRF display takes the rate its page remembered either way from the start it opened
+/// at, under the range's high end rather than the CBR bitrate its dashboard hides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_rate_seeds_a_crf_peak_above_its_start() {
+    settings_installed();
+    let (_, hi) = crate::webrtc::service::bitrate_range();
+    assert_eq!(
+        seeded_in("crf", START_KBPS, Some(json!(20000)), 0, 8000.0, true).await,
+        ["bitrate 20000"],
+        "above the start, and above the CBR bitrate"
+    );
+    assert_eq!(
+        seeded_in("crf", 30000.0, Some(json!(2000)), 0, 8000.0, true).await,
+        ["bitrate 2000"]
+    );
+    assert!(
+        seeded_in("crf", START_KBPS, None, 0, 8000.0, true)
+            .await
+            .is_empty(),
+        "nothing remembered stays at the start"
+    );
+    assert_eq!(
+        seeded_in("crf", START_KBPS, Some(json!(hi * 2.0)), 0, 8000.0, true).await,
+        [format!("bitrate {hi:.0}")]
     );
 }
 
@@ -2221,6 +2324,134 @@ async fn owner_a_page_beside_it_is_held_back_until_it_owns_the_display() {
         .any(|(m, _, c)| m == "r,1280x720" && *c == conn_b);
     assert!(replayed, "{:?}", rig.input.messages.lock());
     rig.service.shutdown().await;
+}
+
+/// A STUN server that never answers, for the peers the engine starts from here on: their
+/// server-reflexive gathering waits out its bound, holding their start. It answers nothing once
+/// dropped either.
+fn silent_stun(rig: &Rig) -> std::net::UdpSocket {
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = silent.local_addr().unwrap();
+    rig.service
+        .engine
+        .update_ice_servers(vec![selkies_rtc::ice::IceServer::new(&format!(
+            "stun:{addr}"
+        ))]);
+    silent
+}
+
+/// A page that starts as the display's last peer leaves gets the display's media: the graph its
+/// sender subscribed to stays while it gathers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_still_gathering_keeps_its_display_consumed() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rig.peer("a", ClientType::Controller, "primary").await;
+    let graph = rig.service.engine.displays.lock().get("primary").cloned();
+    let _silent = silent_stun(&rig);
+    let engine = rig.service.engine.clone();
+    tokio::spawn(async move {
+        engine
+            .start_rtc_connection(PeerRequest::new("b", ClientType::Controller, "primary"))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        rig.service.engine.peers.lock().get("b").is_none(),
+        "b is still gathering"
+    );
+    rig.service
+        .engine
+        .stop_rtc_connection("a", "controller")
+        .await;
+    let kept = rig.service.engine.displays.lock().get("primary").cloned();
+    assert!(
+        matches!((kept, graph), (Some(kept), Some(graph)) if Arc::ptr_eq(&kept, &graph)),
+        "the graph b's sender rides stays"
+    );
+}
+
+/// A start aborted mid-gather, as a service stop aborts it, leaves its display to be released
+/// with the last peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_aborted_start_leaves_its_display_releasable() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rig.peer("a", ClientType::Controller, "primary").await;
+    let _silent = silent_stun(&rig);
+    let engine = rig.service.engine.clone();
+    let start = tokio::spawn(async move {
+        engine
+            .start_rtc_connection(PeerRequest::new("b", ClientType::Controller, "primary"))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    start.abort();
+    assert!(start.await.is_err_and(|e| e.is_cancelled()));
+    rig.service
+        .engine
+        .stop_rtc_connection("a", "controller")
+        .await;
+    assert!(
+        !rig.service.engine.displays.lock().contains_key("primary"),
+        "the display is released with its last peer"
+    );
+}
+
+/// The owner's reload keeps the display while its new connection gathers against a STUN server
+/// that never answers, which outlasts the reconnect grace: its session has started, its peer
+/// connection is not in the engine yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_a_reload_still_gathering_keeps_the_display() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rig.peer("a", ClientType::Controller, "primary").await;
+    rig.peer("b", ClientType::Controller, "primary").await;
+    {
+        let mut st = rig.service.st.lock();
+        st.peer_tabs.insert("a".into(), Some("tab-a".into()));
+        st.peer_tabs.insert("b".into(), Some("tab-b".into()));
+        st.owner_tabs.insert("primary".into(), "tab-a".into());
+    }
+    let _silent = silent_stun(&rig);
+    rig.service
+        .engine
+        .stop_rtc_connection("a", "controller")
+        .await;
+    let registry = rig.service.peer_registry().expect("running");
+    let (peer_socket, _outbox) = socket();
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { registry.serve(peer_socket, rx, "test", None, None).await });
+    let hello = json!({"client_type": "controller", "client_slot": 1, "display_id": "primary",
+                       "client_tab_id": "tab-a"});
+    tx.send(Inbound::Text(format!("HELLO client {hello}")))
+        .await
+        .unwrap();
+    tx.send(Inbound::Text("SESSION server".into()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let reloaded = rig
+        .service
+        .st
+        .lock()
+        .peer_tabs
+        .iter()
+        .any(|(pid, tab)| pid != "a" && tab.as_deref() == Some("tab-a"));
+    assert!(reloaded, "the reloaded page's session started");
+    assert_eq!(
+        rig.service.engine.peers.lock().len(),
+        1,
+        "and it is still gathering"
+    );
+    assert_eq!(
+        rig.service.st.lock().owner_tabs.get("primary").unwrap(),
+        "tab-a",
+        "past the grace, the reloading tab still owns the display"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

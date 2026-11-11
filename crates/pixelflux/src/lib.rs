@@ -405,8 +405,9 @@ pub struct CaptureSettings {
     /// VBV size as a multiple of one frame's bit budget (bitrate/framerate), so it rescales with
     /// live bitrate/fps changes. Under CBR, `<= 0` selects the policy default: 1.5 on an
     /// infinite GOP, 3 when scheduled keyframes are enabled. Under CRF, a positive value caps
-    /// the software x264 session at a peak of `video_bitrate_kbps` with this buffer, and `<= 0`
-    /// leaves it uncapped.
+    /// the session at a peak of `video_bitrate_kbps` with this buffer, which a live bitrate
+    /// change moves without a key frame (`encoders::CAPPED_VBV_FRAMES`), and `<= 0` leaves it
+    /// uncapped. Whether a session is capped is fixed when it opens.
     pub video_vbv_multiplier: f64,
     /// The rate the path a stream crosses carries, as its transport measures it, which a still
     /// screen's constant-rate cleanup may run at (`pipeline::cleanup_rate`); 0 where none was
@@ -428,8 +429,10 @@ pub struct CaptureSettings {
 /// The per-frame decision/quality knobs every encoder re-reads from the settings on each
 /// tick, so they retune a running capture: x264, x265, and libvpx reconfigure, NVENC and
 /// VA-API retarget their constant quantizer, kvazaar and SVT-AV1 re-open, JPEG is stateless.
-/// Applied on the thread that owns the settings copy. Structural switches (encoder, chroma,
-/// RC mode, device) still need a capture restart.
+/// A changed reference depth (`video_reference_frames`) re-opens an x264 session, on a key
+/// frame; a hardware session keeps the depth it opened with. Applied on the thread that owns
+/// the settings copy. Structural switches (encoder, chroma, RC mode, device) still need a
+/// capture restart.
 #[derive(Clone, Copy, Debug)]
 pub struct LiveTunables {
     pub jpeg_quality: i32,
@@ -443,6 +446,7 @@ pub struct LiveTunables {
     pub keyframe_interval_s: f64,
     pub capture_cursor: bool,
     pub cursor_size_cap: i32,
+    pub video_reference_frames: u32,
 }
 
 impl LiveTunables {
@@ -460,6 +464,7 @@ impl LiveTunables {
             keyframe_interval_s: s.keyframe_interval_s,
             capture_cursor: s.capture_cursor,
             cursor_size_cap: s.cursor_size_cap,
+            video_reference_frames: s.video_reference_frames,
         }
     }
 
@@ -476,6 +481,7 @@ impl LiveTunables {
         s.keyframe_interval_s = self.keyframe_interval_s;
         s.cursor_size_cap = self.cursor_size_cap;
         s.capture_cursor = self.capture_cursor;
+        s.video_reference_frames = self.video_reference_frames;
     }
 }
 
@@ -1616,6 +1622,9 @@ fn wayland_encode_loop<B: WlPayload>(
                 requested_idr,
                 crate::pipeline::EncoderQuality::of(encoder),
             );
+            // Whether a rate binds the frame, read once before it is coded: the encode may bind
+            // or release the session, and the frame was coded as it stood before.
+            let bound = encoder.rate_bound(settings.video_cbr_mode);
             crate::pipeline::plan_refinement(
                 &mut hw_state,
                 &settings,
@@ -1624,7 +1633,11 @@ fn wayland_encode_loop<B: WlPayload>(
                 Some(&f.damage),
                 encoder.refines(),
                 encoder.last_quality(),
+                bound,
             );
+            if !decision.send && !encoder.holds_frame() {
+                encoder.idle();
+            }
             if decision.send || encoder.holds_frame() {
                 let force_idr = decision.force_idr;
                 decision.prepare(encoder);
@@ -1648,6 +1661,8 @@ fn wayland_encode_loop<B: WlPayload>(
                     &decision,
                     crate::pipeline::EncoderQuality::of(encoder),
                     outcome.as_ref().map_or(0, Vec::len),
+                    bound,
+                    encoder.coded_capped(),
                 );
                 match outcome {
                     Ok(data) => {
@@ -1863,7 +1878,8 @@ fn encoder_desc(
         range_str,
         encoders::rate_desc(
             settings,
-            video_encoder.and_then(FrameEncoder::fixed_rate_control)
+            video_encoder.and_then(FrameEncoder::fixed_rate_control),
+            encoders::session_capped(video_encoder, settings)
         )
     )
 }
@@ -1885,16 +1901,19 @@ pub(crate) fn log_stream_settings(
     );
     let fullcolor = encoders::session_fullcolor(video_encoder, settings);
     let full_range = encoders::session_full_range(video_encoder, settings);
+    let capped = encoders::session_capped(video_encoder, settings);
     log_stream_settings_of(
-        tag, settings, n_stripes, backend, fixed_rate, holds, fullcolor, full_range,
+        tag, settings, n_stripes, backend, fixed_rate, holds, capped, fullcolor, full_range,
     );
     report::bit_depth(encoders::session_bit_depth(video_encoder, settings));
+    report::capped(capped);
 }
 
 /// The "Stream settings active" line for a backend named outright, `(name, hardware)`, where
 /// the session is not a `FrameEncoder` (NvFBC's own NVENC session); `None` is the CPU path, `fixed_rate` is the backend's one rate control where it has one
-/// (`FrameEncoder::fixed_rate_control`), and `holds` says whether the session holds a cleanup
-/// at the quantizer asked for (`FrameEncoder::holds_quantizer`).
+/// (`FrameEncoder::fixed_rate_control`), `holds` says whether the session holds a cleanup at
+/// the quantizer asked for (`FrameEncoder::holds_quantizer`), and `capped` whether a constant
+/// quality runs under the peak of `video_bitrate_kbps` (`encoders::session_capped`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn log_stream_settings_of(
     tag: &str,
@@ -1903,6 +1922,7 @@ pub(crate) fn log_stream_settings_of(
     backend: Option<(&str, bool)>,
     fixed_rate: Option<&str>,
     holds: bool,
+    capped: bool,
     fullcolor: bool,
     full_range: bool,
 ) {
@@ -1910,7 +1930,7 @@ pub(crate) fn log_stream_settings_of(
     println!(
         "{}",
         stream_settings_line(
-            tag, settings, n_stripes, backend, fixed_rate, holds, fullcolor, full_range
+            tag, settings, n_stripes, backend, fixed_rate, holds, capped, fullcolor, full_range
         )
     );
 }
@@ -1925,6 +1945,7 @@ fn stream_settings_line(
     backend: Option<(&str, bool)>,
     fixed_rate: Option<&str>,
     holds: bool,
+    capped: bool,
     fullcolor: bool,
     full_range: bool,
 ) -> String {
@@ -1956,7 +1977,10 @@ fn stream_settings_line(
             log_msg.push_str(" Streaming");
         }
 
-        log_msg.push_str(&format!(" | {}", encoders::rate_desc(settings, fixed_rate)));
+        log_msg.push_str(&format!(
+            " | {}",
+            encoders::rate_desc(settings, fixed_rate, capped)
+        ));
         if let Some(paint_over) = encoders::paint_over_desc(settings, fixed_rate, holds) {
             log_msg.push_str(&format!(" | {paint_over}"));
         }
@@ -1998,6 +2022,7 @@ mod stream_settings_line_tests {
                 Some(("NVENC", true)),
                 fixed,
                 fixed.is_none(),
+                false,
                 false,
                 false,
             )

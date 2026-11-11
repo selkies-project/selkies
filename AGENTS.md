@@ -147,20 +147,27 @@ the webcam uplink runs on a client's bitstream before any decoder), and `red` fo
 the pinned `rtc-dtls` and `rtc-srtp` crates parse them, and a finding there is theirs to fix.
 Code that parses bytes a peer, a client, or another local account controls gets a target, a seed corpus where valid
 inputs are hard to stumble on, and its source among the workflow's `pull_request` paths. Native fuzz targets compile
-their parser modules directly so the builder needs no media libraries. A crash is fixed at its cause, and its input
+their parser modules directly so the builder needs no media libraries, standing in for what those modules reach
+elsewhere in their crate; the `clippy-fuzz` hook (`scripts/ci/clippy-fuzz.sh`) checks every target on each commit
+and push, with the `fuzzing` cfg `cargo fuzz` builds with. A crash is fixed at its cause, and its input
 joins the corpus.
 
-CodeQL's code scanning and the other checkers (clippy, rustfmt, ruff, codespell, eslint and tsc through
-pre-commit; cargo-deny's advisories, licenses and bans; Dependabot's alerts; the OSS Scanner's and the fuzzers'
-findings) are at least stylistic recommendations: a finding is fixed in the code and its alert closed by the next
-scan or update, never dismissed or closed by hand, and a lint is not silenced (`#[allow]`, `noqa`,
-`eslint-disable`) where the code can be written its way. Code that is safe through a check a checker cannot follow
+CodeQL's code scanning and the other checkers (clippy, rustfmt, ruff, codespell, eslint and tsc through pre-commit;
+cargo-deny's advisories, licenses and bans; Dependabot's alerts; Snyk's (its GitHub app's pull-request checks, daily
+tests and fix pull requests; `.github/workflows/snyk.yaml`'s Snyk Code alerts in code scanning and daily test of the
+Rust crates and of each build's codec libraries), whose license findings answer to the Licenses workflow's policy;
+the OSS Scanner's and the fuzzers' findings) are at least stylistic recommendations: a finding is fixed in the code
+and its alert closed by the next scan or update, never dismissed or closed by hand, and a lint is not silenced
+(`#[allow]`, `noqa`, `eslint-disable`) where the code can be written its way. Code that is safe through a check a
+checker cannot follow
 (a validator in another function, a lookup in a table the code fills itself) is rewritten so the check sits where it
 is recognized (the language's models in github/codeql list the forms: for a path, canonicalized and then checked
 with `starts_with` against the root it must stay under; for a value from a fixed set, a comparison against
 literals; for a redirect, a constant prefix the value follows), so the checker keeps watching that path. A protocol
 requirement alone is dismissed, with the standard that fixes it named (a hash, port or file format the protocol or
-its tools prescribe).
+its tools prescribe). An advisory that no release of a library fixes, once the code removes the path it describes, is
+listed with that mitigation in `scripts/ci/snyk-mitigated.json` on a maintainer's word, and the entry goes with the
+advisory or the library.
 
 ## Landing a change
 
@@ -294,11 +301,14 @@ Each is documented in full where named; read that before changing the subsystem.
   `crates/selkies-rtc/src/rtp/sender.rs`, the `lost_frame` hook, which the WebRTC engine answers). A stream whose
   encoder names no reference -- a session that cannot invalidate -- gets the key frame instead, and so does a run
   of drops the encoder never predicts past, or an H.264 loss covering the frame at the encoder's
-  `frame_num` wrap, which the browsers' FFmpeg decoder cannot be predicted past. A WebSockets stream keeps one
-  reference frame (`video_reference_frames`, the WebSockets server's `capture_settings`) on every encoder but
-  NVENC: every client decodes against the whole buffer on every frame, and TCP loses nothing, so there x264 and
-  VA-API's H.264 and H.265 answer a drop with the key frame, while NVENC and the encoders that keep a buffer of
-  their own (libvpx, SVT-AV1, VA-API's VP8, VP9, and AV1) still predict past it.
+  `frame_num` wrap, which the browsers' FFmpeg decoder cannot be predicted past. A WebSockets stream that one page
+  streams keeps one reference frame (`video_reference_frames`, the WebSockets server's `capture_settings`) on every
+  encoder but NVENC: every client decodes against the whole buffer on every frame, and TCP loses nothing, so there
+  x264 and VA-API's H.264 and H.265 answer a drop with the key frame. Once two pages or more stream the display, the
+  encoder takes its own depth (`deepen_references`: x264 reopens in place on the key frame the joining page starts
+  from, a hardware session restarts its capture) and keeps it until its capture next starts, or x264's next resize,
+  so a page beside the owner that its link leaves frames is predicted past, as NVENC and the encoders that keep a
+  buffer of their own (libvpx, SVT-AV1, VA-API's VP8, VP9, and AV1) predict past it.
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in the server
   (`web/selkies-web-core/lib/webcam-capture.ts` header, `crates/selkies/src/webcam` module docblock,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

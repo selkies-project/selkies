@@ -140,6 +140,7 @@ struct Peer {
     peer_id: String,
     socket: Arc<PeerSocket>,
     raddr: String,
+    host: Option<String>,
     is_server: bool,
     seq: u64,
     client_type: Option<ClientType>,
@@ -163,6 +164,9 @@ struct Peer {
 pub struct PeerInfo {
     pub peer_id: String,
     pub raddr: String,
+    /// The `Host` its signaling request named: the address the page reached this server at,
+    /// which tells apart the public entries of a server published at more than one.
+    pub host: Option<String>,
     pub is_server: bool,
     pub client_type: Option<ClientType>,
     pub client_slot: Option<i64>,
@@ -297,6 +301,7 @@ impl PeerRegistry {
         Some(PeerInfo {
             peer_id: peer.peer_id.clone(),
             raddr: peer.raddr.clone(),
+            host: peer.host.clone(),
             is_server: peer.is_server,
             client_type: peer.client_type,
             client_slot: peer.client_slot,
@@ -361,13 +366,15 @@ impl PeerRegistry {
     /// Serve one connection end to end: its hello, its messages, and its removal.
     ///
     /// `ceiling` is the highest role the transport credential grants; `Viewer` caps a
-    /// self-asserted controller. The route forwards the WebSocket's frames to `inbound` and
+    /// self-asserted controller. `host` is the request's `Host` header, kept for the peer
+    /// (`PeerInfo::host`). The route forwards the WebSocket's frames to `inbound` and
     /// writes the socket's outbox; a dropped `inbound` reads as a cut.
     pub async fn serve(
         self: &Arc<PeerRegistry>,
         socket: Arc<PeerSocket>,
         mut inbound: mpsc::Receiver<Inbound>,
         raddr: &str,
+        host: Option<&str>,
         ceiling: Option<ClientType>,
     ) {
         let text = loop {
@@ -386,7 +393,7 @@ impl PeerRegistry {
                 }
             }
         };
-        let peer_id = match self.hello_peer(&text, &socket, raddr, ceiling) {
+        let peer_id = match self.hello_peer(&text, &socket, raddr, host, ceiling) {
             Ok(peer_id) => peer_id,
             Err(refusal) => {
                 error!(target: "signaling", "Error during handshake with peer {raddr}: {}", refusal.log);
@@ -593,6 +600,7 @@ impl PeerRegistry {
         state: &mut State,
         socket: &Arc<PeerSocket>,
         raddr: &str,
+        host: Option<&str>,
         hello: &Hello,
         client_type: Option<ClientType>,
     ) -> Option<(String, String, Vec<String>)> {
@@ -630,6 +638,7 @@ impl PeerRegistry {
         }
         peer.socket = Arc::clone(socket);
         peer.raddr = raddr.to_owned();
+        peer.host = host.map(str::to_owned);
         let held = std::mem::take(&mut peer.held);
         Some((peer_id, partner, held))
     }
@@ -644,6 +653,7 @@ impl PeerRegistry {
         text: &str,
         socket: &Arc<PeerSocket>,
         raddr: &str,
+        host: Option<&str>,
         ceiling: Option<ClientType>,
     ) -> Result<String, Refusal> {
         let hello = parse_hello(text)?;
@@ -670,7 +680,7 @@ impl PeerRegistry {
                 client_type = Some(ClientType::Viewer);
             }
             if let Some((peer_id, partner, held)) =
-                Self::resume(&mut state, socket, raddr, &hello, client_type)
+                Self::resume(&mut state, socket, raddr, host, &hello, client_type)
             {
                 drop(state);
                 info!(target: "signaling", "Peer {peer_id} resumed its session from {raddr}");
@@ -696,6 +706,7 @@ impl PeerRegistry {
                 peer_id: peer_id.clone(),
                 socket: Arc::clone(socket),
                 raddr: raddr.to_owned(),
+                host: host.map(str::to_owned),
                 is_server: hello.is_server,
                 seq,
                 client_type,

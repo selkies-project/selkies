@@ -15,6 +15,7 @@ instead; it also streams at a plain URL with the login given to the browser.
 """
 import os
 import re
+import secrets
 import sys
 import time
 
@@ -24,7 +25,9 @@ import core_lib as C
 
 from playwright.sync_api import sync_playwright
 
-USER, PASSWORD = "selkies", "hunter2"
+# Drawn per run, URL-safe, so they stand in `user:pass@` as they are.
+USER = f"user-{secrets.token_hex(4)}"
+PASSWORD = secrets.token_urlsafe(16)
 passed = failed = 0
 
 

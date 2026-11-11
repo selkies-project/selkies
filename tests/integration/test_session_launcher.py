@@ -215,12 +215,17 @@ def logged(log: str, prefix: str) -> Optional[str]:
 
 
 def stop(proc: subprocess.Popen, pid: int, detached: bool) -> Optional[int]:
-    """SIGTERM to the launcher; its exit status where this process started it."""
+    """SIGTERM to the launcher, returning once it has exited (it removes its runtime
+    directory last, after collecting its session); its exit status where this
+    process started it."""
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         return None
     if detached:
+        deadline = time.time() + 30
+        while running(pid) and time.time() < deadline:
+            time.sleep(0.2)
         return None
     try:
         return proc.wait(timeout=30)

@@ -49,6 +49,7 @@ use crate::display::{
     populate_capture_settings, reconcile_realized_layout, structurally_same, wayland_output_id,
 };
 use crate::files::pacing::TransferPacer;
+use crate::http::audit::rfc3339;
 use crate::settings::{
     CODEC_LABELS, STREAM_SETTINGS, WS_MESSAGE_SIZE_HARD_CAP, codec_for_encoder, effective_use_cpu,
     encoder_for_codec, settings, settings_mut,
@@ -319,6 +320,108 @@ impl WsService {
     pub(crate) fn schedule_idr(&self, display_id: &str) {
         if let Some(capture) = self.capture_of(display_id) {
             capture.request_idr_frame();
+        }
+    }
+
+    /// The key frame a page starting on `display_id` decodes from. Its relay, made at the first
+    /// frame after the page connected, asks for one itself at the first delta it drops, and an
+    /// encoder that codes the two requests either side of a frame sends the page two key frames
+    /// back to back; so this asks only where the relay has not, and the relay waits for it.
+    pub(crate) fn schedule_idr_for_page(&self, client: ClientId, display_id: &str) {
+        self.deepen_references(display_id);
+        let relay = self
+            .reg
+            .lock()
+            .relays
+            .get(display_id)
+            .and_then(|group| group.get(&client).cloned());
+        if relay.as_ref().is_some_and(|r| r.sync_pending()) {
+            return;
+        }
+        self.schedule_idr(display_id);
+        if let Some(relay) = relay {
+            relay.hold_sync();
+        }
+    }
+
+    /// The pages streaming `display_id`: its owner and, on the primary, the pages beside it and
+    /// the viewers, each unless its video is paused.
+    pub(crate) fn pages_streaming(&self, display_id: &str) -> usize {
+        let reg = self.reg.lock();
+        let live = |c: &ClientId| reg.clients.contains_key(c) && !reg.video_paused.contains(c);
+        let owner = usize::from(reg.owners.get(display_id).is_some_and(live));
+        if display_id != PRIMARY_DISPLAY {
+            return owner;
+        }
+        let beside = reg.co_controllers.iter().filter(|(c, _)| live(c)).count();
+        let viewers = reg
+            .clients
+            .iter()
+            .filter(|(c, client)| client.is_viewer() && live(c))
+            .count();
+        owner + beside + viewers
+    }
+
+    /// Two pages or more stream `display_id`: an encoder under the one-reference cap
+    /// (`capture_settings`) takes its own reference depth, so a page beside the owner that is
+    /// left frames is predicted past rather than sent a key frame. x264 reopens on its next
+    /// frame, which the key frame the page joins on shares; a hardware session restarts its
+    /// capture (`reconcile_reference_frames`). The depth stays when the display is down to one
+    /// page again, until its capture next starts or an x264 session next resizes
+    /// (`settle_depth_on_resize`).
+    fn deepen_references(&self, display_id: &str) {
+        if self.pages_streaming(display_id) < 2 {
+            return;
+        }
+        let software = {
+            let mut st = self.st.lock();
+            let Some(instance) = st.instances.get_mut(display_id) else {
+                return;
+            };
+            if instance.settings.video_reference_frames != 1 {
+                return;
+            }
+            let settings = &mut instance.settings;
+            let software = settings.use_cpu || settings.encode_node_index == -1;
+            if software {
+                settings.video_reference_frames = 0;
+            }
+            if let Some(d) = st.displays.get_mut(display_id) {
+                d.deep_for_pages = true;
+            }
+            software
+        };
+        info!(target: "ws", "Display '{display_id}' streams to two pages or more; its encoder keeps its own reference depth.");
+        if !software {
+            self.schedule_reference_reconcile(display_id);
+            return;
+        }
+        let settings = self
+            .st
+            .lock()
+            .instances
+            .get(display_id)
+            .map(|i| i.settings.clone());
+        if let (Some(capture), Some(settings)) = (self.capture_of(display_id), settings)
+            && let Err(e) = capture.update_tunables(&settings)
+        {
+            warn!(target: "ws", "Display '{display_id}' could not take its encoder's own reference depth: {e}");
+        }
+    }
+
+    /// A resize reopens a software encoder anyway: a depth it took for pages since gone
+    /// (`deepen_references`) ends with it.
+    fn settle_depth_on_resize(&self, display_id: &str, cs: &mut CaptureSettings) {
+        let software = cs.use_cpu || cs.encode_node_index == -1;
+        if cs.video_reference_frames != 0 || !software || self.pages_streaming(display_id) >= 2 {
+            return;
+        }
+        let mut st = self.st.lock();
+        if let Some(d) = st.displays.get_mut(display_id)
+            && d.deep_for_pages
+        {
+            d.deep_for_pages = false;
+            cs.video_reference_frames = 1;
         }
     }
 
@@ -778,12 +881,40 @@ impl WsService {
             .insert(display_id.to_string(), kbps);
     }
 
-    /// The CBR rate a display's encoder runs at: its target, held down to what its path
-    /// carries while congestion control steers it.
+    /// The rate a display's encoder is held to, a CBR target or a CRF peak: its ceiling
+    /// `target`, held down to what its path carries while congestion control steers it.
     pub(crate) fn video_bitrate_kbps(&self, display_id: &str, target: f64) -> f64 {
         self.link(display_id)
             .map(|l| l.lock().video_bitrate_kbps(target))
             .unwrap_or(target)
+    }
+
+    /// Whether congestion control steers a display: on, and for a CRF display unless its capture
+    /// says its encoder reads no peak (`stats::takes_peak`), which leaves it to its rate factor at
+    /// the bitrate its client chose, as without congestion control. Reads the capture's
+    /// description, so no state lock may be held.
+    pub(crate) fn steers(&self, display_id: &str, d: &DisplayState) -> bool {
+        settings().congestion_control().on
+            && (!d.capped(true)
+                || crate::stats::takes_peak(
+                    self.reg
+                        .lock()
+                        .watches
+                        .get(display_id)
+                        .and_then(|w| w.info())
+                        .as_ref(),
+                ) != Some(false))
+    }
+
+    /// The rate, in kbps, a display's encoder is held to: its ceiling held down to what its path
+    /// carries where congestion control steers it (`steers`), else the bitrate its client chose.
+    pub(crate) fn held_kbps(&self, display_id: &str, d: &DisplayState) -> f64 {
+        if self.steers(display_id, d) {
+            let hi = settings().video_bitrate().1.as_f64();
+            self.video_bitrate_kbps(display_id, d.rate_ceiling(true, hi))
+        } else {
+            d.video_bitrate
+        }
     }
 
     /// `_arg_fps`: sanitize against the server range, store, and live-update the capture; a
@@ -847,7 +978,8 @@ impl WsService {
     }
 
     /// `vb`: live video bitrate in kbps, sanitized exactly like the `SETTINGS` path so locked
-    /// server ranges cannot be bypassed.
+    /// server ranges cannot be bypassed. A steered CRF display stores it for CBR and leaves its
+    /// encoder's peak to the steer.
     pub async fn handle_opcode_video_bitrate(&self, kbps: f64, display_id: &str) {
         let Some(sanitized) = sanitize("video_bitrate", Some(&json!(kbps)))
             .as_ref()
@@ -860,19 +992,21 @@ impl WsService {
             if display_id == PRIMARY_DISPLAY {
                 st.seeds.video_bitrate = sanitized;
             }
-            match st.displays.get_mut(display_id) {
-                Some(d) => {
-                    d.video_bitrate = sanitized;
-                    true
-                }
-                None => false,
-            }
+            st.displays.get_mut(display_id).map(|d| {
+                d.video_bitrate = sanitized;
+                d.clone()
+            })
         };
+        if let Some(d) = &known
+            && d.capped(true)
+            && self.steers(display_id, d)
+        {
+            return;
+        }
         if let Some(capture) = self.capture_of(display_id) {
-            let rate = if known {
-                self.video_bitrate_kbps(display_id, sanitized)
-            } else {
-                sanitized
+            let rate = match &known {
+                Some(d) => self.held_kbps(display_id, d),
+                None => sanitized,
             };
             let rate = kbps_i32(rate);
             match capture.update_video_bitrate(rate) {
@@ -897,6 +1031,24 @@ impl WsService {
         };
         self.st.lock().seeds.audio_bitrate = sanitized;
         self.deps.audio.set_bitrate(sanitized as i32);
+    }
+
+    /// The rate a display that opens a new capped CRF session under congestion control, where
+    /// nothing has steered it yet, is capped at (`seed_capped_rate`): the rate its stream ran at
+    /// before, the client's bitrate, rather than the range's high end, which a slower path would
+    /// queue seconds of before the first steer tick.
+    fn capped_seed(d: &DisplayState) -> Option<f64> {
+        let hi = settings().video_bitrate().1.as_f64();
+        d.capped(settings().congestion_control().on)
+            .then(|| d.video_bitrate.min(hi))
+    }
+
+    /// Cap a display's new CRF session at `seed` (`capped_seed`) where its link holds no steered
+    /// rate: a switch to CRF, or to an encoder that takes the peak from one that did not.
+    fn seed_capped_rate(&self, display_id: &str, seed: Option<f64>) {
+        if let (Some(rate), Some(link)) = (seed, self.link(display_id)) {
+            link.lock().link_kbps.get_or_insert(rate);
+        }
     }
 
     /// `_rc`: structural like the `SETTINGS` path (the encoder session must be rebuilt), honoring
@@ -925,13 +1077,14 @@ impl WsService {
             }
             d.rate_control_mode = sanitized.clone();
             let active = d.video_active;
+            let seed = Self::capped_seed(d);
             if display_id == PRIMARY_DISPLAY {
                 st.seeds.rc_mode = sanitized.clone();
             }
-            if !active {
-                return;
-            }
-            let Some(layout) = st.layouts.get(display_id).copied() else {
+            let layout = st.layouts.get(display_id).copied();
+            drop(st);
+            self.seed_capped_rate(display_id, seed);
+            let (true, Some(layout)) = (active, layout) else {
                 return;
             };
             layout
@@ -1285,7 +1438,13 @@ impl WsService {
                 l.w = w;
                 l.h = h;
             }
-            st.displays.get(display_id).map(|d| d.scale).unwrap_or(1.0)
+            match st.displays.get_mut(display_id) {
+                Some(d) => {
+                    d.laid_out = Some((w, h));
+                    d.scale
+                }
+                None => 1.0,
+            }
         };
         self.deps
             .display
@@ -1293,7 +1452,11 @@ impl WsService {
             .await;
         let layout = Layout::new(0, 0, w, h);
         let alive = self.capture_of(display_id).filter(|c| c.is_capturing());
-        match (alive, self.capture_settings(display_id, layout)) {
+        let fresh = self.capture_settings(display_id, layout).map(|mut cs| {
+            self.settle_depth_on_resize(display_id, &mut cs);
+            cs
+        });
+        match (alive, fresh) {
             (Some(capture), Some(fresh)) => {
                 let _guard = self.video_capture_lock.lock().await;
                 let applied = fresh.clone();
@@ -1330,8 +1493,9 @@ impl WsService {
 
     /// Reconcile a display's state with the compositor's realized geometry (it may even-mask
     /// dimensions or keep the old mode), the Wayland counterpart of X11's realized clamp. The
-    /// read is a barrier too: answered only after any queued capture start finished.
-    async fn sync_wayland_realized_geometry(&self, display_id: &str, broadcast: bool) {
+    /// read is a barrier too: answered only after any queued capture start finished. A size the
+    /// page asked for after the pass laid its display out stays the display's request.
+    pub(crate) async fn sync_wayland_realized_geometry(&self, display_id: &str, broadcast: bool) {
         if !Self::is_wayland() || !self.reg.lock().running.contains(display_id) {
             return;
         }
@@ -1361,8 +1525,11 @@ impl WsService {
         {
             let mut st = self.st.lock();
             if let Some(d) = st.displays.get_mut(display_id) {
-                d.width = w;
-                d.height = h;
+                if d.laid_out.is_none_or(|laid| laid == (d.width, d.height)) {
+                    d.width = w;
+                    d.height = h;
+                    d.laid_out = Some((w, h));
+                }
                 if scale > 0.0 {
                     d.scale = scale;
                 }
@@ -1712,8 +1879,9 @@ impl WsService {
             .map(|c| {
                 let perms = c.perms();
                 let display = owners.iter().find(|(_, o)| **o == c.id).map(|(d, _)| d.as_str()).unwrap_or(PRIMARY_DISPLAY);
+                let connected_at = (perms.connected_at > 0.0).then(|| rfc3339(perms.connected_at));
                 json!({"id": perms.id, "transport": "websockets", "role": perms.role, "slot": perms.slot,
-                       "display": display, "connected_at": rfc3339(perms.connected_at), "rtt_ms": c.rtt_ms()})
+                       "display": display, "connected_at": connected_at, "rtt_ms": c.rtt_ms()})
             })
             .collect()
     }
@@ -2191,6 +2359,13 @@ impl WsService {
     ) -> bool {
         let mut restart =
             old.restart != new.restart || (Self::is_wayland() && old.scale != new.scale);
+        // A new session, in a new rate-control mode or on a new encoder: one that takes the
+        // peak after one that did not (whose display's link holds no rate) opens capped at the
+        // stream's rate.
+        if old.restart != new.restart {
+            let seed = self.st.lock().displays.get(did).and_then(Self::capped_seed);
+            self.seed_capped_rate(did, seed);
+        }
         let capture = if self.reg.lock().running.contains(did) {
             self.capture_of(did)
         } else {
@@ -2198,7 +2373,7 @@ impl WsService {
         };
         if !restart && let Some(capture) = &capture {
             info!(target: "ws", "Applying video settings for '{did}' live (no restart).");
-            let (layout, fps, target) = {
+            let (layout, fps, d) = {
                 let st = self.st.lock();
                 let d = st.displays.get(did);
                 (
@@ -2211,10 +2386,10 @@ impl WsService {
                         )
                     }),
                     d.map(|d| d.capture_fps()).unwrap_or(60.0),
-                    d.map(|d| d.video_bitrate).unwrap_or(0.0),
+                    d.cloned(),
                 )
             };
-            let rate = kbps_i32(self.video_bitrate_kbps(did, target));
+            let rate = kbps_i32(d.map_or(0.0, |d| self.held_kbps(did, &d)));
             let applied = self
                 .capture_settings(did, layout)
                 .ok_or_else(|| "no display".to_string())
@@ -2320,21 +2495,22 @@ impl WsService {
     /// `None` for an unknown secondary.
     ///
     /// Software, VA-API/Intel, V4L2, and Tegra streams keep one reference frame
-    /// (`video_reference_frames`); NVENC keeps its acknowledged references for loss recovery.
-    /// A deeper buffer lets the encoder
-    /// predict past a frame a page dropped (`LOST_FRAME`, a relay's thinned run) instead of
-    /// coding a key frame, but every client
-    /// decodes against all of it on every frame: at 2560x1600 eight frames cost FFmpeg's decoder
-    /// 0.3 ms a frame over one, and a decoder that holds its whole buffer before showing a picture
-    /// shows each that many frames later. TCP loses nothing, so over WebSockets a drop is rare and
-    /// repaired by a key frame; the WebRTC pipeline keeps the depth for the losses its NACK and FEC
-    /// leave.
+    /// (`video_reference_frames`) while one page streams the display; NVENC keeps its acknowledged
+    /// references for loss recovery. A deeper buffer lets the encoder predict past a frame a page
+    /// dropped (`LOST_FRAME`, a relay's thinned run) instead of coding a key frame, but every
+    /// client decodes against all of it on every frame: at 2560x1600 eight frames cost FFmpeg's
+    /// decoder 0.3 ms a frame over one. TCP loses nothing, so one page's drop is rare and repaired
+    /// by a key frame. A display two pages or more stream, where a page beside the owner on a
+    /// narrower link is left frames, starts at the encoder's own depth, and a running one takes
+    /// it as the second page joins (`deepen_references`). The WebRTC pipeline keeps the depth for
+    /// the losses its NACK and FEC leave.
     pub(crate) fn capture_settings(
         &self,
         display_id: &str,
         layout: Layout,
     ) -> Option<CaptureSettings> {
         let cap = self.input().map(|i| i.cursor_size_cap()).unwrap_or(0);
+        let shared = self.pages_streaming(display_id) >= 2;
         let (d, capture_cursor, current_policy) = {
             let st = self.st.lock();
             let d = match st.displays.get(display_id) {
@@ -2360,7 +2536,7 @@ impl WsService {
                 });
             (d, st.capture_cursor, current)
         };
-        let bitrate = self.video_bitrate_kbps(display_id, d.video_bitrate);
+        let bitrate = self.held_kbps(display_id, &d);
         let mut cs = CaptureSettings {
             width: layout.w,
             height: layout.h,
@@ -2420,8 +2596,12 @@ impl WsService {
                 cs.encode_node_index = -1;
                 cs.encode_node_path.clear();
             }
-            if hardware.as_deref() != Some("nvenc") {
+            let capped = hardware.as_deref() != Some("nvenc");
+            if capped && !shared {
                 cs.video_reference_frames = 1;
+            }
+            if let Some(d) = self.st.lock().displays.get_mut(display_id) {
+                d.deep_for_pages = capped && shared;
             }
         }
         Some(cs)
@@ -2707,10 +2887,11 @@ impl WsService {
         });
     }
 
-    /// Keep the one-reference WebSocket cap on every actual encoder except NVENC. The startup
-    /// probe is only a selection hint: a capture can open software for an unsupported format,
-    /// or demote to it after hardware errors. Native reference depth is structural, so a changed
-    /// actual class takes the ordinary capture restart and decoder-reset path exactly once.
+    /// Keep the one-reference WebSocket cap on every actual encoder except NVENC while one page
+    /// streams the display (`deepen_references` has the rest). The startup probe is only a
+    /// selection hint: a capture can open software for an unsupported format, or demote to it
+    /// after hardware errors. Native reference depth is structural, so a changed actual class
+    /// takes the ordinary capture restart and decoder-reset path exactly once.
     pub(crate) async fn reconcile_reference_frames(&self, display_id: &str) {
         let reconfigure = self.reconfigure_lock.lock().await;
         let capture = self.video_capture_lock.lock().await;
@@ -2741,11 +2922,9 @@ impl WsService {
             return;
         };
         let nvenc = actual.info.hardware && actual.info.encoder == "NVENC";
-        let wanted = EncoderPolicy {
-            reference_frames: u32::from(!nvenc),
-            software: !actual.info.hardware,
-        };
-        let (current, layout) = {
+        let shared = self.pages_streaming(display_id) >= 2;
+        let software = !actual.info.hardware;
+        let (current, layout, deep_for_pages) = {
             let st = self.st.lock();
             (
                 st.instances.get(display_id).map(|instance| EncoderPolicy {
@@ -2754,7 +2933,18 @@ impl WsService {
                         || instance.settings.encode_node_index == -1,
                 }),
                 st.layouts.get(display_id).copied(),
+                st.displays
+                    .get(display_id)
+                    .is_some_and(|d| d.deep_for_pages),
             )
+        };
+        // A session that took its own depth for pages since gone keeps it until its capture
+        // next starts (`deepen_references`).
+        let kept = deep_for_pages
+            && current.is_some_and(|c| c.reference_frames == 0 && c.software == software);
+        let wanted = EncoderPolicy {
+            reference_frames: u32::from(!(nvenc || shared || kept)),
+            software,
         };
         if current == Some(wanted) {
             return;
@@ -2776,6 +2966,9 @@ impl WsService {
             .await
         {
             self.start_backpressure_task(display_id);
+        }
+        if let Some(d) = self.st.lock().displays.get_mut(display_id) {
+            d.deep_for_pages = !nvenc && wanted.reference_frames == 0;
         }
     }
 
@@ -3081,7 +3274,7 @@ impl WsService {
     }
 
     /// The backpressure loop of one display: one check per period once a controller's settings
-    /// arrived, and the steer behind it where congestion control steers a CBR display.
+    /// arrived, and the steer behind it where congestion control is on.
     async fn run_backpressure(self: Arc<Self>, display_id: String) {
         let mut received = self.settings_received.subscribe();
         if received.wait_for(|r| *r).await.is_err() {
@@ -3117,13 +3310,36 @@ impl WsService {
         at: f64,
         late_ms: f64,
     ) {
-        let (target, configured_fps, steered, video_active) = {
+        let (lo, hi) = {
+            let (lo, hi) = settings().video_bitrate();
+            (lo.as_f64(), hi.as_f64())
+        };
+        // A CRF display whose encoder reads no peak is left to its rate factor, as without
+        // congestion control.
+        let takes_peak = crate::stats::takes_peak(
+            self.reg
+                .lock()
+                .watches
+                .get(display_id)
+                .and_then(|w| w.info())
+                .as_ref(),
+        );
+        let cc = settings().congestion_control().on;
+        let (target, configured_fps, steered, capped, video_active, unread) = {
             let st = self.st.lock();
             let Some(d) = st.displays.get(display_id) else {
                 return;
             };
-            let steered = settings().congestion_control().on && d.rate_control_mode == "cbr";
-            (d.video_bitrate, d.capture_fps(), steered, d.video_active)
+            let unread = d.capped(cc) && takes_peak == Some(false);
+            let steered = cc && !unread;
+            (
+                d.rate_ceiling(steered, hi),
+                d.capture_fps(),
+                steered,
+                d.capped(steered),
+                d.video_active,
+                unread.then_some(d.video_bitrate),
+            )
         };
         let (capturing, capture, relay, client, paused) = {
             let reg = self.reg.lock();
@@ -3136,8 +3352,20 @@ impl WsService {
                 owner.is_some_and(|o| reg.video_paused.contains(&o)),
             )
         };
+        // A CRF display whose encoder turned out to read no peak goes back to the bitrate its
+        // client chose, which a device that runs at the bitrate whatever the mode codes at.
+        if let Some(kbps) = unread
+            && link.lock().link_kbps.take().is_some()
+            && let Some(capture) = &capture
+        {
+            let kbps = kbps_i32(kbps);
+            if capture.update_video_bitrate(kbps).is_ok() {
+                self.track_capture(display_id, |cs| cs.video_bitrate_kbps = kbps);
+            }
+        }
+        // A capped CRF display is never padded (`PathProbe`).
         let pad = PadPermit {
-            announced: client.as_ref().is_some_and(|c| c.pad()),
+            announced: !capped && client.as_ref().is_some_and(|c| c.pad()),
             streaming: video_active && !paused,
         };
         let padded = relay.clone();
@@ -3148,10 +3376,6 @@ impl WsService {
             interval_s: self.timings.backpressure_check_s,
             allowed_desync_ms: BACKPRESSURE_ALLOWED_DESYNC_MS,
             primary: display_id == PRIMARY_DISPLAY,
-        };
-        let (lo, hi) = {
-            let (lo, hi) = settings().video_bitrate();
-            (lo.as_f64(), hi.as_f64())
         };
         let mut effects = CheckEffects {
             capture: capture.clone(),
@@ -3282,8 +3506,10 @@ impl WsService {
                 continue;
             };
             let mut stats = host.clone();
+            let mut takes_peak = None;
             if let Some(watch) = self.reg.lock().watches.get(&display_id).cloned() {
                 stats.extend(watch.rates());
+                takes_peak = crate::stats::takes_peak(watch.info().as_ref());
             }
             if let Some(link) = self.link(&display_id) {
                 let link = link.lock();
@@ -3298,7 +3524,7 @@ impl WsService {
                 .lock()
                 .instances
                 .get(&display_id)
-                .filter(|i| i.settings.video_cbr_mode)
+                .filter(|i| i.settings.video_cbr_mode || takes_peak == Some(true))
                 .map(|i| i.settings.video_bitrate_kbps);
             if let Some(target) = target.filter(|t| *t > 0) {
                 stats.insert(
@@ -3510,7 +3736,7 @@ impl WsService {
                     // A controller tab-hide can tear the capture down mid-resume; an IDR request
                     // is then a no-op and the reset decoder would wait forever.
                     if service.reg.lock().running.contains(PRIMARY_DISPLAY) {
-                        service.schedule_idr(PRIMARY_DISPLAY);
+                        service.schedule_idr_for_page(id, PRIMARY_DISPLAY);
                     } else {
                         service.ensure_viewer_capture().await;
                     }
@@ -3747,8 +3973,9 @@ impl WsService {
 
     /// The union layout from all display clients, and the fastest stream: a real display's
     /// refresh caps what a vsynced application shows, so its modes never run slower than that.
+    /// Each display's size is marked laid out (`DisplayState::laid_out`).
     fn compute_layouts(&self) -> Option<(Layouts, i32, i32, f64)> {
-        let st = self.st.lock();
+        let mut st = self.st.lock();
         let primary = st.displays.get(PRIMARY_DISPLAY);
         let secondary = st
             .displays
@@ -3799,6 +4026,9 @@ impl WsService {
                     .unwrap_or(st.seeds.framerate)
             })
             .fold(0.0, f64::max);
+        for d in st.displays.values_mut() {
+            d.laid_out = Some((d.width, d.height));
+        }
         Some((layouts, total_w, total_h, fps))
     }
 
@@ -3827,7 +4057,10 @@ impl WsService {
                 .filter(|_| alive)
                 .and_then(|l| self.capture_settings(&did, l));
             match fresh.filter(|f| structurally_same(f, &old)) {
-                Some(fresh) => {
+                Some(mut fresh) => {
+                    if (fresh.width, fresh.height) != (old.width, old.height) {
+                        self.settle_depth_on_resize(&did, &mut fresh);
+                    }
                     self.track_capture(&did, |cs| *cs = fresh);
                     keep.insert(did);
                 }
@@ -4212,14 +4445,6 @@ fn opt(value: Option<i64>) -> String {
     value
         .map(|v| v.to_string())
         .unwrap_or_else(|| "None".into())
-}
-
-/// Unix seconds as the audit log's timestamp.
-fn rfc3339(unix: f64) -> Json {
-    match chrono::DateTime::from_timestamp(unix as i64, 0) {
-        Some(at) if unix > 0.0 => json!(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        _ => Json::Null,
-    }
 }
 
 /// Store the sanitized per-display tunables for the keys the payload carries: sanitizing an

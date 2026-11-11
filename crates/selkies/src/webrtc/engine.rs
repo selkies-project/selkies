@@ -14,9 +14,12 @@
 //! so a viewer cannot bring one up, and its controller leaving ends it with its viewers.
 //!
 //! Peers are registered only after the offer was sent: a failure before registration tears the
-//! half-built connection down there, because no other teardown path could ever find it. An
-//! explicit stop deregisters a peer before closing it, so the state event that close raises finds
-//! no entry and every teardown step runs once (`reap_peer`).
+//! half-built connection down there, because no other teardown path could ever find it. Until
+//! then a starting peer counts as a consumer of its display, since its sender subscribed to the
+//! display's graph when the start began, and the offer waits on ICE gathering, which against a
+//! TURN server that does not answer lasts the agent's gather timeout. An explicit stop
+//! deregisters a peer before closing it, so the state event that close raises finds no entry and
+//! every teardown step runs once (`reap_peer`).
 //!
 //! The ICE topology is decided once, at startup: `open_ice_muxes` binds the shared UDP and TCP
 //! ports the settings name, failing the service on a port in use, and every peer reads the muxes
@@ -39,6 +42,7 @@
 //! neither is held while taking the other's writers.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -153,6 +157,8 @@ pub trait EngineHost: Send + Sync + 'static {
     async fn send_sdp(&self, _kind: &str, _sdp: &str, _peer: &str) -> Result<(), String> {
         Ok(())
     }
+    /// Send a local candidate over signaling, trickled after the description.
+    fn send_ice(&self, _candidate: &str, _peer: &str) {}
     /// Whether a pipeline starts on for a page, the one rule both transports read
     /// (`settings::pipeline_starts_on`).
     fn starts_on(&self, _pipeline: &str, _display: &str, _viewer: bool) -> bool {
@@ -185,6 +191,10 @@ pub struct PeerRequest {
     pub client_slot: Option<i64>,
     pub fullcolor_codecs: Option<Vec<String>>,
     pub tenbit_codecs: Option<Vec<String>>,
+    /// The address the page reached this server at, where its signaling request's `Host` names
+    /// one (`routes::entry_address`). A public address listed for the host candidates is
+    /// advertised to this peer in place of the first of its family (`IceConfig::prefer_public_ip`).
+    pub entry: Option<IpAddr>,
 }
 
 impl PeerRequest {
@@ -198,6 +208,7 @@ impl PeerRequest {
             client_slot: None,
             fullcolor_codecs: None,
             tenbit_codecs: None,
+            entry: None,
         }
     }
 }
@@ -387,6 +398,32 @@ pub enum StartError {
     Signaling(String),
 }
 
+/// A peer's place among the engine's starting peers, given up when its start ends, a cancelled
+/// one included: a start whose task is aborted mid-gather (a service stop) would otherwise keep
+/// its display consumed for good.
+struct Starting<'a> {
+    starting: &'a Mutex<HashMap<String, String>>,
+    peer: String,
+}
+
+impl<'a> Starting<'a> {
+    fn enter(starting: &'a Mutex<HashMap<String, String>>, peer: &str, display: &str) -> Self {
+        starting
+            .lock()
+            .insert(peer.to_string(), display.to_string());
+        Starting {
+            starting,
+            peer: peer.to_string(),
+        }
+    }
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        self.starting.lock().remove(&self.peer);
+    }
+}
+
 /// The WebRTC engine (module docblock).
 pub struct RtcEngine {
     me: Weak<RtcEngine>,
@@ -396,6 +433,9 @@ pub struct RtcEngine {
     muxes: RwLock<IceMuxes>,
     certificate: Arc<Certificate>,
     pub(crate) peers: Mutex<PeerTable>,
+    /// Peers between their start and their entry in `peers`, by the display each streams: their
+    /// senders already ride the display's graph, so the display stays consumed.
+    starting: Mutex<HashMap<String, String>>,
     pub(crate) displays: Mutex<HashMap<String, Arc<DisplayGraph>>>,
     pub(crate) last_cursor: Mutex<Option<Json>>,
     common: Mutex<HashMap<(String, bool), CommonFrames<u64>>>,
@@ -419,6 +459,7 @@ impl RtcEngine {
             muxes: RwLock::new(IceMuxes::default()),
             certificate,
             peers: Mutex::new(PeerTable::default()),
+            starting: Mutex::new(HashMap::new()),
             displays: Mutex::new(HashMap::new()),
             last_cursor: Mutex::new(None),
             common: Mutex::new(HashMap::new()),
@@ -572,10 +613,11 @@ impl RtcEngine {
         }
     }
 
-    /// Hold a display's frames to its steered rate; `None` lets every frame through.
-    pub fn set_video_budget(&self, display_id: &str, bps: Option<f64>) {
+    /// Account a display's frames against its steered rate, holding them to it where `hold`;
+    /// `None` lets every frame through and keeps no account.
+    pub fn set_video_budget(&self, display_id: &str, bps: Option<f64>, hold: bool) {
         if let Some(graph) = self.displays.lock().get(display_id) {
-            graph.video_bridge.set_budget(bps);
+            graph.video_bridge.set_budget(bps, hold);
         }
     }
 
@@ -684,7 +726,11 @@ impl RtcEngine {
             request.client_type,
             request.display_id.clone(),
         );
-        match self.start_pipeline(request).await {
+        let started = {
+            let _starting = Starting::enter(&self.starting, &peer_id, &display_id);
+            self.start_pipeline(request).await
+        };
+        match started {
             Ok(()) => {
                 info!(target: "webrtc", "RTC pipeline started for peer {peer_id} ({}, display '{display_id}').", client_type.as_str());
             }
@@ -705,6 +751,7 @@ impl RtcEngine {
             client_slot,
             fullcolor_codecs,
             tenbit_codecs,
+            entry,
         } = request;
         let (peer_id, display_id) = (peer_id.as_str(), display_id.as_str());
         let graph = self.graph_for(client_type, display_id)?;
@@ -777,6 +824,11 @@ impl RtcEngine {
             let topology = self.topology.read();
             topology.peer_config(&self.muxes.read())
         };
+        if let Some(entry) = entry
+            && ice.prefer_public_ip(entry)
+        {
+            debug!(target: "webrtc", "Peer {peer_id} reached this server at {entry}, which its host candidates advertise.");
+        }
         ice.label = Some(peer_id.to_string());
         let conn = self
             .next_conn
@@ -788,6 +840,7 @@ impl RtcEngine {
             controller: client_type == ClientType::Controller,
             conn,
         };
+        let pace_bps = host.pace_bps(display_id);
         let spec = PeerSpec {
             peer_id: peer_id.to_string(),
             ice,
@@ -797,7 +850,7 @@ impl RtcEngine {
             audio: graph.audio_relay.is_some(),
             microphone,
             webcam,
-            pace_bps: host.pace_bps(display_id),
+            pace_bps,
             munge: Box::new(move |sdp| munge_sdp(&sdp, &format)),
             video_enabled: !video_paused,
             audio_enabled: !audio_paused,
@@ -807,6 +860,9 @@ impl RtcEngine {
         let audio_feed = graph.audio_relay.as_ref().map(|r| r.subscribe());
         let (peer, offer) =
             Peer::spawn(spec, events, graph.video_relay.subscribe(), audio_feed).await?;
+        if let Some(bps) = pace_bps {
+            info!(target: "webrtc", "WebRTC pacer enabled for peer {peer_id} on display '{display_id}' (encoder ceiling {} kbps).", bps / 1000);
+        }
         if let Err(e) = host.send_sdp("offer", &offer, peer_id).await {
             peer.close();
             return Err(StartError::Signaling(e));
@@ -990,7 +1046,8 @@ impl RtcEngine {
                 .peers
                 .lock()
                 .iter()
-                .any(|(_, p)| p.display_id == display_id);
+                .any(|(_, p)| p.display_id == display_id)
+                || self.starting.lock().values().any(|d| d == display_id);
             if remaining && !(controller_left && display_id != "primary") {
                 return;
             }
@@ -1861,6 +1918,12 @@ impl RtcEngine {
 struct EngineEvents(Weak<RtcEngine>);
 
 impl PeerEvents for EngineEvents {
+    fn local_candidate(&self, peer: &str, candidate: &str) {
+        if let Some(engine) = self.0.upgrade() {
+            engine.host().send_ice(candidate, peer);
+        }
+    }
+
     fn state(&self, peer: &str, state: PeerState) {
         if let Some(engine) = self.0.upgrade() {
             let peer = peer.to_string();

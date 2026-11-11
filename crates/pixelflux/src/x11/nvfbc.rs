@@ -65,6 +65,7 @@ use crate::encoders::nvenc::NvencEncoder;
 use crate::encoders::software::{EncodedStripe, FrameTiming, StripeState};
 use crate::pipeline::{
     DAMAGE_BAND_ROWS, Damage, EncoderQuality, decide_hw_fullframe, hashed_damage, periodic_idr_due,
+    plan_refinement, refinement_coded,
 };
 use crate::recording_sink::RecordingSink;
 use nvcodec_sys::cuda::CUdeviceptr;
@@ -937,10 +938,12 @@ fn open(settings: &CaptureSettings) -> Option<GpuCapture> {
         Some(("NVENC", true)),
         None,
         true,
+        encoder.capped(),
         encoder.is_fullcolor(),
         false,
     );
     crate::report::bit_depth(encoder.bit_depth());
+    crate::report::capped(encoder.capped());
     Some(GpuCapture {
         nvfbc,
         encoder,
@@ -1254,6 +1257,34 @@ where
             }
             extent = Some(d);
         }
+        // A capped constant quantizer keeps the block ledger of what it coded bound to its peak,
+        // and codes it again once the peak lets go (`plan_refinement`); a tick that codes nothing
+        // drains its peak. The capture places no change, so the ledger reads one as the whole
+        // frame's, Turbo's the frame before's: a frame the released peak codes at the session's
+        // quantizer codes the coarse picture under it again too.
+        let capped = gpu.encoder.capped();
+        let bound = gpu.encoder.peak_bound();
+        if capped {
+            let refines = gpu
+                .encoder
+                .refines()
+                .then_some(crate::ledger::Refiner::finer(
+                    crate::encoders::nvenc::REFINE_FINER,
+                ));
+            plan_refinement(
+                &mut state,
+                &gpu.settings,
+                &mut decision,
+                damage,
+                None,
+                refines,
+                gpu.encoder.last_quality(),
+                bound,
+            );
+            if !decision.send {
+                gpu.encoder.idle();
+            }
+        }
         let mut delivered = false;
         if decision.send {
             let encode_start_ns = crate::wayland::host::now_ns();
@@ -1263,14 +1294,44 @@ where
             if let Some(bytes) = decision.cap {
                 gpu.encoder.cap(bytes);
             }
-            match gpu.encoder.encode_cuda_pitch(
+            if let Some(refinement) = &decision.refine {
+                gpu.encoder.refine_blocks(refinement);
+            }
+            gpu.encoder.defer_blocks(decision.defer.as_ref());
+            let outcome = gpu.encoder.encode_cuda_pitch(
                 frame.device_ptr,
                 pitch,
                 false,
                 frame_counter as u64,
                 decision.target_qp,
                 decision.force_idr,
-            ) {
+            );
+            if capped {
+                let quality = EncoderQuality {
+                    last: gpu.encoder.last_quality(),
+                    bytes: gpu.encoder.last_size(),
+                    holds: true,
+                    reopens: false,
+                    keys: true,
+                    band: gpu.encoder.band_size(),
+                    measures: false,
+                    psnr: None,
+                    refit: gpu.encoder.refit(),
+                    follows_cap: false,
+                    finer: 0,
+                    ends_on_key: false,
+                };
+                refinement_coded(
+                    &mut state,
+                    &gpu.settings,
+                    &decision,
+                    quality,
+                    outcome.as_ref().map_or(0, Vec::len),
+                    bound,
+                    gpu.encoder.coded_capped(),
+                );
+            }
+            match outcome {
                 Ok(data) if !data.is_empty() => {
                     encode_errors = 0;
                     let stripes = vec![EncodedStripe {
@@ -1624,7 +1685,10 @@ mod region_tests {
 
 #[cfg(test)]
 mod gpu_tests {
-    use super::super::gpu_test_support::{decoded_mean, paint_root, painted_ycbcr, settings};
+    use super::super::gpu_test_support::{
+        capped_crf_codes_again_what_it_coded_bound, decoded_mean, paint_root, painted_ycbcr,
+        settings,
+    };
     use super::*;
     use crate::encoders::codec::{FRAME_DELTA, FRAME_KEY, VIDEO_HEADER_LEN, parse_video_type};
     use crate::webcam::decode::{Codec as DecCodec, VideoDecoder};
@@ -2025,6 +2089,61 @@ mod gpu_tests {
         println!("{rate:.1} frames a second on a still screen at {fps}");
         assert!(matches!(ended, Some(Ok(()))), "{ended:?}");
         assert!(rate >= fps * 0.95, "{rate:.1} frames a second at {fps}");
+    }
+
+    /// On a real NVIDIA X server: a capped CRF session its peak bound while a page scrolled codes
+    /// the still page again once a higher peak lets it go, without a key frame, sending the still
+    /// screen's frames for it, to the uncapped session's quality
+    /// (`capped_crf_codes_again_what_it_coded_bound`). Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_nvfbc_capped_crf_codes_again_what_it_coded_bound() {
+        let Some([plain, (capped, sent, bytes, keys)]) = capped_crf_codes_again_what_it_coded_bound(
+            |s, c, t, mut f| run_capture(s, c, t, &mut f),
+            false,
+        ) else {
+            println!("the NvFBC path declined this host; nothing to capture");
+            return;
+        };
+        println!(
+            "NvFBC: uncapped {:.2} dB ({} frames while still), capped and refreshed {capped:.2} dB, \
+             {sent} frames of {bytes} bytes while still, {keys} key frames",
+            plain.0, plain.1
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(sent > 0, "nothing refreshed the still page");
+        assert!(
+            capped >= plain.0 - 1.0,
+            "refreshed to {capped:.2} dB against {:.2}",
+            plain.0
+        );
+    }
+
+    /// `gpu_nvfbc_capped_crf_codes_again_what_it_coded_bound` with the paint-over armed: the
+    /// paint-over the binding peak spends is owed to the still page, which the refresh codes at
+    /// it once the peak lets go, so it ends where the uncapped session's paint-over leaves it.
+    /// Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_nvfbc_capped_crf_comes_to_the_paint_over_once_its_peak_lets_go() {
+        let Some([plain, (capped, sent, bytes, keys)]) = capped_crf_codes_again_what_it_coded_bound(
+            |s, c, t, mut f| run_capture(s, c, t, &mut f),
+            true,
+        ) else {
+            println!("the NvFBC path declined this host; nothing to capture");
+            return;
+        };
+        println!(
+            "NvFBC paint-over: uncapped {:.2} dB ({} frames, {} bytes while still), capped \
+             {capped:.2} dB ({sent} frames, {bytes} bytes), {keys} key frames",
+            plain.0, plain.1, plain.2
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(
+            capped >= plain.0 - 0.5,
+            "{capped:.2} dB against the uncapped paint-over's {:.2}",
+            plain.0
+        );
     }
 
     /// What the zero-copy path costs on a real GPU, per codec the device serves.

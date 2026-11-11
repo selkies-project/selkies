@@ -26,8 +26,9 @@ use super::codecs::{
 };
 use super::munge::{StreamFormat, munge_sdp};
 use super::{
-    Direction, DtlsFingerprint, IceParameters, LocalTransport, MAX_CODECS, MAX_REMOTE_SDP,
-    MAX_RTCP_FB, MAX_SSRCS, SdpError, SdpType, Session, SessionDescription,
+    Direction, DtlsFingerprint, IceParameters, LocalTransport, MAX_CODECS, MAX_FINGERPRINTS,
+    MAX_ICE_VALUE, MAX_MEDIA_SECTIONS, MAX_REMOTE_SDP, MAX_RTCP_FB, MAX_SSRCS, SdpError, SdpType,
+    Session, SessionDescription,
 };
 
 fn head() -> String {
@@ -144,6 +145,97 @@ fn an_answer_past_its_bound_is_refused_before_anything_else() {
     assert_eq!(outcome, Err(SdpError::TooLong));
     assert!(took < Duration::from_millis(50), "{took:?}");
     assert!(SdpError::TooLong.to_string().contains("longer than"));
+}
+
+/// A plain audio section, as many of them as a test names.
+const AUDIO_SECTION: &str = "m=audio 9 UDP/TLS/RTP/SAVPF 0\r\nc=IN IP4 0.0.0.0\r\n";
+
+#[test]
+fn a_section_keeps_only_fingerprints_rfc_8122_writes_for_a_function_dtls_verifies_with() {
+    let text = format!(
+        "{}{AUDIO_SECTION}a=fingerprint:sha-256 AB:CD\r\na=fingerprint:sha-1 {}\r\n\
+         a=fingerprint:sha-256 {}:ZZ\r\na=fingerprint:md5 {}\r\n\
+         a=fingerprint:sha-256 {} trailing\r\na=fingerprint:sha-512 {}\r\n",
+        head(),
+        vec!["AA"; 20].join(":"),
+        vec!["AA"; 31].join(":"),
+        vec!["AA"; 16].join(":"),
+        vec!["AA"; 32].join(":"),
+        vec!["ab"; 64].join(":"),
+    );
+    let parsed = SessionDescription::parse(&text).expect("the description parses");
+    let kept: Vec<(String, String)> = parsed.media[0]
+        .dtls
+        .as_ref()
+        .expect("dtls parameters")
+        .fingerprints
+        .iter()
+        .map(|f| (f.algorithm.clone(), f.value.clone()))
+        .collect();
+    assert_eq!(
+        kept,
+        vec![
+            ("sha-256".to_owned(), vec!["AA"; 32].join(":")),
+            ("sha-512".to_owned(), vec!["ab"; 64].join(":")),
+        ],
+        "the session's and the section's well-formed ones"
+    );
+}
+
+#[test]
+fn a_description_past_its_fingerprints_or_sections_is_refused_and_a_long_ice_value_skipped() {
+    let fingerprint = format!("a=fingerprint:sha-256 {}\r\n", vec!["AA"; 32].join(":"));
+    let fingerprints = format!(
+        "{}{}{AUDIO_SECTION}",
+        head(),
+        fingerprint.repeat(MAX_FINGERPRINTS)
+    );
+    assert_eq!(
+        SessionDescription::parse(&fingerprints),
+        Err(SdpError::Bound(MAX_FINGERPRINTS, "fingerprints")),
+        "one past the bound, the head's included"
+    );
+    let sections = format!("{}{}", head(), AUDIO_SECTION.repeat(MAX_MEDIA_SECTIONS + 1));
+    assert_eq!(
+        SessionDescription::parse(&sections),
+        Err(SdpError::Bound(MAX_MEDIA_SECTIONS, "media sections"))
+    );
+    let long = "u".repeat(MAX_ICE_VALUE + 1);
+    let text = format!(
+        "{}a=ice-ufrag:{long}\r\n{AUDIO_SECTION}a=ice-pwd:{long}\r\n",
+        head()
+    );
+    let parsed = SessionDescription::parse(&text).expect("the description parses");
+    assert_eq!(
+        parsed.media[0].ice.username_fragment.as_deref(),
+        Some("abcd")
+    );
+    assert_eq!(
+        parsed.media[0].ice.password.as_deref(),
+        Some("abcdefghijklmnopqrstuv")
+    );
+}
+
+/// Every section prints its session's ICE values and fingerprints again; at the bounds, a
+/// description still prints back within twice what is read at all.
+#[test]
+fn a_description_at_every_bound_prints_back_within_twice_the_read_limit() {
+    let ice = "u".repeat(MAX_ICE_VALUE);
+    let fingerprint = format!("a=fingerprint:sha-512 {}\r\n", vec!["AA"; 64].join(":"));
+    let text = format!(
+        "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=ice-ufrag:{ice}\r\na=ice-pwd:{ice}\r\n\
+         a=ice-options:{ice}\r\n{}{}",
+        fingerprint.repeat(MAX_FINGERPRINTS),
+        AUDIO_SECTION.repeat(MAX_MEDIA_SECTIONS)
+    );
+    let parsed = SessionDescription::parse(&text).expect("the description parses");
+    let printed = parsed.to_sdp();
+    assert!(
+        printed.len() <= 2 * MAX_REMOTE_SDP,
+        "{} printed {}",
+        text.len(),
+        printed.len()
+    );
 }
 
 #[test]

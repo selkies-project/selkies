@@ -29,6 +29,7 @@ use rtc_shared::TransportProtocol;
 
 use super::channel::{ChannelState, DataChannelParameters, Message};
 use super::dcep::{self, DcepMessage};
+use super::path::PathEstimate;
 
 /// What this side accepts in one data channel message, announced as `a=max-message-size`:
 /// larger clipboard and file messages with less chunking, and the browsers' own ceiling.
@@ -138,6 +139,10 @@ struct Channel {
     low_threshold: usize,
     /// Whether the buffered amount was last seen above the threshold.
     above_low: bool,
+    /// Bytes ever handed to the channel's stream.
+    written: u64,
+    /// What its bulk transfers measured of the path.
+    path: PathEstimate,
 }
 
 /// A send waiting for the association to be established.
@@ -365,6 +370,8 @@ impl Sctp {
                 queued: 0,
                 low_threshold: 0,
                 above_low: false,
+                written: 0,
+                path: PathEstimate::default(),
             },
         );
         if !negotiated {
@@ -460,11 +467,9 @@ impl Sctp {
     }
 
     /// Bytes queued on a channel and not yet transmitted, as W3C's `bufferedAmount` counts
-    /// them. A bulk transfer waits on this against `DATA_CHANNEL_BULK_HIGH_WATER`, so bytes
-    /// in flight do not count: they would cap it at the high water per round trip, whatever
-    /// the congestion window. The association counts what waits per association, so with two
-    /// channels sending at once this reads up to the other's share high, bounded by what this
-    /// channel has unacknowledged.
+    /// them; bytes in flight do not count. The association counts what waits per association,
+    /// so with two channels sending at once this reads up to the other's share high, bounded by
+    /// what this channel has unacknowledged.
     pub fn buffered_amount(&mut self, id: u16) -> usize {
         let queued = self.channels.get(&id).map_or(0, |channel| channel.queued);
         let Some(assoc) = self.assoc.as_mut() else {
@@ -477,6 +482,45 @@ impl Sctp {
             .and_then(|stream| stream.buffered_amount().ok())
             .unwrap_or(0);
         queued + pending.min(unacknowledged)
+    }
+
+    /// Bytes a channel has queued or in flight and not yet acknowledged: what a message sent on
+    /// it now waits behind on its ordered stream. A bulk transfer waits on this against
+    /// `bulk_bound`, so a newer payload superseding an older one, and the messages sharing the
+    /// channel, wait behind about one round trip of it rather than a whole congestion window,
+    /// which a browser decoding the payload takes in more slowly than a near path carries it.
+    pub fn unacknowledged_amount(&mut self, id: u16) -> usize {
+        let queued = self.channels.get(&id).map_or(0, |channel| channel.queued);
+        let Some(assoc) = self.assoc.as_mut() else {
+            return queued;
+        };
+        queued
+            + assoc
+                .stream(id)
+                .ok()
+                .and_then(|stream| stream.buffered_amount().ok())
+                .unwrap_or(0)
+    }
+
+    /// What a bulk transfer on a channel may leave unacknowledged: twice the path's
+    /// bandwidth-delay product as its acknowledgements and the association's round trip measure
+    /// it, and at least `floor` (`path`). Each call takes a reading.
+    pub fn bulk_bound(&mut self, id: u16, floor: usize, now: Instant) -> usize {
+        let Some(assoc) = self.assoc.as_mut() else {
+            return floor;
+        };
+        let srtt = assoc.rtt();
+        let unacknowledged = assoc
+            .stream(id)
+            .ok()
+            .and_then(|stream| stream.buffered_amount().ok())
+            .unwrap_or(0) as u64;
+        let Some(channel) = self.channels.get_mut(&id) else {
+            return floor;
+        };
+        let acknowledged = channel.written.saturating_sub(unacknowledged);
+        channel.path.note(now, acknowledged, srtt);
+        channel.path.bound(now, floor)
     }
 
     /// Set the buffered amount at which `BufferedAmountLow` fires for a channel: when the
@@ -643,6 +687,8 @@ impl Sctp {
                             queued: 0,
                             low_threshold: 0,
                             above_low: false,
+                            written: 0,
+                            path: PathEstimate::default(),
                         },
                     );
                     self.set_reliability(id, &params);
@@ -752,6 +798,9 @@ impl Sctp {
         stream
             .write_chunk_with_ppi(now, &data, ppid)
             .map_err(|err| SendError::Transport(err.to_string()))?;
+        if let Some(channel) = self.channels.get_mut(&id) {
+            channel.written += data.len() as u64;
+        }
         self.gather(now);
         Ok(())
     }

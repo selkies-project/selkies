@@ -1819,6 +1819,7 @@ export class Input {
         /** The two-finger gesture in progress in either touch mode (`_twoFingerStart`), or null. */
         this._twoFinger = null;
         this._TAP_THRESHOLD_DISTANCE_SQ = 10*10;
+        /** How long a finger that shared the screen with another may stay down and still tap, in milliseconds. */
         this._TAP_MAX_DURATION = 250;
         this._trackpadMode = false;
         this._trackpadTouches = new Map();
@@ -4389,7 +4390,9 @@ export class Input {
         }
         if (!this._guac_markEvent(event)) return;
         const type = event.type;
-        const now = Date.now();
+        // When the finger moved, not when the handler runs: a main thread busy decoding the
+        // stream runs a lift's handler late, which would time a quick tap past a tap's length
+        const now = event.timeStamp;
         let preventDefault = false;
         let activeTouchMoved = false;
         const LONG_PRESS_MAX_MOVEMENT_SQ = 15 * 15;
@@ -4415,6 +4418,9 @@ export class Input {
                 }
             }
             const touchCount = this._activeTouches.size;
+            if (touchCount > 1) {
+                for (const shared of this._activeTouches.values()) shared.shared = true;
+            }
             if (touchCount === 1 && !this._isTwoFingerGesture) {
                 preventDefault = true;
                 const [singleTouchID] = this._activeTouches.keys();
@@ -4537,7 +4543,11 @@ export class Input {
                 if (this._isTwoFingerGesture) {
                     // Two-finger scrolling is handled above.
                 } else if (!swipeDetected && this._activeTouchIdentifier === null && this._activeTouches.size === 1 && this._activeTouches.has(identifier)) {
-                    if (duration < this._TAP_MAX_DURATION && deltaDistSq < TAP_THRESHOLD_DISTANCE_SQ_LOGICAL) {
+                    // A lone finger lifted where it touched, short of the long press, is a tap however
+                    // long it rested, as on a phone's or a tablet's own controls. One a pinch or a
+                    // scroll left behind rested through the gesture, and taps only within a quick tap
+                    const tapMs = startData.shared ? this._TAP_MAX_DURATION : LONG_PRESS_MS;
+                    if (duration < tapMs && deltaDistSq < TAP_THRESHOLD_DISTANCE_SQ_LOGICAL) {
                         this._calculateTouchCoordinates(endedTouch); this.buttonMask |= 1; this._sendMouseState(); preventDefault = true;
                         setTimeout((): void => { this.buttonMask &= ~1; this._sendMouseState(); }, 10);
                     }

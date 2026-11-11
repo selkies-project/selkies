@@ -850,6 +850,13 @@ impl Decoder for JpegDecoder {
                 hdr.width, hdr.height
             )));
         }
+        // A camera streams baseline JPEG, and so does every engine's canvas encoder the page
+        // falls back to. Only a progressive JPEG makes libjpeg-turbo hold the whole picture's
+        // coefficients while it decodes (the memory of CVE-2019-13960), so one is refused
+        // before decoding.
+        if hdr.is_progressive {
+            return Err(DecodeError::Corrupt("progressive jpeg".into()));
+        }
         self.out.resize(hdr.width, hdr.height);
         if hdr.subsamp == Subsamp::Sub2x2 {
             let img = YuvImage {
@@ -1003,6 +1010,40 @@ mod tests {
         assert!(matches!(err, DecodeError::Corrupt(_)), "{err:?}");
         assert!(dec.out.data.len() < 1 << 20, "{} bytes", dec.out.data.len());
         assert!(dec.rgb.len() < 1 << 20, "{} bytes", dec.rgb.len());
+    }
+
+    /// A progressive JPEG is refused before its picture is sized or decoded, and the decoder
+    /// still decodes the baseline JPEG of the same picture after it.
+    #[test]
+    fn a_progressive_jpeg_is_refused_before_decoding() {
+        let (w, h) = (64usize, 48usize);
+        let img = I420Buffer::new(w, h);
+        let src = || YuvImage {
+            pixels: &img.data[..],
+            width: w,
+            align: 1,
+            height: h,
+            subsamp: Subsamp::Sub2x2,
+        };
+        let mut comp = turbojpeg::Compressor::new().unwrap();
+        comp.set_quality(90).unwrap();
+        comp.set_progressive(true).unwrap();
+        let progressive = comp.compress_yuv_to_vec(src()).unwrap();
+        assert!(turbojpeg::read_header(&progressive).unwrap().is_progressive);
+        let mut dec = JpegDecoder::new().unwrap();
+        let err = dec.decode(&progressive).unwrap_err();
+        assert!(matches!(err, DecodeError::Corrupt(_)), "{err:?}");
+        assert!(dec.frame().is_none(), "a picture after a refused JPEG");
+        assert!(dec.out.data.len() < w * h, "{} bytes", dec.out.data.len());
+        comp.set_progressive(false).unwrap();
+        let baseline = comp.compress_yuv_to_vec(src()).unwrap();
+        assert!(!turbojpeg::read_header(&baseline).unwrap().is_progressive);
+        assert!(
+            dec.decode(&baseline).unwrap(),
+            "the baseline JPEG did not decode"
+        );
+        let v = dec.frame().unwrap();
+        assert_eq!((v.width, v.height), (w, h));
     }
 
     /// Every inter-coded codec has a decoder, and none holds a picture before decoding one.

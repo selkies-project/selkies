@@ -19,6 +19,7 @@ Usage: python3 tests/e2e/test_turn_relay.py
 """
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -32,7 +33,7 @@ import core_lib as C
 from Xlib import display as x11_display
 from playwright.sync_api import sync_playwright
 
-SECRET = "e2e-turn-shared-secret"
+SECRET = secrets.token_hex(16)
 REALM = "selkies.test"
 # Relay allocations come out of this port range; narrow so two runs on one
 # host can only collide with each other, never with the servers under test.

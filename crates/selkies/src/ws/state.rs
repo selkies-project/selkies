@@ -157,8 +157,16 @@ impl Seeds {
 pub struct DisplayState {
     pub tab_id: Option<String>,
     pub decode_pace: Option<f64>,
+    /// The size the page asked for, until a realized-geometry read folds in what the
+    /// compositor made of it.
     pub width: i32,
     pub height: i32,
+    /// The size the last layout pass laid out, as the compositor realized it: a realized read
+    /// leaves a request that came after the pass to the pass that lays it out.
+    pub laid_out: Option<(i32, i32)>,
+    /// The display's encoder, one under the one-reference cap (`capture_settings`), keeps its own
+    /// reference depth because two pages or more streamed the display (`deepen_references`).
+    pub deep_for_pages: bool,
     pub position: String,
     pub video_active: bool,
     pub encoder: String,
@@ -210,6 +218,8 @@ impl DisplayState {
             decode_pace: None,
             width: 0,
             height: 0,
+            laid_out: None,
+            deep_for_pages: false,
             position: "right".into(),
             video_active,
             encoder: seeds.encoder.clone(),
@@ -237,6 +247,25 @@ impl DisplayState {
             client_stream_box: None,
             client_stream_box_at: 0.0,
             stop_signaled: false,
+        }
+    }
+
+    /// Whether congestion control, where it `steered`, gives the display's encoder a peak rather
+    /// than a target: a CRF display, whose rate factor picks the picture under that cap.
+    pub fn capped(&self, steered: bool) -> bool {
+        steered && self.rate_control_mode != "cbr"
+    }
+
+    /// The rate, in kbps, congestion control holds the display's encoder under: a CBR display's
+    /// `video_bitrate`, and a capped CRF display's (`capped`) the configured range's high end
+    /// `hi_kbps`. The bitrate a client chose is CBR's alone (the dashboard hides it in CRF), so
+    /// it bounds no CRF picture. A CRF display nothing steers keeps `video_bitrate`, which its
+    /// uncapped encoder never reads.
+    pub fn rate_ceiling(&self, steered: bool, hi_kbps: f64) -> f64 {
+        if self.capped(steered) {
+            hi_kbps
+        } else {
+            self.video_bitrate
         }
     }
 
@@ -587,6 +616,27 @@ mod tests {
                 .as_deref(),
             Some("jpeg"),
             "an encoder whose fallback mark changed is a change"
+        );
+    }
+
+    /// A steered CRF display is held under the range's high end, never the CBR bitrate the
+    /// dashboard hides from it; CBR, and a CRF display nothing steers, keep the chosen bitrate.
+    #[test]
+    fn a_steered_crf_display_is_capped_under_the_ranges_high_end() {
+        settings_installed();
+        let mut d = DisplayState::new(&Seeds::from_settings(), None, true, None);
+        d.video_bitrate = 8000.0;
+        d.rate_control_mode = "cbr".into();
+        assert!(!d.capped(true));
+        assert_eq!(d.rate_ceiling(true, 1_000_000.0), 8000.0);
+        d.rate_control_mode = "crf".into();
+        assert!(d.capped(true));
+        assert_eq!(d.rate_ceiling(true, 1_000_000.0), 1_000_000.0);
+        assert!(!d.capped(false));
+        assert_eq!(
+            d.rate_ceiling(false, 1_000_000.0),
+            8000.0,
+            "an uncapped CRF encoder never reads its bitrate"
         );
     }
 

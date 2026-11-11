@@ -470,7 +470,7 @@ export class WebRTCSignaling {
 
         this._ws_conn.addEventListener('open', own(this._onServerOpen as (event: Event) => void));
         this._ws_conn.addEventListener('error', own(this._onServerError as (event: Event) => void));
-        this._ws_conn.addEventListener('message', own(this._onServerMessage as (event: Event) => void));
+        this._ws_conn.onmessage = (event: MessageEvent): void => { if (live) this._onServerMessage(event); };
         this._ws_conn.addEventListener('close', own(this._onServerClose as (event: Event) => void));
     }
 

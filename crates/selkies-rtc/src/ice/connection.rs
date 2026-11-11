@@ -12,8 +12,11 @@
 //! relay where one is configured for a full agent; every point delivers to the one inbound
 //! channel the task reads. `gather` builds the candidates: host candidates advertising the public
 //! address of their family behind 1:1 NAT (`IceConfig::public_ips`), with unique local preferences
-//! per address, then server-reflexive candidates by a STUN query over the IPv4 host points and a
-//! relay candidate by a TURN allocation, both within a bound.
+//! per address, then server-reflexive candidates by a STUN query over the IPv4 host points within
+//! a bound. A TURN allocation runs beside the queries: a relay ready by the time they end is
+//! among the gathered candidates, and one still allocating does not hold the offer back (a TURN
+//! server that answers nothing would hold it for the allocation's whole timeout); it is added
+//! when it lands (`late_relay`), its candidate trickled to the peer.
 //!
 //! Every STUN request is authenticated here before any agent sees it (`stun::authenticate_request`):
 //! one that fails is answered 400 and its source stays unlearned, one that passes teaches the
@@ -32,8 +35,10 @@
 //! not learned yet still finds this connection.
 
 use std::collections::{HashSet, VecDeque};
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -60,7 +65,7 @@ use super::{
     Packet, Protocol,
 };
 
-/// Seconds the server-reflexive and relay gathering waits in all.
+/// Seconds the server-reflexive gathering waits in all.
 const GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 /// The retransmission schedule of a server-reflexive query, RTO 0.5 s doubling.
 const SRFLX_RTO: Duration = Duration::from_millis(500);
@@ -74,6 +79,16 @@ const UDP_CHUNK: usize = 128 * 1024;
 const UDP_MAX_DATAGRAM: usize = 65_536;
 /// The number the next connection without a label logs under.
 static NEXT_UNLABELED: AtomicU64 = AtomicU64::new(1);
+
+/// A future's output if it is ready at this poll, without waiting for it.
+fn futures_now<T>(future: &mut Pin<Box<dyn Future<Output = T> + Send>>) -> Option<T> {
+    let waker = std::task::Waker::noop();
+    let mut context = std::task::Context::from_waker(waker);
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(value) => Some(value),
+        std::task::Poll::Pending => None,
+    }
+}
 
 /// The ICE parameters one side signals.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,7 +203,12 @@ pub struct IceConnection {
     last_received: Instant,
     state: IceState,
     closed: bool,
+    /// A TURN allocation gathering left running (`late_relay`).
+    pending_relay: Option<PendingRelay>,
 }
+
+/// A TURN allocation in flight.
+type PendingRelay = Pin<Box<dyn Future<Output = Result<TurnRelay, IceError>> + Send>>;
 
 impl IceConnection {
     /// A connection for one peer; its points deliver to `inbound_tx`.
@@ -254,6 +274,7 @@ impl IceConnection {
             last_received: Instant::now(),
             state: IceState::New,
             closed: false,
+            pending_relay: None,
         })
     }
 
@@ -471,8 +492,10 @@ impl IceConnection {
             .unwrap_or(bound)
     }
 
-    /// Server-reflexive queries over the IPv4 host points and a TURN allocation, together
-    /// within `GATHER_TIMEOUT`; datagrams that are not their answers are kept for later.
+    /// Server-reflexive queries over the IPv4 host points within `GATHER_TIMEOUT`, and a TURN
+    /// allocation beside them, kept among the candidates if it is done when they are and left
+    /// running for `late_relay` otherwise; datagrams that are not their answers are kept for
+    /// later.
     async fn gather_from_servers(
         &mut self,
         servers: &Servers,
@@ -481,13 +504,10 @@ impl IceConnection {
         component: u16,
     ) {
         let deadline = tokio::time::Instant::now() + GATHER_TIMEOUT;
-        let mut relay = match &servers.turn {
-            Some(server) => {
-                let tx = self.inbound_tx.clone();
-                Some(Box::pin(turn::allocate(server.clone(), tx)))
-            }
-            None => None,
-        };
+        let mut relay: Option<PendingRelay> = servers.turn.as_ref().map(|server| {
+            let tx = self.inbound_tx.clone();
+            Box::pin(turn::allocate(server.clone(), tx)) as PendingRelay
+        });
         let mut queries: Vec<SrflxQuery> = Vec::new();
         if let Some((host, port)) = &servers.stun {
             match tokio::net::lookup_host((host.as_str(), *port)).await {
@@ -516,9 +536,7 @@ impl IceConnection {
             }
         }
         let mut relay_result: Option<Result<TurnRelay, IceError>> = None;
-        while (!queries.is_empty() || (relay.is_some() && relay_result.is_none()))
-            && tokio::time::Instant::now() < deadline
-        {
+        while !queries.is_empty() && tokio::time::Instant::now() < deadline {
             let next_retry = queries
                 .iter()
                 .map(|q| q.retry_at)
@@ -588,42 +606,78 @@ impl IceConnection {
         for query in queries {
             query.point.forget_response(&query.tid);
         }
+        // A relay that answered at once is in the offer; any other follows it.
+        if relay_result.is_none()
+            && let Some(pending) = relay.as_mut()
+        {
+            relay_result = futures_now(pending);
+        }
         match relay_result {
             Some(Ok(relay)) => {
-                let candidate = Candidate {
-                    foundation: candidate_foundation(
-                        CandidateType::Relay,
-                        Protocol::Udp,
-                        &relay.relayed_addr.ip().to_string(),
-                    ),
-                    component,
-                    transport: Protocol::Udp,
-                    priority: candidate_priority(component, CandidateType::Relay, 65535),
-                    host: relay.relayed_addr.ip().to_string(),
-                    port: relay.relayed_addr.port(),
-                    kind: CandidateType::Relay,
-                    related_address: Some(relay.related_addr.ip().to_string()),
-                    related_port: Some(relay.related_addr.port()),
-                    tcptype: None,
-                    generation: None,
-                };
-                let bound = relay.relayed_addr;
-                self.add_point(Arc::new(LocalPoint {
-                    candidate,
-                    bound,
-                    protocol: Protocol::Udp,
-                    sender: Sender::Relay(relay),
-                }));
+                self.add_relay(relay, component);
             }
             Some(Err(e)) => {
                 info!(target: "ice", "{} TURN relay candidate not gathered: {e}", self.name)
             }
             None => {
                 if relay.is_some() {
-                    info!(target: "ice", "{} TURN relay candidate not gathered within {}s", self.name, GATHER_TIMEOUT.as_secs());
+                    debug!(target: "ice", "{} TURN relay candidate still allocating; it follows the offer", self.name);
+                    self.pending_relay = relay;
                 }
             }
         }
+    }
+
+    /// Whether a TURN allocation is still in flight, its candidate yet to follow the offer.
+    pub fn relay_pending(&self) -> bool {
+        self.pending_relay.is_some()
+    }
+
+    /// The relay candidate of the allocation `gather` left running, once it lands; `None` where
+    /// it failed or there is none, never resolving while none is in flight. Cancel-safe: the
+    /// allocation is kept between calls.
+    pub async fn late_relay(&mut self) -> Option<Candidate> {
+        let result = match self.pending_relay.as_mut() {
+            Some(pending) => pending.await,
+            None => return std::future::pending().await,
+        };
+        self.pending_relay = None;
+        match result {
+            Ok(relay) => Some(self.add_relay(relay, 1)),
+            Err(e) => {
+                info!(target: "ice", "{} TURN relay candidate not gathered: {e}", self.name);
+                None
+            }
+        }
+    }
+
+    /// Add a relay point for an allocation that landed, returning its candidate.
+    fn add_relay(&mut self, relay: TurnRelay, component: u16) -> Candidate {
+        let candidate = Candidate {
+            foundation: candidate_foundation(
+                CandidateType::Relay,
+                Protocol::Udp,
+                &relay.relayed_addr.ip().to_string(),
+            ),
+            component,
+            transport: Protocol::Udp,
+            priority: candidate_priority(component, CandidateType::Relay, 65535),
+            host: relay.relayed_addr.ip().to_string(),
+            port: relay.relayed_addr.port(),
+            kind: CandidateType::Relay,
+            related_address: Some(relay.related_addr.ip().to_string()),
+            related_port: Some(relay.related_addr.port()),
+            tcptype: None,
+            generation: None,
+        };
+        let bound = relay.relayed_addr;
+        self.add_point(Arc::new(LocalPoint {
+            candidate: candidate.clone(),
+            bound,
+            protocol: Protocol::Udp,
+            sender: Sender::Relay(relay),
+        }));
+        candidate
     }
 
     fn srflx_answer(&self, packet: &Packet, queries: &[SrflxQuery]) -> Option<usize> {

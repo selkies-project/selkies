@@ -795,6 +795,21 @@ async fn the_control_socket_grows_and_retires_by_the_names_it_coins() {
     );
 }
 
+#[test]
+fn scratch_directories_made_at_once_are_distinct() {
+    let made: Vec<Scratch> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..16)
+            .map(|_| scope.spawn(|| (0..8).map(|_| Scratch::new("at-once")).collect::<Vec<_>>()))
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("every directory made"))
+            .collect()
+    });
+    let distinct: HashSet<&PathBuf> = made.iter().map(|scratch| &scratch.0).collect();
+    assert_eq!(distinct.len(), made.len());
+}
+
 #[tokio::test]
 async fn a_stale_socket_file_is_no_control() {
     let pf = FakeScreens::new(false);

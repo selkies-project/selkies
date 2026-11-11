@@ -28,7 +28,7 @@ use super::reference::{Invalidation, ReferenceWindow};
 #[cfg(feature = "gpl")]
 use super::sps::{WideFrameNum, h264_frame_num_range};
 use crate::CaptureSettings;
-use crate::ledger::{BlockLedger, RefinePace};
+use crate::ledger::{BlockLedger, RefinePace, RefreshPace};
 use crate::pipeline::{Cleanup, Damage};
 use rayon::prelude::*;
 use smithay::utils::{Physical, Rectangle};
@@ -490,6 +490,87 @@ fn x264_frame_rate(fps: f64) -> FrameRate {
     FrameRate::of(if fps < 1.0 { 30.0 } else { fps })
 }
 
+/// Quantizer steps a halving of a capped CRF's key frame is taken to need where it is aimed into
+/// the bucket's room (`H264EncoderWrapper::aim_key`, `fit_key`), an encode at most aimed: text
+/// keeps 17 steps a halving between quantizers 12 and 35 (10.1 to 4.1 Mbit at 1280x720) where
+/// the quantizer's own scale says 6, so an aim of 6 lands a second attempt past the room.
+#[cfg(feature = "gpl")]
+const KEY_STEPS: f64 = 10.0;
+
+/// Quantizer steps finer than the paint-over one a capped CRF codes a block owed its paint-over
+/// at (`ledger::BlockLedger::refresh_owed`): a refinement's, and two more, the predicted frame
+/// over a coarser picture landing short of it: a 720p page under a 4 Mbit/s peak came to
+/// 48.1 dB at one more and 49.4 at two, where the uncapped session's paint-over leaves it at
+/// 48.5.
+#[cfg(feature = "gpl")]
+const OWED_FINER: u32 = crate::ledger::REFINE_FINER + 2;
+
+/// The peak of a capped CRF x264 session (`video_vbv_multiplier`), held beside x264.
+///
+/// x264's own cap, a VBV, changes how it codes every frame whether the peak binds or not (a 720p
+/// scroll's key frame at quantizer 27 for 22 under a 100 Mbit/s peak it never reached), and is
+/// taken only at open. So the session opens uncapped, and a leaky bucket of the peak, its buffer
+/// the VBV's, takes each frame: from a frame that overflows it the rate factor stands `offset`
+/// above the session's, aimed after each frame at bringing the bucket back to half full in
+/// `DRAIN_FRAMES` frames (a size halving every six steps) and lowered at most `RELEASE_STEP` a
+/// frame. A key frame is aimed at half the bucket's room, as x264's VBV holds a frame to half
+/// its buffer's fill: from the start where the last key frame says it would not fit
+/// (`H264EncoderWrapper::aim_key`), else by one encode more where its first comes out past the
+/// room (`H264EncoderWrapper::fit_key`).
+#[cfg(feature = "gpl")]
+#[derive(Clone, Copy, Debug)]
+struct X264Peak {
+    /// Bits a frame drains from the bucket, and the bucket's buffer.
+    per_frame: f64,
+    buffer: f64,
+    fill: f64,
+    /// Rate-factor steps above the session's own.
+    offset: f64,
+}
+
+#[cfg(feature = "gpl")]
+impl X264Peak {
+    const DRAIN_FRAMES: f64 = 8.0;
+    const RELEASE_STEP: f64 = 2.0;
+
+    fn new(bitrate_kbps: i32, vbv_kbit: i32, fps: f64) -> Self {
+        let mut peak = X264Peak {
+            per_frame: 0.0,
+            buffer: 0.0,
+            fill: 0.0,
+            offset: 0.0,
+        };
+        peak.follow(bitrate_kbps, vbv_kbit, fps);
+        peak
+    }
+
+    /// Take a live peak and buffer.
+    fn follow(&mut self, bitrate_kbps: i32, vbv_kbit: i32, fps: f64) {
+        self.per_frame = bitrate_kbps.max(1) as f64 * 1000.0 / fps.max(1.0);
+        self.buffer = vbv_kbit.max(1) as f64 * 1000.0;
+    }
+
+    /// Fold in a frame of `bits` and return the offset the next frame takes. A key frame, or a
+    /// frame held at a quantizer of its own (`steers` false), fills the bucket but says nothing
+    /// of what the rate factor's frames come to.
+    fn note(&mut self, bits: f64, steers: bool, max_offset: f64) -> f64 {
+        self.fill = (self.fill - self.per_frame).max(0.0) + bits;
+        if !steers || (self.offset <= 0.0 && self.fill <= self.buffer) {
+            return self.offset;
+        }
+        let target = (self.per_frame + (self.buffer / 2.0 - self.fill) / Self::DRAIN_FRAMES)
+            .max(self.per_frame / 4.0);
+        let step = 6.0 * (bits.max(1.0) / target).log2();
+        self.offset = (self.offset + step.max(-Self::RELEASE_STEP)).clamp(0.0, max_offset.max(0.0));
+        self.offset
+    }
+
+    /// The bits the next frame has before the bucket overflows.
+    fn room(&self) -> f64 {
+        self.buffer - (self.fill - self.per_frame).max(0.0)
+    }
+}
+
 /// One long-lived libx264 session for a frame, holding the raw `x264_t` handle alongside a
 /// mirror of its live parameters so the encoder can be retuned per frame instead of rebuilt.
 ///
@@ -537,6 +618,21 @@ pub struct H264EncoderWrapper {
     last_qp: Option<u32>,
     /// The live rate factor, which x264 reports a frame's mean quantizer against (`last_qp`).
     rf_constant: f64,
+    /// A capped CRF session's peak (`X264Peak`), and the quantizer ceiling it opened with, which
+    /// the peak lowers to 51 while it binds.
+    peak: Option<X264Peak>,
+    open_qp_max: i32,
+    /// The frame the last encode coded (`Coded`), and whether it was coded coarser than the
+    /// rate factor for the peak (`coded_capped`).
+    coded: Option<Coded>,
+    last_capped: bool,
+    /// Whether the peak has bound a frame of the session (`holds_cleanup`).
+    bound_once: bool,
+    /// The last key frame's first attempt (`aim_key`).
+    last_key: Option<LastKey>,
+    /// The pictures x264 has been handed, attempts again included.
+    #[cfg(test)]
+    encodes: usize,
     /// The quantizer offset of each macroblock of the next frame, empty where it has none
     /// (`refine_blocks`).
     quant_offsets: Vec<f32>,
@@ -547,9 +643,32 @@ pub struct H264EncoderWrapper {
     held_input: Option<*const u8>,
 }
 
+/// A key frame's first attempt (`H264EncoderWrapper::aim_key`): its bits, the quantizer it was
+/// planned or held at, the rate factor it was coded under, and whether it was held there.
+#[cfg(feature = "gpl")]
+#[derive(Clone, Copy, Debug)]
+struct LastKey {
+    bits: f64,
+    qp: f64,
+    rf: f64,
+    held: bool,
+}
+
+/// A frame x264 coded: its bits, the quantizer it was planned or held at, whether it was a key
+/// frame, and whether it was held (`hold_quantizer`).
+#[cfg(feature = "gpl")]
+#[derive(Clone, Copy, Debug)]
+struct Coded {
+    bits: f64,
+    qp: f64,
+    key: bool,
+    held: bool,
+}
+
 /// The planes of a picture handed to x264: 4:2:0 or 4:4:4 planes of either depth, each its
 /// stride in bytes, or an 8-bit 4:2:0 picture as NV12.
 #[cfg(feature = "gpl")]
+#[derive(Clone, Copy)]
 enum Input<'a> {
     Planar {
         planes: [&'a [u8]; 3],
@@ -600,10 +719,10 @@ impl H264EncoderWrapper {
     ///      when the VBV underflows, which leaves rows of the picture frozen on old content. A
     ///      budget the content cannot meet overshoots instead, as NVENC and libvpx do.
     ///    - **CRF** (default): constant-quality with `f_rf_constant = crf`. A positive
-    ///      `vbv_kbit` caps it with a VBV of that buffer at a peak of `bitrate_kbps` (x264's
-    ///      capped CRF): the rate factor still picks the quantizer and the VBV bounds the size
-    ///      of a frame, a key frame above all, under CBR's ceiling of 51, so content the cap
-    ///      starves overshoots it rather than freezes. `vbv_kbit == 0` leaves it uncapped.
+    ///      `vbv_kbit` and `bitrate_kbps` cap it at that peak with a buffer of that size, held
+    ///      beside x264 (`X264Peak`): the session opens as an uncapped one, and where the peak
+    ///      binds the rate factor rises, up to 51, so content the cap starves overshoots it
+    ///      rather than freezes. A `vbv_kbit` or `bitrate_kbps` of 0 leaves it uncapped.
     /// 4. **Color**: I444 at full range or I420 at limited range, a VUI declaring that range
     ///    with the BT.709 primaries, transfer, and matrix the sRGB source and the conversion
     ///    carry, and the matching `high444` / `baseline` profile.
@@ -791,11 +910,6 @@ impl H264EncoderWrapper {
             } else {
                 param.rc.i_rc_method = codec_sys::x264::X264_RC_CRF as i32;
                 param.rc.f_rf_constant = crf as f32;
-                if vbv_kbit > 0 {
-                    param.rc.i_vbv_max_bitrate = bitrate_kbps.saturating_abs();
-                    param.rc.i_vbv_buffer_size = vbv_kbit;
-                    param.rc.i_qp_max = 51 + qp_offset(bit_depth);
-                }
             }
             let depth_flag = if bit_depth > 8 {
                 codec_sys::x264::X264_CSP_HIGH_DEPTH
@@ -854,7 +968,7 @@ impl H264EncoderWrapper {
                     bit_depth,
                     is_cbr: cbr_mode,
                     current_bitrate: bitrate_kbps.saturating_abs(),
-                    current_vbv: vbv_kbit,
+                    current_vbv: if cbr_mode { vbv_kbit } else { 0 },
                     current_fps: frame_rate,
                     threads,
                     min_qp,
@@ -867,6 +981,16 @@ impl H264EncoderWrapper {
                     held_qp: None,
                     last_qp: None,
                     rf_constant: param.rc.f_rf_constant as f64,
+                    peak: (!cbr_mode && vbv_kbit > 0 && bitrate_kbps != 0).then(|| {
+                        X264Peak::new(bitrate_kbps.saturating_abs(), vbv_kbit, frame_rate.fps())
+                    }),
+                    open_qp_max: param.rc.i_qp_max,
+                    coded: None,
+                    last_capped: false,
+                    bound_once: false,
+                    last_key: None,
+                    #[cfg(test)]
+                    encodes: 0,
                     quant_offsets: Vec::new(),
                     mb_info: Vec::new(),
                     held_input: None,
@@ -888,18 +1012,33 @@ impl H264EncoderWrapper {
         if self.is_cbr || self.current_crf == new_crf {
             return;
         }
-        unsafe {
-            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
-            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
-            param.rc.f_rf_constant = new_crf as f32;
-            if codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
-                self.current_crf = new_crf;
-                self.rf_constant = new_crf as f64;
-            }
+        let offset = self.peak.map_or(0.0, |p| p.offset);
+        if self.set_rate_factor(new_crf, offset) {
+            self.current_crf = new_crf;
         }
     }
 
-    /// Retune bitrate/VBV (CBR, or a capped CRF) and/or frame rate to match the live settings,
+    /// Put the rate factor at `crf` plus a peak's `offset`, the quantizer ceiling at 51 while an
+    /// offset holds and at the session's own otherwise; true where x264 took it.
+    fn set_rate_factor(&mut self, crf: i32, offset: f64) -> bool {
+        unsafe {
+            let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
+            codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
+            param.rc.f_rf_constant = (crf as f64 + offset) as f32;
+            param.rc.i_qp_max = if offset > 0.0 {
+                51 + qp_offset(self.bit_depth)
+            } else {
+                self.open_qp_max
+            };
+            let taken = codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0;
+            if taken {
+                self.rf_constant = param.rc.f_rf_constant as f64;
+            }
+            taken
+        }
+    }
+
+    /// Retune bitrate/VBV (CBR, or a capped CRF's peak) and/or frame rate to match the live settings,
     /// structured to be called unconditionally every frame so the caller need not track what
     /// changed itself.
     ///
@@ -911,18 +1050,19 @@ impl H264EncoderWrapper {
     /// does not apply `i_fps_*`, and the CBR/VBV per-frame budget is `bitrate / fps`, so a session
     /// left at its old rate ships roughly half the configured bitrate once fps halves. The reopen
     /// carries the new bitrate/VBV too, and a fresh session emits an IDR on its first frame; a failed
-    /// reopen keeps the working session instead of nulling the handle. Capping a CRF session or
-    /// lifting its cap reopens it too, since x264 retunes a VBV in place only while one is on. A
-    /// bitrate/VBV-only change otherwise stays a live `x264_encoder_reconfig`, and the tracked
-    /// mirror advances only on success so it cannot drift from the encoder's real state.
+    /// reopen keeps the working session instead of nulling the handle. A CRF session's peak, set,
+    /// moved, or lifted, never reaches x264 (`follow_peak`). A CBR bitrate/VBV-only change
+    /// otherwise stays a live `x264_encoder_reconfig`, and the tracked mirror advances only on
+    /// success so it cannot drift from the encoder's real state.
     pub fn reconfigure_rate(&mut self, bitrate_kbps: i32, vbv_kbit: i32, fps: f64) {
         let bk = bitrate_kbps.saturating_abs();
         let new_fps = x264_frame_rate(fps);
-        let vbv_applies = self.is_cbr || vbv_kbit > 0;
+        if !self.is_cbr {
+            self.follow_peak(bk, vbv_kbit, new_fps.fps());
+        }
         let rate_changed =
-            vbv_applies && (self.current_bitrate != bk || self.current_vbv != vbv_kbit);
-        let reopen = self.current_fps != new_fps
-            || (!self.is_cbr && (self.current_vbv > 0) != (vbv_kbit > 0));
+            self.is_cbr && (self.current_bitrate != bk || self.current_vbv != vbv_kbit);
+        let reopen = self.current_fps != new_fps;
         if !rate_changed && !reopen {
             return;
         }
@@ -942,7 +1082,12 @@ impl H264EncoderWrapper {
                 self.max_qp,
                 self.reference_frames,
             ) {
+                // The bucket carries over to the key frame that opens it.
+                let peak = self.peak;
                 *self = fresh;
+                if let (Some(fresh), Some(peak)) = (self.peak.as_mut(), peak) {
+                    fresh.fill = peak.fill;
+                }
             }
             return;
         }
@@ -950,10 +1095,8 @@ impl H264EncoderWrapper {
             let mut param: codec_sys::x264::x264_param_t = std::mem::zeroed();
             codec_sys::x264::x264_encoder_parameters(self.encoder, &mut param);
             param.rc.i_bitrate = bk;
-            if vbv_applies {
-                param.rc.i_vbv_max_bitrate = bk;
-                param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
-            }
+            param.rc.i_vbv_max_bitrate = bk;
+            param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
             if codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
                 self.current_bitrate = bk;
                 self.current_vbv = vbv_kbit;
@@ -969,6 +1112,95 @@ impl H264EncoderWrapper {
     /// The mean quantizer the rate control last coded a frame's rows at, held frames aside.
     pub fn last_qp(&self) -> Option<u32> {
         self.last_qp
+    }
+
+    /// Whether the peak of a capped CRF session binds it: the rate factor stands above the
+    /// session's own (`X264Peak`).
+    pub fn peak_bound(&self) -> bool {
+        self.peak.is_some_and(|p| p.offset > 0.0)
+    }
+
+    /// Whether the session runs its CRF under a peak (`X264Peak`).
+    pub fn capped(&self) -> bool {
+        self.peak.is_some()
+    }
+
+    /// A tick that codes no frame, under the live `settings`: the peak follows them and its
+    /// bucket drains as for an empty frame, the rate factor stepping back toward the session's
+    /// own, so a still screen lets the peak go.
+    pub fn idle(&mut self, settings: &CaptureSettings) {
+        if !self.is_cbr {
+            let (bitrate, vbv) = rate_control(settings);
+            self.follow_peak(bitrate, vbv, x264_frame_rate(settings.target_fps).fps());
+        }
+        if self.peak.is_some() {
+            self.fold_frame(Coded {
+                bits: 0.0,
+                qp: self.rf_constant,
+                key: false,
+                held: false,
+            });
+        }
+    }
+
+    /// Whether the last frame was coded coarser than the session's rate factor for its peak:
+    /// under a raised rate factor, or a key frame coded again within the bucket (`fit_key`).
+    pub fn coded_capped(&self) -> bool {
+        self.last_capped
+    }
+
+    /// Code the next frame as a refresh of coarse blocks (`ledger::BlockLedger::refresh_keyed`):
+    /// held at quantizer `qp` where one is named, the macroblocks `now` names `finer` steps finer
+    /// (`ledger::REFRESH_FINER`), the ones of them a key frame left coarse (`key`) `key_finer`
+    /// steps finer, and the ones `wait` names past the coarsest quantizer, where x264 codes a
+    /// block its reference holds (`constant_blocks`) as a skip.
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_blocks(
+        &mut self,
+        qp: Option<i32>,
+        now: &crate::ledger::BlockPlan,
+        finer: f32,
+        key: &crate::ledger::BlockPlan,
+        key_finer: f32,
+        wait: &crate::ledger::BlockPlan,
+    ) {
+        if let Some(qp) = qp {
+            self.hold_quantizer(qp);
+        }
+        let cols = (self.width as usize).div_ceil(16);
+        let rows = (self.height as usize).div_ceil(16);
+        self.quant_offsets.clear();
+        self.quant_offsets.extend((0..rows).flat_map(|row| {
+            (0..cols).map(move |col| {
+                if key.refines(col, row) {
+                    -key_finer
+                } else if now.refines(col, row) {
+                    -finer
+                } else if wait.refines(col, row) {
+                    51.0
+                } else {
+                    0.0
+                }
+            })
+        }));
+    }
+
+    /// Cap a CRF session at a peak of `bitrate_kbps` with a buffer of `vbv_kbit`, or lift its cap
+    /// where either is 0, live and outside x264 (`X264Peak`).
+    fn follow_peak(&mut self, bitrate_kbps: i32, vbv_kbit: i32, fps: f64) {
+        self.current_bitrate = bitrate_kbps;
+        match (self.peak.as_mut(), vbv_kbit > 0 && bitrate_kbps > 0) {
+            (Some(peak), true) => peak.follow(bitrate_kbps, vbv_kbit, fps),
+            (None, true) => self.peak = Some(X264Peak::new(bitrate_kbps, vbv_kbit, fps)),
+            (Some(peak), false) => {
+                let bound = peak.offset > 0.0;
+                self.peak = None;
+                if bound {
+                    self.set_rate_factor(self.current_crf, 0.0);
+                }
+            }
+            (None, false) => {}
+        }
     }
 
     /// Move the floor of a constant-rate session's quantizer live, `min_qp` on the H.264 scale
@@ -1077,6 +1309,20 @@ impl H264EncoderWrapper {
             param.rc.i_vbv_max_bitrate = self.current_bitrate;
             param.rc.i_vbv_buffer_size = self.current_vbv.max(1);
             codec_sys::x264::x264_encoder_reconfig(self.encoder, &mut param);
+        }
+    }
+
+    /// Take a frame just coded into a capped CRF's peak, and move the rate factor where the
+    /// peak says to.
+    fn fold_frame(&mut self, frame: Coded) {
+        let max_offset = 51.0 - self.current_crf as f64;
+        let Some(peak) = self.peak.as_mut() else {
+            return;
+        };
+        let was = peak.offset;
+        let offset = peak.note(frame.bits, !frame.key && !frame.held, max_offset);
+        if offset != was {
+            self.set_rate_factor(self.current_crf, offset);
         }
     }
 
@@ -1189,11 +1435,107 @@ impl H264EncoderWrapper {
     ) -> bool {
         let key_budget =
             self.is_cbr && force_idr && self.held_qp.is_some() && self.open_for_held_key();
-        let coded = self.encode_picture(input, frame_id, force_idr, omit_headers, output_buf);
+        self.last_capped = self.peak_bound();
+        let key = force_idr || !self.references.has_reference();
+        let aimed = (key && self.held_qp.is_none())
+            .then(|| self.aim_key())
+            .flatten();
+        if let Some(q) = aimed {
+            self.held_qp = Some(q as i32);
+        }
+        let rf = self.rf_constant;
+        let mut coded = self.encode_picture(input, frame_id, force_idr, omit_headers, output_buf);
         if key_budget {
             self.restore_rate();
         }
+        // The key frame's first attempt, as the rate factor coded it or as it was aimed.
+        if let Some(frame) = self.coded.filter(|c| c.key) {
+            self.last_key = Some(LastKey {
+                bits: frame.bits,
+                qp: frame.qp,
+                rf,
+                held: aimed.is_some(),
+            });
+        }
+        let mut held = aimed;
+        if coded && aimed.is_none() {
+            (coded, held) = self.fit_key(input, frame_id, omit_headers, output_buf);
+        }
+        if let (Some(q), Some(peak)) = (held, self.peak.as_mut()) {
+            // The rate factor stands at the key frame's quantizer from here, so the frames after
+            // it refine the picture as the peak lets them rather than code it again whole.
+            self.last_capped = true;
+            let crf = self.current_crf as f64;
+            let offset = (q - crf).clamp(peak.offset, (51.0 - crf).max(0.0));
+            if offset != peak.offset {
+                peak.offset = offset;
+                self.set_rate_factor(self.current_crf, offset);
+            }
+        }
+        self.bound_once |= self.last_capped;
+        if let Some(frame) = self.coded.take() {
+            self.fold_frame(frame);
+        }
         coded
+    }
+
+    /// Whether the bucket of a capped CRF's peak has room in one frame for a cleanup at rate
+    /// factor `crf` (`encode_cpu_from`): for as much as the last key frame's first attempt
+    /// (`LastKey`) would come to at it, a cleanup of a still page coding much of it again, and
+    /// after a refresh held at a quantizer all of it. True uncapped, on a session no peak has
+    /// bound, which codes as an uncapped one, or before a key frame.
+    pub fn holds_cleanup(&self, crf: i32) -> bool {
+        let (Some(peak), Some(last)) = (self.peak.filter(|_| self.bound_once), self.last_key)
+        else {
+            return true;
+        };
+        let from = if last.held { last.qp } else { last.rf };
+        last.bits * 2f64.powf((from - crf as f64) / KEY_STEPS) <= peak.room()
+    }
+
+    /// The quantizer a capped CRF's key frame is held at from the start, where the last key
+    /// frame's first attempt (`LastKey`) says one at the rate factor now would overflow the room
+    /// the bucket has left: aimed at half that room, at `KEY_STEPS` quantizer steps a halving
+    /// (`X264Peak`), one encode. `None` where it would fit, or where no key frame came before,
+    /// whose first attempt `fit_key` measures instead.
+    fn aim_key(&self) -> Option<f64> {
+        let room = self.peak?.room().max(1.0);
+        let last = self.last_key?;
+        // What the last key frame would have come to at the rate factor now: from the rate factor
+        // it was coded under, or from the quantizer it was held at.
+        let from = if last.held { last.qp } else { last.rf };
+        let expected = last.bits * 2f64.powf((from - self.rf_constant) / KEY_STEPS);
+        (expected > room).then(|| {
+            (last.qp + KEY_STEPS * (2.0 * last.bits / room).log2())
+                .ceil()
+                .min(51.0)
+        })
+    }
+
+    /// Code a capped CRF's key frame that overflows the room its peak has left once more, held at
+    /// a quantizer aimed at half that room from the first attempt's size, at `KEY_STEPS`
+    /// quantizer steps a halving (`X264Peak`); the second attempt is the one that goes out,
+    /// overflowing or not, so a key frame costs at most two encodes. Returns whether the frame
+    /// coded, and the quantizer it was held at where it was coded again.
+    fn fit_key(
+        &mut self,
+        input: Input<'_>,
+        frame_id: u16,
+        omit_headers: bool,
+        output_buf: &mut Vec<u8>,
+    ) -> (bool, Option<f64>) {
+        let Some(room) = self.peak.map(|p| p.room().max(1.0)) else {
+            return (true, None);
+        };
+        let Some(first) = self.coded.filter(|c| c.key && c.bits > room && c.qp < 51.0) else {
+            return (true, None);
+        };
+        let q = (first.qp + KEY_STEPS * (2.0 * first.bits / room).log2())
+            .ceil()
+            .min(51.0);
+        self.held_qp = Some(q as i32);
+        let coded = self.encode_picture(input, frame_id, true, omit_headers, output_buf);
+        (coded, Some(q))
     }
 
     /// `encode_input` past the choice of session.
@@ -1205,11 +1547,16 @@ impl H264EncoderWrapper {
         omit_headers: bool,
         output_buf: &mut Vec<u8>,
     ) -> bool {
+        #[cfg(test)]
+        {
+            self.encodes += 1;
+        }
         unsafe {
             let mut pic_in: codec_sys::x264::x264_picture_t = std::mem::zeroed();
             codec_sys::x264::x264_picture_init(&mut pic_in);
 
             self.held_input = None;
+            self.coded = None;
             match input {
                 Input::Planar { planes, strides } => {
                     pic_in.img.i_csp = (if self.is_i444 {
@@ -1299,6 +1646,12 @@ impl H264EncoderWrapper {
                 } else {
                     FRAME_DELTA
                 };
+                self.coded = Some(Coded {
+                    bits: frame_size as f64 * 8.0,
+                    qp: (pic_out.i_qpplus1 - 1 - offset) as f64,
+                    key: frame_type == FRAME_KEY,
+                    held: held.is_some(),
+                });
                 self.last_reference = self.references.record(frame_id, frame_type != FRAME_DELTA);
                 output_buf.clear();
                 output_buf.reserve(super::codec::VIDEO_HEADER_LEN + frame_size as usize);
@@ -1455,8 +1808,10 @@ pub struct StripeState {
     /// The region's blocks, which held still and which are clean (`ledger`), for refining the
     /// ones that held still while others move.
     pub ledger: BlockLedger,
-    /// How many of them a frame refines (`ledger::RefinePace`).
+    /// How many of them a frame refines (`ledger::RefinePace`), and how many coarse ones a
+    /// capped constant quality refreshes once its peak lets go (`ledger::RefreshPace`).
     pub refine: RefinePace,
+    pub refresh: RefreshPace,
 }
 
 /// The bits per sample the software H.264 session codes `settings` at: 10 where they ask for it
@@ -2008,6 +2363,19 @@ pub fn encode_cpu_from(
         && !requested_idr
         && !(codec.is_video() && settings.video_streaming_mode);
     if idle_candidate {
+        // A capped CRF its peak let go with coarse blocks left has a refresh to send
+        // (`BlockLedger::refresh`).
+        let refresh_due = |st: &StripeState| {
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "gpl")] {
+                    st.ledger.coarse()
+                        && st.h264_encoder.as_ref().is_some_and(|e| e.capped() && !e.peak_bound())
+                } else {
+                    let _ = st;
+                    false
+                }
+            }
+        };
         let no_pending_send = |st: &StripeState| {
             (!codec.is_video() || st.h264_burst_frames_remaining <= 0)
                 && !crate::pipeline::cleanup_pending(
@@ -2017,6 +2385,7 @@ pub fn encode_cpu_from(
                     paint_over_armed(st),
                     false,
                 )
+                && !refresh_due(st)
         };
         let quiescent = if !hash_damage {
             stripes.iter().all(no_pending_send)
@@ -2054,6 +2423,10 @@ pub fn encode_cpu_from(
                 st.consecutive_changes = 0;
                 st.key_owed |= scheduled;
                 st.ledger.frame([]);
+                #[cfg(feature = "gpl")]
+                if let Some(enc) = st.h264_encoder.as_mut() {
+                    enc.idle(settings);
+                }
             }
             return Vec::new();
         }
@@ -2183,6 +2556,31 @@ pub fn encode_cpu_from(
                 Damage::None
             },
         );
+        // A paint-over that falls due on a capped CRF while its peak binds, which would code it
+        // coarse, or once it let go on blocks it coded bound and has yet to refresh or refreshed
+        // at its own quality since, or that the room its bucket has left cannot take in one frame
+        // (`H264EncoderWrapper::holds_cleanup`), is owed to the still blocks instead
+        // (`BlockLedger::spent`), which the refresh codes at the paint-over quality within the
+        // peak once it lets go: x264's rate factor reads a still frame over a refreshed page as
+        // next to no complexity and codes the paint-over in one frame past it.
+        #[cfg(feature = "gpl")]
+        let cleanup = if cleanup == Cleanup::Refresh
+            && video
+            && !video_cbr
+            && stripe_state.h264_encoder.as_ref().is_some_and(|e| {
+                e.capped()
+                    && (e.peak_bound()
+                        || stripe_state.ledger.coarse()
+                        || stripe_state.ledger.fresh()
+                        || !e.holds_cleanup(video_po_crf))
+            }) {
+            if stripe_state.ledger.spent() {
+                stripe_state.refresh = Default::default();
+            }
+            Cleanup::None
+        } else {
+            cleanup
+        };
         let force_idr_all = requested_idr || stripe_state.scheduled_key(scheduled, is_dirty);
         let mut send_this_stripe = is_dirty || cleanup != Cleanup::None || force_idr_all;
         let mut quality_or_crf = if !video { jpeg_q } else { video_crf };
@@ -2257,6 +2655,8 @@ pub fn encode_cpu_from(
                 stripe_state.h264_burst_frames_remaining = 0;
             }
         }
+        // Whether this frame is the cleanup's or its burst's, which a refresh leaves alone.
+        let mut cleaning = cleanup != Cleanup::None;
         if is_dirty {
             stripe_state.h264_burst_frames_remaining = 0;
         } else if video
@@ -2277,6 +2677,7 @@ pub fn encode_cpu_from(
         } else if video && stripe_state.h264_burst_frames_remaining > 0 {
             stripe_state.h264_burst_frames_remaining -= 1;
             send_this_stripe = true;
+            cleaning = true;
             if stripe_state.burst_held && armed {
                 hold = Some(refresh_crf);
             }
@@ -2299,6 +2700,48 @@ pub fn encode_cpu_from(
         }
         if video && video_streaming {
             send_this_stripe = true;
+        }
+        // A capped CRF its peak let go codes again the blocks it coded while bound that held
+        // still since, so many a frame (`BlockLedger::refresh`), the rest held as skips, the
+        // ones owed their paint-over first and at it on a still stripe's frame
+        // (`BlockLedger::refresh_owed`); a still stripe's frames are sent for it. A cleanup already
+        // running, and its burst, run as they would without.
+        #[cfg(feature = "gpl")]
+        let refresh = if video && !video_cbr && !force_idr && !cleaning {
+            let unbound = stripe_state
+                .h264_encoder
+                .as_ref()
+                .is_some_and(|e| e.capped() && !e.peak_bound());
+            let blocks = stripe_state.ledger.blocks();
+            let most = if unbound && stripe_state.ledger.coarse() {
+                stripe_state.refresh.most(blocks)
+            } else {
+                0
+            };
+            if most == 0 {
+                None
+            } else if !is_dirty && let Some((now, wait)) = stripe_state.ledger.refresh_owed(most) {
+                let key = now.none_like();
+                Some((now, key, wait, true))
+            } else {
+                stripe_state
+                    .ledger
+                    .refresh_keyed(most)
+                    .map(|(now, key, wait)| (now, key, wait, false))
+            }
+        } else {
+            None
+        };
+        #[cfg(feature = "gpl")]
+        if refresh.is_some() {
+            send_this_stripe = true;
+        }
+        #[cfg(feature = "gpl")]
+        if video
+            && !send_this_stripe
+            && let Some(enc) = stripe_state.h264_encoder.as_mut()
+        {
+            enc.idle(settings);
         }
 
         if send_this_stripe {
@@ -2353,6 +2796,7 @@ pub fn encode_cpu_from(
                         || enc.height != actual_height as i32
                         || enc.is_i444 != video_fullcolor
                         || enc.bit_depth != bit_depth
+                        || enc.reference_frames != settings.video_reference_frames
                 } else {
                     true
                 };
@@ -2387,13 +2831,21 @@ pub fn encode_cpu_from(
 
                 // A stripe moving at the session's quality refines the blocks of it that held
                 // still and are not clean, at the paint-over quality: a quantizer offset from
-                // the rate control's last, or from the session's rate factor.
+                // the rate control's last, or from the session's rate factor. A capped CRF
+                // refines nothing while its peak binds: the offsets would code the blocks from a
+                // rate factor the peak has raised, coarser than the quality they count clean at.
+                let peak_bound = stripe_state
+                    .h264_encoder
+                    .as_ref()
+                    .is_some_and(H264EncoderWrapper::peak_bound);
                 let refines = video
                     && armed
                     && is_dirty
                     && cleanup == Cleanup::None
                     && hold.is_none()
-                    && !force_idr;
+                    && !force_idr
+                    && !peak_bound
+                    && refresh.is_none();
                 let plan = refines
                     .then(|| {
                         let blocks = stripe_state.ledger.blocks();
@@ -2419,6 +2871,36 @@ pub fn encode_cpu_from(
                         enc.refine_blocks(&refinement.plan, refinement.offset() as f32);
                         refinement
                     });
+                    // A still refresh frame is held at the stripe's quality as a quantizer, the
+                    // session's own or the paint-over one it was cleaned up to: x264's rate factor
+                    // reads a still frame's complexity as next to none and holds the frames after a
+                    // peak let go at quantizers anywhere from 51 to 6. One that also moves is the
+                    // rate factor's, so the peak's bucket steers it and binds again.
+                    // A block owed its paint-over is coded `OWED_FINER` steps past it.
+                    if let Some((now, key, wait, paint)) = &refresh {
+                        let (quality, finer) = if *paint {
+                            (
+                                video_po_crf,
+                                OWED_FINER as i32,
+                            )
+                        } else {
+                            (x264_crf, crate::ledger::REFRESH_FINER as i32)
+                        };
+                        let finer = if is_dirty {
+                            (x264_crf - quality).max(0) + finer
+                        } else {
+                            finer
+                        };
+                        enc.refresh_blocks(
+                            (!is_dirty).then_some(quality),
+                            now,
+                            finer as f32,
+                            key,
+                            (crate::ledger::REFRESH_FINER + crate::ledger::REFRESH_KEY_FINER)
+                                as f32,
+                            wait,
+                        );
+                    }
                     if hash_damage || !current {
                         enc.constant_blocks(std::iter::empty());
                     } else {
@@ -2559,6 +3041,17 @@ pub fn encode_cpu_from(
                         if hold.is_none() || !video_cbr {
                             stripe_state.rc_bytes = stripe_state.packet_buf.len();
                         }
+                        let capped = enc.coded_capped();
+                        stripe_state.ledger.coded(capped, force_idr);
+                        if let Some((now, _, _, _)) = refresh.as_ref().filter(|_| !capped) {
+                            stripe_state.ledger.refreshed(now);
+                            let blocks = stripe_state.ledger.blocks();
+                            stripe_state.refresh.coded(
+                                stripe_state.packet_buf.len(),
+                                crate::pipeline::frame_budget(video_bitrate, target_fps),
+                                blocks,
+                            );
+                        }
                         if let Some(refinement) = &refinement {
                             let coded = if video_cbr {
                                 enc.last_qp().map_or(i32::MAX, |q| q as i32)
@@ -2582,10 +3075,20 @@ pub fn encode_cpu_from(
                                 blocks,
                             );
                         }
-                        if hold.is_some_and(|q| q <= video_po_crf) {
+                        if hold.is_some_and(|q| q <= video_po_crf) && !capped && refresh.is_none() {
                             stripe_state.ledger.cleaned();
                         } else if force_idr {
                             stripe_state.ledger.coarsened();
+                        }
+                        // A cleanup the binding peak held coarse is spent short of its target:
+                        // its still blocks are owed the paint-over once the peak lets go.
+                        if peak_bound
+                            && !video_cbr
+                            && cleaning
+                            && hold.is_some_and(|q| q < video_crf)
+                            && stripe_state.ledger.spent()
+                        {
+                            stripe_state.refresh = Default::default();
                         }
                         Some(EncodedStripe {
                             data: Arc::new(std::mem::take(&mut stripe_state.packet_buf)),
@@ -2808,7 +3311,7 @@ fn cleanup_vbv_kbit(settings: &CaptureSettings, bitrate_kbps: i32) -> i32 {
 /// four frames, 3.52 at 34.6 dB in eight, 3.68 in fifteen, with no latency lost on a LAN (6.2 ms
 /// to draw and decode at 1.5 frames, 5.5 at 8). Eight frames hold a frame's worst case to 133 ms
 /// of the rate at 60 fps, where fifteen added queue on a slow link for 4% more of the target.
-const CBR_VBV_FRAMES: f64 = 8.0;
+pub const CBR_VBV_FRAMES: f64 = 8.0;
 
 /// The `(bitrate_kbps, vbv_kbit)` the software H.264 encoder is programmed with: the CBR
 /// target, with a buffer of `CBR_VBV_FRAMES` unless `video_vbv_multiplier` names one, or the
@@ -4237,6 +4740,51 @@ mod qp_bound_sweep {
         }
     }
 
+    /// A capped CRF's key frame costs at most two encodes, the first of a session measuring
+    /// itself and coding once more aimed into the bucket, and one after a key frame before it,
+    /// aimed from the start: each within the buffer.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_codes_a_key_frame_in_at_most_two_encodes() {
+        const VBV_KBIT: i32 = 1500;
+        let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+        let mut enc = H264EncoderWrapper::new(
+            W as i32, H as i32, 12, false, 60.0, 4, false, 8000, VBV_KBIT, 0, 0,
+        )
+        .expect("x264 init");
+        let key = |enc: &mut H264EncoderWrapper, i: usize| {
+            let before = enc.encodes;
+            let mut out = Vec::new();
+            assert!(enc.encode_with_headers(
+                &text_luma(i),
+                &u,
+                &v,
+                W as i32,
+                (W / 2) as i32,
+                (W / 2) as i32,
+                i as u16,
+                true,
+                true,
+                &mut out
+            ));
+            (enc.encodes - before, out.len() * 8)
+        };
+        let (first, first_bits) = key(&mut enc, 0);
+        for _ in 0..120 {
+            enc.idle(&CaptureSettings {
+                video_bitrate_kbps: 8000,
+                video_vbv_multiplier: VBV_KBIT as f64 * 1000.0 / (8_000_000.0 / 60.0),
+                target_fps: 60.0,
+                ..Default::default()
+            });
+        }
+        let (later, later_bits) = key(&mut enc, 1);
+        println!("first key: {first} encodes, {first_bits} bits; later: {later}, {later_bits}");
+        assert!(first <= 2, "the first key frame took {first} encodes");
+        assert_eq!(later, 1, "a later key frame took {later} encodes");
+        assert!(first_bits <= VBV_KBIT as usize * 1000 && later_bits <= VBV_KBIT as usize * 1000);
+    }
+
     /// A CRF session given a VBV codes its key frame within the buffer, where the same session
     /// without one codes it at whatever size the rate factor asks.
     #[cfg(feature = "gpl")]
@@ -4438,6 +4986,530 @@ mod qp_bound_sweep {
         assert!(psnr > 35.0, "a still screen refined to {psnr:.1} dB");
     }
 
+    /// A capped CRF session under a peak its picture never reaches codes every frame as the
+    /// uncapped one does, byte for byte: the key frame that opens it and the frames after it, a
+    /// scroll, the cleanup of the still screen after it at the paint-over quality, a key frame a
+    /// client asks for in that cleanup, and the scroll after.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_codes_as_uncapped_under_a_peak_it_never_reaches() {
+        use crate::encoders::codec::{FRAME_KEY, parse_video_type};
+        let (w, h) = (W as i32, H as i32);
+        let uncapped = CaptureSettings {
+            width: w,
+            height: h,
+            codec: Codec::H264,
+            target_fps: 60.0,
+            video_crf: 25,
+            video_paintover_crf: 18,
+            use_paint_over_quality: true,
+            video_bitrate_kbps: 8000,
+            ..Default::default()
+        };
+        let capped = CaptureSettings {
+            video_bitrate_kbps: 100_000,
+            video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+            ..uncapped.clone()
+        };
+        let whole = [smithay::utils::Rectangle::new((0, 0).into(), (w, h).into())];
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let (mut keys, mut cleanup) = (0, 0);
+        for t in 0..150u16 {
+            let still = (30..90).contains(&t);
+            let at = if still {
+                30
+            } else if t < 30 {
+                t
+            } else {
+                t - 60
+            };
+            let frame = crate::encoders::scrolled_text(W, H, at as usize);
+            let changed: &[_] = if still { &[] } else { &whole };
+            let key = t == 0 || t == 60;
+            let one = super::encode_cpu(
+                &mut a, &frame, w, h, changed, &uncapped, t, false, false, key,
+            );
+            let two =
+                super::encode_cpu(&mut b, &frame, w, h, changed, &capped, t, false, false, key);
+            assert_eq!(one.len(), two.len(), "frame {t} coded on one side only");
+            for (x, y) in one.iter().zip(&two) {
+                assert!(
+                    x.data == y.data,
+                    "frame {t}: {} bytes uncapped, {} capped",
+                    x.data.len(),
+                    y.data.len()
+                );
+                keys += usize::from(parse_video_type(x.data[1]).map(|(_, k)| k) == Some(FRAME_KEY));
+                cleanup += usize::from(still);
+            }
+        }
+        assert!(keys >= 2, "{keys} key frames");
+        assert!(cleanup > 0, "the still screen was never cleaned up");
+    }
+
+    /// Code a 720p page through the stripe path: scrolled for `SCROLL` frames under a peak of
+    /// `peak` kbps (0 uncapped), then held still under `then` kbps, the paint-over armed or not
+    /// (`paint`), returning the decoded pictures, each frame's bytes, the key frames after the
+    /// first, and whether coarse blocks are left (`BlockLedger::coarse`).
+    #[cfg(feature = "gpl")]
+    fn scroll_then_still(
+        peak: i32,
+        then: i32,
+        frames: usize,
+        paint: bool,
+    ) -> (Vec<Vec<u8>>, Vec<usize>, usize, bool) {
+        let peaks = |t: usize| if t <= 60 || peak == 0 { peak } else { then };
+        scroll_then_still_under(&peaks, frames, paint)
+    }
+
+    /// `scroll_then_still` under the peak `peaks` names for each frame (0 uncapped throughout).
+    #[cfg(feature = "gpl")]
+    fn scroll_then_still_under(
+        peaks: &dyn Fn(usize) -> i32,
+        frames: usize,
+        paint: bool,
+    ) -> (Vec<Vec<u8>>, Vec<usize>, usize, bool) {
+        use crate::encoders::codec::{FRAME_KEY, VIDEO_HEADER_LEN, parse_video_type};
+        const SCROLL: usize = 60;
+        let (w, h) = (W as i32, H as i32);
+        let peak = peaks(0);
+        let mut s = CaptureSettings {
+            width: w,
+            height: h,
+            codec: Codec::H264,
+            target_fps: 60.0,
+            video_crf: 25,
+            video_paintover_crf: 18,
+            use_paint_over_quality: paint,
+            video_bitrate_kbps: peak.max(8000),
+            video_vbv_multiplier: if peak > 0 {
+                crate::encoders::CAPPED_VBV_FRAMES
+            } else {
+                0.0
+            },
+            ..Default::default()
+        };
+        if peak > 0 {
+            s.video_bitrate_kbps = peak;
+        }
+        let whole = [smithay::utils::Rectangle::new((0, 0).into(), (w, h).into())];
+        let (mut stripes, mut stream, mut sizes, mut keys) =
+            (Vec::new(), Vec::new(), Vec::new(), 0);
+        for t in 0..frames {
+            if peak > 0 {
+                s.video_bitrate_kbps = peaks(t);
+            }
+            let frame = crate::encoders::scrolled_text(W, H, t.min(SCROLL));
+            let changed: &[_] = if t <= SCROLL { &whole } else { &[] };
+            let out = super::encode_cpu(
+                &mut stripes,
+                &frame,
+                w,
+                h,
+                changed,
+                &s,
+                t as u16,
+                false,
+                false,
+                t == 0,
+            );
+            let mut bytes = 0;
+            for st in &out {
+                keys += usize::from(
+                    t > 0 && parse_video_type(st.data[1]).map(|(_, k)| k) == Some(FRAME_KEY),
+                );
+                bytes += st.data.len() - VIDEO_HEADER_LEN;
+                stream.push(st.data[VIDEO_HEADER_LEN..].to_vec());
+            }
+            sizes.push(bytes);
+        }
+        let coarse = stripes
+            .first()
+            .is_some_and(|st: &super::StripeState| st.ledger.coarse());
+        (decode_luma(&stream), sizes, keys, coarse)
+    }
+
+    /// The luma of the still page `scroll_then_still` ends on, as the stripe path converts it.
+    #[cfg(feature = "gpl")]
+    fn still_page_luma() -> Vec<u8> {
+        crate::encoders::scrolled_text(W, H, 60)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| (16.0 + px[0] as f64 * 219.0 / 255.0).round() as u8)
+            .collect()
+    }
+
+    /// A capped CRF stripe its peak bound while the page scrolled codes the still page it
+    /// leaves again once the peak lets go, without a key frame: every coarse block is refreshed
+    /// once, and the page comes to within `NEAR_DB` of the uncapped session's quality. The
+    /// refresh's held quantizer lands at 37.7 dB on any host; the uncapped rate factor's own
+    /// result moves with the host's cores, which set x264's slice threads (37.9 dB on four,
+    /// 38.6-38.8 on one to three), and a refresh no finer than the session's quantizer lands at
+    /// 35.1-35.3.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_refreshes_what_it_coded_bound_once_its_peak_lets_go() {
+        const NEAR_DB: f64 = 1.5;
+        const FRAMES: usize = 200;
+        let page = still_page_luma();
+        let (plain, _, _, _) = scroll_then_still(0, 0, FRAMES, false);
+        let (capped, sizes, keys, coarse) = scroll_then_still(300, 100_000, FRAMES, false);
+        let psnr = |p: &[Vec<u8>]| mean_psnr(&p[p.len() - 1..], std::slice::from_ref(&page));
+        let (a, b) = (psnr(&plain), psnr(&capped));
+        let refreshing = sizes[61..].iter().filter(|&&n| n > 0).count();
+        println!(
+            "uncapped {a:.2} dB, capped and refreshed {b:.2} dB, {refreshing} frames sent while still"
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(!coarse, "coarse blocks left");
+        assert!(refreshing > 0, "nothing refreshed the still page");
+        assert!(
+            b >= a - NEAR_DB,
+            "refreshed to {b:.2} dB against {a:.2} uncapped"
+        );
+    }
+
+    /// A still page's paint-over cleanup runs on a capped CRF stripe whose peak let go as on an
+    /// uncapped one, the refresh leaving it alone: the page comes to the paint-over quality.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_refresh_leaves_the_paint_over_to_run() {
+        const FRAMES: usize = 300;
+        let page = still_page_luma();
+        let psnr = |p: &[Vec<u8>]| mean_psnr(&p[p.len() - 1..], std::slice::from_ref(&page));
+        let (plain, _, _, _) = scroll_then_still(0, 0, FRAMES, true);
+        let (capped, _, keys, coarse) = scroll_then_still(300, 100_000, FRAMES, true);
+        let (a, b) = (psnr(&plain), psnr(&capped));
+        println!("paint-over: uncapped {a:.2} dB, capped and refreshed {b:.2} dB");
+        assert_eq!(keys, 0, "a key frame");
+        assert!(!coarse, "coarse blocks left");
+        assert!(
+            b >= a - 0.5,
+            "{b:.2} dB against the uncapped paint-over's {a:.2}"
+        );
+    }
+
+    /// On a link that holds the peak low, the paint-over that falls due on the page the peak
+    /// left coarse is owed to the still blocks and refreshed at its quality within the peak: no
+    /// still frame past the bucket's room, and the page comes to the uncapped paint-over's
+    /// quality.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_paints_over_within_the_peak() {
+        const FRAMES: usize = 600;
+        const THEN: i32 = 4000;
+        let page = still_page_luma();
+        let psnr = |p: &[Vec<u8>]| mean_psnr(&p[p.len() - 1..], std::slice::from_ref(&page));
+        let (plain, plain_sizes, _, _) = scroll_then_still(0, 0, FRAMES, true);
+        let (capped, sizes, keys, coarse) = scroll_then_still(300, THEN, FRAMES, true);
+        let room =
+            (crate::encoders::CAPPED_VBV_FRAMES * THEN as f64 * 1000.0 / 8.0 / 60.0) as usize;
+        let still = &sizes[61..];
+        let largest = still.iter().max().copied().unwrap_or(0);
+        let sent = still.iter().filter(|&&n| n > 0).count();
+        let bytes = |s: &[usize]| s[61..].iter().sum::<usize>();
+        let (a, b) = (psnr(&plain), psnr(&capped));
+        println!(
+            "paint-over under {THEN} kbps: uncapped {a:.2} dB in {} bytes still, capped {b:.2} dB \
+             in {sent} frames of {} bytes, the largest {largest} (room {room})",
+            bytes(&plain_sizes),
+            bytes(&sizes)
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(!coarse, "coarse blocks left");
+        assert!(
+            largest <= room,
+            "a still frame of {largest} bytes past the room"
+        );
+        assert!(
+            b >= a - 0.5,
+            "{b:.2} dB against the uncapped paint-over's {a:.2}"
+        );
+    }
+
+    /// A capped CRF whose peak bound once, its page coded again at its own quality under a peak
+    /// that took it, and then still under a peak that holds low: the paint-over the bucket's
+    /// room cannot take in one frame is owed to the still blocks and refreshed at its quality
+    /// within the peak, no still frame past the room, and the page comes to the uncapped
+    /// paint-over's quality.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_holds_its_paint_over_to_the_room() {
+        const FRAMES: usize = 600;
+        const THEN: i32 = 4000;
+        let page = still_page_luma();
+        let psnr = |p: &[Vec<u8>]| mean_psnr(&p[p.len() - 1..], std::slice::from_ref(&page));
+        let (plain, plain_sizes, _, _) = scroll_then_still(0, 0, FRAMES, true);
+        let peaks = |t: usize| match t {
+            0..5 => 300,
+            5..=60 => 50_000,
+            _ => THEN,
+        };
+        let (capped, sizes, keys, coarse) = scroll_then_still_under(&peaks, FRAMES, true);
+        let room =
+            (crate::encoders::CAPPED_VBV_FRAMES * THEN as f64 * 1000.0 / 8.0 / 60.0) as usize;
+        let still = &sizes[61..];
+        let largest = still.iter().max().copied().unwrap_or(0);
+        let sent = still.iter().filter(|&&n| n > 0).count();
+        let bytes = |s: &[usize]| s[61..].iter().sum::<usize>();
+        let (a, b) = (psnr(&plain), psnr(&capped));
+        println!(
+            "paint-over under {THEN} kbps after a page coded at its own quality: uncapped {a:.2} \
+             dB in {} bytes still, capped {b:.2} dB in {sent} frames of {} bytes, the largest \
+             {largest} (room {room})",
+            bytes(&plain_sizes),
+            bytes(&sizes)
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(!coarse, "coarse blocks left");
+        assert!(
+            largest <= room,
+            "a still frame of {largest} bytes past the room"
+        );
+        assert!(
+            b >= a - 0.5,
+            "{b:.2} dB against the uncapped paint-over's {a:.2}"
+        );
+    }
+
+    /// The refresh of a peak that let go on a slow link spreads over frames within the peak:
+    /// the page's still frames average no more than it, and the refresh still ends.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_paces_its_refresh_within_the_peak() {
+        const FRAMES: usize = 600;
+        const THEN: i32 = 2000;
+        let (_, sizes, keys, coarse) = scroll_then_still(300, THEN, FRAMES, false);
+        let sent: Vec<usize> = sizes[61..].iter().copied().filter(|&n| n > 0).collect();
+        let kbps =
+            sizes[61..].iter().sum::<usize>() as f64 * 8.0 * 60.0 / (FRAMES - 61) as f64 / 1000.0;
+        let largest = sent.iter().copied().max().unwrap_or(0);
+        println!(
+            "{} still frames sent, largest {largest} bytes, {kbps:.0} kbps under a {THEN} kbps peak",
+            sent.len()
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(!coarse, "the refresh did not end");
+        assert!(
+            kbps <= 1.1 * THEN as f64,
+            "{kbps:.0} kbps under a {THEN} kbps peak"
+        );
+    }
+
+    /// A refresh under way when the page moves again on a slow link lets the peak bind the
+    /// moving frames as before: its frames on the still page each fit the bucket, and the scroll
+    /// after runs within the peak. The scroll's first frame codes the page the bind left coarse
+    /// again, past the bucket, as it does without a refresh (556 kB at quantizer 27; 702 kB at
+    /// 20 after the refresh's frames, held at the session's quantizer, left x264's rate factor
+    /// reading less complexity), and the peak binds from the next.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_refresh_yields_to_motion_within_the_peak() {
+        use crate::encoders::codec::{FRAME_KEY, VIDEO_HEADER_LEN, parse_video_type};
+        const THEN: i32 = 2000;
+        let (w, h) = (W as i32, H as i32);
+        let mut s = CaptureSettings {
+            width: w,
+            height: h,
+            codec: Codec::H264,
+            target_fps: 60.0,
+            video_crf: 25,
+            use_paint_over_quality: false,
+            video_bitrate_kbps: 300,
+            video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+            ..Default::default()
+        };
+        let whole = [smithay::utils::Rectangle::new((0, 0).into(), (w, h).into())];
+        let (mut stripes, mut sizes, mut keys) = (Vec::new(), Vec::new(), 0);
+        let mut refreshing = false;
+        for t in 0..300usize {
+            if t == 61 {
+                s.video_bitrate_kbps = THEN;
+            }
+            // Scrolled, held still while the refresh starts, then scrolled again.
+            let (at, moving) = match t {
+                0..=60 => (t, true),
+                61..=90 => (60, false),
+                _ => (t - 30, true),
+            };
+            let frame = crate::encoders::scrolled_text(W, H, at);
+            let changed: &[_] = if moving { &whole } else { &[] };
+            let out = super::encode_cpu(
+                &mut stripes,
+                &frame,
+                w,
+                h,
+                changed,
+                &s,
+                t as u16,
+                false,
+                false,
+                t == 0,
+            );
+            let mut bytes = 0;
+            for st in &out {
+                keys += usize::from(
+                    t > 0 && parse_video_type(st.data[1]).map(|(_, k)| k) == Some(FRAME_KEY),
+                );
+                bytes += st.data.len() - VIDEO_HEADER_LEN;
+            }
+            refreshing |= t == 90 && stripes[0].ledger.coarse();
+            sizes.push(bytes);
+        }
+        let kbps = sizes[120..].iter().sum::<usize>() as f64 * 8.0 * 60.0 / 180.0 / 1000.0;
+        let largest = sizes[61..=90].iter().copied().max().unwrap_or(0);
+        let bucket = crate::encoders::vbv_bits(
+            THEN as u32 * 1000,
+            60.0,
+            0.0,
+            crate::encoders::CAPPED_VBV_FRAMES,
+        ) as usize
+            / 8;
+        println!(
+            "{kbps:.0} kbps under a {THEN} kbps peak, largest refreshing frame {largest} bytes \
+             (bucket {bucket}), the scroll's first {} bytes",
+            sizes[91]
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(
+            refreshing,
+            "the refresh had ended before the page moved again"
+        );
+        assert!(
+            kbps <= 1.1 * THEN as f64,
+            "{kbps:.0} kbps under a {THEN} kbps peak"
+        );
+        assert!(
+            largest <= bucket,
+            "a {largest}-byte refreshing frame past the {bucket}-byte bucket"
+        );
+    }
+
+    /// A capped CRF stripe whose peak binds refines nothing of its still half, so the moving half
+    /// stays within the peak, paint-over armed or not.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_refines_nothing_while_its_peak_binds() {
+        use crate::CaptureSettings;
+        const KBPS: i32 = 1500;
+        let (w, h) = (W as i32, H as i32);
+        let settings = CaptureSettings {
+            width: w,
+            height: h,
+            codec: Codec::H264,
+            target_fps: 60.0,
+            video_crf: 25,
+            video_paintover_crf: 18,
+            use_paint_over_quality: true,
+            video_bitrate_kbps: KBPS,
+            video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+            ..Default::default()
+        };
+        let still = crate::encoders::scrolled_text(W, H, 0);
+        let moving = [smithay::utils::Rectangle::new(
+            (0, 0).into(),
+            (w, h / 2).into(),
+        )];
+        let mut stripes = Vec::new();
+        let mut bits = 0usize;
+        for t in 0..300u16 {
+            let mut frame = still.clone();
+            let scrolled = crate::encoders::scrolled_text(W, H, t as usize + 1);
+            frame[..W * H * 2].copy_from_slice(&scrolled[..W * H * 2]);
+            let out = super::encode_cpu(
+                &mut stripes,
+                &frame,
+                w,
+                h,
+                if t == 0 { &[] } else { &moving },
+                &settings,
+                t,
+                false,
+                false,
+                t == 0,
+            );
+            if t >= 120 {
+                bits += out.iter().map(|s| s.data.len() * 8).sum::<usize>();
+            }
+        }
+        let kbps = bits as f64 * 60.0 / 180.0 / 1000.0;
+        assert!(
+            kbps <= 1.05 * KBPS as f64,
+            "{kbps:.0} kbps under a {KBPS} kbps peak"
+        );
+    }
+
+    /// A capped CRF session takes each new peak congestion control steers it to live: no key
+    /// frame, and a scroll after a cut codes within the lower peak, where before it the rate
+    /// factor's picture fit under the higher one.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_moves_its_peak_without_a_key_frame() {
+        use crate::encoders::codec::{FRAME_KEY, h264_frame_type};
+        const CUT: usize = 30;
+        const LOW_KBPS: i32 = 1000;
+        let vbv = |kbps: i32| {
+            (crate::encoders::vbv_bits(
+                kbps as u32 * 1000,
+                60.0,
+                0.0,
+                crate::encoders::CAPPED_VBV_FRAMES,
+            ) / 1000) as i32
+        };
+        let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+        let mut enc = H264EncoderWrapper::new(
+            W as i32,
+            H as i32,
+            25,
+            false,
+            60.0,
+            4,
+            false,
+            100_000,
+            vbv(100_000),
+            0,
+            0,
+        )
+        .expect("x264 init");
+        let mut sizes = Vec::new();
+        for i in 0..CUT + FRAMES {
+            if i == CUT {
+                enc.reconfigure_rate(LOW_KBPS, vbv(LOW_KBPS), 60.0);
+            }
+            let mut out = Vec::new();
+            assert!(enc.encode_with_headers(
+                &text_luma(i),
+                &u,
+                &v,
+                W as i32,
+                (W / 2) as i32,
+                (W / 2) as i32,
+                i as u16,
+                i == 0,
+                true,
+                &mut out
+            ));
+            assert!(
+                i == 0 || h264_frame_type(&out) != FRAME_KEY,
+                "frame {i} is a key frame"
+            );
+            sizes.push(out.len() * 8);
+        }
+        let kbps = |frames: &[usize]| {
+            frames.iter().sum::<usize>() as f64 * 60.0 / frames.len() as f64 / 1000.0
+        };
+        let (before, after) = (kbps(&sizes[1..CUT]), kbps(&sizes[CUT + 10..]));
+        assert!(
+            before > 2.0 * LOW_KBPS as f64,
+            "the scroll ran at {before:.0} kbps under the high peak"
+        );
+        assert!(
+            after <= 1.1 * LOW_KBPS as f64,
+            "the scroll ran at {after:.0} kbps under a {LOW_KBPS} kbps peak"
+        );
+    }
+
     /// A CRF session capped or uncapped live codes its next key frame by the new setting.
     #[cfg(feature = "gpl")]
     #[test]
@@ -4628,6 +5700,62 @@ mod qp_bound_sweep {
             &mut out
         ));
         assert_eq!(h264_frame_type(&out), FRAME_KEY, "nothing older is held");
+    }
+
+    /// A reference depth changed live (`LiveTunables::video_reference_frames`) reopens the
+    /// x264 session at it on a key frame, and an unchanged one codes on.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_reopens_at_a_changed_reference_depth() {
+        use crate::encoders::codec::{FRAME_DELTA, FRAME_KEY, h264_frame_type};
+        use crate::encoders::sps::h264_max_num_ref_frames;
+        let mut settings = CaptureSettings {
+            width: W as i32,
+            height: H as i32,
+            codec: Codec::H264,
+            target_fps: 60.0,
+            video_streaming_mode: true,
+            omit_stripe_headers: true,
+            video_reference_frames: 1,
+            ..Default::default()
+        };
+        let mut stripes = Vec::new();
+        let mut encode = |settings: &CaptureSettings, i: usize| {
+            let argb: Vec<u8> = text_luma(i).iter().flat_map(|&l| [l, l, l, 255]).collect();
+            let out = super::encode_cpu(
+                &mut stripes,
+                &argb,
+                W as i32,
+                H as i32,
+                &[],
+                settings,
+                i as u16,
+                false,
+                true,
+                i == 0,
+            );
+            assert_eq!(out.len(), 1, "frame {i} is one full-frame stripe");
+            out[0].data.to_vec()
+        };
+        let first = encode(&settings, 0);
+        assert_eq!(h264_max_num_ref_frames(&first), Some(1));
+        assert_eq!(h264_frame_type(&encode(&settings, 1)), FRAME_DELTA);
+        settings.video_reference_frames = 0;
+        let reopened = encode(&settings, 2);
+        assert_eq!(
+            h264_frame_type(&reopened),
+            FRAME_KEY,
+            "the reopen codes a key frame"
+        );
+        assert!(
+            h264_max_num_ref_frames(&reopened).is_some_and(|n| n > 1),
+            "at the session's own depth"
+        );
+        assert_eq!(
+            h264_frame_type(&encode(&settings, 3)),
+            FRAME_DELTA,
+            "and codes on"
+        );
     }
 
     /// x264 counts `frame_num` in sixteen values and the stream in 4096 (`WideFrameNum`): a loss

@@ -28,7 +28,7 @@ use super::{
 };
 use crate::core::Role;
 
-const PASSWORD: &str = "correct horse battery staple";
+const HIDDEN_TEXT: &str = "correct horse battery staple";
 /// The spellings password managers offer the hint under, written out rather than read from
 /// the server's table: the checks hold the server to them.
 const HINTS: [&str; 3] = [
@@ -1233,18 +1233,18 @@ fn x11_table_read(offer: &[(&str, &[u8])], use_binary: bool) -> Option<Payload> 
 fn x11_reads_a_password_managers_copy_as_a_secret() {
     for hint in HINTS {
         let p = x11_table_read(
-            &[("UTF8_STRING", PASSWORD.as_bytes()), (hint, b"secret")],
+            &[("UTF8_STRING", HIDDEN_TEXT.as_bytes()), (hint, b"secret")],
             true,
         )
         .unwrap();
         assert!(
-            is_secret(&p, PASSWORD),
+            is_secret(&p, HIDDEN_TEXT),
             "x11: a copy offering {hint} reads as its text, marked secret"
         );
     }
     let p = x11_table_read(
         &[
-            ("UTF8_STRING", PASSWORD.as_bytes()),
+            ("UTF8_STRING", HIDDEN_TEXT.as_bytes()),
             ("image/png", b"\x89PNG"),
             ("text/html", b"<b>x</b>"),
             (HINTS[0], b"secret"),
@@ -1253,7 +1253,7 @@ fn x11_reads_a_password_managers_copy_as_a_secret() {
     )
     .unwrap();
     assert!(
-        is_secret(&p, PASSWORD),
+        is_secret(&p, HIDDEN_TEXT),
         "a secret copy reads as its text alone, whatever else it offers"
     );
     let p = x11_table_read(&[("UTF8_STRING", b""), (HINTS[0], b"secret")], false).unwrap();
@@ -1275,14 +1275,14 @@ fn the_compositors_flavors_read_a_secret_as_its_text() {
     for hint in HINTS {
         let p = native_payload(
             &text_entries(&[
-                ("text/plain;charset=utf-8", PASSWORD.as_bytes()),
+                ("text/plain;charset=utf-8", HIDDEN_TEXT.as_bytes()),
                 (hint, b"secret"),
             ]),
             true,
         )
         .unwrap();
         assert!(
-            is_secret(&p, PASSWORD),
+            is_secret(&p, HIDDEN_TEXT),
             "compositor: a copy offering {hint} reads as its text, marked secret"
         );
     }
@@ -1312,13 +1312,13 @@ async fn data_control_reads_a_secret_as_its_text_alone() {
     for hint in HINTS {
         let comp = FakeCompositor::new().with_app(&[
             ("image/png", b"\x89PNG"),
-            ("text/plain", PASSWORD.as_bytes()),
+            ("text/plain", HIDDEN_TEXT.as_bytes()),
             (hint, b"secret"),
         ]);
         let h = nested_handler(controller(), comp.clone(), true);
         let p = h.app_clipboard_read(true).await.unwrap();
         assert!(
-            is_secret(&p, PASSWORD),
+            is_secret(&p, HIDDEN_TEXT),
             "data-control: a copy offering {hint} reads as its text alone, marked secret"
         );
         assert!(
@@ -1347,13 +1347,13 @@ async fn the_monitor_retracts_a_secret_the_session_let_go() {
     let task = tokio::spawn(h.clone().run_monitor());
     tokio::time::sleep(Duration::from_millis(300)).await;
     comp.copy(text_entries(&[
-        ("text/plain", PASSWORD.as_bytes()),
+        ("text/plain", HIDDEN_TEXT.as_bytes()),
         (HINTS[0], b"secret"),
     ]));
     tokio::time::sleep(Duration::from_millis(300)).await;
     let sent = host.payloads(1);
     assert!(
-        sent.len() == 1 && is_secret(&sent[0], PASSWORD),
+        sent.len() == 1 && is_secret(&sent[0], HIDDEN_TEXT),
         "a secret copy reaches the clients marked: {sent:?}"
     );
     comp.copy(vec![]);
@@ -1374,25 +1374,25 @@ async fn the_monitor_retracts_a_secret_the_session_let_go() {
         "a selection cleared after ordinary text sends nothing"
     );
     comp.copy(text_entries(&[
-        ("text/plain", PASSWORD.as_bytes()),
+        ("text/plain", HIDDEN_TEXT.as_bytes()),
         (HINTS[2], b"secret"),
     ]));
     tokio::time::sleep(Duration::from_millis(300)).await;
     let sent = host.payloads(1);
     assert!(
-        sent.len() == 4 && is_secret(&sent[3], PASSWORD),
+        sent.len() == 4 && is_secret(&sent[3], HIDDEN_TEXT),
         "the same secret copied again after its retraction goes out again"
     );
     stop_monitor(&h, task).await;
 
     let comp = FakeCompositor::new();
     let h = wayland_handler(controller(), comp.clone(), true);
-    h.set_clipboard(Payload::secret(PASSWORD), None, false)
+    h.set_clipboard(Payload::secret(HIDDEN_TEXT), None, false)
         .await;
     let offered: HashMap<String, Vec<u8>> = comp.offers.lock()[0].0.iter().cloned().collect();
     assert_eq!(
         offered.get("text/plain").map(Vec::as_slice),
-        Some(PASSWORD.as_bytes())
+        Some(HIDDEN_TEXT.as_bytes())
     );
     assert!(
         HINTS
@@ -1413,7 +1413,7 @@ async fn the_monitor_retracts_a_secret_the_session_let_go() {
 async fn a_secret_is_marked_ahead_of_its_frames_and_never_announced_to_a_viewer() {
     let host = controller();
     let h = wayland_handler(host.clone(), FakeCompositor::new(), true);
-    h.send(Payload::secret(PASSWORD), None, None).await;
+    h.send(Payload::secret(HIDDEN_TEXT), None, None).await;
     assert_eq!(
         host.verbs(1),
         vec!["clipboard_secret", "clipboard"],
@@ -1442,7 +1442,7 @@ async fn a_secret_is_marked_ahead_of_its_frames_and_never_announced_to_a_viewer(
     );
     host.clear();
     host.clients.lock().push((2, Role::Viewer));
-    h.send(Payload::secret(PASSWORD), None, None).await;
+    h.send(Payload::secret(HIDDEN_TEXT), None, None).await;
     h.send(Payload::text("ordinary"), None, None).await;
     h.send(Payload::text("asked for"), Some("cr"), Some(2))
         .await;
@@ -2746,14 +2746,17 @@ async fn a_nested_compositor_moves_copies_through_the_real_data_control_client()
         "the selection reads as the same envelope"
     );
 
-    assert!(h.write(Payload::secret(PASSWORD), None).await);
+    assert!(h.write(Payload::secret(HIDDEN_TEXT), None).await);
     assert_eq!(
         wl_paste(&dir, "wayland-0", HINTS[0]).await,
         b"secret",
         "a secret is offered with its hint"
     );
     let read = h.read(true).await.expect("the secret reads back");
-    assert!(is_secret(&read, PASSWORD), "as its text, marked: {read:?}");
+    assert!(
+        is_secret(&read, HIDDEN_TEXT),
+        "as its text, marked: {read:?}"
+    );
 
     let keys = FakeKeys::new(&[], None);
     assert!(h.write(Payload::text("before"), None).await);

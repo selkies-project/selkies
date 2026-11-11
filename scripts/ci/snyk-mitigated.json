@@ -1,0 +1,3 @@
+{
+  "SNYK-UNMANAGED-LIBJPEGTURBO-2317741": "CVE-2019-13960, disputed, listed for every libjpeg-turbo release: the memory a progressive JPEG whose header claims a huge picture makes the decoder hold. A peer's JPEG is decoded only by the webcam uplink's decoder (crates/pixelflux/src/webcam/decode.rs), which refuses a progressive JPEG, and any side past 8192, before decoding."
+}

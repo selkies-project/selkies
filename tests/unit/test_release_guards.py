@@ -110,6 +110,7 @@ for filename, names in (
 for filename, names in (
     ("tests.yaml", ("unit", "server-unit", "wheel", "wheels", "suites")),
     ("fuzz.yaml", ("fuzz",)),
+    ("browserstack.yaml", ("credentials",)),
 ):
     source = workflow(filename)
     for name in names:

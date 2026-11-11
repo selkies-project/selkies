@@ -13,7 +13,7 @@
 # workflow files, which is left to CI because it needs its own download.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.3
+    rev: v0.17.4
     hooks:
       # Rule selection lives in ruff.toml
       - id: ruff-check
@@ -54,6 +54,12 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+      - id: clippy-fuzz
+        name: clippy (fuzz targets)
+        entry: scripts/ci/clippy-fuzz.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
       - id: web-lint
         name: eslint and tsc (web client)
         # The flat configs are per package and their rules read across files, so
@@ -61,7 +67,7 @@ repos:
         entry: scripts/ci/lint-web.sh
         language: script
         pass_filenames: false
-        files: ^(web/(selkies-dashboard/.*\.(js|jsx|ts|tsx|json)|selkies-web-core/.*\.(js|mjs|ts)|universal-touch-gamepad/.*\.(js|mjs)|eslint\.config\.mjs)|(tests/tools|website/scripts)/.*\.mjs|tests/image/site/.*\.js|eslint\.config\.mjs)$
+        files: ^(web/(selkies-dashboard/.*\.(js|jsx|ts|tsx|json)|selkies-web-core/.*\.(js|mjs|ts)|universal-touch-gamepad/.*\.(js|mjs)|eslint\.config\.mjs)|(tests/tools|website/scripts)/.*\.mjs|tests/browserstack/[^/]*\.(ts|json)|tests/image/site/.*\.js|eslint\.config\.mjs)$
 
       - id: settings-doc
         name: settings reference (docs/settings.md)

@@ -879,9 +879,11 @@ mod tests {
         );
         assert_eq!(csv_cell("=1+1"), "'=1+1", "a formula is quoted");
         let metrics = Metrics::new(true);
-        let dir = std::env::temp_dir().join(format!("selkies-stats-csv-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("video.csv");
+        let dir = tempfile::Builder::new()
+            .prefix("selkies-stats-csv-")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("video.csv");
         let stats = Metrics::sanitize_json_stats(&report());
         metrics.write_webrtc_stats_csv(&stats, path.to_str().unwrap(), false);
         metrics.write_webrtc_stats_csv(
@@ -890,7 +892,6 @@ mod tests {
             false,
         );
         let rows = parse_csv(&std::fs::read_to_string(&path).unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
         let cells: Vec<&String> = rows.iter().flatten().collect();
         let led: Vec<&&String> = cells
             .iter()

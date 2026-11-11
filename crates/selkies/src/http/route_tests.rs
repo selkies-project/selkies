@@ -2031,9 +2031,7 @@ async fn idle_connections() {
         ),
     ];
     for (label, sent) in cases {
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", app.port))
-            .await
-            .unwrap();
+        let mut stream = app.connect().await;
         if !sent.is_empty() {
             stream.write_all(sent).await.unwrap();
         }
@@ -2059,9 +2057,7 @@ async fn idle_connections() {
 
     // A request in progress is never idle: a body trickling for twice the timeout still lands.
     let body = b"xxxxxxxx";
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", app.port))
-        .await
-        .unwrap();
+    let mut stream = app.connect().await;
     stream.write_all(format!("POST /api/slow HTTP/1.1\r\nHost: x\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
                              body.len()).as_bytes()).await.unwrap();
     let started = std::time::Instant::now();
@@ -2320,9 +2316,7 @@ async fn websocket_handshake_through_the_listener() {
             app.port
         )
     };
-    let mut refused = tokio::net::TcpStream::connect(("127.0.0.1", app.port))
-        .await
-        .unwrap();
+    let mut refused = app.connect().await;
     refused
         .write_all(handshake("Origin: https://evil.example\r\n").as_bytes())
         .await
@@ -2335,9 +2329,7 @@ async fn websocket_handshake_through_the_listener() {
         String::from_utf8_lossy(&buf[..n])
     );
 
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", app.port))
-        .await
-        .unwrap();
+    let mut stream = app.connect().await;
     stream.write_all(handshake("").as_bytes()).await.unwrap();
     let n = stream.read(&mut buf).await.unwrap();
     let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();

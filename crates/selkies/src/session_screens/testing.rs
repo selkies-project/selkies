@@ -12,6 +12,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const ISOLATED: &str = "SELKIES_TEST_ISOLATED";
@@ -50,12 +51,19 @@ pub(crate) struct Scratch(pub PathBuf);
 
 impl Scratch {
     pub(crate) fn new(tag: &str) -> Scratch {
+        // The clock tells this process from an earlier one of the same id, and the count tells
+        // apart the tests that start together on parallel threads: a coarse clock source, such
+        // as an HPET, gives them the same reading.
+        static MADE: AtomicU64 = AtomicU64::new(0);
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("after the epoch")
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("selkies-{tag}-{}-{unique}", std::process::id()));
+        let count = MADE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "selkies-{tag}-{}-{unique}-{count}",
+            std::process::id()
+        ));
         std::fs::create_dir(&dir).expect("scratch directory");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("private");
         Scratch(dir)
@@ -151,13 +159,26 @@ pub(crate) fn named_process(dir: &Path, name: &str, env: &[(&str, &str)]) -> Chi
         .expect("the stand-in starts");
     let deadline = Instant::now() + Duration::from_secs(5);
     let comm: String = name.chars().take(15).collect();
-    while std::fs::read_to_string(format!("/proc/{}/comm", child.id()))
-        .map_or(true, |c| c.trim_end() != comm)
-    {
+    while proc_comm(child.id()).map_or(true, |c| c.trim_end() != comm) {
         assert!(Instant::now() < deadline, "{name} never ran");
         std::thread::sleep(Duration::from_millis(10));
     }
     child
+}
+
+/// The name the kernel gives process `pid` (`/proc/<pid>/comm`).
+fn proc_comm(pid: u32) -> std::io::Result<String> {
+    let path = std::path::Path::new("/proc")
+        .join(pid.to_string())
+        .join("comm");
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(std::io::Error::other("not a /proc path"));
+    }
+    std::fs::read_to_string(path)
 }
 
 /// A throwaway Xvfb on a display nothing else holds, and the display's name.

@@ -15,8 +15,12 @@
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
-const source = readFileSync(process.argv[2], 'utf8');
+// The file named, resolved, and refused where it holds a NUL or names a parent.
+const named = resolve(process.argv[2] ?? '');
+if (!/^\/[^\0]*$/.test(named) || named.split('/').includes('..')) throw new Error(`file-index-footer: ${named} is not a usable path`);
+const source = readFileSync(named, 'utf8');
 const start = source.indexOf('function processDirectoryListing()');
 const end = source.indexOf('let attempts = 0;', start);
 if (start === -1 || end === -1) {

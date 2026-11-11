@@ -29,6 +29,12 @@
 //! to, at limited range, and declares it; VP8 is held to BT.601, the only matrix its bitstream
 //! can name. libva itself is loaded at run time, so the host's copy serves the driver it was
 //! built for, and a test can put its own functions behind the same table.
+//!
+//! The constant quantizer runs uncapped where a caller asks for a capped one
+//! (`RateSettings::capped`): the rate-control mode is fixed with the session's configuration
+//! (`VAConfigAttribRateControl`), so a constant-quantizer session takes no peak, nor goes over
+//! to a constant rate while one binds, as NVENC's does, short of a new configuration and the key
+//! frame it opens with.
 
 mod av1;
 mod h264;
@@ -1198,7 +1204,7 @@ impl VaapiEncoder {
         bit_depth: u32,
     ) -> Result<Self, String> {
         let api = device.api;
-        let rate = RateSettings::new(settings);
+        let rate = RateSettings::new(settings).uncapped();
         let rc_mode = if rate.cbr { VA_RC_CBR } else { VA_RC_CQP };
         let rt_format = rt_format(fullcolor, bit_depth);
         let width = settings.width.max(1) as u32;

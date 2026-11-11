@@ -1849,6 +1849,7 @@ static const char *resolve_at(int dirfd, const char *pathname, char *full, size_
         snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", dirfd);
         ssize_t len = readlink(procfd, full, full_sz - 1);
         if (len > 0 && (size_t)len < full_sz - 1) {
+            full[len] = '\0'; /* readlink leaves the string unterminated */
             int w = snprintf(full + len, full_sz - (size_t)len, "/%s", pathname);
             if (w > 0 && (size_t)w < full_sz - (size_t)len) {
                 return full;

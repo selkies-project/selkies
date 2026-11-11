@@ -629,6 +629,39 @@ async fn another_tab_joins_beside_the_owner() {
     assert!(rig.primary_capture().has("tunables"), "a crf applies live");
 }
 
+/// A page joining beside the owner is sent one key frame: its relay asks for one at the first
+/// delta it drops, and the join asks only where the relay has not.
+#[tokio::test]
+async fn a_page_joining_beside_is_asked_one_key_frame() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    capture.deliver(1, 1, true);
+    settle().await;
+    let mut beside = rig.controller().await;
+    settle().await;
+    let idrs = capture.count("idr");
+    // The page's relay, made at the first frame since it connected, drops the delta and asks.
+    capture.deliver(2, 1, false);
+    settle().await;
+    assert_eq!(
+        capture.count("idr"),
+        idrs + 1,
+        "the relay asks for the page's key frame"
+    );
+    beside
+        .say(r#"SETTINGS,{"tabId":"b","initialClientWidth":640,"initialClientHeight":480}"#)
+        .await;
+    settle().await;
+    assert!(rig.service.reg.lock().is_beside(beside.id()));
+    assert_eq!(
+        capture.count("idr"),
+        idrs + 1,
+        "the join adds no second one"
+    );
+}
+
 #[tokio::test]
 async fn a_pick_needs_full_permissions_on_both_pages() {
     let rig = Rig::new();
@@ -1390,6 +1423,90 @@ async fn actual_non_nvenc_sessions_keep_their_existing_reference_cap() {
     }
 }
 
+/// A second page on a display whose encoder keeps one reference has the encoder take its own
+/// depth in place, as a live tunable with no capture restart. The depth stays once the display
+/// is down to one page, through a reconcile, until the capture next starts.
+#[tokio::test]
+async fn a_second_page_takes_the_encoders_own_reference_depth() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let capture = rig.primary_capture();
+    let frames = |rig: &Rig| {
+        rig.service.st.lock().instances[PRIMARY_DISPLAY]
+            .settings
+            .video_reference_frames
+    };
+    rig.service
+        .st
+        .lock()
+        .instances
+        .get_mut(PRIMARY_DISPLAY)
+        .unwrap()
+        .settings
+        .encode_node_index = -1;
+    assert_eq!(frames(&rig), 1, "one page, one reference");
+    let (starts, tunables) = (capture.count("start"), capture.count("tunables"));
+
+    let mut viewer = rig.viewer().await;
+    viewer.say("SETTINGS,{}").await;
+    settle().await;
+    assert_eq!(frames(&rig), 0, "two pages, the encoder's own depth");
+    assert!(capture.count("tunables") > tunables, "taken live");
+    assert_eq!(capture.count("start"), starts, "with no restart");
+
+    viewer.say("STOP_VIDEO").await;
+    settle().await;
+    let actual = settled_encoder("x264", false);
+    *capture.info.lock() = Some(actual.clone());
+    rig.service
+        .publish_stream_info(PRIMARY_DISPLAY, crate::stats::stream_info_message(&actual))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(frames(&rig), 0, "one page again, the depth stays");
+    assert_eq!(
+        capture.count("start"),
+        starts,
+        "and nothing restarts for it"
+    );
+
+    let layout = rig.layout(PRIMARY_DISPLAY).unwrap();
+    rig.service.stop_capture_for_display(PRIMARY_DISPLAY).await;
+    rig.service
+        .start_capture_for_display(PRIMARY_DISPLAY, layout)
+        .await;
+    assert_eq!(
+        capture.starts.lock().last().unwrap().video_reference_frames,
+        1,
+        "its next start takes one reference again"
+    );
+}
+
+/// A page on each of two displays is one page per display: the primary keeps one reference.
+#[tokio::test]
+async fn a_page_on_another_display_leaves_the_primary_one_reference() {
+    let rig = Rig::new();
+    let _owner = rig.owner("a").await;
+    settle().await;
+    let mut second = rig.controller().await;
+    second.say(&secondary_settings("display2", "left")).await;
+    settle().await;
+    assert!(rig.captures.of("display2").is_some());
+    assert_eq!(
+        rig.service.st.lock().instances[PRIMARY_DISPLAY]
+            .settings
+            .video_reference_frames,
+        1
+    );
+    assert!(
+        rig.primary_capture()
+            .starts
+            .lock()
+            .iter()
+            .all(|s| s.video_reference_frames == 1)
+    );
+}
+
 #[tokio::test]
 async fn the_rate_control_and_quality_verbs_apply() {
     let rig = Rig::new();
@@ -1740,6 +1857,160 @@ async fn a_steered_rate_held_is_told_to_its_page() {
     }
 }
 
+/// A CRF display opens capped at the steer's start, its peak climbs under the range's high end
+/// as a CBR target does, its page is told the rate it held, and a client's bitrate, CBR's
+/// alone, leaves the peak where the steer put it.
+#[tokio::test]
+async fn a_crf_display_is_steered_by_its_peak() {
+    use crate::ws::steer::START_KBPS;
+    let rig = Rig::new();
+    let mut owner = rig.controller().await;
+    owner
+        .say(r#"SETTINGS,{"initialClientWidth":1280,"initialClientHeight":720,"tabId":"a","encoder":"h264enc","rate_control_mode":"crf"}"#)
+        .await;
+    settle().await;
+    if !crate::settings::settings().congestion_control().on {
+        return;
+    }
+    let capture = rig.primary_capture();
+    let opened = capture.starts.lock().last().cloned().expect("a capture");
+    assert!(!opened.video_cbr_mode);
+    assert_eq!(
+        opened.video_vbv_multiplier,
+        pixelflux::encoders::CAPPED_VBV_FRAMES,
+        "capped from the first frame, so a cut never reopens the encoder"
+    );
+    assert_eq!(opened.video_bitrate_kbps, START_KBPS as i32);
+    owner.clear().await;
+    let link = rig.service.link(PRIMARY_DISPLAY).unwrap();
+    let hi = crate::settings::settings().video_bitrate().1.as_f64();
+    let mut bytes = 0u64;
+    for tick in 0..30 {
+        let at = crate::ws::now() + tick as f64 * 0.5;
+        {
+            let mut l = link.lock();
+            l.acknowledged_frame_id = 1;
+            l.has_sent_any_frame = true;
+            l.last_sent_frame_id = 1;
+            for ack in 0..10 {
+                bytes += 25_000;
+                l.sent_bytes = bytes;
+                l.note_round_trip(20.0, bytes, at - 0.5 + ack as f64 * 0.05);
+            }
+        }
+        rig.service
+            .backpressure_check(PRIMARY_DISPLAY, &link, at, 0.0)
+            .await;
+    }
+    settle().await;
+    let peaks: Vec<i64> = capture
+        .calls
+        .lock()
+        .iter()
+        .filter_map(|c| c.strip_prefix("bitrate ")?.parse().ok())
+        .collect();
+    assert!(
+        peaks.first().is_some_and(|p| *p > START_KBPS as i64),
+        "the peak climbs from the start: {peaks:?}"
+    );
+    assert!(peaks.iter().all(|p| *p as f64 <= hi), "{peaks:?}");
+    assert!(
+        owner
+            .texts()
+            .await
+            .iter()
+            .any(|t| t.starts_with("CC_RATE ")),
+        "{peaks:?}"
+    );
+    let calls = capture.calls.lock().len();
+    rig.service
+        .handle_opcode_video_bitrate(2000.0, PRIMARY_DISPLAY)
+        .await;
+    assert_eq!(
+        capture.calls.lock().len(),
+        calls,
+        "a client's bitrate moves no peak"
+    );
+    assert_eq!(
+        rig.service.st.lock().displays[PRIMARY_DISPLAY].video_bitrate,
+        2000.0,
+        "and is kept for CBR"
+    );
+}
+
+/// A CRF display whose capture says its encoder reads no peak is left to its rate factor, as
+/// without congestion control: no steer, no rate told to its page, and its encoder back at the
+/// bitrate its client chose.
+#[tokio::test]
+async fn a_crf_display_whose_encoder_reads_no_peak_is_not_steered() {
+    let rig = Rig::new();
+    let mut owner = rig.controller().await;
+    owner
+        .say(r#"SETTINGS,{"initialClientWidth":1280,"initialClientHeight":720,"tabId":"a","encoder":"h264enc","rate_control_mode":"crf","video_bitrate":6000}"#)
+        .await;
+    settle().await;
+    if !crate::settings::settings().congestion_control().on {
+        return;
+    }
+    let watch = rig.service.reg.lock().watches.get(PRIMARY_DISPLAY).cloned();
+    let mut described = serde_json::Map::new();
+    described.insert("capped".into(), json!(false));
+    watch.expect("a watch").describe(described);
+    owner.clear().await;
+    let capture = rig.primary_capture();
+    let calls = capture.calls.lock().len();
+    let link = rig.service.link(PRIMARY_DISPLAY).unwrap();
+    let mut bytes = 0u64;
+    for tick in 0..30 {
+        let at = crate::ws::now() + tick as f64 * 0.5;
+        {
+            let mut l = link.lock();
+            l.acknowledged_frame_id = 1;
+            l.has_sent_any_frame = true;
+            l.last_sent_frame_id = 1;
+            for ack in 0..10 {
+                bytes += 25_000;
+                l.sent_bytes = bytes;
+                l.note_round_trip(20.0, bytes, at - 0.5 + ack as f64 * 0.05);
+            }
+        }
+        rig.service
+            .backpressure_check(PRIMARY_DISPLAY, &link, at, 0.0)
+            .await;
+    }
+    settle().await;
+    let rates: Vec<String> = capture.calls.lock()[calls..]
+        .iter()
+        .filter(|c| c.starts_with("bitrate "))
+        .cloned()
+        .collect();
+    assert_eq!(
+        rates,
+        ["bitrate 6000"],
+        "back at the client's bitrate, once"
+    );
+    assert!(
+        !owner
+            .texts()
+            .await
+            .iter()
+            .any(|t| t.starts_with("CC_RATE ")),
+        "no rate the stream never ran at is remembered"
+    );
+    // On to an encoder that takes the peak: the new session opens capped at the rate the stream
+    // ran at, not at the range's high end.
+    assert_eq!(link.lock().link_kbps, None);
+    owner
+        .say(r#"SETTINGS,{"tabId":"a","encoder":"vp9enc","rate_control_mode":"crf","video_bitrate":6000}"#)
+        .await;
+    settle().await;
+    assert_eq!(
+        rig.service.link(PRIMARY_DISPLAY).unwrap().lock().link_kbps,
+        Some(6000.0),
+        "the encoder's switch left the new capped session at the range's high end"
+    );
+}
+
 #[tokio::test]
 async fn the_clipboard_host_sends_to_one_client_and_waits_on_its_queue() {
     use crate::clipboard::outbound::ClipboardHost;
@@ -1798,6 +2069,9 @@ async fn sessions_list_the_pages_and_one_can_be_disconnected() {
     let rig = Rig::new();
     let owner = rig.owner("a").await;
     settle().await;
+    let mut perms = owner.client().perms();
+    perms.connected_at = 1_000_000.5;
+    owner.client().set_perms(perms);
     let sessions = {
         let service = rig.service.clone();
         let task = tokio::spawn(async move { service.sessions().await });
@@ -1821,6 +2095,11 @@ async fn sessions_list_the_pages_and_one_can_be_disconnected() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["transport"], json!("websockets"));
     assert_eq!(sessions[0]["display"], json!("primary"));
+    // The form the audit trail and the WebRTC listing carry: UTC to the millisecond.
+    assert_eq!(
+        sessions[0]["connected_at"],
+        json!("1970-01-12T13:46:40.500Z")
+    );
     let id = sessions[0]["id"].as_str().unwrap().to_string();
     assert!(rig.service.disconnect_session(&id).await);
     assert_eq!(owner.client().close_code(), Some(1001));
@@ -1944,6 +2223,71 @@ async fn a_lone_wayland_resize_in_its_process() {
 fn a_lone_wayland_resize_carries_the_session_screen() {
     crate::session_screens::testing::run_isolated(
         "ws::server_tests::a_lone_wayland_resize_in_its_process",
+        &[],
+    );
+}
+
+/// A realized-geometry read folds in what the compositor made of the size a pass laid out, and
+/// leaves a size the page asked for during the pass to the pass that lays it out.
+#[tokio::test]
+#[ignore = "run by a_request_during_a_pass_outlives_its_realized_read, in a process of its own"]
+async fn a_request_during_a_pass_in_its_process() {
+    if !crate::session_screens::testing::isolated() {
+        return;
+    }
+    crate::settings::install(crate::settings::Settings::parse(
+        &["--wayland=true".to_string()],
+        &|_| None,
+    ));
+    let rig = Rig::new();
+    let mut page = rig.controller().await;
+    page.say(r#"SETTINGS,{"initialClientWidth":1280,"initialClientHeight":720,"tabId":"a"}"#)
+        .await;
+    let capture = rig.primary_capture();
+    let size = |rig: &Rig| {
+        let st = rig.service.st.lock();
+        let d = &st.displays[PRIMARY_DISPLAY];
+        (d.width, d.height)
+    };
+
+    // The pass laid 1920x1080 out, and the page asked for 1600x838 while it ran.
+    {
+        let mut st = rig.service.st.lock();
+        let d = st.displays.get_mut(PRIMARY_DISPLAY).expect("the primary");
+        d.laid_out = Some((1920, 1080));
+        (d.width, d.height) = (1600, 838);
+    }
+    *capture.geometry.lock() = Ok(Some((1920, 1080, 1.0)));
+    rig.service
+        .sync_wayland_realized_geometry(PRIMARY_DISPLAY, false)
+        .await;
+    assert_eq!(size(&rig), (1600, 838), "the request outlives the read");
+    let layout = rig.layout(PRIMARY_DISPLAY).expect("the primary's layout");
+    assert_eq!(
+        (layout.w, layout.h),
+        (1920, 1080),
+        "the layout holds what was realized"
+    );
+
+    // Laid out in turn, the request takes what the compositor made of it.
+    rig.service
+        .st
+        .lock()
+        .displays
+        .get_mut(PRIMARY_DISPLAY)
+        .expect("the primary")
+        .laid_out = Some((1600, 838));
+    *capture.geometry.lock() = Ok(Some((1600, 832, 1.0)));
+    rig.service
+        .sync_wayland_realized_geometry(PRIMARY_DISPLAY, false)
+        .await;
+    assert_eq!(size(&rig), (1600, 832));
+}
+
+#[test]
+fn a_request_during_a_pass_outlives_its_realized_read() {
+    crate::session_screens::testing::run_isolated(
+        "ws::server_tests::a_request_during_a_pass_in_its_process",
         &[],
     );
 }

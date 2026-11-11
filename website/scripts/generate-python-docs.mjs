@@ -84,6 +84,9 @@ if (!jsonPath) {
   }
 }
 
+// The JSON is resolved and refused where it holds a NUL or names a parent.
+jsonPath = resolve(jsonPath);
+if (!/^\/[^\0]*$/.test(jsonPath) || jsonPath.split('/').includes('..')) throw new Error(`generate-python-docs: ${jsonPath} is not a usable path`);
 const pkg = JSON.parse(await fs.readFile(jsonPath, 'utf8'));
 for (const name of EXCLUDED_MODULES) delete pkg.modules[name];
 
@@ -92,6 +95,8 @@ for (const name of EXCLUDED_MODULES) delete pkg.modules[name];
 const files = Python.convert(pkg, { baseUrl: '/reference', groupBy: 'none' });
 
 if (archiveDir) {
+  // Refused where it holds a NUL or names a parent, as the JSON above.
+  if (!/^\/[^\0]*$/.test(archiveDir) || archiveDir.split('/').includes('..')) throw new Error(`generate-python-docs: ${archiveDir} is not a usable path`);
   const pages = await writeHtml(files, archiveDir, 'Python server', '/reference');
   console.log(`generate-python-docs: wrote ${pages} pages to ${archiveDir}`);
   process.exit(0);

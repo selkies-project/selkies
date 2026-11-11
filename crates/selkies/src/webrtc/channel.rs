@@ -168,7 +168,8 @@ impl ChannelTx {
         self.send_typed("system", &json!({"action": action}));
     }
 
-    /// Wait until the channel has at most `DATA_CHANNEL_BULK_HIGH_WATER` queued bytes; false where
+    /// Wait until what the channel has unacknowledged is within its bulk bound, about twice the
+    /// path's bandwidth-delay product and at least `DATA_CHANNEL_BULK_HIGH_WATER`; false where
     /// it did not within `timeout`, or the channel closed.
     pub async fn drain(&self, timeout: Duration) -> bool {
         match &self.sink {

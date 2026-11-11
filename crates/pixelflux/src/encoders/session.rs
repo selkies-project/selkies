@@ -236,6 +236,9 @@ impl Quality {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RateSettings {
     pub cbr: bool,
+    /// Whether a constant-quality session is capped at a peak of `bitrate_kbps` with a VBV of
+    /// `vbv_multiplier` frames (`CaptureSettings::video_vbv_multiplier`), fixed at its open.
+    pub capped: bool,
     pub bitrate_kbps: i32,
     pub vbv_multiplier: f64,
     pub keyframe_interval_s: f64,
@@ -248,6 +251,7 @@ impl RateSettings {
     pub fn new(settings: &CaptureSettings) -> Self {
         Self {
             cbr: settings.video_cbr_mode,
+            capped: !settings.video_cbr_mode && settings.video_vbv_multiplier > 0.0,
             bitrate_kbps: settings.video_bitrate_kbps,
             vbv_multiplier: settings.video_vbv_multiplier,
             keyframe_interval_s: settings.keyframe_interval_s,
@@ -257,16 +261,27 @@ impl RateSettings {
         }
     }
 
+    /// The settings of a session that runs its constant quality uncapped whatever a caller asks,
+    /// whose bitrate then moves nothing.
+    pub fn uncapped(self) -> Self {
+        Self {
+            capped: false,
+            ..self
+        }
+    }
+
     /// The settings as they stand now, if a rate or frame-rate value the encoder was programmed
-    /// with changed: in CBR a bitrate or VBV multiplier, in any mode the frame rate.
+    /// with changed: a bitrate or VBV multiplier in CBR and in a capped CRF, the frame rate in
+    /// any mode.
     pub fn changed(&self, settings: &CaptureSettings) -> Option<Self> {
         let next = Self {
             cbr: self.cbr,
+            capped: self.capped,
             min_qp: self.min_qp,
             max_qp: self.max_qp,
             ..Self::new(settings)
         };
-        let rate_moved = self.cbr
+        let rate_moved = (self.cbr || self.capped)
             && (next.bitrate_kbps != self.bitrate_kbps
                 || next.vbv_multiplier != self.vbv_multiplier);
         (rate_moved || next.fps != self.fps).then_some(next)
@@ -285,6 +300,76 @@ impl RateSettings {
             self.keyframe_interval_s,
             self.vbv_multiplier,
         )
+    }
+}
+
+/// A leaky bucket of a capped constant quality's peak (`RateSettings::capped`), its buffer the
+/// session's VBV, for an encoder whose constant quality takes no cap of its own: the session
+/// codes as an uncapped one while the bucket holds what it codes, binds to the peak through its
+/// constant rate, never finer than its quality, from the frame that overflows the bucket, and
+/// lets go once `RELEASE_FRAMES` frames in a row come out at that quality with the bucket back
+/// within its buffer, which says the content fits under the peak again: a rate control that
+/// takes the peak with its buffer full codes at the quality for a while whatever the content.
+/// The frame that overflows has already gone out: the cap holds the frames after it.
+#[derive(Clone, Copy, Debug)]
+pub struct PeakBucket {
+    pub bps: u32,
+    pub vbv: u32,
+    fps: f64,
+    /// The bits the bucket holds.
+    fill: f64,
+    pub binding: bool,
+    /// Frames in a row the constant rate coded at the quality while binding.
+    at_floor: u32,
+}
+
+impl PeakBucket {
+    pub const RELEASE_FRAMES: u32 = 30;
+
+    pub fn new(bps: u32, vbv: u32, fps: f64) -> Self {
+        Self {
+            bps,
+            vbv,
+            fps: fps.max(1.0),
+            fill: 0.0,
+            binding: false,
+            at_floor: 0,
+        }
+    }
+
+    /// Frames in a row the constant rate has coded at the quality while binding.
+    #[cfg(test)]
+    pub fn floor_run(&self) -> u32 {
+        self.at_floor
+    }
+
+    /// Take a live peak, buffer, and frame rate.
+    pub fn follow(&mut self, bps: u32, vbv: u32, fps: f64) {
+        self.bps = bps;
+        self.vbv = vbv;
+        self.fps = fps.max(1.0);
+    }
+
+    /// Fold in a frame of `bits`, `at_floor` saying whether the rate control coded it at the
+    /// session's quality (`None` for a held frame, whose quantizer is not the rate control's):
+    /// `Some(true)` to bind the session to the peak, `Some(false)` to release it.
+    pub fn note(&mut self, bits: f64, at_floor: Option<bool>) -> Option<bool> {
+        self.fill = (self.fill - self.bps as f64 / self.fps).max(0.0) + bits;
+        if !self.binding {
+            self.binding = self.fill > self.vbv as f64;
+            self.at_floor = 0;
+            return self.binding.then_some(true);
+        }
+        match at_floor {
+            Some(true) => self.at_floor += 1,
+            Some(false) => self.at_floor = 0,
+            None => {}
+        }
+        if self.at_floor < Self::RELEASE_FRAMES || self.fill > self.vbv as f64 {
+            return None;
+        }
+        self.binding = false;
+        Some(false)
     }
 }
 
@@ -438,6 +523,38 @@ mod tests {
         settings.video_bitrate_kbps = 9000;
         assert_eq!(cbr.changed(&settings).map(|r| r.bitrate_kbps), Some(9000));
         assert_eq!(cbr.bps(), 8_000_000);
+        assert!(!cbr.capped);
+    }
+
+    /// A capped constant-quality session reads its peak as a constant rate reads its target; a
+    /// session that cannot cap reads neither.
+    #[test]
+    fn a_capped_crf_session_notices_its_peak_move() {
+        let mut settings = CaptureSettings {
+            target_fps: 60.0,
+            video_bitrate_kbps: 4000,
+            video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+            ..Default::default()
+        };
+        let capped = RateSettings::new(&settings);
+        assert!(capped.capped && !capped.cbr);
+        let uncapped = capped.uncapped();
+        settings.video_bitrate_kbps = 2000;
+        assert_eq!(
+            capped
+                .changed(&settings)
+                .map(|r| (r.bitrate_kbps, r.capped)),
+            Some((2000, true))
+        );
+        assert_eq!(uncapped.changed(&settings), None);
+        assert!(
+            !RateSettings::new(&CaptureSettings {
+                video_vbv_multiplier: 0.0,
+                ..settings
+            })
+            .capped,
+            "no buffer leaves the rate factor uncapped"
+        );
     }
 
     /// A packet names the frame it encodes however deep the encoder pipelines, the frames it

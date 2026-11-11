@@ -146,6 +146,13 @@ pub fn hardware_expected(
     }
 }
 
+/// Whether a stream description (`stream_info_message`) says its capture runs its constant
+/// quality under the peak it was given (`capped`): `Some(false)` for an encoder with no capped
+/// mode, which reads no peak, `None` for a capture not described yet.
+pub fn takes_peak(info: Option<&Map<String, Json>>) -> Option<bool> {
+    info?.get("capped")?.as_bool()
+}
+
 /// The `stream_info` object of a capture's report, keyed as the pages read it: pixelflux's
 /// description, `encode_node` as the device path of a hardware session (empty otherwise),
 /// `striped` for more than one stripe (JPEG's), and a Wayland capture's renderer beside it.
@@ -167,6 +174,7 @@ pub fn stream_info_message(report: &StreamInfo) -> Map<String, Json> {
     map.insert("fullcolor".into(), json!(info.fullcolor));
     map.insert("bit_depth".into(), json!(info.bit_depth));
     map.insert("full_range".into(), json!(info.full_range));
+    map.insert("capped".into(), json!(info.capped));
     map.insert("striped".into(), json!(info.stripes > 1));
     map.insert("gpu".into(), json!(info.gpu));
     map.insert("driver".into(), json!(info.driver));
@@ -308,6 +316,12 @@ impl StreamWatch {
     /// The description last published, for a page that connects later.
     pub fn info(&self) -> Option<Map<String, Json>> {
         self.info.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Stand in a description, as a read of the capture's report would publish it.
+    #[cfg(test)]
+    pub(crate) fn describe(&self, info: Map<String, Json>) {
+        *self.info.lock().unwrap_or_else(|e| e.into_inner()) = Some(info);
     }
 
     /// The per-frame record of the time from the end of a frame's encode to the wire.
@@ -605,6 +619,23 @@ mod tests {
     use super::*;
     use crate::settings::{Sides, TenBit};
     use pixelflux::report::{StreamPeaks, StreamTotals};
+
+    /// A description says whether its capture takes a peak; one not read yet says nothing.
+    #[test]
+    fn a_description_says_whether_its_capture_takes_a_peak() {
+        let described = |capped: bool| {
+            stream_info_message(&pixelflux::StreamInfo {
+                info: pixelflux::report::StreamInfo {
+                    capped,
+                    ..Default::default()
+                },
+                renderer: None,
+            })
+        };
+        assert_eq!(takes_peak(Some(&described(true))), Some(true));
+        assert_eq!(takes_peak(Some(&described(false))), Some(false));
+        assert_eq!(takes_peak(None), None);
+    }
 
     /// A capture whose encode counters the test advances by hand, reporting each read's
     /// extremes and starting them again, as pixelflux's report does.

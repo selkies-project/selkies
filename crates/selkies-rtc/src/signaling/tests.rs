@@ -51,6 +51,17 @@ impl Sock {
         ceiling: Option<ClientType>,
         lines: &[&str],
     ) -> Sock {
+        Self::join_at(registry, ceiling, None, lines).await
+    }
+
+    /// `join`, from a request whose `Host` header named `host`.
+    async fn join_at(
+        registry: &Arc<PeerRegistry>,
+        ceiling: Option<ClientType>,
+        host: Option<&str>,
+        lines: &[&str],
+    ) -> Sock {
+        let host = host.map(str::to_owned);
         let (peer_socket, mut outbox) = socket();
         let (feed, inbound) = mpsc::channel(4096);
         let written = Arc::new(Mutex::new(Written::default()));
@@ -71,7 +82,9 @@ impl Sock {
         let served = Arc::clone(registry);
         let serve_socket = Arc::clone(&peer_socket);
         let task = tokio::spawn(async move {
-            served.serve(serve_socket, inbound, "page", ceiling).await;
+            served
+                .serve(serve_socket, inbound, "page", host.as_deref(), ceiling)
+                .await;
         });
         let sock = Sock {
             feed,
@@ -435,6 +448,54 @@ async fn what_a_hello_said_reaches_session_start_and_the_peer_entry() {
     assert_eq!(info.page_size, Some((1280, 720)));
     assert_eq!(info.tab_id.as_deref().map(str::len), Some(64));
     assert_eq!(info.cc_start_kbps, Some(json!(4000)));
+}
+
+#[tokio::test]
+async fn a_peer_keeps_the_host_its_latest_signaling_request_named() {
+    let registry = PeerRegistry::new(options(true));
+    let server_hello = format!(
+        "HELLO server {}",
+        json!({"server_token": registry.server_peer_secret()})
+    );
+    let server = Sock::join(&registry, None, &[&server_hello]).await;
+    let _page = Sock::join_at(
+        &registry,
+        None,
+        Some("203.0.113.5:8080"),
+        &[&resumable("controller", KEY), "SESSION server"],
+    )
+    .await;
+    let peer_id = server.started().last().cloned().expect("a session started");
+    assert_eq!(
+        registry
+            .peer(&peer_id)
+            .and_then(|info| info.host)
+            .as_deref(),
+        Some("203.0.113.5:8080")
+    );
+    let moved = Sock::join_at(
+        &registry,
+        None,
+        Some("198.51.100.7:8080"),
+        &[&resumable("controller", KEY)],
+    )
+    .await;
+    assert!(
+        moved
+            .sent()
+            .first()
+            .is_some_and(|line| line.starts_with("RESUMED ")),
+        "{:?}",
+        moved.sent()
+    );
+    assert_eq!(
+        registry
+            .peer(&peer_id)
+            .and_then(|info| info.host)
+            .as_deref(),
+        Some("198.51.100.7:8080"),
+        "a resume takes the host of the request it arrived on"
+    );
 }
 
 #[tokio::test]

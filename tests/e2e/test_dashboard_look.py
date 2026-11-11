@@ -35,6 +35,7 @@ times (at rest, hovered, focused) with its scrolling swept, in two themes on thr
 import contextlib
 import json
 import os
+import re
 import sys
 import time
 from typing import Any, List
@@ -652,8 +653,9 @@ def contrast_block(layout: str) -> "H.Results":
                         if f["ratio"] < f["need"] and not f.get("disabled") and key not in seen:
                             seen.add(key)
                             below.append(f)
-                    if os.environ.get("LOOK_DUMP"):
-                        with open(os.environ["LOOK_DUMP"], "a") as dump:
+                    dump_path = os.environ.get("LOOK_DUMP", "")
+                    if dump_path and re.fullmatch(r"/[^\0]*", dump_path) and ".." not in dump_path.split("/"):
+                        with open(dump_path, "a") as dump:
                             for f in below:
                                 dump.write(json.dumps(dict(f, layout=layout, theme=theme)) + "\n")
                     kinds = sorted({f["kind"] for f in rows})

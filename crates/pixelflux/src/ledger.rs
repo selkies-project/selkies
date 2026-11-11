@@ -22,7 +22,10 @@
 //! rate control's quality leaves every block unclean. A block that held still and is clean is
 //! constant (`BlockLedger::constant`): a frame of the rate control's may code it as a skip
 //! without analysis (`FrameEncoder::constant_blocks`), since its reference already holds it at
-//! the cleanup's quality. Nothing reads pixels: the damage source
+//! the cleanup's quality. A block coded while a capped constant quality's peak bound it is
+//! coarse (`BlockLedger::coded`), never clean; once the peak lets go, the coarse blocks that held
+//! still are coded again at the session's own quality, so many a frame (`BlockLedger::refresh`,
+//! `RefreshPace`), the rest of them waiting as skips. Nothing reads pixels: the damage source
 //! did the detection, and a source that over-reports (a client damaging its whole surface)
 //! only refines less, never wrongly.
 
@@ -172,6 +175,71 @@ impl RefinePace {
     }
 }
 
+/// Quality index steps finer than the session's own a capped constant quality's refresh codes its
+/// coarse blocks at (`BlockLedger::refresh`), so a predicted frame refreshing them comes to what
+/// the uncapped session's picture stands at: x264 refreshing a 720p page of text it coded at
+/// quantizer 51 brought it to 35.3 dB at the session's own quality where the uncapped session's
+/// stood at 37.9, to 37.7 three steps finer, and to 42.5 six steps finer at twice the bytes.
+pub const REFRESH_FINER: u32 = 3;
+
+/// Quality index steps further finer a refresh codes a block a capped key frame left coarse at
+/// (`BlockLedger::refresh`), where the uncapped session's key frame stood at its rate factor's
+/// intra offset finer than its predicted frames: x264's coarse start on a 1080p desktop left
+/// the screen's still parts 0.6 dB under the uncapped session's refreshed `REFRESH_FINER` steps
+/// finer.
+pub const REFRESH_KEY_FINER: u32 = 3;
+
+/// Frames a capped constant quality's refresh of its coarse blocks (`BlockLedger::refresh`) would
+/// take at its first share of the region's blocks a frame, which halves while a refreshing frame
+/// comes out past the peak's frame budget and doubles while one comes out under half of it
+/// (`RefreshPace`): on a fast path the share doubles to the whole region in eight frames, and
+/// on a slow one the first frame is a small one.
+const REFRESH_FRAMES: usize = 256;
+
+/// Frames a refresh waits, refreshing nothing and holding nothing back, once a frame refreshing
+/// one block comes out past the peak's frame budget: the content alone fills the peak, as where
+/// NVENC runs past a peak it leaves its level for, and a refresh crawling a block a frame would
+/// hold the rest of the coarse blocks back for seconds, which NVENC holds at its coarsest
+/// quantizer through its QP map and deblocks frame after frame (the static parts of a 1080p
+/// scene 0.4 dB under the uncapped session's after two seconds).
+const REFRESH_PAUSE: u32 = 60;
+
+/// How many coarse blocks a region refreshes a frame (`REFRESH_FRAMES`, `REFRESH_PAUSE`).
+#[derive(Clone, Debug, Default)]
+pub struct RefreshPace {
+    count: usize,
+    paused: u32,
+}
+
+impl RefreshPace {
+    /// The most blocks of a region of `blocks` this frame refreshes, 0 while it waits.
+    pub fn most(&mut self, blocks: usize) -> usize {
+        if self.paused > 0 {
+            self.paused -= 1;
+            return 0;
+        }
+        if self.count == 0 {
+            self.count = blocks.div_ceil(REFRESH_FRAMES).max(1);
+        }
+        self.count
+    }
+
+    /// A refreshing frame came out at `bytes` against the peak's frame `budget`.
+    pub fn coded(&mut self, bytes: usize, budget: f64, blocks: usize) {
+        let count = self.count.max(1);
+        if bytes as f64 > budget && count == 1 {
+            self.paused = REFRESH_PAUSE;
+        }
+        self.count = if bytes as f64 > budget {
+            (count / 2).max(1)
+        } else if (bytes as f64) < budget / 2.0 {
+            count.saturating_mul(2).min(blocks.max(1))
+        } else {
+            count
+        };
+    }
+}
+
 /// The blocks of a picture to code at the paint-over quality this frame (`BlockLedger::plan`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockPlan {
@@ -183,6 +251,16 @@ pub struct BlockPlan {
 }
 
 impl BlockPlan {
+    /// A plan of this one's blocks that refines none of them.
+    pub fn none_like(&self) -> Self {
+        Self {
+            cols: self.cols,
+            rows: self.rows,
+            refine: vec![0; self.refine.len()],
+            count: 0,
+        }
+    }
+
     /// Whether block (`col`, `row`) is refined.
     pub fn refines(&self, col: usize, row: usize) -> bool {
         let i = row * self.cols + col;
@@ -214,6 +292,26 @@ pub struct BlockLedger {
     /// Whether each block was refined (`refined`) since it last changed: coded at the target a
     /// key-frame cleanup reaches, which a refresh at the paint-over quality does not.
     refined: Vec<bool>,
+    /// Whether each block was last coded under a capped constant quality's binding peak,
+    /// coarser than the rate factor would have chosen (`coded`), and not refreshed since, and
+    /// whether that was in a key frame.
+    coarse: Vec<bool>,
+    coarse_key: Vec<bool>,
+    /// How many blocks are coarse, so a session no peak ever bound reads none at no cost.
+    coarse_count: usize,
+    /// Whether each block is owed its paint-over: a cleanup that fell due on it was left to the
+    /// refresh, or coded short of its target under a binding peak (`spent`), and the block not
+    /// coded at it since. An owed block is coarse too, and the refresh codes it at the
+    /// paint-over quality (`refresh_owed`).
+    owed: Vec<bool>,
+    owed_count: usize,
+    /// Whether each block was refreshed at the session's own quality since it changed: a
+    /// cleanup coded over it as over the picture an uncapped session holds leaves it coarser
+    /// than that session's paint-over, the quality it starts from being finer (`fresh`).
+    fresh: Vec<bool>,
+    fresh_count: usize,
+    /// The block the next refresh starts its turn from.
+    next_refresh: usize,
     /// The block the next plan starts its turn from.
     next: usize,
     /// Whether the region's source was last seen to leave a change unreported
@@ -234,6 +332,14 @@ impl BlockLedger {
             still: vec![0; cols * rows],
             clean: vec![false; cols * rows],
             refined: vec![false; cols * rows],
+            coarse: vec![false; cols * rows],
+            coarse_key: vec![false; cols * rows],
+            coarse_count: 0,
+            owed: vec![false; cols * rows],
+            owed_count: 0,
+            fresh: vec![false; cols * rows],
+            fresh_count: 0,
+            next_refresh: 0,
             next: 0,
             unreported: true,
         }
@@ -309,11 +415,56 @@ impl BlockLedger {
     }
 
     /// The frame just coded the whole region at the paint-over quality or finer: every block
-    /// that did not change in it is clean.
+    /// that did not change in it is clean, and no longer coarse nor owed its paint-over.
     pub fn cleaned(&mut self) {
-        for (clean, &still) in self.clean.iter_mut().zip(&self.still) {
-            *clean |= still > 0;
+        for i in 0..self.still.len() {
+            if self.still[i] == 0 {
+                continue;
+            }
+            self.clean[i] = true;
+            if self.coarse[i] {
+                self.coarse[i] = false;
+                self.coarse_count -= 1;
+            }
+            if self.owed[i] {
+                self.owed[i] = false;
+                self.owed_count -= 1;
+            }
+            self.unfresh(i);
         }
+    }
+
+    /// Block `i` holds no refresh at the session's own quality.
+    fn unfresh(&mut self, i: usize) {
+        if self.fresh[i] {
+            self.fresh[i] = false;
+            self.fresh_count -= 1;
+        }
+    }
+
+    /// A cleanup that fell due on the region is left to the refresh, or was coded short of its
+    /// target under a binding peak: every block that did not change this frame is owed its
+    /// paint-over, for the refresh once the peak lets go (`refresh_owed`). Whether that owed
+    /// any block it did not owe.
+    pub fn spent(&mut self) -> bool {
+        let before = self.owed_count;
+        for i in 0..self.still.len() {
+            if self.still[i] == 0 {
+                continue;
+            }
+            self.clean[i] = false;
+            self.refined[i] = false;
+            if !self.coarse[i] {
+                self.coarse[i] = true;
+                self.coarse_count += 1;
+            }
+            if !self.owed[i] {
+                self.owed[i] = true;
+                self.owed_count += 1;
+            }
+            self.unfresh(i);
+        }
+        self.owed_count > before
     }
 
     /// Whether every block that held still is clean: nothing for a cleanup to do.
@@ -420,6 +571,162 @@ impl BlockLedger {
     /// The number of blocks in the region.
     pub fn blocks(&self) -> usize {
         self.cols * self.rows
+    }
+
+    /// The frame just coded the blocks that changed in it, or the whole region where it was a
+    /// key frame (`whole`), under a capped constant quality's binding peak (`capped`): coarser
+    /// than the rate factor would have chosen, so coarse and unclean, or at the session's own
+    /// quality, so no longer coarse. Either way they are owed no paint-over: one falls due on
+    /// them again once they hold still.
+    pub fn coded(&mut self, capped: bool, whole: bool) {
+        if !capped && self.coarse_count == 0 && self.fresh_count == 0 {
+            return;
+        }
+        for i in 0..self.coarse.len() {
+            if whole || self.still[i] == 0 {
+                match (self.coarse[i], capped) {
+                    (false, true) => self.coarse_count += 1,
+                    (true, false) => self.coarse_count -= 1,
+                    _ => {}
+                }
+                self.coarse[i] = capped;
+                self.coarse_key[i] = capped && whole;
+                if self.owed[i] {
+                    self.owed[i] = false;
+                    self.owed_count -= 1;
+                }
+                self.unfresh(i);
+                if capped {
+                    self.clean[i] = false;
+                    self.refined[i] = false;
+                }
+            }
+        }
+    }
+
+    /// The coarse blocks (`coded`) that held still this frame, split into the ones it codes
+    /// again at the session's own quality, at most `max` in turn from where the last refresh
+    /// stopped, and the rest, which wait as skips; `None` where none is coarse.
+    pub fn refresh(&mut self, max: usize) -> Option<(BlockPlan, BlockPlan)> {
+        self.refresh_keyed(max).map(|(now, _, wait)| (now, wait))
+    }
+
+    /// `refresh`, with the blocks it codes now that a capped key frame left coarse apart
+    /// (`REFRESH_KEY_FINER`), among them. A block owed its paint-over waits for
+    /// `refresh_owed`.
+    pub fn refresh_keyed(&mut self, max: usize) -> Option<(BlockPlan, BlockPlan, BlockPlan)> {
+        let n = self.cols * self.rows;
+        if n == 0 || self.coarse_count == 0 {
+            return None;
+        }
+        let mut now = vec![0u64; n.div_ceil(64)];
+        let mut key = vec![0u64; n.div_ceil(64)];
+        let mut wait = vec![0u64; n.div_ceil(64)];
+        let (mut count, mut keyed, mut waiting) = (0, 0, 0);
+        let start = self.next_refresh % n;
+        for k in 0..n {
+            let i = (start + k) % n;
+            if !self.coarse[i] || self.still[i] == 0 {
+                continue;
+            }
+            if count < max.max(1) && !self.owed[i] {
+                now[i / 64] |= 1 << (i % 64);
+                count += 1;
+                if self.coarse_key[i] {
+                    key[i / 64] |= 1 << (i % 64);
+                    keyed += 1;
+                }
+                self.next_refresh = i + 1;
+            } else {
+                wait[i / 64] |= 1 << (i % 64);
+                waiting += 1;
+            }
+        }
+        let plan = |refine, count| BlockPlan {
+            cols: self.cols,
+            rows: self.rows,
+            refine,
+            count,
+        };
+        (count > 0).then(|| (plan(now, count), plan(key, keyed), plan(wait, waiting)))
+    }
+
+    /// The coarse blocks owed their paint-over (`spent`) that held still this frame, split into
+    /// the ones it codes again at the paint-over quality, at most `max` in turn from where the
+    /// last refresh stopped, and every other coarse block that held still, which waits as a
+    /// skip; `None` where none is owed. A refresh takes these before the rest (`refresh`).
+    pub fn refresh_owed(&mut self, max: usize) -> Option<(BlockPlan, BlockPlan)> {
+        let n = self.cols * self.rows;
+        if n == 0 || self.owed_count == 0 {
+            return None;
+        }
+        let mut now = vec![0u64; n.div_ceil(64)];
+        let mut wait = vec![0u64; n.div_ceil(64)];
+        let (mut count, mut waiting) = (0, 0);
+        let start = self.next_refresh % n;
+        for k in 0..n {
+            let i = (start + k) % n;
+            if !self.coarse[i] || self.still[i] == 0 {
+                continue;
+            }
+            if self.owed[i] && count < max.max(1) {
+                now[i / 64] |= 1 << (i % 64);
+                count += 1;
+                self.next_refresh = i + 1;
+            } else {
+                wait[i / 64] |= 1 << (i % 64);
+                waiting += 1;
+            }
+        }
+        let plan = |refine, count| BlockPlan {
+            cols: self.cols,
+            rows: self.rows,
+            refine,
+            count,
+        };
+        (count > 0).then(|| (plan(now, count), plan(wait, waiting)))
+    }
+
+    /// The blocks `plan` refreshed were coded at the session's own quality, or at the
+    /// paint-over quality where they were owed it (`refresh_owed`), which leaves them clean: no
+    /// longer coarse.
+    pub fn refreshed(&mut self, plan: &BlockPlan) {
+        for row in 0..self.rows.min(plan.rows) {
+            for col in 0..self.cols.min(plan.cols) {
+                let i = row * self.cols + col;
+                if !plan.refines(col, row) {
+                    continue;
+                }
+                if self.coarse[i] {
+                    self.coarse[i] = false;
+                    self.coarse_count -= 1;
+                }
+                if self.owed[i] {
+                    self.owed[i] = false;
+                    self.owed_count -= 1;
+                    self.clean[i] = true;
+                    self.refined[i] = true;
+                } else if !self.fresh[i] {
+                    self.fresh[i] = true;
+                    self.fresh_count += 1;
+                }
+            }
+        }
+    }
+
+    /// Whether any block is owed its paint-over (`spent`).
+    pub fn owed(&self) -> bool {
+        self.owed_count > 0
+    }
+
+    /// Whether any block was refreshed at the session's own quality since it changed.
+    pub fn fresh(&self) -> bool {
+        self.fresh_count > 0
+    }
+
+    /// Whether any block is coarse (`coded`).
+    pub fn coarse(&self) -> bool {
+        self.coarse_count > 0
     }
 }
 
@@ -608,6 +915,164 @@ mod tests {
         };
         ledger.refinement_coded(&short, 45);
         assert!(!ledger.settled(), "the frame came out coarser than planned");
+    }
+
+    /// The blocks a capped frame coded are coarse and unclean; once the peak lets go, the ones
+    /// that held still are refreshed so many a frame in turn, the rest waiting, each once, and
+    /// a block an uncapped frame codes again is no longer coarse.
+    #[test]
+    fn coarse_blocks_are_refreshed_once_in_turn() {
+        let mut ledger = BlockLedger::new(64, 16);
+        ledger.frame([]);
+        ledger.cleaned();
+        ledger.frame([&Rectangle::new((0, 0).into(), (48, 16).into())]);
+        ledger.coded(true, false);
+        assert!(ledger.coarse());
+        assert!(
+            ledger.constant().take(3).all(|c| !c),
+            "a capped block is unclean"
+        );
+        assert!(ledger.refresh(8).is_none(), "nothing coarse held still yet");
+        ledger.frame([]);
+        let (now, wait) = ledger.refresh(2).unwrap();
+        assert_eq!((now.count, wait.count), (2, 1));
+        assert!(now.refines(0, 0) && now.refines(1, 0) && wait.refines(2, 0));
+        assert!(
+            !now.refines(3, 0) && !wait.refines(3, 0),
+            "block 3 was never coarse"
+        );
+        ledger.refreshed(&now);
+        ledger.frame([]);
+        let (now, wait) = ledger.refresh(2).unwrap();
+        assert_eq!((now.count, wait.count), (1, 0));
+        assert!(now.refines(2, 0));
+        ledger.refreshed(&now);
+        assert!(!ledger.coarse() && ledger.refresh(2).is_none());
+        ledger.frame([&Rectangle::new((0, 0).into(), (16, 16).into())]);
+        ledger.coded(true, false);
+        ledger.frame([&Rectangle::new((0, 0).into(), (16, 16).into())]);
+        ledger.coded(false, false);
+        assert!(!ledger.coarse(), "coded again at the session's quality");
+        ledger.frame([]);
+        ledger.coded(true, true);
+        ledger.frame([]);
+        assert_eq!(
+            ledger.refresh(usize::MAX).unwrap().0.count,
+            4,
+            "a capped key frame"
+        );
+    }
+
+    /// A cleanup coded under a binding peak leaves the blocks that held still owed their
+    /// paint-over: a refresh codes them first, so many a frame, every other coarse block waiting,
+    /// and leaves them clean; a block that changed on the cleanup frame is owed nothing.
+    #[test]
+    fn a_spent_cleanup_is_owed_to_the_blocks_that_held_still() {
+        let mut ledger = BlockLedger::new(64, 16);
+        ledger.frame([&Rectangle::new((0, 0).into(), (16, 16).into())]);
+        ledger.coded(true, false);
+        ledger.frame([&Rectangle::new((48, 0).into(), (16, 16).into())]);
+        ledger.coded(true, false);
+        ledger.spent();
+        assert!(ledger.owed() && ledger.coarse());
+        assert!(!ledger.settled(), "an owed block is unclean");
+        ledger.frame([]);
+        let (now, wait) = ledger.refresh_owed(1).unwrap();
+        assert_eq!((now.count, wait.count), (1, 3));
+        assert!(
+            !now.refines(3, 0),
+            "block 3 changed on the cleanup frame: nothing owed"
+        );
+        let (plain, _) = ledger.refresh(usize::MAX).unwrap();
+        assert!(
+            plain.refines(3, 0) && (0..3).all(|c| !plain.refines(c, 0)),
+            "an owed block waits for the owed refresh"
+        );
+        ledger.refreshed(&now);
+        ledger.frame([]);
+        let (now, wait) = ledger.refresh_owed(usize::MAX).unwrap();
+        assert_eq!((now.count, wait.count), (2, 1));
+        ledger.refreshed(&now);
+        assert!(!ledger.owed() && ledger.coarse());
+        assert!(
+            ledger.clean[..3].iter().all(|&c| c),
+            "the owed blocks are clean"
+        );
+        ledger.refreshed(&plain);
+        assert!(!ledger.coarse() && !ledger.clean[3]);
+    }
+
+    /// The count of coarse blocks follows the blocks through every path that marks or clears
+    /// them, a resize among them.
+    #[test]
+    fn the_coarse_count_follows_the_coarse_blocks() {
+        let tally = |l: &BlockLedger| {
+            assert_eq!(l.coarse_count, l.coarse.iter().filter(|&&c| c).count());
+            assert_eq!(l.owed_count, l.owed.iter().filter(|&&c| c).count());
+            assert!(l.owed.iter().zip(&l.coarse).all(|(&o, &c)| !o || c));
+            assert_eq!(l.fresh_count, l.fresh.iter().filter(|&&c| c).count());
+        };
+        let mut ledger = BlockLedger::new(64, 32);
+        ledger.frame([&Rectangle::new((0, 0).into(), (48, 16).into())]);
+        ledger.coded(true, false);
+        tally(&ledger);
+        ledger.frame([&Rectangle::new((16, 0).into(), (32, 32).into())]);
+        ledger.coded(true, false);
+        tally(&ledger);
+        ledger.frame([]);
+        ledger.cleaned();
+        tally(&ledger);
+        ledger.frame([]);
+        ledger.coded(true, true);
+        tally(&ledger);
+        ledger.frame([]);
+        let (now, _) = ledger.refresh(3).unwrap();
+        ledger.refreshed(&now);
+        ledger.refreshed(&now);
+        tally(&ledger);
+        ledger.frame([&Rectangle::new((0, 0).into(), (16, 16).into())]);
+        ledger.spent();
+        tally(&ledger);
+        ledger.frame([]);
+        let (now, _) = ledger.refresh_owed(2).unwrap();
+        ledger.refreshed(&now);
+        tally(&ledger);
+        ledger.frame([&Rectangle::new((0, 16).into(), (64, 16).into())]);
+        ledger.coded(false, false);
+        tally(&ledger);
+        ledger.frame([]);
+        ledger.cleaned();
+        tally(&ledger);
+        ledger.fit(32, 32);
+        tally(&ledger);
+        assert!(!ledger.coarse());
+    }
+
+    /// A refresh spreads over more frames while its frames come out past the peak's budget, and
+    /// over fewer while they come out well under it; one a block a frame still past it waits.
+    #[test]
+    fn a_refresh_follows_the_peaks_budget() {
+        let mut pace = RefreshPace::default();
+        let first = pace.most(25_600);
+        assert_eq!(first, 100);
+        pace.coded(20_000, 10_000.0, 25_600);
+        assert_eq!(pace.most(25_600), 50);
+        pace.coded(7_000, 10_000.0, 25_600);
+        assert_eq!(pace.most(25_600), 50);
+        pace.coded(1_000, 10_000.0, 25_600);
+        assert_eq!(pace.most(25_600), 100);
+        for _ in 0..7 {
+            pace.coded(20_000, 10_000.0, 25_600);
+        }
+        assert_eq!(
+            pace.most(25_600),
+            0,
+            "a block a frame past the budget waits"
+        );
+        for _ in 1..REFRESH_PAUSE {
+            pace.most(25_600);
+        }
+        assert_eq!(pace.most(25_600), 1);
     }
 
     #[test]

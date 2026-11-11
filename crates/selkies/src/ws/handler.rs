@@ -758,7 +758,7 @@ impl Connection {
             // Only the joining viewer is reset; the IDR opens its key frame gate now, since an
             // infinite GOP schedules none.
             say(&self.client, "PIPELINE_RESETTING primary").await;
-            service.schedule_idr(PRIMARY_DISPLAY);
+            service.schedule_idr_for_page(self.client.id, PRIMARY_DISPLAY);
             return Flow::Continue(());
         }
         let display_id = parsed.display_id.clone();
@@ -875,7 +875,7 @@ impl Connection {
         }
         service.broadcast_stream_resolution().await;
         say(&self.client, "PIPELINE_RESETTING primary").await;
-        service.schedule_idr(PRIMARY_DISPLAY);
+        service.schedule_idr_for_page(id, PRIMARY_DISPLAY);
         service.tell_display_settings(PRIMARY_DISPLAY, &[id]).await;
     }
 
@@ -981,7 +981,7 @@ impl Connection {
                 }
             }
             say(&self.client, format!("PIPELINE_RESETTING {display_id}")).await;
-            service.schedule_idr(display_id);
+            service.schedule_idr_for_page(id, display_id);
             return;
         }
         debug!(target: "ws", "Registering new client for display: {display_id}");
@@ -999,12 +999,12 @@ impl Connection {
             let seeds = st.seeds.clone();
             let entry = DisplayState::new(&seeds, self.tab_id.clone(), video_active, Some(dpi));
             // A steered display starts at the rate its path last carried for this page, else
-            // climbs to its target from `START_KBPS`.
-            if settings().congestion_control().on && seeds.rc_mode == "cbr" {
+            // climbs to its ceiling from `START_KBPS`.
+            if settings().congestion_control().on {
                 let (lo, hi) = settings().video_bitrate();
                 let remembered = parsed.cc_start_kbps.as_ref();
                 let seeded = crate::ws::steer::start_kbps(remembered, lo.as_f64(), hi.as_f64());
-                if seeded < seeds.video_bitrate {
+                if seeded < entry.rate_ceiling(true, hi.as_f64()) {
                     link.link_kbps = Some(seeded);
                     let from = if crate::ws::steer::remembered_kbps(remembered).is_some() {
                         "from the rate its page last held"
@@ -1182,7 +1182,7 @@ impl Connection {
             }
         }
         say(&self.client, "PIPELINE_RESETTING primary").await;
-        service.schedule_idr(PRIMARY_DISPLAY);
+        service.schedule_idr_for_page(self.client.id, PRIMARY_DISPLAY);
         service.send_current_cursor(&self.client).await;
     }
 

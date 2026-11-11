@@ -96,6 +96,9 @@ pub enum TransportEvent {
         local: Candidate,
         remote: Candidate,
     },
+    /// A local candidate gathered after the offer was written (a TURN relay that landed late),
+    /// for the peer to hear by trickle.
+    LocalCandidate(Candidate),
     /// The task ended; nothing more comes.
     Closed,
 }
@@ -135,6 +138,8 @@ struct Shared {
     last_received: Mutex<Instant>,
     ice_parameters: IceParameters,
     local_candidates: Vec<Candidate>,
+    /// Whether gathering ended with `local_candidates`: no relay is still allocating.
+    candidates_complete: bool,
     certificate: Arc<Certificate>,
     controlling: bool,
     lite: bool,
@@ -169,6 +174,7 @@ impl Transport {
             last_received: Mutex::new(Instant::now()),
             ice_parameters: connection.local_parameters(),
             local_candidates,
+            candidates_complete: !connection.relay_pending(),
             certificate: config.certificate.clone(),
             controlling: connection.is_controlling(),
             lite: connection.is_lite(),
@@ -211,6 +217,12 @@ impl Transport {
     /// The local candidates gathered.
     pub fn local_candidates(&self) -> Vec<Candidate> {
         self.shared.local_candidates.clone()
+    }
+
+    /// Whether the gathered candidates are all there will be: false while a TURN relay is still
+    /// allocating, whose candidate a `TransportEvent::LocalCandidate` carries when it lands.
+    pub fn candidates_complete(&self) -> bool {
+        self.shared.candidates_complete
     }
 
     /// The local DTLS parameters to signal: the certificate's fingerprints.
@@ -408,6 +420,11 @@ impl Task {
                     let now = Instant::now();
                     self.connection.handle_timeout(now);
                     self.dtls.handle_timeout(now);
+                }
+                candidate = self.connection.late_relay(), if self.connection.relay_pending() => {
+                    if let Some(candidate) = candidate {
+                        let _ = self.events.try_send(TransportEvent::LocalCandidate(candidate));
+                    }
                 }
             }
             self.after_step();

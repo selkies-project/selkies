@@ -14,11 +14,13 @@
  * is caught here rather than shipped broken.
  */
 import { readFile, readdir, rm } from 'node:fs/promises';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const FULL = '__next._full.txt';
-const out = process.argv[2] ?? join(dirname(dirname(fileURLToPath(import.meta.url))), 'out');
+// The export directory, resolved, and refused where it holds a NUL or names a parent.
+const out = resolve(process.argv[2] ?? join(dirname(dirname(fileURLToPath(import.meta.url))), 'out'));
+if (!/^\/[^\0]*$/.test(out) || out.split('/').includes('..')) throw new Error(`drop-full-payloads: ${out} is not a usable path`);
 
 async function* payloads(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {

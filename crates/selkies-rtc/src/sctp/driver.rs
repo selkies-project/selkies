@@ -37,8 +37,9 @@ pub trait DtlsDatagrams: Send + Sync + 'static {
 /// multiple of 3 so chunks concatenate as base64.
 pub const DATA_CHANNEL_BULK_CHUNK_SIZE: usize = 16 * 1024 / 3 * 3;
 
-/// The SCTP queue cap a bulk transfer waits below, bounding what it holds away from input
-/// and the media streams.
+/// The least a bulk transfer may leave unacknowledged on its channel before it sends more; on
+/// a long path the bound grows to twice the path's bandwidth-delay product
+/// (`Sctp::bulk_bound`).
 pub const DATA_CHANNEL_BULK_HIGH_WATER: usize = 64 * 1024;
 
 /// The raw-byte chunk size for base64 payloads, `DATA_CHANNEL_BULK_CHUNK_SIZE` lowered to
@@ -128,7 +129,7 @@ impl SctpTransport {
                     if reply.is_closed() {
                         return false;
                     }
-                    if sctp.buffered_amount(*id) > *high {
+                    if sctp.unacknowledged_amount(*id) > sctp.bulk_bound(*id, *high, now) {
                         return true;
                     }
                     let (done, _) = oneshot::channel();
@@ -283,8 +284,10 @@ impl DataChannel {
             .send(Command::LowThreshold(self.id, threshold));
     }
 
-    /// Wait until the channel has at most `high` bytes queued, for a bulk transfer's pacing.
-    /// The timeout keeps a stalled or closing channel from wedging the sender.
+    /// Wait until what the channel has unacknowledged, queued or in flight
+    /// (`Sctp::unacknowledged_amount`), is within its bulk bound (`Sctp::bulk_bound`, at least
+    /// `high`), for a bulk transfer's pacing. The timeout keeps a stalled or closing channel
+    /// from wedging the sender.
     ///
     /// Returns whether it drained: `false` when it did not within `timeout`, still stalled.
     pub async fn drain(&self, high: usize, timeout: Duration) -> bool {

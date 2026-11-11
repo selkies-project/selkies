@@ -622,6 +622,11 @@ pub struct HwFrameDecision {
     /// The blocks this frame may code as skips without analysis, in raster order
     /// (`plan_refinement`, `BlockLedger::constant`); `None` where none may be.
     pub constant: Option<Vec<bool>>,
+    /// The coarse blocks of a capped constant quality whose peak let go that this frame codes
+    /// again at the session's own quality, and the ones left for later frames, which it holds
+    /// as skips (`BlockLedger::refresh`, `FrameEncoder::defer_blocks`).
+    pub refresh: Option<crate::ledger::BlockPlan>,
+    pub defer: Option<crate::ledger::BlockPlan>,
 }
 
 impl HwFrameDecision {
@@ -649,6 +654,7 @@ impl HwFrameDecision {
             encoder.refine_blocks(refinement);
         }
         encoder.constant_blocks(self.constant.as_deref().unwrap_or(&[]));
+        encoder.defer_blocks(self.defer.as_ref());
     }
 }
 
@@ -659,7 +665,16 @@ impl HwFrameDecision {
 /// `damage` says something changed; and where the frame goes at the session's own quality while the region moves, on a
 /// session that refines (`refines`, how: `ledger::Refiner`) with the cleanup armed, name the
 /// blocks it refines, the offset taken from the quality index the rate control last coded at
-/// (`last`) or, at a constant quality, the session's.
+/// (`last`) where a rate binds the session (`bound`, `FrameEncoder::rate_bound`), paced against
+/// the frame budget (`ledger::RefinePace`), or from the session's own at a constant quality no
+/// peak binds. A capped constant quality its peak let go codes again the blocks it coded while
+/// bound that held still since, so many a frame at its own quality (`BlockLedger::refresh`,
+/// `ledger::RefreshPace`), the rest held as skips, sending a still screen's frames for it, and
+/// first, at the paint-over quality, the blocks owed it (`BlockLedger::refresh_owed`): a
+/// cleanup it spent under the binding peak, or one falling due on blocks it has yet to refresh
+/// or refreshed at its own quality, which it takes in place of that cleanup's frame; it refines
+/// nothing on those frames and waits while the peak binds again.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_refinement(
     st: &mut StripeState,
     settings: &CaptureSettings,
@@ -668,6 +683,7 @@ pub fn plan_refinement(
     changed: Option<&[Rectangle<i32, Physical>]>,
     refines: Option<crate::ledger::Refiner>,
     last: Option<u32>,
+    bound: bool,
 ) {
     st.ledger.fit(settings.width, settings.height);
     match changed {
@@ -678,6 +694,90 @@ pub fn plan_refinement(
         None => st.ledger.frame([]),
     }
     let normal = settings.video_crf as u32;
+    // A cleanup that falls due on a capped constant quality while its peak binds, or once it let
+    // go with blocks it coded bound yet to refresh or refreshed at its own quality since, is
+    // owed to the still blocks instead, which the refresh codes at the paint-over quality within
+    // the peak once it lets go: coded under the peak, the rate control walks it down over frames
+    // and leaves it short of the uncapped session's one pass; coded whole after, it would code
+    // the coarse picture again in one frame past the peak, or leave the refreshed one coarser
+    // than that pass, which starts from coarser.
+    let capped_bound = bound && !settings.video_cbr_mode;
+    if (capped_bound || st.ledger.coarse() || st.ledger.fresh())
+        && d.send
+        && !d.force_idr
+        && d.refresh.is_none()
+        && d.cleanup_quality(normal).is_some_and(|q| q < normal)
+    {
+        if st.ledger.spent() {
+            st.refresh = Default::default();
+        }
+        d.send = false;
+        d.hold_qp = None;
+        d.hold_band = None;
+        d.cap = None;
+        d.target_qp = normal;
+    }
+    let most = if !bound
+        && st.ledger.coarse()
+        && !d.force_idr
+        && d.hold_qp.is_none()
+        && (d.target_qp == normal || !d.send)
+    {
+        st.refresh.most(st.ledger.blocks())
+    } else {
+        0
+    };
+    // The blocks owed their paint-over (`BlockLedger::spent`) go first, at the paint-over
+    // quality as a refinement codes it, on a frame that changes nothing, so a frame that moves
+    // carries none of them (Turbo's still frames included); the rest at the session's own, a
+    // refresh's steps finer (`Codec::refresh_index`).
+    let owed = if most > 0 && !damage.is_dirty() {
+        st.ledger.refresh_owed(most)
+    } else {
+        None
+    };
+    let paint = owed.is_some();
+    if let Some((now, wait)) =
+        owed.or_else(|| (most > 0).then(|| st.ledger.refresh(most)).flatten())
+    {
+        d.send = true;
+        let quality = d.target_qp as i32;
+        let finer = match (paint, refines) {
+            (true, Some(r)) => settings.video_paintover_crf - r.finer as i32,
+            (true, None) => settings.video_paintover_crf,
+            (false, _) => settings.codec.refresh_index(quality),
+        };
+        // An encoder that refines blocks codes the refreshed ones finer than the frame; one that
+        // does not (libvpx's VP9) codes the frame finer, every still block but the refreshed
+        // ones held as a skip.
+        let constant: Vec<bool> = match refines {
+            Some(r) => {
+                d.refine = Some(crate::ledger::Refinement {
+                    plan: now.clone(),
+                    target: finer,
+                    from: quality,
+                    reach: r.reach,
+                });
+                st.ledger
+                    .constant()
+                    .enumerate()
+                    .map(|(i, c)| c || wait.refines(i % wait.cols, i / wait.cols))
+                    .collect()
+            }
+            None => {
+                d.target_qp = finer.max(0) as u32;
+                st.ledger
+                    .unchanged()
+                    .enumerate()
+                    .map(|(i, c)| c && !now.refines(i % now.cols, i / now.cols))
+                    .collect()
+            }
+        };
+        d.constant = constant.contains(&true).then_some(constant);
+        d.refresh = Some(now);
+        d.defer = (wait.count > 0).then_some(wait);
+        return;
+    }
     let own_quality = settings.cleans_up()
         && d.send
         && !d.force_idr
@@ -696,12 +796,12 @@ pub fn plan_refinement(
         return;
     }
     let blocks = st.ledger.blocks();
-    let most = st.refine.most(blocks, settings.video_cbr_mode);
+    let most = st.refine.most(blocks, bound);
     if let Some(plan) = st
         .ledger
         .plan(settings.paint_over_trigger(), most, refiner.runs)
     {
-        let from = match (settings.video_cbr_mode, last) {
+        let from = match (bound, last) {
             (true, Some(q)) => q as i32,
             _ => normal as i32,
         };
@@ -716,27 +816,63 @@ pub fn plan_refinement(
 
 /// What a full-frame frame decided as `d` left in `st`'s ledger once coded in `bytes`, the
 /// encoder now reporting `quality`: its refined blocks are clean where the rate control's quality index put
-/// them at the target (`BlockLedger::refinement_coded`) and the pace follows the rate control
+/// them at the target (`BlockLedger::refinement_coded`) and, where a rate binds the session
+/// (`bound`, as `plan_refinement` takes it), the pace follows the rate control
 /// (`RefinePace`); a frame held whole at the paint-over quality, or the region's cleanup having
 /// run its course, cleans the region, and a key frame at the rate control's own leaves it
-/// unclean.
+/// unclean. A frame coded under a capped constant quality's binding peak (`capped`,
+/// `FrameEncoder::coded_capped`) leaves the blocks it coded coarse and cleans nothing; one coded
+/// without it takes the blocks it refreshed (`HwFrameDecision::refresh`) off the coarse ones and
+/// paces the refresh against the peak's frame budget (`ledger::RefreshPace`), where it came out
+/// at all (`bytes` above 0). The last block owed the paint-over (`BlockLedger::spent`,
+/// `plan_refinement`) refreshed, the cleanup falls due again.
+#[allow(clippy::too_many_arguments)]
 pub fn refinement_coded(
     st: &mut StripeState,
     settings: &CaptureSettings,
     d: &HwFrameDecision,
     quality: EncoderQuality,
     bytes: usize,
+    bound: bool,
+    capped: bool,
 ) {
     let normal = settings.video_crf as u32;
-    if let Some(refinement) = &d.refine {
-        let coded = if settings.video_cbr_mode {
+    let refine = d.refine.as_ref().filter(|_| d.refresh.is_none());
+    // A frame the encoder refused, or coded to nothing, reached no one: the blocks it would have
+    // coded keep what the ledger had for them.
+    if d.send && bytes > 0 {
+        st.ledger.coded(capped, d.force_idr);
+        if let Some(plan) = d.refresh.as_ref().filter(|_| !capped) {
+            // The last owed block refreshed, the cleanup the peak spent falls due again: its
+            // frames refine the picture the refresh brought to the paint-over quality further,
+            // as the uncapped session's burst does, at a cost a frame of it already holds.
+            let owed = st.ledger.owed();
+            st.ledger.refreshed(plan);
+            if owed && !st.ledger.owed() {
+                st.paint_over_sent = false;
+            }
+            let blocks = st.ledger.blocks();
+            st.refresh.coded(
+                bytes,
+                frame_budget(settings.video_bitrate_kbps, settings.target_fps),
+                blocks,
+            );
+        }
+    }
+    // A capped constant quality bound to its peak codes no block finer than its own quality
+    // (NVENC's minQP, libvpx's floored quantizer): a refinement to a finer target leaves its
+    // blocks short of it, to be refined again once the peak lets go.
+    if let Some(refinement) =
+        refine.filter(|r| !bound || settings.video_cbr_mode || r.target >= normal as i32)
+    {
+        let coded = if bound {
             quality.last.map_or(i32::MAX, |q| q as i32)
         } else {
             normal as i32
         };
         st.ledger.refinement_coded(refinement, coded);
     }
-    if settings.video_cbr_mode
+    if bound
         && d.send
         && d.hold_qp.is_none()
         && !d.force_idr
@@ -744,7 +880,7 @@ pub fn refinement_coded(
     {
         let blocks = st.ledger.blocks();
         st.refine.coded(
-            d.refine.is_some(),
+            refine.is_some(),
             coded as i32,
             bytes,
             frame_budget(settings.video_bitrate_kbps, settings.target_fps),
@@ -754,7 +890,10 @@ pub fn refinement_coded(
     let paint = settings.video_paintover_crf.max(0) as u32;
     let cleanup_ended =
         st.paint_over_sent && st.h264_burst_frames_remaining <= 0 && st.sweep.is_none();
-    if d.cleanup_quality(normal).is_some_and(|q| q <= paint) || cleanup_ended {
+    if !capped
+        && d.refresh.is_none()
+        && (d.cleanup_quality(normal).is_some_and(|q| q <= paint) || cleanup_ended)
+    {
         st.ledger.cleaned();
     } else if d.force_idr {
         st.ledger.coarsened();
@@ -1004,6 +1143,8 @@ fn decide_constant_rate(
         cap: None,
         refine: None,
         constant: None,
+        refresh: None,
+        defer: None,
     };
     if damage.is_dirty() {
         if !converges || damage.is_motion() {
@@ -1414,6 +1555,8 @@ fn decide_constant_quality(
         cap: None,
         refine: None,
         constant: None,
+        refresh: None,
+        defer: None,
     };
     if recovery_idr && cleanup == Cleanup::None {
         d.target_qp = normal_qp;
@@ -1769,6 +1912,7 @@ impl X11Pipeline {
             self.hw.as_ref(),
             &self.settings,
         ));
+        crate::report::capped(encoders::session_capped(self.hw.as_ref(), &self.settings));
     }
 
     /// React to a streak of hardware encode failures: rebuild the session once with the startup
@@ -1868,6 +2012,12 @@ impl X11Pipeline {
     /// Whether the pipeline encodes on a GPU.
     pub fn is_hardware(&self) -> bool {
         self.hw.as_ref().is_some_and(|enc| enc.is_hardware())
+    }
+
+    /// Whether the session runs its constant quality under the peak of its bitrate
+    /// (`encoders::session_capped`), for this pipeline's stream log.
+    pub fn capped(&self) -> bool {
+        encoders::session_capped(self.hw.as_ref(), &self.settings)
     }
 
     /// The encoder's one rate control where its backend has one alone
@@ -2182,6 +2332,13 @@ impl X11Pipeline {
                 .iter()
                 .chain(&self.checked)
                 .any(|band| band.hash_changed);
+            // Whether a rate binds the frame, read once before it is coded: the encode may bind
+            // or release the session, and the frame was coded as it stood before.
+            let bound = self
+                .hw
+                .as_ref()
+                .unwrap()
+                .rate_bound(self.settings.video_cbr_mode);
             {
                 let enc = self.hw.as_ref().unwrap();
                 plan_refinement(
@@ -2192,9 +2349,13 @@ impl X11Pipeline {
                     Some(changed),
                     enc.refines(),
                     enc.last_quality(),
+                    bound,
                 );
             }
             let fc = self.frame_counter as u64;
+            if !d.send && !self.hw.as_ref().unwrap().holds_frame() {
+                self.hw.as_mut().unwrap().idle();
+            }
             if d.send || self.hw.as_ref().unwrap().holds_frame() {
                 let force_idr = d.force_idr;
                 let enc = self.hw.as_mut().unwrap();
@@ -2253,6 +2414,8 @@ impl X11Pipeline {
                     &d,
                     EncoderQuality::of(enc),
                     bytes,
+                    bound,
+                    enc.coded_capped(),
                 );
                 match res {
                     Ok(data) if !data.is_empty() => {
@@ -5799,6 +5962,343 @@ mod tests {
             hashed_damage(&mut last, frame[..n - 1].to_vec()),
             Damage::Area(1.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use crate::encoders::codec::{FRAME_KEY, VIDEO_HEADER_LEN, parse_video_type};
+    use crate::webcam::decode::{Decoder as _, VideoDecoder};
+
+    const W: usize = 320;
+    const H: usize = 240;
+    const SCROLL: usize = 30;
+
+    /// Code a page through the X11 pipeline, in software or on the GPU (`cpu`): scrolled for
+    /// `SCROLL` frames under a peak of `peak` kbps (0 uncapped), then held still under `then`,
+    /// for `frames` in all, a caret blinking in its corner every other still frame but the last
+    /// where `caret`, reported as a change of the whole frame, as a capture that cannot place one
+    /// reports it (NvFBC's); the PSNR of the last picture shown against the page, the frames sent
+    /// while still, the key frames after the first, and whether coarse blocks are left.
+    fn scroll_then_still(
+        codec: Codec,
+        cpu: bool,
+        peak: i32,
+        then: i32,
+        frames: usize,
+        caret: bool,
+    ) -> (f64, usize, usize, bool) {
+        let (psnr, still, keys, coarse, _) =
+            scroll_then_still_painted(codec, cpu, peak, then, frames, caret, false, 0);
+        (psnr, still, keys, coarse)
+    }
+
+    /// `scroll_then_still` with the paint-over armed or not (`paint`, at quality 18), the page
+    /// held still under `peak` for `hold` frames before `then` takes over, also returning the
+    /// bytes the still frames came to.
+    #[allow(clippy::too_many_arguments)]
+    fn scroll_then_still_painted(
+        codec: Codec,
+        cpu: bool,
+        peak: i32,
+        then: i32,
+        frames: usize,
+        caret: bool,
+        paint: bool,
+        hold: usize,
+    ) -> (f64, usize, usize, bool, usize) {
+        let vbv = if peak > 0 {
+            crate::encoders::CAPPED_VBV_FRAMES
+        } else {
+            0.0
+        };
+        let mut p = X11Pipeline::new(CaptureSettings {
+            width: W as i32,
+            height: H as i32,
+            codec,
+            use_cpu: cpu,
+            target_fps: 60.0,
+            video_crf: 25,
+            video_paintover_crf: 18,
+            use_paint_over_quality: paint,
+            video_bitrate_kbps: if peak > 0 { peak } else { 8000 },
+            video_vbv_multiplier: vbv,
+            ..Default::default()
+        });
+        let whole = [Rectangle::new((0, 0).into(), (W as i32, H as i32).into())];
+        let mut dec = VideoDecoder::new(codec).unwrap();
+        let (mut still, mut keys, mut bytes) = (0, 0, 0);
+        for t in 0..frames {
+            if t == SCROLL + 1 + hold && peak > 0 {
+                p.update_rate(then, vbv, 60.0);
+            }
+            let mut frame = crate::encoders::scrolled_text(W, H, t.min(SCROLL));
+            let blinks = caret && t > SCROLL;
+            if blinks && (t - SCROLL) % 2 == 1 && t + 1 < frames {
+                for y in H - 16..H {
+                    frame[(y * W + W - 16) * 4..(y * W + W) * 4].fill(255);
+                }
+            }
+            let changed: &[_] = if t <= SCROLL || blinks { &whole } else { &[] };
+            for f in p.process_reported(&frame, W * 4, changed) {
+                still += usize::from(t > SCROLL);
+                if t > SCROLL {
+                    bytes += f.data.len() - VIDEO_HEADER_LEN;
+                }
+                keys += usize::from(
+                    t > 0 && parse_video_type(f.data[1]).map(|(_, k)| k) == Some(FRAME_KEY),
+                );
+                assert!(dec.decode(&f.data[VIDEO_HEADER_LEN..]).expect("decode"));
+            }
+        }
+        let shown = dec.frame().unwrap();
+        let page = crate::encoders::scrolled_text(W, H, SCROLL);
+        let mut mse = 0.0;
+        for y in 0..H {
+            for x in 0..W {
+                let want = 16.0 + page[(y * W + x) * 4] as f64 * 219.0 / 255.0;
+                let d = shown.y[y * shown.y_stride + x] as f64 - want;
+                mse += d * d;
+            }
+        }
+        let psnr = 10.0 * (255.0f64 * 255.0 / (mse / (W * H) as f64)).log10();
+        (psnr, still, keys, p.hw_state.ledger.coarse(), bytes)
+    }
+
+    /// A capped constant quality bound to its peak counts no block clean that a refinement past
+    /// its own quality planned: its rate control floors the blocks there, and they are refined
+    /// again once the peak lets go; under a constant rate, or released, they are.
+    #[test]
+    fn a_bound_capped_quality_counts_no_block_clean_past_its_own_quality() {
+        let settings = CaptureSettings {
+            width: 64,
+            height: 16,
+            video_crf: 25,
+            video_bitrate_kbps: 4000,
+            target_fps: 60.0,
+            ..Default::default()
+        };
+        let quality = EncoderQuality {
+            last: Some(51),
+            bytes: None,
+            holds: false,
+            reopens: false,
+            keys: false,
+            band: None,
+            measures: false,
+            psnr: None,
+            refit: None,
+            follows_cap: false,
+            finer: 0,
+            ends_on_key: false,
+        };
+        for (bound, cbr, clean) in [
+            (true, false, false),
+            (true, true, true),
+            (false, false, true),
+        ] {
+            let mut st = StripeState {
+                ledger: crate::ledger::BlockLedger::new(64, 16),
+                ..Default::default()
+            };
+            st.ledger.frame([]);
+            let plan = st
+                .ledger
+                .plan(0, usize::MAX, usize::MAX)
+                .expect("every block");
+            let d = HwFrameDecision {
+                send: true,
+                force_idr: false,
+                target_qp: 25,
+                hold_qp: None,
+                hold_band: None,
+                measure: false,
+                cap: None,
+                refine: Some(crate::ledger::Refinement {
+                    plan,
+                    target: 15,
+                    from: if bound { 51 } else { 25 },
+                    reach: u32::MAX,
+                }),
+                constant: None,
+                refresh: None,
+                defer: None,
+            };
+            let settings = CaptureSettings {
+                video_cbr_mode: cbr,
+                ..settings.clone()
+            };
+            refinement_coded(&mut st, &settings, &d, quality, 100, bound, bound && !cbr);
+            assert_eq!(
+                st.ledger.settled(),
+                clean,
+                "bound {bound}, constant rate {cbr}"
+            );
+        }
+    }
+
+    /// A refreshing frame the encoder refused (no bytes) refreshes nothing: its blocks stay
+    /// coarse for the next refresh frame, and the pace does not read it as one under budget.
+    #[test]
+    fn a_refresh_frame_that_came_out_as_nothing_refreshes_nothing() {
+        let settings = CaptureSettings {
+            width: 64,
+            height: 16,
+            video_crf: 25,
+            video_bitrate_kbps: 4000,
+            target_fps: 60.0,
+            ..Default::default()
+        };
+        let mut st = StripeState {
+            ledger: crate::ledger::BlockLedger::new(64, 16),
+            ..Default::default()
+        };
+        st.ledger
+            .frame([&Rectangle::new((0, 0).into(), (64, 16).into())]);
+        st.ledger.coded(true, false);
+        st.ledger.frame([]);
+        let most = st.refresh.most(st.ledger.blocks());
+        let (now, _) = st.ledger.refresh(usize::MAX).expect("coarse blocks");
+        let d = HwFrameDecision {
+            send: true,
+            force_idr: false,
+            target_qp: 25,
+            hold_qp: None,
+            hold_band: None,
+            measure: false,
+            cap: None,
+            refine: None,
+            constant: None,
+            refresh: Some(now),
+            defer: None,
+        };
+        let quality = EncoderQuality {
+            last: None,
+            bytes: None,
+            holds: false,
+            reopens: false,
+            keys: false,
+            band: None,
+            measures: false,
+            psnr: None,
+            refit: None,
+            follows_cap: false,
+            finer: 0,
+            ends_on_key: false,
+        };
+        refinement_coded(&mut st, &settings, &d, quality, 0, false, false);
+        assert!(
+            st.ledger.coarse(),
+            "a frame of no bytes refreshed its blocks"
+        );
+        assert_eq!(st.refresh.most(st.ledger.blocks()), most, "the pace moved");
+        refinement_coded(&mut st, &settings, &d, quality, 100, false, false);
+        assert!(!st.ledger.coarse());
+    }
+
+    /// A capped libvpx quality its peak bound while the page scrolled codes the still page it
+    /// leaves again once the peak lets go, without a key frame, to the uncapped session's
+    /// quality, and leaves no coarse block.
+    #[test]
+    fn a_capped_libvpx_quality_refreshes_what_it_coded_bound() {
+        for codec in [Codec::Vp8, Codec::Vp9] {
+            let (plain, plain_still, _, _, plain_bytes) =
+                scroll_then_still_painted(codec, true, 0, 0, 150, false, false, 0);
+            let (capped, still, keys, coarse, bytes) =
+                scroll_then_still_painted(codec, true, 100, 100_000, 150, false, false, 0);
+            println!(
+                "{codec:?}: uncapped {plain:.2} dB ({plain_still} frames, {plain_bytes} bytes while \
+                 still), capped and refreshed {capped:.2} dB ({still} frames, {bytes} bytes)"
+            );
+            assert_eq!(keys, 0, "{codec:?}: a key frame");
+            assert!(!coarse, "{codec:?}: coarse blocks left");
+            assert!(still > 0, "{codec:?}: nothing refreshed the still page");
+            assert!(
+                capped >= plain,
+                "{codec:?}: refreshed to {capped:.2} dB against {plain:.2}"
+            );
+        }
+    }
+
+    /// NVENC's capped constant quantizer, bound while the page scrolled, codes the still page
+    /// again once the peak lets go, without a key frame, to the uncapped session's quality.
+    /// Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_a_capped_nvenc_quantizer_refreshes_what_it_coded_bound() {
+        let (plain, _, _, _) = scroll_then_still(Codec::H264, false, 0, 0, 150, false);
+        let (capped, still, keys, coarse) =
+            scroll_then_still(Codec::H264, false, 100, 100_000, 150, false);
+        println!(
+            "NVENC: uncapped {plain:.2} dB, capped and refreshed {capped:.2} dB, {still} frames sent while still"
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(!coarse, "coarse blocks left");
+        assert!(still > 0, "nothing refreshed the still page");
+        assert!(
+            capped >= plain - 1.0,
+            "refreshed to {capped:.2} dB against {plain:.2}"
+        );
+    }
+
+    /// NVENC's capped constant quantizer, bound while the page scrolled, codes the page again
+    /// under a change the capture cannot place once the peak lets go: the ledger reads it as a
+    /// change of the whole frame, which the encoder codes at the session's quantizer from the
+    /// coarse picture before it, to the uncapped session's quality, without a key frame.
+    /// Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_a_capped_nvenc_quantizer_codes_again_under_a_change_it_cannot_place() {
+        let (plain, _, _, _) = scroll_then_still(Codec::H264, false, 0, 0, 150, true);
+        let (capped, _, keys, coarse) =
+            scroll_then_still(Codec::H264, false, 100, 100_000, 150, true);
+        println!("NVENC under a caret: uncapped {plain:.2} dB, capped {capped:.2} dB");
+        assert_eq!(keys, 0, "a key frame");
+        assert!(!coarse, "coarse blocks left");
+        assert!(
+            capped >= plain - 1.0,
+            "coded again to {capped:.2} dB against {plain:.2}"
+        );
+    }
+    /// A capped quality its peak bound while the page scrolled, with the paint-over armed,
+    /// ends where the uncapped session's paint-over leaves the page once a fast link's peak lets
+    /// go, with no key frame: where the paint-over falls due after the peak let go, and where it
+    /// falls due under the binding peak (held still 60 frames under it), spent short of its
+    /// target, the still blocks owed it. `codec` through the X11 pipeline in software or on the
+    /// GPU (`cpu`).
+    fn comes_to_the_paint_over(codec: Codec, cpu: bool) {
+        let (plain, plain_still, _, _, plain_bytes) =
+            scroll_then_still_painted(codec, cpu, 0, 0, 300, false, true, 0);
+        for hold in [0, 60] {
+            let (capped, still, keys, coarse, bytes) =
+                scroll_then_still_painted(codec, cpu, 100, 100_000, 300, false, true, hold);
+            println!(
+                "{codec:?} paint-over: uncapped {plain:.2} dB ({plain_still} frames, \
+                 {plain_bytes} bytes while still), capped, held {hold} frames, {capped:.2} dB \
+                 ({still} frames, {bytes} bytes)"
+            );
+            assert_eq!(keys, 0, "{codec:?}: a key frame");
+            assert!(!coarse, "{codec:?}: coarse blocks left");
+            assert!(
+                capped >= plain - 0.5,
+                "{codec:?}, held {hold}: {capped:.2} dB against the uncapped paint-over's {plain:.2}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_capped_libvpx_quality_comes_to_the_paint_over_once_its_peak_lets_go() {
+        for codec in [Codec::Vp8, Codec::Vp9] {
+            comes_to_the_paint_over(codec, true);
+        }
+    }
+
+    /// `comes_to_the_paint_over` on NVENC. Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_a_capped_nvenc_quantizer_comes_to_the_paint_over_once_its_peak_lets_go() {
+        comes_to_the_paint_over(Codec::H264, false);
     }
 }
 

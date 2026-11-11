@@ -248,9 +248,9 @@ export function Clipboard() {
 
 			{clipboardSecret && (
 				<div className="flex flex-col gap-1.5">
-					<p className="text-xs text-muted-foreground">{t('sections.clipboard.secretHidden')}</p>
-					<ActionButton title={t('sections.clipboard.copySecret')} onClick={handleCopySecret}>
-						<Clip>{t('sections.clipboard.copySecret')}</Clip>
+					<p className="text-xs text-muted-foreground">{t('sections.clipboard.hiddenNotice')}</p>
+					<ActionButton title={t('sections.clipboard.copyHidden')} onClick={handleCopySecret}>
+						<Clip>{t('sections.clipboard.copyHidden')}</Clip>
 					</ActionButton>
 				</div>
 			)}

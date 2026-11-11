@@ -91,7 +91,7 @@ impl Connector for RegistryConnector {
             let (incoming_tx, incoming) = mpsc::unbounded_channel::<String>();
             tokio::spawn(async move {
                 registry
-                    .serve(peer_socket, inbound_rx, "in-process", None)
+                    .serve(peer_socket, inbound_rx, "in-process", None, None)
                     .await;
             });
             tokio::spawn(async move {

@@ -353,6 +353,9 @@ DASHBOARD_DIST = os.path.join(REPO, "web/selkies-dashboard/dist")
 LAYOUTS = ("default", "wish", "edge")
 
 WORKDIR = os.environ.get("E2E_WORKDIR", os.path.join(tempfile.gettempdir(), "selkies-tests"))
+# Every suite and helper writes under it from whatever directory it runs in.
+if not re.fullmatch(r"/[^\0]*", WORKDIR) or ".." in WORKDIR.split("/"):
+    raise SystemExit(f"E2E_WORKDIR={WORKDIR!r} is not an absolute path without '..'")
 os.makedirs(WORKDIR, exist_ok=True)
 # The XDG runtime directory every compositor, observer, and client the suites
 # start is given: the session's own would collect their sockets beside the
@@ -662,8 +665,11 @@ def server_start(mode: str = "websockets", wayland: bool = False,
     _server_starts += 1
     with open(log, "w") as lf:
         lf.write("")
+    server = os.path.abspath(shutil.which(SERVER) or SERVER)
+    if not (os.path.isfile(server) and os.access(server, os.X_OK)):
+        raise RuntimeError(f"no selkies server to run at {SERVER!r}")
     proc = spawn(
-        [SERVER],
+        [server],
         env=env, cwd=WORKDIR,
         stdout=open(log, "a"), stderr=subprocess.STDOUT,
         start_new_session=True)

@@ -671,7 +671,10 @@ mod tests {
             "{}",
             server.endpoint()
         );
-        let port = server.local_addrs()[0].port();
+        let addr = server.local_addrs()[0];
+        if !addr.ip().is_loopback() {
+            panic!("the server bound {addr}, not loopback");
+        }
 
         let peer_cert = || async move {
             let client = rustls::ClientConfig::builder_with_provider(provider())
@@ -680,9 +683,7 @@ mod tests {
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoVerify))
                 .with_no_client_auth();
-            let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .unwrap();
+            let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
             let mut tls = tokio_rustls::TlsConnector::from(Arc::new(client))
                 .connect(ServerName::try_from("localhost").unwrap(), stream)
                 .await

@@ -1301,16 +1301,26 @@ where
                 gpu.settings.height as u16,
             )
         });
-        if !decision.send {
+        // A frame the decision does not send still takes its change into the ledger, and may
+        // be sent for a capped constant quality's refresh (`plan_refinement`).
+        let planned = !decision.send;
+        if planned {
+            let cbr = gpu.settings.video_cbr_mode;
+            let (refines, last) = (gpu.enc().refines(), gpu.enc().last_quality());
+            let bound = gpu.enc().rate_bound(cbr);
             plan_refinement(
                 &mut state,
                 &gpu.settings,
                 &mut decision,
                 damage,
                 frame_changed.as_deref(),
-                None,
-                None,
+                refines,
+                last,
+                bound,
             );
+            if !decision.send {
+                gpu.enc().idle();
+            }
         }
         // A tick that publishes nothing is no frame: counted as one, it would hold a change
         // landing just after it back by a pull's worth of budget or a whole period.
@@ -1342,15 +1352,20 @@ where
                 last_cursor = gpu.cursor_drawn;
             }
             let (refines, last) = (gpu.enc().refines(), gpu.enc().last_quality());
-            plan_refinement(
-                &mut state,
-                &gpu.settings,
-                &mut decision,
-                damage,
-                frame_changed.as_deref(),
-                refines,
-                last,
-            );
+            let cbr = gpu.settings.video_cbr_mode;
+            let bound = gpu.enc().rate_bound(cbr);
+            if !planned {
+                plan_refinement(
+                    &mut state,
+                    &gpu.settings,
+                    &mut decision,
+                    damage,
+                    frame_changed.as_deref(),
+                    refines,
+                    last,
+                    bound,
+                );
+            }
             decision.prepare(gpu.enc());
             let encode_start_ns = crate::wayland::host::now_ns();
             let result = if after_blit {
@@ -1369,8 +1384,17 @@ where
                 )
             };
             let coded = EncoderQuality::of(gpu.enc());
+            let capped = gpu.enc().coded_capped();
             let bytes = result.as_ref().map_or(0, Vec::len);
-            refinement_coded(&mut state, &gpu.settings, &decision, coded, bytes);
+            refinement_coded(
+                &mut state,
+                &gpu.settings,
+                &decision,
+                coded,
+                bytes,
+                bound,
+                capped,
+            );
             match result {
                 Ok(data) if !data.is_empty() => {
                     encode_errors = 0;
@@ -1503,7 +1527,10 @@ mod modifier_tests {
 
 #[cfg(test)]
 mod gpu_tests {
-    use super::super::gpu_test_support::{decoded_mean, paint_root, painted_ycbcr, settings};
+    use super::super::gpu_test_support::{
+        capped_crf_codes_again_what_it_coded_bound, decoded_mean, paint_root, painted_ycbcr,
+        settings,
+    };
     use super::*;
     use crate::encoders::codec::{FRAME_DELTA, FRAME_KEY, VIDEO_HEADER_LEN, parse_video_type};
     use crate::webcam::decode::{Codec as DecCodec, Decoder, VideoDecoder};
@@ -1523,6 +1550,61 @@ mod gpu_tests {
             gpu.enc().encode_dmabuf(&dmabuf, i, 25, key)
         }
         .expect("encode in place")
+    }
+
+    /// On an X server whose screen lives on the GPU: a capped CRF session its peak bound while a page scrolled codes
+    /// the still page again once a higher peak lets it go, without a key frame, sending the still
+    /// screen's frames for it, to the uncapped session's quality
+    /// (`capped_crf_codes_again_what_it_coded_bound`). Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_dri3_capped_crf_codes_again_what_it_coded_bound() {
+        let Some([plain, (capped, sent, bytes, keys)]) = capped_crf_codes_again_what_it_coded_bound(
+            |s, c, t, mut f| run_capture(s, c, t, &mut f),
+            false,
+        ) else {
+            println!("the DRI3 path declined this host; nothing to capture");
+            return;
+        };
+        println!(
+            "DRI3: uncapped {:.2} dB ({} frames while still), capped and refreshed {capped:.2} dB, \
+             {sent} frames of {bytes} bytes while still, {keys} key frames",
+            plain.0, plain.1
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(sent > 0, "nothing refreshed the still page");
+        assert!(
+            capped >= plain.0 - 1.0,
+            "refreshed to {capped:.2} dB against {:.2}",
+            plain.0
+        );
+    }
+
+    /// `gpu_dri3_capped_crf_codes_again_what_it_coded_bound` with the paint-over armed: the
+    /// paint-over the binding peak spends is owed to the still page, which the refresh codes at
+    /// it once the peak lets go, so it ends where the uncapped session's paint-over leaves it.
+    /// Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_dri3_capped_crf_comes_to_the_paint_over_once_its_peak_lets_go() {
+        let Some([plain, (capped, sent, bytes, keys)]) = capped_crf_codes_again_what_it_coded_bound(
+            |s, c, t, mut f| run_capture(s, c, t, &mut f),
+            true,
+        ) else {
+            println!("the DRI3 path declined this host; nothing to capture");
+            return;
+        };
+        println!(
+            "DRI3 paint-over: uncapped {:.2} dB ({} frames, {} bytes while still), capped \
+             {capped:.2} dB ({sent} frames, {bytes} bytes), {keys} key frames",
+            plain.0, plain.1, plain.2
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(
+            capped >= plain.0 - 0.5,
+            "{capped:.2} dB against the uncapped paint-over's {:.2}",
+            plain.0
+        );
     }
 
     /// The primary node of the encode node's GPU is the same GPU to the DRI3 check, as the

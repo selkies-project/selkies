@@ -499,6 +499,21 @@ index 9883edb..8ce66d8 100644
          while remaining > 0 {
              let s = ChunkForwardTsnStream::unmarshal(
                  &buf.slice(offset..CHUNK_HEADER_SIZE + header.value_length()),
+diff --git a/src/chunk/chunk_init.rs b/src/chunk/chunk_init.rs
+index e9c3c63..f94e3bc 100644
+--- a/src/chunk/chunk_init.rs
++++ b/src/chunk/chunk_init.rs
+@@ -158,7 +158,9 @@ impl Chunk for ChunkInit {
+         let mut params = vec![];
+         let mut offset = CHUNK_HEADER_SIZE + INIT_CHUNK_MIN_LENGTH;
+         let mut remaining = raw.len() as isize - offset as isize;
+-        while remaining > INIT_OPTIONAL_VAR_HEADER_LENGTH as isize
++        // A parameter may be its header alone (Forward-TSN-Supported is), so one
++        // that ends the chunk with nothing after its header is read too.
++        while remaining >= INIT_OPTIONAL_VAR_HEADER_LENGTH as isize
+             && offset < CHUNK_HEADER_SIZE + header.value_length()
+         {
+             let p = build_param(&raw.slice(offset..CHUNK_HEADER_SIZE + header.value_length()))?;
 diff --git a/src/chunk/mod.rs b/src/chunk/mod.rs
 index f0ce194..cdce3ca 100644
 --- a/src/chunk/mod.rs

@@ -166,9 +166,10 @@ impl Log for Logger {
             Level::Debug => "DEBUG",
             Level::Trace => "TRACE",
         };
-        let stderr = std::io::stderr();
-        let mut out = stderr.lock();
-        let _ = writeln!(out, "{level}:{}:{message}{suffix}", record.target());
+        // One write per line: stderr is unbuffered, so `writeln!` would issue one per
+        // fragment and a line of another process on the same stderr could land inside it.
+        let line = format!("{level}:{}:{message}{suffix}\n", record.target());
+        let _ = std::io::stderr().lock().write_all(line.as_bytes());
     }
 
     fn flush(&self) {

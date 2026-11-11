@@ -139,6 +139,7 @@ jobs:
           pre-commit run --all-files --show-diff-on-failure clippy
           pre-commit run --all-files --show-diff-on-failure clippy-pixelflux-python
           pre-commit run --all-files --show-diff-on-failure clippy-pcmflux-python
+          pre-commit run --all-files --show-diff-on-failure clippy-fuzz
 
   native-tests:
     name: Native capture tests (${{ matrix.arch }})
@@ -247,6 +248,26 @@ jobs:
     with:
       tiers: unit or integration
       # The jobs above put them in this run's artifacts
+      wheels_ready: true
+
+  # One browser cell per transport and backend, and the cells that first
+  # caught regressions the integration tier cannot see, in one job beside the
+  # integration shards (about eight minutes of suites); the whole browser tier
+  # runs nightly from tests.yaml
+  e2e-smoke:
+    name: E2E smoke
+    needs: [python-compat, wheel, pixelflux-pcmflux]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/tests.yaml
+    with:
+      tiers: e2e
+      suites: >-
+        test_matrix or test_encoders-ws or test_two_displays or test_operator_api
+        or test_keyboard_layout-ws-wl or test_dashboard_matrix-wish-webrtc-x11
+        or test_wayland_layout_churn-websockets or test_multi_controller-visible-wr
+        or test_regressions-pacer or (test_slow_page-websockets and not wayland)
+      shards: '[1]'
       wheels_ready: true
 
   wheel:

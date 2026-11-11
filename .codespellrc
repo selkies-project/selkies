@@ -4,7 +4,7 @@
 # catalog, the TypeScript build caches, the vendored Wayland protocols and
 # crates, upstream-native codec patches, and the fuzzers' seed inputs are not
 # ours to spell-check.
-skip = ./.git,./build,./dist,./target,./tests/tools/protocols,./crates/selkies-rtc/vendor,./crates/selkies-rtc/fuzz/seeds,./crates/pixelflux/fuzz/seeds,./crates/pcmflux/fuzz/seeds,./crates/pixelflux/va-sys/headers,./crates/pixelflux/va-sys/src/bindgen,./crates/pixelflux/codec-sys/headers,./crates/pixelflux/nvcodec-sys/headers,./crates/pixelflux/nvcodec-sys/src/bindgen,./web/*/node_modules,./web/*/dist,./website/node_modules,./website/out,./website/.next,./website/public,*.lock,*.patch,package-lock.json,*.tsbuildinfo,*.min.js,selkies-core.js,translations.ts,*.svg,*.png,*.ico,*.woff,*.woff2
+skip = ./.git,./build,./dist,./target,./tests/tools/protocols,./crates/selkies-rtc/vendor,./crates/selkies-rtc/fuzz/seeds,./crates/pixelflux/fuzz/seeds,./crates/pcmflux/fuzz/seeds,./crates/pixelflux/va-sys/headers,./crates/pixelflux/va-sys/src/bindgen,./crates/pixelflux/codec-sys/headers,./crates/pixelflux/nvcodec-sys/headers,./crates/pixelflux/nvcodec-sys/src/bindgen,./web/*/node_modules,./web/*/dist,./tests/browserstack/node_modules,./tests/browserstack/browserstack-out,./website/node_modules,./website/out,./website/.next,./website/public,*.lock,*.patch,package-lock.json,*.tsbuildinfo,*.min.js,selkies-core.js,translations.ts,*.svg,*.png,*.ico,*.woff,*.woff2
 # renderD: DRM render node prefix (renderD128). requestor: X11 selection
 # protocol field name. currentY/initialY: pointer coordinate variables.
 # chage: the shadow-utils command. anc: SDI ancillary-data region.

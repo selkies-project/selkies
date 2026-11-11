@@ -2429,6 +2429,7 @@ dependencies = [
  "libpulse-binding",
  "opusic-sys",
  "pyo3",
+ "tempfile",
 ]
 
 [[package]]

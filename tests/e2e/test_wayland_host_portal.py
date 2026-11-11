@@ -290,7 +290,8 @@ class GnomeRig(PortalRig):
     def __init__(self, scale: int = 1, eis: bool = True) -> None:
         super().__init__("wayland-gnome", scale, XDG_CURRENT_DESKTOP="GNOME", GSETTINGS_BACKEND="keyfile")
         self.eis = eis
-        self.mutter = os.environ.get("E2E_MUTTER") or shutil.which("mutter") or ""
+        mutter = os.path.abspath(os.environ.get("E2E_MUTTER") or shutil.which("mutter") or "/nonexistent")
+        self.mutter = mutter if os.path.isfile(mutter) and os.access(mutter, os.X_OK) else ""
         self.version = (0, 0)
         # The portal takes its backends, and with this set its portals.conf too, from this
         # directory alone.

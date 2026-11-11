@@ -110,13 +110,15 @@ pub trait MediaPipeline: Send + Sync {
     /// Run the capture at `fps` under the configured rate, or back at the configured rate
     /// (None), leaving the configured rate itself, which the display's modes follow, as it is.
     fn shed_framerate(&self, fps: Option<f64>);
-    /// The rate the encoder is held to, in kbps.
+    /// The rate the encoder is held to, in kbps: a CBR target, or a capped CRF peak.
     fn video_bitrate(&self) -> f64;
     /// `cbr` or `crf`.
     fn rc_mode(&self) -> String;
     /// Apply one sanitized setting by the name a page's `SETTINGS` carries it under.
     async fn apply_setting(&self, key: &str, value: &Json);
-    /// Set the encoder's target, in kbps, live in CBR.
+    /// Set the rate the encoder is held to, in kbps: live as a CBR target, and as a CRF peak
+    /// where congestion control caps the session (`populate_capture_settings`); an uncapped CRF
+    /// session keeps it for its next start.
     async fn set_video_bitrate(&self, kbps: f64);
     /// Set the Opus target, in bps.
     fn set_audio_bitrate(&self, bps: i32);
@@ -895,16 +897,17 @@ impl MediaPipeline for Handle {
 
     async fn set_video_bitrate(&self, kbps: f64) {
         let p = &self.0;
-        let (old, cbr, capturing) = {
+        let (old, held, capturing) = {
             let mut l = p.live.lock();
             let old = l.config.video_bitrate;
             if kbps <= 0.0 || old == kbps {
                 return;
             }
             l.config.video_bitrate = kbps;
-            (old, l.config.rc_mode != "crf", l.capturing)
+            let held = l.config.rc_mode != "crf" || settings().congestion_control().on;
+            (old, held, l.capturing)
         };
-        if !cbr || !capturing {
+        if !held || !capturing {
             return;
         }
         match p.capture.update_video_bitrate(kbps.round() as i32) {

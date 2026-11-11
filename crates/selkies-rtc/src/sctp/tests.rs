@@ -351,6 +351,20 @@ fn a_data_chunk_shorter_than_its_header_is_dropped() {
     dropped_before_init(&chunk(0, b"abc"));
 }
 
+/// An INIT whose last parameter is a header alone (Forward-TSN-Supported) is read whole: the
+/// parameter is not mistaken for the start of the next chunk, which dropped the packet.
+#[test]
+fn an_init_ending_in_a_header_only_parameter_is_answered() {
+    let mut rig = Rig::new();
+    let mut params = param(0x8008, &[192, 130]);
+    params.extend_from_slice(&param(0xc000, &[]));
+    let reply = rig.deliver(packet(0, &init_chunk(&params)));
+    assert!(
+        reply.iter().any(|c| c.kind == 2),
+        "an INIT ACK answers the INIT"
+    );
+}
+
 #[test]
 fn an_init_parameter_claiming_zero_length_is_dropped_without_stalling() {
     let mut rig = Rig::new();
@@ -988,6 +1002,23 @@ fn a_sack_past_anything_sent_leaves_the_association_working() {
         "the real SACK still acknowledges"
     );
     assert!(rig.answers_heartbeat());
+}
+
+/// What a channel has in flight counts toward the bulk gate until it is acknowledged, where
+/// `bufferedAmount` counts only what waits to go out: a message sent next waits behind both.
+#[test]
+fn bytes_in_flight_stay_unacknowledged_until_a_sack_covers_them() {
+    let mut rig = Rig::new();
+    rig.establish();
+    let tsns = rig.outstanding(3);
+    assert_eq!(rig.sctp.buffered_amount(0), 0, "nothing waits to go out");
+    assert_eq!(
+        rig.sctp.unacknowledged_amount(0),
+        3,
+        "three bytes in flight"
+    );
+    rig.deliver(rig.sack(tsns[2], &[]));
+    assert_eq!(rig.sctp.unacknowledged_amount(0), 0);
 }
 
 /// A small deterministic generator, so a failure replays.

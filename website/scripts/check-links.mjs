@@ -8,10 +8,12 @@
 // output, whose source-line anchors its script resolves and whose inlined
 // dependency docs keep their crate's relative links.
 import { readFile, readdir } from 'node:fs/promises';
-import { dirname, join, posix, relative } from 'node:path';
+import { dirname, join, posix, relative, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const out = process.argv[2] ?? join(dirname(dirname(fileURLToPath(import.meta.url))), 'out');
+// The export directory, resolved, and refused where it holds a NUL or names a parent.
+const out = resolvePath(process.argv[2] ?? join(dirname(dirname(fileURLToPath(import.meta.url))), 'out'));
+if (!/^\/[^\0]*$/.test(out) || out.split('/').includes('..')) throw new Error(`check-links: ${out} is not a usable path`);
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
 async function walk(dir) {

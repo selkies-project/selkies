@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The desktop through Jupyter's server proxy, as `selkies session --jupyter-config` offers it.
 
-The configuration it prints, placed in a Jupyter configuration directory's
-jupyter_server_config.d, registers a server process with jupyter-server-proxy, so a
+The configuration it prints, as the jupyter_server_config.json of the Jupyter
+server's configuration directory, registers a server process with
+jupyter-server-proxy ahead of any entry point an installed wheel adds, so a
 Jupyter server lists a Selkies item, its icon the web client's, and serves the desktop at /selkies/: it
 starts the launcher on a Unix socket of the proxy's own and carries the page,
 the API, and the data WebSocket behind Jupyter's token, its Xvfb screen
@@ -61,29 +62,32 @@ def registered() -> bool:
 
 
 def offer_selkies(config_dir: str) -> None:
-    """Register the server under test with jupyter-server-proxy the way an install does: the
-    configuration `selkies session --jupyter-config` prints, in jupyter_server_config.d."""
+    """Register the server under test with jupyter-server-proxy: the configuration `selkies
+    session --jupyter-config` prints, as the configuration directory's jupyter_server_config.json.
+    Jupyter reads only the extensions' switches from jupyter_server_config.d, and the proxy
+    registers the servers its configuration names before those of entry points."""
     printed = subprocess.run([H.SERVER, "session", "--jupyter-config"], capture_output=True, text=True,
                              timeout=30, check=True).stdout
     json.loads(printed)
-    os.makedirs(os.path.join(config_dir, "jupyter_server_config.d"))
-    with open(os.path.join(config_dir, "jupyter_server_config.d", "selkies.json"), "w") as fh:
+    os.makedirs(config_dir)
+    with open(os.path.join(config_dir, "jupyter_server_config.json"), "w") as fh:
         fh.write(printed)
 
 
 def start_jupyter(token: str, runtime: str, wayland: bool) -> tuple:
     port = H._free_port()
     share = os.path.join(runtime, "share")
+    config = os.path.join(runtime, "config")
     for kind in ("xsessions", "wayland-sessions"):
         os.makedirs(os.path.join(share, kind))
         with open(os.path.join(share, kind, "standin.desktop"), "w") as fh:
             fh.write("[Desktop Entry]\nName=Stand-in\nExec=sh -c 'setsid sleep 3600 & exec sleep 3600'\n")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"), "XDG_RUNTIME_DIR": runtime,
            "XDG_DATA_DIRS": share, "XDG_DATA_HOME": share,
-           "JUPYTER_CONFIG_DIR": os.path.join(runtime, "config"), "JUPYTER_DATA_DIR": os.path.join(runtime, "data"),
+           "JUPYTER_CONFIG_DIR": config, "JUPYTER_DATA_DIR": os.path.join(runtime, "data"),
            "JUPYTER_RUNTIME_DIR": os.path.join(runtime, "jupyter"), "SELKIES_WEB_ROOT": H.CORE_DIST,
            "SELKIES_WAYLAND": "true" if wayland else "false"}
-    offer_selkies(env["JUPYTER_CONFIG_DIR"])
+    offer_selkies(config)
     proc = H.spawn([H.PYTHON, "-m", "jupyter_server", "--ServerApp.ip=127.0.0.1", f"--ServerApp.port={port}",
                     "--ServerApp.port_retries=0", f"--ServerApp.token={token}", f"--ServerApp.root_dir={runtime}",
                     "--ServerApp.open_browser=False"],
@@ -100,7 +104,8 @@ def start_jupyter(token: str, runtime: str, wayland: bool) -> tuple:
 
 def launcher_of(jupyter: subprocess.Popen):
     """The launcher the proxy started, as the child of the Jupyter server running `selkies session`."""
-    for pid in open(f"/proc/{jupyter.pid}/task/{jupyter.pid}/children").read().split():
+    server = int(jupyter.pid)
+    for pid in open(f"/proc/{server}/task/{server}/children").read().split():
         if "session --follow" in H._cmdline(int(pid)):
             return int(pid)
     return None

@@ -21,6 +21,15 @@
 //! 4.6 where it took 10.8. An x265 a distribution packages copies each picture from plain
 //! planes, analyses every block, and weighs the offsets against adaptive quantization. kvazaar
 //! converts into the picture it allocates and encodes from.
+//!
+//! The constant quality runs uncapped where a caller asks for a capped one
+//! (`RateSettings::capped`). x265's capped CRF (a VBV at the peak) moves its peak live only
+//! within the level and tier it derives from that peak: `x265_encoder_reconfig` keeps the old
+//! VBV, reporting success, where a move changes either (4.2: "Cannot reconfigure
+//! rate-control"), so a peak cut from the High tier's range into the Main one would cost a
+//! key frame, as a capped session at a pinned level's Main tier would cost the picture
+//! uncapped content takes past that tier's rate. kvazaar's rate control targets a rate and has
+//! no capped quality.
 
 use std::ffi::CString;
 
@@ -95,7 +104,7 @@ impl HevcEncoder {
             8
         };
         let threads = encode_threads(settings);
-        let rate = RateSettings::new(settings);
+        let rate = RateSettings::new(settings).uncapped();
         let quality = Quality::new(Codec::H265.quantizer(settings.video_crf));
         let width = settings.width.max(1) as usize;
         let height = settings.height.max(1) as usize;
