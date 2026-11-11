@@ -1005,6 +1005,38 @@ const REFINE_FINER: u32 = 3;
 /// codes natively, moved nothing.
 const REFINE_REACH: u32 = 10;
 
+/// The zones Intel's low-power H.264 encoder codes regions of interest in natively.
+const INTEL_VDENC_NATIVE_ROI: u32 = 3;
+
+/// The regions of interest a frame may name (`Negotiated::roi_regions`), from the driver's
+/// `VAConfigAttribEncROI`: none where it reports none, or at a constant rate whose rate control
+/// takes no quantizer deltas (bit 9). On Intel's low-power entry point at a constant quantizer
+/// no more than `INTEL_VDENC_NATIVE_ROI`: iHD's VDEnc from Gen9 to Gen12 copies the delta of
+/// every region it is handed into a stack array of three when they share at most three deltas,
+/// which one refinement always does, so a fourth region writes past it and a frame naming a
+/// dozen aborted the process on `__stack_chk_fail` inside `vaEndPicture` (N97, a window dragged
+/// at 144 fps). Its rate control hands the regions to the firmware instead.
+fn roi_regions(
+    attribute: Option<u32>,
+    hardware: Hardware,
+    entrypoint: VAEntrypoint,
+    cbr: bool,
+) -> u32 {
+    let Some(v) = attribute else {
+        return 0;
+    };
+    let qp_deltas_under_rate_control = v & (1 << 9) != 0;
+    if cbr && !qp_deltas_under_rate_control {
+        return 0;
+    }
+    let regions = v & 0xff;
+    if !cbr && hardware == Hardware::VaapiIntel && entrypoint == VAEntrypointEncSliceLP {
+        regions.min(INTEL_VDENC_NATIVE_ROI)
+    } else {
+        regions
+    }
+}
+
 /// One VA-API encoder session, hardware, for one capture.
 pub struct VaapiEncoder {
     codec: Codec,
@@ -1365,16 +1397,12 @@ impl VaapiEncoder {
                 },
                 unit_qp_deltas,
                 h264_driver_level: device.h264_driver_level(),
-                roi_regions: device
-                    .attribute(profile, entrypoint, VAConfigAttribEncROI)
-                    .map_or(0, |v| {
-                        let qp_deltas_under_rate_control = v & (1 << 9) != 0;
-                        if rate.cbr && !qp_deltas_under_rate_control {
-                            0
-                        } else {
-                            v & 0xff
-                        }
-                    }),
+                roi_regions: roi_regions(
+                    device.attribute(profile, entrypoint, VAConfigAttribEncROI),
+                    device.hardware(),
+                    entrypoint,
+                    rate.cbr,
+                ),
             },
             fourcc,
             rt_format,
@@ -2965,6 +2993,21 @@ mod tests {
         assert!(refines(700_000, 8.0, 1920, 1080));
         assert!(!refines(2_000_000, 60.0, 1920, 1080));
         assert!(!refines(500_000, 8.0, 1920, 1080));
+    }
+
+    /// Intel's low-power H.264 encoder is named no more regions than its three native zones at a
+    /// constant quantizer, and every region it reports under its rate control.
+    #[test]
+    fn intel_low_power_constant_quantizer_names_at_most_three_regions() {
+        let lp = VAEntrypointEncSliceLP;
+        let full = VAEntrypointEncSlice;
+        let intel = Hardware::VaapiIntel;
+        assert_eq!(roi_regions(Some(0x210), intel, lp, false), 3);
+        assert_eq!(roi_regions(Some(0x210), intel, lp, true), 16);
+        assert_eq!(roi_regions(Some(0x010), intel, lp, true), 0);
+        assert_eq!(roi_regions(Some(0x210), intel, full, false), 16);
+        assert_eq!(roi_regions(Some(0x002), intel, lp, false), 2);
+        assert_eq!(roi_regions(None, intel, lp, false), 0);
     }
 
     /// A held key frame gets a second of the rate, and never less than 1.6 bits a pixel.
