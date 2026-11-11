@@ -351,6 +351,20 @@ fn a_data_chunk_shorter_than_its_header_is_dropped() {
     dropped_before_init(&chunk(0, b"abc"));
 }
 
+/// An INIT whose last parameter is a header alone (Forward-TSN-Supported) is read whole: the
+/// parameter is not mistaken for the start of the next chunk, which dropped the packet.
+#[test]
+fn an_init_ending_in_a_header_only_parameter_is_answered() {
+    let mut rig = Rig::new();
+    let mut params = param(0x8008, &[192, 130]);
+    params.extend_from_slice(&param(0xc000, &[]));
+    let reply = rig.deliver(packet(0, &init_chunk(&params)));
+    assert!(
+        reply.iter().any(|c| c.kind == 2),
+        "an INIT ACK answers the INIT"
+    );
+}
+
 #[test]
 fn an_init_parameter_claiming_zero_length_is_dropped_without_stalling() {
     let mut rig = Rig::new();
