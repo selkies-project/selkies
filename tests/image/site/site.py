@@ -28,7 +28,8 @@ TYPES = {".html": "text/html", ".js": "text/javascript", ".png": "image/png",
          ".webm": "video/webm", ".ogg": "audio/ogg", ".json": "application/json"}
 # What the pages report, each to a file of its own.
 REPORTS = {name: os.path.join(OUT, f"{name}.json") for name in
-           ("clip", "gamepad", "ime", "media", "pattern", "play", "pointer", "texture", "tone")}
+           ("clip", "gamepad", "ime", "media", "pattern", "play", "pointer", "scheme-chrome", "scheme-firefox",
+            "texture", "tone")}
 
 
 def listing(directory: str, prefix: str = "") -> dict:

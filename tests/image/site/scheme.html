@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>it-scheme</title>
+<style>
+  html, body { margin: 0; height: 100%; background: Canvas; color: CanvasText; color-scheme: light dark; }
+  p { font: 24px sans-serif; padding: 24px; }
+</style>
+<p id="scheme"></p>
+<script src="it.js"></script>
+<script>
+  // What this browser's desktop asks pages for: reported at once, on every
+  // change, and again each second so a harness clearing the report hears it.
+  const query = matchMedia('(prefers-color-scheme: dark)');
+  const tell = () => {
+    const dark = query.matches;
+    document.getElementById('scheme').textContent = dark ? 'dark' : 'light';
+    IT.report('scheme-' + IT.ch, {dark, ua: navigator.userAgent, at: Date.now()});
+  };
+  query.addEventListener('change', tell);
+  tell();
+  setInterval(tell, 1000);
+</script>

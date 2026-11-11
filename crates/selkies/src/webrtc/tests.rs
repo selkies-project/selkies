@@ -440,12 +440,7 @@ impl Rig {
             log: log.clone(),
             made: Mutex::new(HashMap::new()),
         });
-        let input = Arc::new(FakeInput {
-            messages: Mutex::new(Vec::new()),
-            released: Mutex::new(0),
-            gamepads: Mutex::new(Vec::new()),
-            lost_slots: Mutex::new(Vec::new()),
-        });
+        let input = Arc::new(FakeInput::default());
         let tokens = Arc::new(FakeTokens::default());
         let service = WebRtcService::with_timings(
             WebRtcDeps {
@@ -2563,6 +2558,35 @@ async fn the_upload_gauge_reads_each_browsers_signaling_socket() {
     assert!(
         Arc::ptr_eq(&listed[0].clock, &again[0].clock),
         "one clock per socket"
+    );
+    rig.service.shutdown().await;
+}
+
+/// The desktop follows the primary display's page alone, through the shared sanitizer, as over
+/// WebSockets.
+#[tokio::test]
+async fn the_color_scheme_is_the_primary_pages_alone() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rig.peer("c1", ClientType::Controller, "primary").await;
+    {
+        let mut st = rig.service.st.lock();
+        let seeds = st.seeds.clone();
+        let entry = crate::ws::state::DisplayState::new(&seeds, None, true, None);
+        st.displays.insert("display2".into(), entry);
+    }
+    for (payload, display) in [
+        (json!({"color_scheme": "light"}), "display2"),
+        (json!({"color_scheme": "dark"}), "primary"),
+        (json!({"color_scheme": "sepia"}), "primary"),
+    ] {
+        rig.service.handle_update_settings(&payload, display).await;
+    }
+    assert_eq!(
+        *rig.input.color_schemes.lock(),
+        ["dark", "off"],
+        "the primary's page asks, and a scheme outside the list is the server's own"
     );
     rig.service.shutdown().await;
 }

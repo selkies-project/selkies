@@ -169,21 +169,42 @@ fn process_environ(pid: i32) -> Option<HashMap<String, String>> {
 }
 
 /// The `SESSION_ENV_ADOPTED` subset of the environment of the desktop session running on the
-/// given displays, read from the oldest process of this user that carries a session bus address
-/// and exports one of those displays. Empty when no such process exists (the session has not
-/// started, or runs no bus).
+/// given displays, read from the first of [`session_processes`] whose bus answers. Empty when
+/// no such process exists (the session has not started, or runs no bus). Blocking: it walks
+/// `/proc`.
+pub fn session_environment(
+    x11_display: Option<&str>,
+    wayland_display: Option<&str>,
+) -> HashMap<String, String> {
+    for env in session_processes(x11_display, wayland_display) {
+        if dbus_address_live(&env["DBUS_SESSION_BUS_ADDRESS"]) {
+            return SESSION_ENV_ADOPTED
+                .iter()
+                .filter_map(|k| {
+                    env.get(*k)
+                        .filter(|v| !v.is_empty())
+                        .map(|v| (k.to_string(), v.clone()))
+                })
+                .collect();
+        }
+    }
+    HashMap::new()
+}
+
+/// The environments of this user's processes that carry a session bus address and export one
+/// of the given displays, oldest of this runtime dir first. The bus of each is not checked.
 ///
 /// A Wayland socket name is relative to `XDG_RUNTIME_DIR`, so it identifies a session only
 /// together with it; an X display name is host-wide and outlives the server that used it, so a
 /// process of this runtime dir ranks before a leftover of an earlier session. Commands launched
 /// from here and their descendants carry whatever was adopted for them and are never a source.
 /// Blocking: it walks `/proc`.
-pub fn session_environment(
+pub fn session_processes(
     x11_display: Option<&str>,
     wayland_display: Option<&str>,
-) -> HashMap<String, String> {
+) -> Vec<HashMap<String, String>> {
     if x11_display.is_none() && wayland_display.is_none() {
-        return HashMap::new();
+        return Vec::new();
     }
     let uid = nix::unistd::getuid().as_raw();
     let me = std::process::id() as i32;
@@ -198,7 +219,7 @@ pub fn session_environment(
         descendants(&launched)
     };
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return HashMap::new();
+        return Vec::new();
     };
     let mut candidates: Vec<(u8, i32, HashMap<String, String>)> = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
@@ -236,19 +257,7 @@ pub fn session_environment(
         }
     }
     candidates.sort_by_key(|c| (c.0, c.1));
-    for (_, _, env) in candidates {
-        if dbus_address_live(&env["DBUS_SESSION_BUS_ADDRESS"]) {
-            return SESSION_ENV_ADOPTED
-                .iter()
-                .filter_map(|k| {
-                    env.get(*k)
-                        .filter(|v| !v.is_empty())
-                        .map(|v| (k.to_string(), v.clone()))
-                })
-                .collect();
-        }
-    }
-    HashMap::new()
+    candidates.into_iter().map(|(_, _, env)| env).collect()
 }
 
 /// The adopted session environment per `(x11, wayland)` pair; an empty scan is negative-cached

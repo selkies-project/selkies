@@ -35,10 +35,12 @@ from typing import Any, Dict, List, Optional
 # its WAYLAND_DISPLAY is the one apps use), with the LD_PRELOAD interposers that
 # hand apps the session's gamepads and webcam, and the toolkit settings a
 # browser started without them can die on. The images' defaults stand where no
-# such process runs yet.
+# such process runs yet: the session environment their services start with
+# (`container-env`), which names the session bus where no desktop runs one.
 DESKTOP_PROCS = "plasmashell selkies-desktop lxqt-panel xfce4-panel pcmanfm-qt mate-panel gnome-shell kwin_x11 kwin_wayland labwc openbox"
 SESSION_ENV = (
     'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(id -un)}"; '
+    '[ -f "$XDG_RUNTIME_DIR/container-env" ] && . "$XDG_RUNTIME_DIR/container-env"; '
     f'for n in {DESKTOP_PROCS}; do p=$(pgrep -u "$(id -u)" -x -o "$n") || continue; '
     'while IFS= read -r -d "" kv; do case "$kv" in PWD=*|OLDPWD=*|SHLVL=*|_=*) ;; *) export "$kv";; esac; '
     'done < /proc/$p/environ; break; done 2>/dev/null; '

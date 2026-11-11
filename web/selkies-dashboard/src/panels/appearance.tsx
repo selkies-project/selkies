@@ -10,8 +10,11 @@
  * mirrors), the layout, which cycles the registry and stores the pick under
  * the prefixed `ui_layout` key, and the translucency (`useBarPrefs`). Icons name the state they show, as the
  * theme toggle does: the moon while dark, the layout's own mark while shown.
+ * A theme its user picked is also the color scheme the session's desktop
+ * follows (`DesktopColorScheme`).
  * @module
  */
+import { useEffect } from "react";
 import { Blend, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useBarPrefs, type Translucency } from "@/layouts/actions";
@@ -43,6 +46,28 @@ export function ThemePill() {
       <Sun className="sun" strokeWidth={2.5} />
     </button>
   );
+}
+
+/**
+ * Hands the core the theme its user picked as the color scheme the session's
+ * desktop follows (`setColorScheme`, the core's lib/color-scheme.ts), on every
+ * change of the theme; with no pick stored, `null` leaves the desktop on the
+ * browser's own preference, which the dashboard's default theme does not
+ * reflect. Renders nothing.
+ */
+export function DesktopColorScheme() {
+  const { theme } = useTheme();
+  useEffect(() => {
+    let stored: string | null = null;
+    try {
+      stored = localStorage.getItem("theme");
+    } catch {
+      // Storage blocked: no pick survives, and the browser's preference stands.
+    }
+    const value = stored === "light" || stored === "dark" ? stored : null;
+    window.postMessage({ type: "setColorScheme", value }, window.location.origin);
+  }, [theme]);
+  return null;
 }
 
 /** Steps to the next layout the server allows; hidden while there is only one. */

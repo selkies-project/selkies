@@ -54,7 +54,7 @@ fn usable_dir(dir: PathBuf) -> Option<PathBuf> {
 }
 
 /// The user's home directory as the environment names it.
-fn home() -> PathBuf {
+pub(super) fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(usable_dir)
@@ -330,9 +330,8 @@ async fn run_lxqt_font(dpi: i32) -> bool {
 /// merged, never loaded wholesale, so the database keeps every resource the file does not
 /// define -- then merges the matching `Xft/DPI` value (in 1024ths) and the font rendering keys
 /// into `~/.xsettingsd`, keeping every other setting the file holds (the theme names the desktop
-/// shell writes there), and SIGHUPs every xsettingsd serving this display: the one serving it is not necessarily
-/// the oldest, and one serving another display from the same home would re-read this file
-/// and hand that display this density. Returns whether the xrdb merge succeeded.
+/// shell and the color scheme write there), and has every xsettingsd serving this display read
+/// it again ([`super::xsettings::reload`]). Returns whether the xrdb merge succeeded.
 async fn run_xrdb(dpi: i32) -> bool {
     if !which("xrdb") {
         debug!(target: "display", "xrdb not found. Skipping Xresources DPI setting.");
@@ -364,7 +363,7 @@ async fn run_xrdb(dpi: i32) -> bool {
     } else {
         warn!(target: "display", "Failed to load {} using xrdb. Error: {}", xresources.display(), out.stderr.trim());
     }
-    let xsettingsd = home().join(".xsettingsd");
+    let xsettingsd = super::xsettings::xsettingsd_path();
     let written = tokio::task::spawn_blocking({
         let path = xsettingsd.clone();
         move || {
@@ -381,28 +380,7 @@ async fn run_xrdb(dpi: i32) -> bool {
         return false;
     }
     debug!(target: "display", "Wrote font and DPI settings to {}.", xsettingsd.display());
-    let pids = tokio::task::spawn_blocking(|| pids_on_display("xsettingsd"))
-        .await
-        .unwrap_or_default();
-    let mut signaled = Vec::new();
-    for pid in &pids {
-        match nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(*pid),
-            nix::sys::signal::Signal::SIGHUP,
-        ) {
-            Ok(()) => signaled.push(pid.to_string()),
-            Err(e) => {
-                debug!(target: "display", "Failed to send SIGHUP to xsettingsd process {pid}: {e}")
-            }
-        }
-    }
-    if !signaled.is_empty() {
-        debug!(target: "display", "Sent SIGHUP to xsettingsd to reload config ({}).", signaled.join(", "));
-    } else if !pids.is_empty() {
-        warn!(target: "display", "No xsettingsd process could be signaled to reload.");
-    } else {
-        debug!(target: "display", "No xsettingsd serves this display. Skipping reload.");
-    }
+    super::xsettings::reload().await;
     out.success
 }
 
@@ -569,34 +547,16 @@ fn last_dpi(pattern: &Regex, text: &str) -> Option<i32> {
 /// file's other lines: an `Xft/` line already there is replaced in place, the rest appended, and
 /// every other setting is kept as it stands.
 fn merge_xsettings_font(existing: &str, dpi: i32) -> String {
-    let owned: [(&str, String); 5] = [
-        ("Xft/Antialias", "1".to_string()),
-        ("Xft/Hinting", "1".to_string()),
-        ("Xft/HintStyle", "\"hintfull\"".to_string()),
-        ("Xft/RGBA", "\"rgb\"".to_string()),
-        ("Xft/DPI", (dpi * 1024).to_string()),
-    ];
-    let mut lines: Vec<String> = Vec::new();
-    let mut seen = [false; 5];
-    for line in existing.lines() {
-        let key = line.split_whitespace().next().unwrap_or("");
-        match owned.iter().position(|(k, _)| *k == key) {
-            Some(i) if seen[i] => {}
-            Some(i) => {
-                seen[i] = true;
-                lines.push(format!("{} {}", owned[i].0, owned[i].1));
-            }
-            None => lines.push(line.to_string()),
-        }
-    }
-    for (i, (key, value)) in owned.iter().enumerate() {
-        if !seen[i] {
-            lines.push(format!("{key} {value}"));
-        }
-    }
-    let mut text = lines.join("\n");
-    text.push('\n');
-    text
+    super::xsettings::with_entries(
+        existing,
+        &[
+            ("Xft/Antialias", "1".to_string()),
+            ("Xft/Hinting", "1".to_string()),
+            ("Xft/HintStyle", "\"hintfull\"".to_string()),
+            ("Xft/RGBA", "\"rgb\"".to_string()),
+            ("Xft/DPI", (dpi * 1024).to_string()),
+        ],
+    )
 }
 
 /// The density the home persists for the X11 desktop, read as `desktop_dpi` reads it but
@@ -634,7 +594,7 @@ fn desktop_dpi_from(resource_db: Option<String>) -> Option<i32> {
     if let Some(dpi) = last_dpi(&xft, &persisted(home().join(".Xresources"))) {
         return Some(dpi);
     }
-    last_dpi(&xsettings, &persisted(home().join(".xsettingsd"))).map(|v| v / 1024)
+    last_dpi(&xsettings, &persisted(super::xsettings::xsettingsd_path())).map(|v| v / 1024)
 }
 
 /// The density the X11 desktop has before this process applies one.

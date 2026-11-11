@@ -376,6 +376,24 @@ if [ "${SELKIES_MODE}" = "webrtc" ] || is_true "${SELKIES_ENABLE_DUAL_MODE-true}
   fi
 fi
 
+# Where no desktop session runs a bus of its own (no desktop service, one held
+# down by START_DESKTOP=false, or no session compositor on Wayland), the
+# session-bus service's bus is the session's, and the environment names it:
+# GLib falls back to that address by itself, but Chrome's D-Bus client connects
+# only to an address it is given, and never sees the settings portal otherwise.
+# An operator's compositor brings a session of its own, and an address passed in
+# stands.
+desktop_session=true
+if [ ! -d /etc/service/desktop ] || ! is_true "$(setting_value "${START_DESKTOP:-true}")"; then
+  desktop_session=false
+elif [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_WAYLAND_COMPOSITOR}" = "none" ]; then
+  desktop_session=false
+fi
+if [ "${desktop_session}" = "false" ] && [ -z "${DBUS_SESSION_BUS_ADDRESS-}" ] &&
+   [ -z "${SELKIES_WAYLAND_HOST_DISPLAY-}" ]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+fi
+
 # Persist the environment for the s6 services (they are siblings, not children,
 # of selkies and coturn would otherwise not see these computed values). The
 # variables a shell maintains for itself are left out: exported into another

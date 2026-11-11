@@ -1353,6 +1353,23 @@ impl Dispatcher {
         }
     }
 
+    /// The primary display's sanitized `SETTINGS` `color_scheme`, handed to the desktop the
+    /// session's applications run on ([`crate::display::appearance`]); `off` leaves it alone.
+    /// Returns at once: the stores are reached on a task of their own, the newest scheme
+    /// winning, since `app_session` and the ladder block and spawn tools.
+    pub fn apply_client_color_scheme(&self, scheme: &str) {
+        let Some(scheme) = crate::display::appearance::ColorScheme::from_setting(scheme) else {
+            return;
+        };
+        let Some(me) = self.me.upgrade() else { return };
+        tokio::spawn(async move {
+            let Ok(session) = tokio::task::spawn_blocking(move || me.app_session()).await else {
+                return;
+            };
+            crate::display::appearance::apply(scheme, session).await;
+        });
+    }
+
     /// Record a hint; whether it was the one noted already, so a re-assert logs nothing.
     fn note_layout_hint(&self, hint: &str) -> bool {
         let mut st = self.state.lock();

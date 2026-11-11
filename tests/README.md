@@ -194,7 +194,7 @@ python3 tests/image/run.py --items 1,4 --engines chromium --backends x11 \
 | `E2E_IMAGE_PRIORITY_CLASS` | none | The pods' `priorityClassName`. A preempted pod is brought up again before the next cell. |
 | `E2E_IMAGE_CPU` | `4` | Each pod's CPU request, in whole CPUs; the limit is twice it. A node with less free, as a shared GPU's often is, takes a smaller request. |
 | `E2E_IMAGE_MEMORY` | `8Gi` | Each pod's memory request and limit. |
-| `E2E_IMAGE_TRANSPORTS`, `E2E_IMAGE_BACKENDS`, `E2E_IMAGE_ENGINES`, `E2E_IMAGE_ITEMS` | all | `websockets,webrtc`; `x11,wayland`; `chromium,firefox,webkit`; `1-10`. |
+| `E2E_IMAGE_TRANSPORTS`, `E2E_IMAGE_BACKENDS`, `E2E_IMAGE_ENGINES`, `E2E_IMAGE_ITEMS` | all | `websockets,webrtc`; `x11,wayland`; `chromium,firefox,webkit`; `1-11`. |
 | `E2E_IMAGE_ENV`, `E2E_IMAGE_LABELS`, `E2E_IMAGE_NAME` | none, none, `selkies-imagetest` | Extra container environment and pod labels (`K=V,...`; a value may hold commas, as in `SELKIES_ENCODER=h264enc,vp8enc`), and the pod or container name prefix. |
 | `E2E_IMAGE_DRIFT_SECONDS` | `120` | How long item 8 watches the shared view of a still screen for quality drift; tens of minutes for the long check. |
 | `E2E_IMAGE_KEEP` | unset | `1` leaves each target running after its run. |
@@ -226,6 +226,7 @@ detail, the screenshots, and each target's server log.
 | 8 | `i08_shared` | `#shared` gets the screen and sound and nothing else (pointer, keys, clipboard, uploads, gamepad); its picture holds its quality; `#player2`-`#player4` drive pads. |
 | 9 | `i09_shortcuts` | Ctrl+Shift+M, G, F, X and Left Click, pointer lock alone and in gaming mode's fullscreen, and shortcuts off. |
 | 10 | `i10_media_ime` | A clip playing in the session's Chrome and Firefox, its sound and motion reaching the client; Korean composed through an IME on the client into a session text field. |
+| 11 | `i11_color_scheme` | Past the checklist: the session's Chrome and Firefox, and the settings portal on the session's bus, following the client browser's light or dark preference and then the dashboard's theme picked over it. |
 
 What WebKit cannot stand in for: Playwright's WebKit is WebKitGTK on Linux, not
 Safari. Its media stack is GStreamer rather than VideoToolbox, so what decodes

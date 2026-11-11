@@ -113,6 +113,7 @@ fn run(probe_stdout: &str, probe_rc: i32, env: &[(&str, &str)]) -> Run {
                 "XDG_SESSION_TYPE",
                 "GDK_BACKEND",
                 "MOZ_ENABLE_WAYLAND",
+                "DBUS_SESSION_BUS_ADDRESS",
             ]
             .contains(&name.as_str())
         {
@@ -274,4 +275,51 @@ fn every_spelling_canonicalizes_to_one_value() {
         assert_eq!(env.get("SELKIES_WAYLAND"), Some("false"), "{spelling:?}");
         assert_eq!(env.probe_calls, [""], "{spelling:?}");
     }
+}
+
+#[test]
+fn the_session_bus_is_named_where_no_desktop_runs_one() {
+    let runtime_bus = |env: &Run| {
+        env.get("DBUS_SESSION_BUS_ADDRESS")
+            .is_some_and(|a| a.starts_with("unix:path=") && a.ends_with("/runtime/bus"))
+    };
+    let env = run(&good(), 0, &[("START_DESKTOP", "false")]);
+    assert!(
+        runtime_bus(&env),
+        "with the desktop held down, the runtime dir's bus is the session's: {:?}",
+        env.get("DBUS_SESSION_BUS_ADDRESS")
+    );
+    if !Path::new("/etc/service/desktop").exists() {
+        assert!(
+            runtime_bus(&run(&good(), 0, &[])),
+            "and with no desktop service at all"
+        );
+    }
+    let env = run(
+        &good(),
+        0,
+        &[
+            ("START_DESKTOP", "false"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+        ],
+    );
+    assert_eq!(
+        env.get("DBUS_SESSION_BUS_ADDRESS"),
+        Some("unix:path=/run/user/1000/bus"),
+        "an address passed in stands"
+    );
+    let env = run(
+        &good(),
+        0,
+        &[
+            ("START_DESKTOP", "false"),
+            ("SELKIES_WAYLAND", "true"),
+            ("SELKIES_WAYLAND_HOST_DISPLAY", "wayland-0"),
+        ],
+    );
+    assert_eq!(
+        env.get("DBUS_SESSION_BUS_ADDRESS"),
+        None,
+        "an operator's compositor brings a session bus of its own"
+    );
 }

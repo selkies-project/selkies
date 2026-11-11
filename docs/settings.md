@@ -73,7 +73,7 @@ Server-to-client audio and the microphone uplink.
 
 ## Display
 
-Resolution, scaling, cursors, and the second display.
+Resolution, scaling, the color scheme, cursors, and the second display.
 
 | Setting | Default | Description |
 | --- | --- | --- |
@@ -83,6 +83,7 @@ Resolution, scaling, cursors, and the second display.
 | `--manual-height`<br>`SELKIES_MANUAL_HEIGHT` | `0`<br>int, 0 to 16384 | Lock height to a fixed value. Setting this forces manual resolution mode. |
 | `--force-aligned-resolution`<br>`SELKIES_FORCE_ALIGNED_RESOLUTION` | `false`<br>bool | Forces the display resolution to be a multiple of 16 pixels. |
 | `--scaling-dpi`<br>`SELKIES_SCALING_DPI` | `96`<br>enum: one of `96`, `120`, `144`, `168`, `192`, `216`, `240`, `264`, `288` | The default DPI for UI scaling. |
+| `--color-scheme`<br>`SELKIES_COLOR_SCHEME` | `off`<br>enum: one of `light`, `dark`, `off` | The light or dark color scheme the session's desktop follows. By default every value is allowed and the primary display's page asks for its browser's preference, or the theme its user picked in the dashboard, which the server hands to the desktop's settings stores: the GNOME color-scheme key the settings portal serves, and the dark or light variant of the GTK theme over XSETTINGS or the desktop's own store. A single value locks it: "light" or "dark" whatever the page asks, "off" leaving the desktop's own scheme untouched. A page asking for a scheme outside the list gets the first value listed; the default value, "off", is only what such a page gets. |
 | `--use-css-scaling`<br>`SELKIES_USE_CSS_SCALING` | `false`<br>bool | HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched; the UI scaling pick then divides that resolution and the desktop stays at 96 DPI. |
 | `--second-screen`<br>`SELKIES_SECOND_SCREEN` | `true`<br>bool | Enable support for a second monitor/display. |
 | `--enable-cursors`<br>`SELKIES_ENABLE_CURSORS` | `true`<br>bool | Enable passing remote cursors to client |

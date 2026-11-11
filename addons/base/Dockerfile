@@ -524,6 +524,19 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # restarts. Wayland has no equivalent gap, where the compositor hands
         # applications the scale.
         xsettingsd \
+        # The settings stores the desktop's color scheme reaches
+        # (crates/selkies/src/display/appearance.rs): gsettings, which writes
+        # the GNOME keys into dconf, the settings portal and its GTK backend,
+        # which serve them as org.freedesktop.appearance to GTK 4, libadwaita,
+        # Qt, and the browsers, and Adwaita's dark GTK 3 theme, which GTK 3
+        # does not build in and XSETTINGS can only name
+        libglib2.0-bin \
+        dconf-service \
+        dconf-gsettings-backend \
+        gsettings-desktop-schemas \
+        xdg-desktop-portal \
+        xdg-desktop-portal-gtk \
+        gnome-themes-extra-data \
         # GPU support: Mesa (llvmpipe fallback, VA-API) and Vulkan/GL plumbing
         libgl1 \
         libgl1-mesa-dri \
@@ -675,6 +688,9 @@ COPY --from=add-ons --chown=1000:1000 /opt/add-ons/opt/lib/ /opt/lib/
 
 # A PulseAudio client that leaves its buffer to pipewire-pulse gets 40 ms, not 2 s
 COPY --chown=1000:1000 addons/base/pipewire-pulse.conf.d/ /etc/pipewire/pipewire-pulse.conf.d/
+
+# The settings portal answers from the GTK backend where a desktop configures no other
+COPY --chown=1000:1000 addons/base/xdg-desktop-portal.conf /etc/xdg/xdg-desktop-portal/portals.conf
 
 # Copy the startup scripts and s6 service definitions (same /etc/service/<svc>/run layout as runit, supervised by s6-supervise)
 COPY --chown=1000:1000 addons/base/container-entrypoint.sh /etc/container-entrypoint.sh
