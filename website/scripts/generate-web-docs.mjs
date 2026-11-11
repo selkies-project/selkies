@@ -85,6 +85,8 @@ const MARKDOWN = {
 
 /** Renders one package into `out`, as the site's Markdown or, for `html`, TypeDoc's own theme. */
 async function generate({ title, source, entryPoints }, out, html) {
+  // Refused where it holds a NUL or names a parent: it is emptied first.
+  if (!/^\/[^\0]*$/.test(out) || out.split('/').includes('..')) throw new Error(`generate-web-docs: ${out} is not a usable path`);
   const plugins = [join(root, 'scripts', 'web-reference-plugin.mjs')];
   const app = await Application.bootstrapWithPlugins(
     {

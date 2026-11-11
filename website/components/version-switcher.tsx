@@ -42,10 +42,15 @@ export function VersionSwitcher({ className }: { className?: string }) {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     setOpen(false);
-    let target = event.currentTarget.href;
+    let target = versionPath(servedSegment(version));
     const samePage = versionPath(servedSegment(version), pathname);
     try {
-      if ((await fetch(samePage, { method: 'HEAD' })).ok) target = samePage + window.location.hash;
+      if ((await fetch(samePage, { method: 'HEAD' })).ok) {
+        // The same page in that version, at the section the reader is at.
+        const page = new URL(samePage, window.location.origin);
+        page.hash = window.location.hash;
+        target = page.pathname + page.hash;
+      }
     } catch {}
     window.location.assign(target);
   };

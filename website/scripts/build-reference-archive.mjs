@@ -32,7 +32,7 @@
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { exportTag, git, referenceAsset, repoRoot, run, siteDir } from './version-tree.mjs';
 
 // What GitHub accepts as one release asset.
@@ -43,9 +43,9 @@ function option(name) {
   return at === -1 ? undefined : process.argv[at + 1];
 }
 
-// The version is part of the archive's file name, never a path of its own.
+// The version is part of the archive's file name: letters, digits, `.`, `_`, `+`, and `-`.
 const version = process.argv[2];
-if (!version || version.startsWith('--') || basename(version) !== version) {
+if (!version || !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(version) || version.includes('..')) {
   console.error('Usage: node build-reference-archive.mjs <version> [--tag <tag>] [--out <dir>]');
   process.exit(2);
 }
@@ -105,6 +105,8 @@ try {
   );
   await writeFile(join(staging, 'index.html'), entryPage(halves));
 
+  // Refused where it holds a NUL or names a parent.
+  if (!/^\/[^\0]*$/.test(outDir) || outDir.split('/').includes('..')) throw new Error(`build-reference-archive: ${outDir} is not a usable path`);
   await mkdir(outDir, { recursive: true });
   const file = join(outDir, referenceAsset(version));
   run('tar', ['-czf', file, '-C', work, name]);
