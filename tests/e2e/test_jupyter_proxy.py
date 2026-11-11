@@ -74,16 +74,17 @@ def offer_selkies(config_dir: str) -> None:
 def start_jupyter(token: str, runtime: str, wayland: bool) -> tuple:
     port = H._free_port()
     share = os.path.join(runtime, "share")
+    config = os.path.join(runtime, "config")
     for kind in ("xsessions", "wayland-sessions"):
         os.makedirs(os.path.join(share, kind))
         with open(os.path.join(share, kind, "standin.desktop"), "w") as fh:
             fh.write("[Desktop Entry]\nName=Stand-in\nExec=sh -c 'setsid sleep 3600 & exec sleep 3600'\n")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"), "XDG_RUNTIME_DIR": runtime,
            "XDG_DATA_DIRS": share, "XDG_DATA_HOME": share,
-           "JUPYTER_CONFIG_DIR": os.path.join(runtime, "config"), "JUPYTER_DATA_DIR": os.path.join(runtime, "data"),
+           "JUPYTER_CONFIG_DIR": config, "JUPYTER_DATA_DIR": os.path.join(runtime, "data"),
            "JUPYTER_RUNTIME_DIR": os.path.join(runtime, "jupyter"), "SELKIES_WEB_ROOT": H.CORE_DIST,
            "SELKIES_WAYLAND": "true" if wayland else "false"}
-    offer_selkies(env["JUPYTER_CONFIG_DIR"])
+    offer_selkies(config)
     proc = H.spawn([H.PYTHON, "-m", "jupyter_server", "--ServerApp.ip=127.0.0.1", f"--ServerApp.port={port}",
                     "--ServerApp.port_retries=0", f"--ServerApp.token={token}", f"--ServerApp.root_dir={runtime}",
                     "--ServerApp.open_browser=False"],
