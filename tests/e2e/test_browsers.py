@@ -260,64 +260,71 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
 def striped_block(engine: str) -> "H.Results":
     """Striped JPEG on one engine: the video worker decodes, composites, and
     presents it off the page, fps counting the worker's composites and the
-    worker canvas the visible sink."""
+    worker canvas the visible sink. JPEG sends only damaged stripes, so the
+    display churns: on a still one fps counts the first frame's composites for
+    a second and then reads 0."""
     tag = f"{engine}-striped"
     res = H.Results(tag)
     H.server_start(mode="websockets", wayland=False,
                    extra_env={"SELKIES_ENCODER": "jpeg"})
-    with sync_playwright() as p:
-        browser, ctx = engine_launch(p, engine)
-        ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
-        page = ctx.pages[0] if (engine == "firefox" and ctx.pages) else ctx.new_page()
-        page_errors = []
-        page.on("pageerror", lambda e: page_errors.append(str(e)))
-        page.goto(H.BASE_URL, wait_until="load")
-        # Polled, not sampled once: which counter is live depends on the divert,
-        # and an engine that takes it optimistically and falls back on the first
-        # decode failure flips between them while the stream is coming up. The
-        # worker's own rows and composites are what settle it, and they trail
-        # the first chunks by as long as its decoders take to come up.
-        settled = """() => {
-          const c = document.getElementById('videoWorkerCanvas');
-          return !!window.videoDivertOn && Object.keys(window.videoStripeRows || {}).length > 1
-            && (window.fps || 0) > 0 && !!c && c.width >= 640;
-        }"""
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            time.sleep(1.0)
-            if page.evaluate(settled):
-                break
-        try:
-            state = page.evaluate("""({
-              divert: !!window.videoDivertOn,
-              rows: Object.keys(window.videoStripeRows || {}).length,
-              chunks: window.videoChunksReceived || 0,
-              fps: window.fps || 0,
-              enc: window.encoder,
-              workerCanvas: (() => {
-                const c = document.getElementById('videoWorkerCanvas');
-                return c ? {w: c.width, shown: c.style.display !== 'none'} : null;
-              })(),
-              mainShown: (() => {
-                const c = document.getElementById('videoCanvas');
-                return c ? c.style.display !== 'none' : null;
-              })(),
-            })""")
-            res.check("striped stream reaches the client",
-                      state["enc"] == "jpeg" and state["chunks"] > 0, state)
-            res.check("the video worker takes the striped divert",
-                      state["divert"] and state["rows"] > 1, state)
-            res.check("the worker presents (fps counts its composites)",
-                      state["fps"] > 0, state)
-            res.check("the worker canvas is the visible sink",
-                      bool(state["workerCanvas"]) and state["workerCanvas"]["shown"]
-                      and state["workerCanvas"]["w"] >= 640 and not state["mainShown"], state)
-            res.check("no page errors", not page_errors, "; ".join(page_errors)[:160])
-        finally:
-            if browser:
-                browser.close()
-            else:
-                ctx.close()
+    churn = C.Churn()
+    churn.start()
+    try:
+        with sync_playwright() as p:
+            browser, ctx = engine_launch(p, engine)
+            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+            page = ctx.pages[0] if (engine == "firefox" and ctx.pages) else ctx.new_page()
+            page_errors = []
+            page.on("pageerror", lambda e: page_errors.append(str(e)))
+            page.goto(H.BASE_URL, wait_until="load")
+            # Polled, not sampled once: which counter is live depends on the divert,
+            # and an engine that takes it optimistically and falls back on the first
+            # decode failure flips between them while the stream is coming up. The
+            # worker's own rows and composites are what settle it, and they trail
+            # the first chunks by as long as its decoders take to come up.
+            settled = """() => {
+              const c = document.getElementById('videoWorkerCanvas');
+              return !!window.videoDivertOn && Object.keys(window.videoStripeRows || {}).length > 1
+                && (window.fps || 0) > 0 && !!c && c.width >= 640;
+            }"""
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                time.sleep(1.0)
+                if page.evaluate(settled):
+                    break
+            try:
+                state = page.evaluate("""({
+                  divert: !!window.videoDivertOn,
+                  rows: Object.keys(window.videoStripeRows || {}).length,
+                  chunks: window.videoChunksReceived || 0,
+                  fps: window.fps || 0,
+                  enc: window.encoder,
+                  workerCanvas: (() => {
+                    const c = document.getElementById('videoWorkerCanvas');
+                    return c ? {w: c.width, shown: c.style.display !== 'none'} : null;
+                  })(),
+                  mainShown: (() => {
+                    const c = document.getElementById('videoCanvas');
+                    return c ? c.style.display !== 'none' : null;
+                  })(),
+                })""")
+                res.check("striped stream reaches the client",
+                          state["enc"] == "jpeg" and state["chunks"] > 0, state)
+                res.check("the video worker takes the striped divert",
+                          state["divert"] and state["rows"] > 1, state)
+                res.check("the worker presents (fps counts its composites)",
+                          state["fps"] > 0, state)
+                res.check("the worker canvas is the visible sink",
+                          bool(state["workerCanvas"]) and state["workerCanvas"]["shown"]
+                          and state["workerCanvas"]["w"] >= 640 and not state["mainShown"], state)
+                res.check("no page errors", not page_errors, "; ".join(page_errors)[:160])
+            finally:
+                if browser:
+                    browser.close()
+                else:
+                    ctx.close()
+    finally:
+        churn.stop()
     res.summary()
     return res
 
