@@ -967,10 +967,10 @@ fn test_timed_abandonment_preserves_t3_restart_for_outstanding_data() -> Result<
             ..Default::default()
         };
         a.handle_sack(&sack, at)?;
-        assert_eq!(Some(at + Duration::from_secs(2)), a.poll_timeout());
+        assert_eq!(Some(at + Duration::from_secs(1)), a.poll_timeout());
         a.handle_sack(&sack, at + Duration::from_millis(100))?;
         assert_eq!(
-            Some(at + Duration::from_secs(2)),
+            Some(at + Duration::from_secs(1)),
             a.poll_timeout(),
             "duplicate SACK must not restart T3"
         );
