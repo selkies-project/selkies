@@ -81,6 +81,14 @@ pub trait Backend {
     /// screen is the compositor's logical layout.
     fn panel_origin(&self) -> (i32, i32, i32);
 
+    /// The X window the system tray's strip is made a child of: the panel's own window on
+    /// X11, where the server then paints the strip from the bar's background and stacks it
+    /// with the bar. `None` where the panel is not an X window (under XWayland the strip is a
+    /// window of its own that the compositor blends over the panel).
+    fn tray_parent(&self) -> Option<u32> {
+        None
+    }
+
     /// Where a display's bar surface sits in the background behind it, as
     /// [`Backend::panel_origin`] gives the panel's.
     fn bar_origin(&self, _bar: u32) -> (i32, i32, i32) {

@@ -2,11 +2,20 @@
 //! that park an icon beside the clock still speak.  The host owns the
 //! `_NET_SYSTEM_TRAY_S<n>` selection on the X display of the session, which
 //! on Wayland is Xwayland, and reparents each docked icon window into a
-//! small override-redirect window placed over the bar's tray strip.  The X
-//! server paints and delivers input to the icons itself: on X11 the strip
-//! sits above the dock window, and on Wayland the compositor stacks Xwayland's
-//! override-redirect windows above the panel layer, so no pixels are copied
-//! and the icons' own menus open where they expect.
+//! small window, the strip, placed over the bar's tray slot.  The X server
+//! paints and delivers input to the icons itself, so no pixels are copied and
+//! the icons' own menus open where they expect.
+//!
+//! Where the panel is an X window (X11) the strip is its child with a
+//! parent-relative background, and the tray names the screen's own visual:
+//! nothing blends a translucent window there, so an icon drawn with alpha
+//! would show black wherever it is clear, and an icon in the screen's visual
+//! draws over a parent-relative background instead, which the server fills
+//! from the bar's own pixels.  As a child the strip also stays stacked with
+//! the bar whatever the window manager raises.  Under Xwayland the panel is a
+//! layer surface, so the strip is an override-redirect window of its own with
+//! a 32-bit visual, which the compositor stacks above the panel layer and
+//! blends with its alpha.
 
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 
@@ -54,15 +63,21 @@ pub struct Tray {
     mapped: bool,
     /// Whether icons came or went since the strip was last arranged.
     changed: bool,
+    /// Whether the strip is a child of the panel's window rather than a window of its own.
+    parented: bool,
 }
 
 impl Tray {
     /// Connects to the X display and takes the tray selection.
     ///
+    /// # Arguments
+    /// * `parent` - The panel's window to make the strip a child of, or `None` for a strip of
+    ///   its own above the panel.
+    ///
     /// # Returns
     /// The host, or `None` when there is no X display, the selection is
     /// already owned, or the setup failed.
-    pub fn new() -> Option<Tray> {
+    pub fn new(parent: Option<xproto::Window>) -> Option<Tray> {
         let (conn, screen_num) = RustConnection::connect(None).ok()?;
         let setup = conn.setup().clone();
         let screen = &setup.roots[screen_num];
@@ -82,7 +97,8 @@ impl Tray {
             .iter()
             .find(|d| d.depth == 32)
             .and_then(|d| d.visuals.first())
-            .map(|v| v.visual_id);
+            .map(|v| v.visual_id)
+            .filter(|_| parent.is_none());
         let manager = conn.generate_id().ok()?;
         conn.create_window(
             x11rb::COPY_DEPTH_FROM_PARENT,
@@ -99,8 +115,28 @@ impl Tray {
         )
         .ok()?;
         let holder = conn.generate_id().ok()?;
-        match argb {
-            Some(visual) => {
+        match (parent, argb) {
+            (Some(parent), _) => {
+                conn.create_window(
+                    x11rb::COPY_DEPTH_FROM_PARENT,
+                    holder,
+                    parent,
+                    0,
+                    0,
+                    1,
+                    1,
+                    0,
+                    xproto::WindowClass::INPUT_OUTPUT,
+                    x11rb::COPY_FROM_PARENT,
+                    &xproto::CreateWindowAux::new()
+                        .background_pixmap(u32::from(xproto::BackPixmap::PARENT_RELATIVE))
+                        .event_mask(
+                            xproto::EventMask::SUBSTRUCTURE_NOTIFY | xproto::EventMask::STRUCTURE_NOTIFY,
+                        ),
+                )
+                .ok()?;
+            }
+            (None, Some(visual)) => {
                 let colormap = conn.generate_id().ok()?;
                 conn.create_colormap(xproto::ColormapAlloc::NONE, colormap, root, visual)
                     .ok()?;
@@ -126,7 +162,7 @@ impl Tray {
                 )
                 .ok()?;
             }
-            None => {
+            (None, None) => {
                 conn.create_window(
                     x11rb::COPY_DEPTH_FROM_PARENT,
                     holder,
@@ -187,7 +223,13 @@ impl Tray {
             icon_size: 22,
             mapped: false,
             changed: false,
+            parented: parent.is_some(),
         })
+    }
+
+    /// Whether the strip is a child of the panel's window, placed in its coordinates.
+    pub fn parented(&self) -> bool {
+        self.parented
     }
 
     /// The descriptor to poll for readability.
@@ -237,15 +279,25 @@ impl Tray {
         self.icons.len() != before
     }
 
-    /// Embeds an icon window.
+    /// Embeds an icon window, unless it is gone already: an application can drop the window
+    /// it asked to dock before the request is read (GTK makes a new one when the visual
+    /// changes), and one taken in then would keep an empty slot, since no notice of its end
+    /// would ever come.
     fn dock(&mut self, icon: xproto::Window) {
         if self.icons.contains(&icon) {
             return;
         }
-        let _ = self.conn.change_window_attributes(
-            icon,
-            &xproto::ChangeWindowAttributesAux::new().event_mask(xproto::EventMask::STRUCTURE_NOTIFY),
-        );
+        let watched = self
+            .conn
+            .change_window_attributes(
+                icon,
+                &xproto::ChangeWindowAttributesAux::new().event_mask(xproto::EventMask::STRUCTURE_NOTIFY),
+            )
+            .map_err(|_| ())
+            .and_then(|cookie| cookie.check().map_err(|_| ()));
+        if watched.is_err() {
+            return;
+        }
         let _ = self.conn.change_save_set(xproto::SetMode::INSERT, icon);
         let _ = self.conn.reparent_window(icon, self.holder, 0, 0);
         let notify = xproto::ClientMessageEvent::new(
@@ -279,6 +331,20 @@ impl Tray {
         self.slot = slot;
         self.icon_size = icon_size.max(8);
         self.arrange();
+        let _ = self.conn.flush();
+    }
+
+    /// Draws the strip and its icons again after the bar's pixels under it changed: a child
+    /// fills a parent-relative background from its parent's only when exposed, not when the
+    /// parent's background changes.
+    pub fn repaint(&mut self) {
+        if !self.parented || !self.mapped {
+            return;
+        }
+        let _ = self.conn.clear_area(false, self.holder, 0, 0, 0, 0);
+        for icon in &self.icons {
+            let _ = self.conn.clear_area(true, *icon, 0, 0, 0, 0);
+        }
         let _ = self.conn.flush();
     }
 

@@ -2105,6 +2105,10 @@ impl Backend for X11Backend {
         (primary.x, y, self.scale)
     }
 
+    fn tray_parent(&self) -> Option<u32> {
+        Some(self.panel.window)
+    }
+
     fn dispatch(&mut self, _readable: bool) -> Result<Vec<Event>, String> {
         while let Some(event) = self.conn.poll_for_event().map_err(|e| format!("{e}"))? {
             self.handle_event(event);

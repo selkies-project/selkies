@@ -177,7 +177,7 @@ fn run() -> i32 {
         None
     };
     let mut tray = if desktop.config.show_tray {
-        tray::Tray::new()
+        tray::Tray::new(backend.tray_parent())
     } else {
         None
     };
@@ -217,8 +217,16 @@ fn run() -> i32 {
             let (ox, oy, scale) = backend.panel_origin();
             desktop.panel_offset = (ox / scale.max(1), oy / scale.max(1));
         }
-        if let Some(frame) = desktop.render_panel() {
+        let panel_damage = desktop.render_panel().map(|frame| {
             backend.present(SurfaceId::Panel, &frame);
+            frame.damage
+        });
+        if let Some(damage) = panel_damage
+            && let Some(slot) = desktop.tray_slot
+            && damage.iter().any(|r| !r.intersect(&slot).is_empty())
+            && let Some(tray) = tray.as_mut()
+        {
+            tray.repaint();
         }
         for id in desktop.bar_ids() {
             let (ox, oy, scale) = backend.bar_origin(id);
@@ -232,6 +240,7 @@ fn run() -> i32 {
         {
             desktop.tray_moved = false;
             let (ox, oy, scale) = backend.panel_origin();
+            let (ox, oy) = if tray.parented() { (0, 0) } else { (ox, oy) };
             let slot = desktop.tray_slot.map(|r| {
                 let r = r.scaled(scale);
                 geom::Rect::new(r.x + ox, r.y + oy, r.w, r.h)
