@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 #include <poll.h>
@@ -268,10 +269,13 @@ int main(int argc, char **argv) {
     if (pid == 0) {
         close(c2p[1]); close(p2c[0]);
         if (peer) {
+            /* The peer is an executable file, resolved before it is run. */
+            char real[PATH_MAX];
+            if (!realpath(peer, real) || access(real, X_OK) != 0) _exit(127);
             char rd[16], wr[16];
             snprintf(rd, sizeof rd, "%d", c2p[0]);
             snprintf(wr, sizeof wr, "%d", p2c[1]);
-            execl(peer, peer, "consume", rd, wr, (char *)NULL);
+            execl(real, real, "consume", rd, wr, (char *)NULL);
             _exit(127);
         }
         _exit(run_consumer(c2p[0], p2c[1]));

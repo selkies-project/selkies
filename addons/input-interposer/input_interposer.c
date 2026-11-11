@@ -1253,8 +1253,11 @@ static int synth_for_basename(const char *name) {
     char *end = NULL;
     long num = strtol(name + 5, &end, 10);
     if (end == name + 5 || *end != '\0') return -1;
-    if (num < UDYN_EVENT_BASE || num >= UDYN_EVENT_BASE + UDYN_MAX) return -1;
-    return NUM_EV_INTERPOSERS + (int)(num - UDYN_EVENT_BASE);
+    /* The dynamic slot whose node this is, matched rather than computed from `num`. */
+    for (int i = 0; i < UDYN_MAX; i++) {
+        if (num == UDYN_EVENT_BASE + i) return NUM_EV_INTERPOSERS + i;
+    }
+    return -1;
 }
 
 /* Per-open() state for a /dev/input DIR* stream: which synthetic slots the
