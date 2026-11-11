@@ -32,17 +32,6 @@ import { isMobileClient } from './util.ts';
 const fetchedDocuments = new Set<string>();
 
 /**
- * `url` when it names a document this page fetched, else null: no other
- * address reaches a frame or a tab.
- * @param url The address a print request names.
- * @returns The blob URL, or null.
- */
-function ownBlobUrl(url: unknown): string | null {
-    if (typeof url !== 'string' || !fetchedDocuments.has(url)) return null;
-    return url;
-}
-
-/**
  * Prints the PDF at `url`: on a desktop through a frame of no size, so the
  * document prints rather than the page around it, and the frame goes once
  * the dialog closes; on a touch-first client by opening it in a new tab,
@@ -50,14 +39,21 @@ function ownBlobUrl(url: unknown): string | null {
  * @param url Blob URL of the PDF.
  */
 export function printDocument(url: string): void {
-    const own = ownBlobUrl(url);
-    if (own === null) {
+    const prefix = `blob:${window.location.origin}/`;
+    if (typeof url !== 'string' || !fetchedDocuments.has(url) || !url.startsWith(prefix)) {
         console.warn('Print request ignored: not a document this page fetched.');
         return;
     }
-    url = own;
+    // Rebuilt from this page's origin and the blob's identifier, so no other
+    // address reaches a frame or a tab.
+    const own = `${prefix}${encodeURIComponent(url.slice(prefix.length))}`;
     if (isMobileClient) {
-        window.open(url, '_blank');
+        // A tab of its own, through a link: target _blank opens it without an opener.
+        const link = document.createElement('a');
+        link.href = own;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.click();
         return;
     }
     const frame = document.createElement('iframe');
@@ -70,10 +66,14 @@ export function printDocument(url: string): void {
             target.print();
         } catch (e) {
             frame.remove();
-            window.open(url, '_blank');
+            const link = document.createElement('a');
+            link.href = own;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.click();
         }
     });
-    frame.src = url;
+    frame.src = own;
     document.body.appendChild(frame);
 }
 
