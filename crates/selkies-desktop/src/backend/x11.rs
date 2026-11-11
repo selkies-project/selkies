@@ -78,6 +78,16 @@ struct ShmSegment {
 }
 
 /// One of the desktop's windows with the pixels it shows.
+///
+/// The pixels are kept twice: in client memory, a shared memory segment where the server
+/// takes one and a buffer where it does not, which the shell draws into, and in `image`, a
+/// pixmap of the window's size in the server set as the window's background. A present
+/// uploads only its damage into the image and copies from the image to the window, and the
+/// server repaints an exposure (a window dragged across the desktop, a popup closed) from the
+/// background on its own. On a GPU screen an upload straight into the window waits for the
+/// GPU to finish with the screen, so repainting each exposed rectangle from client memory
+/// stalled the server once per rectangle, hundreds of times a second under a drag, while the
+/// image is an offscreen texture the copies read on the GPU.
 struct X11Surface {
     window: xproto::Window,
     gc: xproto::Gcontext,
@@ -85,11 +95,52 @@ struct X11Surface {
     height: i32,
     shm: Option<ShmSegment>,
     pixels: Vec<u8>,
+    /// The server's copy of the pixels, the window's background, made at the first present of
+    /// a size.
+    image: Option<xproto::Pixmap>,
     visible: Vec<Rect>,
     /// The input rectangles last presented, in logical pixels, which a reparent re-applies.
     input: Vec<Rect>,
     /// The bar's background in physical pixels and its corner radius, on the panel's window.
     bar: Option<(Rect, i32)>,
+}
+
+impl X11Surface {
+    /// Takes a new pixel size, dropping the pixels of the old one.
+    fn resize(&mut self, conn: &RustConnection, width: i32, height: i32) {
+        self.width = width;
+        self.height = height;
+        self.release_pixels(conn);
+        self.pixels.clear();
+    }
+
+    /// Frees the server's copies of the pixels, the image and the segment, and leaves the
+    /// window without a background, so the server paints nothing over what it shows until
+    /// the next present makes them again.
+    fn release_pixels(&mut self, conn: &RustConnection) {
+        if let Some(image) = self.image.take() {
+            let _ = conn.change_window_attributes(
+                self.window,
+                &xproto::ChangeWindowAttributesAux::new().background_pixmap(x11rb::NONE),
+            );
+            let _ = conn.free_pixmap(image);
+        }
+        if let Some(segment) = self.shm.take() {
+            let _ = conn.shm_detach(segment.seg);
+        }
+    }
+
+    /// Destroys the window and frees everything the server holds for it.
+    fn destroy(mut self, conn: &RustConnection) {
+        if let Some(image) = self.image.take() {
+            let _ = conn.free_pixmap(image);
+        }
+        if let Some(segment) = self.shm.take() {
+            let _ = conn.shm_detach(segment.seg);
+        }
+        let _ = conn.free_gc(self.gc);
+        let _ = conn.destroy_window(self.window);
+    }
 }
 
 /// How a window's visible rectangles become its bounding shape.
@@ -457,10 +508,7 @@ impl X11Backend {
             (&mut self.desktop, self.screen_w, self.screen_h),
         ] {
             if surface.width != width || surface.height != height {
-                surface.width = width;
-                surface.height = height;
-                surface.shm = None;
-                surface.pixels.clear();
+                surface.resize(&self.conn, width, height);
                 surface.visible.clear();
             }
         }
@@ -511,7 +559,7 @@ impl X11Backend {
         for id in gone {
             if let Some(index) = self.bars.iter().position(|(b, _)| *b == id) {
                 let (_, surface) = self.bars.remove(index);
-                let _ = self.conn.destroy_window(surface.window);
+                surface.destroy(&self.conn);
                 self.task_rects
                     .retain(|(surface, _)| *surface != SurfaceId::Bar(id));
                 self.events.push(Event::BarRemoved { bar: id });
@@ -554,10 +602,7 @@ impl X11Backend {
             if let Some((_, surface)) = self.bars.iter_mut().find(|(b, _)| *b == id)
                 && (surface.width != monitor.w || surface.height != bar_h * s)
             {
-                surface.width = monitor.w;
-                surface.height = bar_h * s;
-                surface.shm = None;
-                surface.pixels.clear();
+                surface.resize(&self.conn, monitor.w, bar_h * s);
                 surface.visible.clear();
             }
             self.events.push(Event::Configured {
@@ -624,10 +669,7 @@ impl X11Backend {
                 .stack_mode(xproto::StackMode::ABOVE),
         );
         if surface.width != w || surface.height != h {
-            surface.width = w;
-            surface.height = h;
-            surface.shm = None;
-            surface.pixels.clear();
+            surface.resize(&self.conn, w, h);
             surface.visible.clear();
         }
         let _ = self.conn.map_window(surface.window);
@@ -1077,8 +1119,34 @@ impl X11Backend {
         );
     }
 
-    /// Copies the visible rectangles of a surface's pixels to its window.
-    fn blit(&self, surface: &X11Surface, rects: &[Rect]) {
+    /// Shows rectangles of a surface in its window: copied there on the server from its
+    /// image, or uploaded from its client pixels where it has none.
+    fn show(&self, surface: &X11Surface, rects: &[Rect]) {
+        let Some(image) = surface.image else {
+            self.upload(surface, surface.window, rects);
+            return;
+        };
+        for rect in rects {
+            let r = rect.intersect(&Rect::new(0, 0, surface.width, surface.height));
+            if r.is_empty() {
+                continue;
+            }
+            let _ = self.conn.copy_area(
+                image,
+                surface.window,
+                surface.gc,
+                r.x as i16,
+                r.y as i16,
+                r.x as i16,
+                r.y as i16,
+                r.w as u16,
+                r.h as u16,
+            );
+        }
+    }
+
+    /// Uploads rectangles of a surface's client pixels to `target`, its image or its window.
+    fn upload(&self, surface: &X11Surface, target: xproto::Drawable, rects: &[Rect]) {
         if surface.pixels.is_empty() && surface.shm.is_none() {
             return;
         }
@@ -1090,7 +1158,7 @@ impl X11Backend {
             }
             if let Some(seg) = &surface.shm {
                 let _ = self.conn.shm_put_image(
-                    surface.window,
+                    target,
                     surface.gc,
                     w as u16,
                     h as u16,
@@ -1120,7 +1188,7 @@ impl X11Backend {
                     }
                     let _ = self.conn.put_image(
                         xproto::ImageFormat::Z_PIXMAP,
-                        surface.window,
+                        target,
                         surface.gc,
                         r.w as u16,
                         rows as u16,
@@ -1307,10 +1375,7 @@ impl X11Backend {
                     .width(w.max(1) as u32)
                     .height(h.max(1) as u32),
             );
-            window.surface.width = w;
-            window.surface.height = h;
-            window.surface.shm = None;
-            window.surface.pixels.clear();
+            window.surface.resize(&self.conn, w, h);
             window.surface.visible.clear();
             configured.push((window.id, width, height));
         }
@@ -1327,9 +1392,7 @@ impl X11Backend {
     /// Destroys a file manager window.
     fn destroy_window(&mut self, id: u32) {
         if let Some(index) = self.windows.iter().position(|w| w.id == id) {
-            let window = self.windows.remove(index);
-            let _ = self.conn.free_gc(window.surface.gc);
-            let _ = self.conn.destroy_window(window.surface.window);
+            self.windows.remove(index).surface.destroy(&self.conn);
         }
     }
 
@@ -1628,7 +1691,9 @@ impl X11Backend {
     /// Dispatches one X event.  Shapes are applied again whenever the window
     /// manager reparents one of the desktop's windows, because openbox only
     /// learns about a client's input shape from the change notification and
-    /// never queries it when it starts managing a window.  An expose repaints
+    /// never queries it when it starts managing a window.  An exposure of a
+    /// surface with an image is already repainted by the server from the
+    /// window's background when the event arrives; one without is uploaded for
     /// the rectangle the server names rather than the surface's visible
     /// rectangles: the desktop is presented as the wallpaper and then the
     /// launcher icons, so its visible list is the icon cells, and a window
@@ -1637,9 +1702,11 @@ impl X11Backend {
         match event {
             XEvent::Expose(e) => {
                 let id = self.surface_of(e.window);
-                if let Some(surface) = self.surface_ref(id) {
+                if let Some(surface) = self.surface_ref(id)
+                    && surface.image.is_none()
+                {
                     let exposed = Rect::new(e.x as i32, e.y as i32, e.width as i32, e.height as i32);
-                    self.blit(surface, &[exposed]);
+                    self.upload(surface, surface.window, &[exposed]);
                 }
             }
             XEvent::ButtonPress(e) | XEvent::ButtonRelease(e) => {
@@ -1755,10 +1822,7 @@ impl X11Backend {
                     && let Some(window) = self.windows.iter_mut().find(|w| w.id == id)
                     && (window.surface.width != e.width as i32 || window.surface.height != e.height as i32)
                 {
-                    window.surface.width = e.width as i32;
-                    window.surface.height = e.height as i32;
-                    window.surface.shm = None;
-                    window.surface.pixels.clear();
+                    window.surface.resize(&self.conn, e.width as i32, e.height as i32);
                     let s = self.scale;
                     self.events.push(Event::Configured {
                         surface: SurfaceId::Window(id),
@@ -1830,9 +1894,9 @@ fn add_rounded_shape(out: &mut Vec<xproto::Rectangle>, r: Rect, radius: i32) {
 /// Creates one of the desktop's windows and tags it with the EWMH type and
 /// states that make the window manager treat it as part of the desktop shell.
 /// The window never takes keyboard focus, so clicking the taskbar does not
-/// change which window is active before the click is handled, and it has
-/// no background, so the server paints nothing when it is resized and the
-/// pixels the desktop blits are the only ones ever shown.
+/// change which window is active before the click is handled, and it starts
+/// without a background, so the server paints nothing over it until the
+/// first present of a size makes the surface's image its background.
 fn create_window(
     conn: &RustConnection,
     atoms: &Atoms,
@@ -1920,6 +1984,7 @@ fn create_window(
         height: 0,
         shm: None,
         pixels: Vec::new(),
+        image: None,
         visible: Vec::new(),
         input: Vec::new(),
         bar: None,
@@ -2071,6 +2136,23 @@ impl Backend for X11Backend {
                 self.shm_works = false;
             }
         }
+        let mut new_image = None;
+        if let Some(window) = self
+            .surface_ref(id)
+            .filter(|s| s.image.is_none())
+            .map(|s| s.window)
+            && let Ok(image) = self.conn.generate_id()
+            && self
+                .conn
+                .create_pixmap(self.depth, image, window, w as u16, h as u16)
+                .is_ok()
+        {
+            let _ = self.conn.change_window_attributes(
+                window,
+                &xproto::ChangeWindowAttributesAux::new().background_pixmap(image),
+            );
+            new_image = Some(image);
+        }
         let stride = w as usize * 4;
         let visible: Vec<Rect> = frame.visible.iter().map(|r| r.scaled(scale)).collect();
         let moved = self.surface_ref(id).is_some_and(|s| s.visible != visible);
@@ -2081,6 +2163,9 @@ impl Backend for X11Backend {
             };
             if let Some(segment) = new_segment {
                 surface.shm = Some(segment);
+            }
+            if new_image.is_some() {
+                surface.image = new_image;
             }
             let src = frame.pixmap.data();
             match &mut surface.shm {
@@ -2161,9 +2246,16 @@ impl Backend for X11Backend {
         let Some(surface) = self.surface_ref(id) else {
             return;
         };
+        if let Some(image) = surface.image {
+            if new_image.is_some() {
+                self.upload(surface, image, &[Rect::new(0, 0, w, h)]);
+            } else {
+                self.upload(surface, image, &damage);
+            }
+        }
         let mut to_blit = damage.clone();
         to_blit.extend(surface.visible.iter().copied());
-        self.blit(surface, &to_blit);
+        self.show(surface, &to_blit);
         let _ = self.conn.flush();
     }
 
