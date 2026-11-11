@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -74,9 +74,11 @@ pub const HOST_SESSION_VARS: &[&str] = &[
 /// A process environment.
 pub type Env = BTreeMap<String, String>;
 
-/// One line of the launcher's own log, on stderr beside its children's.
+/// One line of the launcher's own log, on stderr beside its children's, in one write so a
+/// child's line cannot land inside it.
 pub fn log(message: &str) {
-    eprintln!("[selkies-session] {message}");
+    let line = format!("[selkies-session] {message}\n");
+    let _ = io::stderr().lock().write_all(line.as_bytes());
 }
 
 /// Whether the Unix socket at `path` accepts a connection.
