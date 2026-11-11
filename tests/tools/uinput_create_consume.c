@@ -114,7 +114,10 @@ static int listed(const char *node) {
 static int run_consumer(int rd, int wr) {
     char sys[64] = {0};
     FILE *f = fdopen(rd, "r");
-    if (!f || !fgets(sys, sizeof sys, f)) return 1;
+    if (!f) return 1;
+    int got = fgets(sys, sizeof sys, f) != NULL;
+    fclose(f);
+    if (!got) return 1;
     sys[strcspn(sys, "\n")] = 0;
     char path[128];
     snprintf(path, sizeof path, "/dev/input/%s", sys);
@@ -219,7 +222,7 @@ static int run_watch(const char *self) {
         int nul = open("/dev/null", O_WRONLY);
         dup2(nul, 1);
         dup2(nul, 2);
-        execl(self, self, "hold", (char *)NULL);
+        execl("/proc/self/exe", self, "hold", (char *)NULL);
         _exit(127);
     }
     int opened = 0;
@@ -227,9 +230,11 @@ static int run_watch(const char *self) {
     char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
     while (!opened) {
         ssize_t n = read(in, buf, sizeof buf);
-        if (n <= 0) break;
-        for (char *p = buf; p < buf + n && !opened;) {
-            struct inotify_event *ev = (struct inotify_event *)p;
+        if (n <= 0 || (size_t)n > sizeof buf) break;
+        /* Each record is read only where it lies wholly inside what was read. */
+        for (size_t off = 0; off + sizeof(struct inotify_event) <= (size_t)n && !opened;) {
+            struct inotify_event *ev = (struct inotify_event *)(buf + off);
+            if (ev->len > (size_t)n - off - sizeof(struct inotify_event)) break;
             if (ev->len && strncmp(ev->name, "event", 5) == 0 && (ev->mask & (IN_CREATE | IN_MOVED_TO))) {
                 char path[300];
                 snprintf(path, sizeof path, "/dev/input/%s", ev->name);
@@ -237,7 +242,7 @@ static int run_watch(const char *self) {
                 dprintf(2, "watch: %s mask=%#x open=%s\n", ev->name, ev->mask, fd >= 0 ? "ok" : strerror(errno));
                 if (fd >= 0) { opened = 1; close(fd); }
             }
-            p += sizeof(struct inotify_event) + ev->len;
+            off += sizeof(struct inotify_event) + ev->len;
         }
     }
     kill(kid, SIGTERM);
