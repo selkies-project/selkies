@@ -156,6 +156,8 @@ impl Reply {
 pub(crate) struct TestServer {
     listener: Option<Listener>,
     pub port: u16,
+    /// The address the listener bound first.
+    addr: std::net::SocketAddr,
     client: Client<HttpConnector, Full<Bytes>>,
 }
 
@@ -180,17 +182,23 @@ impl TestServer {
             cfg.port = free_port();
         }
         let listener = listen::start(router, &cfg, None).await.expect("listener");
-        let port = listener
-            .local_addrs()
-            .first()
-            .map(|a| a.port())
-            .unwrap_or(cfg.port);
+        let addr = listener.local_addrs().first().copied().unwrap_or_else(|| {
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, cfg.port))
+        });
         let client = Client::builder(TokioExecutor::new()).build_http();
         TestServer {
             listener: Some(listener),
-            port,
+            port: addr.port(),
+            addr,
             client,
         }
+    }
+
+    /// A raw TCP connection to the listener, for a test that writes its request by hand.
+    pub(crate) async fn connect(&self) -> tokio::net::TcpStream {
+        tokio::net::TcpStream::connect(self.addr)
+            .await
+            .expect("the test server accepts")
     }
 
     pub(crate) fn origin(&self) -> String {

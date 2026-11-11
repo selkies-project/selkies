@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use log::{debug, error, info, warn};
 use regex::Regex;
@@ -41,10 +41,23 @@ use super::xrandr::{run_tool, which};
 /// Where xfconfd persists the channel `set_dpi` writes on XFCE.
 const XFCONF_XSETTINGS: &str = "xfce4/xfconf/xfce-perchannel-xml/xsettings.xml";
 
+/// Whether `path` is absolute and free of `..`: the XDG Base Directory specification has a
+/// relative path in its variables ignored, and no settings file this module edits is named
+/// through a parent.
+fn sound_path(path: &Path) -> bool {
+    path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)
+}
+
+/// `dir` where it is a [`sound_path`].
+fn usable_dir(dir: PathBuf) -> Option<PathBuf> {
+    sound_path(&dir).then_some(dir)
+}
+
 /// The user's home directory as the environment names it.
 fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
+        .and_then(usable_dir)
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
@@ -97,6 +110,12 @@ pub fn atomic_write_text(path: &Path, content: &str) -> std::io::Result<()> {
 /// preserved, so a DPI change never costs them their session configuration. A missing file
 /// is created with just the DPI line.
 pub fn write_xresources_dpi(path: &Path, dpi: i32) -> std::io::Result<()> {
+    if !sound_path(path) {
+        return Err(std::io::Error::other(format!(
+            "{} is not an absolute path",
+            path.display()
+        )));
+    }
     let xft = Regex::new(r"^\s*Xft\.dpi\s*:").expect("regex");
     let mut lines: Vec<String> = match std::fs::read_to_string(path) {
         Ok(text) => text
@@ -126,6 +145,9 @@ pub fn write_xresources_dpi(path: &Path, dpi: i32) -> std::io::Result<()> {
 /// base to scale; a file Qt round-tripped carries pixels alone, resolved at the density
 /// currently on the display (`current_dpi`).
 pub fn rewrite_lxqt_font(path: &Path, dpi: i32, current_dpi: i32) -> Option<(f64, i32)> {
+    if !sound_path(path) {
+        return None;
+    }
     let text = std::fs::read_to_string(path).ok()?;
     let font_line = Regex::new(r#"(?i)^(\s*font\s*=\s*)"?([^"\n]*)"?\s*$"#).expect("regex");
     let mut section = String::new();
@@ -277,11 +299,12 @@ async fn run_lxqt_font(dpi: i32) -> bool {
     let env = process_environ(pid);
     let config = env
         .get("XDG_CONFIG_HOME")
-        .filter(|c| !c.is_empty())
         .map(PathBuf::from)
+        .and_then(usable_dir)
         .unwrap_or_else(|| {
             env.get("HOME")
                 .map(PathBuf::from)
+                .and_then(usable_dir)
                 .unwrap_or_else(home)
                 .join(".config")
         });
@@ -554,12 +577,16 @@ fn desktop_dpi_from(resource_db: Option<String>) -> Option<i32> {
     let xft = Regex::new(r"(?m)^\s*Xft\.dpi\s*:\s*(\d+)").expect("regex");
     let xsettings = Regex::new(r"(?m)^\s*Xft/DPI\s+(\d+)").expect("regex");
     let xfconf = Regex::new(r#"name="DPI"[^>]*value="(-?\d+)""#).expect("regex");
-    let persisted = |path: PathBuf| std::fs::read_to_string(path).unwrap_or_default();
+    let persisted = |path: PathBuf| {
+        if !sound_path(&path) {
+            return String::new();
+        }
+        std::fs::read_to_string(path).unwrap_or_default()
+    };
     if running_desktop("xfce", "xfce4-session") {
-        let config = std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .filter(|c| !c.is_empty())
+        let config = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
+            .and_then(usable_dir)
             .unwrap_or_else(|| home().join(".config"));
         if let Some(dpi) = last_dpi(&xfconf, &persisted(config.join(XFCONF_XSETTINGS))) {
             return Some(dpi);

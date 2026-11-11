@@ -159,13 +159,26 @@ pub(crate) fn named_process(dir: &Path, name: &str, env: &[(&str, &str)]) -> Chi
         .expect("the stand-in starts");
     let deadline = Instant::now() + Duration::from_secs(5);
     let comm: String = name.chars().take(15).collect();
-    while std::fs::read_to_string(format!("/proc/{}/comm", child.id()))
-        .map_or(true, |c| c.trim_end() != comm)
-    {
+    while proc_comm(child.id()).map_or(true, |c| c.trim_end() != comm) {
         assert!(Instant::now() < deadline, "{name} never ran");
         std::thread::sleep(Duration::from_millis(10));
     }
     child
+}
+
+/// The name the kernel gives process `pid` (`/proc/<pid>/comm`).
+fn proc_comm(pid: u32) -> std::io::Result<String> {
+    let path = std::path::Path::new("/proc")
+        .join(pid.to_string())
+        .join("comm");
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(std::io::Error::other("not a /proc path"));
+    }
+    std::fs::read_to_string(path)
 }
 
 /// A throwaway Xvfb on a display nothing else holds, and the display's name.
