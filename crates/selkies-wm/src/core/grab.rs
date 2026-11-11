@@ -33,7 +33,7 @@ pub enum Zone {
 /// How close to an output's edge, in logical pixels, the pointer must be to reach a zone.
 const ZONE_EDGE: i32 = 8;
 /// Below this width an output takes one window across, so every zone is the whole area.
-const NARROW_OUTPUT: i32 = 700;
+pub const NARROW_OUTPUT: i32 = 700;
 
 /// The zone the pointer at `(x, y)` reaches on an output of `output` logical pixels, if any.
 pub fn zone_at(output: Rect, x: f64, y: f64) -> Option<Zone> {
