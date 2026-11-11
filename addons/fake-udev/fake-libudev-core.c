@@ -81,6 +81,7 @@
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -2145,7 +2146,9 @@ static struct udev_device *monitor_dispense_virtual(struct udev_monitor *mon) {
     }
     for (;;) {
         if (mon->evbuf_off > mon->evbuf_len || mon->evbuf_len - mon->evbuf_off < sizeof(struct inotify_event)) {
-            ssize_t n = read(mon->inotify_fd, mon->evbuf, sizeof(mon->evbuf));
+            // The kernel's records, read with the system call: this private fd is no business of
+            // a read() hook another preloaded library installs (the input interposer's).
+            ssize_t n = syscall(SYS_read, mon->inotify_fd, mon->evbuf, sizeof(mon->evbuf));
             if (n <= 0) {
                 return NULL; // EAGAIN (nothing pending) or error/EOF
             }
