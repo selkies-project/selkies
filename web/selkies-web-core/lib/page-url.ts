@@ -87,3 +87,23 @@ export function shareablePageURL(): string {
     return `${window.location.origin}${window.location.pathname}`;
   }
 }
+
+/**
+ * `shareablePageURL` as a page-relative link: the path and the query without
+ * `token`, every segment and value encoded again, for the `href` of a link the
+ * page renders.
+ */
+export function shareablePagePath(): string {
+  if (typeof window === 'undefined' || !window.location) return '';
+  const decoded = (part: string): string => {
+    try { return decodeURIComponent(part); } catch (_) { return part; }
+  };
+  const url = new URL(window.location.href);
+  url.searchParams.delete('token');
+  const segments: string[] = [];
+  for (const segment of url.pathname.split('/')) segments.push(encodeURIComponent(decoded(segment)));
+  const pairs: string[] = [];
+  for (const [key, value] of url.searchParams) pairs.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  const path = segments.join('/');
+  return pairs.length ? `${path}?${pairs.join('&')}` : path;
+}

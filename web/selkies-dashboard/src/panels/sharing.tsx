@@ -11,7 +11,7 @@ import { Check, Copy, Info } from "lucide-react";
 import { toast } from "sonner";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
 import { t } from "@/i18n";
-import { shareablePageURL } from "../../../selkies-web-core/lib/page-url.ts";
+import { shareablePagePath, shareablePageURL } from "../../../selkies-web-core/lib/page-url.ts";
 
 /**
  * The sharing view of the overflow menu: copyable links for the viewer
@@ -70,6 +70,8 @@ export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 
 	const baseUrl =
 		typeof window !== "undefined" ? shareablePageURL() : "";
+	const basePath =
+		typeof window !== "undefined" ? shareablePagePath() : "";
 
 	useEffect(() => {
 		const handleMessage = (event: MessageEvent) => {
@@ -160,7 +162,7 @@ export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 							<div key={link.id} className="sharing-link-item">
 								<span className="text-sm font-semibold">{link.label}</span>
 								<div className="mt-1 flex items-center justify-between gap-2">
-									<a className="sharing-link min-w-0" href={fullUrl} target="_blank" rel="noopener noreferrer">{breakable(fullUrl)}</a>
+									<a className="sharing-link min-w-0" href={`${basePath}${link.hash}`} target="_blank" rel="noopener noreferrer">{breakable(fullUrl)}</a>
 									{copyButton}
 								</div>
 							</div>

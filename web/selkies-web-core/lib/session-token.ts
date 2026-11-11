@@ -92,24 +92,20 @@ export function sessionAuthHeaders(headers?: Record<string, string>): Record<str
 }
 
 /**
- * A same-origin URL with a query token appended as `?token=`, for URLs the
+ * A same-origin URL with a query token appended as `token=`, for URLs the
  * browser navigates to (an iframe src, a link) rather than fetches. A token
  * that came in the fragment is left to the cookie, so no request line ever
  * carries it.
- * @param url Absolute or page-relative URL.
- * @returns The URL as given without a query token, else resolved and tokened.
+ * @param url Page-relative URL, without a token of its own.
+ * @returns The URL as given without a query token, else with the token encoded into its query.
  */
 export function withSessionToken(url: string): string {
     if (sessionTokenInFragment()) return url;
     const token = getSessionToken();
     if (!token) return url;
-    try {
-        const resolved = new URL(url, window.location.href);
-        resolved.searchParams.set('token', token);
-        return resolved.href;
-    } catch (_) {
-        return url;
-    }
+    const cut = url.indexOf('#');
+    const [path, fragment] = cut < 0 ? [url, ''] : [url.slice(0, cut), url.slice(cut)];
+    return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}${fragment}`;
 }
 
 /**
@@ -149,9 +145,9 @@ export function sessionTokenProtocols(): string[] {
 export function installSessionCookie(): void {
     const token = getSessionToken();
     if (!token || typeof document === 'undefined') return;
-    const attributes = [`path=${getRoutePrefix()}/api/`, 'SameSite=Strict'];
-    if (window.location.protocol === 'https:') attributes.push('Secure');
+    // Secure wherever the page is served over HTTPS; a plain-HTTP page cannot set it.
+    const secure = window.location.protocol === 'https:' ? '; Secure' : '';
     try {
-        document.cookie = `${SESSION_TOKEN_COOKIE}=${encodeURIComponent(token)}; ${attributes.join('; ')}`;
+        document.cookie = `${SESSION_TOKEN_COOKIE}=${encodeURIComponent(token)}; path=${getRoutePrefix()}/api/; SameSite=Strict${secure}`;
     } catch (_) { /* cookies unavailable */ }
 }
