@@ -2100,14 +2100,14 @@ static bool evbuf_has_matching_record(const struct udev_monitor *mon) {
     if (!monitor_admits_virtual(mon)) {
         return false;
     }
+    // Bounds as subtractions (off never passes evbuf_len), which a 32-bit size_t cannot wrap.
     size_t off = mon->evbuf_off;
-    while (off + sizeof(struct inotify_event) <= mon->evbuf_len) {
+    while (off <= mon->evbuf_len && mon->evbuf_len - off >= sizeof(struct inotify_event)) {
         const struct inotify_event *ev = (const struct inotify_event *)(mon->evbuf + off);
-        size_t rec = sizeof(struct inotify_event) + ev->len;
-        if (off + rec > mon->evbuf_len) {
+        if (ev->len > mon->evbuf_len - off - sizeof(struct inotify_event)) {
             break; // trailing partial record, never dispensed
         }
-        off += rec;
+        off += sizeof(struct inotify_event) + ev->len;
         if (!(ev->mask & (IN_CREATE | IN_DELETE)) || ev->len == 0) {
             continue;
         }
@@ -2149,25 +2149,24 @@ static struct udev_device *monitor_dispense_virtual(struct udev_monitor *mon) {
         return NULL;
     }
     for (;;) {
-        if (mon->evbuf_off + sizeof(struct inotify_event) > mon->evbuf_len) {
+        if (mon->evbuf_off > mon->evbuf_len || mon->evbuf_len - mon->evbuf_off < sizeof(struct inotify_event)) {
             ssize_t n = read(mon->inotify_fd, mon->evbuf, sizeof(mon->evbuf));
             if (n <= 0) {
                 return NULL; // EAGAIN (nothing pending) or error/EOF
             }
             mon->evbuf_len = (size_t)n;
             mon->evbuf_off = 0;
-            if (mon->evbuf_off + sizeof(struct inotify_event) > mon->evbuf_len) {
+            if (mon->evbuf_len < sizeof(struct inotify_event)) {
                 return NULL;
             }
         }
 
         struct inotify_event *ev = (struct inotify_event *)(mon->evbuf + mon->evbuf_off);
-        size_t rec = sizeof(struct inotify_event) + ev->len;
-        if (mon->evbuf_off + rec > mon->evbuf_len) {
+        if (ev->len > mon->evbuf_len - mon->evbuf_off - sizeof(struct inotify_event)) {
             mon->evbuf_off = mon->evbuf_len; // drop trailing partial, force refill
             continue;
         }
-        mon->evbuf_off += rec;
+        mon->evbuf_off += sizeof(struct inotify_event) + ev->len;
 
         const char *action = (ev->mask & IN_CREATE) ? "add" : (ev->mask & IN_DELETE) ? "remove" : NULL;
         if (!action || ev->len == 0 || !monitor_admits_virtual(mon)) {

@@ -2490,6 +2490,7 @@ static const char *resolve_at_path(int dirfd, const char *pathname, char *full, 
     if (len <= 0 || (size_t)len >= full_len - 1) {
         return pathname;
     }
+    full[len] = '\0'; /* readlink leaves the string unterminated */
     int written = snprintf(full + len, full_len - (size_t)len, "/%s", pathname);
     if (written <= 0 || (size_t)written >= full_len - (size_t)len) {
         return pathname;
