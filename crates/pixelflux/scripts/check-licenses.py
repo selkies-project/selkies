@@ -398,7 +398,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     failed = False
     for set_name in sets:
         if args.metadata:
-            with open(args.metadata, "r", encoding="utf-8") as handle:
+            metadata = os.path.realpath(args.metadata)
+            if not re.fullmatch(r"/[^\0]*", metadata) or ".." in metadata.split("/"):
+                parser.error(f"--metadata {args.metadata}: not a path this reads")
+            with open(metadata, "r", encoding="utf-8") as handle:
                 meta = json.load(handle)
         else:
             meta = run_cargo_metadata(SETS[set_name], target)

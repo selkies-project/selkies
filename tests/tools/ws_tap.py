@@ -15,16 +15,27 @@ Request log lines: `<method> <path and query> [<offered subprotocols>]`, a
 session-token subprotocol shown without its value.
 """
 import asyncio
+import os
+import re
 import sys
 import time
 
 import aiohttp
 from aiohttp import web
 
-LISTEN, UPSTREAM, LOG_PATH = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+LISTEN, UPSTREAM = int(sys.argv[1]), int(sys.argv[2])
 HOP_HEADERS = {"host", "transfer-encoding", "content-length", "connection", "keep-alive"}
+# The logs are files the suite names under its work directory: absolute, without '..'.
+LOG_PATH = os.path.realpath(sys.argv[3])
+if not re.fullmatch(r"/[^\0]*", LOG_PATH) or ".." in LOG_PATH.split("/"):
+    raise SystemExit(f"ws_tap: {LOG_PATH!r} is not an absolute path without '..'")
 log = open(LOG_PATH, "a", buffering=1)
-request_log = open(sys.argv[4], "a", buffering=1) if len(sys.argv) > 4 else None
+request_log = None
+if len(sys.argv) > 4:
+    REQUEST_LOG_PATH = os.path.realpath(sys.argv[4])
+    if not re.fullmatch(r"/[^\0]*", REQUEST_LOG_PATH) or ".." in REQUEST_LOG_PATH.split("/"):
+        raise SystemExit(f"ws_tap: {REQUEST_LOG_PATH!r} is not an absolute path without '..'")
+    request_log = open(REQUEST_LOG_PATH, "a", buffering=1)
 
 
 async def relay_socket(request: web.Request, protocols: list) -> web.StreamResponse:

@@ -25,8 +25,8 @@ import core_lib as C
 
 from playwright.sync_api import sync_playwright
 
-USER = "selkies"
-# URL-safe, so it stands in `user:pass@` as it is.
+# Drawn per run, URL-safe, so they stand in `user:pass@` as they are.
+USER = f"user-{secrets.token_hex(4)}"
 PASSWORD = secrets.token_urlsafe(16)
 passed = failed = 0
 

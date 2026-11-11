@@ -101,7 +101,8 @@ def start_jupyter(token: str, runtime: str, wayland: bool) -> tuple:
 
 def launcher_of(jupyter: subprocess.Popen):
     """The launcher the proxy started, as the child of the Jupyter server running `selkies session`."""
-    for pid in open(f"/proc/{jupyter.pid}/task/{jupyter.pid}/children").read().split():
+    server = int(jupyter.pid)
+    for pid in open(f"/proc/{server}/task/{server}/children").read().split():
         if "session --follow" in H._cmdline(int(pid)):
             return int(pid)
     return None

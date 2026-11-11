@@ -11,7 +11,11 @@ const IT = {
   setInterval(async () => {
     try {
       const next = (await (await fetch('/next/' + IT.ch, {cache: 'no-store'})).text()).trim();
-      if (next && next !== here) location.href = next;
+      // The harness names a page of this site by its path.
+      const page = next ? new URL(next, location.origin) : null;
+      if (page && page.origin === location.origin && page.pathname + page.search !== here) {
+        location.href = page.pathname + page.search;
+      }
     } catch (e) { /* the site restarts between cells */ }
   }, 500);
 })();

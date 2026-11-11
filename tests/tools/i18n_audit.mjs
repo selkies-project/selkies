@@ -7,7 +7,9 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const WEB = process.argv[2];
+// The web directory, resolved, and refused where it holds a NUL or names a parent.
+const WEB = resolve(process.argv[2] ?? "");
+if (!/^\/[^\0]*$/.test(WEB) || WEB.split("/").includes("..")) throw new Error(`i18n_audit: ${WEB} is not a usable path`);
 const LOCALES = "en es zh_cn zh_tw hi pt fr ru de tr it nl ar ko ja vi th fil da".split(" ");
 
 // A browser tag has to read the dictionary written for it: Chinese is two
