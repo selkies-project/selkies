@@ -354,6 +354,8 @@ ROLES: Tuple[Role, ...] = (
     Role(("pcmflux",), "audio capture and Opus encoding, over libpulse and libopus",
          "see [pcmflux's LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pcmflux/LICENSES.md)"),
     Role(("selkies-rtc",), "the WebRTC stack, in this repository under `crates/selkies-rtc`"),
+    Role(("selkies-wm",), "the window manager and desktop session `--wm` and `--desktop` run, in this repository "
+         "under `crates/selkies-wm`"),
     Role(("rtc-crypto", "rtc-dtls", "rtc-ice", "rtc-mdns", "rtc-sctp", "rtc-sdp", "rtc-shared", "rtc-srtp",
           "rtc-stun", "rtc-turn", "sansio"),
          "the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over",
