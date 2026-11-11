@@ -932,8 +932,8 @@
         disconnectGamepad();
     }
 
-    window.addEventListener('message', (event) => {
-        // The dashboards post from the page's own origin; a frame of another may not drive the pad.
+    // The dashboards post from the page's own origin; a frame of another may not drive the pad.
+    function onPadMessage(event) {
         if (event.origin !== window.location.origin) return;
         const { data } = event;
         if (!data || typeof data !== 'object') return;
@@ -981,7 +981,8 @@
                 }
                 break;
         }
-    });
+    }
+    window.addEventListener('message', onPadMessage);
 
     overrideGamepadAPI();
     console.log(GAMEPAD_ID + " library loaded. Send 'TOUCH_GAMEPAD_SETUP' message to initialize.");

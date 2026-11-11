@@ -67,6 +67,8 @@ const archiveDir = archiveAt === -1 ? undefined : resolve(process.argv[archiveAt
 
 /** Copies rustdoc's output to `dir`, with a page at the documentation root. */
 async function copyRustdoc(dir) {
+  // Refused where it holds a NUL or names a parent: it is emptied first.
+  if (!/^\/[^\0]*$/.test(dir) || dir.split('/').includes('..')) throw new Error(`generate-rust-docs: ${dir} is not a usable path`);
   await fs.rm(dir, { recursive: true, force: true });
   // rustdoc's build lock is not part of the output.
   await fs.cp(join(targetDir, 'doc'), dir, { recursive: true, filter: (src) => !src.endsWith('.lock') });

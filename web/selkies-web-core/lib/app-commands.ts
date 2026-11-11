@@ -127,14 +127,20 @@ export function resolveFinishedAppCommand(command: string): void {
     announceState();
 }
 
+/**
+ * Settles the command a `commandDone` message names, posted by this page alone.
+ * @param event The window message.
+ */
+const onCommandDone = (event: MessageEvent): void => {
+    if (event.source !== window || event.origin !== window.location.origin) return;
+    const data = event.data as { type?: string; command?: unknown } | null;
+    if (data && data.type === "commandDone" && typeof data.command === "string") {
+        resolveFinishedAppCommand(data.command);
+    }
+};
+
 if (typeof window !== "undefined") {
-    window.addEventListener("message", (event: MessageEvent) => {
-        if (event.source !== window || event.origin !== window.location.origin) return;
-        const data = event.data as { type?: string; command?: unknown } | null;
-        if (data && data.type === "commandDone" && typeof data.command === "string") {
-            resolveFinishedAppCommand(data.command);
-        }
-    });
+    window.addEventListener("message", onCommandDone);
 }
 
 /**

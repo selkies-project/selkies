@@ -239,23 +239,20 @@ export function FileManager({
   // A download is a navigation rather than a fetch, so it cannot carry a
   // header; the query token is what reaches the route in that case. A folder
   // has no single file to fetch, so it goes to the archive route instead.
+  // Page-relative: the browser resolves them against this page.
   const fileUrl = React.useCallback(
     (entryPath: string) => {
       const segments = entryPath.split("/").map((seg) => encodeURIComponent(seg))
-      return withSessionToken(
-        new URL(["api/files", ...segments].join("/"), window.location.href).href,
-      )
+      return withSessionToken(["api/files", ...segments].join("/"))
     },
     []
   )
 
   const archiveUrl = React.useCallback(
     (entryPath: string) => {
-      const url = new URL(`${apiBase}/zip`, window.location.href)
-      url.searchParams.set("path", entryPath)
-      return withSessionToken(url.href)
+      return withSessionToken(`api/file-manager/zip?path=${encodeURIComponent(entryPath)}`)
     },
-    [apiBase]
+    []
   )
 
   const post = (action: string, body: unknown) => request(`${apiBase}/${action}`, body)

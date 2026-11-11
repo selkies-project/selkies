@@ -84,7 +84,7 @@
 import { WebRTCClient } from "./lib/webrtc.ts";
 import { WebRTCSignaling } from "./lib/signaling.ts";
 import { Input } from "./lib/input.ts";
-import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale } from "./lib/stream-density.ts";
+import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale, capStreamSize, STREAM_SIDE_CAP } from "./lib/stream-density.ts";
 import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createIncomingClipboard, createLocalClipboardSender, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, digestedPayload } from "./lib/clipboard-sync.ts";
 import { createFileUploader } from "./lib/file-upload.ts";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.ts';
@@ -837,11 +837,20 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		return HIDPI_SPEC.toServer(hidpi) as boolean;
 	}
 
-	/** Starts playback after the user's gesture and takes the wake lock. */
+	/**
+	 * Starts playback after the user's gesture and takes the wake lock. A video
+	 * with no picture yet asks for a key frame (`START_VIDEO`), since WebKit
+	 * requests none for a player that starts mid-stream, and the resume
+	 * watchdog, which stands down while the button waits, is armed again.
+	 */
 	function playStream(): any {
 		showStart = false;
 		if (playButtonElement) playButtonElement.classList.add('hidden');
 		webrtc.playStream();
+		if (videoElement && videoElement.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+			try { webrtc.sendDataChannelMessage('START_VIDEO'); } catch (_) {}
+		}
+		armResumeWatchdog();
 		requestWakeLock();
 	}
 
@@ -1636,7 +1645,8 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	 */
 	function streamResolution(width: number, height: number): number[] {
 		const dpr = window.manualResolution ? 1 : streamDensity();
-		return [Math.min(alignResolution(width * dpr), 4080), Math.min(alignResolution(height * dpr), 4080), dpr];
+		const [w, h] = capStreamSize(alignResolution(width * dpr), alignResolution(height * dpr));
+		return [alignResolution(w), alignResolution(h), dpr];
 	}
 
 	/**
@@ -1645,8 +1655,9 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	 * A manual resolution is the exact framebuffer and is not multiplied by the
 	 * device pixel ratio, or a HiDPI toggle would swing it between 1x and 2x;
 	 * an auto resolution is CSS pixels times dpr unless CSS scaling is on. Both
-	 * are capped at 4080 so a dpr-2 4K fullscreen never asks for a 7680-wide
-	 * framebuffer.
+	 * scaled down, both sides together, until neither exceeds STREAM_SIDE_CAP
+	 * (4080), so a dpr-2 4K fullscreen never asks for a 7680-wide framebuffer
+	 * and keeps its aspect ratio.
 	 * @param width
 	 * @param height
 	 */
@@ -1722,9 +1733,9 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	 * A manual preset applied while a debounce is pending is not overwritten
 	 * when it fires. `enable_resize` false pins the primary's resolution
 	 * server-side, so the resize the server ignores is neither requested nor
-	 * restyled onto; a secondary's stays allowed. The CSS size is clamped so
-	 * the physical request stays within the 4080 cap and the element box
-	 * matches what the server realizes.
+	 * restyled onto; a secondary's stays allowed. The CSS size is scaled down,
+	 * both sides together, so the physical request stays within the 4080 cap
+	 * and the element box matches what the server realizes.
 	 */
 	function handleResizeUI(): any {
 		if (window.manualResolution) {
@@ -1737,8 +1748,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		const dpr = streamDensity();
 		appliedStreamDensity = dpr;
 		if (input && input.setStreamDensity) input.setStreamDensity(dpr);
-		if (windowResolution[0] * dpr > 4080) windowResolution[0] = Math.floor(4080 / dpr);
-		if (windowResolution[1] * dpr > 4080) windowResolution[1] = Math.floor(4080 / dpr);
+		windowResolution = capStreamSize(windowResolution[0], windowResolution[1], STREAM_SIDE_CAP / dpr);
 		sendResolutionToServer(windowResolution[0], windowResolution[1]);
 		resetToWindowResolution(windowResolution[0], windowResolution[1]);
 	}
@@ -2996,6 +3006,14 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			videoElement.className = 'video';
 			videoElement.autoplay = true;
 			videoElement.playsInline = true;
+			// WebKit can refuse the track's play() and start the video by itself
+			// moments later; the button its refusal showed then has nothing to start.
+			videoElement.addEventListener('playing', (): any => {
+				if (!showStart) return;
+				showStart = false;
+				if (playButtonElement) playButtonElement.classList.add('hidden');
+				armResumeWatchdog();
+			});
 			videoElement.addEventListener('resize', (): any => {
 				// The track's intrinsic size is the realized resolution; a divergence from the
 				// request routes input through the video's fitted box instead of window math.

@@ -15,6 +15,7 @@ alike, which keeps the client inside the subset both can run.
 import http.server
 import io
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -66,6 +67,9 @@ class TypeScriptHandler(http.server.SimpleHTTPRequestHandler):
     def send_head(self):
         """Answer a `.ts` request with its stripped source; anything else as the base class does."""
         path = self.translate_path(self.path)
+        # translate_path keeps a request inside the served directory: absolute, without '..'.
+        if not re.fullmatch(r"/[^\0]*", path) or ".." in path.split("/"):
+            return super().send_head()
         if not path.endswith(".ts") or path.endswith(".d.ts") or not os.path.isfile(path):
             return super().send_head()
         stamp = os.stat(path).st_mtime_ns

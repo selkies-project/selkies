@@ -415,7 +415,8 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
    * leaves the arrows up: an arrow click is a fresh one.
    */
   const launchWindow = React.useCallback((direction: string, screen: any = null) => {
-    const url = `${window.location.href.split("#")[0]}${fragmentWithSessionToken(`display2-${direction}`)}`;
+    const here = new URL(window.location.href);
+    const url = `${here.pathname}${here.search}${fragmentWithSessionToken(`display2-${direction}`)}`;
     let features = "resizable=yes,scrollbars=yes";
     if (screen) {
       features += `,left=${screen.availLeft},top=${screen.availTop},width=${screen.availWidth},height=${screen.availHeight}`;

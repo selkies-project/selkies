@@ -709,6 +709,7 @@ impl WebRtcService {
             depth_ms: f64,
             sent_bps: f64,
             padding_bps: f64,
+            pacer_dropped: bool,
             rooms: Vec<f64>,
             paces: Vec<f64>,
             peers: Vec<Peer>,
@@ -817,6 +818,7 @@ impl WebRtcService {
                     .sent_bps
                     .max((window.sent_bps as f64 - audio_bps).max(0.0));
                 bucket.padding_bps = bucket.padding_bps.max(window.padding_bps as f64);
+                bucket.pacer_dropped |= tick.video_dropped > 0;
                 bucket.worst_loss = bucket.worst_loss.max(window.loss_fraction);
                 if let Some(standing) = standing {
                     bucket.queue_ms = Some(bucket.queue_ms.unwrap_or(0.0).max(standing));
@@ -895,6 +897,7 @@ impl WebRtcService {
                         acked_offered_bps: None,
                         capacity_bps: None,
                         probed,
+                        pacer_dropped: bucket.pacer_dropped,
                     })
                     .round();
                 // A target cut by a queue the path showed (the steer holds the capacity it

@@ -205,6 +205,9 @@ fn a_restart_reads_the_density_the_home_persists() {
 
 /// The tool runs the stand-ins recorded since the last call, as `tool bus args`.
 fn runs(written: &Path) -> Vec<String> {
+    if !super::sound_path(written) {
+        panic!("{} is not an absolute path", written.display());
+    }
     let lines = std::fs::read_to_string(written)
         .map(|text| text.lines().map(str::to_string).collect())
         .unwrap_or_default();

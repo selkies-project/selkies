@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -74,9 +74,11 @@ pub const HOST_SESSION_VARS: &[&str] = &[
 /// A process environment.
 pub type Env = BTreeMap<String, String>;
 
-/// One line of the launcher's own log, on stderr beside its children's.
+/// One line of the launcher's own log, on stderr beside its children's, in one write so a
+/// child's line cannot land inside it.
 pub fn log(message: &str) {
-    eprintln!("[selkies-session] {message}");
+    let line = format!("[selkies-session] {message}\n");
+    let _ = io::stderr().lock().write_all(line.as_bytes());
 }
 
 /// Whether the Unix socket at `path` accepts a connection.
@@ -982,9 +984,12 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
 }
 
 /// The Jupyter server configuration that offers this desktop: jupyter-server-proxy reads its
-/// servers from `ServerProxy.servers` in any file of a Jupyter configuration directory's
-/// `jupyter_server_config.d`, so `selkies session --jupyter-config` written there gives every
-/// Jupyter server of that environment a Selkies launcher item. The entry names this executable
+/// servers from `ServerProxy.servers` in a Jupyter server's configuration and from its
+/// `jupyter_serverproxy_servers` entry points. The wheel's entry point returns this entry, and
+/// `selkies session --jupyter-config` written as a configuration directory's
+/// `jupyter_server_config.json` gives every Jupyter server reading that directory a Selkies
+/// launcher item; Jupyter reads only extensions' switches from `jupyter_server_config.d`. The
+/// entry names this executable
 /// and the web client's `selkies.svg` as a file ([`jupyter_icon`]), `data_home` being the
 /// user's data directory.
 pub fn jupyter_config(data_home: Option<&Path>) -> Json {
@@ -1284,32 +1289,34 @@ mod tests {
             "a host session's variables do not reach this one"
         );
         assert_eq!(session.env["KEEP"], "1");
-        let base = std::env::temp_dir().join(format!("selkies-runtime-{}", std::process::id()));
-        fs::create_dir_all(&base).unwrap();
-        let under = Session::new_in(Some(&base), Env::new()).unwrap();
+        let base = tempfile::Builder::new()
+            .prefix("selkies-runtime-")
+            .tempdir()
+            .unwrap();
+        let under = Session::new_in(Some(base.path()), Env::new()).unwrap();
         assert_eq!(
             under.runtime_dir.parent(),
-            Some(base.as_path()),
+            Some(base.path()),
             "a usable runtime directory holds the session's"
         );
         fs::remove_dir_all(&session.runtime_dir).unwrap();
-        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
     fn the_x11_socket_directory_is_world_writable_and_sticky() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("selkies-x11-unix-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let sockets = dir.join(".X11-unix");
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("selkies-x11-unix-")
+            .tempdir()
+            .unwrap();
+        let sockets = dir.path().join(".X11-unix");
         x11_socket_dir(&sockets);
         assert_eq!(
             fs::metadata(&sockets).unwrap().permissions().mode() & 0o7777,
             0o1777
         );
         x11_socket_dir(&sockets);
-        fs::remove_dir_all(&dir).unwrap();
+        drop(dir);
         assert!(!answers(&sockets.join("X0")));
     }
 

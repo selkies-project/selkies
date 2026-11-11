@@ -787,7 +787,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     direct: Set[str] = set()
     for set_name in sets:
         if args.metadata:
-            with open(args.metadata, encoding="utf-8") as f:
+            metadata = os.path.realpath(args.metadata)
+            if not re.fullmatch(r"/[^\0]*", metadata) or ".." in metadata.split("/"):
+                parser.error(f"--metadata {args.metadata}: not a path this reads")
+            with open(metadata, encoding="utf-8") as f:
                 meta = json.load(f)
         else:
             meta = resolve(set_name)
@@ -817,10 +820,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1 if failed else 0
 
     page_path = os.path.realpath(args.page)
+    if not re.fullmatch(r"/[^\0]*", page_path) or ".." in page_path.split("/"):
+        parser.error(f"--page {args.page}: not a path this reads")
     inside = page_path.startswith(os.path.realpath(REPO) + os.sep)
     page_name = os.path.relpath(page_path, REPO) if inside else page_path
     fix = "python3 scripts/check-licenses.py --write" + ("" if page_path == os.path.realpath(PAGE) else f" --page {page_name}")
-    with open(args.page, encoding="utf-8") as f:
+    with open(page_path, encoding="utf-8") as f:
         current = f.read()
     rendered, missing = splice(current, sections)
     for name in missing:
@@ -828,7 +833,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         failed = True
     if args.write:
         if rendered != current:
-            with open(args.page, "w", encoding="utf-8") as f:
+            with open(page_path, "w", encoding="utf-8") as f:
                 f.write(rendered)
             print(f"wrote {page_name}")
         else:

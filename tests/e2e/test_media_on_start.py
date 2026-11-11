@@ -11,6 +11,8 @@ and off again through the dashboard's control messages, a shared viewer is
 shown exempt, and the gamepad block proves a browser's persisted toggle wins.
 The capture-gating blocks (defaults, video off, audio off) also run against
 the Wayland backend, whose captures start and stop through the compositor.
+Over WebSockets, video off also holds on a page whose decoder probe still runs
+when its socket opens, so the server's first settings land mid-open.
 
     python3 tests/e2e/test_media_on_start.py websockets|webrtc|websockets-wl|webrtc-wl|all
 """
@@ -144,6 +146,50 @@ def video_off_block(mode: str, wayland: bool = False) -> "H.Results":
             res.check("a shared viewer joining the video-off session gets the stream", video_up(viewer, mode, 30))
             res.check("the owner's page stays without video", not video_seen(page, mode) or pipe(page).get("video") is False)
             viewer.context.close()
+            page.context.close()
+            browser.close()
+    finally:
+        H.server_stop()
+    return res
+
+
+# Holds the answer of the page's H.264 framing probe (lib/util.ts, a worker
+# replying 'annexb' or 'avcc') for two seconds, as a slow first decoder does: the
+# socket opens while the probe still runs, and the server's first messages land
+# while the open handler waits on it.
+HELD_PROBE_JS = """
+  (() => {
+    const desc = Object.getOwnPropertyDescriptor(Worker.prototype, 'onmessage');
+    Object.defineProperty(Worker.prototype, 'onmessage', {
+      configurable: true,
+      get() { return desc.get.call(this); },
+      set(fn) {
+        desc.set.call(this, typeof fn !== 'function' ? fn : (e) => {
+          if (e.data === 'annexb' || e.data === 'avcc') setTimeout(() => fn.call(this, e), 2000);
+          else fn.call(this, e);
+        });
+      },
+    });
+  })();
+"""
+
+
+def held_probe_block(mode: str) -> "H.Results":
+    """Video off at start, on a page still waiting on its decoder probe when its
+    socket opens: the start policy the first server_settings applies stands."""
+    res = H.Results(f"video-off-held-probe-{mode}")
+    H.server_start(mode=mode, wayland=False,
+                   extra_env={"SELKIES_VIDEO_ON_START": "false", "SELKIES_DEBUG": "true"})
+    try:
+        with sync_playwright() as pw:
+            browser = C.launch_browser(pw)
+            page = open_page(browser, mode, extra_init=[HELD_PROBE_JS])
+            res.check("server registers the page with video off", C.wait_log(VIDEO_OFF_AT_START[mode], timeout=15))
+            time.sleep(3.0)
+            res.check("page announces video off", wait_pipe(page, "video", False), pipe(page))
+            post(page, {"type": "pipelineControl", "pipeline": "video", "enabled": True})
+            res.check("toggle on: the capture starts", C.wait_log(VIDEO_STARTED[mode], timeout=15))
+            res.check("toggle on: video flows", video_up(page, mode, 30))
             page.context.close()
             browser.close()
     finally:
@@ -287,6 +333,8 @@ def main() -> int:
         if not wayland:
             for block in (microphone_block, webcam_block, gamepad_off_block):
                 blocks.append(block(mode))
+            if mode == "websockets":
+                blocks.append(held_probe_block(mode))
     summaries = [b.summary() for b in blocks]
     return 0 if all(summaries) else 1
 

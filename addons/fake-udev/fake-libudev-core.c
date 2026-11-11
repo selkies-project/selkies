@@ -81,6 +81,7 @@
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -558,15 +559,10 @@ static bool udyn_read_desc(int num, udyn_desc_t *out) {
     snprintf(path, sizeof(path), "%s/selkies_event%d.desc", dir, num);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return false;
-    size_t got = 0;
-    char *p = (char *)out;
-    while (got < sizeof(*out)) {
-        ssize_t r = read(fd, p + got, sizeof(*out) - got);
-        if (r <= 0) break;
-        got += (size_t)r;
-    }
+    // A regular file reads whole in one call, short only at its end.
+    ssize_t got = read(fd, out, sizeof(*out));
     close(fd);
-    return got == sizeof(*out) && out->magic == UDYN_DESC_MAGIC;
+    return got == (ssize_t)sizeof(*out) && out->magic == UDYN_DESC_MAGIC;
 }
 
 /* The dynamic slot already holding event<num>, or -1. Holds dyn_mutex. */
@@ -2100,14 +2096,14 @@ static bool evbuf_has_matching_record(const struct udev_monitor *mon) {
     if (!monitor_admits_virtual(mon)) {
         return false;
     }
+    // Bounds as subtractions (off never passes evbuf_len), which a 32-bit size_t cannot wrap.
     size_t off = mon->evbuf_off;
-    while (off + sizeof(struct inotify_event) <= mon->evbuf_len) {
+    while (off <= mon->evbuf_len && mon->evbuf_len - off >= sizeof(struct inotify_event)) {
         const struct inotify_event *ev = (const struct inotify_event *)(mon->evbuf + off);
-        size_t rec = sizeof(struct inotify_event) + ev->len;
-        if (off + rec > mon->evbuf_len) {
+        if (ev->len > mon->evbuf_len - off - sizeof(struct inotify_event)) {
             break; // trailing partial record, never dispensed
         }
-        off += rec;
+        off += sizeof(struct inotify_event) + ev->len;
         if (!(ev->mask & (IN_CREATE | IN_DELETE)) || ev->len == 0) {
             continue;
         }
@@ -2149,25 +2145,26 @@ static struct udev_device *monitor_dispense_virtual(struct udev_monitor *mon) {
         return NULL;
     }
     for (;;) {
-        if (mon->evbuf_off + sizeof(struct inotify_event) > mon->evbuf_len) {
-            ssize_t n = read(mon->inotify_fd, mon->evbuf, sizeof(mon->evbuf));
+        if (mon->evbuf_off > mon->evbuf_len || mon->evbuf_len - mon->evbuf_off < sizeof(struct inotify_event)) {
+            // The kernel's records, read with the system call: this private fd is no business of
+            // a read() hook another preloaded library installs (the input interposer's).
+            ssize_t n = syscall(SYS_read, mon->inotify_fd, mon->evbuf, sizeof(mon->evbuf));
             if (n <= 0) {
                 return NULL; // EAGAIN (nothing pending) or error/EOF
             }
             mon->evbuf_len = (size_t)n;
             mon->evbuf_off = 0;
-            if (mon->evbuf_off + sizeof(struct inotify_event) > mon->evbuf_len) {
+            if (mon->evbuf_len < sizeof(struct inotify_event)) {
                 return NULL;
             }
         }
 
         struct inotify_event *ev = (struct inotify_event *)(mon->evbuf + mon->evbuf_off);
-        size_t rec = sizeof(struct inotify_event) + ev->len;
-        if (mon->evbuf_off + rec > mon->evbuf_len) {
+        if (ev->len > mon->evbuf_len - mon->evbuf_off - sizeof(struct inotify_event)) {
             mon->evbuf_off = mon->evbuf_len; // drop trailing partial, force refill
             continue;
         }
-        mon->evbuf_off += rec;
+        mon->evbuf_off += sizeof(struct inotify_event) + ev->len;
 
         const char *action = (ev->mask & IN_CREATE) ? "add" : (ev->mask & IN_DELETE) ? "remove" : NULL;
         if (!action || ev->len == 0 || !monitor_admits_virtual(mon)) {

@@ -559,15 +559,11 @@ pub async fn stop_shared_webcam() {
 /// A directory of this process's own for a test camera's socket.
 #[cfg(test)]
 fn test_socket_dir(tag: &str) -> std::path::PathBuf {
-    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "selkies-webcam-{}-{}-{}",
-        std::process::id(),
-        tag,
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&dir).expect("test socket dir");
-    dir
+    tempfile::Builder::new()
+        .prefix(&format!("selkies-webcam-{tag}-"))
+        .tempdir()
+        .expect("test socket dir")
+        .keep()
 }
 
 /// A configuration for a test camera: its own socket, no kernel device, no PipeWire node.

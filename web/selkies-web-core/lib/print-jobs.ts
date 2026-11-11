@@ -28,6 +28,9 @@
 import { sessionAuthHeaders } from './session-token.ts';
 import { isMobileClient } from './util.ts';
 
+/** The blob URLs of the documents this page fetched, the only ones it prints. */
+const fetchedDocuments = new Set<string>();
+
 /**
  * Prints the PDF at `url`: on a desktop through a frame of no size, so the
  * document prints rather than the page around it, and the frame goes once
@@ -36,8 +39,21 @@ import { isMobileClient } from './util.ts';
  * @param url Blob URL of the PDF.
  */
 export function printDocument(url: string): void {
+    const prefix = `blob:${window.location.origin}/`;
+    if (typeof url !== 'string' || !fetchedDocuments.has(url) || !url.startsWith(prefix)) {
+        console.warn('Print request ignored: not a document this page fetched.');
+        return;
+    }
+    // Rebuilt from this page's origin and the blob's identifier, so no other
+    // address reaches a frame or a tab.
+    const own = `${prefix}${encodeURIComponent(url.slice(prefix.length))}`;
     if (isMobileClient) {
-        window.open(url, '_blank');
+        // A tab of its own, through a link: target _blank opens it without an opener.
+        const link = document.createElement('a');
+        link.href = own;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.click();
         return;
     }
     const frame = document.createElement('iframe');
@@ -50,10 +66,14 @@ export function printDocument(url: string): void {
             target.print();
         } catch (e) {
             frame.remove();
-            window.open(url, '_blank');
+            const link = document.createElement('a');
+            link.href = own;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.click();
         }
     });
-    frame.src = url;
+    frame.src = own;
     document.body.appendChild(frame);
 }
 
@@ -96,6 +116,7 @@ export function createPrintJobs({ automatic }: PrintJobsOptions): PrintJobs {
                 return;
             }
             const objectUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }));
+            fetchedDocuments.add(objectUrl);
             window.postMessage({ type: 'printDocument', name, size: blob.size, url: objectUrl }, window.location.origin);
             if (auto && !isMobileClient) printDocument(objectUrl);
         },

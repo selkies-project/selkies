@@ -200,8 +200,8 @@ python3 tests/image/run.py --items 1,4 --engines chromium --backends x11 \
 | `E2E_IMAGE_KEEP` | unset | `1` leaves each target running after its run. |
 | `E2E_IMAGE_CONSOLE` | unset | `1` keeps each page's console in the run's folder, as `<cell>-console.log`. |
 
-Targets are started with `SELKIES_ENABLE_BASIC_AUTH=false` and `CAP_SYS_PTRACE`
-(the apps panel's runner needs it), each from a fresh pod or container: one of
+Targets are started with `SELKIES_ENABLE_BASIC_AUTH=false` and no added
+capability, as the images' docs run them, each from a fresh pod or container: one of
 the same name, a killed run's, is removed first. The client browsers run headed on
 `E2E_DISPLAY`, so focus, the X clipboard, and pointer lock are real there:
 Chrome's focus emulation is off on every page and the Firefox profile drops the

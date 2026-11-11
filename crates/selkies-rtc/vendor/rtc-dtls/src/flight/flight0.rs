@@ -111,9 +111,12 @@ impl Flight for Flight0 {
                         }
                     }
                     Extension::UseSrtp(e) => {
+                        // The server's order picks among the profiles both sides support, so an
+                        // AEAD profile listed first wins over a client's SHA1_80-first offer
+                        // (RFC 8827 section 6.5: SHOULD favor AEAD).
                         if let Ok(profile) = find_matching_srtp_profile(
-                            &e.protection_profiles,
                             &cfg.local_srtp_protection_profiles,
+                            &e.protection_profiles,
                         ) {
                             state.srtp_protection_profile = profile;
                         } else {

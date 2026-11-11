@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import ssl
 import subprocess
@@ -50,8 +51,12 @@ NO_VERIFY.verify_mode = ssl.CERT_NONE
 
 def run(cmd: List[str], timeout: float = 60, data: Optional[bytes] = None) -> subprocess.CompletedProcess:
     """Run a local command, capturing bytes; a timeout reads as exit 124."""
+    # Found on PATH and run by that path, so a link to a multi-call binary keeps its name.
+    exe = os.path.abspath(shutil.which(cmd[0]) or cmd[0])
+    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+        raise RuntimeError(f"{cmd[0]!r} is not an executable file")
     try:
-        return subprocess.run(cmd, input=data, capture_output=True, timeout=timeout)
+        return subprocess.run([exe] + list(cmd[1:]), input=data, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         return subprocess.CompletedProcess(cmd, 124, e.stdout or b"", e.stderr or b"")
 
@@ -120,9 +125,11 @@ class KubePod(Target):
                  cpu: str = "4", memory: str = "8Gi") -> None:
         self.image, self.name, self.env = image, name, env
         self.ns = namespace or os.environ.get("E2E_IMAGE_NAMESPACE") or "default"
+        if not re.fullmatch(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", self.ns):
+            raise SystemExit(f"E2E_IMAGE_NAMESPACE={self.ns!r} is not a namespace name")
         self.labels = {"app": name, **(labels or {})}
         self.gpu, self.affinity, self.cpu, self.memory = gpu, affinity, cpu, memory
-        self.kc = shlex.split(os.environ.get("E2E_IMAGE_KUBECTL", "kubectl")) + ["-n", self.ns]
+        self.kc = command_from("E2E_IMAGE_KUBECTL", "kubectl") + ["-n", self.ns]
         self.exec_prefix = self.kc + ["exec", "-i", name, "--"]
         self.forward: Optional[subprocess.Popen] = None
 
@@ -143,8 +150,6 @@ class KubePod(Target):
                 "env": [{"name": k, "value": v} for k, v in self.env.items()],
                 "ports": [{"containerPort": 8080}],
                 "resources": {"requests": requests, "limits": limits},
-                # The apps panel's runner (proot) needs ptrace, as the images' docs say.
-                "securityContext": {"capabilities": {"add": ["SYS_PTRACE"]}},
                 "volumeMounts": [{"name": "dshm", "mountPath": "/dev/shm"}],
             }],
             "volumes": [{"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "2Gi"}}],
@@ -265,8 +270,7 @@ class DockerContainer(Target):
 
     def up(self, timeout: float = 1800) -> None:
         self.docker("rm", "-f", self.name)
-        args = ["run", "-d", "--name", self.name, "--shm-size", "2g", "--cap-add", "SYS_PTRACE",
-                "-p", f"{self.port}:8080"]
+        args = ["run", "-d", "--name", self.name, "--shm-size", "2g", "-p", f"{self.port}:8080"]
         if self.gpus:
             args += ["--gpus", self.gpus]
         for k, v in self.env.items():
@@ -301,8 +305,24 @@ class Existing(Target):
             raise RuntimeError(f"{self.url} does not answer /api/status")
 
     def selkies_log(self, lines: int = 2000) -> str:
-        cmd = os.environ.get("E2E_IMAGE_LOGS")
-        return run(shlex.split(cmd) + [f"--tail={lines}"], 60).stdout.decode(errors="replace") if cmd else ""
+        if not os.environ.get("E2E_IMAGE_LOGS"):
+            return ""
+        return run(command_from("E2E_IMAGE_LOGS", "") + [f"--tail={lines}"], 60).stdout.decode(errors="replace")
+
+
+def command_from(variable: str, default: str) -> List[str]:
+    """The command `variable` names (`default` where unset): its first word an executable file,
+    found on PATH by name, and the rest words of letters, digits, and `_./:=@,+-`."""
+    words = shlex.split(os.environ.get(variable) or default)
+    if not words:
+        raise SystemExit(f"{variable} names no command")
+    exe = os.path.abspath(shutil.which(words[0]) or words[0])
+    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+        raise SystemExit(f"{variable}: {words[0]!r} is not an executable file")
+    rest = [w for w in words[1:] if re.fullmatch(r"[A-Za-z0-9_./:=@,+-]+", w)]
+    if len(rest) != len(words) - 1:
+        raise SystemExit(f"{variable}: {words[1:]!r} holds a word outside letters, digits, and _./:=@,+-")
+    return [exe] + rest
 
 
 def make(image: str, name: str, env: Dict[str, str], **kube: Any) -> Target:

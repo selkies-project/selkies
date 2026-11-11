@@ -79,7 +79,7 @@ check('a fragment token is mirrored into the API cookie',
       cookies[0]);
 at('http://host.test/app/?token=q1');
 check('a query token rides navigated URLs as before',
-      withSessionToken('./api/files/') === 'http://host.test/app/api/files/?token=q1', withSessionToken('./api/files/'));
+      withSessionToken('./api/files/') === './api/files/?token=q1', withSessionToken('./api/files/'));
 
 at(`http://host.test/app/#token=${encodeURIComponent(odd)}`);
 const second = fragmentWithSessionToken('display2-right');

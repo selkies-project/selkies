@@ -15,7 +15,7 @@
 globalThis.window = { devicePixelRatio: 2 };
 
 const { streamDensity, publishedScale, autoScalingDpi, resolutionScalingDpi,
-        DPI_STOPS } = await import(
+        DPI_STOPS, capStreamSize, STREAM_SIDE_CAP } = await import(
     '../../web/selkies-web-core/lib/stream-density.ts');
 
 let failed = 0;
@@ -199,6 +199,28 @@ function check(label, ok, detail = '') {
         needsRepublish(settled) === true, settled);
     reported = settled;
     check('once republished, the settled scale is stable', needsRepublish(settled) === false, reported);
+}
+
+{
+    // The stream cap scales both sides by one factor, so the framebuffer keeps the
+    // window's aspect ratio: a 5K window at dpr 2 asks for 5120x2632 physical pixels.
+    const wide = capStreamSize(5120, 2632);
+    check('a size wider than the cap keeps its aspect ratio',
+        wide[0] === 4080 && wide[1] === 2097, wide);
+    const tall = capStreamSize(2632, 5120);
+    check('a size taller than the cap keeps its aspect ratio',
+        tall[0] === 2097 && tall[1] === 4080, tall);
+    const both = capStreamSize(8192, 6144);
+    check('a size past the cap on both sides scales by the tighter one',
+        both[0] === 4080 && both[1] === 3060, both);
+    const within = capStreamSize(3840, 2160);
+    check('a size within the cap is kept', within[0] === 3840 && within[1] === 2160, within);
+    const edge = capStreamSize(STREAM_SIDE_CAP, 1000);
+    check('a side exactly at the cap is kept', edge[0] === 4080 && edge[1] === 1000, edge);
+    // The resize paths cap the CSS size at the cap over the density.
+    const css = capStreamSize(2560, 1316, STREAM_SIDE_CAP / 2);
+    check('the CSS size scales to the cap over the density, both sides together',
+        css[0] === 2040 && css[1] === 1048, css);
 }
 
 console.log(`\n[stream-density] ${failed ? 'FAILED' : 'OK'}`);

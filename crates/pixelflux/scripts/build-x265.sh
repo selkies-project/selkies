@@ -58,6 +58,9 @@ cmake -S "${SRC}/source" -B "${SRC}/build" -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="${PREFIX}" -DCMAKE_INSTALL_LIBDIR=lib -DENABLE_SHARED="${shared}" \
     -DENABLE_CLI=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DEXTRA_LIB=x265_main10.a \
     -DEXTRA_LINK_FLAGS="-L${SRC}/build" -DLINKED_10BIT=ON
+# With the shared library as well, the static one first: on aarch64 both list the same
+# assembly objects, whose rules two parallel targets would otherwise run at once.
+[ "${shared}" = OFF ] || cmake --build "${SRC}/build" --target x265-static -j"${JOBS}"
 cmake --build "${SRC}/build" -j"${JOBS}"
 cmake --install "${SRC}/build"
 if [ "${KIND}" = static ]; then

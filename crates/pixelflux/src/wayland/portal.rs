@@ -96,11 +96,20 @@ fn opt_u32(o: &mut Options<'_>, key: &'static str, v: u32) {
     o.insert(key, Variant::U32(v));
 }
 
+/// Whether `path` is absolute and free of `..`: the XDG Base Directory specification has a
+/// relative path in its variables ignored.
+fn sound_path(path: &std::path::Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+}
+
 /// Where the portal's restore token lives between runs: `$XDG_STATE_HOME/pixelflux`, or
-/// `~/.local/state/pixelflux` in its absence.
+/// `~/.local/state/pixelflux` where that is unset or not absolute.
 fn token_path() -> Option<std::path::PathBuf> {
-    let base = match std::env::var_os("XDG_STATE_HOME") {
-        Some(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+    let base = match std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from) {
+        Some(dir) if sound_path(&dir) => dir,
         _ => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".local/state"),
     };
     Some(base.join("pixelflux/portal-restore-token"))
@@ -108,7 +117,11 @@ fn token_path() -> Option<std::path::PathBuf> {
 
 /// The restore token saved by an earlier session, if any.
 pub fn saved_restore_token() -> Option<String> {
-    let token = std::fs::read_to_string(token_path()?).ok()?;
+    let path = token_path()?;
+    if !sound_path(&path) {
+        return None;
+    }
+    let token = std::fs::read_to_string(path).ok()?;
     let token = token.trim();
     (!token.is_empty()).then(|| token.to_string())
 }
@@ -117,6 +130,9 @@ pub fn saved_restore_token() -> Option<String> {
 /// the one that opened this session).
 pub fn save_restore_token(token: &str) {
     let Some(path) = token_path() else { return };
+    if !sound_path(&path) {
+        return;
+    }
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

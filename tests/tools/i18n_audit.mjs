@@ -7,7 +7,9 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const WEB = process.argv[2];
+// The web directory, resolved, and refused where it holds a NUL or names a parent.
+const WEB = resolve(process.argv[2] ?? "");
+if (!/^\/[^\0]*$/.test(WEB) || WEB.split("/").includes("..")) throw new Error(`i18n_audit: ${WEB} is not a usable path`);
 const LOCALES = "en es zh_cn zh_tw hi pt fr ru de tr it nl ar ko ja vi th fil da".split(" ");
 
 // A browser tag has to read the dictionary written for it: Chinese is two
@@ -29,24 +31,11 @@ function walk(dir, out = []) {
   return out;
 }
 
-// The dictionaries are plain object literals, so read them without a bundler.
-function literal(src, name) {
-  const start = src.search(new RegExp(`^const ${name}(?::\\s*Dictionary)? = \\{`, "m"));
-  if (start < 0) return null;
-  const open = src.indexOf("{", start);
-  let depth = 0, end = -1;
-  for (let j = open; j < src.length; j++) {
-    if (src[j] === "{") depth++;
-    else if (src[j] === "}" && --depth === 0) { end = j + 1; break; }
-  }
-  return end < 0 ? null : eval("(" + src.slice(open, end) + ")");
-}
-
 const statsView = await import(pathToFileURL(resolve(`${WEB}/selkies-web-core/lib/stream-stats-view.ts`)).href);
-// The translator is TypeScript, which Node strips the types from on import.
+// The translator and its dictionaries are TypeScript, which Node strips the types from on import.
 const { resolveLocale } = await import(pathToFileURL(resolve(`${DASHBOARD}/src/i18n.ts`)).href);
-const src = readFileSync(`${DASHBOARD}/src/translations.ts`, "utf8");
-const dict = Object.fromEntries(LOCALES.map((l) => [l, literal(src, l)]));
+const { translations } = await import(pathToFileURL(resolve(`${DASHBOARD}/src/translations.ts`)).href);
+const dict = Object.fromEntries(LOCALES.map((l) => [l, translations[l]]));
 
 const has = (table, key) => {
   let o = table;

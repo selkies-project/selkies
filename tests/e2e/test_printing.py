@@ -6,7 +6,8 @@ websockets / webrtc:
     printed through the session's own CUPS queue (`lp -d Selkies`) while the
     page is up is announced live, fetched whole, taken out of the spool, and,
     with automatic printing on, opened in a frame for the browser's print
-    dialog. Both dashboards list each document with its switch, print, and
+    dialog (a headless page counts the print it asks of the frame, since
+    headless Chrome crashes the PDF viewer's frame on one). Both dashboards list each document with its switch, print, and
     save controls; the switch off leaves the next document in the list only,
     and the save link hands the browser the same bytes. A second display page
     of the same browser is told nothing. The websockets block also drives the
@@ -56,6 +57,29 @@ BLOB_JS = """
   }
 """
 FRAMES_JS = "document.querySelectorAll('iframe[src^=\"blob:\"]').length"
+# Headless Chrome crashes the PDF viewer's frame when it is asked to print, and Playwright
+# (since 1.65) fails the page with it. A headless page counts the print it asks of a
+# document's frame instead; the installed Chrome on the test display prints for real.
+HEADLESS_PRINT_JS = """
+  window.__printCalls = 0;
+  (() => {
+    const real = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+    Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+      configurable: true,
+      get() {
+        const w = real.get.call(this);
+        if (!w || !String(this.src).startsWith('blob:')) return w;
+        return new Proxy(w, {
+          get(target, key) {
+            if (key === 'print') return () => { window.__printCalls++; };
+            const value = Reflect.get(target, key);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      },
+    });
+  })();
+"""
 
 # Headless Chromium never closes a print dialog, so `afterprint` does not fire
 # and the frames the core opens stay, each with a PDF viewer behind it. That
@@ -135,6 +159,16 @@ def wait_printed(page: Any, count: int, timeout: float = 30) -> list:
     return page.evaluate("window.__printed") or []
 
 
+def wait_print_calls(page: Any, count: int, timeout: float = 10) -> bool:
+    """Whether the page asked `count` documents' frames to print within `timeout`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if (page.evaluate("window.__printCalls") or 0) >= count:
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def wait_gone(path: str, timeout: float = 10) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -171,6 +205,8 @@ def new_page(pw: Any, mode: str, url_hash: str = "", headed_chrome: bool = False
     ctx = browser.new_context(viewport={"width": 1440, "height": 900}, device_scale_factor=1, **context)
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
     ctx.add_init_script(PRINT_JS)
+    if not headed_chrome:
+        ctx.add_init_script(HEADLESS_PRINT_JS)
     page = ctx.new_page()
     page.goto(H.BASE_URL + "/" + url_hash, wait_until="load")
     return browser, page
@@ -264,8 +300,9 @@ def dashboard_round(res: "H.Results", pw: Any, mode: str, dashboard: str) -> Non
         res.check(f"{dashboard}: the page holds the document's bytes",
                   got and blob_matches(page, got[0]["url"], PDF))
         res.check(f"{dashboard}: the document left the spool once taken", wait_gone(pending))
-        res.check(f"{dashboard}: automatic printing opened it in a frame",
-                  page.evaluate(FRAMES_JS) == 1, page.evaluate(FRAMES_JS))
+        res.check(f"{dashboard}: automatic printing opened it in a frame and printed it",
+                  page.evaluate(FRAMES_JS) == 1 and wait_print_calls(page, 1),
+                  (page.evaluate(FRAMES_JS), page.evaluate("window.__printCalls")))
         res.check(f"{dashboard}: the printing controls appear with the document",
                   open_printing_ui(page, dashboard) and rows(page, dashboard) == 1, rows(page, dashboard))
 
@@ -284,7 +321,9 @@ def dashboard_round(res: "H.Results", pw: Any, mode: str, dashboard: str) -> Non
                   (page.evaluate(FRAMES_JS), rows(page, dashboard)))
         press(row_control(page, dashboard, "Print", 1))
         time.sleep(1)
-        res.check(f"{dashboard}: the print button opens it in a frame", page.evaluate(FRAMES_JS) == 2, page.evaluate(FRAMES_JS))
+        res.check(f"{dashboard}: the print button opens it in a frame and prints it",
+                  page.evaluate(FRAMES_JS) == 2 and wait_print_calls(page, 2),
+                  (page.evaluate(FRAMES_JS), page.evaluate("window.__printCalls")))
         drop_frames(page)
         # A bar layout's panel is a menu, and printing from it closed it.
         open_printing_ui(page, dashboard)
