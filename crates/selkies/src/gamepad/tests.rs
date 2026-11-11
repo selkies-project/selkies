@@ -30,10 +30,11 @@ use super::*;
 
 /// A scratch directory of this process for one test.
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("selkies-gamepad-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    tempfile::Builder::new()
+        .prefix(&format!("selkies-gamepad-{tag}-"))
+        .tempdir()
+        .unwrap()
+        .keep()
 }
 
 /// Build one tool under `tests/tools` with its Makefile and return its path.

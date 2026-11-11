@@ -291,10 +291,11 @@ mod tests {
     #[test]
     fn the_socket_is_its_users_alone() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("pcmflux-ogg-mode-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir(&dir).unwrap();
-        let path = dir.join("out.sock").to_string_lossy().into_owned();
+        let dir = tempfile::Builder::new()
+            .prefix("pcmflux-ogg-mode-")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("out.sock").to_string_lossy().into_owned();
         let head = OpusHead {
             channels: 2,
             pre_skip: 312,
@@ -310,7 +311,6 @@ mod tests {
         let peer = UnixStream::connect(&path).unwrap();
         assert!(peer_is_session_user(&peer));
         drop(sink);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The table gives what the polynomial gives a bit at a time: nothing for nothing, the

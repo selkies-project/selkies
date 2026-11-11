@@ -486,12 +486,11 @@ mod tests {
     use std::time::Duration;
 
     fn scratch(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "{prefix}-{}-{}",
-            std::process::id(),
-            rand::random::<u32>()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("{prefix}-"))
+            .tempdir()
+            .unwrap()
+            .keep();
         std::fs::canonicalize(dir).unwrap()
     }
 

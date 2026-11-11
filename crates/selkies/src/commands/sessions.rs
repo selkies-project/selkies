@@ -362,11 +362,11 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("selkies-sessions-{}-{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        tempfile::Builder::new()
+            .prefix(&format!("selkies-sessions-{tag}-"))
+            .tempdir()
+            .unwrap()
+            .keep()
     }
 
     fn host(root: &Path) -> Desktops {

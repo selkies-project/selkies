@@ -1230,32 +1230,34 @@ mod tests {
             "a host session's variables do not reach this one"
         );
         assert_eq!(session.env["KEEP"], "1");
-        let base = std::env::temp_dir().join(format!("selkies-runtime-{}", std::process::id()));
-        fs::create_dir_all(&base).unwrap();
-        let under = Session::new_in(Some(&base), Env::new()).unwrap();
+        let base = tempfile::Builder::new()
+            .prefix("selkies-runtime-")
+            .tempdir()
+            .unwrap();
+        let under = Session::new_in(Some(base.path()), Env::new()).unwrap();
         assert_eq!(
             under.runtime_dir.parent(),
-            Some(base.as_path()),
+            Some(base.path()),
             "a usable runtime directory holds the session's"
         );
         fs::remove_dir_all(&session.runtime_dir).unwrap();
-        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
     fn the_x11_socket_directory_is_world_writable_and_sticky() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("selkies-x11-unix-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let sockets = dir.join(".X11-unix");
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("selkies-x11-unix-")
+            .tempdir()
+            .unwrap();
+        let sockets = dir.path().join(".X11-unix");
         x11_socket_dir(&sockets);
         assert_eq!(
             fs::metadata(&sockets).unwrap().permissions().mode() & 0o7777,
             0o1777
         );
         x11_socket_dir(&sockets);
-        fs::remove_dir_all(&dir).unwrap();
+        drop(dir);
         assert!(!answers(&sockets.join("X0")));
     }
 

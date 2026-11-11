@@ -757,8 +757,11 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("selkies-dpi-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let dir = tempfile::Builder::new()
+            .prefix("selkies-dpi-")
+            .tempdir()
+            .expect("tmpdir")
+            .keep();
         dir.join(name)
     }
 

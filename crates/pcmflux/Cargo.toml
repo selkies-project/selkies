@@ -28,6 +28,9 @@ opusic-sys = "0.7"
 bytemuck = "1"
 libc = "0.2"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 opt-level = 3
 lto = true

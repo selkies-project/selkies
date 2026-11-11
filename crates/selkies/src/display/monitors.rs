@@ -1422,10 +1422,12 @@ mod tests {
         // SAFETY: the test binary is single-threaded for this ignored test, run alone.
         unsafe { std::env::set_var("DISPLAY", &display) };
         x11::drop_connection();
-        let marker =
-            std::env::temp_dir().join(format!("selkies-wm-autostart-{}", std::process::id()));
-        let script =
-            std::env::temp_dir().join(format!("selkies-wm-autostart-{}.sh", std::process::id()));
+        let scratch = tempfile::Builder::new()
+            .prefix("selkies-wm-autostart-")
+            .tempdir()
+            .expect("scratch");
+        let marker = scratch.path().join("ran");
+        let script = scratch.path().join("autostart.sh");
         std::fs::write(
             &script,
             format!("#!/bin/sh\necho ran >> {}\n", marker.display()),
@@ -1496,8 +1498,6 @@ mod tests {
         x11::drop_connection();
         let _ = xvfb.kill();
         let _ = xvfb.wait();
-        let _ = std::fs::remove_file(&marker);
-        let _ = std::fs::remove_file(&script);
         // SAFETY: as above.
         unsafe {
             match previous {
