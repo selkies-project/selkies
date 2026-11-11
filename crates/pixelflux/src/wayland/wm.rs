@@ -581,7 +581,7 @@ pub fn window_resized(state: &mut AppState, window: &Window, size: Size) {
     };
     if let Some(pending) = pending {
         let location = pending.location(size);
-        state.space.map_element(window.clone(), location, false);
+        relocate(state, window, location);
         let rect = Rect::new(location.0, location.1, size.w, size.h);
         move_to_output_under(state, window, rect);
         state.refocus_pointer();
@@ -1238,6 +1238,26 @@ fn buffer_of(image: &Image) -> MemoryRenderBuffer {
     )
 }
 
+/// Moves a mapped window to a location and keeps its place in the stacking: Smithay's
+/// `Space::map_element` raises what it maps, so the windows that stood above this one are
+/// raised over it again in their order. A configure or a held move applied after the policy
+/// restacked (a cascade laid out over tiles, the tiles' moves landing as their clients answer)
+/// would otherwise lift each moved window over the ones the policy stacked above it. A window
+/// mapped for the first time goes on top.
+fn relocate(state: &mut AppState, window: &Window, location: (i32, i32)) {
+    let above: Vec<Window> = state
+        .space
+        .elements()
+        .skip_while(|w| *w != window)
+        .skip(1)
+        .cloned()
+        .collect();
+    state.space.map_element(window.clone(), location, false);
+    for other in above {
+        state.space.raise_element(&other, false);
+    }
+}
+
 /// Carry one command out.
 fn apply(state: &mut AppState, command: Command) {
     match command {
@@ -1498,7 +1518,7 @@ fn configure(state: &mut AppState, id: WindowId, rect: Rect, states: States) {
             }
         }
         if !awaits_size {
-            state.space.map_element(window.clone(), location, false);
+            relocate(state, &window, location);
             move_to_output_under(state, &window, rect);
             state.refocus_pointer();
         }
