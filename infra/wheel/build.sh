@@ -41,9 +41,14 @@ export PATH
 
 # libxkbcommon's parser takes bison 3.6 or newer, which CentOS 7 and
 # AlmaLinux 8 predate (3.0.4): the release pinned here is built where it is.
+# It comes from a GNU mirror through ftpmirror.gnu.org, as GNU asks, and from
+# ftp.gnu.org where that fails: CentOS 7's curl retries no failed connection,
+# so one unreachable host would fail the build. The pinned digest decides.
 bison="$(bison --version | head -n 1 | grep -oE '[0-9]+\.[0-9]+' | head -n 1)"
 if [ "$(printf '%s\n3.6\n' "${bison}" | sort -V | head -n 1)" != 3.6 ]; then
-    curl -fsSL --retry 5 -o /tmp/bison.tar.xz https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz
+    for source in https://ftpmirror.gnu.org/bison https://ftp.gnu.org/gnu/bison; do
+        curl -fsSL --retry 5 -o /tmp/bison.tar.xz "${source}/bison-3.8.2.tar.xz" && break
+    done
     echo "9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2  /tmp/bison.tar.xz" | sha256sum -c -
     mkdir -p /tmp/bison
     tar -xJf /tmp/bison.tar.xz -C /tmp/bison --strip-components=1
