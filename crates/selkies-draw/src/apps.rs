@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use crate::dirs;
@@ -851,7 +852,79 @@ pub fn exec_argv_files(
     if !placed && !argv.is_empty() {
         argv.extend(files.iter().map(|f| f.to_string_lossy().to_string()));
     }
+    if described() {
+        describe_chromium(&mut argv);
+    }
     argv
+}
+
+/// The session variable that asks applications to describe themselves over the accessibility
+/// bus, set to `1` in the environment of a session something reads the windows of.
+pub const DESCRIBED_ENV: &str = "SELKIES_ACCESSIBILITY";
+
+/// The switch a Chromium-based application fills its accessibility tree under.
+pub const CHROMIUM_DESCRIBED_FLAG: &str = "--force-renderer-accessibility";
+
+static DESCRIBED: AtomicBool = AtomicBool::new(false);
+
+/// Ask, for this process, what [`DESCRIBED_ENV`] asks for a session: the server, which launches
+/// from the window manager's menus, says it here, since its own environment is not the
+/// session's.
+pub fn describe_applications() {
+    DESCRIBED.store(true, Ordering::Relaxed);
+}
+
+/// Whether applications started from here are to describe themselves.
+fn described() -> bool {
+    DESCRIBED.load(Ordering::Relaxed) || std::env::var(DESCRIBED_ENV).is_ok_and(|value| value == "1")
+}
+
+/// The file names Chromium-based browsers install their launcher or binary under.
+const CHROMIUM_NAMES: &[&str] = &[
+    "chromium",
+    "chrome",
+    "google-chrome",
+    "brave",
+    "microsoft-edge",
+    "vivaldi",
+    "electron",
+];
+
+/// Whether a program is Chromium or built on it (Chrome, Electron applications), told by its
+/// name or by the resource files every such build ships beside its binary, looked for in the
+/// directory the program resolves to and the one above it, since a launcher script often sits
+/// in a `bin` directory under them.
+///
+/// These applications describe nothing inside their windows unless started with
+/// [`CHROMIUM_DESCRIBED_FLAG`]: no property of the accessibility bus and no environment
+/// variable turns it on afterwards.
+pub fn chromium_based(program: &str) -> bool {
+    let Some(path) = resolve_program(program) else {
+        return false;
+    };
+    let real = std::fs::canonicalize(&path).unwrap_or(path);
+    let name = real
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if CHROMIUM_NAMES.iter().any(|known| name.starts_with(known)) {
+        return true;
+    }
+    let ships_chromium = |dir: &Path| {
+        dir.join("chrome_100_percent.pak").is_file()
+            || (dir.join("resources.pak").is_file() && dir.join("icudtl.dat").is_file())
+    };
+    real.parent()
+        .is_some_and(|dir| ships_chromium(dir) || dir.parent().is_some_and(ships_chromium))
+}
+
+/// Add [`CHROMIUM_DESCRIBED_FLAG`] to a command line that starts a Chromium-based program and
+/// does not carry it.
+fn describe_chromium(argv: &mut Vec<String>) {
+    let starts_chromium = argv.first().is_some_and(|program| chromium_based(program));
+    if starts_chromium && !argv.iter().any(|arg| arg == CHROMIUM_DESCRIBED_FLAG) {
+        argv.insert(1, CHROMIUM_DESCRIBED_FLAG.to_string());
+    }
 }
 
 /// A `file://` URI for a path, every byte outside the unreserved set percent-encoded.
@@ -953,6 +1026,38 @@ mod tests {
             category: MISC.to_string(),
             wm_class: class.map(str::to_string),
         }
+    }
+
+    /// A program is Chromium-based by the resources beside it or above its `bin` directory,
+    /// and only such a command line takes the accessibility switch, once.
+    #[test]
+    fn a_chromium_based_command_line_takes_the_accessibility_switch() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("selkies-draw-chromium-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let program = |dir: &str| {
+            let dir = root.join(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("app");
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().to_string()
+        };
+        let electron = program("editor/bin");
+        std::fs::write(root.join("editor/chrome_100_percent.pak"), "").unwrap();
+        let plain = program("plain/bin");
+        assert!(chromium_based(&electron));
+        assert!(!chromium_based(&plain));
+        assert!(!chromium_based("/nonexistent/program"));
+
+        let mut argv = vec![electron.clone(), "file.txt".to_string()];
+        describe_chromium(&mut argv);
+        describe_chromium(&mut argv);
+        assert_eq!(argv, [electron.as_str(), CHROMIUM_DESCRIBED_FLAG, "file.txt"]);
+        let mut argv = vec![plain.clone()];
+        describe_chromium(&mut argv);
+        assert_eq!(argv, [plain.as_str()]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// An Exec value splits on its quoting rules and its field codes expand or drop out.
