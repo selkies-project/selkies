@@ -26,10 +26,10 @@ import { t } from "@/i18n";
 
 /** Flips between dark and light. */
 export function ThemeToggle() {
-  const { theme, setTheme } = useTheme();
+  const { resolvedTheme, setTheme } = useTheme();
   return (
     <Button variant="outline" size="icon-sm" className="theme-toggle" aria-label={t('toggleThemeTitle')} title={t('toggleThemeTitle')}
-      onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
+      onClick={() => setTheme(resolvedTheme === "light" ? "dark" : "light")}>
       <Sun className="size-3.5 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
       <Moon className="absolute size-3.5 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
     </Button>
@@ -38,10 +38,10 @@ export function ThemeToggle() {
 
 /** The theme as a pill with the moon and the sun sliding through it, the sidebar's own control. */
 export function ThemePill() {
-  const { theme, setTheme } = useTheme();
+  const { resolvedTheme, setTheme } = useTheme();
   return (
     <button type="button" className="theme-toggle theme-pill" aria-label={t('toggleThemeTitle')} title={t('toggleThemeTitle')}
-      onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
+      onClick={() => setTheme(resolvedTheme === "light" ? "dark" : "light")}>
       <Moon className="moon" fill="currentColor" strokeWidth={1} />
       <Sun className="sun" strokeWidth={2.5} />
     </button>
@@ -51,20 +51,14 @@ export function ThemePill() {
 /**
  * Hands the core the theme its user picked as the color scheme the session's
  * desktop follows (`setColorScheme`, the core's lib/color-scheme.ts), on every
- * change of the theme; with no pick stored, `null` leaves the desktop on the
- * browser's own preference, which the dashboard's default theme does not
- * reflect. Renders nothing.
+ * change of the theme; with no pick stored, the theme follows the browser's
+ * preference and `null` leaves the core on that same preference. Renders
+ * nothing.
  */
 export function DesktopColorScheme() {
   const { theme } = useTheme();
   useEffect(() => {
-    let stored: string | null = null;
-    try {
-      stored = localStorage.getItem("theme");
-    } catch {
-      // Storage blocked: no pick survives, and the browser's preference stands.
-    }
-    const value = stored === "light" || stored === "dark" ? stored : null;
+    const value = theme === "light" || theme === "dark" ? theme : null;
     window.postMessage({ type: "setColorScheme", value }, window.location.origin);
   }, [theme]);
   return null;

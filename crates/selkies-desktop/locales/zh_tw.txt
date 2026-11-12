@@ -278,6 +278,7 @@ A file or folder with this name already exists = 已有同名的檔案或資料�
 Cannot create the folder: {error} = 無法建立資料夾：{error}
 Application icon = 應用程式圖示
 Light or dark = 淺色或深色
+Follow the browser = 跟隨瀏覽器
 Automatic = 自動
 Float = 浮動
 Mint = 薄荷

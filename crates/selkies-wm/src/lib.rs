@@ -16,9 +16,12 @@
 //!
 //! The crate is split along what differs: [`core`] decides, [`frame`] and [`menu`] draw through
 //! `selkies-draw`, [`config`] reads the openbox-format files the images configure, [`theme`]
-//! follows the shell's theme, [`session`] starts programs and the shell, and [`x11`] carries the
-//! engine's commands out on an X server, where the compositor does the same on Wayland.
+//! follows the shell's theme, [`appearance`] carries it to the applications' toolkits and follows
+//! the browser's light or dark scheme, [`session`] starts programs and the shell, and [`x11`]
+//! carries the engine's commands out on an X server, where the compositor does the same on
+//! Wayland.
 
+pub mod appearance;
 pub mod config;
 pub mod core;
 pub mod frame;

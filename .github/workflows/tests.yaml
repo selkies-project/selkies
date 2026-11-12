@@ -301,8 +301,6 @@ jobs:
             pulseaudio pulseaudio-utils \
             dbus pipewire pipewire-pulse wireplumber xdg-desktop-portal xdg-desktop-portal-kde qtwayland5 qt6-wayland \
             mutter python3-gi python3-xlib gir1.2-gtk-3.0 \
-            xsettingsd dconf-service dconf-gsettings-backend gsettings-desktop-schemas libglib2.0-bin \
-            xdg-desktop-portal-gtk gnome-themes-extra-data \
             libudev-dev libpipewire-0.3-dev ffmpeg v4l-utils \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \

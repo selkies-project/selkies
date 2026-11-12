@@ -37,9 +37,9 @@ const TRANSPORT_TOAST_ID = "transport-advice";
 
 /** The toaster, following the theme, with the kit's icons. */
 export function Toaster() {
-  const { theme } = useTheme();
+  const { resolvedTheme } = useTheme();
   return (
-    <Sonner position="bottom-right" richColors closeButton theme={theme} className="toaster group"
+    <Sonner position="bottom-right" richColors closeButton theme={resolvedTheme} className="toaster group"
       icons={{
         success: <CircleCheck className="size-4" />,
         info: <Info className="size-4" />,

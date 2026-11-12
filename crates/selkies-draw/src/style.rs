@@ -226,6 +226,85 @@ pub fn truthy(values: &HashMap<String, String>, key: &str, current: bool) -> boo
     }
 }
 
+/// The keys of the four colors a [`Theme`] is, in its order: accent, bar, menus, and text.
+pub const COLOR_KEYS: [&str; 4] = ["color_accent", "color_panel", "color_popup", "color_text"];
+
+/// The color schemes the desktop offers: the four colors of each, as [`COLOR_KEYS`] orders them.
+/// Dark, the default, and Light share a sky-blue accent on neutral grays, the bar the shade of a
+/// window's header and the menus a window's own; Ember is a copper accent on warm charcoal, dark
+/// enough to take white text; Mint is a green accent on pale sage, a light desktop of a warmer
+/// cast than Light; and Graphite is flat neutral grays with a light gray accent, a dark desktop
+/// without a hue.
+pub const SCHEMES: [(&str, [&str; 4]); 5] = [
+    ("Dark", ["#3daee9", "#292c30", "#202326", "#fcfcfc"]),
+    ("Light", ["#3daee9", "#dee0e2", "#eff0f1", "#232629"]),
+    ("Ember", ["#b9671b", "#1c1917", "#272220", "#f4ede4"]),
+    ("Mint", ["#13866a", "#d8e9e2", "#f2f8f5", "#14302a"]),
+    ("Graphite", ["#cccccc", "#2c2c2c", "#303030", "#dfdfdf"]),
+];
+
+/// Writes settings into a `key = value` file, replacing the lines of the keys given and keeping
+/// every other line, comments included. The file is replaced in one rename, since the shell and
+/// the window manager both write it and each reads it as it changes; a link is followed, so the
+/// file it names is the one replaced.
+///
+/// # Arguments
+/// * `path` - The file, created with its directory when missing.
+/// * `changes` - Keys and their new values; an empty value removes the key.
+///
+/// # Errors
+/// The file could not be written.
+pub fn save_values(path: &std::path::Path, changes: &[(&str, String)]) -> std::io::Result<()> {
+    let path = &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<String> = Vec::new();
+    let mut written: Vec<&str> = Vec::new();
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        let key = trimmed
+            .split_once('=')
+            .filter(|_| !trimmed.starts_with('#'))
+            .map(|(k, _)| k.trim().to_ascii_lowercase().replace('-', "_"));
+        match key.and_then(|k| changes.iter().find(|(name, _)| *name == k)) {
+            Some((name, value)) => {
+                if !written.contains(name) {
+                    if !value.is_empty() {
+                        lines.push(format!("{name} = {}", quote(value)));
+                    }
+                    written.push(name);
+                }
+            }
+            None => lines.push(line.to_string()),
+        }
+    }
+    for (name, value) in changes {
+        if !written.contains(name) && !value.is_empty() {
+            lines.push(format!("{name} = {}", quote(value)));
+        }
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(format!(".{}.tmp", std::process::id()));
+    let staged = PathBuf::from(staged);
+    std::fs::write(&staged, text)?;
+    std::fs::rename(&staged, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&staged);
+    })
+}
+
+/// Quotes a value when it has leading or trailing spaces or a comment mark.
+fn quote(value: &str) -> String {
+    if value != value.trim() || value.contains('#') {
+        format!("\"{}\"", value.replace('"', ""))
+    } else {
+        value.to_string()
+    }
+}
+
 /// The theme and the window style the desktop's settings describe, defaults filling the gaps.
 pub fn parse_style(values: &HashMap<String, String>) -> (Theme, WindowStyle) {
     let defaults = Theme::default();

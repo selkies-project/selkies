@@ -278,6 +278,7 @@ A file or folder with this name already exists = この名前のファイルま�
 Cannot create the folder: {error} = フォルダーを作成できません: {error}
 Application icon = アプリケーションのアイコン
 Light or dark = ライトまたはダーク
+Follow the browser = ブラウザーに合わせる
 Automatic = 自動
 Float = フローティング
 Mint = ミント

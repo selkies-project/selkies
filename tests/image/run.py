@@ -16,7 +16,7 @@ screenshots under `$E2E_WORKDIR/image-tier/<run>/`.
 
     E2E_IMAGES             label=ref pairs, comma-separated (positional arguments win)
     E2E_IMAGE_TRANSPORTS   websockets,webrtc       E2E_IMAGE_BACKENDS  x11,wayland
-    E2E_IMAGE_ENGINES      chromium,firefox,webkit E2E_IMAGE_ITEMS     1-11
+    E2E_IMAGE_ENGINES      chromium,firefox,webkit E2E_IMAGE_ITEMS     1-10
     E2E_IMAGE_GPU          none, nvidia (any NVENC GPU, AV1-capable preferred),
                            nvidia-av1 (Ada or newer only), or amd; E2E_IMAGE_GPU_PRODUCTS
                            names the nvidia.com/gpu.product values to pick from instead
@@ -209,7 +209,7 @@ def main() -> int:
     ap.add_argument("--transports", default=os.environ.get("E2E_IMAGE_TRANSPORTS", "websockets,webrtc"))
     ap.add_argument("--backends", default=os.environ.get("E2E_IMAGE_BACKENDS", "x11,wayland"))
     ap.add_argument("--engines", default=os.environ.get("E2E_IMAGE_ENGINES", "chromium,firefox,webkit"))
-    ap.add_argument("--items", default=os.environ.get("E2E_IMAGE_ITEMS", "1-11"))
+    ap.add_argument("--items", default=os.environ.get("E2E_IMAGE_ITEMS", "1-10"))
     args = ap.parse_args()
     images = pairs(",".join(args.images)) if args.images else pairs(os.environ.get("E2E_IMAGES", ""))
     if not images:

@@ -63,7 +63,7 @@ interface AppProps {
 /** Wraps the chrome in the providers every panel relies on. */
 export default function App({ dashboardRoot }: AppProps) {
   return (
-    <ThemeProvider defaultTheme="dark" storageKey="theme">
+    <ThemeProvider defaultTheme="system" storageKey="theme">
       <DesktopColorScheme />
       <DashboardProvider>
         <SettingsProvider>

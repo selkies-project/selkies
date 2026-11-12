@@ -25,6 +25,11 @@
 //! ([`selkies_wm::session::start_autostart`]). The handles live for the process, since the
 //! manager does: a session's window management is never handed back.
 //!
+//! The manager keeps the session's appearance in either mode: the toolkit settings and the
+//! Settings portal on the session bus, and the light or dark scheme the primary display's
+//! browser asks for, which the desktop follows until its user picks one of their own
+//! ([`browser_color_scheme`], [`selkies_wm::appearance`]).
+//!
 //! The session is the desktop or the application alone, `--desktop` deciding which a session
 //! starts in. Unless `--session-switch` is off or the desktop setting is locked, the window
 //! manager's root menu and window menu switch between the two at runtime: the shell is started
@@ -34,7 +39,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use selkies_wm::config::{Backend, Policy};
 use selkies_wm::frame::Buttons;
 use selkies_wm::session::{
@@ -114,6 +119,7 @@ pub fn start(is_wayland: bool) {
         env.set("LD_PRELOAD", &preload);
     }
     let bus = SessionBus::ensure(&mut env);
+    selkies_wm::appearance::start(&env);
     let env = Arc::new(Mutex::new(env));
     let x11 = if is_wayland {
         if !start_wayland(env.clone(), control) {
@@ -143,6 +149,21 @@ pub fn start(is_wayland: bool) {
         _x11: x11,
         wayland: is_wayland,
     });
+}
+
+/// Hand the window manager the primary display's sanitized `color_scheme` (`light`, `dark`, or
+/// `off` for none), which the desktop follows unless its user picked a scheme of their own
+/// ([`selkies_wm::appearance`]). Returns at once. Without `--wm` nothing keeps the desktop's
+/// appearance and the scheme is dropped.
+pub fn browser_color_scheme(scheme: &str) {
+    let scheme = match scheme {
+        "light" => selkies_wm::appearance::BrowserScheme::Light,
+        "dark" => selkies_wm::appearance::BrowserScheme::Dark,
+        _ => return,
+    };
+    if !selkies_wm::appearance::browser_scheme(scheme) {
+        debug!(target: "wm", "The browser asks for the {} scheme; no window manager keeps the desktop's appearance", scheme.name());
+    }
 }
 
 /// How the startup line names the session's mode.

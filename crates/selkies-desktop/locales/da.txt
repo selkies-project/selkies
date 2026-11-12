@@ -278,6 +278,7 @@ A file or folder with this name already exists = Der findes allerede en fil elle
 Cannot create the folder: {error} = Kan ikke oprette mappen: {error}
 Application icon = Programikon
 Light or dark = Lys eller mørk
+Follow the browser = Følg browseren
 Automatic = Automatisk
 Float = Svævende
 Mint = Mynte

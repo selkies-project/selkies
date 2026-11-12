@@ -15,7 +15,6 @@ Uses `E2E_DISPLAY` when set; otherwise starts a throwaway Xvfb.
 Usage: python3 tests/e2e/test_dpi_restart.py [websockets|webrtc|all] [x11|wayland|all]
 """
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -70,11 +69,6 @@ def leave_desktop_at(home: str, dpi: Optional[int]) -> None:
         subprocess.run(["xrdb", "-merge", os.path.join(home, ".Xresources")], check=True, env=x_env())
 
 
-# The resource each file keeps the density in; the files hold other settings beside it.
-DENSITY = {".Xresources": re.compile(r"^\s*Xft\.dpi\s*:\s*(\d+)", re.M),
-           ".xsettingsd": re.compile(r"^\s*Xft/DPI\s+(\d+)", re.M)}
-
-
 def persisted(home: str) -> dict:
     """Each persisted file's density and mtime."""
     found = {}
@@ -82,12 +76,10 @@ def persisted(home: str) -> dict:
         path = os.path.join(home, name)
         try:
             with open(path) as f:
-                values = DENSITY[name].findall(f.read())
+                digits = [int(t) for t in f.read().replace(":", " ").split() if t.isdigit()]
         except FileNotFoundError:
             continue
-        if not values:
-            continue
-        found[name] = (int(values[-1]) // (1024 if name == ".xsettingsd" else 1),
+        found[name] = (digits[-1] // (1024 if name == ".xsettingsd" else 1),
                        os.stat(path).st_mtime_ns)
     return found
 

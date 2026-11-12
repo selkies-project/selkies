@@ -57,7 +57,6 @@
 //! bus Selkies inherited, since another display's session may share the home and would
 //! apply the change live.
 
-pub mod appearance;
 pub mod capture;
 pub mod dpi;
 pub mod geometry;
@@ -67,7 +66,6 @@ pub mod resize;
 pub mod wayland;
 pub mod x11;
 pub mod xrandr;
-pub mod xsettings;
 
 use std::collections::BTreeMap;
 use std::fmt;

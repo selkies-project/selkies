@@ -278,6 +278,7 @@ A file or folder with this name already exists = يوجد ملف أو مجلد �
 Cannot create the folder: {error} = تعذّر إنشاء المجلد: {error}
 Application icon = أيقونة التطبيق
 Light or dark = فاتح أو داكن
+Follow the browser = اتباع المتصفح
 Automatic = تلقائي
 Float = عائم
 Mint = نعناع

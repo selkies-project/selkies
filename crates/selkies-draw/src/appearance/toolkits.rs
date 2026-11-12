@@ -1,51 +1,43 @@
-//! The applications' theme, derived from the interface colors so GTK, Qt,
-//! Chromium, and Electron windows take the shell's light or dark scheme and
-//! its accent.  The scheme is dark when the popup color is, and it picks the
-//! half of the installed GTK theme pair that matches (Breeze-Dark or Breeze,
-//! else GTK's built-in Adwaita-dark or Adwaita), the matching icon theme, and
-//! the cursor theme where those are installed.  What each toolkit reads:
+//! The applications' theme, derived from the desktop's interface colors so GTK, Qt, Chromium,
+//! and Electron windows take its light or dark scheme and its accent. The scheme is dark when the
+//! popup color is, and it picks the half of the installed GTK theme pair that matches (Breeze-Dark
+//! or Breeze, else GTK's built-in Adwaita-dark or Adwaita), the matching icon theme, and the
+//! cursor theme where those are installed. What each toolkit reads:
 //!
-//! * GTK 3 and plain GTK 4 read `settings.ini` under `~/.config/gtk-3.0` and
-//!   `~/.config/gtk-4.0` for the theme, icon and cursor names and the dark
-//!   preference; only those keys of its `[Settings]` group are replaced, so
-//!   every other line stays the user's.  On X11 a running `xsettingsd`
-//!   overrides that file, so its configuration takes the same names and the
-//!   daemon is told to reread it.
-//! * GTK on Wayland and libadwaita read GSettings'
-//!   `org.gnome.desktop.interface` instead (`color-scheme`, `gtk-theme`,
-//!   `icon-theme`, `cursor-theme`), which `gsettings` sets.  Those writes go
-//!   through a D-Bus service, so they are made only when the decision
-//!   differs from the one last made, recorded in `toolkits.state` under the
-//!   shell's config directory, and a start with unchanged settings spawns
-//!   nothing.
-//! * The accent reaches GTK through its user style sheets: each `gtk.css`
-//!   imports a file under the shell's config directory that this module
-//!   owns and rewrites, holding GTK's named selection and accent colors and,
-//!   for GTK 4, libadwaita's accent variables.  The import is the first line
-//!   of `gtk.css`, since CSS takes `@import` only before every rule, and the
-//!   user's own rules after it still win over it.
-//! * Qt follows GTK through its gtk3 platform theme (`QT_QPA_PLATFORMTHEME`,
-//!   set by the image): Qt 6 takes its palette and dark scheme from the GTK
-//!   theme, Qt 5 its dialogs and fonts.
-//! * Chromium and Electron take `prefers-color-scheme` from the desktop
-//!   portal where one answers and otherwise from the GTK theme they load,
-//!   which is why the dark scheme is a named dark theme rather than the
-//!   preference alone.
+//! * GTK 3 and plain GTK 4 read `settings.ini` under `~/.config/gtk-3.0` and `~/.config/gtk-4.0`
+//!   for the theme, icon and cursor names and the dark preference; only those keys of its
+//!   `[Settings]` group are replaced, so every other line stays the user's. On X11 a running
+//!   `xsettingsd` overrides that file, so its configuration takes the same names and the daemon
+//!   is told to reread it.
+//! * GTK on Wayland and libadwaita read GSettings' `org.gnome.desktop.interface` instead
+//!   (`color-scheme`, `gtk-theme`, `icon-theme`, `cursor-theme`), which `gsettings` sets. Those
+//!   writes go through a D-Bus service, so they are made only when the decision differs from the
+//!   one last made, recorded in `toolkits.state` under the desktop's config directory, and a start
+//!   with unchanged settings spawns nothing.
+//! * The accent reaches GTK through its user style sheets: each `gtk.css` imports a file under the
+//!   desktop's config directory that this module owns and rewrites, holding GTK's named selection
+//!   and accent colors and, for GTK 4, libadwaita's accent variables. The import is the first line
+//!   of `gtk.css`, since CSS takes `@import` only before every rule, and the user's own rules after
+//!   it still win over it.
+//! * Qt follows GTK through its gtk3 platform theme (`QT_QPA_PLATFORMTHEME`, set by the image):
+//!   Qt 6 takes its palette and dark scheme from the GTK theme, Qt 5 its dialogs and fonts.
+//! * Chromium and Electron take `prefers-color-scheme` from the desktop portal where one answers
+//!   and otherwise from the GTK theme they load, which is why the dark scheme is a named dark
+//!   theme rather than the preference alone.
 //! * libadwaita, Qt 6, Chromium, and Electron read the Settings portal's
-//!   `org.freedesktop.appearance` scheme and accent first, which
-//!   [`crate::portal`] serves from the same [`Decision`] where no portal of
-//!   the image's own holds the name.
+//!   `org.freedesktop.appearance` scheme and accent first, which [`super::portal`] serves from the
+//!   same [`Decision`] where no portal of the image's own holds the name.
 //!
-//! Every file is written only when its content changes, and a failure is
-//! reported on stderr under `SELKIES_DESKTOP_DEBUG` and is never fatal.
+//! Every file is written only when its content changes. What was updated and what failed comes
+//! back to the caller as lines to log, and a failure is never fatal.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-use selkies_draw::dirs;
-use selkies_draw::style::{luminance, on_color};
 use tiny_skia::Color;
 
-use crate::config::{self, Config};
+use crate::dirs;
+use crate::style::{Theme, desktop_config_dir, luminance, on_color};
 
 /// The first line of every style sheet this module writes, which marks it
 /// as generated.
@@ -143,12 +135,15 @@ fn installed(roots: &[PathBuf], name: &str, part: &str) -> bool {
     roots.iter().any(|root| root.join(name).join(part).exists())
 }
 
-/// Decides the scheme, the theme names, and the accent for the settings.
-/// Adwaita needs no directory since GTK carries it built in; the other names
-/// are taken only where installed, so a session never names a theme it
-/// cannot load.
-pub fn decide(config: &Config) -> Decision {
-    let dark = luminance(config.theme.popup) < 0.5;
+/// Decides the scheme, the theme names, and the accent for the desktop's colors and icon theme.
+/// Adwaita needs no directory since GTK carries it built in; the other names are taken only where
+/// installed, so a session never names a theme it cannot load.
+///
+/// # Arguments
+/// * `theme` - The desktop's four colors.
+/// * `icon_theme` - The icon theme the desktop's settings name, or `None` to detect one.
+pub fn decide(theme: Theme, icon_theme: Option<&str>) -> Decision {
+    let dark = luminance(theme.popup) < 0.5;
     let themes = theme_roots();
     let icons = icon_roots();
     let (breeze, adwaita) = if dark {
@@ -161,7 +156,7 @@ pub fn decide(config: &Config) -> Decision {
     } else {
         adwaita
     };
-    let icon_theme = config.icon_theme.clone().or_else(|| {
+    let icon_theme = icon_theme.map(str::to_string).or_else(|| {
         [dark.then_some("breeze-dark"), Some("breeze")]
             .into_iter()
             .flatten()
@@ -174,7 +169,7 @@ pub fn decide(config: &Config) -> Decision {
         gtk_theme: gtk_theme.to_string(),
         icon_theme,
         cursor_theme,
-        accent: config.theme.accent,
+        accent: theme.accent,
     }
 }
 
@@ -455,11 +450,12 @@ fn apply_xsettings(decision: &Decision) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Sets the GSettings keys through `gsettings` when the decision differs
-/// from the one last made; without `gsettings` nothing is recorded, so the
-/// keys are set once it appears.
-fn apply_gsettings(decision: &Decision) -> std::io::Result<bool> {
-    let Some(program) = selkies_draw::apps::resolve_program("gsettings") else {
+/// Sets the GSettings keys through `gsettings` when the decision differs from the one last made;
+/// without `gsettings` nothing is recorded, so the keys are set once it appears. Each `gsettings`
+/// runs with the environment given over this process's, which names the session bus its write
+/// goes through, and is reaped on a thread of its own so the caller never waits on the bus.
+fn apply_gsettings(decision: &Decision, env: &[(String, String)]) -> std::io::Result<bool> {
+    let Some(program) = crate::apps::resolve_program("gsettings") else {
         return Ok(false);
     };
     let values = decision.gsettings();
@@ -467,42 +463,47 @@ fn apply_gsettings(decision: &Decision) -> std::io::Result<bool> {
         .iter()
         .map(|(key, value)| format!("{key}={value}\n"))
         .collect();
-    if !write_if_changed(&config::config_dir().join("toolkits.state"), &state)? {
+    if !write_if_changed(&desktop_config_dir().join("toolkits.state"), &state)? {
         return Ok(false);
     }
-    let program = program.to_string_lossy().into_owned();
     for (key, value) in values {
-        let argv = [
-            program.clone(),
-            "set".into(),
-            INTERFACE_SCHEMA.into(),
-            key.into(),
-            value,
-        ];
-        selkies_draw::apps::spawn_detached(&argv, None);
+        let child = Command::new(&program)
+            .args(["set", INTERFACE_SCHEMA, key, &value])
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            std::thread::spawn(move || child.wait());
+        }
     }
     Ok(true)
 }
 
-/// Writes the toolkit settings, style sheets, XSETTINGS, and GSettings the
-/// settings imply, each only where it changed.
+/// Writes the toolkit settings, style sheets, XSETTINGS, and GSettings the desktop's colors and
+/// icon theme imply, each only where it changed.
 ///
 /// # Arguments
-/// * `config` - The settings.
+/// * `theme` - The desktop's four colors.
+/// * `icon_theme` - The icon theme the desktop's settings name, or `None` to detect one.
+/// * `env` - Variables over this process's environment for the tools it runs, the session bus
+///   among them.
 ///
 /// # Returns
-/// The decision written, for the Settings portal to serve.
-pub fn apply(config: &Config) -> Decision {
-    let debug = std::env::var_os("SELKIES_DESKTOP_DEBUG").is_some();
-    let report = |what: &str, result: std::io::Result<bool>| match result {
-        Ok(true) if debug => eprintln!("selkies-desktop: {what} updated"),
-        Err(error) if debug => eprintln!("selkies-desktop: cannot update {what}: {error}"),
-        _ => {}
+/// The decision written, for the Settings portal to serve, and a line for each store that was
+/// updated or could not be.
+pub fn apply(theme: Theme, icon_theme: Option<&str>, env: &[(String, String)]) -> (Decision, Vec<String>) {
+    let mut notes = Vec::new();
+    let mut report = |what: &str, result: std::io::Result<bool>| match result {
+        Ok(true) => notes.push(format!("{what} updated")),
+        Err(error) => notes.push(format!("cannot update {what}: {error}")),
+        Ok(false) => {}
     };
-    let decision = decide(config);
+    let decision = decide(theme, icon_theme);
     let settings = decision.settings_ini();
     let config_home = dirs::config_home();
-    let own = config::config_dir();
+    let own = desktop_config_dir();
     let accent = decision.accent;
     let sheets = [
         ("gtk-3.0", "gtk3.css", gtk3_css(accent)),
@@ -526,8 +527,8 @@ pub fn apply(config: &Config) -> Decision {
         }
     }
     report("xsettingsd", apply_xsettings(&decision).map(|()| false));
-    report("GSettings", apply_gsettings(&decision));
-    decision
+    report("GSettings", apply_gsettings(&decision, env));
+    (decision, notes)
 }
 
 #[cfg(test)]

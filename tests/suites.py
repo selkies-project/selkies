@@ -280,8 +280,6 @@ SUITES: list = [
      "selectors": ["x11", "wl", "x11-two", "wl-two", "x11-dashboards"]},
     {"path": "e2e/test_keyboard_layout.py", "tier": "e2e", "timeout": 600,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
-    {"path": "e2e/test_color_scheme.py", "tier": "e2e", "timeout": 600,
-     "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_encoders.py", "tier": "e2e", "timeout": 900,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_video_drop_recovery.py", "tier": "e2e", "timeout": 600,

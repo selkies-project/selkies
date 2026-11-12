@@ -278,6 +278,7 @@ A file or folder with this name already exists = Bu adda bir dosya veya klasör 
 Cannot create the folder: {error} = Klasör oluşturulamıyor: {error}
 Application icon = Uygulama simgesi
 Light or dark = Açık veya koyu
+Follow the browser = Tarayıcıyı izle
 Automatic = Otomatik
 Float = Yüzen
 Mint = Nane

@@ -52,12 +52,16 @@
   arguments.
   Everything there runs as the session user, who may already do each of these; the boundary it keeps is the
   stream's: a panic in the window manager is caught at the policy boundary and the compositor carries on without it.
-- Under `--desktop`, the `selkies-desktop` shell serves the desktop Settings portal
-  (`crates/selkies-desktop/src/portal.rs`): `org.freedesktop.portal.Settings` on the session bus under
-  `org.freedesktop.portal.Desktop`, taken only while no other process owns that name. Any process of the session
-  user's bus may call it; it answers `ReadAll`, `ReadOne`, `Read`, and its `version` property from the shell's own
-  theme decision, takes no writes, and runs nothing a caller names, so a caller learns only the scheme, accent, and
-  theme names every window of the session is drawn with.
+- Under `--wm`, the window manager in the `selkies` process serves the desktop Settings portal
+  (`crates/selkies-draw/src/appearance/portal.rs`, kept by `crates/selkies-wm/src/appearance.rs`), and a
+  `selkies-desktop` shell under another window manager serves it itself: `org.freedesktop.portal.Settings` on the
+  session bus under `org.freedesktop.portal.Desktop`, taken only while no other process owns that name. Any process
+  of the session user's bus may call it; it answers `ReadAll`, `ReadOne`, `Read`, and its `version` property from the
+  desktop's own theme decision, takes no writes, and runs nothing a caller names, so a caller learns only the scheme,
+  accent, and theme names every window of the session is drawn with. The primary display's page names the scheme
+  the desktop follows (`color_scheme` in its `SETTINGS`, sanitized against `light`, `dark`, and `off`): it chooses
+  between the desktop's own Light and Dark colors, written into the session user's desktop configuration while that
+  configuration lets it, and no byte of the page's reaches the file.
 - Under `--desktop` the shell is also the session's notification server (`crates/selkies-desktop/src/notify.rs`):
   `org.freedesktop.Notifications` on the session bus, taken only while no other process owns that name. Any
   process of the session user's bus may call `Notify`, `CloseNotification`, `GetCapabilities`, and
@@ -71,7 +75,7 @@
   most 64 notifications, closing the oldest. A caller can show text and an image on the user's screen and learn
   when the user invoked one of its actions; nothing it sends is run, opened, or written.
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
-  `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio, the session bus), and through a file-manager directory they can
+  `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
   write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose
   segment any local account could read and write, and shares its framebuffer (`SELKIES-FRAMEBUFFER`) only with a
   local X client that may read the root, read-only.

@@ -14,7 +14,6 @@ The [Base Container](https://github.com/selkies-project/selkies/tree/main/addons
 | Audio | PipeWire, WirePlumber, and `pipewire-pulse`, which `pcmflux` captures from and the microphone plays into; a PulseAudio client that leaves its buffer size to the server gets a 40 ms target (`addons/base/pipewire-pulse.conf.d`) rather than pipewire-pulse's 2 s |
 | GPU runtime | NVIDIA's EGL platform libraries for GBM, Wayland, and X11 (`egl-x11`, pinned by checksum), Mesa with Zink, the VA-API and Vulkan loaders, and `selkies gpu-probe`, which measures what the session can render on |
 | Printing | A CUPS scheduler Selkies runs its own print queue on, so a document printed in the session reaches the browser |
-| Color scheme | dconf with `gsettings`, the settings portal (`xdg-desktop-portal` with its GTK backend), and Adwaita's dark GTK 3 theme: the stores the light or dark scheme of the browser's page reaches the session's applications through (`color_scheme` in the [Settings Reference](../settings.md)) |
 | Supervision | The [s6](https://skarnet.org/software/s6/) supervision suite from the distribution's packages, one service directory per daemon under `/etc/service` |
 | TURN | An embedded [coTURN](turn.md#coturn) for the WebRTC transport, started only when no external TURN server is configured |
 | Selkies | The `selkies` server built from source with `pixelflux` and `pcmflux` linked in, its web client, the [Input Interposer](input-interposer.md), [fake-udev](input-interposer.md#fake-udev), and the [V4L2 Interposer](v4l2-interposer.md) built from source, and `selkies-privileged-files` |
@@ -44,7 +43,6 @@ The services under `/etc/service` are, each a `run` script and a `finish` script
 | `xvfb` | The framebuffer X server on the X11 backend; parked on Wayland |
 | `wayland` | The nested session compositor on the Wayland backend, unless an operator's compositor is captured (`SELKIES_WAYLAND_HOST_DISPLAY`) or none is wanted |
 | `xsettingsd` | The XSETTINGS manager, so a DPI change from the dashboard reaches running X11 applications live |
-| `session-bus` | The session bus at `${XDG_RUNTIME_DIR}/bus`, so an application started outside a desktop session reaches dconf and the settings portal: GLib connects there where a process names no bus, and where no desktop session runs a bus of its own the session environment names it as `DBUS_SESSION_BUS_ADDRESS` for the clients that do not, Chrome among them. It starts once the display its applications use is up, and stays out of the way where that address is already served |
 | `coturn` | The embedded TURN server, listening on `SELKIES_TURN_PORT` with the `TURN_MIN_PORT`-`TURN_MAX_PORT` relay range |
 | `selkies` | `/etc/selkies-entrypoint.sh`, once the environment file exists |
 
