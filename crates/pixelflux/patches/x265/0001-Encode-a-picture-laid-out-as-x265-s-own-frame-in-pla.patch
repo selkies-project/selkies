@@ -17,8 +17,8 @@ a 256x256 changing box, and a scroll. A still 1920x1080 frame took 5.3 ms on eig
 it took 5.7, and a 2560x1600 scroll 14.6 where it took 15.6.
 ---
  source/encoder/api.cpp | 36 +++++++++++++++++++++++++++++++++++-
- source/x265.h          | 32 ++++++++++++++++++++++++++++++++
- 2 files changed, 67 insertions(+), 1 deletion(-)
+ source/x265.h          | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 68 insertions(+), 1 deletion(-)
 
 diff --git a/source/encoder/api.cpp b/source/encoder/api.cpp
 index 9e3e632..424c2e2 100644
@@ -75,25 +75,26 @@ index 9e3e632..424c2e2 100644
  
  typedef const x265_api* (*api_get_func)(int bitDepth);
 diff --git a/source/x265.h b/source/x265.h
-index 3c5d3e3..1f9d81d 100644
+index 3c5d3e3..faa0262 100644
 --- a/source/x265.h
 +++ b/source/x265.h
-@@ -504,6 +504,14 @@ typedef struct x265_picture
+@@ -504,6 +504,15 @@ typedef struct x265_picture
  
      int   layerID;
      int    format;
 +
 +    /* The caller's map of the picture's 16x16 blocks, one byte each in raster
-+     * order, nonzero where the block is constant: its pixels are the frame
-+     * before's, which the first reference holds. A coding unit of constant
-+     * blocks in a P slice is coded as a skip from the zero-motion merge
-+     * candidate of that reference without analysis, where the merge candidates
-+     * offer one. NULL marks no block constant. */
++     * order over the picture's width and height as given, before any padding
++     * to the minimum coding unit, nonzero where the block is constant: its
++     * pixels are the frame before's, which the first reference holds. A coding
++     * unit of constant blocks in a P slice is coded as a skip from the
++     * zero-motion merge candidate of that reference without analysis, where the
++     * merge candidates offer one. NULL marks no block constant. */
 +    uint8_t *constantBlocks;
  } x265_picture;
  
  typedef enum
-@@ -2479,6 +2487,29 @@ void x265_picture_free(x265_picture *);
+@@ -2479,6 +2488,29 @@ void x265_picture_free(x265_picture *);
   *       type to auto - so the lookahead will determine slice type. */
  void x265_picture_init(x265_param *param, x265_picture *pic);
  
@@ -123,7 +124,7 @@ index 3c5d3e3..1f9d81d 100644
  /* x265_max_bit_depth:
   *      Specifies the numer of bits per pixel that x265 uses internally to
   *      represent a pixel, and the bit depth of the output bitstream.
-@@ -2719,6 +2750,7 @@ typedef struct x265_api
+@@ -2719,6 +2751,7 @@ typedef struct x265_api
      void          (*vmaf_encoder_log)(x265_encoder*, int, char**, x265_param *, x265_vmaf_data *);
  #endif
      int           (*zone_param_parse)(x265_param*, const char*, const char*);

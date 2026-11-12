@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: thelamer <ryankuba@gmail.com>
+Date: Wed, 11 Nov 2026 16:48:21 -0500
+Subject: [PATCH 3/3] Code a picture whose forced quantizer is 0 at the
+ sequence's
+
+use_qp_file forces the quantizer of every picture, so a caller that names one for some pictures
+names one for all, and a forced quantizer codes the picture at it whatever its temporal layer,
+where the sequence's quantizer codes each layer at its own offset. A picture whose qp is 0, which
+the forced path took as 1 since the real-time mode codes nothing lossless, now takes the
+sequence's path as without use_qp_file, so a caller forces only the pictures it means to:
+SVT_AV1_QP_FILE_KEEPS_SEQUENCE says the library does.
+
+A session that names qp 0 for every picture comes out bit for bit as without use_qp_file, at
+1280x720 in the real-time low-delay mode, layered and flat, with a constant-block map and
+without.
+---
+ Source/API/EbSvtAv1Enc.h                         | 4 +++-
+ Source/Lib/Codec/resource_coordination_process.c | 2 +-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/Source/API/EbSvtAv1Enc.h b/Source/API/EbSvtAv1Enc.h
+index 2cde987..66aa2db 100644
+--- a/Source/API/EbSvtAv1Enc.h
++++ b/Source/API/EbSvtAv1Enc.h
+@@ -409,7 +409,9 @@ typedef struct EbSvtAv1EncConfiguration {
+      * Default is 50. */
+     uint32_t qp;
+ 
+-    /* force qp values for every picture that are passed in the header pointer
++#define SVT_AV1_QP_FILE_KEEPS_SEQUENCE 1
++    /* force qp values for every picture that are passed in the header pointer;
++    * a picture whose qp is 0 is coded as it would be without this
+     *
+     * Default is 0.*/
+     bool use_qp_file;
+diff --git a/Source/Lib/Codec/resource_coordination_process.c b/Source/Lib/Codec/resource_coordination_process.c
+index ffc8f12..e16cb06 100644
+--- a/Source/Lib/Codec/resource_coordination_process.c
++++ b/Source/Lib/Codec/resource_coordination_process.c
+@@ -1357,7 +1357,7 @@ EbErrorType svt_aom_resource_coordination_kernel_iter(void* context) {
+                 SVT_LOG("Error reading data in multi pass encoding\n");
+             }
+         }
+-        if (scs->static_config.use_qp_file) {
++        if (scs->static_config.use_qp_file && pcs->input_ptr->qp != 0) {
+             pcs->qp_on_the_fly = true;
+             if (pcs->input_ptr->qp > MAX_QP_VALUE) {
+                 SVT_WARN("INPUT QP/CRF OUTSIDE OF RANGE\n");
+-- 
+2.47.3
+
