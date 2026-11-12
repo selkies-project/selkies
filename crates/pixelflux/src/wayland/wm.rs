@@ -760,7 +760,7 @@ pub fn judged_location(state: &AppState, seat: Point<f64, Logical>) -> Point<f64
 
 /// What the compositor's hit test found, for the policy.
 pub fn under_of(_state: &AppState, target: &Option<(FocusTarget, Point<f64, Logical>)>) -> Under {
-    match target {
+    match target.as_ref().map(|(target, at)| (target.owner(), at)) {
         Some((FocusTarget::Window(window), _)) => Under {
             window: window_id(window),
             top_layer: false,
@@ -776,7 +776,8 @@ pub fn under_of(_state: &AppState, target: &Option<(FocusTarget, Point<f64, Logi
             top_layer: true,
             desktop: false,
         },
-        None => Under::default(),
+        // `owner` is never a subsurface.
+        None | Some((FocusTarget::Subsurface(..), _)) => Under::default(),
     }
 }
 
