@@ -544,16 +544,16 @@ def viewer_check(page, res: "H.Results") -> None:
 def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     """Gaming mode stays reachable on a touch client, and by its chord.
 
-    The action-button row carries the fullscreen and gaming-mode pair on every
-    client; the trackpad toggle joins the keyboard tile in that row (in
-    a bar layout the bar's touch group, or the edge fan's, with no second one
-    in the soft keys), and appears only once touch is seen. The Ctrl+Shift+X
+    The sidebar's mode buttons carry the fullscreen and gaming-mode pair on
+    every client; the trackpad toggle joins the keyboard button there (in a
+    bar layout the bar's touch group, or the edge fan's, with no second one in
+    the soft keys), and appears only once touch is seen. The Ctrl+Shift+X
     chord is the core's own, so it works whatever the dashboard shows.
     """
     if dashboard == "default":
         present = lambda: page.evaluate("""() => ({
-            gaming: !!document.querySelector('.sidebar-action-buttons .gaming-mode-button'),
-            trackpad: !!document.querySelector('.sidebar-action-buttons .trackpad-mode-button'),
+            gaming: !!document.querySelector('.sidebar-mode-actions .gaming-mode-button'),
+            trackpad: !!document.querySelector('.sidebar-mode-actions .trackpad-mode-button'),
             headerTrackpad: !!document.querySelector('.header-controls .trackpad-mode-button'),
         })""")
     else:
@@ -568,7 +568,7 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     after = present()
     res.check("gaming mode button shown without touch", before["gaming"], before)
     res.check("gaming mode button survives touch detection", after["gaming"], after)
-    res.check("trackpad button appears with touch, in the action row", after["trackpad"], after)
+    res.check("trackpad button appears with touch, among the mode buttons", after["trackpad"], after)
     res.check("the header carries no trackpad button", not after["headerTrackpad"], after)
 
     # requestFullscreen needs a real display; the mode the input handler
@@ -593,12 +593,13 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
 
 
 def sidebar_layout_check(page, res: "H.Results") -> None:
-    """Pin the sidebar layout: icon parity of the fullscreen and gaming tiles,
-    uniform tiles, and a files dialog that follows the theme.
+    """Pin the sidebar layout: icon parity of the fullscreen and gaming mode
+    buttons, the mode buttons above the stream tiles and shaped apart from
+    them, uniform tiles, and a files dialog that follows the theme.
 
     Runs after gaming_mode_check: the touchstart it dispatches is what makes
-    the keyboard and trackpad tiles render, so the action row is at its
-    fullest nine here and has to wrap without resizing any tile.
+    the keyboard and trackpad mode buttons render, so the mode buttons are at
+    their fullest four here, sharing their one row.
     """
     if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
         page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
@@ -626,20 +627,31 @@ def sidebar_layout_check(page, res: "H.Results") -> None:
     res.check("fullscreen and gaming icons draw at one size", same, icons)
 
     tiles = page.evaluate("""() => {
-      const els = [...document.querySelectorAll('.sidebar-action-buttons .action-button')];
-      const r = els.map(e => e.getBoundingClientRect());
+      const box = (sel) => [...document.querySelectorAll(sel)].map(e => e.getBoundingClientRect());
+      const r = box('.sidebar-action-buttons .action-button');
+      const m = box('.sidebar-mode-actions .mode-button');
       return {
-        n: els.length,
+        n: r.length,
         widths: r.map(x => Math.round(x.width * 10) / 10),
         rows: [...new Set(r.map(x => Math.round(x.top)))].length,
+        modes: m.length,
+        modeWidths: m.map(x => Math.round(x.width * 10) / 10),
+        modeRows: [...new Set(m.map(x => Math.round(x.top)))].length,
+        modeHeight: Math.max(0, ...m.map(x => x.height)),
+        tileHeight: Math.min(...r.map(x => x.height)),
+        modesAbove: m.length > 0 && r.length > 0 && Math.max(...m.map(x => x.bottom)) <= Math.min(...r.map(x => x.top)),
         keyRow: [...document.querySelectorAll('.sidebar-mobile-key-actions .mobile-key-button:not(.key-palette-toggle)')].length,
         // The palette's disclosure carries a chevron; every other icon would be an icon button in the key row.
         keyRowIcons: [...document.querySelectorAll('.sidebar-mobile-key-actions svg')].filter((s) => !s.closest('.key-palette-toggle')).length,
       };
     }""")
-    uniform = (tiles["n"] == 9 and tiles["rows"] == 2
+    uniform = (tiles["n"] == 5 and tiles["rows"] == 1
                and max(tiles["widths"]) - min(tiles["widths"]) <= 1.0)
-    res.check("nine action tiles wrap onto two rows at one width", uniform, tiles)
+    res.check("the five stream tiles stand in one row at one width", uniform, tiles)
+    modes = (tiles["modes"] == 4 and tiles["modeRows"] == 1 and tiles["modesAbove"]
+             and max(tiles["modeWidths"]) - min(tiles["modeWidths"]) <= 1.0
+             and tiles["modeHeight"] < tiles["tileHeight"])
+    res.check("the four mode buttons share one row above the tiles, lower than a tile", modes, tiles)
     res.check("the key row holds the five soft keys and no icon buttons",
               tiles["keyRow"] == 5 and tiles["keyRowIcons"] == 0, tiles)
 

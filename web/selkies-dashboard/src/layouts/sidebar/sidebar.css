@@ -272,6 +272,36 @@ html[data-translucency="3"] .stream-strip { background: rgba(0, 0, 0, 0.35); }
 :root:not(.dark) .theme-pill .sun { left: auto; right: 3px; opacity: 1; transform: translateX(0); }
 
 /* --- Stream toggle tiles --- */
+/* The mode buttons: what the session's view and input do, not a stream, so
+   shaped apart from the tiles under them: rounded, lower, and sharing one row
+   between them, however many the client has. */
+.sidebar-mode-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.sidebar .mode-button {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--sk-border-strong);
+  border-radius: 16px;
+  background-color: var(--sk-surface-inset);
+  color: var(--sk-text);
+  cursor: pointer;
+}
+.sidebar .mode-button svg { width: 16px; height: 16px; }
+.sidebar .mode-button:hover { border-color: var(--sk-accent-border); }
+.sidebar .mode-button[aria-pressed="true"] {
+  background-color: var(--sk-accent-soft);
+  border-color: var(--sk-accent-border);
+  color: var(--sk-accent-text);
+}
+
 .sidebar-action-buttons {
   display: flex;
   flex-wrap: wrap;

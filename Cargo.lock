@@ -3684,6 +3684,7 @@ dependencies = [
  "x11rb 0.14.0",
  "xkbcommon",
  "xxhash-rust",
+ "zbus",
  "zip",
 ]
 
@@ -3715,6 +3716,7 @@ dependencies = [
  "libc",
  "resvg",
  "tiny-skia",
+ "zbus",
 ]
 
 [[package]]

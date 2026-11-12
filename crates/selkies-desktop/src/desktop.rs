@@ -535,8 +535,9 @@ pub struct Desktop {
     pub tray_slot: Option<Rect>,
     /// Whether the tray strip moved since the tray was last placed.
     pub tray_moved: bool,
-    /// The desktop Settings portal the shell serves, when it holds the name.
-    pub portal: Option<crate::portal::Portal>,
+    /// The desktop Settings portal the shell serves, when it keeps the appearance and holds the
+    /// name.
+    pub portal: Option<selkies_draw::appearance::portal::Portal>,
     /// How many virtual desktops the window manager reports.
     pub desktops: u32,
     /// The index of the current virtual desktop.
@@ -582,6 +583,27 @@ fn load_apps(config: &Config) -> Apps {
     apps
 }
 
+/// Writes the toolkit settings the settings imply where the shell keeps the session's appearance
+/// ([`Config::toolkits`]); the decision written, for the Settings portal.
+fn apply_toolkits(config: &Config) -> Option<selkies_draw::appearance::toolkits::Decision> {
+    if !config.toolkits {
+        return None;
+    }
+    let (decision, notes) =
+        selkies_draw::appearance::toolkits::apply(config.theme, config.icon_theme.as_deref(), &[]);
+    for note in notes {
+        debug_line(&note);
+    }
+    Some(decision)
+}
+
+/// A line on stderr under `SELKIES_DESKTOP_DEBUG`.
+fn debug_line(line: &str) {
+    if std::env::var_os("SELKIES_DESKTOP_DEBUG").is_some() {
+        eprintln!("selkies-desktop: {line}");
+    }
+}
+
 impl Desktop {
     /// Loads settings, fonts, icons and applications, and applies the
     /// settings to the session: the window manager's theme, and the file
@@ -604,8 +626,11 @@ impl Desktop {
         if session {
             crate::i18n::select(config.language.as_deref());
             crate::wmtheme::apply(&config);
-            let decision = crate::toolkits::apply(&config);
-            portal = crate::portal::Portal::start(&decision);
+            if let Some(decision) = apply_toolkits(&config) {
+                portal = selkies_draw::appearance::portal::Portal::start(&decision, None)
+                    .inspect_err(|error| debug_line(&format!("not serving the settings portal: {error}")))
+                    .ok();
+            }
         }
         let fonts = Fonts::new();
         let icons = Icons::new(config.icon_theme.as_deref());
@@ -1245,10 +1270,7 @@ impl Desktop {
         }
         self.sync_panel(was_top, was_height, was_autohide);
         crate::wmtheme::apply(&self.config);
-        let decision = crate::toolkits::apply(&self.config);
-        if let Some(portal) = self.portal.as_mut() {
-            portal.update(&decision);
-        }
+        self.update_appearance();
         self.icons = Icons::new(self.config.icon_theme.as_deref());
         self.apps = load_apps(&self.config);
         seed_favorites(&mut self.config, &self.apps);
@@ -1280,10 +1302,7 @@ impl Desktop {
         self.menu.invalidate();
         self.sync_panel(was_top, was_height, was_autohide);
         crate::wmtheme::apply(&self.config);
-        let decision = crate::toolkits::apply(&self.config);
-        if let Some(portal) = self.portal.as_mut() {
-            portal.update(&decision);
-        }
+        self.update_appearance();
         self.wallpapers.retain(|_, image| image.is_some());
         self.repaint_wallpapers();
         self.panel_dirty = true;
@@ -2089,15 +2108,28 @@ impl Desktop {
         self.icons.get(&name, (size * scale) as u32)
     }
 
-    /// Writes a setting and applies it, the way the settings window does.
+    /// Writes a setting and applies it, the way the settings window does. A change of a color
+    /// the user makes here turns following the browser's scheme off
+    /// ([`selkies_draw::appearance::user_changes`]).
     ///
     /// # Arguments
     /// * `changes` - Keys and their new values; an empty value removes the key.
     pub fn write_config(&mut self, changes: &[(&str, String)]) {
-        if let Err(error) = crate::config::save(changes) {
+        let changes = selkies_draw::appearance::user_changes(changes);
+        if let Err(error) = crate::config::save(&changes) {
             eprintln!("selkies-desktop: cannot write the config file: {error}");
         }
         self.apply_config();
+    }
+
+    /// Writes the toolkit settings again and serves the new decision on the portal, where the
+    /// shell keeps the session's appearance.
+    fn update_appearance(&mut self) {
+        if let (Some(decision), Some(portal)) = (apply_toolkits(&self.config), self.portal.as_mut())
+            && let Err(error) = portal.update(&decision)
+        {
+            debug_line(&format!("cannot signal the settings portal: {error}"));
+        }
     }
 
     /// Adds a desktop file ID to a list setting, or removes it when present.

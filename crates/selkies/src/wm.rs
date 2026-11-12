@@ -25,6 +25,11 @@
 //! ([`selkies_wm::session::start_autostart`]). The handles live for the process, since the
 //! manager does: a session's window management is never handed back.
 //!
+//! The manager keeps the session's appearance in either mode: the toolkit settings and the
+//! Settings portal on the session bus, and the light or dark scheme the primary display's
+//! browser asks for, which the desktop follows until its user picks one of their own
+//! ([`browser_color_scheme`], [`selkies_wm::appearance`]).
+//!
 //! The session is the desktop or the application alone, `--desktop` deciding which a session
 //! starts in. Unless `--session-switch` is off or the desktop setting is locked, the window
 //! manager's root menu and window menu switch between the two at runtime: the shell is started
@@ -34,7 +39,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use selkies_wm::config::{Backend, Policy};
 use selkies_wm::frame::Buttons;
 use selkies_wm::session::{
@@ -173,6 +178,7 @@ pub fn start(is_wayland: bool) {
         env.set(selkies_draw::apps::DESCRIBED_ENV, "1");
         selkies_draw::apps::describe_applications();
     }
+    selkies_wm::appearance::start(&env);
     let env = Arc::new(Mutex::new(env));
     let session_env = env.clone();
     let x11 = if is_wayland {
@@ -215,11 +221,26 @@ pub fn start(is_wayland: bool) {
 /// given the switch by what starts it.
 fn enable_accessibility(session_bus: Option<&str>) {
     match pelorus::atspi::enable(session_bus) {
-        Ok(_) => log::debug!(target: "pelorus", "accessibility is on for the session"),
+        Ok(_) => debug!(target: "pelorus", "accessibility is on for the session"),
         Err(e) => warn!(
             target: "pelorus",
             "applications will not describe their windows ({e}); Pelorus has screenshots alone"
         ),
+    }
+}
+
+/// Hand the window manager the primary display's sanitized `color_scheme` (`light`, `dark`, or
+/// `off` for none), which the desktop follows unless its user picked a scheme of their own
+/// ([`selkies_wm::appearance`]). Returns at once. Without `--wm` nothing keeps the desktop's
+/// appearance and the scheme is dropped.
+pub fn browser_color_scheme(scheme: &str) {
+    let scheme = match scheme {
+        "light" => selkies_wm::appearance::BrowserScheme::Light,
+        "dark" => selkies_wm::appearance::BrowserScheme::Dark,
+        _ => return,
+    };
+    if !selkies_wm::appearance::browser_scheme(scheme) {
+        debug!(target: "wm", "The browser asks for the {} scheme; no window manager keeps the desktop's appearance", scheme.name());
     }
 }
 
@@ -269,4 +290,145 @@ fn start_wayland(env: Arc<Mutex<SessionEnv>>, control: Arc<SessionControl>) -> b
         error!(target: "wm", "session thread not started: {e}");
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::BufRead;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use selkies_draw::appearance::{FOLLOW_BROWSER, user_changes};
+    use selkies_draw::style;
+    use selkies_wm::session::SessionEnv;
+
+    use crate::session_screens::testing::{Owned, Scratch, isolated, run_isolated};
+
+    /// Waits up to five seconds for `check` to hold, the appearance looking at its configuration
+    /// once a second.
+    fn eventually(what: &str, check: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !check() {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The scheme the Settings portal on a bus answers, as the portal numbers it.
+    fn portal_scheme(address: &str) -> Option<u32> {
+        zbus::block_on(async {
+            let connection = zbus::connection::Builder::address(address)
+                .build()
+                .await
+                .ok()?;
+            let reply = connection
+                .call_method(
+                    Some("org.freedesktop.portal.Desktop"),
+                    "/org/freedesktop/portal/desktop",
+                    Some("org.freedesktop.portal.Settings"),
+                    "ReadOne",
+                    &("org.freedesktop.appearance", "color-scheme"),
+                )
+                .await
+                .ok()?;
+            let value: zbus::OwnedVariant = reply.body().deserialize().ok()?;
+            match &*value {
+                zbus::Variant::U32(scheme) => Some(*scheme),
+                _ => None,
+            }
+        })
+    }
+
+    #[test]
+    #[ignore = "run by the_browsers_scheme_reaches_the_desktop_until_its_user_picks_one, in a process of its own"]
+    fn the_browsers_scheme_reaches_the_desktop_until_its_user_picks_one_in_its_process() {
+        if !isolated() {
+            return;
+        }
+        let Ok(mut daemon) = Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .map(Owned)
+        else {
+            eprintln!("skipped: no dbus-daemon");
+            return;
+        };
+        let mut address = String::new();
+        std::io::BufReader::new(daemon.0.stdout.take().expect("the daemon's address"))
+            .read_line(&mut address)
+            .expect("the daemon prints its address");
+        let address = address.trim().to_string();
+        let mut env = SessionEnv::new(None, None);
+        env.set("DBUS_SESSION_BUS_ADDRESS", &address);
+        selkies_wm::appearance::start(&env);
+
+        let config = style::desktop_config_file();
+        let value = |key: &str| {
+            style::parse_values(&std::fs::read_to_string(&config).unwrap_or_default()).remove(key)
+        };
+        let gtk3 = selkies_draw::dirs::config_home().join("gtk-3.0/settings.ini");
+        let gtk3_light = || {
+            std::fs::read_to_string(&gtk3)
+                .is_ok_and(|text| text.contains("gtk-application-prefer-dark-theme=0"))
+        };
+        eventually("the portal serves the default Dark scheme", || {
+            portal_scheme(&address) == Some(1)
+        });
+
+        super::browser_color_scheme("light");
+        eventually(
+            "a light browser puts the Light scheme in the configuration",
+            || value("color_popup").as_deref() == Some("#eff0f1"),
+        );
+        eventually("GTK is told the light scheme", gtk3_light);
+        eventually("the portal serves the light scheme", || {
+            portal_scheme(&address) == Some(2)
+        });
+
+        let picked = user_changes(&[("color_accent", "#b9671b".to_string())]);
+        style::save_values(&config, &picked).expect("the user's pick is written");
+        super::browser_color_scheme("dark");
+        std::thread::sleep(Duration::from_millis(2500));
+        assert_eq!(
+            value("color_accent").as_deref(),
+            Some("#b9671b"),
+            "the user's color stays"
+        );
+        assert_eq!(
+            value("color_popup").as_deref(),
+            Some("#eff0f1"),
+            "a dark browser is not followed"
+        );
+        assert_eq!(value(FOLLOW_BROWSER).as_deref(), Some("false"));
+        assert_eq!(portal_scheme(&address), Some(2));
+
+        style::save_values(&config, &[(FOLLOW_BROWSER, "true".to_string())])
+            .expect("following is turned back on");
+        eventually("following again takes the browser's last scheme", || {
+            value("color_popup").as_deref() == Some("#202326")
+        });
+        eventually("the portal serves the dark scheme", || {
+            portal_scheme(&address) == Some(1)
+        });
+    }
+
+    #[test]
+    fn the_browsers_scheme_reaches_the_desktop_until_its_user_picks_one() {
+        let home = Scratch::new("scheme");
+        let config = home.path("config").display().to_string();
+        let system = home.path("etc").display().to_string();
+        let data = home.path("data").display().to_string();
+        run_isolated(
+            "wm::tests::the_browsers_scheme_reaches_the_desktop_until_its_user_picks_one_in_its_process",
+            &[
+                ("HOME", &home.text()),
+                ("XDG_CONFIG_HOME", &config),
+                ("XDG_CONFIG_DIRS", &system),
+                ("XDG_DATA_HOME", &data),
+            ],
+        );
+    }
 }

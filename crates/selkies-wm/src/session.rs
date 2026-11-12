@@ -15,6 +15,9 @@
 //! `dbus-launch` and the applications it launches inherit that bus; a bus already in the
 //! environment is kept.
 //!
+//! The shell is started with its own keeping of the session's appearance off, since the manager
+//! keeps it in both session modes ([`crate::appearance`]).
+//!
 //! The shell is a child process on purpose: its file manager decodes images from the user's home
 //! and scans directories, untrusted-file parsing that does not belong beside the stream, and a
 //! shell crash is a restart rather than a lost stream. [`ShellSupervisor`] restarts it with a
@@ -43,6 +46,10 @@ use std::time::{Duration, Instant};
 
 use crate::config::{self, Backend};
 use crate::core::{Launcher, SessionMode};
+
+/// The shell's setting by which it keeps the session's appearance, off for the shell this
+/// manager starts: the manager keeps it in both session modes ([`crate::appearance`]).
+const SHELL_TOOLKITS: &str = "SELKIES_DESKTOP_TOOLKITS";
 
 /// The environment the session's children run in.
 #[derive(Clone, Debug, Default)]
@@ -696,6 +703,7 @@ impl ShellSupervisor {
         let env = self.env.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let mut command = env.command(&self.program);
         command
+            .env(SHELL_TOOLKITS, "false")
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());

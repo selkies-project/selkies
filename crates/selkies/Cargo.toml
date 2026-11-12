@@ -80,6 +80,10 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 [dev-dependencies]
 # The tests compile build/web_bundle.rs, which tags files by their xxh3 hash
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# The window manager's appearance test writes the desktop's configuration as the shell does and
+# asks the Settings portal the manager serves
+selkies-draw = { path = "../selkies-draw" }
+zbus = { version = "6", default-features = false, features = ["default-rt"] }
 
 [features]
 ## Writes one line per frame sent to `$BASELINE_FRAME_LOG`, what the comparison benchmark reads; a

@@ -278,6 +278,7 @@ A file or folder with this name already exists = Đã có tệp hoặc thư mụ
 Cannot create the folder: {error} = Không thể tạo thư mục: {error}
 Application icon = Biểu tượng ứng dụng
 Light or dark = Sáng hoặc tối
+Follow the browser = Theo trình duyệt
 Automatic = Tự động
 Float = Nổi
 Mint = Bạc hà

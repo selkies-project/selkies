@@ -15,8 +15,6 @@ mod i18n;
 mod ipc;
 mod keybinds;
 mod notify;
-mod portal;
-mod toolkits;
 mod tray;
 mod ui;
 mod wallpapers;

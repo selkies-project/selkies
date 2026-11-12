@@ -84,6 +84,10 @@ pub trait Input: Send + Sync {
     /// Take a page's xkb layout hint (`de`, `ch(fr)`).
     async fn apply_client_keyboard_layout(&self, layout: &str);
 
+    /// Hand the desktop the primary display's sanitized color scheme (`light`, `dark`, or `off`
+    /// for none). Returns at once; the desktop's stores are reached on a task of their own.
+    fn apply_client_color_scheme(&self, scheme: &str);
+
     /// Whether the backend takes a touchpad's scroll as a finger's (`sf`), for
     /// `DISPLAY_CONFIG_UPDATE`.
     fn finger_scroll_available(&self) -> bool;

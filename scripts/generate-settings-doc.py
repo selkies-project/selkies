@@ -55,9 +55,9 @@ SECTIONS = [
         "audio_enabled", "audio_bitrate", "audio_channels", "audio_device_name", "audio_frame_duration_ms",
         "audio_redundancy", "audio_redundancy_distance", "backpressure_queue_size", "microphone_enabled",
     ]),
-    ("Display", "Resolution, scaling, cursors, and the second display.", [
+    ("Display", "Resolution, scaling, the color scheme, cursors, and the second display.", [
         "enable_resize", "manual_resolution", "manual_width", "manual_height", "force_aligned_resolution",
-        "scaling_dpi", "use_css_scaling", "second_screen", "enable_cursors", "cursor_size",
+        "scaling_dpi", "color_scheme", "use_css_scaling", "second_screen", "enable_cursors", "cursor_size",
         "use_browser_cursors", "raw_pointer_motion", "watermark_path", "watermark_location", "debug_cursors",
     ]),
     ("Backends", "The X11 or Wayland capture backend and the GPU it renders on.", [

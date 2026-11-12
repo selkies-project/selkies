@@ -92,6 +92,27 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Each layer that fetches from a floating source is cached by that
+      # source's state, read here, so a change upstream rebuilds it where the
+      # cache would hand back the last build's: the distribution archive (its
+      # release files' dates, read in the distribution's own image on this
+      # architecture), Mozilla's and Google's apt repositories, and the
+      # proot-apps and FerrisPad releases.
+      - name: Read the upstream states the floating layers take
+        id: upstream
+        env:
+          DISTRIB: ${{ matrix.flavor.image }}:${{ matrix.flavor.release }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive_date() { scripts/ci/retry.sh 5 30 curl -fsSL "$1" | sed -n 's/^Date: //p' | head -n 1; }
+          {
+            echo "archive=$(scripts/ci/retry.sh 5 30 docker run --rm "${DISTRIB}" sh -c \
+              'apt-get update -qq > /dev/null && sed -n "s/^Date: //p" /var/lib/apt/lists/*Release | sort | sha256sum | cut -c1-16')"
+            echo "browsers=$(archive_date https://packages.mozilla.org/apt/dists/mozilla/InRelease); $(archive_date https://dl.google.com/linux/chrome/deb/dists/stable/InRelease)"
+            echo "proot_apps=$(gh api repos/linuxserver/proot-apps/releases/latest --jq .tag_name)"
+            echo "ferrispad=$(gh api repos/fedro86/ferrispad/releases/latest --jq .tag_name)"
+          } | tee -a "$GITHUB_OUTPUT"
       # The session without a desktop, which the desktop image is then built
       # on. Both are built in this one job so the desktop image can name the base it was
       # just given by digest: an exact, single-architecture reference, months
@@ -106,6 +127,7 @@ jobs:
           build-args: |
             DISTRIB_IMAGE=${{ matrix.flavor.image }}
             DISTRIB_RELEASE=${{ matrix.flavor.release }}
+            DISTRIB_ARCHIVE=${{ steps.upstream.outputs.archive }}
             SELKIES_VERSION=${{ inputs.release && inputs.tag_prefix || '' }}
           outputs: type=image,"name=${{ env.BASE_IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: base-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
@@ -120,6 +142,10 @@ jobs:
           platforms: ${{ matrix.arch.platform }}
           build-args: |
             BASE_IMAGE=${{ env.BASE_IMAGE_NAME }}@${{ steps.base.outputs.digest }}
+            DISTRIB_ARCHIVE=${{ steps.upstream.outputs.archive }}
+            BROWSER_ARCHIVES=${{ steps.upstream.outputs.browsers }}
+            PROOT_APPS_VERSION=${{ steps.upstream.outputs.proot_apps }}
+            FERRISPAD_VERSION=${{ steps.upstream.outputs.ferrispad }}
           outputs: type=image,"name=${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: desktop-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
@@ -271,6 +297,9 @@ jobs:
           context: addons/${{ matrix.addon }}
           platforms: ${{ matrix.arch.platform }}
           outputs: type=image,"name=${{ env.REGISTRY_NAMESPACE }}/${{ matrix.addon }}",push-by-digest=true,name-canonical=true,push=true
+          # Small enough to build whole every time, so a pip or base-image
+          # update upstream is never answered from a cached layer
+          no-cache: "true"
           cache-scope: ${{ matrix.addon }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
       - name: Export digest
