@@ -451,12 +451,25 @@ fn spawn_shell(
     command: &str,
     env: &HashMap<String, String>,
 ) -> std::io::Result<(tokio::process::Child, tokio::net::unix::pipe::Receiver)> {
-    let (read, write): (OwnedFd, OwnedFd) = nix::unistd::pipe().map_err(std::io::Error::from)?;
+    let mut shell = tokio::process::Command::new("/bin/sh");
+    shell.arg("-c").arg(command);
+    spawn_merged(shell, env)
+}
+
+/// Spawn `command` in `env` alone, from the home directory, with no input and its stdout and
+/// stderr on one pipe, whose read end comes back: one stream keeps what a program printed in
+/// the order it printed it. Both ends are close-on-exec, so the child holds the pipe only as its
+/// stdout and stderr: a stray copy under another number would keep the stream open for whatever
+/// the child leaves running with its output sent elsewhere.
+pub fn spawn_merged(
+    mut command: tokio::process::Command,
+    env: &HashMap<String, String>,
+) -> std::io::Result<(tokio::process::Child, tokio::net::unix::pipe::Receiver)> {
+    let (read, write): (OwnedFd, OwnedFd) =
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(std::io::Error::from)?;
     let stderr = write.try_clone()?;
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let child = tokio::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
+    let child = command
         .env_clear()
         .envs(env)
         .current_dir(home)

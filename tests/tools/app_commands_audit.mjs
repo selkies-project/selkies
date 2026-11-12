@@ -4,13 +4,14 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What the apps panel shows between posting a command and the server answering.
-// The panel applies installs and removes optimistically, so the module tracks
-// every posted command until a `command_done` message settles it or a
-// `command_error` notice rolls it back, and announces both so a mounted list
-// re-reads the running set. Which apps are installed comes from the server,
-// with the stored list a cache of its last answer, so that is checked too --
-// including that adopting one does not undo a command still in flight.
+// What the apps panel knows between the server's reports. Nothing about the
+// session is kept in the browser: the panel asks the server by naming an
+// operation, and the store takes in what the server tells every page -- a
+// whole state (what is installed, every job and its console) or one job's
+// change (its state, phase, progress, and the console lines since the last).
+// So the checks are that a request leaves the page as an operation and not a
+// command line, that the cores' forwarding reaches the store, and that the
+// store folds both reports the way the server means them.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -22,7 +23,6 @@ function check(label, ok, detail = '') {
 
 const listeners = new Map();
 const posted = [];
-const store = new Map();
 const origin = 'http://localhost';
 
 globalThis.window = {
@@ -34,121 +34,92 @@ globalThis.window = {
     removeEventListener(type, fn) {
         listeners.set(type, (listeners.get(type) || []).filter((f) => f !== fn));
     },
-    dispatchEvent(event) {
-        for (const fn of listeners.get(event.type) || []) fn(event);
-        return true;
-    },
     postMessage(data) { posted.push(data); },
-};
-globalThis.localStorage = {
-    getItem: (key) => (store.has(key) ? store.get(key) : null),
-    setItem: (key, value) => store.set(key, String(value)),
-};
-globalThis.CustomEvent = class CustomEvent {
-    constructor(type, init) { this.type = type; this.detail = init && init.detail; }
 };
 
 const {
-    APP_COMMAND_STATE_EVENT,
-    INSTALLED_APPS_ROLLBACK_EVENT,
-    INSTALLED_APPS_SERVER_EVENT,
-    applyServerInstalledApps,
+    APPS_EVENT,
+    CONSOLE_LINES,
+    applyAppsEvent,
     appsCatalog,
-    pendingAppAction,
-    postAppCommand,
-    readInstalledApps,
-    writeInstalledApps,
-    resolveFailedAppCommand,
+    appsSnapshot,
+    forwardAppsEvent,
+    jobForApp,
+    sendAppsRequest,
+    subscribeApps,
 } = await import('../../web/selkies-web-core/lib/app-commands.ts');
 
-let stateEvents = 0;
-window.addEventListener(APP_COMMAND_STATE_EVENT, () => { stateEvents++; });
-let rollbacks = [];
-window.addEventListener(INSTALLED_APPS_ROLLBACK_EVENT, (e) => rollbacks.push(e.detail));
-
-const deliver = (data) => {
-    for (const fn of listeners.get('message') || []) fn({ source: window, origin, data });
+const deliver = (data, source = window) => {
+    for (const fn of listeners.get('message') || []) fn({ source, origin, data });
 };
 
-postAppCommand('install', 'geany');
-check('a posted install reaches the core',
-      posted.at(-1) && posted.at(-1).type === 'command'
-      && posted.at(-1).value === 'selkies-proot install geany', JSON.stringify(posted.at(-1)));
-check('the app reads as installing while the server runs it',
-      pendingAppAction('geany') === 'install', String(pendingAppAction('geany')));
-check('posting announces the change', stateEvents === 1, String(stateEvents));
+sendAppsRequest('install', 'firefox');
+sendAppsRequest('clear', undefined, 7);
+check('a request names an operation and an app, never a command line',
+      JSON.stringify(posted[0]) === JSON.stringify({ type: 'apps', value: { op: 'install', app: 'firefox' } }),
+      JSON.stringify(posted[0]));
+check('a job is named by its id',
+      JSON.stringify(posted[1].value) === JSON.stringify({ op: 'clear', id: 7 }), JSON.stringify(posted[1]));
 
-deliver({ type: 'commandDone', command: 'selkies-proot install geany' });
-check('a clean exit clears the running state',
-      pendingAppAction('geany') === null, String(pendingAppAction('geany')));
-check('settling announces the change', stateEvents === 2, String(stateEvents));
+posted.length = 0;
+forwardAppsEvent('apps_job,{"id":1,"app":"firefox"}');
+forwardAppsEvent('apps_state,not json');
+check('a core forwards an apps action as its kind and parsed body, and drops a malformed one',
+      posted.length === 1 && posted[0].type === APPS_EVENT && posted[0].kind === 'job'
+      && posted[0].payload.app === 'firefox', JSON.stringify(posted));
 
-writeInstalledApps(['inkscape']);
-postAppCommand('install', 'inkscape');
-stateEvents = 0;
-const shown = resolveFailedAppCommand(
-    'exited with status 1 after 0.3s -- proot error: ptrace denied: selkies-proot install inkscape');
-check('a failure notice is shown to the user', shown === true, String(shown));
-check('a failure clears the running state',
-      pendingAppAction('inkscape') === null, String(pendingAppAction('inkscape')));
-check('a failed install is rolled back',
-      readInstalledApps().includes('inkscape') === false, JSON.stringify(readInstalledApps()));
-check('the rollback reaches a mounted list',
-      rollbacks.length === 1 && rollbacks[0].app === 'inkscape', JSON.stringify(rollbacks));
-check('rolling back announces the change', stateEvents === 1, String(stateEvents));
+let changes = 0;
+const stop = subscribeApps(() => { changes++; });
+deliver({ type: APPS_EVENT, kind: 'state', payload: { installed: ['gimp'], jobs: [] } });
+check('a forwarded state reaches the store and its subscribers',
+      changes === 1 && appsSnapshot().installed.join() === 'gimp', JSON.stringify(appsSnapshot()));
+deliver({ type: APPS_EVENT, kind: 'state', payload: { installed: ['x'], jobs: [] } }, {});
+check('a message another window posted is not taken in', appsSnapshot().installed.join() === 'gimp');
+const before = appsSnapshot();
+deliver({ type: APPS_EVENT, kind: 'unknown', payload: {} });
+check('an action of no known kind changes nothing', appsSnapshot() === before && changes === 1);
+stop();
 
-postAppCommand('install', 'gimp');
-stateEvents = 0;
-const other = resolveFailedAppCommand('exited with status 1 after 0.1s: someone-elses-command');
-check("another client's failure leaves this one running",
-      other === true && pendingAppAction('gimp') === 'install' && stateEvents === 0,
-      `${other} ${pendingAppAction('gimp')} ${stateEvents}`);
+let state = { installed: null, jobs: [] };
+state = applyAppsEvent(state, 'job', {
+    id: 1, app: 'firefox', op: 'install', state: 'running', phase: null, progress: null, code: null,
+    reset: true, lines: ['Installing firefox'], current: '',
+});
+state = applyAppsEvent(state, 'job', {
+    id: 1, app: 'firefox', op: 'install', state: 'running', phase: 'download', progress: 40, code: null,
+    append: ['Getting layer'], current: '####   40.0%',
+});
+const job = state.jobs[0];
+check('a job change appends its new lines and replaces the line being written',
+      job.lines.join('|') === 'Installing firefox|Getting layer' && job.current === '####   40.0%'
+      && job.phase === 'download' && job.progress === 40, JSON.stringify(job));
+state = applyAppsEvent(state, 'job', {
+    id: 1, app: 'firefox', op: 'install', state: 'done', phase: 'install', progress: null, code: 0,
+    append: ['Adding icon'], current: '',
+});
+check('a finished job keeps its console',
+      state.jobs[0].state === 'done' && state.jobs[0].lines.length === 3 && state.jobs[0].current === '',
+      JSON.stringify(state.jobs[0]));
+state = applyAppsEvent(state, 'job', {
+    id: 2, app: 'firefox', op: 'remove', state: 'queued', phase: null, progress: null, code: null,
+    reset: true, lines: [], current: '',
+});
+check('the job shown for an app is its pending one', jobForApp(state, 'firefox').id === 2);
+state = applyAppsEvent(state, 'job', { id: 2, app: 'firefox', op: 'remove', state: 'done', code: 0 });
+check('else the last that ran for it', jobForApp(state, 'firefox').id === 2 && jobForApp(state, 'gimp') === null);
 
-deliver({ type: 'commandDone', command: 'not-a-tracked-command' });
-check('an untracked completion changes nothing',
-      pendingAppAction('gimp') === 'install' && stateEvents === 0,
-      `${pendingAppAction('gimp')} ${stateEvents}`);
+const flood = Array.from({ length: CONSOLE_LINES + 10 }, (_, i) => `line ${i}`);
+state = applyAppsEvent(state, 'job', { id: 2, app: 'firefox', op: 'remove', state: 'done', append: flood });
+check('a console keeps its last lines as the server does',
+      state.jobs[1].lines.length === CONSOLE_LINES && state.jobs[1].lines.at(-1) === `line ${CONSOLE_LINES + 9}`);
 
-postAppCommand('launch', 'geany');
-check('a launch runs the application through the runner, by name and not by path',
-      posted.at(-1) && posted.at(-1).value === 'selkies-proot run geany',
-      JSON.stringify(posted.at(-1)));
-
-// The server's list is the truth; what is stored is a cache of the last answer.
-// A browser that never installed anything itself must still see what the
-// session has, which is the whole reason the server is asked at all.
-let serverLists = [];
-window.addEventListener(INSTALLED_APPS_SERVER_EVENT, (e) => serverLists.push(e.detail.apps));
-// Nothing may be left in flight here: an unsettled command is an optimistic
-// update the server's list must not undo, which the last two checks cover.
-deliver({ type: 'commandDone', command: 'selkies-proot install gimp' });
-writeInstalledApps([]);
-check('the server list replaces an empty local one',
-      applyServerInstalledApps(['inkscape', 'krita']) === true
-      && readInstalledApps().sort().join() === 'inkscape,krita',
-      JSON.stringify(readInstalledApps()));
-check('adopting the list reaches a mounted list',
-      serverLists.length === 1, JSON.stringify(serverLists));
-check('the same list again is not re-announced',
-      applyServerInstalledApps(['krita', 'inkscape']) === false && serverLists.length === 1,
-      JSON.stringify(serverLists));
-check('an app the session does not have is dropped from the cache',
-      applyServerInstalledApps(['krita']) === true
-      && readInstalledApps().join() === 'krita', JSON.stringify(readInstalledApps()));
-check('a non-list answer is ignored rather than clearing the cache',
-      applyServerInstalledApps(undefined) === false
-      && readInstalledApps().join() === 'krita', JSON.stringify(readInstalledApps()));
-
-// A list read before an in-flight install finished would otherwise undo the
-// optimistic update the panel is already showing.
-postAppCommand('install', 'blender');
-applyServerInstalledApps(['krita']);
-check('a list from before an in-flight install keeps the optimistic update',
-      readInstalledApps().sort().join() === 'blender,krita', JSON.stringify(readInstalledApps()));
-postAppCommand('remove', 'krita');
-applyServerInstalledApps(['krita', 'blender']);
-check('a list from before an in-flight remove keeps the optimistic update',
-      readInstalledApps().join() === 'blender', JSON.stringify(readInstalledApps()));
+state = applyAppsEvent(state, 'state', { installed: ['firefox'], jobs: [{ id: 3, app: 'gimp', op: 'install', state: 'running', lines: ['a'], current: 'b' }] });
+check('a whole state replaces every job and what is installed',
+      state.jobs.length === 1 && state.jobs[0].current === 'b' && state.installed.join() === 'firefox',
+      JSON.stringify(state));
+state = applyAppsEvent(state, 'state', { installed: null, jobs: [] });
+check('a runner that could not say what is installed leaves the last answer standing',
+      state.installed.join() === 'firefox' && state.jobs.length === 0);
 
 // Where the catalog is read from is the server's answer: a session installing
 // from a proot-apps local repository lists that folder's catalog, served by the

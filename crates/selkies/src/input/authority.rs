@@ -10,8 +10,8 @@
 //! A read-only viewer peer (shared or player co-op) may send only `VIEWER_ALLOWED_PREFIXES`; a
 //! viewer holding the active mk token while `enable_collab` is on (a read-write collaborator)
 //! may additionally send `VIEWER_COLLAB_EXTRA_PREFIXES`, the keyboard, mouse, and clipboard
-//! set, including `co,` because IME commits and atomic typing arrive that way. `cmd` and every
-//! settings-mutating message stay controller-only. Blur and visibility lifecycle noise and a
+//! set, including `co,` because IME commits and atomic typing arrive that way. `cmd`, `apps`, and
+//! every settings-mutating message stay controller-only. Blur and visibility lifecycle noise and a
 //! trackpad page's pointer echo request (`VIEWER_SILENT_DROP_PREFIXES`) from a read-only viewer
 //! are normal operation and are dropped without a warning. In secure mode (a master token is
 //! set) every peer is additionally held to the token check for input: the active mk-token
@@ -79,7 +79,7 @@ pub fn page_put_to_use(msg: &str) -> bool {
 
 /// The verbs secure mode holds to the token check on either transport: what drives the desktop
 /// or runs on it, whatever role the connection has.
-pub const SECURE_INPUT_VERBS: &[&str] = &["cmd", "co"];
+pub const SECURE_INPUT_VERBS: &[&str] = &["cmd", "apps", "co"];
 
 /// What a transport knows about a message's sender, as the gates read it; the host answers it
 /// per message (`InputHost::sender`) from its live token table, so a revocation or a re-slot

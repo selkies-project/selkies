@@ -792,7 +792,7 @@ impl WebRtcService {
     /// The settings a page is greeted with, in what `display` streams with in place of the boot
     /// values, `second_screen` and `ui_sidebar_show_apps` as effective availability, so dashboards
     /// never offer a second display the server would refuse nor an apps panel whose every button
-    /// would fail, and what the apps panel already has installed.
+    /// would fail.
     pub fn server_settings_payload(&self, display: &str) -> Json {
         let mut payload = settings().client_payload();
         let live: Map<String, Json> = {
@@ -809,15 +809,11 @@ impl WebRtcService {
         {
             entry.insert("value".into(), json!(false));
         }
-        let input = self.input();
-        if input.as_ref().is_some_and(|i| !i.apps_available())
+        if self.input().is_some_and(|i| !i.apps_available())
             && let Some(Json::Object(entry)) = payload.get_mut("ui_sidebar_show_apps")
             && entry.get("value") == Some(&Json::Bool(true))
         {
             entry.insert("value".into(), json!(false));
-        }
-        if let Some(installed) = input.and_then(|i| i.installed_apps()) {
-            payload.insert("apps_installed".into(), json!({"value": installed}));
         }
         json!({"settings": payload})
     }

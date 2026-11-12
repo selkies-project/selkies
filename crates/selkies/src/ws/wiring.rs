@@ -528,10 +528,6 @@ impl Input for DispatcherInput {
     fn apps_available(&self) -> bool {
         self.0.apps().available()
     }
-
-    fn installed_apps(&self) -> Option<Vec<String>> {
-        self.0.apps().installed()
-    }
 }
 
 #[async_trait]

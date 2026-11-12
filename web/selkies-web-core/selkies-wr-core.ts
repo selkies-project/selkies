@@ -43,7 +43,8 @@
  * `lib/clipboard-worker-bridge.ts`. Server to client arrives through the
  * `WebRTCClient` callbacks: the settings payload, `clipboard-msg*` messages,
  * cursor and display-config updates, stats, and system actions (`reload`,
- * `mk_access,0|1`, `command_error,text`, `auth_success,{json}` /
+ * `mk_access,0|1`, `command_error,text`, the apps panel's `apps_job,{json}` and
+ * `apps_state,{json}` (`lib/app-commands.ts`), `auth_success,{json}` /
  * `role_update,{json}`, `resolution,WxH`, `video_declined,mime`,
  * `capture_demand,<subject>,0|1`, and the `pointer,` echo trackpad mode asks
  * for with `_pointer_echo,0|1`, lib/input.ts).
@@ -101,6 +102,7 @@ import { keyboardAssist, showVirtualKeyboard } from './lib/virtual-keyboard.ts';
 import { codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit } from './lib/wire-codecs.ts';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.ts';
 import { createPrintJobs, printDocument } from './lib/print-jobs.ts';
+import { forwardAppsEvent } from './lib/app-commands.ts';
 import { StreamStats, DecodeCapability, webrtcDecoder, FIRST_SAMPLE_MS } from './lib/stream-stats.ts';
 import { createPresentMeter, watchVideo } from './lib/present-meter.ts';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.ts';
@@ -2072,6 +2074,13 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 					console.warn(`Received invalid command from dashboard: ${message.value}`)
 				}
 				break;
+			case "apps":
+				// The apps panel's request (`lib/app-commands.ts`), held to the same permission as a command.
+				if (isSharedMode || !serverCommandEnabled) { break; }
+				if (message.value && typeof message.value === 'object') {
+					webrtc.sendDataChannelMessage(`apps,${JSON.stringify(message.value)}`);
+				}
+				break;
 			case 'pipelineControl':
 				if (message.pipeline === 'microphone' && isSharedMode) {
 					console.log("Shared mode: Microphone control blocked.");
@@ -3580,20 +3589,9 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 							code: 'commandFailed',
 						},
 					}, window.location.origin);
-				} else if (action.startsWith('command_done,') && !isSharedMode) {
-					// Settles what the apps panel shows as running; a failure
-					// arrives on the channel above instead.
-					window.postMessage({
-						type: 'commandDone',
-						command: action.slice('command_done,'.length),
-					}, window.location.origin);
-				} else if (action.startsWith('apps_installed,') && !isSharedMode) {
-					// Broadcast when a command changed it: this page may not
-					// be the one that ran it.
-					window.postMessage({
-						type: 'appsInstalled',
-						apps: JSON.parse(action.slice('apps_installed,'.length)),
-					}, window.location.origin);
+				} else if (action.startsWith('apps_') && !isSharedMode) {
+					// The apps panel's jobs and installed set, told to every page.
+					forwardAppsEvent(action);
 				} else if (action.startsWith('auth_success,') || action.startsWith('role_update,')) {
 					const verdict = action.slice(action.indexOf(',') + 1);
 					let perms;

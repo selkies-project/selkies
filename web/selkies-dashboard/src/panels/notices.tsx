@@ -28,7 +28,6 @@ import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/ui/theme-provider";
 import { useDashboard } from "@/state/dashboard";
 import { computeRenderableSettings, getLastServerSettings, isMobileClient, isViewerUrlMode, onCoreMessage } from "@/utils";
-import { resolveFailedAppCommand } from "../../../selkies-web-core/lib/app-commands.ts";
 import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.ts";
 import { STATS_EVENT } from "../../../selkies-web-core/lib/stream-stats.ts";
 import { t } from "@/i18n";
@@ -109,9 +108,6 @@ export function Notices() {
         const errorMessage = errMsg ? `${t('notifications.errorPrefix')} ${errMsg}` : t('notifications.unknownError');
         toast.error(t('uploads.uploadFailedFile', { fileName, errorMessage }), { id: fileName });
       } else if (status === 'warning') {
-        // A failed apps command settles its pending optimistic update first;
-        // a stale launch match is lifecycle noise, not a notice.
-        if (code === 'commandFailed' && !resolveFailedAppCommand(errMsg)) return;
         const codeKey = (typeof code === 'string' && (code.startsWith('clipboard') || code === 'commandFailed' || code.startsWith('keyboardLock')))
           ? `notifications.${code}` : null;
         const codeMsg = codeKey ? t(codeKey, { detail: errMsg }) : null;

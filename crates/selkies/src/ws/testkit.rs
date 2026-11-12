@@ -551,9 +551,6 @@ impl Input for FakeInput {
     fn apps_available(&self) -> bool {
         true
     }
-    fn installed_apps(&self) -> Option<Vec<String>> {
-        None
-    }
 }
 
 pub struct FakeClipboard;

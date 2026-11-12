@@ -152,6 +152,7 @@ import { DecodePace } from './lib/decode-pace.ts';
 import { DecodeGate } from './lib/decode-gate.ts';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.ts';
 import { createPrintJobs, printDocument } from './lib/print-jobs.ts';
+import { forwardAppsEvent } from './lib/app-commands.ts';
 
 installAuthGuard();
 installSessionCookie();
@@ -5704,6 +5705,13 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): any {
         console.warn("Received 'command' message without a string value:", message);
       }
       break;
+    case 'apps':
+      // The apps panel's request (`lib/app-commands.ts`), held to the same permission as a command.
+      if (isSharedMode || !serverCommandEnabled) break;
+      if (message.value && typeof message.value === 'object' && websocket && websocket.readyState === WebSocket.OPEN) {
+        websocket.send(`apps,${JSON.stringify(message.value)}`);
+      }
+      break;
     case 'touchinput:trackpad':
       if (window.webrtcInput && typeof window.webrtcInput.setTrackpadMode === 'function') {
         trackpadMode = true;
@@ -8774,22 +8782,9 @@ class WorkerWebSocket {
               }, window.location.origin);
             }
             else if (typeof systemMsg.action === 'string' &&
-                systemMsg.action.startsWith('command_done,') && !isSharedMode) {
-              // Settles what the apps panel shows as running; a failure arrives
-              // on the channel above instead.
-              window.postMessage({
-                type: 'commandDone',
-                command: systemMsg.action.slice('command_done,'.length),
-              }, window.location.origin);
-            }
-            else if (typeof systemMsg.action === 'string' &&
-                systemMsg.action.startsWith('apps_installed,') && !isSharedMode) {
-              // Broadcast when a command changed it: this page may not be the
-              // one that ran it.
-              window.postMessage({
-                type: 'appsInstalled',
-                apps: JSON.parse(systemMsg.action.slice('apps_installed,'.length)),
-              }, window.location.origin);
+                systemMsg.action.startsWith('apps_') && !isSharedMode) {
+              // The apps panel's jobs and installed set, told to every page.
+              forwardAppsEvent(systemMsg.action);
             }
             else if (typeof systemMsg.action === 'string' &&
                 systemMsg.action.startsWith('rumble,') && window.webrtcInput) {

@@ -485,6 +485,13 @@ impl Dispatcher {
                     warn!(target: "input", "Received 'cmd' message without a command string.");
                 }
             }
+            "apps" => {
+                if !self.cfg.command_enabled {
+                    warn!(target: "input", "Received an apps request, but command execution is disabled by server settings.");
+                    return Ok(());
+                }
+                self.apps_request(msg.get(5..).unwrap_or(""), conn).await;
+            }
             "_arg_fps" => {
                 let fps: f64 = toks
                     .get(1)

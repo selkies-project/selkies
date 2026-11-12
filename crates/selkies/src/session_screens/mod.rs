@@ -53,6 +53,7 @@
 //! [`attach`es]: SessionScreens::attach
 //! [`input::InputHost::app_compositor_adopted`]: crate::input::InputHost::app_compositor_adopted
 
+pub mod app_jobs;
 pub mod apps;
 pub mod layout;
 pub mod verdict;
@@ -84,7 +85,7 @@ use crate::core::PRIMARY_DISPLAY;
 use crate::display::{Layouts, wayland_output_id};
 use crate::settings::settings;
 
-pub use apps::{APP_RUNNER, AppsRunner};
+pub use apps::{APP_RUNNER, AppsRunner, JobHost};
 
 /// Basename of the session compositor's control socket in `XDG_RUNTIME_DIR`.
 pub const SESSION_IPC_SOCKET: &str = "labwc.sock";

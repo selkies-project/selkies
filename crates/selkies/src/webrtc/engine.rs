@@ -67,8 +67,8 @@ use tokio::task::JoinHandle;
 
 use crate::display::capture::CommonFrames;
 use crate::input::authority::{
-    VIEWER_ALLOWED_PREFIXES, VIEWER_COLLAB_EXTRA_PREFIXES, VIEWER_SILENT_DROP_PREFIXES,
-    starts_with_any,
+    SECURE_INPUT_VERBS, VIEWER_ALLOWED_PREFIXES, VIEWER_COLLAB_EXTRA_PREFIXES,
+    VIEWER_SILENT_DROP_PREFIXES, starts_with_any,
 };
 use crate::settings::{WEBRTC_ENCODER_CHOICES, settings, software_encoders, software_video_path};
 use crate::stats::stats_request;
@@ -1413,14 +1413,16 @@ impl RtcEngine {
         self.mk_input_authorized(token)
     }
 
-    /// Secure-mode input authority, mirroring the WebSockets gate; `cmd`, `co` and the
+    /// Secure-mode input authority, mirroring the WebSockets gate; `SECURE_INPUT_VERBS` and the
     /// keyboard, mouse, and clipboard set come only from the holder of it.
     fn secure_input_denied(&self, msg: &str, token: Option<&str>) -> bool {
         if !self.tokens.is_secure() {
             return false;
         }
         let head = msg.split(',').next().unwrap_or("");
-        if head != "cmd" && head != "co" && !starts_with_any(msg, VIEWER_COLLAB_EXTRA_PREFIXES) {
+        if !SECURE_INPUT_VERBS.contains(&head)
+            && !starts_with_any(msg, VIEWER_COLLAB_EXTRA_PREFIXES)
+        {
             return false;
         }
         let authorized = self.mk_input_authorized(token);
