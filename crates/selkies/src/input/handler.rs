@@ -2039,10 +2039,21 @@ impl Dispatcher {
         .await;
     }
 
-    /// The environment a command or an apps job runs in: the session's display and bus, and the
-    /// apps repository. `app_session` reads the display sockets and the environment scan walks
-    /// `/proc`, so both run off the runtime.
+    /// The environment a command or an apps job runs in, with the apps repository where the
+    /// runner reads it. Under the window manager it is the one the manager starts every program
+    /// in ([`crate::wm::launch_env`]), so a launch from here matches one from the shell or a
+    /// menu; without one, the session's display and bus are found (`SessionEnvCache`), which
+    /// reads the display sockets and walks `/proc`, so that runs off the runtime.
     async fn session_launch_env(&self) -> Option<HashMap<String, String>> {
+        let repo = crate::settings::settings().apps_repo_path();
+        if let Some(mut env) = crate::wm::launch_env() {
+            if repo.is_empty() {
+                env.remove("PA_REPO_FOLDER");
+            } else {
+                env.insert("PA_REPO_FOLDER".into(), repo);
+            }
+            return Some(env);
+        }
         let me = self.me.upgrade()?;
         let env = tokio::task::spawn_blocking(move || {
             let session = me.app_session();

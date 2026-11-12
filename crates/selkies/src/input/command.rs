@@ -8,15 +8,14 @@
 //! reports how they ended.
 //!
 //! A command runs in the session's environment, so a launched application lands on the display
-//! and session bus the desktop uses: the server's own, with the apps repository as the runner
-//! reads it, `DISPLAY`, `WAYLAND_DISPLAY`, and `XDG_SESSION_TYPE` set for where the applications
-//! run ([`AppSession`]), and the session bus plus desktop identity adopted from that session's
-//! processes when the server has none of its own. A launch failure or any nonzero exit, above
-//! all 127, the command-not-installed case, is reported with the runtime, the reason its output
-//! gives, and the echoed command, because the dashboards' apps UI marks the action done
-//! optimistically and needs a counter-signal to roll back. A clean exit settles a pending
-//! install; the dashboards decide relevance by age, since a long-lived app quitting nonzero
-//! hours later is application lifecycle rather than a launch failure.
+//! and session bus the desktop uses. Under the server's window manager that is the environment
+//! the manager starts every program in (`crate::wm::launch_env`); without one it is found here
+//! ([`SessionEnvCache`]): the server's own, `DISPLAY`, `WAYLAND_DISPLAY`, and
+//! `XDG_SESSION_TYPE` set for where the applications run ([`AppSession`]), and the session bus
+//! plus desktop identity adopted from that session's processes. Either way the apps repository
+//! is set as the runner reads it. A launch failure or any nonzero exit, above all 127, the
+//! command-not-installed case, is reported with the runtime, the reason its output gives, and
+//! the echoed command; a clean exit as done.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::OwnedFd;

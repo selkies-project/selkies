@@ -19,7 +19,8 @@
 //! type, and the device interposers the server keeps out of its own process
 //! ([`application_preload`]), so what the menus and the shell launch finds the same desktop and
 //! the session's gamepads and camera. The bus is started in that environment too, so an
-//! application it activates gets them as well. The backend's
+//! application it activates gets them as well, and what the server launches from elsewhere (the
+//! apps panel, a client's command) starts in it as well ([`launch_env`]). The backend's
 //! `autostart` file is the session's application: it runs once the manager is up, with that
 //! environment, and again when everything it started exited where `--app-restart` asks
 //! ([`selkies_wm::session::start_autostart`]). The handles live for the process, since the
@@ -36,6 +37,7 @@
 //! or stopped, the application keeps running, and the choice is kept for the next session
 //! ([`selkies_wm::session::SessionControl`]).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -58,6 +60,8 @@ const XWAYLAND_WAIT: Duration = Duration::from_secs(15);
 
 /// What the mode keeps alive: the session bus, and on X11 the manager's thread.
 struct Session {
+    /// The environment every program the manager starts runs in.
+    env: Arc<Mutex<SessionEnv>>,
     _bus: Option<SessionBus>,
     _x11: Option<selkies_wm::x11::ManagerHandle>,
     /// Whether the capture compositor runs the policy and its Xwayland.
@@ -79,6 +83,17 @@ pub fn owns_x11_session() -> bool {
 }
 
 static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+
+/// The environment the window manager starts programs in, as it stands now (Xwayland's display
+/// joins it once that is up), for what the server launches from elsewhere, so an application
+/// the apps panel starts finds the same desktop as one the shell or a menu starts: its session
+/// bus and the Settings portal on it, `XDG_CURRENT_DESKTOP`, both display sockets, and the
+/// device interposers. `None` where no window manager runs.
+pub fn launch_env() -> Option<HashMap<String, String>> {
+    let slot = SESSION.get()?.lock().unwrap_or_else(|p| p.into_inner());
+    let env = slot.as_ref()?.env.lock().unwrap_or_else(|p| p.into_inner());
+    Some(env.vars().into_iter().collect())
+}
 
 /// Start the window manager and, under `--desktop`, the shell, for the backend in use. Runs on
 /// a blocking thread at startup, after the display is up and before the transports bind.
@@ -121,6 +136,7 @@ pub fn start(is_wayland: bool) {
     let bus = SessionBus::ensure(&mut env);
     selkies_wm::appearance::start(&env);
     let env = Arc::new(Mutex::new(env));
+    let session_env = env.clone();
     let x11 = if is_wayland {
         if !start_wayland(env.clone(), control) {
             return;
@@ -145,6 +161,7 @@ pub fn start(is_wayland: bool) {
     };
     let slot = SESSION.get_or_init(|| Mutex::new(None));
     *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Session {
+        env: session_env,
         _bus: bus,
         _x11: x11,
         wayland: is_wayland,
