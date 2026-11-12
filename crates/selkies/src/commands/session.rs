@@ -568,8 +568,10 @@ impl Session {
     ///
     /// PulseAudio starts without its default script (`-n`): that script loads the host's
     /// hardware, its idle suspension, and the user's own `default.pa` from the shared home,
-    /// none of which a captured session wants, so the server loads only its socket, and
-    /// Selkies' audio control plane makes the sinks and the microphone source it streams. The
+    /// none of which a captured session wants, so the server loads its socket and a placeholder
+    /// sink alone (`module-always-sink`), which an application that opens audio before any
+    /// client streams plays into until Selkies' audio control plane makes the sinks and the
+    /// microphone source it streams, when the server moves those streams onto them. The
     /// socket admits whoever reaches it, since it sits in the session's private runtime
     /// directory, which is the access control, rather than asking for the cookie a fresh home
     /// has none of.
@@ -610,6 +612,7 @@ impl Session {
                     "-n".into(),
                     "--load=module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0"
                         .into(),
+                    "--load=module-always-sink".into(),
                 ],
             ]
             .concat(),

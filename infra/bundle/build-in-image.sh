@@ -81,7 +81,7 @@ install -Dm755 "${BUILD}/target/${PROFILE}/selkies-desktop" "${TREE}/bin/selkies
 # with its configuration
 install -m755 /usr/bin/pulseaudio /usr/bin/dbus-daemon "${TREE}/libexec/selkies/"
 modules="$(dirname "$(find /usr/lib64 -name module-null-sink.so | head -n 1)")"
-for module in module-native-protocol-unix module-null-sink module-virtual-source; do
+for module in module-native-protocol-unix module-always-sink module-null-sink module-virtual-source; do
     install -m755 "${modules}/${module}.so" "${TREE}/lib/selkies/pulse/modules/"
 done
 cp /usr/share/dbus-1/session.conf "${TREE}/share/selkies/dbus-1/"
