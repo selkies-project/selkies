@@ -31,7 +31,7 @@ use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 
 use super::command::{
-    AppSession, CommandOutcome, SessionEnvCache, live_x_displays, run_client_command,
+    AppSession, CommandOutcome, SessionEnvCache, live_x_displays, run_client_command, run_watched,
 };
 use super::cursor::{CursorEncoder, CursorMessage, DEFAULT_MAX_CURSOR_SIZE};
 use super::keysyms::{
@@ -2078,7 +2078,8 @@ impl Dispatcher {
     /// application the way its desktop entry does, through the runner's `run`, and reports a
     /// failure to the page that asked only within [`LAUNCH_FAILURE_WINDOW`]: an application
     /// that ran and later exited nonzero is its own lifecycle, not a failed launch. An
-    /// application name is checked before anything runs, and never reaches a shell unchecked.
+    /// application name is checked before anything runs and reaches the runner as an argument,
+    /// never through a shell.
     pub(crate) async fn apps_request(&self, body: &str, conn: Option<ConnId>) {
         let Ok(request) = serde_json::from_str::<serde_json::Value>(body) else {
             warn!(target: "input", "Rejecting an apps request that is not JSON");
@@ -2101,9 +2102,11 @@ impl Dispatcher {
                 let Some(env) = self.session_launch_env().await else {
                     return;
                 };
+                let mut runner = tokio::process::Command::new(crate::session_screens::APP_RUNNER);
+                runner.arg("run").arg(app);
                 let command = format!("{} run {app}", crate::session_screens::APP_RUNNER);
                 let started = Instant::now();
-                run_client_command(command, env, move |outcome| {
+                run_watched(runner, command, env, move |outcome| {
                     if let CommandOutcome::Error(text) = outcome
                         && started.elapsed() < LAUNCH_FAILURE_WINDOW
                     {

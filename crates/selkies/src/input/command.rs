@@ -365,14 +365,29 @@ pub enum CommandOutcome {
     Error(String),
 }
 
-/// Launch `command` through the shell in `env`, from the home directory, and return once it is
-/// running; `on_end` hears how it ended. The output is read rather than discarded so a failure
-/// can say why, and read continuously so a chatty application never blocks on a full pipe.
+/// Launch `command` through the shell in `env` and watch it ([`run_watched`]).
 pub async fn run_client_command<F>(command: String, env: HashMap<String, String>, on_end: F)
 where
     F: FnOnce(CommandOutcome) + Send + 'static,
 {
-    let spawned = spawn_shell(&command, &env);
+    let mut shell = tokio::process::Command::new("/bin/sh");
+    shell.arg("-c").arg(&command);
+    run_watched(shell, command, env, on_end).await;
+}
+
+/// Launch `program` in `env`, from the home directory, and return once it is running; `on_end`
+/// hears how it ended, and `command` names it in the log and in a failure's text. The output is
+/// read rather than discarded so a failure can say why, and read continuously so a chatty
+/// application never blocks on a full pipe.
+pub async fn run_watched<F>(
+    program: tokio::process::Command,
+    command: String,
+    env: HashMap<String, String>,
+    on_end: F,
+) where
+    F: FnOnce(CommandOutcome) + Send + 'static,
+{
+    let spawned = spawn_merged(program, &env);
     let (mut child, reader) = match spawned {
         Ok(pair) => pair,
         Err(e) => {
@@ -443,16 +458,6 @@ where
             "exited with status {code}{hint} after {runtime:.1}s{detail}: {command}"
         )));
     });
-}
-
-/// `sh -c command` with stdout and stderr on one pipe, whose read end comes back.
-fn spawn_shell(
-    command: &str,
-    env: &HashMap<String, String>,
-) -> std::io::Result<(tokio::process::Child, tokio::net::unix::pipe::Receiver)> {
-    let mut shell = tokio::process::Command::new("/bin/sh");
-    shell.arg("-c").arg(command);
-    spawn_merged(shell, env)
 }
 
 /// Spawn `command` in `env` alone, from the home directory, with no input and its stdout and
