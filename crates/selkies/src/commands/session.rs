@@ -1140,6 +1140,10 @@ fn install_stop_handlers() {
 pub struct Options {
     /// A session by file, desktop, or program name, else a command to run.
     pub session: Option<String>,
+    /// The session the Wayland backend runs in place of [`Options::session`]
+    /// (`--wayland-session`), for a deployment with one desktop script per backend: the backend
+    /// is settled only once the GPU is known, which may move a Wayland session to X11.
+    pub wayland_session: Option<String>,
     /// End the session when the parent exits, for a parent that owns it and may die without
     /// stopping it: the Jupyter server proxy's entry.
     pub follow: bool,
@@ -1203,12 +1207,15 @@ pub enum Parsed {
 /// The usage text, as `--help` prints it.
 pub fn usage(prog: &str) -> String {
     format!(
-        "usage: {prog} [-h] [--session SESSION] [--follow] [--host] [--runtime-dir DIR] ...\n\n\
+        "usage: {prog} [-h] [--session SESSION] [--wayland-session SESSION] [--follow] [--host]\n\
+         \x20      [--runtime-dir DIR] ...\n\n\
          Start a desktop session and Selkies streaming it; every other argument goes to selkies.\n\n\
          options:\n\
          \x20 -h, --help         show this help message and exit\n\
          \x20 --session SESSION  a session by file, desktop, or program name (plasma, KDE, xfce, startlxqt), else a command\n\
          \x20                    to run; unset, the desktop XDG_CURRENT_DESKTOP names, else the host's default desktop\n\
+         \x20 --wayland-session SESSION\n\
+         \x20                    the session the Wayland backend runs instead of --session's\n\
          \x20 --follow           end the session when the parent exits, as the Jupyter server proxy's entry asks\n\
          \x20 --host             share the host's runtime directory, buses, and sound server instead of starting the\n\
          \x20                    session's own\n\
@@ -1248,6 +1255,20 @@ pub fn parse(argv: &[String]) -> Parsed {
             }
         } else if let Some(value) = arg.strip_prefix("--session=") {
             options.session = Some(value.to_string());
+        } else if arg == "--wayland-session" {
+            match argv.get(i).filter(|v| !v.starts_with('-')) {
+                Some(value) => {
+                    options.wayland_session = Some(value.clone());
+                    i += 1;
+                }
+                None => {
+                    return Parsed::Error(
+                        "argument --wayland-session: expected one argument".into(),
+                    );
+                }
+            }
+        } else if let Some(value) = arg.strip_prefix("--wayland-session=") {
+            options.wayland_session = Some(value.to_string());
         } else if arg == "--host" {
             options.host = true;
         } else if arg == "--runtime-dir" {
@@ -1337,7 +1358,11 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
             session.x11(&gpu.x_render_node)?;
             session.size_screen(&settings, run_resize);
         }
-        let (sid, entry) = Desktops::from_env().pick(options.session.as_deref(), wayland)?;
+        let wanted = match (wayland, &options.wayland_session) {
+            (true, Some(session)) => Some(session.as_str()),
+            _ => options.session.as_deref(),
+        };
+        let (sid, entry) = Desktops::from_env().pick(wanted, wayland)?;
         if wayland {
             session.start_selkies(&command)?;
         }
@@ -1521,6 +1546,22 @@ mod tests {
                 argv(&["--port=1"])
             ),
             "--runtime-dir names the isolated session's directory"
+        );
+        assert_eq!(
+            parse(&argv(&[
+                "--session",
+                "bash /defaults/startwm.sh",
+                "--wayland-session=bash /defaults/startwm_wayland.sh"
+            ])),
+            Parsed::Run(
+                Options {
+                    session: Some("bash /defaults/startwm.sh".into()),
+                    wayland_session: Some("bash /defaults/startwm_wayland.sh".into()),
+                    ..Options::default()
+                },
+                Vec::new()
+            ),
+            "a session for each backend"
         );
         assert_eq!(
             parse(&argv(&["--host"])),

@@ -54,7 +54,9 @@ variables alike:
   finds one in the `xsessions` or `wayland-sessions` directories of the XDG data
   directories (`~/.local/share` first, so a user adds one without root).
   `--session` names it by file, desktop, or program name (`xfce`, `kde`, `lxqt`,
-  `gnome`, `plasma`, `startxfce4`) or gives a command to run instead. Unset, the
+  `gnome`, `plasma`, `startxfce4`) or gives a command to run instead, and
+  `--wayland-session` names the one the Wayland backend runs in its place, for a
+  deployment with a desktop script per backend. Unset, the
   desktop `XDG_CURRENT_DESKTOP` names comes first, then the host's default: the
   user's last choice in `~/.dmrc`, LightDM's `user-session`, GDM's
   `FallbackSession`, the `x-session-manager` alternative, or
