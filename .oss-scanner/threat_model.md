@@ -109,8 +109,11 @@
   reader of the file and its copies; it is no defense against whoever controls the server, which receives every key
   a run is sent and serves the page that opens them.
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
-  `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
-  write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose
+  `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio, D-Bus), and through a file-manager directory they
+  can write (planted names, FIFOs, set-ID files). `selkies session` keeps the session bus and the system bus it
+  starts, and its PulseAudio socket, which asks for no cookie, in a runtime directory of mode 0700 (`--runtime-dir`
+  makes the one it names so), so that directory's mode is their access control; under `--host` the session joins
+  the host's buses and sound server instead and starts none of these. The screen is no account's to map: Xvfb starts without `-shmem`, whose
   segment any local account could read and write, and shares its framebuffer (`SELKIES-FRAMEBUFFER`) only with a
   local X client that may read the root, read-only.
 

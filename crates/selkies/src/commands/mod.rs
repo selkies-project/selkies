@@ -16,6 +16,7 @@
 //! `selkies --help` lists the commands after the server's options ([`help_epilog`]).
 
 pub mod session;
+pub mod session_gpu;
 pub mod sessions;
 
 use std::collections::HashMap;
