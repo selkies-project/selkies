@@ -11,12 +11,15 @@
 //!
 //! Neither CUDA nor GL can make a semaphore another API imports, so Vulkan makes it, a binary one
 //! exported as an OPAQUE_FD, on the device whose UUID is the CUDA device's. Two fds of it go out,
-//! one for CUDA's import and one for the server's GL, and every Vulkan object is gone again once
-//! they are: the imports hold the payload between them.
+//! one for CUDA's import and one for the server's GL, and the device and the semaphore are gone
+//! again once they are: the imports hold the payload between them. The instance the device is
+//! made from stays for the life of the process ([`Vulkan`]), since destroying one leaks
+//! descriptors in NVIDIA's driver.
 
 use std::ffi::{c_char, c_void};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::ptr;
+use std::sync::OnceLock;
 
 use libloading::Library;
 
@@ -154,167 +157,227 @@ type DestroySemaphore = unsafe extern "C" fn(VkDevice, VkSemaphore, *const c_voi
 type GetSemaphoreFd =
     unsafe extern "C" fn(VkDevice, *const SemaphoreGetFdInfo, *mut i32) -> VkResult;
 
+/// The Vulkan loader and the one instance every semaphore's device is made from, kept for the life
+/// of the process. NVIDIA's driver leaves a `/dev/nvidiactl` and a render-node descriptor open for
+/// every instance it destroys while `DISPLAY` names an X server without NV-GLX, as the images' Xvfb
+/// is, so an instance per capture start runs a server that streams to reconnecting clients out of
+/// descriptors; the devices made from a kept instance are destroyed without leaking any.
+struct Vulkan {
+    _lib: Library,
+    instance: VkInstance,
+    enumerate: EnumeratePhysicalDevices,
+    properties: GetPhysicalDeviceProperties2,
+    create_device: CreateDevice,
+    get_device_proc: GetDeviceProcAddr,
+}
+
+// SAFETY: the instance is never destroyed, and the instance-level commands called on it
+// (enumerating its physical devices, reading their properties, creating a device) need no external
+// synchronization.
+unsafe impl Send for Vulkan {}
+unsafe impl Sync for Vulkan {}
+
+impl Vulkan {
+    /// The process's instance, made by the first call; a host whose loader or driver refused it
+    /// gets the same refusal every time.
+    fn get() -> Result<&'static Vulkan, String> {
+        static VULKAN: OnceLock<Result<Vulkan, String>> = OnceLock::new();
+        VULKAN
+            .get_or_init(|| unsafe { Self::open() })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// Load the loader and create the instance, with no layers or extensions.
+    ///
+    /// # Safety
+    ///
+    /// `libvulkan.so.1` has to be the Vulkan loader, whose exported entry points have the
+    /// signatures this module declares.
+    unsafe fn open() -> Result<Self, String> {
+        unsafe {
+            let lib = Library::new("libvulkan.so.1")
+                .map_err(|e| format!("no Vulkan loader (libvulkan.so.1): {e}"))?;
+            let get_instance_proc: GetInstanceProcAddr = *lib
+                .get(b"vkGetInstanceProcAddr\0")
+                .map_err(|e| format!("no vkGetInstanceProcAddr: {e}"))?;
+            macro_rules! instance_fn {
+                ($instance:expr, $ty:ty, $name:literal) => {
+                    match get_instance_proc($instance, $name.as_ptr()) {
+                        Some(f) => Ok(std::mem::transmute::<unsafe extern "C" fn(), $ty>(f)),
+                        None => Err(format!("no {}", $name.to_string_lossy())),
+                    }
+                };
+            }
+            let create_instance: CreateInstance =
+                instance_fn!(ptr::null_mut(), CreateInstance, c"vkCreateInstance")?;
+            let app = ApplicationInfo {
+                s_type: STRUCTURE_TYPE_APPLICATION_INFO,
+                p_next: ptr::null(),
+                application_name: c"pixelflux".as_ptr(),
+                application_version: 1,
+                engine_name: ptr::null(),
+                engine_version: 0,
+                api_version: VK_API_VERSION_1_1,
+            };
+            let instance_info = InstanceCreateInfo {
+                s_type: STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                p_next: ptr::null(),
+                flags: 0,
+                application_info: &app,
+                enabled_layer_count: 0,
+                enabled_layer_names: ptr::null(),
+                enabled_extension_count: 0,
+                enabled_extension_names: ptr::null(),
+            };
+            let mut instance: VkInstance = ptr::null_mut();
+            let r = create_instance(&instance_info, ptr::null(), &mut instance);
+            if r != 0 {
+                return Err(format!("vkCreateInstance: {r}"));
+            }
+            let destroy_instance: DestroyInstance =
+                instance_fn!(instance, DestroyInstance, c"vkDestroyInstance")?;
+            let entry_points = (|| {
+                Ok((
+                    instance_fn!(
+                        instance,
+                        EnumeratePhysicalDevices,
+                        c"vkEnumeratePhysicalDevices"
+                    )?,
+                    instance_fn!(
+                        instance,
+                        GetPhysicalDeviceProperties2,
+                        c"vkGetPhysicalDeviceProperties2"
+                    )?,
+                    instance_fn!(instance, CreateDevice, c"vkCreateDevice")?,
+                    instance_fn!(instance, GetDeviceProcAddr, c"vkGetDeviceProcAddr")?,
+                ))
+            })();
+            match entry_points {
+                Ok((enumerate, properties, create_device, get_device_proc)) => Ok(Self {
+                    _lib: lib,
+                    instance,
+                    enumerate,
+                    properties,
+                    create_device,
+                    get_device_proc,
+                }),
+                Err(e) => {
+                    destroy_instance(instance, ptr::null());
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
 /// Two fds of one new binary semaphore exportable as OPAQUE_FD, made on the Vulkan device whose
 /// UUID is `uuid` (the CUDA device's, as `cuDeviceGetUuid` reports it).
 pub(crate) fn opaque_fd_pair(uuid: [u8; 16]) -> Result<(OwnedFd, OwnedFd), String> {
+    let vk = Vulkan::get()?;
+    let instance = vk.instance;
     unsafe {
-        let lib = Library::new("libvulkan.so.1")
-            .map_err(|e| format!("no Vulkan loader (libvulkan.so.1): {e}"))?;
-        let get_instance_proc: GetInstanceProcAddr = *lib
-            .get(b"vkGetInstanceProcAddr\0")
-            .map_err(|e| format!("no vkGetInstanceProcAddr: {e}"))?;
-        macro_rules! instance_fn {
-            ($instance:expr, $ty:ty, $name:literal) => {
-                match get_instance_proc($instance, $name.as_ptr()) {
+        let mut count = 0u32;
+        (vk.enumerate)(instance, &mut count, ptr::null_mut());
+        let mut devices: Vec<VkPhysicalDevice> = Vec::with_capacity(count as usize);
+        (vk.enumerate)(instance, &mut count, devices.as_mut_ptr());
+        devices.set_len(count as usize);
+        let physical = devices
+            .into_iter()
+            .find(|&d| {
+                let mut id = PhysicalDeviceIdProperties {
+                    s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+                    p_next: ptr::null_mut(),
+                    device_uuid: [0; 16],
+                    driver_uuid: [0; 16],
+                    device_luid: [0; 8],
+                    device_node_mask: 0,
+                    device_luid_valid: 0,
+                };
+                let mut props = PhysicalDeviceProperties2 {
+                    s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                    p_next: (&mut id as *mut PhysicalDeviceIdProperties).cast(),
+                    properties: [0; 103],
+                };
+                (vk.properties)(d, &mut props);
+                id.device_uuid == uuid
+            })
+            .ok_or("no Vulkan device has the CUDA device's UUID")?;
+
+        let priority = 1.0f32;
+        let queue = DeviceQueueCreateInfo {
+            s_type: STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: 0,
+            queue_family_index: 0,
+            queue_count: 1,
+            queue_priorities: &priority,
+        };
+        let extensions = [c"VK_KHR_external_semaphore_fd".as_ptr()];
+        let device_info = DeviceCreateInfo {
+            s_type: STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: 0,
+            queue_create_info_count: 1,
+            queue_create_infos: &queue,
+            enabled_layer_count: 0,
+            enabled_layer_names: ptr::null(),
+            enabled_extension_count: 1,
+            enabled_extension_names: extensions.as_ptr(),
+            enabled_features: ptr::null(),
+        };
+        let mut device: VkDevice = ptr::null_mut();
+        let r = (vk.create_device)(physical, &device_info, ptr::null(), &mut device);
+        if r != 0 {
+            return Err(format!("vkCreateDevice: {r}"));
+        }
+        macro_rules! device_fn {
+            ($ty:ty, $name:literal) => {
+                match (vk.get_device_proc)(device, $name.as_ptr()) {
                     Some(f) => std::mem::transmute::<unsafe extern "C" fn(), $ty>(f),
                     None => return Err(format!("no {}", $name.to_string_lossy())),
                 }
             };
         }
-        let create_instance = instance_fn!(ptr::null_mut(), CreateInstance, c"vkCreateInstance");
-        let app = ApplicationInfo {
-            s_type: STRUCTURE_TYPE_APPLICATION_INFO,
-            p_next: ptr::null(),
-            application_name: c"pixelflux".as_ptr(),
-            application_version: 1,
-            engine_name: ptr::null(),
-            engine_version: 0,
-            api_version: VK_API_VERSION_1_1,
-        };
-        let instance_info = InstanceCreateInfo {
-            s_type: STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: 0,
-            application_info: &app,
-            enabled_layer_count: 0,
-            enabled_layer_names: ptr::null(),
-            enabled_extension_count: 0,
-            enabled_extension_names: ptr::null(),
-        };
-        let mut instance: VkInstance = ptr::null_mut();
-        let r = create_instance(&instance_info, ptr::null(), &mut instance);
-        if r != 0 {
-            return Err(format!("vkCreateInstance: {r}"));
-        }
-        let destroy_instance = instance_fn!(instance, DestroyInstance, c"vkDestroyInstance");
-        let result = (|| {
-            let enumerate = instance_fn!(
-                instance,
-                EnumeratePhysicalDevices,
-                c"vkEnumeratePhysicalDevices"
-            );
-            let properties = instance_fn!(
-                instance,
-                GetPhysicalDeviceProperties2,
-                c"vkGetPhysicalDeviceProperties2"
-            );
-            let create_device = instance_fn!(instance, CreateDevice, c"vkCreateDevice");
-            let get_device_proc = instance_fn!(instance, GetDeviceProcAddr, c"vkGetDeviceProcAddr");
-
-            let mut count = 0u32;
-            enumerate(instance, &mut count, ptr::null_mut());
-            let mut devices: Vec<VkPhysicalDevice> = Vec::with_capacity(count as usize);
-            enumerate(instance, &mut count, devices.as_mut_ptr());
-            devices.set_len(count as usize);
-            let physical = devices
-                .into_iter()
-                .find(|&d| {
-                    let mut id = PhysicalDeviceIdProperties {
-                        s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
-                        p_next: ptr::null_mut(),
-                        device_uuid: [0; 16],
-                        driver_uuid: [0; 16],
-                        device_luid: [0; 8],
-                        device_node_mask: 0,
-                        device_luid_valid: 0,
-                    };
-                    let mut props = PhysicalDeviceProperties2 {
-                        s_type: STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-                        p_next: (&mut id as *mut PhysicalDeviceIdProperties).cast(),
-                        properties: [0; 103],
-                    };
-                    properties(d, &mut props);
-                    id.device_uuid == uuid
-                })
-                .ok_or("no Vulkan device has the CUDA device's UUID")?;
-
-            let priority = 1.0f32;
-            let queue = DeviceQueueCreateInfo {
-                s_type: STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        let destroy_device: DestroyDevice = device_fn!(DestroyDevice, c"vkDestroyDevice");
+        let fds = (|| {
+            let create_semaphore = device_fn!(CreateSemaphore, c"vkCreateSemaphore");
+            let destroy_semaphore = device_fn!(DestroySemaphore, c"vkDestroySemaphore");
+            let get_fd = device_fn!(GetSemaphoreFd, c"vkGetSemaphoreFdKHR");
+            let export = ExportSemaphoreCreateInfo {
+                s_type: STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
                 p_next: ptr::null(),
-                flags: 0,
-                queue_family_index: 0,
-                queue_count: 1,
-                queue_priorities: &priority,
+                handle_types: EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD,
             };
-            let extensions = [c"VK_KHR_external_semaphore_fd".as_ptr()];
-            let device_info = DeviceCreateInfo {
-                s_type: STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-                p_next: ptr::null(),
+            let info = SemaphoreCreateInfo {
+                s_type: STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                p_next: (&export as *const ExportSemaphoreCreateInfo).cast(),
                 flags: 0,
-                queue_create_info_count: 1,
-                queue_create_infos: &queue,
-                enabled_layer_count: 0,
-                enabled_layer_names: ptr::null(),
-                enabled_extension_count: 1,
-                enabled_extension_names: extensions.as_ptr(),
-                enabled_features: ptr::null(),
             };
-            let mut device: VkDevice = ptr::null_mut();
-            let r = create_device(physical, &device_info, ptr::null(), &mut device);
+            let mut semaphore: VkSemaphore = 0;
+            let r = create_semaphore(device, &info, ptr::null(), &mut semaphore);
             if r != 0 {
-                return Err(format!("vkCreateDevice: {r}"));
+                return Err(format!("vkCreateSemaphore: {r}"));
             }
-            macro_rules! device_fn {
-                ($ty:ty, $name:literal) => {
-                    match get_device_proc(device, $name.as_ptr()) {
-                        Some(f) => std::mem::transmute::<unsafe extern "C" fn(), $ty>(f),
-                        None => return Err(format!("no {}", $name.to_string_lossy())),
-                    }
-                };
-            }
-            let destroy_device: DestroyDevice = device_fn!(DestroyDevice, c"vkDestroyDevice");
-            let fds = (|| {
-                let create_semaphore = device_fn!(CreateSemaphore, c"vkCreateSemaphore");
-                let destroy_semaphore = device_fn!(DestroySemaphore, c"vkDestroySemaphore");
-                let get_fd = device_fn!(GetSemaphoreFd, c"vkGetSemaphoreFdKHR");
-                let export = ExportSemaphoreCreateInfo {
-                    s_type: STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
-                    p_next: ptr::null(),
-                    handle_types: EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD,
-                };
-                let info = SemaphoreCreateInfo {
-                    s_type: STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-                    p_next: (&export as *const ExportSemaphoreCreateInfo).cast(),
-                    flags: 0,
-                };
-                let mut semaphore: VkSemaphore = 0;
-                let r = create_semaphore(device, &info, ptr::null(), &mut semaphore);
-                if r != 0 {
-                    return Err(format!("vkCreateSemaphore: {r}"));
+            let fd_info = SemaphoreGetFdInfo {
+                s_type: STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+                p_next: ptr::null(),
+                semaphore,
+                handle_type: EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD,
+            };
+            let export_one = || -> Result<OwnedFd, String> {
+                let mut fd = -1;
+                let r = get_fd(device, &fd_info, &mut fd);
+                if r != 0 || fd < 0 {
+                    return Err(format!("vkGetSemaphoreFdKHR: {r}"));
                 }
-                let fd_info = SemaphoreGetFdInfo {
-                    s_type: STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
-                    p_next: ptr::null(),
-                    semaphore,
-                    handle_type: EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD,
-                };
-                let export_one = || -> Result<OwnedFd, String> {
-                    let mut fd = -1;
-                    let r = get_fd(device, &fd_info, &mut fd);
-                    if r != 0 || fd < 0 {
-                        return Err(format!("vkGetSemaphoreFdKHR: {r}"));
-                    }
-                    Ok(OwnedFd::from_raw_fd(fd))
-                };
-                let pair = export_one().and_then(|a| Ok((a, export_one()?)));
-                destroy_semaphore(device, semaphore, ptr::null());
-                pair
-            })();
-            destroy_device(device, ptr::null());
-            fds
+                Ok(OwnedFd::from_raw_fd(fd))
+            };
+            let pair = export_one().and_then(|a| Ok((a, export_one()?)));
+            destroy_semaphore(device, semaphore, ptr::null());
+            pair
         })();
-        destroy_instance(instance, ptr::null());
-        result
+        destroy_device(device, ptr::null());
+        fds
     }
 }
