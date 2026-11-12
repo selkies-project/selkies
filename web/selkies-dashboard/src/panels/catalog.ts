@@ -17,9 +17,9 @@
  * @module
  */
 import type * as React from "react";
-import { Clipboard as ClipboardIcon, FileText, Gamepad2, Joystick, Keyboard, LayoutGrid, Mic, Monitor, Printer, Share2, Volume2, Webcam,
+import { Bot, Clipboard as ClipboardIcon, FileText, Gamepad2, Joystick, Keyboard, LayoutGrid, Mic, Monitor, Printer, Share2, Volume2, Webcam,
   type LucideIcon } from "lucide-react";
-import { AppsAction, FilesActions, GamepadsBody, SharingBody } from "@/panels/catalog-bodies";
+import { AppsAction, FilesActions, GamepadsBody, PelorusBody, SharingBody } from "@/panels/catalog-bodies";
 import { Clipboard } from "@/panels/clipboard";
 import { Printing } from "@/panels/printing";
 import { AudioDeviceSettings, AudioQualitySettings, DisplaySettings, FormatSettings, PerformanceSettings, ResolutionSettings } from "@/panels/settings";
@@ -131,6 +131,12 @@ export const PANELS: PanelSpec[] = [
     // Floating, the panel carries the gamepad input switch too, which a layout with sections has as a toggle of its own.
     shown: ({ d, primary }, place) => primary && (d.renderable.gamepads || (place === "float" && d.renderable.coreButtons && d.renderable.gamepadToggle)),
     Body: GamepadsBody,
+  },
+  {
+    id: "pelorus", contentId: "pelorus-content", title: "sections.pelorus.title", icon: Bot, kind: "panel", floats: true,
+    // The server says at load whether it serves Pelorus; a viewer has no dashboard and never reaches this.
+    shown: ({ primary }) => primary && window.__SELKIES_PELORUS__ === true, Body: PelorusBody,
+    menuClass: "w-[420px] max-w-[calc(100vw-1rem)]",
   },
   {
     id: "shortcuts", contentId: "shortcuts-content", title: "sections.shortcuts.title", icon: Keyboard, kind: "panel",

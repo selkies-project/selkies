@@ -1,0 +1,22 @@
+<!doctype html>
+<!--
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+-->
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <!-- A URL carrying user:pass@ keeps them in document.URL, where every relative fetch() throws; the browser
+         holds the login, so the page reloads at the same URL without them. -->
+    <script>(function () { var u = new URL(document.URL); if (u.username || u.password) { u.username = ''; u.password = ''; location.replace(u.href); } })();</script>
+    <title>Pelorus</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="../icon.png" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="../src/pelorus/main.tsx"></script>
+  </body>
+</html>
