@@ -11,9 +11,9 @@
 # (proot, jq, ncat) from ~/.local/bin by absolute path, so the image's staging
 # directory is linked there before delegating -- linked rather than copied,
 # because a copy drops the extended attribute the capability-carrying proot
-# below is built on. `link` does only that, and the desktop service runs it at
-# every start, so `proot-apps` in a terminal works before the panel was ever
-# opened and follows the image's release after an update.
+# below is built on. `link` does only that, and the window manager's autostart
+# runs it at every start, so `proot-apps` in a terminal works before the panel
+# was ever opened and follows the image's release after an update.
 #
 # proot also stands in for bubblewrap when it is started as `bwrap`, so the
 # link gets that name too: the sandboxes applications build with bubblewrap
@@ -26,10 +26,17 @@ staging="/opt/proot-apps"
 capable="/opt/proot-apps-cap/proot"
 bin="${HOME}/.local/bin"
 
+# A link is made under a name of its own beside the one it replaces and renamed
+# over it: two runs can link at once (the server's check beside a terminal's
+# proot-apps), and an `ln -sf` of one finds the name the other just made.
+link_name() {
+    ln -sfn "$1" "$2.link.$$" && mv -fT "$2.link.$$" "$2"
+}
+
 if [ -d "${staging}" ]; then
     mkdir -p "${bin}"
     for tool in "${staging}"/*; do
-        ln -sfn "${tool}" "${bin}/$(basename "${tool}")"
+        link_name "${tool}" "${bin}/$(basename "${tool}")"
     done
     # At Yama's ptrace_scope 2 proot (proot-next) runs in a restricted mode,
     # without ptrace or capabilities; the copy carrying CAP_SYS_PTRACE runs in
@@ -37,11 +44,11 @@ if [ -d "${staging}" ]; then
     # even exec where the container's bounding set lacks the capability, so
     # which one works is settled by running it.
     if [ -x "${capable}" ] && "${capable}" -0 /bin/true > /dev/null 2>&1; then
-        ln -sfn "${capable}" "${bin}/proot"
+        link_name "${capable}" "${bin}/proot"
     fi
     # A bwrap the user put there themselves is theirs
     if [ ! -e "${bin}/bwrap" ] && [ ! -L "${bin}/bwrap" ] || [ "$(readlink "${bin}/bwrap")" = "proot" ]; then
-        ln -sfn proot "${bin}/bwrap"
+        link_name proot "${bin}/bwrap"
     fi
 fi
 
