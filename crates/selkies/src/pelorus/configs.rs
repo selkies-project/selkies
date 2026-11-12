@@ -20,7 +20,9 @@
 //! endpoint is an address this server fetches for whoever saved it, which in a session that is
 //! meant to reach one application and nothing else is more than its user holds otherwise;
 //! the lock is how such a session keeps that. A key is taken and never given back: a listing
-//! says only whether one is set.
+//! says only whether one is set, and a stored key is sent only to the provider and endpoint it
+//! was stored with, so asking a provider for its models at another address takes a key of its
+//! own ([`probe`]).
 //!
 //! A key saved from the interface is kept one of two ways. Kept on the server, it is in the
 //! file as typed, and any caller holding the controller's credential can run on it: the
@@ -58,6 +60,18 @@ pub const EFFORTS: &[&str] = &["default", "low", "medium", "high", "xhigh", "max
 
 /// The most configurations kept.
 const SAVED_MOST: usize = 32;
+
+/// The most characters a configuration's name keeps; a longer one is cut.
+const NAME_MOST: usize = 80;
+
+/// The most characters an endpoint may hold.
+const ENDPOINT_MOST: usize = 2048;
+
+/// The most characters a model's name may hold, saved or asked for by a run.
+pub(super) const MODEL_MOST: usize = 256;
+
+/// The most characters a key may hold, typed, opened, or sealed.
+pub(super) const KEY_MOST: usize = 4096;
 
 /// One saved configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,9 +157,10 @@ impl Saved {
     }
 }
 
-/// What a caller is told of a provider or an effort the server does not know.
+/// What a caller is told of a provider, an effort, or an endpoint the server does not take.
 const UNKNOWN_PROVIDER: &str = "That provider is not one this server knows.";
 const UNKNOWN_EFFORT: &str = "the effort is default, low, medium, high, xhigh, or max";
+const NOT_WEB_ADDRESS: &str = "The endpoint is an http:// or https:// address.";
 
 /// Whether the operator fixed the session to the server's configuration.
 pub fn locked() -> bool {
@@ -306,23 +321,56 @@ fn field<'a>(request: &'a Json, name: &str) -> Option<&'a str> {
     request.get(name).and_then(Json::as_str).map(str::trim)
 }
 
+/// A field of a request as [`field`] reads it, refused where it holds more than `most`
+/// characters: an endpoint, a model name, or a key that long is no address, model, or key,
+/// and cutting one short would store or send something the person never typed.
+pub(super) fn bounded<'a>(
+    request: &'a Json,
+    name: &str,
+    most: usize,
+) -> Result<Option<&'a str>, String> {
+    match field(request, name) {
+        Some(value) if value.chars().count() > most => {
+            Err(format!("`{name}` is longer than {most} characters."))
+        }
+        value => Ok(value),
+    }
+}
+
+/// Whether `endpoint` is an address the server may fetch: `http://` or `https://`.
+fn is_web_address(endpoint: &str) -> bool {
+    endpoint.starts_with("http://") || endpoint.starts_with("https://")
+}
+
+/// The address a configuration of `provider` reaches at `endpoint`: the provider's own where
+/// it names none.
+fn reached(endpoint: &str, provider: &Provider) -> String {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        provider.endpoint
+    } else {
+        endpoint
+    }
+    .to_string()
+}
+
 /// A configuration from a request's fields over `base`: a field the request leaves out keeps
 /// what `base` holds, which is how an edit keeps a key it does not send again.
 fn merged(base: Saved, request: &Json) -> Result<Saved, String> {
     let mut config = base;
     if let Some(name) = field(request, "name") {
-        config.name = name.chars().take(80).collect();
+        config.name = name.chars().take(NAME_MOST).collect();
     }
     if let Some(provider) = field(request, "provider") {
         config.provider = provider.to_string();
     }
-    if let Some(endpoint) = field(request, "endpoint") {
+    if let Some(endpoint) = bounded(request, "endpoint", ENDPOINT_MOST)? {
         config.endpoint = endpoint.to_string();
     }
-    if let Some(model) = field(request, "model") {
+    if let Some(model) = bounded(request, "model", MODEL_MOST)? {
         config.model = model.to_string();
     }
-    if let Some(key) = field(request, "api_key").filter(|key| !key.is_empty()) {
+    if let Some(key) = bounded(request, "api_key", KEY_MOST)?.filter(|key| !key.is_empty()) {
         config.api_key = key.to_string();
         config.sealed.clear();
     }
@@ -351,11 +399,8 @@ fn merged(base: Saved, request: &Json) -> Result<Saved, String> {
     if !config.effort.is_empty() && !EFFORTS.contains(&config.effort.as_str()) {
         return Err(UNKNOWN_EFFORT.to_string());
     }
-    if !config.endpoint.is_empty()
-        && !config.endpoint.starts_with("http://")
-        && !config.endpoint.starts_with("https://")
-    {
-        return Err("The endpoint is an http:// or https:// address.".to_string());
+    if !config.endpoint.is_empty() && !is_web_address(&config.endpoint) {
+        return Err(NOT_WEB_ADDRESS.to_string());
     }
     if config.model.is_empty() && provider.model.is_empty() {
         return Err(format!("Name a model for {}.", provider.label));
@@ -369,7 +414,7 @@ fn merged(base: Saved, request: &Json) -> Result<Saved, String> {
 /// Whether `sealed` is what a browser seals a key into, or empty: a bounded run of the
 /// characters its encoding uses. The server never reads it beyond that.
 fn is_sealed_key(sealed: &str) -> bool {
-    sealed.len() <= 4096
+    sealed.len() <= KEY_MOST
         && sealed.bytes().all(|b| {
             b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+' | b'/' | b'=')
         })
@@ -530,8 +575,7 @@ pub async fn handle_delete(ceiling: Ceiling, Path(id): Path<String>) -> Response
 
 /// `POST /pelorus/api/models/names`: the models a provider offers, for a form's list: with an
 /// `id`, as that configuration reaches it, any other field of the request in place of the
-/// saved one (an endpoint or key typed and not yet saved). A sealed configuration is asked
-/// with the key its browser sends, or none.
+/// saved one (an endpoint or key typed and not yet saved), as [`probe`] settles it.
 pub async fn handle_names(ceiling: Ceiling, body: Bytes) -> Response {
     if ceiling.is_viewer() {
         return refused();
@@ -546,42 +590,58 @@ pub async fn handle_names(ceiling: Ceiling, body: Bytes) -> Response {
         .and_then(|id| all().into_iter().find(|(c, _)| c.id == id))
         .map(|(c, _)| c)
         .unwrap_or_default();
-    let mut config = base;
-    if !config.sealed.is_empty() {
-        config.api_key.clear();
-    }
-    if let Some(provider) = field(&request, "provider") {
-        config.provider = provider.to_string();
-    }
-    if let Some(endpoint) = field(&request, "endpoint") {
-        config.endpoint = endpoint.to_string();
-    }
-    if let Some(key) = field(&request, "api_key").filter(|key| !key.is_empty()) {
-        config.api_key = key.to_string();
-    }
-    let Some(provider) = Provider::named(&config.provider) else {
-        return json_error(StatusCode::BAD_REQUEST, UNKNOWN_PROVIDER);
-    };
-    let endpoint = if config.endpoint.trim().is_empty() {
-        provider.endpoint.to_string()
-    } else {
-        config.endpoint.trim().to_string()
-    };
-    if endpoint.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "Enter the endpoint first.");
-    }
-    let probe = Model {
-        provider,
-        endpoint,
-        name: String::new(),
-        api_key: config.api_key,
-        vision: false,
-        effort: String::new(),
+    let probe = match probe(&base, &request) {
+        Ok(probe) => probe,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
     };
     match model::list_models(&probe).await {
         Ok(names) => axum::Json(json!({"models": names})).into_response(),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, &e),
     }
+}
+
+/// The model a listing asks: the saved configuration `base` with the request's provider,
+/// endpoint, and key in place of its own, the endpoint held to what [`merged`] would save.
+///
+/// A stored key goes only to the address it was stored for. A probe that names another
+/// provider or endpoint runs on the key it sends or on none, so it cannot carry the server's
+/// own key, which no edit reaches, or a kept one to an address of the caller's choosing. A
+/// sealed configuration has no stored key here: it is asked with the key its browser sends, or
+/// none.
+fn probe(base: &Saved, request: &Json) -> Result<Model, String> {
+    let named = field(request, "provider").unwrap_or(&base.provider);
+    let provider = Provider::named(named).ok_or(UNKNOWN_PROVIDER)?;
+    let endpoint = reached(
+        bounded(request, "endpoint", ENDPOINT_MOST)?.unwrap_or(&base.endpoint),
+        provider,
+    );
+    if endpoint.is_empty() {
+        return Err("Enter the endpoint first.".to_string());
+    }
+    if !is_web_address(&endpoint) {
+        return Err(NOT_WEB_ADDRESS.to_string());
+    }
+    let stored_for_this = base.sealed.is_empty()
+        && Provider::named(&base.provider).is_some_and(|saved| {
+            saved.id == provider.id && reached(&base.endpoint, saved) == endpoint
+        });
+    let stored = if stored_for_this {
+        base.api_key.as_str()
+    } else {
+        ""
+    };
+    let api_key = bounded(request, "api_key", KEY_MOST)?
+        .filter(|key| !key.is_empty())
+        .unwrap_or(stored)
+        .to_string();
+    Ok(Model {
+        provider,
+        endpoint,
+        name: String::new(),
+        api_key,
+        vision: false,
+        effort: String::new(),
+    })
 }
 
 #[cfg(test)]
@@ -644,6 +704,50 @@ mod tests {
         assert_eq!(run.model().unwrap().api_key, "opened");
         let kept = opened(saved_config(), Some("sent")).unwrap();
         assert_eq!(kept.api_key, "secret");
+    }
+
+    #[test]
+    fn a_listing_probe_sends_a_stored_key_only_to_the_address_it_was_stored_for() {
+        let base = saved_config();
+        let key = |request: Json| probe(&base, &request).map(|model| model.api_key);
+        assert_eq!(key(json!({"id": "abc"})).unwrap(), "secret");
+        assert_eq!(
+            key(json!({"endpoint": "https://api.anthropic.com"})).unwrap(),
+            "secret",
+            "the provider's own address, spelled out, is the same one"
+        );
+        assert_eq!(
+            key(json!({"endpoint": "https://elsewhere.example/v1"})).unwrap(),
+            ""
+        );
+        assert_eq!(
+            key(json!({"endpoint": "https://elsewhere.example/v1", "api_key": "typed"})).unwrap(),
+            "typed"
+        );
+        assert_eq!(key(json!({"provider": "openrouter"})).unwrap(), "");
+        assert!(key(json!({"endpoint": "file:///etc/passwd"})).is_err());
+        assert!(key(json!({"endpoint": "gopher://host"})).is_err());
+        assert!(key(json!({"api_key": "k".repeat(KEY_MOST + 1)})).is_err());
+        let sealed = merged(saved_config(), &json!({"sealed": "v1.ab12.iv.data"})).unwrap();
+        assert_eq!(probe(&sealed, &json!({})).unwrap().api_key, "");
+        assert_eq!(
+            probe(&sealed, &json!({"api_key": "opened"}))
+                .unwrap()
+                .api_key,
+            "opened"
+        );
+    }
+
+    #[test]
+    fn a_saved_field_too_long_to_be_what_it_names_is_refused() {
+        let long = |n: usize| "x".repeat(n);
+        let endpoint = format!("https://{}", long(ENDPOINT_MOST));
+        assert!(merged(saved_config(), &json!({"endpoint": endpoint})).is_err());
+        assert!(merged(saved_config(), &json!({"model": long(MODEL_MOST + 1)})).is_err());
+        assert!(merged(saved_config(), &json!({"api_key": long(KEY_MOST + 1)})).is_err());
+        let named = merged(saved_config(), &json!({"name": long(NAME_MOST + 20)})).unwrap();
+        assert_eq!(named.name.chars().count(), NAME_MOST, "a long name is cut");
+        assert!(merged(saved_config(), &json!({"model": long(MODEL_MOST)})).is_ok());
     }
 
     #[test]

@@ -226,7 +226,9 @@ struct Object {
     path: OwnedObjectPath,
 }
 
-/// A connection to the session's accessibility bus.
+/// A connection to the session's accessibility bus; a clone shares the one connection, so a
+/// caller holding several reads apart can each take one.
+#[derive(Clone)]
 pub struct Bus {
     conn: Connection,
 }

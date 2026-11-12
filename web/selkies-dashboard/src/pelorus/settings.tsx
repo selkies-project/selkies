@@ -185,7 +185,7 @@ function ModelForm({ base, list, form, setForm, onDone, onCancel }: {
         )}
         {defaults?.key !== "none" && (
           <div className="sm:col-span-2">
-            <Field id={`${id}-key`} label={t("pelorus.apiKey")} hint={form.hasKey ? t("pelorus.keyKeptHint") : undefined}>
+            <Field id={`${id}-key`} label={t("pelorus.accessLabel")} hint={form.hasKey ? t("pelorus.keyKeptHint") : undefined}>
               <Input id={`${id}-key`} type="password" autoComplete="off" value={draft.api_key} placeholder={form.hasKey ? t("pelorus.keyKept") : ""}
                 required={defaults?.key === "required" && !form.hasKey} onChange={(event) => set({ api_key: event.target.value })} />
             </Field>

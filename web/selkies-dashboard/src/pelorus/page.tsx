@@ -225,7 +225,11 @@ function TabLabel({ base, id, number, active, closable, onSelect, onClose }: { b
   );
 }
 
-/** The conversation in front, with the prompt under it. */
+/**
+ * The conversation in front, with the prompt under it. A locked server refuses a run that
+ * names a model or an effort of its own, so a run under the lock leaves out the choices this
+ * browser remembers from an unlocked session, which its bar no longer shows to clear.
+ */
 function Pane({ base, id, list, config, model, effort, client, onOpen }: { base: string; id: number; list: ModelList; config: string; model: string; effort: string; client: ClientSettings; onOpen: (source: string) => void }) {
   const conversation = conversationFor(base, String(id));
   const { exchanges, running } = React.useSyncExternalStore(conversation.subscribe, conversation.read);
@@ -244,8 +248,8 @@ function Pane({ base, id, list, config, model, effort, client, onOpen }: { base:
     void conversation.send(text, {
       config: config || undefined,
       api_key: apiKey,
-      model: model && model !== selected?.model ? model : undefined,
-      effort: effort || undefined,
+      model: !list.locked && model && model !== selected?.model ? model : undefined,
+      effort: !list.locked && effort ? effort : undefined,
       screenshots: client.screenshots,
       suffix: client.suffix || undefined,
       max_steps: client.maxSteps > 0 ? client.maxSteps : undefined,

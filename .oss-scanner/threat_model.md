@@ -77,7 +77,9 @@
   allows it, so what the model reads on screen is untrusted input steering the session user's own power; a model
   that is talked into acting is the session user acting, never more. A saved configuration's endpoint is an
   address the server fetches for the controller who saved it, which a locked `--pelorus` (`true|locked`) refuses
-  along with every change to the model. Keys: `--pelorus-api-key` from the settings; a key saved from the interface
+  along with every change to the model; a stored key, the server's own or one kept from the interface, goes only
+  to the provider and endpoint it was stored with, so a model listing naming another address runs on the key it
+  sends or on none (`configs.rs`, `probe`). Keys: `--pelorus-api-key` from the settings; a key saved from the interface
   and kept on the server, in `~/.config/selkies/pelorus.json` (mode 0600, so readable by the session user and by
   anything running as that user, the agent's own shell among them); or a key sealed by the browser that saved it,
   where that file holds only AES-GCM ciphertext under a non-extractable Web Crypto key kept in that browser's

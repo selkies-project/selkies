@@ -50,6 +50,10 @@ const SESSIONS_KEPT: usize = 16;
 /// The most characters of a person's own instructions a run takes.
 const SUFFIX_MOST: usize = 2000;
 
+/// The most characters a run's prompt may hold: a task and whatever was pasted with it, kept
+/// in the conversation and sent again with every later step.
+const PROMPT_MOST: usize = 100_000;
+
 /// The longest a tool's text is shown in an event; the model is given all of it.
 const EVENT_TEXT: usize = 4000;
 
@@ -351,20 +355,32 @@ pub async fn handle_run(ceiling: Ceiling, body: Bytes) -> Response {
     else {
         return json_error(StatusCode::BAD_REQUEST, "`prompt` is required");
     };
+    if prompt.chars().count() > PROMPT_MOST {
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("The prompt is longer than {PROMPT_MOST} characters."),
+        );
+    }
     let asked = |name: &str| {
         request
             .get(name)
             .and_then(Json::as_str)
             .filter(|v| !v.is_empty())
     };
+    let capped = |name: &str, most: usize| {
+        configs::bounded(&request, name, most).map(|value| value.filter(|v| !v.is_empty()))
+    };
     let vision = request.get("vision").and_then(Json::as_bool);
-    let model = match configs::resolve(
-        asked("config"),
-        asked("model"),
-        asked("effort"),
-        vision,
-        asked("api_key"),
-    ) {
+    let model = (|| {
+        configs::resolve(
+            asked("config"),
+            capped("model", configs::MODEL_MOST)?,
+            asked("effort"),
+            vision,
+            capped("api_key", configs::KEY_MOST)?,
+        )
+    })();
+    let model = match model {
         Ok(model) => model,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
     };

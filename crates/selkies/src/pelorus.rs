@@ -246,29 +246,36 @@ fn read_window(id: u32) -> Result<WindowRead, Unreadable> {
             )
         })
         .collect();
-    let mut bus = BUS.lock().unwrap_or_else(|p| p.into_inner());
-    if bus.is_none() {
-        let address = crate::wm::session_bus_address();
-        *bus = Some(Bus::connect(address.as_deref()).map_err(Unreadable::NoBus)?);
-    }
-    let result = bus
-        .as_ref()
-        .map(|bus| bus.window_tree(pid, &window.info.title, &placement, TREE_BUDGET));
-    match result {
-        Some(Ok(tree)) => Ok(WindowRead {
+    let bus = accessibility_bus()?;
+    match bus.window_tree(pid, &window.info.title, &placement, TREE_BUDGET) {
+        Ok(tree) => Ok(WindowRead {
             title: window.info.title.clone(),
             tree,
             clip: placement.rect,
             above,
         }),
-        Some(Err(miss)) => {
+        Err(miss) => {
             if miss == Miss::Absent {
-                *bus = None;
+                *BUS.lock().unwrap_or_else(|p| p.into_inner()) = None;
             }
             Err(Unreadable::Miss(miss))
         }
-        None => Err(Unreadable::NoBus("not connected".to_string())),
     }
+}
+
+/// The session's accessibility bus, connected on the first call and again after a read found
+/// it gone. The lock is held only to take the connection, never across a read: a read makes
+/// D-Bus calls per control, each waiting out its timeout on an application that stopped
+/// answering, and every other read of the desktop would queue behind it.
+fn accessibility_bus() -> Result<Bus, Unreadable> {
+    let mut bus = BUS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(bus) = bus.as_ref() {
+        return Ok(bus.clone());
+    }
+    let address = crate::wm::session_bus_address();
+    let connected = Bus::connect(address.as_deref()).map_err(Unreadable::NoBus)?;
+    *bus = Some(connected.clone());
+    Ok(connected)
 }
 
 /// The answer for a window that could not be read.
