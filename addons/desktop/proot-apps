@@ -1,4 +1,21 @@
 #! /bin/bash
+#
+# proot-apps, from https://github.com/linuxserver/proot-apps
+# Copyright (C) LinuxServer.io
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version. It is distributed WITHOUT ANY WARRANTY; without even the implied
+# warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+# https://www.gnu.org/licenses/gpl-3.0.html for the full license.
+#
+# Modified by the Selkies project, 2026-11-12: the default repository filled in
+# as the release builds fill it; `##pa phase` lines and curl's --progress-bar
+# under PA_STATUS; an INT or TERM during a download removes the partial folder;
+# a folder still marked DOWNLOADING is started over by install and get and is
+# absent to run and update; a `list` command; and the system socket's listener
+# started under umask 077.
 
 TYPE=$1
 DEFAULT_GH_USER=linuxserver
@@ -959,7 +976,8 @@ fi
 
 # List installed apps by the name the other commands take, skipping unfinished downloads
 if [ "${TYPE}" == "list" ]; then
-  for IMAGE_FOLDER in $(ls $ROOT_DIR 2>/dev/null); do
+  for IMAGE_PATH in "${ROOT_DIR}"/*; do
+    IMAGE_FOLDER="${IMAGE_PATH##*/}"
     if app_present "${IMAGE_FOLDER}"; then
       completion_name "${IMAGE_FOLDER}"
     fi
