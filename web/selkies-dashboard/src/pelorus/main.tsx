@@ -6,7 +6,7 @@
 
 /**
  * Entry point of the Pelorus page, served at `pelorus/` where the server has
- * Pelorus on: the chat alone, filling the window, with no stream beside it.
+ * Pelorus on: the agent's work in full (`page.tsx`), with no stream beside it.
  * The page sits one directory under the client's root, so the API it talks to
  * is `api` relative to its own address, whatever prefix the server is under.
  * @module
@@ -14,7 +14,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { ThemeProvider } from "@/components/ui/theme-provider";
-import { PelorusChat } from "@/pelorus/chat";
+import { PelorusPage } from "@/pelorus/page";
 import "../index.css";
 
 const mount = document.getElementById("root");
@@ -23,7 +23,7 @@ if (mount) {
     <React.StrictMode>
       <ThemeProvider defaultTheme="dark" storageKey="theme">
         <div className="h-dvh w-full bg-background text-foreground">
-          <PelorusChat base="api" standalone />
+          <PelorusPage base="api" />
         </div>
       </ThemeProvider>
     </React.StrictMode>,

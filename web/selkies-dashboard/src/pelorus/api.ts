@@ -78,6 +78,10 @@ export interface ModelDraft {
 /** One event of a run. */
 export type RunEvent =
   | { type: "start"; session: string; model: string }
+  /** A model turn begins, counted from one. */
+  | { type: "step"; number: number }
+  /** The screen as a base64 JPEG, for the person watching: before the run, after a tool that acted, at the end. */
+  | { type: "screen"; when: "start" | "step" | "end"; image: string }
   | { type: "thinking"; text: string }
   | { type: "text"; text: string }
   | { type: "call"; name: string; arguments: Record<string, unknown> }
@@ -92,6 +96,12 @@ export interface RunRequest {
   config?: string;
   model?: string;
   effort?: string;
+  /** Ask for the screen as the run goes. */
+  screenshots?: boolean;
+  /** Instructions of the person's own, added after the server's. */
+  suffix?: string;
+  /** End the run after this many model turns, within the server's own limit. */
+  max_steps?: number;
 }
 
 /**

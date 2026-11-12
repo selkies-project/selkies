@@ -74,10 +74,16 @@ export interface PanelSpec {
   /** Classes of the menu popup that draws the body, where it needs a width of its own. */
   menuClass?: string;
   /** A layout with a bar floats it beside the bar rather than listing it in a menu. */
-  floats?: boolean;
-}
+  floats?: boolean;}
 
 export const PANELS: PanelSpec[] = [
+  {
+    id: "pelorus", contentId: "pelorus-content", title: "sections.pelorus.title", icon: Bot, kind: "panel", floats: true,
+    // First of all panels: a server that has Pelorus on has it on to be used. The server says at load
+    // whether it serves Pelorus; a viewer has no dashboard and never reaches this.
+    shown: ({ primary }) => primary && window.__SELKIES_PELORUS__ === true, Body: PelorusBody,
+    menuClass: "w-[340px] max-w-[calc(100vw-1rem)]",
+  },
   {
     id: "video", contentId: "settings-content", title: "sections.video.title", tab: "settingsTabs.video", kind: "settings",
     shown: ({ panels }) => panels.video,
@@ -131,12 +137,6 @@ export const PANELS: PanelSpec[] = [
     // Floating, the panel carries the gamepad input switch too, which a layout with sections has as a toggle of its own.
     shown: ({ d, primary }, place) => primary && (d.renderable.gamepads || (place === "float" && d.renderable.coreButtons && d.renderable.gamepadToggle)),
     Body: GamepadsBody,
-  },
-  {
-    id: "pelorus", contentId: "pelorus-content", title: "sections.pelorus.title", icon: Bot, kind: "panel", floats: true,
-    // The server says at load whether it serves Pelorus; a viewer has no dashboard and never reaches this.
-    shown: ({ primary }) => primary && window.__SELKIES_PELORUS__ === true, Body: PelorusBody,
-    menuClass: "w-[420px] max-w-[calc(100vw-1rem)]",
   },
   {
     id: "shortcuts", contentId: "shortcuts-content", title: "sections.shortcuts.title", icon: Keyboard, kind: "panel",
