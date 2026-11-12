@@ -66,8 +66,6 @@ struct Session {
     _x11: Option<selkies_wm::x11::ManagerHandle>,
     /// What reaches the X11 manager's thread.
     x11_remote: Option<selkies_wm::x11::Remote>,
-    /// The environment the session's programs are started in.
-    env: Arc<Mutex<SessionEnv>>,
     /// Whether the capture compositor runs the policy and its Xwayland.
     wayland: bool,
 }
@@ -223,7 +221,6 @@ pub fn start(is_wayland: bool) {
         env: session_env,
         _bus: bus,
         x11_remote: x11.as_ref().map(selkies_wm::x11::ManagerHandle::remote),
-        env: session_env,
         _x11: x11,
         wayland: is_wayland,
     });

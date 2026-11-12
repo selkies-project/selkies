@@ -2567,6 +2567,89 @@ async fn server_watches_the_tokens_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An `https_port` opens a listener beside `port` that answers the same routes over TLS on
+/// the configured certificate, minted there when the path holds none, while `port` stays plain
+/// HTTP with `enable_https` off; the one contract endpoint names both.
+#[tokio::test]
+async fn an_https_port_serves_tls_beside_a_plain_http_port() {
+    use rustls::pki_types::pem::PemObject;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let dir = super::testing::tempfile_dir("selkies-http-dual-");
+    let https_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = HttpConfig {
+        listen: ListenConfig {
+            addr: "127.0.0.1".into(),
+            port: 0,
+            ..ListenConfig::default()
+        },
+        https_port,
+        tls: super::tls::TlsConfig {
+            enable_https: false,
+            cert: dir.join("cert.pem").to_string_lossy().into_owned(),
+            key: dir.join("cert.key").to_string_lossy().into_owned(),
+            reload_interval: 0,
+        },
+        ..HttpConfig::default()
+    };
+    let state = AppState::new(config, FixedSupervisor::new(None, &[]));
+    let server = super::Server::start(&state, build(state.clone(), Vec::new()))
+        .await
+        .expect("server");
+    let [plain, secure] = server.local_addrs() else {
+        panic!("two listeners: {}", server.endpoint());
+    };
+    assert_eq!(secure.port(), https_port);
+    assert_eq!(
+        server.endpoint(),
+        format!("http://{plain}, https://{secure}")
+    );
+
+    let request = b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let mut stream = tokio::net::TcpStream::connect(plain).await.unwrap();
+    stream.write_all(request).await.unwrap();
+    let mut reply = Vec::new();
+    stream.read_to_end(&mut reply).await.unwrap();
+    assert!(
+        reply.starts_with(b"HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&reply)
+    );
+
+    let minted = rustls::pki_types::CertificateDer::from_pem_file(dir.join("cert.pem"))
+        .expect("the certificate is minted at the configured path");
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(minted).unwrap();
+    let client = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let stream = tokio::net::TcpStream::connect(secure).await.unwrap();
+    let mut tls = tokio_rustls::TlsConnector::from(Arc::new(client))
+        .connect(
+            rustls::pki_types::ServerName::IpAddress(secure.ip().into()),
+            stream,
+        )
+        .await
+        .expect("the second port speaks TLS");
+    tls.write_all(request).await.unwrap();
+    let mut reply = Vec::new();
+    let _ = tls.read_to_end(&mut reply).await;
+    assert!(
+        reply.starts_with(b"HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&reply)
+    );
+    server.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// With Pelorus off nothing under `pelorus` is served, however the path spells it: the gate
 /// reads the name the file is looked up by, so a percent-encoded letter or separator does not
 /// reach the page. With it on, `pelorus` moves to `pelorus/`, which is the page.

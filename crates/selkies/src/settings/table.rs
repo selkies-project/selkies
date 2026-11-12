@@ -1210,6 +1210,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "https_port",
+        kind: Kind::Int,
+        default: "0",
+        help: "A second port, on the addresses --addr or --public names, that always serves HTTPS beside --port, so one server answers a reverse proxy over plain HTTP on --port and browsers that reach it directly over HTTPS here. It serves the certificate --https-cert and --https-key name (a self-signed one when they hold none) whether or not --enable-https is on, which makes --port HTTPS as well; with --unix-socket it is the only TCP listener. 0 (default) opens no second port.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: Some(0.0),
+        max: Some(65535.0),
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "https_cert",
         kind: Kind::Str,
         default: "/etc/ssl/certs/ssl-cert-snakeoil.pem",
@@ -2977,6 +2991,10 @@ impl Settings {
 
     pub fn enable_https(&self) -> BoolSetting {
         self.bool_setting("enable_https")
+    }
+
+    pub fn https_port(&self) -> i64 {
+        self.int_value("https_port")
     }
 
     pub fn https_cert(&self) -> &str {

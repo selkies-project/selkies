@@ -21,9 +21,10 @@
 //! nothing, stops inside its headers, or leaves a kept-alive connection idle after a response
 //! is closed after [`super::IDLE_CONNECTION_TIMEOUT`], while a request in progress is never
 //! idle. Each request carries a [`ConnInfo`] extension with the connection's addresses and
-//! whether it is TLS, which the entry page reads for [`ipv6_loopback_redirect`]. The contract
-//! line `Selkies server running on <endpoint>` is logged once the listeners are up; the
-//! suites wait on it.
+//! whether it is TLS, which the entry page reads for [`ipv6_loopback_redirect`]. One
+//! [`Listener`] may hold several sides, each its own addresses and scheme over the one router
+//! ([`start_each`]); the contract line `Selkies server running on <endpoint>` is logged once
+//! every side is up, naming them all; the suites wait on it.
 //!
 //! The access log, off by default, writes the request line and the Referer without their
 //! queries: a secure-mode session token rides `?token=` on the data WebSocket URL, the
@@ -420,13 +421,13 @@ pub struct Listener {
 }
 
 impl Listener {
-    /// Where the server is reached: every bound address as `http(s)://host:port`, joined by
-    /// `, `, or `unix://<path>`.
+    /// Where the server is reached: every bound address as `http(s)://host:port` or
+    /// `unix://<path>`, joined by `, `.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
-    /// `TCP listener` or `Unix socket listener`.
+    /// `Unix socket listener` when one of its sides is a Unix socket, else `TCP listener`.
     pub fn kind(&self) -> &'static str {
         self.kind
     }
@@ -487,83 +488,95 @@ pub async fn start(
     cfg: &ListenConfig,
     tls: Option<Arc<rustls::ServerConfig>>,
 ) -> Result<Listener, ListenError> {
-    let started = serve_prepared(router, cfg, tls).await;
-    match &started {
-        Ok(listener) => {
-            log::info!(target: "server", "Selkies server running on {}", listener.endpoint)
-        }
-        Err(exc) => {
+    start_each(router, &[(cfg.clone(), tls)]).await
+}
+
+/// Serve `router` on every listener `sides` names, each with its own scheme, as one
+/// [`Listener`] that stops them together.
+///
+/// The contract line names every endpoint once all of them are up, so a suite waiting on it
+/// never connects to a port still binding; a side that fails stops the ones already bound.
+pub async fn start_each(
+    router: Router,
+    sides: &[(ListenConfig, Option<Arc<rustls::ServerConfig>>)],
+) -> Result<Listener, ListenError> {
+    let mut listener = Listener {
+        endpoint: String::new(),
+        kind: "TCP listener",
+        cancel: CancellationToken::new(),
+        accepts: Vec::new(),
+        unix_socket: None,
+        local_addrs: Vec::new(),
+    };
+    for (cfg, tls) in sides {
+        if let Err(exc) = serve_prepared(&mut listener, router.clone(), cfg, tls.clone()).await {
             let place = if cfg.unix_socket.is_empty() {
                 format!("{} port {}", cfg.addr, cfg.port)
             } else {
                 format!("unix://{}", cfg.unix_socket)
             };
             log::error!(target: "server", "Cannot bind {place}: {exc}");
+            listener.stop().await;
+            return Err(exc);
         }
     }
-    started
+    log::info!(target: "server", "Selkies server running on {}", listener.endpoint);
+    Ok(listener)
 }
 
+/// Bind what `cfg` names and add its accept loops and endpoints to `listener`.
 async fn serve_prepared(
+    listener: &mut Listener,
     router: Router,
     cfg: &ListenConfig,
     tls: Option<Arc<rustls::ServerConfig>>,
-) -> Result<Listener, ListenError> {
+) -> Result<(), ListenError> {
     let prepared = {
         let cfg = cfg.clone();
         tokio::task::spawn_blocking(move || prepare(&cfg))
             .await
             .map_err(std::io::Error::other)??
     };
-    let cancel = CancellationToken::new();
     let secure = tls.is_some();
-    let mut accepts = Vec::new();
-    let mut local_addrs = Vec::new();
-    let (endpoint, kind, unix_socket) = match prepared {
+    let mut names = Vec::new();
+    match prepared {
         Prepared::Unix(path) => {
-            let listener = tokio::net::UnixListener::bind(&path)?;
-            accepts.push(tokio::spawn(accept_unix(
-                listener,
+            let unix = tokio::net::UnixListener::bind(&path)?;
+            listener.accepts.push(tokio::spawn(accept_unix(
+                unix,
                 router,
                 cfg.idle_timeout,
                 tls,
-                cancel.clone(),
+                listener.cancel.clone(),
             )));
-            (
-                format!("unix://{}", path.display()),
-                "Unix socket listener",
-                Some(path),
-            )
+            names.push(format!("unix://{}", path.display()));
+            listener.kind = "Unix socket listener";
+            listener.unix_socket = Some(path);
         }
         Prepared::Tcp(sockets) => {
-            let mut listeners = Vec::with_capacity(sockets.len());
+            let mut tcp = Vec::with_capacity(sockets.len());
             for socket in sockets {
-                listeners.push(tokio::net::TcpListener::from_std(socket)?);
+                tcp.push(tokio::net::TcpListener::from_std(socket)?);
             }
-            let mut names = Vec::new();
-            for listener in listeners {
-                let local = listener.local_addr()?;
+            for socket in tcp {
+                let local = socket.local_addr()?;
                 names.push(site_name(&local, secure));
-                local_addrs.push(local);
-                accepts.push(tokio::spawn(accept_tcp(
-                    listener,
+                listener.local_addrs.push(local);
+                listener.accepts.push(tokio::spawn(accept_tcp(
+                    socket,
                     router.clone(),
                     cfg.idle_timeout,
                     tls.clone(),
-                    cancel.clone(),
+                    listener.cancel.clone(),
                 )));
             }
-            (names.join(", "), "TCP listener", None)
         }
-    };
-    Ok(Listener {
-        endpoint,
-        kind,
-        cancel,
-        accepts,
-        unix_socket,
-        local_addrs,
-    })
+    }
+    if !listener.endpoint.is_empty() {
+        names.insert(0, std::mem::take(&mut listener.endpoint));
+    }
+    listener.endpoint = names.join(", ");
+    Ok(())
 }
 
 async fn accept_tcp(
