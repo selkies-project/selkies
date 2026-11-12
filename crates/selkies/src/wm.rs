@@ -60,8 +60,62 @@ const XWAYLAND_WAIT: Duration = Duration::from_secs(15);
 struct Session {
     _bus: Option<SessionBus>,
     _x11: Option<selkies_wm::x11::ManagerHandle>,
+    /// What reaches the X11 manager's thread.
+    x11_remote: Option<selkies_wm::x11::Remote>,
+    /// The environment the session's programs are started in.
+    env: Arc<Mutex<SessionEnv>>,
     /// Whether the capture compositor runs the policy and its Xwayland.
     wayland: bool,
+}
+
+/// The desktop as the window manager holds it: every window's place, state, and stacking, in
+/// logical layout coordinates with each output's scale. `None` where no window manager runs
+/// (`--wm` off, or one that failed or panicked), which is how a consumer learns that only the
+/// picture describes the session. Blocks for up to two seconds on the thread that owns the
+/// window manager, so an async caller runs it on a blocking thread.
+pub fn desktop_view() -> Option<pixelflux::wm::DesktopView> {
+    let (wayland, x11_remote) = backend()?;
+    if wayland {
+        pixelflux::desktop_view()
+    } else {
+        x11_remote?.view()
+    }
+}
+
+/// Ask the window manager to act on a window (activate, close, minimize, and the like), as a
+/// taskbar asks. False where no window manager runs or it does not know the window. Blocks as
+/// [`desktop_view`] does.
+pub fn window_request(id: pixelflux::wm::WindowId, request: pixelflux::wm::Request) -> bool {
+    match backend() {
+        Some((true, _)) => pixelflux::window_request(id, request),
+        Some((false, Some(remote))) => remote.request(id, request),
+        _ => false,
+    }
+}
+
+/// The address of the session bus the session's programs are started on, which is the one the
+/// window manager started where the server's own environment named none; `None` where no
+/// window manager runs.
+pub fn session_bus_address() -> Option<String> {
+    let env = SESSION.get()?.lock().ok()?.as_ref()?.env.clone();
+    let env = env.lock().ok()?;
+    env.get("DBUS_SESSION_BUS_ADDRESS").map(str::to_string)
+}
+
+/// The environment the session's programs are started in, as it stands now; `None` where no
+/// window manager runs.
+pub fn session_env() -> Option<SessionEnv> {
+    let env = SESSION.get()?.lock().ok()?.as_ref()?.env.clone();
+    let env = env.lock().ok()?;
+    Some(env.clone())
+}
+
+/// Which backend the window manager runs on (true for the capture compositor) and, on X11,
+/// what reaches its thread; `None` where the session started none.
+fn backend() -> Option<(bool, Option<selkies_wm::x11::Remote>)> {
+    let slot = SESSION.get()?.lock().ok()?;
+    let session = slot.as_ref()?;
+    Some((session.wayland, session.x11_remote.clone()))
 }
 
 /// Whether the capture compositor manages the session's X11 clients itself: its Xwayland is
@@ -119,8 +173,14 @@ pub fn start(is_wayland: bool) {
         env.set("LD_PRELOAD", &preload);
     }
     let bus = SessionBus::ensure(&mut env);
+    if settings().pelorus().on {
+        enable_accessibility(env.get("DBUS_SESSION_BUS_ADDRESS"));
+        env.set(selkies_draw::apps::DESCRIBED_ENV, "1");
+        selkies_draw::apps::describe_applications();
+    }
     selkies_wm::appearance::start(&env);
     let env = Arc::new(Mutex::new(env));
+    let session_env = env.clone();
     let x11 = if is_wayland {
         if !start_wayland(env.clone(), control) {
             return;
@@ -146,9 +206,27 @@ pub fn start(is_wayland: bool) {
     let slot = SESSION.get_or_init(|| Mutex::new(None));
     *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Session {
         _bus: bus,
+        x11_remote: x11.as_ref().map(selkies_wm::x11::ManagerHandle::remote),
+        env: session_env,
         _x11: x11,
         wayland: is_wayland,
     });
+}
+
+/// Turn accessibility on for the session before any of its applications start, which is when
+/// Chromium-based ones decide whether to describe themselves at all (`pelorus::atspi`). The
+/// session's environment then carries `selkies_draw::apps::DESCRIBED_ENV`, under which the
+/// window manager's menus and the shell start those applications with the switch they fill
+/// their trees under; one started any other way (a terminal, the `autostart` file) has to be
+/// given the switch by what starts it.
+fn enable_accessibility(session_bus: Option<&str>) {
+    match pelorus::atspi::enable(session_bus) {
+        Ok(_) => debug!(target: "pelorus", "accessibility is on for the session"),
+        Err(e) => warn!(
+            target: "pelorus",
+            "applications will not describe their windows ({e}); Pelorus has screenshots alone"
+        ),
+    }
 }
 
 /// Hand the window manager the primary display's sanitized `color_scheme` (`light`, `dark`, or

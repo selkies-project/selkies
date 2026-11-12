@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="100%" height="100%">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="2" dy="6" stdDeviation="5" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+    <filter id="ring-shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+  <circle cx="200" cy="200" r="190" fill="#1A237E" filter="url(#ring-shadow)" />
+  <circle cx="200" cy="200" r="182" fill="#E8EAF6" />
+  <circle cx="200" cy="200" r="176" fill="#FFFFFF" />
+  <circle cx="200" cy="200" r="165" fill="none" stroke="#C5CAE9" stroke-width="6" stroke-dasharray="2 12.3989" stroke-dashoffset="1" />
+  <circle cx="200" cy="200" r="165" fill="none" stroke="#7986CB" stroke-width="10" stroke-dasharray="6 123.5906" stroke-dashoffset="3" />
+  <g font-family="Roboto, Helvetica, sans-serif" font-size="22" font-weight="900" fill="#283593" text-anchor="middle" dominant-baseline="central">
+    <text x="200" y="55">N</text>
+    <text x="345" y="200">E</text>
+    <text x="200" y="345">S</text>
+    <text x="55" y="200">W</text>
+  </g>
+  <g transform="rotate(45 200 200)">
+    <polygon points="200,200 200,120 188,200" fill="#CFD8DC"/>
+    <polygon points="200,200 200,120 212,200" fill="#B0BEC5"/>
+    <polygon points="200,200 280,200 200,188" fill="#CFD8DC"/>
+    <polygon points="200,200 280,200 200,212" fill="#B0BEC5"/>
+    <polygon points="200,200 200,280 188,200" fill="#CFD8DC"/>
+    <polygon points="200,200 200,280 212,200" fill="#B0BEC5"/>
+    <polygon points="200,200 120,200 200,188" fill="#CFD8DC"/>
+    <polygon points="200,200 120,200 200,212" fill="#B0BEC5"/>
+  </g>
+  <g>
+    <polygon points="200,200 200,90 185,200" fill="#EF5350"/>
+    <polygon points="200,200 200,90 215,200" fill="#C62828"/>
+    <polygon points="200,200 310,200 200,185" fill="#90A4AE"/>
+    <polygon points="200,200 310,200 200,215" fill="#607D8B"/>
+    <polygon points="200,200 200,310 185,200" fill="#90A4AE"/>
+    <polygon points="200,200 200,310 215,200" fill="#607D8B"/>
+    <polygon points="200,200 90,200 200,185" fill="#90A4AE"/>
+    <polygon points="200,200 90,200 200,215" fill="#607D8B"/>
+  </g>
+  <g transform="rotate(55 200 200)" filter="url(#shadow)">
+    <circle cx="200" cy="200" r="55" fill="none" stroke="#FFCA28" stroke-width="6"/>
+    <circle cx="200" cy="200" r="52" fill="none" stroke="#FFB300" stroke-width="2"/>
+    <rect x="194" y="45" width="6" height="110" fill="#FFE082" />
+    <rect x="194" y="245" width="6" height="110" fill="#FFE082" />
+    <rect x="200" y="45" width="6" height="110" fill="#FFB300" />
+    <rect x="200" y="245" width="6" height="110" fill="#FFB300" />
+    <path d="M 175 45 L 200 45 L 200 55 L 180 55 Z" fill="#FFE082" />
+    <path d="M 200 45 L 225 45 L 220 55 L 200 55 Z" fill="#FFB300" />
+    <circle cx="200" cy="50" r="3" fill="#263238" />
+    <path d="M 180 345 L 200 345 L 200 355 L 175 355 Z" fill="#FFE082" />
+    <path d="M 200 345 L 220 345 L 225 355 L 200 355 Z" fill="#FFB300" />
+    <circle cx="200" cy="350" r="3" fill="#263238" />
+    <circle cx="200" cy="200" r="18" fill="#FFCA28" />
+    <path d="M 200 182 A 18 18 0 0 1 218 200 L 200 200 Z" fill="#FFB300" />
+    <circle cx="200" cy="200" r="6" fill="#263238" />
+    <circle cx="198" cy="198" r="2" fill="#546E7A" />
+  </g>
+</svg>

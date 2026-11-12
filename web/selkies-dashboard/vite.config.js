@@ -37,6 +37,11 @@ export default ({ mode }) => {
       target: 'chrome94',
       chunkSizeWarningLimit: 1000,
       rollupOptions: {
+        // Two pages: the dashboard, and the Pelorus chat on a page of its own at pelorus/.
+        input: {
+          main: path.resolve(import.meta.dirname, "index.html"),
+          pelorus: path.resolve(import.meta.dirname, "pelorus/index.html"),
+        },
         output: {
           manualChunks: (id) => {
             if (id.includes('node_modules')) {

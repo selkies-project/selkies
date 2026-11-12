@@ -2550,6 +2550,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pelorus"
+version = "0.0.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "zbus",
+]
+
+[[package]]
 name = "pem"
 version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3655,6 +3665,7 @@ dependencies = [
  "nvml-wrapper",
  "parking_lot",
  "pcmflux",
+ "pelorus",
  "percent-encoding",
  "pixelflux",
  "prometheus-client",

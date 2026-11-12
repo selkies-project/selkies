@@ -1464,8 +1464,8 @@ async fn operator_routes() {
     assert_eq!(
         r.json(),
         json!({"current_mode": null, "available_modes": ["fake"], "enable_dual_mode": true,
-                                "ui_layout": "default", "ui_layout_allowed": ["default"]}),
-        "the status names the mode and the layouts"
+                                "ui_layout": "default", "ui_layout_allowed": ["default"], "pelorus": false}),
+        "the status names the mode, the layouts, and whether Pelorus is served"
     );
     assert!(
         r.header("content-security-policy") == Some("frame-ancestors 'self'"),
@@ -2565,4 +2565,59 @@ async fn server_watches_the_tokens_file() {
     assert!(state.tokens.lookup(CTRL).is_some());
     server.stop().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// With Pelorus off nothing under `pelorus` is served, however the path spells it: the gate
+/// reads the name the file is looked up by, so a percent-encoded letter or separator does not
+/// reach the page. With it on, `pelorus` moves to `pelorus/`, which is the page.
+#[tokio::test]
+async fn the_pelorus_page_is_closed_with_pelorus_off_however_its_path_is_encoded() {
+    let client = || {
+        Some(WebClient::Embedded(super::embedded::leak(
+            &[
+                ("index.html", b"<!doctype html><html>dashboard</html>"),
+                ("pelorus/index.html", b"<!doctype html><html>pelorus</html>"),
+            ],
+            784_111_777,
+        )))
+    };
+    let off = AppState::new(HttpConfig::default(), FixedSupervisor::new(None, &[]))
+        .with_web_client(client());
+    let app = TestServer::start(build(off, Vec::new())).await;
+    for path in [
+        "/pelorus",
+        "/pelorus/",
+        "/pelorus/index.html",
+        "/%70elorus/",
+        "/%70elorus/index.html",
+        "/pelorus%2Findex.html",
+        "/%70%65%6c%6f%72%75%73/index.html",
+    ] {
+        let r = app.call("GET", path, &[]).await;
+        assert_eq!(r.status, 404, "{path} is closed with Pelorus off");
+    }
+    app.stop().await;
+
+    let config = HttpConfig {
+        pelorus: true,
+        ..HttpConfig::default()
+    };
+    let on = AppState::new(config, FixedSupervisor::new(None, &[])).with_web_client(client());
+    let app = TestServer::start(build(on, Vec::new())).await;
+    let r = app.call("GET", "/pelorus", &[]).await;
+    assert_eq!(
+        (r.status, r.header("location")),
+        (308, Some("pelorus/")),
+        "pelorus moves to its directory"
+    );
+    for path in ["/pelorus/", "/%70elorus/"] {
+        let r = app.call("GET", path, &[]).await;
+        assert!(
+            r.status == 200 && r.body.contains("pelorus"),
+            "{path} is the page: {}",
+            r.status
+        );
+        assert_eq!(r.header("cache-control"), Some("no-cache"), "{path}");
+    }
+    app.stop().await;
 }

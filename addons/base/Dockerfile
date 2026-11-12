@@ -477,6 +477,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         xauth \
         wmctrl \
         dbus-x11 \
+        # The accessibility bus the session's applications describe their windows on,
+        # which Pelorus reads (SELKIES_PELORUS)
+        at-spi2-core \
         # Forked by Selkies where the in-process paths cannot serve: xdotool for
         # key injection a layout cannot express, and xclip for the X11 clipboard
         # fallback

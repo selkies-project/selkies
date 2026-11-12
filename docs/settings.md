@@ -118,6 +118,21 @@ The X11 or Wayland capture backend and the GPU it renders on.
 | `--computer-use-bind`<br>`SELKIES_COMPUTER_USE_BIND` | (empty)<br>str | Start pixelflux's Computer-Use HTTP server on comma-separated entries: a bare port listens on the loopback addresses only, which every account on the host can reach, host:port names the address to listen on (0.0.0.0:9500,[::]:9500 accepts connections on every interface). A caller drives the desktop with this user's full authority, so the server needs --computer-use-token and does not start without it. Empty leaves it off; the PIXELFLUX_CU environment variable remains the standalone fallback. |
 | `--computer-use-token`<br>`SELKIES_COMPUTER_USE_TOKEN` | (empty)<br>str | Bearer token every Computer-Use request has to carry (Authorization: Bearer <token>); falls back to the PIXELFLUX_CU_TOKEN environment variable. Never sent to clients. |
 
+## Pelorus
+
+The agent interface under `/pelorus`: the desktop as text, the actions on it, and a model that drives it from a chat. Off unless `pelorus` is on, and a caller there holds what the session's user holds. `pelorus` set to `true|locked` fixes the model to these settings: nothing is configured from a browser.
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `--pelorus`<br>`SELKIES_PELORUS` | `false`<br>bool | Serve Pelorus under /pelorus: the desktop described as text (windows, their controls, and where to click them) and the actions on it, for an agent or a script. A caller there holds what the session's user holds, so it takes a controller's credential. Locked (true\|locked), the agent's model is the one these settings name and nothing of it is configured or shown in a browser. |
+| `--pelorus-provider`<br>`SELKIES_PELORUS_PROVIDER` | `anthropic`<br>enum: one of `anthropic`, `openai`, `gemini`, `openrouter`, `groq`, `mistral`, `deepseek`, `xai`, `together`, `fireworks`, `cerebras`, `ollama`, `lmstudio`, `llamacpp`, `custom` | Whose API the Pelorus agent's model is asked through: anthropic (the Messages API), or one of the others, each through its OpenAI-compatible chat completions endpoint at its own public address; ollama, lmstudio, and llamacpp are local servers at their usual addresses, and custom is any other such server, named by pelorus_endpoint. |
+| `--pelorus-endpoint`<br>`SELKIES_PELORUS_ENDPOINT` | (empty)<br>str | Base URL of the model API the Pelorus agent calls; empty for the provider's own. A local or custom provider is where this is usually set. |
+| `--pelorus-model`<br>`SELKIES_PELORUS_MODEL` | (empty)<br>str | Model the Pelorus agent runs on; empty for the provider's default, which only anthropic has (claude-opus-5-5): every other provider needs one named. |
+| `--pelorus-api-key`<br>`SELKIES_PELORUS_API_KEY` | (empty)<br>str | API key the Pelorus agent sends to its model API. Never sent to clients. |
+| `--pelorus-effort`<br>`SELKIES_PELORUS_EFFORT` | `default`<br>enum: one of `default`, `low`, `medium`, `high`, `xhigh`, `max` | How much the Pelorus agent's model reasons per step, where its API takes an effort (Anthropic's current models): default leaves it to the model, low is the fastest and cheapest. |
+| `--pelorus-vision`<br>`SELKIES_PELORUS_VISION` | `false`<br>bool | Whether the Pelorus agent's model takes images, which gives it the screenshot tool for what applications do not describe as text. |
+| `--pelorus-max-steps`<br>`SELKIES_PELORUS_MAX_STEPS` | `50`<br>int, 1 to 500 | Most model turns one Pelorus agent run may take before it is stopped. |
+
 ## Session start
 
 What a session starts with, and hooks around its first and last client.

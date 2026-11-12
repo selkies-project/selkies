@@ -798,6 +798,17 @@ pub enum ThreadCommand {
     ListWindows {
         reply: std::sync::mpsc::Sender<Vec<WindowDesc>>,
     },
+    /// Reply with the desktop as the installed window policy holds it; `None` without one.
+    DesktopView {
+        reply: std::sync::mpsc::Sender<Option<wm::DesktopView>>,
+    },
+    /// Hand the installed window policy a request about a window it placed, as a taskbar
+    /// would; reply whether a policy took it.
+    WindowRequest {
+        id: wm::WindowId,
+        request: wm::Request,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
     SetCursorCallback(Option<Arc<dyn crate::sink::CursorSink>>),
     SetClipboardCallback(Arc<dyn crate::sink::ClipboardSink>),
     /// Install the window policy that manages the compositor's windows from here on.
@@ -7283,6 +7294,13 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 };
                 let _ = reply.send(ok);
             }
+            ThreadCommand::DesktopView { reply } => {
+                let _ = reply.send(wayland::wm::view(state));
+            }
+            ThreadCommand::WindowRequest { id, request, reply } => {
+                let known = wayland::wm::rect_of(state, id).is_some();
+                let _ = reply.send(known && wayland::wm::request(state, id, request));
+            }
             ThreadCommand::ListWindows { reply } => {
                 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
                 let mut list = Vec::new();
@@ -8622,6 +8640,34 @@ impl Compositor {
             .unwrap_or_default())
     }
 
+    /// The desktop as the installed window policy holds it: every window's place, state, and
+    /// stacking. `None` with no policy installed, or where the compositor does not answer.
+    pub fn desktop_view(&self) -> Result<Option<wm::DesktopView>, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.send(ThreadCommand::DesktopView { reply: reply_tx })
+            .map_err(|e| Error::Compositor(format!("Failed to describe the desktop: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default())
+    }
+
+    /// Ask the installed window policy to act on a window (activate, close, minimize, and the
+    /// like), as a taskbar asks. False with no policy installed, for a window the policy has
+    /// not placed, or where the compositor does not answer; the policy decides what becomes of
+    /// the request.
+    pub fn window_request(&self, id: wm::WindowId, request: wm::Request) -> Result<bool, Error> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.send(ThreadCommand::WindowRequest {
+            id,
+            request,
+            reply: reply_tx,
+        })
+        .map_err(|e| Error::Compositor(format!("Failed to send a window request: {e}")))?;
+        Ok(reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false))
+    }
+
     /// Recreate the cursor theme at `size` pixels — no restart: subsequent named-cursor
     /// callbacks and the burned-in cursor overlay render at the new size. False for a
     /// non-positive size.
@@ -9272,6 +9318,18 @@ pub fn install_window_policy(policy: Box<dyn crate::wm::WindowPolicy>) -> Result
     running_compositor()
         .ok_or_else(|| Error::Compositor("no compositor is running".to_string()))?
         .install_window_policy(policy)
+}
+
+/// The desktop as the window policy installed on the running compositor holds it; `None` where
+/// no compositor runs or none has a policy.
+pub fn desktop_view() -> Option<wm::DesktopView> {
+    running_compositor()?.desktop_view().ok().flatten()
+}
+
+/// Ask the window policy installed on the running compositor to act on a window; false where
+/// no compositor runs or none has a policy.
+pub fn window_request(id: wm::WindowId, request: wm::Request) -> bool {
+    running_compositor().is_some_and(|be| be.window_request(id, request).unwrap_or(false))
 }
 
 /// Start Xwayland on the running compositor; `notify` is told the display number.

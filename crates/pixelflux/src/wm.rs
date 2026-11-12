@@ -607,11 +607,54 @@ pub enum Command {
     Desktops { count: u32, current: u32 },
 }
 
+/// One window as the policy holds it, for a consumer that describes the desktop.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WindowView {
+    pub info: WindowInfo,
+    /// The client area in logical layout coordinates.
+    pub rect: Rect,
+    /// The frame the policy draws around the client area.
+    pub frame: Extents,
+    /// Where the origin of the client's own coordinates lies in logical layout coordinates.
+    /// A Wayland client counts from its surface's corner, which lies outside `rect` by the
+    /// shadow it draws itself (the xdg window geometry's offset); an X11 client from its
+    /// window's corner, which is `rect`'s. The policy answers `rect`'s corner and the backend
+    /// that knows the surface corrects it.
+    pub origin: (i32, i32),
+    pub states: States,
+    pub shaded: bool,
+    /// Whether the client has drawn the window.
+    pub mapped: bool,
+    /// The virtual desktop the window is on, counted from zero; `None` for every desktop.
+    pub desktop: Option<u32>,
+    /// Whether a taskbar and the window switcher list the window.
+    pub listed: bool,
+}
+
+/// The desktop as the policy holds it at one moment: what a consumer needs to say where every
+/// window is and which one a click at a point reaches.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DesktopView {
+    pub outputs: Vec<OutputInfo>,
+    /// Every window the policy manages; the shown ones in stacking order, bottom first, after
+    /// the ones that are not.
+    pub windows: Vec<WindowView>,
+    pub focus: Option<WindowId>,
+    pub desktop_count: u32,
+    pub current_desktop: u32,
+}
+
 /// A window manager's decisions for the compositor; see the module documentation.
 pub trait WindowPolicy: Send {
     /// Handle one event, pushing the commands it leads to onto `out`, and say whether an input
     /// event was taken. The verdict is read for [`Event::Pointer`] and [`Event::Key`] alone.
     fn handle(&mut self, event: Event, out: &mut Vec<Command>) -> Verdict;
+
+    /// The desktop as the policy holds it now. Asked from the thread that calls
+    /// [`WindowPolicy::handle`], between events, so it must not block either.
+    fn view(&self) -> DesktopView {
+        DesktopView::default()
+    }
 }
 
 /// The interval between effect frames when no capture paces them: a frame at 60 Hz.

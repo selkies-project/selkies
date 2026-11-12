@@ -131,9 +131,12 @@ fn no_cache(response: &mut Response) {
 }
 
 /// The route for everything no API route took: `{prefix}/` is the entry page, after the
-/// IPv6-loopback check, and `{prefix}/<file>` a file of the client; anything outside the
-/// prefix, or with no web client, is 404. Under the prefix, a method other than `GET` and
-/// `HEAD` is 405, as the client's catch-all route answered it in 2.2.1.
+/// IPv6-loopback check, `{prefix}/pelorus/` the Pelorus page where Pelorus is on, and
+/// `{prefix}/<file>` a file of the client; anything outside the prefix, under `pelorus` with
+/// Pelorus off, or with no web client, is 404. Under the prefix, a method other than `GET` and
+/// `HEAD` is 405, as the client's catch-all route answered it in 2.2.1. Each of these is
+/// decided on the percent-decoded name the file is looked up by, never on the path as spelled,
+/// so an encoded letter reaches nothing the plain one would not.
 pub async fn fallback(
     State(state): State<AppState>,
     OriginalUri(original): OriginalUri,
@@ -147,6 +150,13 @@ pub async fn fallback(
     let Some(rel) = path.strip_prefix(prefix).and_then(|r| r.strip_prefix('/')) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let decoded = percent_encoding::percent_decode_str(rel)
+        .decode_utf8_lossy()
+        .into_owned();
+    let pelorus = decoded == PELORUS || decoded.starts_with(PELORUS_DIR);
+    if pelorus && !state.config.pelorus {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let (parts, _body) = request.into_parts();
     if parts.method != Method::GET && parts.method != Method::HEAD {
         return (
@@ -155,12 +165,21 @@ pub async fn fallback(
         )
             .into_response();
     }
-    if rel.is_empty() {
+    if decoded.is_empty() {
         return index(&state, client, &parts).await;
     }
-    let decoded = percent_encoding::percent_decode_str(rel)
-        .decode_utf8_lossy()
-        .into_owned();
+    if decoded == PELORUS {
+        return (
+            StatusCode::PERMANENT_REDIRECT,
+            [(header::LOCATION, HeaderValue::from_static(PELORUS_DIR))],
+        )
+            .into_response();
+    }
+    let (rel, decoded) = if decoded == PELORUS_DIR {
+        (PELORUS_PAGE, PELORUS_PAGE.to_string())
+    } else {
+        (rel, decoded)
+    };
     let mut response = match client {
         WebClient::Embedded(table) => embedded::serve(table, &parts, &decoded).await,
         WebClient::Directory(root) => {
@@ -178,11 +197,18 @@ pub async fn fallback(
             .await
         }
     };
-    if revalidates(&decoded) {
+    if revalidates(&decoded) || decoded == PELORUS_PAGE {
         no_cache(&mut response);
     }
     response
 }
+
+/// Where the Pelorus page lives in the client: `pelorus` moves a browser to `pelorus/`, the
+/// directory whose relative addresses the page and its API share, and `pelorus/` is the page.
+/// With `pelorus` off nothing under it is served: the page is closed with its API.
+const PELORUS: &str = "pelorus";
+const PELORUS_DIR: &str = "pelorus/";
+const PELORUS_PAGE: &str = "pelorus/index.html";
 
 /// Whether `name` under `root` resolves to a file inside it: a symlink leading out of the
 /// web root is not served, whatever it names.

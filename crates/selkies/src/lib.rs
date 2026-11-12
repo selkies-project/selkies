@@ -25,6 +25,7 @@ pub mod gamepad;
 pub mod http;
 pub mod input;
 pub mod log;
+pub mod pelorus;
 pub mod server;
 pub mod session_screens;
 pub mod settings;

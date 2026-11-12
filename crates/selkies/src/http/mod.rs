@@ -105,6 +105,9 @@ pub struct HttpConfig {
     pub ui_layout: String,
     pub ui_layout_allowed: Vec<String>,
     pub enable_metrics_http: bool,
+    /// Whether Pelorus is served (`pelorus`): its page under `pelorus/`, and its API, which the
+    /// server mounts beside these routes.
+    pub pelorus: bool,
     /// Whether a viewer-role token may hold input under an mk token (`enable_collab`).
     pub enable_collab: bool,
     pub web_root: String,
@@ -130,6 +133,7 @@ impl HttpConfig {
             ui_layout: s.ui_layout().to_string(),
             ui_layout_allowed: s.enum_allowed("ui_layout"),
             enable_metrics_http: s.enable_metrics_http().on,
+            pelorus: s.pelorus().on,
             enable_collab: s.enable_collab().on,
             web_root: s.web_root().to_string(),
             tokens_file: s.tokens_file().to_string(),
@@ -177,6 +181,7 @@ impl Default for HttpConfig {
             ui_layout: "default".into(),
             ui_layout_allowed: vec!["default".into(), "wish".into(), "edge".into()],
             enable_metrics_http: false,
+            pelorus: false,
             enable_collab: true,
             web_root: String::new(),
             tokens_file: String::new(),

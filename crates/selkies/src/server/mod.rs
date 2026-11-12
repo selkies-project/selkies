@@ -387,11 +387,14 @@ pub async fn run() -> Result<(), String> {
         tokio::runtime::Handle::current(),
     )));
 
-    let extra = vec![
+    let mut extra = vec![
         axum::Router::new().nest("/api", files::router(files_state.clone())),
         ws::routes(service.clone()),
         crate::webrtc::routes(rtc_service.clone()),
     ];
+    if settings().pelorus().on {
+        extra.push(crate::pelorus::routes());
+    }
     let router = http::build(state.clone(), extra);
 
     // The service comes up before the port opens, so a page connecting the moment it accepts
