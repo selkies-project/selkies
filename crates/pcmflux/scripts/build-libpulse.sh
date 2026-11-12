@@ -10,14 +10,19 @@
 # both taking D-Bus and the X11 client libraries along, and Alpine's
 # (musllinux) those and libsndfile's codecs. Each
 # source is checked against the SHA-256 pinned here (PulseAudio's is the sum its
-# release publishes). meson and ninja come from the caller's PATH.
+# release publishes). meson and ninja come from the caller's PATH. Given
+# `daemon`, the PulseAudio server is built beside them from the same release
+# and with the same features left out, for the Selkies bundle, whose session
+# runs it: its own libraries are then the ones the client links.
 #
-# Usage: build-libpulse.sh <prefix> <libdir>   (e.g. /usr lib64)
+# Usage: build-libpulse.sh <prefix> <libdir> [daemon]   (e.g. /usr lib64)
 
 set -eu
 
 PREFIX="${1:?usage: build-libpulse.sh <prefix> <libdir>}"
 LIBDIR="${2:?usage: build-libpulse.sh <prefix> <libdir>}"
+DAEMON=false
+[ "${3:-}" = daemon ] && DAEMON=true
 SNDFILE=1.2.2
 SNDFILE_SHA256=3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e
 PULSE=17.0
@@ -65,7 +70,7 @@ fi
 
 PKG_CONFIG_PATH="${work}/sndfile/lib/pkgconfig" meson setup "${work}/pulse-build" "${work}/pulse-src" \
     --prefix="${PREFIX}" --libdir="${LIBDIR}" --buildtype=release -Dc_link_args="${link_args}" \
-    -Ddaemon=false -Dclient=true -Ddoxygen=false -Dman=false -Dtests=false -Ddatabase=simple \
+    -Ddaemon="${DAEMON}" -Dclient=true -Ddoxygen=false -Dman=false -Dtests=false -Ddatabase=simple \
     -Dalsa=disabled -Dasyncns=disabled -Davahi=disabled -Dbluez5=disabled -Dconsolekit=disabled \
     -Ddbus=disabled -Delogind=disabled -Dfftw=disabled -Dglib=disabled -Dgstreamer=disabled \
     -Dgtk=disabled -Djack=disabled -Dlirc=disabled -Dopenssl=disabled -Dorc=disabled \

@@ -70,6 +70,17 @@ Given `session` as its first argument, it runs a whole session instead, with its
 
 What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL`, and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
 
+## The bundle
+
+`selkies-<version>-linux-<architecture>.tar.gz` is one directory, unpacked anywhere, that brings the whole session with it on any distribution with glibc 2.28 or newer: the server and the desktop shell, XLibre's Xvfb with Selkies' patches, Xwayland, `xkbcomp` and the xkb data, PulseAudio, `dbus-daemon`, and the interposers. `selkies session` started from its `bin/` takes each of those from the bundle, so a host needs no X server, sound server, or bus of its own:
+
+```bash
+tar -xzf "selkies-${SELKIES_VERSION}-linux-$(uname -m).tar.gz"
+"./selkies-${SELKIES_VERSION}-linux-$(uname -m)/bin/selkies" session --public --port=8080 --basic-auth-password=mypasswd
+```
+
+The X servers and `xkbcomp` link glibc alone and find their xkb data beside themselves. What the host still provides is glibc, `libstdc++`, and, for the GPU, its driver's own libraries: `libgbm`, `libEGL`, and `libGL` are opened at run time where the host has them, and a host without them runs the session in software. The libraries the bundled programs link that a host may lack are under `lib/selkies`, each found through a run path relative to the program, so none of them is offered to the host's GPU driver in the same process.
+
 ## Run a session
 
 A native package installs Selkies but starts nothing: it attaches to a display and an audio server you provide. The container and the AppImage both bring their own, so skip this if you took one of those.

@@ -84,9 +84,9 @@ CRATE_VERSION="$(crate_version "${SELKIES_VERSION:-0.0.0}")"
 SRC="${BUILD}/server"
 rm -rf "${SRC}"
 mkdir -p "${SRC}"
-cp -r "${REPO}/Cargo.toml" "${REPO}/Cargo.lock" "${REPO}/crates" "${SRC}/"
+cp -a "${REPO}/Cargo.toml" "${REPO}/Cargo.lock" "${REPO}/crates" "${SRC}/"
 mkdir -p "${SRC}/dist"
-cp -r "${REPO}/dist/web" "${SRC}/dist/web"
+cp -a "${REPO}/dist/web" "${SRC}/dist/web"
 chmod -R u+w "${SRC}"
 export SELKIES_WEB_DIST="${SRC}/dist/web"
 # Every public crate carries the release version
@@ -121,10 +121,11 @@ if [ -n "${WHEEL_OUT}" ]; then
     exit 0
 fi
 
-CARGO_TARGET_DIR="${BUILD}/target" cargo build --release --locked -p selkies \
+PROFILE="${SELKIES_CARGO_PROFILE:-release}"
+CARGO_TARGET_DIR="${BUILD}/target" cargo build --profile "${PROFILE}" --locked -p selkies \
     --manifest-path "${SRC}/Cargo.toml"
 
-install -Dm755 "${BUILD}/target/release/selkies" "${PKG_ROOT}/usr/bin/selkies"
+install -Dm755 "${BUILD}/target/${PROFILE}/selkies" "${PKG_ROOT}/usr/bin/selkies"
 # Fails the package build rather than shipping a server that cannot start, one
 # reporting a version other than the package's, or one without its client
 "${PKG_ROOT}/usr/bin/selkies" --version | grep -F "selkies ${CRATE_VERSION} (pixelflux ${CRATE_VERSION} ("

@@ -1,0 +1,43 @@
+--- a/xkb/xkbInit.c	2026-11-12 17:18:30.046788293 -0500
++++ b/xkb/xkbInit.c	2026-11-12 17:18:30.046788293 -0500
+@@ -32,6 +32,7 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <ctype.h>
+ #include <unistd.h>
+ #include <math.h>
+@@ -87,6 +88,32 @@
+ 
+ const char *XkbBaseDirectory = XKB_BASE_DIRECTORY;
+ const char *XkbBinDirectory = XKB_BIN_DIRECTORY;
++
++/*
++ * A relocatable build names its xkb data and its keymap compiler relative to the directory
++ * the server runs from (-Dxkb_dir, -Dxkb_bin_dir), so a server unpacked anywhere finds the
++ * copies it was shipped with; an absolute path, the usual build's, is taken as it stands, and
++ * -xkbdir still overrides the data directory once the arguments are read.
++ */
++static void __attribute__((constructor))
++XkbLocateRelativeDirectories(void)
++{
++    char exe[4096];
++    char *slash, *dir;
++    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
++
++    if (len <= 0)
++        return;
++    exe[len] = '\0';
++    slash = strrchr(exe, '/');
++    if (!slash)
++        return;
++    *slash = '\0';
++    if (XkbBaseDirectory[0] != '/' && asprintf(&dir, "%s/%s", exe, XkbBaseDirectory) != -1)
++        XkbBaseDirectory = dir;
++    if (XkbBinDirectory[0] != '/' && asprintf(&dir, "%s/%s", exe, XkbBinDirectory) != -1)
++        XkbBinDirectory = dir;
++}
+ static int XkbWantAccessX = 0;
+ 
+ static char *XkbRulesDflt = NULL;

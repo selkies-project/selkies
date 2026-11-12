@@ -21,8 +21,14 @@ TREE="$1"
 . "$(dirname "$0")/version.sh"
 CRATE_VERSION="$(crate_version "$2")"
 
+# Rewrite $1 through sed expression $2 only where that changes it, so a file that
+# already reads the version keeps its time and Cargo the build it made from it
+rewrite() {
+    sed "$2" "$1" > "$1.stamp"
+    if cmp -s "$1" "$1.stamp"; then rm -f "$1.stamp"; else mv "$1.stamp" "$1"; fi
+}
 stamp_manifest() {
-    sed -i "1,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|" "$1"
+    rewrite "$1" "1,/^version = /s|^version = .*|version = \"${CRATE_VERSION}\"|"
     grep -q "^version = \"${CRATE_VERSION}\"$" "$1" || {
         echo "stamp-version.sh: $1 does not read ${CRATE_VERSION}" >&2
         exit 1
@@ -30,7 +36,7 @@ stamp_manifest() {
 }
 
 stamp_lock() {
-    sed -i "/^name = \"$2\"$/{n;s|^version = .*|version = \"${CRATE_VERSION}\"|}" "$1"
+    rewrite "$1" "/^name = \"$2\"$/{n;s|^version = .*|version = \"${CRATE_VERSION}\"|}"
     grep -A1 "^name = \"$2\"$" "$1" | grep -q "^version = \"${CRATE_VERSION}\"$" || {
         echo "stamp-version.sh: $2 in $1 does not read ${CRATE_VERSION}" >&2
         exit 1
