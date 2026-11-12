@@ -1,3 +1,20 @@
+diff --git a/src/association/association_test.rs b/src/association/association_test.rs
+index c91f232..1efe699 100644
+--- a/src/association/association_test.rs
++++ b/src/association/association_test.rs
+@@ -967,10 +967,10 @@ fn test_timed_abandonment_preserves_t3_restart_for_outstanding_data() -> Result<
+             ..Default::default()
+         };
+         a.handle_sack(&sack, at)?;
+-        assert_eq!(Some(at + Duration::from_secs(2)), a.poll_timeout());
++        assert_eq!(Some(at + Duration::from_secs(1)), a.poll_timeout());
+         a.handle_sack(&sack, at + Duration::from_millis(100))?;
+         assert_eq!(
+-            Some(at + Duration::from_secs(2)),
++            Some(at + Duration::from_secs(1)),
+             a.poll_timeout(),
+             "duplicate SACK must not restart T3"
+         );
 diff --git a/src/association/mod.rs b/src/association/mod.rs
 index f29e75c..3973b87 100644
 --- a/src/association/mod.rs
@@ -349,16 +366,37 @@ index f29e75c..3973b87 100644
      /// This is used only by testing.
      pub(crate) fn buffered_amount(&self) -> usize {
 diff --git a/src/association/retransmission_review_test.rs b/src/association/retransmission_review_test.rs
-index df2b65a..7138ec3 100644
+index df2b65a..c15b713 100644
 --- a/src/association/retransmission_review_test.rs
 +++ b/src/association/retransmission_review_test.rs
-@@ -302,7 +302,8 @@ fn public_rtt_reports_measurements_independently_of_backoff() {
+@@ -223,14 +223,18 @@ fn t2_backoff_does_not_compound_simultaneous_t3_expirations() -> Result<()> {
+         a.timers.start(Timer::T3RTX, now, 1000);
+         for interval in [2, 4, 8, 16] {
+             now = a.timers.get(Timer::T2Shutdown).unwrap();
+-            assert_eq!(Some(now), a.timers.get(Timer::T3RTX));
++            assert!(a.timers.get(Timer::T3RTX).is_some_and(|t3| t3 <= now));
+             a.handle_timeout(now);
+             let deadline = now + Duration::from_secs(interval);
+             assert_eq!(Some(deadline), a.timers.get(Timer::T2Shutdown));
+             let packets = a.gather_outbound(now).0;
+             assert!(!packets.is_empty());
+             assert_eq!(Some(deadline), a.timers.get(Timer::T2Shutdown));
+-            assert_eq!(Some(deadline), a.timers.get(Timer::T3RTX));
++            // T3 holds at the backoff cap while T2 keeps doubling its own interval.
++            assert_eq!(
++                Some(now + Duration::from_secs(1)),
++                a.timers.get(Timer::T3RTX)
++            );
+         }
+     }
+     Ok(())
+@@ -302,7 +306,8 @@ fn public_rtt_reports_measurements_independently_of_backoff() {
          a.rto_mgr.backoff();
          assert_eq!(Duration::from_millis(80), a.rtt());
      }
 -    assert_eq!(16_000, a.rto_mgr.get_rto());
-+    // 240 ms measured, raised to the 400 ms floor, then doubled four times.
-+    assert_eq!(6_400, a.rto_mgr.get_rto());
++    // 240 ms measured, raised to the 400 ms floor, then doubled up to the backoff cap.
++    assert_eq!(1_000, a.rto_mgr.get_rto());
      a.rto_mgr.set_new_rtt(160);
      assert_eq!(Duration::from_millis(90), a.rtt());
  }
@@ -439,7 +477,7 @@ index e95b620..01bfd07 100644
  
      #[test]
 diff --git a/src/association/timer_deadline_test.rs b/src/association/timer_deadline_test.rs
-index 5ea308b..0eec170 100644
+index 5ea308b..9e7ccbf 100644
 --- a/src/association/timer_deadline_test.rs
 +++ b/src/association/timer_deadline_test.rs
 @@ -139,7 +139,7 @@ fn due_t3_survives_forward_only_sack_and_same_instant_is_idempotent() -> Result<
@@ -451,6 +489,27 @@ index 5ea308b..0eec170 100644
      assert_eq!(a.inflight_queue.get_num_bytes(), 0);
      assert_eq!(a.inflight_queue.len(), 1);
      assert!(a.inflight_queue.get(first).unwrap().abandoned());
+@@ -173,9 +173,9 @@ fn due_t3_survives_forward_only_sack_and_same_instant_is_idempotent() -> Result<
+     assert_eq!(a.timers.get(Timer::T3RTX), Some(forward_deadline));
+     a.handle_timeout(due);
+     assert_eq!(a.stats.get_num_t3timeouts(), 2);
+-    assert_eq!(a.rto_mgr.get_rto(), 4000);
++    assert_eq!(a.rto_mgr.get_rto(), 1000);
+     let rearmed = a.timers.get(Timer::T3RTX);
+-    assert_eq!(rearmed, Some(due + Duration::from_millis(4000)));
++    assert_eq!(rearmed, Some(due + Duration::from_millis(1000)));
+     let packets = a.gather_outbound(due).0;
+     assert!(transmitted_data(&packets).is_empty());
+     assert!(has_forward(&packets));
+@@ -184,7 +184,7 @@ fn due_t3_survives_forward_only_sack_and_same_instant_is_idempotent() -> Result<
+     // expiration must neither fire twice nor double RTO a second time.
+     a.handle_timeout(due);
+     assert_eq!(a.stats.get_num_t3timeouts(), 2);
+-    assert_eq!(a.rto_mgr.get_rto(), 4000);
++    assert_eq!(a.rto_mgr.get_rto(), 1000);
+     assert_eq!(a.timers.get(Timer::T3RTX), rearmed);
+ 
+     a.handle_sack(
 diff --git a/src/chunk/chunk_abort.rs b/src/chunk/chunk_abort.rs
 index a86f999..8229c79 100644
 --- a/src/chunk/chunk_abort.rs

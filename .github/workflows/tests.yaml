@@ -204,6 +204,8 @@ jobs:
           echo "PULSE_SERVER=unix:$(pactl info | sed -n 's/^Server String: //p')" >> "$GITHUB_ENV"
       - name: cargo test
         run: cargo test --locked --workspace
+      - name: cargo test (vendored rtc crates)
+        run: scripts/ci/test-vendored.sh
 
   # The server the suites drive is the one this run's selkies wheel carries,
   # and the pixelflux and pcmflux they drive beside it ride wheels this run has in
