@@ -15,7 +15,8 @@
 # under PA_STATUS; an INT or TERM during a download removes the partial folder;
 # a folder still marked DOWNLOADING is started over by install and get and is
 # absent to run and update; a `list` command; the system socket's listener
-# started under umask 077; and its expansions quoted, its proot binds held in
+# started under umask 077; an update whose registry lookup fails keeps the
+# installed copy; and its expansions quoted, its proot binds held in
 # arrays, and its app folders globbed, as shellcheck asks.
 
 TYPE=$1
@@ -50,7 +51,7 @@ app_present() {
   [ -d "$ROOT_DIR/${1}" ] && [ ! -f "$ROOT_DIR/${1}/DOWNLOADING" ]
 }
 
-# Get sha for image to download
+# Get sha for image to download, failing when no manifest is for this arch
 get_blob_sha() {
   MULTIDIGEST=$(curl -s -f --retry 3 --retry-max-time 20 --retry-connrefused \
     --location \
@@ -72,7 +73,7 @@ get_blob_sha() {
       # If there's still more than one digest, it's multi-arch
       MULTIDIGEST=$("$HOME/.local/bin/jq" -r ".manifests[] | select(.platform.architecture == \"${4}\").digest?" <<< "${MULTIDIGEST}")
       if [[ -z "${MULTIDIGEST}" ]]; then
-        cleanup
+        return 1
       fi
     else
       # Otherwise it's single arch
@@ -257,7 +258,14 @@ function update() {
     ARCH=$(uname -m| sed 's/x86_64/amd64/g'| sed 's/aarch64/arm64/')
     UA="Mozilla/5.0 (Linux $(uname -m)) kasmweb.com"
     registry_setup "${IMAGE}"
-    SHALAYER=$(get_blob_sha "${TOKEN}" "${MANIFEST_URL}" "${TAG}" "${ARCH}")
+    # A lookup that fails leaves the installed copy as it is
+    if ! SHALAYER=$(get_blob_sha "${TOKEN}" "${MANIFEST_URL}" "${TAG}" "${ARCH}"); then
+      echo "No manifest available for ${IMAGE}, keeping the installed copy"
+      exit 1
+    elif [[ -z "${SHALAYER}" ]]; then
+      echo "${IMAGE} digest could not be fetched from ${REGISTRY}, keeping the installed copy"
+      exit 1
+    fi
   fi
   if [[ "${SHALAYER}" == "${LOCAL_SHA}" ]]; then
     echo "${IMAGE} is up to date: ${LOCAL_SHA}"
