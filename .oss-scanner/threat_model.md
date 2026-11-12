@@ -70,6 +70,21 @@
   a `desktop-entry` hint naming a path is ignored, every image is shrunk to 128 pixels, and the shell keeps at
   most 64 notifications, closing the oldest. A caller can show text and an image on the user's screen and learn
   when the user invoked one of its actions; nothing it sends is run, opened, or written.
+- Under `--pelorus` (`crates/selkies/src/pelorus.rs` and `pelorus/`, the `pelorus` crate's accessibility-bus reader,
+  the dashboard's `src/pelorus`): routes under `/pelorus` that every credential short of the controller's is refused
+  (the desktop as text, the agent's tools, `api/run`, `api/models`, `api/models/names`, `api/session`). A run hands
+  the model the session user's reach: input through Computer Use, and the `shell` tool where `--command-enabled`
+  allows it, so what the model reads on screen is untrusted input steering the session user's own power; a model
+  that is talked into acting is the session user acting, never more. A saved configuration's endpoint is an
+  address the server fetches for the controller who saved it, which a locked `--pelorus` (`true|locked`) refuses
+  along with every change to the model. Keys: `--pelorus-api-key` from the settings; a key saved from the interface
+  and kept on the server, in `~/.config/selkies/pelorus.json` (mode 0600, so readable by the session user and by
+  anything running as that user, the agent's own shell among them); or a key sealed by the browser that saved it,
+  where that file holds only AES-GCM ciphertext under a non-extractable Web Crypto key kept in that browser's
+  IndexedDB (`keys.ts`), and the browser sends the opened key with each run and model listing, used for that request
+  alone and never written (`configs.rs`, `opened`). No listing returns a kept key. Sealing keeps the key from a
+  reader of the file and its copies; it is no defense against whoever controls the server, which receives every key
+  a run is sent and serves the page that opens them.
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
   `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
   write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose

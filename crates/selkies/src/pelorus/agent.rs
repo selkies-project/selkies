@@ -329,7 +329,8 @@ pub async fn run(
 /// `POST /pelorus/api/run`: give the agent a task. The body names the `prompt`, a `session`
 /// to continue (a new one where absent), `stream` for a server-sent stream of events instead
 /// of one answer, the `config` to run on (the default where absent), and what of it the
-/// request changes (`model`, `effort`, `vision`), with `max_steps` to end sooner, `suffix`
+/// request changes (`model`, `effort`, `vision`), the `api_key` a sealed configuration's
+/// browser opened (used for this run alone), with `max_steps` to end sooner, `suffix`
 /// for instructions of the person's own after the server's, and `screenshots` to be sent the
 /// screen as the run goes.
 /// Closing a stream stops its run. With `transcript`, an answer that is not a stream carries
@@ -357,7 +358,13 @@ pub async fn handle_run(ceiling: Ceiling, body: Bytes) -> Response {
             .filter(|v| !v.is_empty())
     };
     let vision = request.get("vision").and_then(Json::as_bool);
-    let model = match configs::resolve(asked("config"), asked("model"), asked("effort"), vision) {
+    let model = match configs::resolve(
+        asked("config"),
+        asked("model"),
+        asked("effort"),
+        vision,
+        asked("api_key"),
+    ) {
         Ok(model) => model,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
     };

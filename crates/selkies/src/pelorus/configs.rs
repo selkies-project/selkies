@@ -21,6 +21,18 @@
 //! meant to reach one application and nothing else is more than its user holds otherwise;
 //! the lock is how such a session keeps that. A key is taken and never given back: a listing
 //! says only whether one is set.
+//!
+//! A key saved from the interface is kept one of two ways. Kept on the server, it is in the
+//! file as typed, and any caller holding the controller's credential can run on it: the
+//! dashboard of any browser, a script against `/pelorus/api/run`. Sealed, the file holds
+//! only what the browser that saved it encrypted (`sealed`), under a key that browser keeps
+//! and never sends; the browser opens it and sends the key with each run and each model
+//! listing, which the server uses for that request alone and never writes. The file, its
+//! backups, and anything of the session user's that reads it (the agent's own shell among
+//! them) then find nothing they can use. It is no defense against a server someone controls,
+//! which sees every key a run is sent and serves the page that opens them, and a configuration
+//! sealed by one browser runs from that browser alone. Sealed and kept are exclusive: saving a
+//! key one way drops the other.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -58,6 +70,10 @@ pub struct Saved {
     pub model: String,
     #[serde(default)]
     pub api_key: String,
+    /// The key as the browser that saved it sealed it, opaque here; empty where the key, if
+    /// any, is `api_key`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sealed: String,
     #[serde(default)]
     pub effort: String,
     #[serde(default)]
@@ -82,7 +98,7 @@ impl Saved {
         if endpoint.is_empty() {
             return Err(format!("\"{}\" names no endpoint.", self.name));
         }
-        if self.api_key.is_empty() && provider.key == Key::Required {
+        if self.api_key.is_empty() && self.sealed.is_empty() && provider.key == Key::Required {
             return Err(format!("\"{}\" has no API key.", self.name));
         }
         if !self.effort.is_empty() && !EFFORTS.contains(&self.effort.as_str()) {
@@ -98,7 +114,8 @@ impl Saved {
         })
     }
 
-    /// The configuration as a client is shown it: everything but the key.
+    /// The configuration as a client is shown it: everything but the key, with the sealed one
+    /// for the browser that holds what opens it.
     fn listed(&self, editable: bool) -> Json {
         let provider = Provider::named(&self.provider);
         let shown = |value: &str, default: &str| {
@@ -117,7 +134,8 @@ impl Saved {
             "model": shown(&self.model, provider.map_or("", |p| p.model)),
             "effort": shown(&self.effort, "default"),
             "vision": self.vision,
-            "has_key": !self.api_key.is_empty(),
+            "has_key": !self.api_key.is_empty() || !self.sealed.is_empty(),
+            "sealed": self.sealed,
             "default": self.default,
             "editable": editable,
             "usable": self.model().is_ok(),
@@ -144,6 +162,7 @@ fn from_settings() -> Saved {
         endpoint: s.pelorus_endpoint().to_string(),
         model: s.pelorus_model().to_string(),
         api_key: s.pelorus_api_key().to_string(),
+        sealed: String::new(),
         effort: s.pelorus_effort().to_string(),
         vision: s.pelorus_vision().on,
         default: false,
@@ -229,12 +248,14 @@ fn all() -> Vec<(Saved, bool)> {
 
 /// The model a run takes: the configuration `id` names, else the default one, with the model
 /// name and effort a request asks for in place of its own. Under the lock a request changes
-/// neither.
+/// neither. A sealed configuration runs on the `key` its browser opened and sent, and on
+/// nothing else; a kept one ignores any key sent.
 pub fn resolve(
     id: Option<&str>,
     name: Option<&str>,
     effort: Option<&str>,
     vision: Option<bool>,
+    key: Option<&str>,
 ) -> Result<Model, String> {
     let list = all();
     let config = match id {
@@ -247,7 +268,7 @@ pub fn resolve(
                  --pelorus-api-key (SELKIES_PELORUS_API_KEY) on the server."
             .to_string(),
     })?;
-    let mut config = config.clone();
+    let mut config = opened(config.clone(), key)?;
     let changes = name.is_some() || effort.is_some() || vision.is_some();
     if changes && locked() {
         return Err("The model is fixed by the server's settings in this session.".to_string());
@@ -262,6 +283,22 @@ pub fn resolve(
         config.vision = vision;
     }
     config.model()
+}
+
+/// A configuration ready to run: a sealed one with the `key` its browser sent in its place,
+/// failing where none was sent; a kept one as it is, whatever was sent.
+fn opened(mut config: Saved, key: Option<&str>) -> Result<Saved, String> {
+    if !config.sealed.is_empty() {
+        let Some(key) = key.filter(|key| !key.is_empty()) else {
+            return Err(format!(
+                "The key of \"{}\" is sealed by the browser that saved it: run it from that browser.",
+                config.name
+            ));
+        };
+        config.api_key = key.to_string();
+        config.sealed.clear();
+    }
+    Ok(config)
 }
 
 /// The text of a field of a request, trimmed; `None` where it is absent.
@@ -287,6 +324,16 @@ fn merged(base: Saved, request: &Json) -> Result<Saved, String> {
     }
     if let Some(key) = field(request, "api_key").filter(|key| !key.is_empty()) {
         config.api_key = key.to_string();
+        config.sealed.clear();
+    }
+    if let Some(sealed) = field(request, "sealed") {
+        if !is_sealed_key(sealed) {
+            return Err("The sealed key does not read.".to_string());
+        }
+        config.sealed = sealed.to_string();
+        if !sealed.is_empty() {
+            config.api_key.clear();
+        }
     }
     if let Some(effort) = field(request, "effort") {
         config.effort = effort.to_string();
@@ -317,6 +364,15 @@ fn merged(base: Saved, request: &Json) -> Result<Saved, String> {
         return Err(format!("{} needs an endpoint.", provider.label));
     }
     Ok(config)
+}
+
+/// Whether `sealed` is what a browser seals a key into, or empty: a bounded run of the
+/// characters its encoding uses. The server never reads it beyond that.
+fn is_sealed_key(sealed: &str) -> bool {
+    sealed.len() <= 4096
+        && sealed.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+' | b'/' | b'=')
+        })
 }
 
 /// The answer to every request that would change or probe a configuration under the lock.
@@ -474,7 +530,8 @@ pub async fn handle_delete(ceiling: Ceiling, Path(id): Path<String>) -> Response
 
 /// `POST /pelorus/api/models/names`: the models a provider offers, for a form's list: with an
 /// `id`, as that configuration reaches it, any other field of the request in place of the
-/// saved one (an endpoint or key typed and not yet saved).
+/// saved one (an endpoint or key typed and not yet saved). A sealed configuration is asked
+/// with the key its browser sends, or none.
 pub async fn handle_names(ceiling: Ceiling, body: Bytes) -> Response {
     if ceiling.is_viewer() {
         return refused();
@@ -490,6 +547,9 @@ pub async fn handle_names(ceiling: Ceiling, body: Bytes) -> Response {
         .map(|(c, _)| c)
         .unwrap_or_default();
     let mut config = base;
+    if !config.sealed.is_empty() {
+        config.api_key.clear();
+    }
     if let Some(provider) = field(&request, "provider") {
         config.provider = provider.to_string();
     }
@@ -558,6 +618,32 @@ mod tests {
         assert_eq!(listed["has_key"], true);
         assert!(!listed.to_string().contains("secret"));
         assert_eq!(listed["effort"], "default");
+    }
+
+    #[test]
+    fn a_sealed_key_and_a_kept_one_replace_each_other() {
+        let sealed = merged(saved_config(), &json!({"sealed": "v1.ab12.iv.data+/="})).unwrap();
+        assert_eq!(sealed.api_key, "");
+        assert_eq!(sealed.sealed, "v1.ab12.iv.data+/=");
+        let listed = sealed.listed(true);
+        assert_eq!(listed["has_key"], true);
+        assert_eq!(listed["usable"], true);
+        let kept = merged(sealed.clone(), &json!({"api_key": "fresh"})).unwrap();
+        assert_eq!(kept.api_key, "fresh");
+        assert_eq!(kept.sealed, "");
+        assert!(merged(saved_config(), &json!({"sealed": "<script>"})).is_err());
+        assert!(merged(saved_config(), &json!({"sealed": "a".repeat(5000)})).is_err());
+    }
+
+    #[test]
+    fn a_sealed_configuration_runs_only_on_the_key_its_browser_sends() {
+        let sealed = merged(saved_config(), &json!({"sealed": "v1.ab12.iv.data"})).unwrap();
+        assert!(opened(sealed.clone(), None).unwrap_err().contains("sealed"));
+        assert!(opened(sealed.clone(), Some("")).is_err());
+        let run = opened(sealed, Some("opened")).unwrap();
+        assert_eq!(run.model().unwrap().api_key, "opened");
+        let kept = opened(saved_config(), Some("sent")).unwrap();
+        assert_eq!(kept.api_key, "secret");
     }
 
     #[test]
