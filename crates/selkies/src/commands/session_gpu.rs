@@ -25,7 +25,7 @@
 //!    server's glamor draws on, Mesa reaches a GPU it has no driver of its own for through Zink
 //!    where the Vulkan driver can present into a window, and a Wayland session whose compositor
 //!    cannot reach a GPU that is here runs on X11 instead, where the session still gets it, unless
-//!    `SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland in software. `DISABLE_ZINK=true` keeps
+//!    `SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland in software. `SELKIES_DISABLE_ZINK=true` keeps
 //!    Zink out. The facts are exported as the probe names them, for what reads them later.
 
 use std::collections::BTreeMap;
@@ -391,8 +391,8 @@ pub fn plan(
     match fact(&facts, "SELKIES_GPU_MESA_DRIVER").as_str() {
         "native" => gl.push_str(", Mesa on its own driver"),
         "zink" => {
-            if is_true(get("DISABLE_ZINK").as_deref()) {
-                gl.push_str(", Mesa in software (DISABLE_ZINK is set)");
+            if is_true(get("SELKIES_DISABLE_ZINK").as_deref()) {
+                gl.push_str(", Mesa in software (SELKIES_DISABLE_ZINK is set)");
             } else if fact(&facts, "SELKIES_GPU_VULKAN_PRESENTS") == "false" {
                 gl.push_str(", Mesa in software: the Vulkan driver cannot present into a window");
             } else {
@@ -519,7 +519,7 @@ mod tests {
             "a DRI3 server takes Zink's own presentation"
         );
         let off = plan(&facts, false, "", false, |k| {
-            (k == "DISABLE_ZINK").then(|| "true".to_string())
+            (k == "SELKIES_DISABLE_ZINK").then(|| "true".to_string())
         });
         assert!(!off.set.contains_key("GALLIUM_DRIVER"));
     }

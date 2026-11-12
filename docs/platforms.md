@@ -37,7 +37,7 @@ variables alike:
 - **GPU**: what `selkies gpu-probe` finds decides the session's GL: GLX goes to
   the vendor library that renders on the X server's render node, Mesa reaches a
   GPU it has no driver for through Zink where the Vulkan driver can present
-  (`DISABLE_ZINK=true` keeps it out), and a Wayland session whose compositor
+  (`SELKIES_DISABLE_ZINK=true` keeps it out), and a Wayland session whose compositor
   cannot reach a GPU that is here runs on X11 instead
   (`SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland in software). Where a
   container runtime passes in the NVIDIA driver's libraries without the files that
