@@ -14,8 +14,9 @@
 # as the release builds fill it; `##pa phase` lines and curl's --progress-bar
 # under PA_STATUS; an INT or TERM during a download removes the partial folder;
 # a folder still marked DOWNLOADING is started over by install and get and is
-# absent to run and update; a `list` command; and the system socket's listener
-# started under umask 077.
+# absent to run and update; a `list` command; the system socket's listener
+# started under umask 077; and its expansions quoted, its proot binds held in
+# arrays, and its app folders globbed, as shellcheck asks.
 
 TYPE=$1
 DEFAULT_GH_USER=linuxserver
@@ -58,24 +59,24 @@ get_blob_sha() {
     --header "Authorization: Bearer ${1}" \
     --user-agent "${UA}" \
     "${2}/${3}")
-  if $HOME/.local/bin/jq -e '.layers // empty' <<< "${MULTIDIGEST}" >/dev/null 2>&1; then
+  if "$HOME/.local/bin/jq" -e '.layers // empty' <<< "${MULTIDIGEST}" >/dev/null 2>&1; then
     # If there's a layer element it's a single-arch manifest so just get that digest
-    $HOME/.local/bin/jq -r '.layers[0].digest' <<< "${MULTIDIGEST}";
+    "$HOME/.local/bin/jq" -r '.layers[0].digest' <<< "${MULTIDIGEST}";
   else
     # Otherwise it's multi-arch or has manifest annotations
-    if $HOME/.local/bin/jq -e '.manifests[]?.annotations // empty' <<< "${MULTIDIGEST}" >/dev/null 2>&1; then
+    if "$HOME/.local/bin/jq" -e '.manifests[]?.annotations // empty' <<< "${MULTIDIGEST}" >/dev/null 2>&1; then
       # Check for manifest annotations and delete if found
-      MULTIDIGEST=$($HOME/.local/bin/jq 'del(.manifests[] | select(.annotations))' <<< "${MULTIDIGEST}")
+      MULTIDIGEST=$("$HOME/.local/bin/jq" 'del(.manifests[] | select(.annotations))' <<< "${MULTIDIGEST}")
     fi
-    if [[ $($HOME/.local/bin/jq '.manifests | length' <<< "${MULTIDIGEST}") -gt 1 ]]; then
+    if [[ $("$HOME/.local/bin/jq" '.manifests | length' <<< "${MULTIDIGEST}") -gt 1 ]]; then
       # If there's still more than one digest, it's multi-arch
-      MULTIDIGEST=$($HOME/.local/bin/jq -r ".manifests[] | select(.platform.architecture == \"${4}\").digest?" <<< "${MULTIDIGEST}")
+      MULTIDIGEST=$("$HOME/.local/bin/jq" -r ".manifests[] | select(.platform.architecture == \"${4}\").digest?" <<< "${MULTIDIGEST}")
       if [[ -z "${MULTIDIGEST}" ]]; then
         cleanup
       fi
     else
       # Otherwise it's single arch
-      MULTIDIGEST=$($HOME/.local/bin/jq -r ".manifests[].digest?" <<< "${MULTIDIGEST}")
+      MULTIDIGEST=$("$HOME/.local/bin/jq" -r ".manifests[].digest?" <<< "${MULTIDIGEST}")
     fi
     if DIGEST=$(curl -s -f --retry 3 --retry-max-time 20 --retry-connrefused \
       --location \
@@ -84,7 +85,7 @@ get_blob_sha() {
       --header "Authorization: Bearer ${1}" \
       --user-agent "${UA}" \
       "${2}/${MULTIDIGEST}"); then
-      $HOME/.local/bin/jq -r '.layers[0].digest' <<< "${DIGEST}";
+      "$HOME/.local/bin/jq" -r '.layers[0].digest' <<< "${DIGEST}";
     fi
   fi
 }
@@ -105,16 +106,14 @@ registry_setup() {
   # Determine endpoints and auth
   case "${IMAGE}" in
     ghcr.io/* )
-    GHIMAGE=$(echo ${IMAGE} | sed 's|ghcr.io/||g')
+    GHIMAGE="${IMAGE#ghcr.io/}"
     ENDPOINT="${GHIMAGE%%:*}"
-    USERNAME="${GHIMAGE%%/*}"
     TAG="${GHIMAGE#*:}"
     REGISTRY="ghcr.io"
     AUTH_URL="https://ghcr.io/token?scope=repository%3A${ENDPOINT}%3Apull"
     ;;
   * )
     ENDPOINT="${IMAGE%%:*}"
-    USERNAME="${IMAGE%%/*}"
     TAG="${IMAGE#*:}"
     REGISTRY="registry-1.docker.io"
     AUTH_URL="https://auth.docker.io/token?service=registry.docker.io&scope=repository:${ENDPOINT}:pull"
@@ -125,13 +124,13 @@ registry_setup() {
   TOKEN="$( 
     curl -s -f --retry 3 --retry-max-time 20 --retry-connrefused \
       "${AUTH_URL}" |
-      $HOME/.local/bin/jq -r '.token'
+      "$HOME/.local/bin/jq" -r '.token'
   )"
 }
 
 # Download layer
 function dl_layer() {
-  mkdir -p $ROOT_DIR
+  mkdir -p "$ROOT_DIR"
   # CLI vars
   IMAGE=$1
   IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
@@ -146,17 +145,36 @@ function dl_layer() {
 
   # Cleanup and exit 1 if something went wrong
   cleanup() {
-    rm -Rf "${ROOT_DIR}/${IMAGE_FOLDER}"
+    rm -Rf "${ROOT_DIR:?}/${IMAGE_FOLDER}"
     exit 1
   }
   # An interrupted download leaves nothing behind
   trap cleanup INT TERM
+
+  # Fetch the layer from the registry, kept as a tarball for a local repo
+  fetch_layer() {
+    if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+      curl -f --retry 3 --retry-max-time 20 "${PROGRESS[@]}" \
+        -o "${ROOT_DIR}/${IMAGE_FOLDER}/app.tar.gz" \
+        --location \
+        --header "Authorization: Bearer ${TOKEN}" \
+        --user-agent "${UA}" \
+        "${BLOB_URL}${SHALAYER}"
+    else
+      curl -f --retry 3 --retry-max-time 20 "${PROGRESS[@]}" \
+        --location \
+        --header "Authorization: Bearer ${TOKEN}" \
+        --user-agent "${UA}" \
+        "${BLOB_URL}${SHALAYER}" \
+        | tar -xzf - -C "${ROOT_DIR}/${IMAGE_FOLDER}/"
+    fi
+  }
   
   if [[ -z ${SHALAYER+x} ]]; then
     if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
-      SHALAYER=$(cat $PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER)
+      SHALAYER=$(cat "$PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER")
     else
-      registry_setup ${IMAGE}
+      registry_setup "${IMAGE}"
       SHALAYER=$(get_blob_sha "${TOKEN}" "${MANIFEST_URL}" "${TAG}" "${ARCH}")
     fi
   fi
@@ -177,28 +195,11 @@ function dl_layer() {
   if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
     echo "Extracting from local repo"
     tar -xf \
-      $PA_REPO_FOLDER/${IMAGE_FOLDER}/app.tar.gz -C \
+      "$PA_REPO_FOLDER/${IMAGE_FOLDER}/app.tar.gz" -C \
       "${ROOT_DIR}/${IMAGE_FOLDER}/"
-  else
-    if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
-      curl -f --retry 3 --retry-max-time 20 "${PROGRESS[@]}" \
-        -o ${ROOT_DIR}/${IMAGE_FOLDER}/app.tar.gz \
-        --location \
-        --header "Authorization: Bearer ${TOKEN}" \
-        --user-agent "${UA}" \
-        "${BLOB_URL}${SHALAYER}" 
-    else
-      curl -f --retry 3 --retry-max-time 20 "${PROGRESS[@]}" \
-        --location \
-        --header "Authorization: Bearer ${TOKEN}" \
-        --user-agent "${UA}" \
-        "${BLOB_URL}${SHALAYER}" \
-        | tar -xzf - -C "${ROOT_DIR}/${IMAGE_FOLDER}/"
-    fi
-    if [[ $? -ne 0 ]]; then
-      echo "Error downloading ${IMAGE}"
-      cleanup
-    fi
+  elif ! fetch_layer; then
+    echo "Error downloading ${IMAGE}"
+    cleanup
   fi
   # Tag image
   echo "${SHALAYER}" > "${ROOT_DIR}/${IMAGE_FOLDER}/SHALAYER"
@@ -211,27 +212,27 @@ function dl_layer() {
 # Update Icon cache
 function update_icon_cache() {
   if [ ! -f "$HOME/.local/share/icons/hicolor/index.theme" ]; then
-    mkdir -p $HOME/.local/share/icons/hicolor
+    mkdir -p "$HOME/.local/share/icons/hicolor"
     cp \
       /usr/share/icons/hicolor/index.theme \
-      $HOME/.local/share/icons/hicolor/
+      "$HOME/.local/share/icons/hicolor/"
   fi
   if which gtk-update-icon-cache >/dev/null 2>&1; then
-    gtk-update-icon-cache $HOME/.local/share/icons/hicolor >/dev/null 2>&1 
+    gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1
   elif which update-icon-caches >/dev/null 2>&1; then
-    update-icon-caches $HOME/.local/share/icons/hicolor >/dev/null 2>&1
+    update-icon-caches "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1
   fi
 }
 
 # Run a unix socket to relay commands to the host
 start_system_socket() {
-  if ! pgrep -f ${1}system.socket; then
-    rm -f ${1}system.socket
-    (umask 077; exec $HOME/.local/bin/ncat -k -U -l ${1}system.socket) | bash &
-    BG_PIDS=$(jobs -p)
-    chmod 600 ${1}system.socket || :
-    tail --pid=$2 -f /dev/null
-    kill -9 $BG_PIDS || :
+  if ! pgrep -f "${1}system.socket"; then
+    rm -f "${1}system.socket"
+    (umask 077; exec "$HOME/.local/bin/ncat" -k -U -l "${1}system.socket") | bash &
+    mapfile -t BG_PIDS <<< "$(jobs -p)"
+    chmod 600 "${1}system.socket" || :
+    tail --pid="$2" -f /dev/null
+    kill -9 "${BG_PIDS[@]}" || :
   fi
 }
 
@@ -245,17 +246,17 @@ function update() {
   fi
   LOCAL_SHA=$(cat "$ROOT_DIR/${IMAGE_FOLDER}/SHALAYER")
   if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
-    if [ ! -f $PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER ]; then
+    if [ ! -f "$PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER" ]; then
       echo "${IMAGE} is not available in local repo"
       exit 1
     fi
     # Use local SHA
-    SHALAYER=$(cat $PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER)
+    SHALAYER=$(cat "$PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER")
   else
     # Check remote SHA
     ARCH=$(uname -m| sed 's/x86_64/amd64/g'| sed 's/aarch64/arm64/')
     UA="Mozilla/5.0 (Linux $(uname -m)) kasmweb.com"
-    registry_setup ${IMAGE}
+    registry_setup "${IMAGE}"
     SHALAYER=$(get_blob_sha "${TOKEN}" "${MANIFEST_URL}" "${TAG}" "${ARCH}")
   fi
   if [[ "${SHALAYER}" == "${LOCAL_SHA}" ]]; then
@@ -265,28 +266,28 @@ function update() {
     # Run remove logic
     if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
       echo "Removing app root local"
-      rm -Rf $ROOT_DIR/${IMAGE_FOLDER}/
-      dl_layer ${IMAGE}
+      rm -Rf "${ROOT_DIR:?}/${IMAGE_FOLDER}/"
+      dl_layer "${IMAGE}"
     else
       pa_status phase remove
       if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/remove" ]; then
-        $HOME/.local/bin/proot \
-          -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+        "$HOME/.local/bin/proot" \
+          -R "$ROOT_DIR/${IMAGE_FOLDER}/" \
           /remove
       fi
       # Remove app layer
       echo "Removing app root"
-      rm -Rf $ROOT_DIR/${IMAGE_FOLDER}/
-      dl_layer ${IMAGE}
+      rm -Rf "${ROOT_DIR:?}/${IMAGE_FOLDER}/"
+      dl_layer "${IMAGE}"
       pa_status phase install
-      $HOME/.local/bin/proot \
-        -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+      "$HOME/.local/bin/proot" \
+        -R "$ROOT_DIR/${IMAGE_FOLDER}/" \
         /install >/dev/null 2>&1
       # Refresh icon cache
       update_icon_cache
       # Install
-      $HOME/.local/bin/proot \
-        -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+      "$HOME/.local/bin/proot" \
+        -R "$ROOT_DIR/${IMAGE_FOLDER}/" \
         /install
     fi
     trigger_panel_reload
@@ -308,18 +309,18 @@ function remove() {
   else
     # Run remove logic
     if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/remove" ]; then
-      $HOME/.local/bin/proot \
-        -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+      "$HOME/.local/bin/proot" \
+        -R "$ROOT_DIR/${IMAGE_FOLDER}/" \
         /remove
     fi
     # Remove bin wrapper if defined
     if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/bin-name" ]; then
-      rm -f $HOME/.local/bin/$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name)
+      rm -f "$HOME/.local/bin/$(cat "$ROOT_DIR/${IMAGE_FOLDER}/bin-name")"
     fi
   fi
   # Remove app layer
   echo "Removing app root"
-  rm -Rf $ROOT_DIR/${IMAGE_FOLDER}/
+  rm -Rf "${ROOT_DIR:?}/${IMAGE_FOLDER}/"
   trigger_panel_reload
 }
 
@@ -334,13 +335,13 @@ function uninstall() {
   fi
   # Run remove logic
   if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/remove" ]; then
-    $HOME/.local/bin/proot \
-      -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+    "$HOME/.local/bin/proot" \
+      -R "$ROOT_DIR/${IMAGE_FOLDER}/" \
       /remove
   fi
   # Remove bin wrapper if defined
   if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/bin-name" ]; then
-    rm -f $HOME/.local/bin/$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name)
+    rm -f "$HOME/.local/bin/$(cat "$ROOT_DIR/${IMAGE_FOLDER}/bin-name")"
   fi
   trigger_panel_reload
 }
@@ -353,27 +354,27 @@ function install_app() {
   # A download that never finished is started over
   if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/DOWNLOADING" ]; then
     echo "Discarding an unfinished download of ${IMAGE}"
-    rm -Rf "$ROOT_DIR/${IMAGE_FOLDER}"
+    rm -Rf "${ROOT_DIR:?}/${IMAGE_FOLDER}"
   fi
   # Download if not present
   if [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}" ]; then
-    dl_layer ${IMAGE}
+    dl_layer "${IMAGE}"
   fi
   pa_status phase install
   # Add bin wrapper if defined
   if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/bin-name" ]; then
-    echo "\$HOME/.local/bin/proot-apps run ${IMAGE} \"\$@\"" > $HOME/.local/bin/$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name)
-    chmod +x $HOME/.local/bin/$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name)
-    echo "$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name) is now available from the command line"
+    echo "\$HOME/.local/bin/proot-apps run ${IMAGE} \"\$@\"" > "$HOME/.local/bin/$(cat "$ROOT_DIR/${IMAGE_FOLDER}/bin-name")"
+    chmod +x "$HOME/.local/bin/$(cat "$ROOT_DIR/${IMAGE_FOLDER}/bin-name")"
+    echo "$(cat "$ROOT_DIR/${IMAGE_FOLDER}/bin-name") is now available from the command line"
   fi
-  $HOME/.local/bin/proot \
-    -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+  "$HOME/.local/bin/proot" \
+    -R "$ROOT_DIR/${IMAGE_FOLDER}/" \
     /install >/dev/null 2>&1
   # Refresh icon cache
   update_icon_cache
   # Install
-  $HOME/.local/bin/proot \
-    -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+  "$HOME/.local/bin/proot" \
+    -R "$ROOT_DIR/${IMAGE_FOLDER}/" \
     /install
   trigger_panel_reload
 }
@@ -385,11 +386,11 @@ function get_app() {
   echo "Getting ${IMAGE}"
   if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/DOWNLOADING" ]; then
     echo "Discarding an unfinished download of ${IMAGE}"
-    rm -Rf "$ROOT_DIR/${IMAGE_FOLDER}"
+    rm -Rf "${ROOT_DIR:?}/${IMAGE_FOLDER}"
   fi
   # Download if not present
   if [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}" ]; then
-    dl_layer ${IMAGE}
+    dl_layer "${IMAGE}"
   else
     echo "${IMAGE} present on this system use update to update"
   fi
@@ -563,7 +564,7 @@ nvidia_binds() {
 
 # If a non docker endpoint is passed assume the default repo
 if [[ ! -z ${2+x} ]]; then
-  if ([[ "${2}" != *"/"* ]] || [[ "${2}" != *":"* ]]) && [[ "${2}" != "all" ]]; then
+  if [[ ( "${2}" != *"/"* || "${2}" != *":"* ) && "${2}" != "all" ]]; then
     IMAGE=${DEFAULT_REPO}:${2}
   else
     IMAGE=${2}
@@ -589,19 +590,22 @@ if [ "${TYPE}" == "run" ]; then
     exit 1
   fi
   # Docker shims for known desktop containers
+  PULSE_BIND=()
   if [ -d "/defaults" ]; then
-    PULSE_BIND="-b /defaults:/defaults"
+    PULSE_BIND=(-b /defaults:/defaults)
   elif [ -d "/var/run/pulse" ]; then
-    PULSE_BIND="-b /var/run/pulse:/var/run/pulse"
+    PULSE_BIND=(-b /var/run/pulse:/var/run/pulse)
   fi
   # Mount repo location for the gui app
+  REPO_BIND=()
   if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ "${IMAGE_FOLDER}" == *gui ]]; then
-    REPO_BIND="-b ${PA_REPO_FOLDER}:${PA_REPO_FOLDER}"
+    REPO_BIND=(-b "${PA_REPO_FOLDER}:${PA_REPO_FOLDER}")
     mkdir -p "$ROOT_DIR/${IMAGE_FOLDER}${PA_REPO_FOLDER}"
   fi
   # Fonts
+  FONTS_BIND=()
   if [ -d "/usr/share/fonts" ] && [ -d "/usr/share/fontconfig" ] && [ -d "/etc/fonts" ]; then
-    FONTS_BIND="-b /usr/share/fonts:/usr/share/fonts -b /usr/share/fontconfig:/usr/share/fontconfig -b /etc/fonts:/etc/fonts"
+    FONTS_BIND=(-b /usr/share/fonts:/usr/share/fonts -b /usr/share/fontconfig:/usr/share/fontconfig -b /etc/fonts:/etc/fonts)
   fi
   # Cursor theme
   CURSOR_BIND=()
@@ -614,9 +618,9 @@ if [ "${TYPE}" == "run" ]; then
   fi
   # NVIDIA acceleration
   nvidia_binds "$ROOT_DIR/${IMAGE_FOLDER}"
-  $HOME/.local/bin/proot \
-    ${PULSE_BIND} ${FONTS_BIND} ${REPO_BIND} "${CURSOR_BIND[@]}" "${NVIDIA_BIND[@]}" \
-    -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+  "$HOME/.local/bin/proot" \
+    "${PULSE_BIND[@]}" "${FONTS_BIND[@]}" "${REPO_BIND[@]}" "${CURSOR_BIND[@]}" "${NVIDIA_BIND[@]}" \
+    -R "$ROOT_DIR/${IMAGE_FOLDER}/" \
     /entrypoint "${@:3}" &
   start_system_socket "$ROOT_DIR/${IMAGE_FOLDER}/" $!
 fi
@@ -632,7 +636,7 @@ if [ "${TYPE}" == "install" ]; then
   if [[ ! -z ${3+x} ]]; then
     for APP in "${@:2}"; do
       if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then
-        install_app ${DEFAULT_REPO}:${APP}
+        install_app "${DEFAULT_REPO}:${APP}"
       else
         install_app "${APP}"
       fi
@@ -643,8 +647,10 @@ if [ "${TYPE}" == "install" ]; then
     if [[ "${IMAGE}" != "all" ]]; then
       install_app "${IMAGE}"
     else
-      if [ -n "$(ls -A $ROOT_DIR 2>/dev/null)" ]; then
-        for IMAGE_FOLDER in $(ls $ROOT_DIR); do
+      if [ -n "$(ls -A "$ROOT_DIR" 2>/dev/null)" ]; then
+        for IMAGE_PATH in "${ROOT_DIR}"/*; do
+          [ -e "${IMAGE_PATH}" ] || continue
+          IMAGE_FOLDER="${IMAGE_PATH##*/}"
           IMAGE=$(echo "${IMAGE_FOLDER}"| sed 's/\(.*\)_/\1:/' | sed 's|_|/|g')
           install_app "${IMAGE}"
         done
@@ -680,8 +686,10 @@ if [ "${TYPE}" == "remove" ]; then
       IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
       remove "${IMAGE_FOLDER}"
     else
-      if [ -n "$(ls -A $ROOT_DIR 2>/dev/null)" ]; then
-        for IMAGE_FOLDER in $(ls $ROOT_DIR); do
+      if [ -n "$(ls -A "$ROOT_DIR" 2>/dev/null)" ]; then
+        for IMAGE_PATH in "${ROOT_DIR}"/*; do
+          [ -e "${IMAGE_PATH}" ] || continue
+          IMAGE_FOLDER="${IMAGE_PATH##*/}"
           remove "${IMAGE_FOLDER}"
         done
       else
@@ -716,8 +724,10 @@ if [ "${TYPE}" == "uninstall" ]; then
       IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
       uninstall "${IMAGE_FOLDER}"
     else
-      if [ -n "$(ls -A $ROOT_DIR 2>/dev/null)" ]; then
-        for IMAGE_FOLDER in $(ls $ROOT_DIR); do
+      if [ -n "$(ls -A "$ROOT_DIR" 2>/dev/null)" ]; then
+        for IMAGE_PATH in "${ROOT_DIR}"/*; do
+          [ -e "${IMAGE_PATH}" ] || continue
+          IMAGE_FOLDER="${IMAGE_PATH##*/}"
           uninstall "${IMAGE_FOLDER}"
         done
       else
@@ -752,8 +762,10 @@ if [ "${TYPE}" == "update" ]; then
       IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
       update "${IMAGE_FOLDER}"
     else
-      if [ -n "$(ls -A $ROOT_DIR 2>/dev/null)" ]; then
-        for IMAGE_FOLDER in $(ls $ROOT_DIR); do
+      if [ -n "$(ls -A "$ROOT_DIR" 2>/dev/null)" ]; then
+        for IMAGE_PATH in "${ROOT_DIR}"/*; do
+          [ -e "${IMAGE_PATH}" ] || continue
+          IMAGE_FOLDER="${IMAGE_PATH##*/}"
           update "${IMAGE_FOLDER}"
         done
       else
@@ -840,7 +852,8 @@ completion_filter() {
 # List app names from a folder of image folders
 completion_folders() {
   APP_DIR=$1
-  for IMAGE_FOLDER in $(ls ${APP_DIR} 2>/dev/null); do
+  for IMAGE_PATH in "${APP_DIR}"/*; do
+    IMAGE_FOLDER="${IMAGE_PATH##*/}"
     # Skip loose files and local repo metadata
     if [ ! -d "${APP_DIR}/${IMAGE_FOLDER}" ] || [ "${IMAGE_FOLDER}" == "metadata" ]; then
       continue
