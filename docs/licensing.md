@@ -55,6 +55,8 @@ dependency of the workspace's crates, by what it does:
 | `pcmflux` | MPL-2.0 | weak copyleft | audio capture and Opus encoding, over libpulse and libopus | see [pcmflux's LICENSES.md](https://github.com/selkies-project/selkies/blob/main/crates/pcmflux/LICENSES.md) |
 | `selkies-rtc` | MPL-2.0 | weak copyleft | the WebRTC stack, in this repository under `crates/selkies-rtc` |  |
 | `selkies-wm` | MPL-2.0 | weak copyleft | the window manager and desktop session `--wm` and `--desktop` run, in this repository under `crates/selkies-wm` |  |
+| `selkies-draw` | MPL-2.0 | weak copyleft | the desktop entries the window manager's menus launch, in this repository under `crates/selkies-draw` |  |
+| `pelorus` | MPL-2.0 | weak copyleft | the desktop described as text for `--pelorus`, over the accessibility bus, in this repository under `crates/pelorus` |  |
 | `rtc-crypto`, `rtc-dtls`, `rtc-ice`, `rtc-mdns`, `rtc-sctp`, `rtc-sdp`, `rtc-shared`, `rtc-srtp`, `rtc-stun`, `rtc-turn`, `sansio` | Apache-2.0 OR MIT | permissive | the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over | `rtc-dtls`, `rtc-sctp`, and `rtc-srtp` vendored (below) |
 | `tokio`, `tokio-util`, `futures`, `async-trait`, `bytes` | MIT; Apache-2.0 OR MIT | permissive | async runtime |  |
 | `axum`, `tokio-websockets`, `hyper`, `hyper-util`, `tower`, `tower-http`, `http`, `http-body-util` | MIT; Apache-2.0 OR MIT | permissive | HTTP and WebSocket server |  |
@@ -129,7 +131,7 @@ Most crates in either graph, the dependencies of pixelflux and pcmflux included,
 | ISC | permissive | `libloading`, `rustls-webpki`, `untrusted` |
 | Unicode-3.0 | permissive | `icu_collections`, `icu_locale_core`, `icu_normalizer`, `icu_normalizer_data`, `icu_properties`, `icu_properties_data`, `icu_provider`, `litemap`, `potential_utf`, `tinystr`, `writeable`, `yoke`, `yoke-derive`, `zerofrom`, `zerofrom-derive`, `zerotrie`, `zerovec`, `zerovec-derive` |
 | Zlib | permissive | `slotmap`, `zlib-rs` |
-| MPL-2.0 | weak copyleft | `pcmflux`, `pixelflux`, `selkies`, `selkies-draw`, `selkies-rtc`, `selkies-wm` |
+| MPL-2.0 | weak copyleft | `pcmflux`, `pelorus`, `pixelflux`, `selkies`, `selkies-draw`, `selkies-rtc`, `selkies-wm` |
 
 <!-- check-licenses:end rust-licenses -->
 

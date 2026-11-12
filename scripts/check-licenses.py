@@ -356,6 +356,10 @@ ROLES: Tuple[Role, ...] = (
     Role(("selkies-rtc",), "the WebRTC stack, in this repository under `crates/selkies-rtc`"),
     Role(("selkies-wm",), "the window manager and desktop session `--wm` and `--desktop` run, in this repository "
          "under `crates/selkies-wm`"),
+    Role(("selkies-draw",), "the desktop entries the window manager's menus launch, in this repository under "
+         "`crates/selkies-draw`"),
+    Role(("pelorus",), "the desktop described as text for `--pelorus`, over the accessibility bus, in this "
+         "repository under `crates/pelorus`"),
     Role(("rtc-crypto", "rtc-dtls", "rtc-ice", "rtc-mdns", "rtc-sctp", "rtc-sdp", "rtc-shared", "rtc-srtp",
           "rtc-stun", "rtc-turn", "sansio"),
          "the [webrtc-rs](https://github.com/webrtc-rs/rtc) protocol crates `selkies-rtc` is built over",
