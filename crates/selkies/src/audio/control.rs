@@ -620,8 +620,14 @@ impl AudioControl {
     /// existing sink is left as it is, since recreating it would move the streams playing into
     /// it.
     pub async fn ensure_null_sink(&mut self, name: &str, channels: i32) -> bool {
+        self.provide_null_sink(name, channels).await.is_some()
+    }
+
+    /// [`Self::ensure_null_sink`], telling a sink this call created (`Some(true)`) from one that
+    /// was already there (`Some(false)`); `None` when it could not be created.
+    async fn provide_null_sink(&mut self, name: &str, channels: i32) -> Option<bool> {
         if self.sinks().await.iter().any(|s| s.name == name) {
-            return true;
+            return Some(false);
         }
         info!(target: "audio", "Sink '{name}' not found. Creating it...");
         let mut args = format!("sink_name={name}");
@@ -630,15 +636,13 @@ impl AudioControl {
                 " rate=48000 channels={channels} channel_map={map}"
             ));
         }
-        if self.load_module("module-null-sink", &args).await.is_none() {
-            return false;
-        }
+        self.load_module("module-null-sink", &args).await?;
         if self.wait_for(true, &[name]).await.is_some() {
             info!(target: "audio", "Created sink '{name}'.");
-            return true;
+            return Some(true);
         }
         error!(target: "audio", "Loaded module-null-sink for '{name}' but it never appeared.");
-        false
+        None
     }
 
     /// Make sure the sink whose monitor the server captures exists.
@@ -650,11 +654,23 @@ impl AudioControl {
     /// for. A surround session creates it with its channel count (`capture_channels`), so the
     /// capture records the channels applications play rather than an upmix of stereo.
     ///
+    /// A sink created here is made the default sink. A sound server that already has another
+    /// sink keeps that one as its default, so applications would go on playing into it and the
+    /// monitor captured here would carry silence until a client's microphone made the microphone
+    /// control plane set the default. A sink that was already there is left as it is, its place
+    /// among the defaults included.
+    ///
     /// Best effort: false only means the capture will fail for the usual reasons, so callers
     /// proceed and let pcmflux report.
     pub async fn ensure_capture_sink(&mut self, audio_device_name: Option<&str>) -> bool {
         let sink = capture_sink_name(audio_device_name);
-        self.ensure_null_sink(&sink, capture_channels()).await
+        let Some(created) = self.provide_null_sink(&sink, capture_channels()).await else {
+            return false;
+        };
+        if created && self.set_default_sink(&sink).await {
+            debug!(target: "audio", "Set system default sink to '{sink}'.");
+        }
+        true
     }
 
     /// The source to capture: the configured one if it exists, else the default sink's monitor,
@@ -1161,6 +1177,33 @@ pub(super) mod tests {
             1,
             "close closes the client"
         );
+    }
+
+    #[tokio::test]
+    async fn capture_sink_created_beside_another_sink_becomes_the_default() {
+        install_test_settings();
+        let scenario = Scenario::new();
+        {
+            let mut server = scenario.server.lock();
+            server.add_sink("speakers", None);
+            server.default_sink = Some("speakers".to_string());
+        }
+        let mut ctl = control(&scenario, "t-default");
+        assert!(ctl.ensure_capture_sink(Some("output.monitor")).await);
+        assert_eq!(
+            scenario.server.lock().default_sink.as_deref(),
+            Some("output"),
+            "applications play into the sink the server captures"
+        );
+        // The sink is there now, so a default chosen afterwards is not taken back.
+        scenario.server.lock().default_sink = Some("speakers".to_string());
+        assert!(ctl.ensure_capture_sink(Some("output.monitor")).await);
+        assert_eq!(
+            scenario.server.lock().default_sink.as_deref(),
+            Some("speakers"),
+            "an existing capture sink keeps the default it was given"
+        );
+        ctl.close().await;
     }
 
     #[tokio::test]

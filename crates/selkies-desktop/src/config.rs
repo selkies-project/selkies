@@ -208,6 +208,13 @@ pub struct Config {
     pub desktops: u32,
     /// Whether the bar shows the pager when there is more than one desktop.
     pub show_pager: bool,
+    /// Whether the shell keeps the session's appearance, the toolkit settings and the Settings
+    /// portal ([`selkies_draw::appearance`]); the Selkies window manager keeps it instead and
+    /// starts the shell with this off.
+    pub toolkits: bool,
+    /// Whether the browser's light or dark scheme sets the colors, which only the Selkies window
+    /// manager carries out; a scheme or a color picked in the settings turns it off.
+    pub follow_browser: bool,
     /// Whether the taskbar lists the windows of every desktop rather than
     /// the current one's.
     pub tasks_all_desktops: bool,
@@ -257,6 +264,8 @@ impl Default for Config {
             files_manager: true,
             desktops: DEFAULT_DESKTOPS,
             show_pager: true,
+            toolkits: true,
+            follow_browser: true,
             tasks_all_desktops: false,
         }
     }
@@ -488,6 +497,8 @@ impl Config {
             config.desktops = count.clamp(1, MAX_DESKTOPS);
         }
         config.show_pager = truthy("show_pager", config.show_pager);
+        config.toolkits = truthy(selkies_draw::appearance::TOOLKITS, config.toolkits);
+        config.follow_browser = selkies_draw::appearance::follows_browser(values);
         config.start_icon_flat = truthy("start_icon_flat", config.start_icon_flat);
         config.panel_float = truthy("panel_float", config.panel_float);
         config.panel_every_display = truthy("panel_every_display", config.panel_every_display);
@@ -563,8 +574,7 @@ pub const PANEL_KEYS: [&str; 25] = [
     "tasks_all_desktops",
 ];
 
-/// The keys of the interface colors.
-pub const COLOR_KEYS: [&str; 4] = ["color_accent", "color_panel", "color_popup", "color_text"];
+pub use selkies_draw::style::COLOR_KEYS;
 
 /// The keys of the window frame settings.
 pub const WINDOW_KEYS: [&str; 5] = [
@@ -645,8 +655,7 @@ fn wallpaper_override(values: &HashMap<String, String>, suffix: &str) -> Wallpap
     over
 }
 
-/// Writes settings into the config file, replacing the lines of the keys
-/// given and keeping every other line, comments included.
+/// Writes settings into the config file ([`selkies_draw::style::save_values`]).
 ///
 /// # Arguments
 /// * `changes` - Keys and their new values; an empty value removes the key.
@@ -654,48 +663,7 @@ fn wallpaper_override(values: &HashMap<String, String>, suffix: &str) -> Wallpap
 /// # Errors
 /// The file could not be written.
 pub fn save(changes: &[(&str, String)]) -> std::io::Result<()> {
-    let path = config_file();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut lines: Vec<String> = Vec::new();
-    let mut written: Vec<&str> = Vec::new();
-    for line in existing.lines() {
-        let trimmed = line.trim();
-        let key = trimmed
-            .split_once('=')
-            .filter(|_| !trimmed.starts_with('#'))
-            .map(|(k, _)| k.trim().to_ascii_lowercase().replace('-', "_"));
-        match key.and_then(|k| changes.iter().find(|(name, _)| *name == k)) {
-            Some((name, value)) => {
-                if !written.contains(name) {
-                    if !value.is_empty() {
-                        lines.push(format!("{name} = {}", quote(value)));
-                    }
-                    written.push(name);
-                }
-            }
-            None => lines.push(line.to_string()),
-        }
-    }
-    for (name, value) in changes {
-        if !written.contains(name) && !value.is_empty() {
-            lines.push(format!("{name} = {}", quote(value)));
-        }
-    }
-    let mut text = lines.join("\n");
-    text.push('\n');
-    std::fs::write(&path, text)
-}
-
-/// Quotes a value when it has leading or trailing spaces or a comment mark.
-fn quote(value: &str) -> String {
-    if value != value.trim() || value.contains('#') {
-        format!("\"{}\"", value.replace('"', ""))
-    } else {
-        value.to_string()
-    }
+    selkies_draw::style::save_values(&config_file(), changes)
 }
 
 #[cfg(test)]
