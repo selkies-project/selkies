@@ -810,12 +810,28 @@ fn scratch_directories_made_at_once_are_distinct() {
     assert_eq!(distinct.len(), made.len());
 }
 
+/// Leave a socket file at `path` that nothing listens on. It is bound and never listened on, so
+/// it stays refused even while a fork another test thread makes holds its descriptor for the
+/// instant before that child's exec closes it; a listener dropped there would still accept.
+fn stale_socket(path: &Path) {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, bind, socket};
+    use std::os::fd::AsRawFd;
+    let fd = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .expect("socket");
+    bind(fd.as_raw_fd(), &UnixAddr::new(path).expect("address")).expect("bind");
+}
+
 #[tokio::test]
 async fn a_stale_socket_file_is_no_control() {
     let pf = FakeScreens::new(false);
     let session = FakeSession::nested(SESSION);
     let (screens, runtime) = ladder(&pf, &session);
-    drop(tokio::net::UnixListener::bind(runtime.path(SESSION_IPC_SOCKET)).expect("bind"));
+    stale_socket(&runtime.path(SESSION_IPC_SOCKET));
     assert!(runtime.path(SESSION_IPC_SOCKET).exists());
     assert!(!screens.probe_ipc().await);
 }

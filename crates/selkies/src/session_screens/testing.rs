@@ -85,9 +85,25 @@ impl Drop for Scratch {
 }
 
 /// Write an executable shell script.
+///
+/// A child process writes it, never this one: a file this process holds open for writing is
+/// held as well by any fork another test thread makes, for the instant before that child's exec
+/// closes it, and running the script in that instant fails with "text file busy".
 pub(crate) fn script(path: &Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("script");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    use std::io::Write;
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("a shell writes the script");
+    writer
+        .stdin
+        .take()
+        .expect("its input")
+        .write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
+        .expect("script");
+    assert!(writer.wait().expect("written").success(), "script");
 }
 
 /// A child that ends with this value, by the process group it leads.
