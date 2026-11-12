@@ -1503,6 +1503,21 @@ pub(crate) fn resolve_backend() -> Result<Box<dyn CuBackend>, String> {
     crate::x11::computer_use::CuX11Backend::connect().map(|be| Box::new(be) as Box<dyn CuBackend>)
 }
 
+/// Run one Computer Use action for a caller inside the process: `body` is the JSON a request to
+/// the server carries, the reply the JSON such a request is answered with, and the backend the
+/// one a request would reach. It needs no listener and checks no token, so what calls it
+/// answers for who may.
+pub fn act(body: &str) -> String {
+    let parsed: CuActionRequest = match serde_json::from_str(body) {
+        Ok(request) => request,
+        Err(e) => return serde_json::json!({"error": format!("Invalid JSON: {e}")}).to_string(),
+    };
+    match resolve_backend() {
+        Ok(backend) => handle_action(parsed, backend.as_ref()),
+        Err(e) => serde_json::json!({"error": e}).to_string(),
+    }
+}
+
 /// Expose the captured desktop to an AI agent over HTTP, so a Computer Use client can drive
 /// the session much as a human viewer would.
 ///
