@@ -24,6 +24,8 @@ pixelflux.workspace = true
 pcmflux.workspace = true
 selkies-rtc = { path = "../selkies-rtc" }
 selkies-wm = { path = "../selkies-wm" }
+pelorus = { path = "../pelorus" }
+selkies-draw = { path = "../selkies-draw" }
 log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

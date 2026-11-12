@@ -1,0 +1,19 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "pelorus"
+description = "The Selkies desktop described as text for an agent that cannot see it: the window manager's geometry joined with what applications say of their controls."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The accessibility bus the toolkits answer on, over the D-Bus client the tree already carries.
+zbus = { version = "6", default-features = false, features = ["default-rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"

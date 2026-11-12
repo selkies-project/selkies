@@ -2442,6 +2442,134 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: true,
     },
     SettingDef {
+        name: "pelorus",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Serve Pelorus under /pelorus: the desktop described as text (windows, their controls, and where to click them) and the actions on it, for an agent or a script. A caller there holds what the session's user holds, so it takes a controller's credential. Locked (true|locked), the agent's model is the one these settings name and nothing of it is configured or shown in a browser.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_provider",
+        kind: Kind::Enum,
+        default: "anthropic",
+        help: "Whose API the Pelorus agent's model is asked through: anthropic (the Messages API), or one of the others, each through its OpenAI-compatible chat completions endpoint at its own public address; ollama, lmstudio, and llamacpp are local servers at their usual addresses, and custom is any other such server, named by pelorus_endpoint.",
+        env_vars: &[],
+        allowed: &[
+            "anthropic",
+            "openai",
+            "gemini",
+            "openrouter",
+            "groq",
+            "mistral",
+            "deepseek",
+            "xai",
+            "together",
+            "fireworks",
+            "cerebras",
+            "ollama",
+            "lmstudio",
+            "llamacpp",
+            "custom",
+        ],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_endpoint",
+        kind: Kind::Str,
+        default: "",
+        help: "Base URL of the model API the Pelorus agent calls; empty for the provider's own. A local or custom provider is where this is usually set.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_model",
+        kind: Kind::Str,
+        default: "",
+        help: "Model the Pelorus agent runs on; empty for the provider's default, which only anthropic has (claude-opus-5-5): every other provider needs one named.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_api_key",
+        kind: Kind::Str,
+        default: "",
+        help: "API key the Pelorus agent sends to its model API.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: true,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_vision",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Whether the Pelorus agent's model takes images, which gives it the screenshot tool for what applications do not describe as text.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_effort",
+        kind: Kind::Enum,
+        default: "default",
+        help: "How much the Pelorus agent's model reasons per step, where its API takes an effort (Anthropic's current models): default leaves it to the model, low is the fastest and cheapest.",
+        env_vars: &[],
+        allowed: &["default", "low", "medium", "high", "xhigh", "max"],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_max_steps",
+        kind: Kind::Int,
+        default: "50",
+        help: "Most model turns one Pelorus agent run may take before it is stopped.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: Some(1.0),
+        max: Some(500.0),
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "enable_metrics_http",
         kind: Kind::Bool,
         default: "False",
@@ -3195,6 +3323,38 @@ impl Settings {
 
     pub fn webrtc_statistics_dir(&self) -> &str {
         self.str_value("webrtc_statistics_dir")
+    }
+
+    pub fn pelorus(&self) -> BoolSetting {
+        self.bool_setting("pelorus")
+    }
+
+    pub fn pelorus_provider(&self) -> &str {
+        self.str_value("pelorus_provider")
+    }
+
+    pub fn pelorus_endpoint(&self) -> &str {
+        self.str_value("pelorus_endpoint")
+    }
+
+    pub fn pelorus_model(&self) -> &str {
+        self.str_value("pelorus_model")
+    }
+
+    pub fn pelorus_api_key(&self) -> &str {
+        self.str_value("pelorus_api_key")
+    }
+
+    pub fn pelorus_vision(&self) -> BoolSetting {
+        self.bool_setting("pelorus_vision")
+    }
+
+    pub fn pelorus_effort(&self) -> &str {
+        self.str_value("pelorus_effort")
+    }
+
+    pub fn pelorus_max_steps(&self) -> i64 {
+        self.int_value("pelorus_max_steps")
     }
 
     pub fn enable_metrics_http(&self) -> BoolSetting {

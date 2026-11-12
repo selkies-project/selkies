@@ -64,6 +64,12 @@ SECTIONS = [
         "wayland", "wm", "desktop", "session_switch", "app_restart", "wm_maximize", "wm_decorations", "wm_buttons", "wm_menus", "wm_keybinds", "render_dri", "auto_gpu", "app_wayland_display", "wayland_host_display",
         "wayland_socket_index", "computer_use_bind", "computer_use_token",
     ]),
+    ("Pelorus", "The agent interface under `/pelorus`: the desktop as text, the actions on it, and a model that "
+     "drives it from a chat. Off unless `pelorus` is on, and a caller there holds what the session's user holds. "
+     "`pelorus` set to `true|locked` fixes the model to these settings: nothing is configured from a browser.", [
+        "pelorus", "pelorus_provider", "pelorus_endpoint", "pelorus_model", "pelorus_api_key", "pelorus_effort",
+        "pelorus_vision", "pelorus_max_steps",
+    ]),
     ("Session start", "What a session starts with, and hooks around its first and last client.", [
         "video_on_start", "audio_on_start", "microphone_on_start", "webcam_on_start", "gamepad_on_start",
         "app_wait_ready", "app_ready_file", "run_after_connect", "run_after_disconnect",

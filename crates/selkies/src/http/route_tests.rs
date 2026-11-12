@@ -1464,8 +1464,8 @@ async fn operator_routes() {
     assert_eq!(
         r.json(),
         json!({"current_mode": null, "available_modes": ["fake"], "enable_dual_mode": true,
-                                "ui_layout": "default", "ui_layout_allowed": ["default"]}),
-        "the status names the mode and the layouts"
+                                "ui_layout": "default", "ui_layout_allowed": ["default"], "pelorus": false}),
+        "the status names the mode, the layouts, and whether Pelorus is served"
     );
     assert!(
         r.header("content-security-policy") == Some("frame-ancestors 'self'"),
