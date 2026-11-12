@@ -26,7 +26,8 @@
 //! data-channel message.
 //!
 //! A finished job keeps its console until a page clears it, so the user reads how it ended
-//! however quickly it ran; [`FINISHED_KEPT`] bounds how many are kept. Canceling a queued job
+//! however quickly it ran; [`FINISHED_KEPT`] bounds how many are kept, and [`PENDING_KEPT`] how
+//! many may wait or run, so every job `apps_state` carries fits it. Canceling a queued job
 //! ends it before it starts; canceling a running one sends its process group SIGTERM, on which
 //! proot-apps removes the download it had started.
 
@@ -43,6 +44,8 @@ use serde_json::{Value as Json, json};
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 /// The finished jobs kept for the panel, the oldest dropped first.
 pub const FINISHED_KEPT: usize = 10;
+/// The jobs queued or running at once; a request past it is refused.
+pub const PENDING_KEPT: usize = 50;
 /// The lines a console keeps, the oldest dropped first.
 pub const CONSOLE_LINES: usize = 200;
 /// The characters a console line keeps.
@@ -370,6 +373,8 @@ pub enum Refused {
     BadName,
     /// The application already has a job queued or running.
     Busy,
+    /// [`PENDING_KEPT`] jobs are already queued or running.
+    Full,
 }
 
 impl JobBoard {
@@ -380,12 +385,12 @@ impl JobBoard {
             return Err(Refused::BadName);
         }
         let mut board = self.inner.lock();
-        if board
-            .jobs
-            .iter()
-            .any(|j| j.app == app && !j.state.finished())
-        {
+        let pending = board.jobs.iter().filter(|j| !j.state.finished());
+        if pending.clone().any(|j| j.app == app) {
             return Err(Refused::Busy);
+        }
+        if pending.count() >= PENDING_KEPT {
+            return Err(Refused::Full);
         }
         board.next_id += 1;
         let mut job = Job::new(board.next_id, op, app.to_string());
@@ -662,6 +667,25 @@ mod tests {
         assert_eq!(board.snapshot().len(), 2);
         assert!(board.clear(None), "every finished job");
         assert_eq!(board.snapshot().len(), 1, "a queued job is not cleared");
+    }
+
+    #[test]
+    fn a_full_queue_refuses_another_job() {
+        let board = JobBoard::default();
+        for n in 0..PENDING_KEPT {
+            board
+                .enqueue(JobOp::Install, &format!("app{n}"))
+                .expect("queued");
+        }
+        assert_eq!(
+            board.enqueue(JobOp::Install, "one-more"),
+            Err(Refused::Full)
+        );
+        let (id, ..) = board.start_next().expect("first");
+        board.finish(id, Some(0));
+        board
+            .enqueue(JobOp::Install, "one-more")
+            .expect("a finished job frees its place");
     }
 
     #[test]

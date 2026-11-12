@@ -2144,6 +2144,9 @@ impl Dispatcher {
                     Err(Refused::Busy) => {
                         debug!(target: "input", "App {op} {app} not queued: a job for it is pending");
                     }
+                    Err(Refused::Full) => {
+                        warn!(target: "input", "App {op} {app} not queued: the apps queue is full");
+                    }
                 }
             }
         }
