@@ -19,6 +19,12 @@
 //! upgrade; what the build names by content hash under `assets/`, and the icons and manifest,
 //! keep heuristic caching. The entry page is also where a browser that arrived on the IPv6
 //! loopback is moved to the IPv4 one ([`super::listen::ipv6_loopback_redirect`]).
+//!
+//! What a deployment brands is served from its settings rather than from a copy of the client
+//! it would otherwise have to keep: the manifest is the client's own with the installed app's
+//! name taken from `ui_title` ([`manifest`]), and an image `ui_icon` names is served as every
+//! icon the client links ([`ICONS`]), the manifest's included, so a single-application image
+//! needs no web server or client of its own to carry its name and icon.
 
 use std::path::{Path, PathBuf};
 
@@ -168,6 +174,17 @@ pub async fn fallback(
     if decoded.is_empty() {
         return index(&state, client, &parts).await;
     }
+    if decoded == MANIFEST {
+        return manifest(&state.config, client).await;
+    }
+    if !state.config.ui_icon.is_empty() && ICONS.contains(&decoded.as_str()) {
+        let icon = Path::new(&state.config.ui_icon);
+        let response = serve(ServeFile::new(icon), &parts, &decoded).await;
+        if response.status() != StatusCode::NOT_FOUND {
+            return response;
+        }
+        log::debug!(target: "http", "ui_icon {} cannot be read; serving the client's own icon", icon.display());
+    }
     if decoded == PELORUS {
         return (
             StatusCode::PERMANENT_REDIRECT,
@@ -201,6 +218,60 @@ pub async fn fallback(
         no_cache(&mut response);
     }
     response
+}
+
+/// The client's web app manifest.
+const MANIFEST: &str = "manifest.json";
+/// The client's icons by the names its page and manifest link them under, each served from
+/// `ui_icon` where that is set.
+pub const ICONS: [&str; 3] = ["icon.png", "icon-512.png", "favicon.ico"];
+
+/// The client's manifest with the installed app named after `ui_title` and, where `ui_icon`
+/// is set, that image as its one icon, sized as the file is: an installed app takes the
+/// deployment's name and icon rather than Selkies'. A client without a readable manifest gets
+/// the fields the client's own carries.
+pub async fn manifest(config: &super::HttpConfig, client: &WebClient) -> Response {
+    let raw = match client {
+        WebClient::Embedded(table) => table.read(MANIFEST).map(|b| b.to_vec()),
+        WebClient::Directory(root) => tokio::fs::read(root.join(MANIFEST)).await.ok(),
+    };
+    let mut doc = raw
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "display": "fullscreen",
+                "start_url": ".",
+                "background_color": "#000000",
+                "theme_color": "#000000",
+            })
+        });
+    let title = config.ui_title.trim();
+    if !title.is_empty() {
+        doc["name"] = title.into();
+        doc["short_name"] = title.into();
+    }
+    if !config.ui_icon.is_empty() {
+        let path = PathBuf::from(&config.ui_icon);
+        let kind = mime_guess::from_path(&path).first_or_octet_stream();
+        let mut icon = serde_json::json!({"src": ICONS[0], "type": kind.essence_str()});
+        let size = tokio::task::spawn_blocking(move || image::image_dimensions(&path).ok())
+            .await
+            .ok()
+            .flatten();
+        if let Some((width, height)) = size {
+            icon["sizes"] = format!("{width}x{height}").into();
+        }
+        doc["icons"] = serde_json::json!([icon]);
+    }
+    (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/manifest+json"),
+        )],
+        doc.to_string(),
+    )
+        .into_response()
 }
 
 /// Where the Pelorus page lives in the client: `pelorus` moves a browser to `pelorus/`, the

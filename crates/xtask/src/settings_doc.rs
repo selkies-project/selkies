@@ -234,6 +234,7 @@ const SECTIONS: &[Section] = &[
                working.",
         names: &[
             "ui_title",
+            "ui_icon",
             "ui_show_logo",
             "ui_layout",
             "ui_show_sidebar",

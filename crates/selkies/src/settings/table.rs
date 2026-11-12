@@ -734,6 +734,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "ui_icon",
+        kind: Kind::Str,
+        default: "",
+        help: "Absolute path to an image served as the dashboard's icon, favicon, and installed-app icon in place of Selkies' own.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "ui_show_logo",
         kind: Kind::Bool,
         default: "True",
@@ -2855,6 +2869,10 @@ impl Settings {
 
     pub fn ui_title(&self) -> &str {
         self.str_value("ui_title")
+    }
+
+    pub fn ui_icon(&self) -> &str {
+        self.str_value("ui_icon")
     }
 
     pub fn ui_show_logo(&self) -> BoolSetting {

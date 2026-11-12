@@ -213,6 +213,7 @@ What the shipped web interface shows; the feature behind a hidden control keeps 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `--ui-title`<br>`SELKIES_UI_TITLE` | `Selkies`<br>str | Title in the dashboard's header, and of the browser tab when set. |
+| `--ui-icon`<br>`SELKIES_UI_ICON` | (empty)<br>str | Absolute path to an image served as the dashboard's icon, favicon, and installed-app icon in place of Selkies' own. |
 | `--ui-show-logo`<br>`SELKIES_UI_SHOW_LOGO` | `true`<br>bool | Show the Selkies logo in the dashboard's header. |
 | `--ui-layout`<br>`SELKIES_UI_LAYOUT` | `default`<br>enum: one of `default`, `wish`, `edge` | How the dashboard arranges its panels: "default" is the sidebar, a drawer on the left edge with every panel as a section; "wish" is the toolbar, a floating bar along the top edge with the panels in its menus; "edge" is a developer's button, a round button docked on an edge of the window that sinks half into it at rest and fans out the toolbar's tools around it when tapped, which the user can drag to any edge or corner, with the stream's live figures in view over the stream. The first value listed is what a page shows until its user picks another with the layout toggle, which the page keeps per browser; a single value locks the layout and hides the toggle. |
 | `--ui-show-sidebar`<br>`SELKIES_UI_SHOW_SIDEBAR` | `true`<br>bool | Show the dashboard's chrome: the layout's menu with every panel in it. Off, the page streams with no controls at all. |

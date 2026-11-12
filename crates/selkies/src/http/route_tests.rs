@@ -3274,3 +3274,53 @@ async fn computer_use_handlers_refuse_a_request_nothing_granted() {
     }
     app.stop().await;
 }
+
+/// A deployment's title names the installed app and its `ui_icon` stands in for every icon
+/// the client links, the manifest's sized as the file is; without one the client's own icons
+/// are served.
+#[tokio::test]
+async fn the_deployment_names_and_icons_the_installed_app() {
+    let dir = crate::http::testing::tempfile_dir("selkies-ui-icon-");
+    let icon = dir.join("app.png");
+    image::RgbaImage::new(3, 2).save(&icon).unwrap();
+    let config = HttpConfig {
+        ui_title: "Firefox".into(),
+        ui_icon: icon.to_string_lossy().into_owned(),
+        ..HttpConfig::default()
+    };
+    let state =
+        AppState::new(config, FixedSupervisor::new(None, &[])).with_web_client(embedded_client());
+    let app = TestServer::start(build(state, Vec::new())).await;
+    let r = app.call("GET", "/manifest.json", &[]).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("content-type"), Some("application/manifest+json"));
+    let manifest: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+    assert_eq!(manifest["name"], "Firefox");
+    assert_eq!(manifest["short_name"], "Firefox");
+    assert_eq!(
+        manifest["icons"],
+        json!([{"src": "icon.png", "type": "image/png", "sizes": "3x2"}])
+    );
+    let png = std::fs::read(&icon).unwrap();
+    for path in ["/icon.png", "/favicon.ico", "/icon-512.png"] {
+        let r = app.call("GET", path, &[]).await;
+        assert_eq!(r.status, 200, "{path}");
+        assert_eq!(r.header("content-type"), Some("image/png"), "{path}");
+        assert_eq!(
+            r.body,
+            String::from_utf8_lossy(&png),
+            "{path} is the deployment's icon"
+        );
+    }
+    app.stop().await;
+
+    let state = AppState::new(HttpConfig::default(), FixedSupervisor::new(None, &[]))
+        .with_web_client(embedded_client());
+    let app = TestServer::start(build(state, Vec::new())).await;
+    let r = app.call("GET", "/favicon.ico", &[]).await;
+    assert_eq!(r.body, "\0\0\u{1}\0", "the client's own icon");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&app.call("GET", "/manifest.json", &[]).await.body).unwrap();
+    assert_eq!(manifest["name"], "Selkies");
+    app.stop().await;
+}

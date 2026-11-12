@@ -29,7 +29,9 @@
   refuse everything.
 - Entry points, under `crates/selkies/src` unless named otherwise: `http` (the auth gate in `auth.rs`, the token
   endpoint and table in `tokens.rs`, the operator routes in `routes.rs`, the web client in `static_files.rs`: a
-  `web_root` directory no path or link leaves, or the table `embedded.rs` serves, which a request names by key),
+  `web_root` directory no path or link leaves, or the table `embedded.rs` serves, which a request names by key,
+  with the manifest built from the settings and the one file `ui_icon` names served under the client's three fixed
+  icon names alone),
   `files` (upload, download, recording, screenshot, print, apps routes), `ws` (data plane, binary opcodes in
   `protocol.rs`), WebRTC signaling (`crates/selkies-rtc/src/signaling`, mounted by `webrtc/routes.rs`), the WebRTC
   stack (`crates/selkies-rtc`: `ice`, `dtls`, `srtp`, `rtp`, `sctp`, `sdp`, and the vendored `rtc-dtls`, `rtc-sctp`, and `rtc-srtp` under `vendor/`, edited in tree and in scope),

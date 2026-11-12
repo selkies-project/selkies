@@ -108,6 +108,10 @@ pub struct HttpConfig {
     pub enable_dual_mode: bool,
     pub ui_layout: String,
     pub ui_layout_allowed: Vec<String>,
+    /// The name the installed app takes in the manifest ([`static_files::manifest`]).
+    pub ui_title: String,
+    /// An image served in place of the client's icons, empty for the client's own.
+    pub ui_icon: String,
     pub enable_metrics_http: bool,
     /// Whether Pelorus is served (`pelorus`): its page under `pelorus/`, and its API, which the
     /// server mounts beside these routes.
@@ -145,6 +149,8 @@ impl HttpConfig {
             enable_dual_mode: s.enable_dual_mode().on,
             ui_layout: s.ui_layout().to_string(),
             ui_layout_allowed: s.enum_allowed("ui_layout"),
+            ui_title: s.ui_title().to_string(),
+            ui_icon: s.ui_icon().trim().to_string(),
             enable_metrics_http: s.enable_metrics_http().on,
             pelorus: s.pelorus().on,
             enable_collab: s.enable_collab().on,
@@ -198,6 +204,8 @@ impl Default for HttpConfig {
             enable_dual_mode: false,
             ui_layout: "default".into(),
             ui_layout_allowed: vec!["default".into(), "wish".into(), "edge".into()],
+            ui_title: "Selkies".into(),
+            ui_icon: String::new(),
             enable_metrics_http: false,
             pelorus: false,
             enable_collab: true,
