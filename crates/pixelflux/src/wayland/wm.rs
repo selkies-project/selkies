@@ -54,9 +54,9 @@ use crate::wayland::frontend::{
     AppState, FocusTarget, next_serial, wayland_time, window_meta, window_output_id,
 };
 use crate::wm::{
-    Command, Decoration, Event, Extents, Frame, Image, KeyEvent, Modifiers, OutputInfo,
-    PointerEvent, PointerKind, Rect, Request, Size, States, Transform, Under, Verdict, WindowId,
-    WindowInfo, WindowKind, WindowPolicy, WindowType,
+    Command, Decoration, DesktopView, Event, Extents, Frame, Image, KeyEvent, Modifiers,
+    OutputInfo, PointerEvent, PointerKind, Rect, Request, Size, States, Transform, Under, Verdict,
+    WindowId, WindowInfo, WindowKind, WindowPolicy, WindowType,
 };
 
 /// A frame's parts as render buffers, placed relative to the client area.
@@ -273,6 +273,27 @@ pub fn dispatch(state: &mut AppState, event: Event) -> Verdict {
             Verdict::Pass
         }
     }
+}
+
+/// The desktop as the installed policy holds it, each window's origin moved to its surface's
+/// corner; `None` with no policy, and after a panic in this call, which drops the policy as one
+/// in [`dispatch`] does.
+pub fn view(state: &mut AppState) -> Option<DesktopView> {
+    let policy = state.wm.as_ref()?.policy.as_ref()?;
+    let Ok(mut view) = catch_unwind(AssertUnwindSafe(|| policy.view())) else {
+        eprintln!(
+            "[Wayland] The window policy panicked describing the desktop; windows are shown without it from here on."
+        );
+        uninstall(state);
+        return None;
+    };
+    for window in &mut view.windows {
+        if let Some(found) = find_window(state, window.info.id) {
+            let offset = found.geometry().loc;
+            window.origin = (window.rect.x - offset.x, window.rect.y - offset.y);
+        }
+    }
+    Some(view)
 }
 
 /// Drop the policy and show every window the way the frontend does without one.

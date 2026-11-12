@@ -38,9 +38,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pixelflux::wm::{
-    Command, Event, Extents, Frame, KeyEvent, Modifiers, OutputId, OutputInfo, PointerEvent, PointerKind,
-    Rect, Request, ResizeEdge, Size, States, Transform, Under, Verdict, WindowId, WindowInfo, WindowPolicy,
-    WindowType,
+    Command, DesktopView, Event, Extents, Frame, KeyEvent, Modifiers, OutputId, OutputInfo, PointerEvent,
+    PointerKind, Rect, Request, ResizeEdge, Size, States, Transform, Under, Verdict, WindowId, WindowInfo,
+    WindowPolicy, WindowType, WindowView,
 };
 
 use self::effects::{EffectKind, Effects};
@@ -4867,6 +4867,40 @@ impl WindowPolicy for Engine {
         }
         out.append(&mut self.out);
         verdict
+    }
+
+    fn view(&self) -> DesktopView {
+        let view_of = |id: &WindowId| {
+            let win = self.windows.get(id)?;
+            Some(WindowView {
+                info: win.info.clone(),
+                rect: win.rect,
+                frame: self.extents_of(*id),
+                origin: (win.rect.x, win.rect.y),
+                states: win.states(self.focus == Some(*id)),
+                shaded: win.shaded,
+                mapped: win.mapped,
+                desktop: win.desktop,
+                listed: win.listed(),
+            })
+        };
+        let mut unshown: Vec<&WindowId> = self
+            .windows
+            .keys()
+            .filter(|id| !self.stack.contains(id))
+            .collect();
+        unshown.sort_unstable();
+        DesktopView {
+            outputs: self.outputs.clone(),
+            windows: unshown
+                .into_iter()
+                .chain(self.stack.iter())
+                .filter_map(view_of)
+                .collect(),
+            focus: self.focus,
+            desktop_count: self.desktop_count,
+            current_desktop: self.current_desktop,
+        }
     }
 }
 
