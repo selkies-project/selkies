@@ -278,6 +278,7 @@ A file or folder with this name already exists = Un fichier ou un dossier portan
 Cannot create the folder: {error} = Impossible de créer le dossier : {error}
 Application icon = Icône de l'application
 Light or dark = Clair ou sombre
+Follow the browser = Suivre le navigateur
 Automatic = Automatique
 Float = Flottante
 Mint = Menthe

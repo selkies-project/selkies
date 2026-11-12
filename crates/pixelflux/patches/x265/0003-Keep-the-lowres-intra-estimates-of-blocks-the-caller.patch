@@ -8,13 +8,14 @@ The pre-lookahead estimates an intra cost and mode for every 8x8 block of a fram
 picture, 30 predictions and SATDs a block over the whole picture, on one thread, before the
 frame reaches the encoder. A block the picture's constant map marks, whose neighbours the
 estimate reads samples from (left, above-left, above, above-right, below-left) are marked as
-well, has the lowres samples the frame before had, so the estimate would come out the same:
-it keeps the frame before's estimate and mode, the frame before being the lookahead's last
-non-B frame, alive as the reference. The estimate is kept in a Lowres array of its own
-(intraEstimate): a VBV rate control weights intraCost, and an I frame's intra lowres costs,
-in place by each block's quantizer offset as the frame is coded, so a block taken from there
-would carry the weight of adaptive quantization or of a caller's offset into the next frame's
-estimate and compound it every frame it stays constant.
+well, has the lowres samples the frame before had, so the estimate would come out the same: it
+keeps the frame before's estimate and mode where the lookahead's last non-B frame, alive as the
+reference, is the frame before. With a lookahead it stands further back, so a block it holds
+the estimate of can have changed since, and the estimate is made anew. The estimate is kept in
+a Lowres array of its own (intraEstimate): a VBV rate control weights intraCost, and an I
+frame's intra lowres costs, in place by each block's quantizer offset as the frame is coded, so
+a block taken from there would carry the weight of adaptive quantization or of a caller's
+offset into the next frame's estimate and compound it every frame it stays constant.
 
 With no lookahead and no B-frames, where the lookahead's last non-B frame is the frame before,
 every stream comes out bit for bit as without the patch, at 1920x1080 on one thread with a
@@ -22,9 +23,10 @@ still screen marked beside a moving window: at a constant quantizer, a constant 
 and a constant rate, with adaptive quantization at strength 1 and, through qp-offsets, with
 offsets on constant blocks, on blocks refined before they turn constant, on key frames, and
 with none. A constant rate on several threads differs from run to run in x265 itself; there
-every frame's estimates come out the same. A still 1920x1080 frame, every block marked, took
-3.0 ms on eight threads where it took 4.5, and 7.2 on one where it took 9.6; at 2560x1600 6.1
-against 8.8 on eight.
+every frame's estimates come out the same. With a lookahead, every estimate is made anew and
+the stream is the unpatched one's. A still 1920x1080 frame, every block marked, took 3.0 ms on
+eight threads where it took 4.5, and 7.2 on one where it took 9.6; at 2560x1600 6.1 against 8.8
+on eight.
 ---
  source/common/lowres.cpp     |  2 ++
  source/common/lowres.h       |  1 +
@@ -65,7 +67,7 @@ index 2bf39c3..7c1522f 100644
      int64_t   satdCost;
      uint16_t* lowresCostForRc;
 diff --git a/source/encoder/slicetype.cpp b/source/encoder/slicetype.cpp
-index 3ecc641..a73ca41 100644
+index 3ecc641..208e6c8 100644
 --- a/source/encoder/slicetype.cpp
 +++ b/source/encoder/slicetype.cpp
 @@ -701,7 +701,29 @@ void LookaheadTLD::calcAdaptiveQuantFrame(Frame *curFrame, x265_param* param)
@@ -142,11 +144,11 @@ index 3ecc641..a73ca41 100644
              tld.collectPictureStatistics(preFrame);
  
 -        tld.lowresIntraEstimate(preFrame->m_lowres, m_lookahead.m_param->rc.qgSize);
-+        /* the frame before is the lookahead's last non-B frame, alive as this frame's
-+         * reference; its blocks the picture marks constant keep their estimates */
++        /* the blocks the picture marks constant keep the estimates of the frame before, where
++         * the lookahead's last non-B frame, alive as this frame's reference, is that frame */
 +        const Lowres* prev = m_lookahead.m_lastNonB;
 +        const uint8_t* constant = preFrame->m_constantBlocks;
-+        if (prev == &preFrame->m_lowres || !prev || !prev->intraEstimate)
++        if (!prev || !prev->intraEstimate || prev->frameNum + 1 != preFrame->m_lowres.frameNum)
 +            constant = NULL;
 +        tld.lowresIntraEstimate(preFrame->m_lowres, m_lookahead.m_param->rc.qgSize, prev, constant);
          preFrame->m_lowresInit = true;

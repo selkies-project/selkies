@@ -8,8 +8,10 @@
  * The default layout: the classic drawer on the left edge, opened by the
  * handle there or by Ctrl+Shift+M. Its header carries the wordmark and the
  * appearance controls (the theme pill, the layout toggle, the translucency
- * knob); a row of tiles toggles the streams and holds fullscreen and gaming
- * mode; a touch client gets the soft keys under them; every panel is a section
+ * knob); the mode buttons under it (fullscreen, gaming mode, and a touch
+ * client's keyboard and trackpad) change how the session is shown and taken,
+ * above a row of tiles that toggles the streams and in a shape of their own; a
+ * touch client gets the soft keys under the tiles; every panel is a section
  * below, each folding on its own, and the footer carries the citation. The sections hold the
  * same panels the toolbar carries, drawn in this layout's own skin
  * (`sidebar.css`), and the stats section's switch lays the strip over the
@@ -40,11 +42,21 @@ import "./sidebar.css";
 /** Height of the handle in pixels, which its drag keeps inside the window. */
 const HANDLE_HEIGHT = 60;
 
-/** One tile of the action row: a stream's toggle or an action; `title` says more than `label` where given. */
-function Tile({ active, label, title, className, onClick, children }: { active: boolean; label: string; title?: string; className?: string; onClick: () => void; children: React.ReactNode }) {
+/** One tile of the stream row: a stream's toggle. */
+function Tile({ active, label, onClick, children }: { active: boolean; label: string; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button type="button" className={`action-button ${className ?? ""}`} aria-pressed={active} aria-label={label} title={title ?? label} onClick={onClick}>
+    <button type="button" className="action-button" aria-pressed={active} aria-label={label} title={label} onClick={onClick}>
       {children}
+    </button>
+  );
+}
+
+/** One mode button: an action's icon, its name the label and `title` saying more where given. */
+function ModeButton({ action }: { action: Action }) {
+  return (
+    <button type="button" className={`mode-button ${action.className}`} aria-pressed={!!action.active} aria-label={action.label}
+      title={action.title} onClick={action.run}>
+      <action.icon />
     </button>
   );
 }
@@ -124,9 +136,8 @@ export default function SidebarLayout() {
   };
 
   const actions = useActions();
-  // Fullscreen and gaming mode after the stream switches, then the touch client's own; the touch gamepad's switch
-  // is in the gamepads section.
-  const tiles = [actions.fullscreen, actions.gamingMode, actions.keyboardButton, actions.trackpad]
+  // Fullscreen and gaming mode, then the touch client's own; the touch gamepad's switch is in the gamepads section.
+  const modes = [actions.fullscreen, actions.gamingMode, actions.keyboardButton, actions.trackpad]
     .filter((action): action is Action => action !== null);
   const handleLabel = t(shown ? "topMenu.hideToolbar" : "topMenu.showToolbar");
 
@@ -151,16 +162,17 @@ export default function SidebarLayout() {
           </div>
         </header>
 
-        {(actions.streams.length > 0 || tiles.length > 0) && (
+        {modes.length > 0 && (
+          <div className="sidebar-mode-actions">
+            {modes.map((action) => <ModeButton key={action.className} action={action} />)}
+          </div>
+        )}
+
+        {actions.streams.length > 0 && (
           <div className="sidebar-action-buttons">
             {actions.streams.map((stream) => (
               <Tile key={stream.id} active={stream.on(d)} label={t(stream.on(d) ? stream.disable : stream.enable)} onClick={() => stream.toggle(d)}>
                 <stream.icon />
-              </Tile>
-            ))}
-            {tiles.map((action) => (
-              <Tile key={action.className} active={!!action.active} className={action.className} label={action.label} title={action.title} onClick={action.run}>
-                <action.icon />
               </Tile>
             ))}
           </div>

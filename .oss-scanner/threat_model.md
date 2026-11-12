@@ -52,12 +52,16 @@
   arguments.
   Everything there runs as the session user, who may already do each of these; the boundary it keeps is the
   stream's: a panic in the window manager is caught at the policy boundary and the compositor carries on without it.
-- Under `--desktop`, the `selkies-desktop` shell serves the desktop Settings portal
-  (`crates/selkies-desktop/src/portal.rs`): `org.freedesktop.portal.Settings` on the session bus under
-  `org.freedesktop.portal.Desktop`, taken only while no other process owns that name. Any process of the session
-  user's bus may call it; it answers `ReadAll`, `ReadOne`, `Read`, and its `version` property from the shell's own
-  theme decision, takes no writes, and runs nothing a caller names, so a caller learns only the scheme, accent, and
-  theme names every window of the session is drawn with.
+- Under `--wm`, the window manager in the `selkies` process serves the desktop Settings portal
+  (`crates/selkies-draw/src/appearance/portal.rs`, kept by `crates/selkies-wm/src/appearance.rs`), and a
+  `selkies-desktop` shell under another window manager serves it itself: `org.freedesktop.portal.Settings` on the
+  session bus under `org.freedesktop.portal.Desktop`, taken only while no other process owns that name. Any process
+  of the session user's bus may call it; it answers `ReadAll`, `ReadOne`, `Read`, and its `version` property from the
+  desktop's own theme decision, takes no writes, and runs nothing a caller names, so a caller learns only the scheme,
+  accent, and theme names every window of the session is drawn with. The primary display's page names the scheme
+  the desktop follows (`color_scheme` in its `SETTINGS`, sanitized against `light`, `dark`, and `off`): it chooses
+  between the desktop's own Light and Dark colors, written into the session user's desktop configuration while that
+  configuration lets it, and no byte of the page's reaches the file.
 - Under `--desktop` the shell is also the session's notification server (`crates/selkies-desktop/src/notify.rs`):
   `org.freedesktop.Notifications` on the session bus, taken only while no other process owns that name. Any
   process of the session user's bus may call `Notify`, `CloseNotification`, `GetCapabilities`, and

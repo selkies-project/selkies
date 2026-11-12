@@ -95,8 +95,6 @@ impl StreamingService for WsStreaming {
         self.dispatcher.connect().await;
         self.devices.open(&self.dispatcher).await;
         self.clipboard.spawn_monitor();
-        let dispatcher = self.dispatcher.clone();
-        tokio::spawn(async move { dispatcher.apps().probe().await });
         if settings().wayland().on {
             self.screens.realize_startup_dpi().await;
         }

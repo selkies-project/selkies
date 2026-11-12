@@ -25,6 +25,9 @@ inputs:
   outputs:
     description: buildx output specification, naming the image to push.
     required: true
+  no-cache:
+    description: Build every layer afresh, for an image too small for a cached layer to be worth one gone stale.
+    default: "false"
   cache-scope:
     description: Layer cache scope, one per image and architecture.
     required: true
@@ -55,6 +58,7 @@ runs:
         build-args: ${{ inputs.build-args }}
         outputs: ${{ inputs.outputs }}
         secrets: github_token=${{ inputs.github-token }}
+        no-cache: ${{ inputs.no-cache == 'true' }}
         cache-from: type=gha,scope=${{ inputs.cache-scope }}
         cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}
     - if: steps.first.outcome == 'failure'
@@ -74,5 +78,6 @@ runs:
         build-args: ${{ inputs.build-args }}
         outputs: ${{ inputs.outputs }}
         secrets: github_token=${{ inputs.github-token }}
+        no-cache: ${{ inputs.no-cache == 'true' }}
         cache-from: type=gha,scope=${{ inputs.cache-scope }}
         cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}

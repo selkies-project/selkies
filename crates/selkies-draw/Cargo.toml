@@ -4,7 +4,7 @@
 
 [package]
 name = "selkies-draw"
-description = "The rasterizer the Selkies window manager's frames and menus and the selkies-desktop shell draw with: a tiny-skia canvas, cosmic-text, resvg, and XDG icon lookup."
+description = "The rasterizer the Selkies window manager's frames and menus and the selkies-desktop shell draw with: a tiny-skia canvas, cosmic-text, resvg, and XDG icon lookup, and the session appearance both carry to the toolkits."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,3 +22,5 @@ resvg = { version = "0.49", default-features = false, features = ["text", "syste
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # The desktop entries' executable checks and detached launches.
 libc = "0.2"
+# The Settings portal the session's appearance serves on its bus.
+zbus = { version = "6", default-features = false, features = ["default-rt", "service"] }

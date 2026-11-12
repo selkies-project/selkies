@@ -1469,14 +1469,16 @@ impl FrameEncoder {
         }
     }
 
-    /// Whether the session runs its constant quality under the peak it was asked for: NVENC and
-    /// libvpx where asked; x265, kvazaar, SVT-AV1, and VA-API never, and the V4L2 and Tegra
-    /// devices run at the rate whatever the mode (their module docblocks).
+    /// Whether the session runs its constant quality under the peak it was asked for: NVENC,
+    /// libvpx, and SVT-AV1 where asked, SVT-AV1 where the release forces a picture's quantizer
+    /// and keeps the sequence's otherwise (`svtav1_sequence_qp`); x265, kvazaar, and VA-API never,
+    /// and the V4L2 and Tegra devices run at the rate whatever the mode (their module docblocks).
     pub fn capped(&self) -> bool {
         match self {
             FrameEncoder::Nvenc(enc) => enc.capped(),
             FrameEncoder::Vpx(enc) => enc.capped(),
-            FrameEncoder::Vaapi(_) | FrameEncoder::Hevc(_) | FrameEncoder::Av1(_) => false,
+            FrameEncoder::Av1(enc) => enc.capped(),
+            FrameEncoder::Vaapi(_) | FrameEncoder::Hevc(_) => false,
             #[cfg(target_arch = "aarch64")]
             FrameEncoder::Tegra(_) => false,
             FrameEncoder::V4l2m2m(_) => false,
@@ -1484,7 +1486,8 @@ impl FrameEncoder {
     }
 
     /// Whether a rate binds the session: a constant rate, or a constant quality whose peak bound
-    /// its last frame (NVENC through its constant rate, libvpx above its pinned quantizer), each
+    /// its last frame (NVENC through its constant rate, libvpx above its pinned quantizer, SVT-AV1
+    /// at a quantizer the peak raised), each
     /// of which codes a frame coarser than its quality, so its refinement and block ledger follow
     /// what its rate control coded (`pipeline::plan_refinement`). Under a peak that does not bind,
     /// a capped session refines as its uncapped quality does.
@@ -1492,17 +1495,20 @@ impl FrameEncoder {
         cbr || match self {
             FrameEncoder::Nvenc(enc) => enc.peak_bound(),
             FrameEncoder::Vpx(enc) => enc.peak_bound(),
+            FrameEncoder::Av1(enc) => enc.peak_bound(),
             _ => false,
         }
     }
 
     /// Whether the frame just coded was coded under a capped constant quality's binding peak,
     /// coarser than the rate factor would have chosen (`ledger::BlockLedger::coded`): NVENC
-    /// through its constant rate, libvpx above its pinned quantizer.
+    /// through its constant rate, libvpx above its pinned quantizer, SVT-AV1 at a quantizer the
+    /// peak raised.
     pub fn coded_capped(&self) -> bool {
         match self {
             FrameEncoder::Nvenc(enc) => enc.coded_capped(),
             FrameEncoder::Vpx(enc) => enc.coded_capped(),
+            FrameEncoder::Av1(enc) => enc.coded_capped(),
             _ => false,
         }
     }
@@ -1514,6 +1520,7 @@ impl FrameEncoder {
         match self {
             FrameEncoder::Nvenc(enc) => enc.idle(),
             FrameEncoder::Vpx(enc) => enc.idle(),
+            FrameEncoder::Av1(enc) => enc.idle(),
             _ => {}
         }
     }
@@ -1529,10 +1536,15 @@ impl FrameEncoder {
     }
 
     /// Whether a change of the session's constant quality re-opens it, so the frame it applies
-    /// to is a key frame: x265, kvazaar, and SVT-AV1 take no new quality while they run. The
-    /// cleanup of a constant-quality session counts such a refresh as its key frame.
+    /// to is a key frame: x265 and kvazaar take no new quality while they run, and SVT-AV1 none
+    /// until a capped session's peak binds (`SvtAv1Encoder::reopens_on_quality`). The cleanup of a
+    /// constant-quality session counts such a refresh as its key frame.
     pub fn reopens_on_quality(&self) -> bool {
-        matches!(self, FrameEncoder::Hevc(_) | FrameEncoder::Av1(_))
+        match self {
+            FrameEncoder::Hevc(_) => true,
+            FrameEncoder::Av1(enc) => enc.reopens_on_quality(),
+            _ => false,
+        }
     }
 
     /// Whether a constant-rate cleanup ends on a key frame after a large change and a longer
