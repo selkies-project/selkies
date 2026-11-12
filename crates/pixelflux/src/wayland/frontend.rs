@@ -2005,11 +2005,20 @@ impl AppState {
         }
     }
 
-    /// The display id under the pointer (primary when indeterminate).
-    pub(crate) fn pointer_display(&self) -> u32 {
+    /// Where the pointer is shown: where the window policy took it while it takes the pointer's
+    /// motion, else the seat's pointer ([`crate::wayland::wm::judged_location`]). A frame drag
+    /// whose press grabbed for the client moves the window and not the seat's pointer, so the
+    /// cursor drawn into the stream, the position the page is told, and the display the pointer
+    /// is on would otherwise stay where the drag began until it ends.
+    pub(crate) fn pointer_shown_at(&self) -> Option<Point<f64, Logical>> {
         self.seat
             .get_pointer()
-            .map(|p| p.current_location())
+            .map(|p| crate::wayland::wm::judged_location(self, p.current_location()))
+    }
+
+    /// The display id under the pointer (primary when indeterminate).
+    pub(crate) fn pointer_display(&self) -> u32 {
+        self.pointer_shown_at()
             .and_then(|pos| self.node_idx_under(pos))
             .map(|idx| self.output_nodes[idx].id)
             .unwrap_or(0)

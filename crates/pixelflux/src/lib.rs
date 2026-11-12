@@ -4897,11 +4897,8 @@ fn render_node_tick(
 
     // The cursor is composited only on the output the pointer is on, at that output's
     // scale; its position is output-local.
-    let pointer_local: Option<Point<f64, smithay::utils::Logical>> = state
-        .seat
-        .get_pointer()
-        .map(|p| p.current_location())
-        .and_then(|pos| {
+    let pointer_local: Option<Point<f64, smithay::utils::Logical>> =
+        state.pointer_shown_at().and_then(|pos| {
             let rect = Rectangle::<f64, smithay::utils::Logical>::new(
                 origin.to_f64(),
                 (logical_w, logical_h).into(),
@@ -7614,7 +7611,12 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 let serial = next_serial();
 
                 if let Some(pointer) = state.seat.get_pointer() {
-                    let current_pos = pointer.current_location();
+                    // A delta adds to where the policy last took the pointer while it takes
+                    // it: under a client's grab (the press that starts a frame drag) the seat
+                    // is not moved, and adding to the seat would start every delta of the
+                    // drag from where it began.
+                    let current_pos =
+                        wayland::wm::judged_location(state, pointer.current_location());
                     let event = RelativeMotionEvent {
                         time,
                         delta: (dx, dy).into(),
@@ -7637,10 +7639,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     let new_pos =
                         state.clamp_logical((current_pos.x + dx, current_pos.y + dy).into());
 
-                    let under = state
-                        .space
-                        .element_under(new_pos)
-                        .map(|(window, loc)| (FocusTarget::Window(window.clone()), loc.to_f64()));
+                    let under = state.pointer_target_under(new_pos);
                     if wayland::wm::pointer(
                         state,
                         crate::wm::PointerKind::Motion,
@@ -7802,8 +7801,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     {
                         return;
                     }
-                    let (_, _, scale) =
-                        state.layout_logical_to_physical_scaled(pointer.current_location());
+                    let (_, _, scale) = state.layout_logical_to_physical_scaled(pos);
                     let mut frame = AxisFrame::new(time).source(AxisSource::Finger);
                     if dx != 0.0 {
                         frame = frame.value(Axis::Horizontal, dx / scale);
@@ -7987,9 +7985,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             }
             ThreadCommand::CuCursorPosition { resp } => {
                 let pos = state
-                    .seat
-                    .get_pointer()
-                    .map(|p| p.current_location())
+                    .pointer_shown_at()
                     .unwrap_or_else(|| (0.0f64, 0.0f64).into());
                 let _ = resp.send(state.layout_logical_to_physical(pos));
             }
@@ -8283,9 +8279,9 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         state.process_pending_clipboard_read();
         state.flush_pending_cursor();
         if state.host.is_none()
-            && let Some(pointer) = state.seat.get_pointer()
+            && let Some(at) = state.pointer_shown_at()
         {
-            let (x, y, scale) = state.layout_logical_to_physical_scaled(pointer.current_location());
+            let (x, y, scale) = state.layout_logical_to_physical_scaled(at);
             state
                 .pointer_share
                 .publish(crate::wayland::frontend::PointerAt {
