@@ -72,7 +72,7 @@ What it takes from the host is the graphics stack and the display server: `libgb
 
 ## The bundle
 
-`selkies-<version>-linux-<architecture>.tar.gz` is one directory, unpacked anywhere, that brings the whole session with it on any distribution with glibc 2.28 or newer: the server and the desktop shell, XLibre's Xvfb with Selkies' patches, Xwayland, `xkbcomp` and the xkb data, PulseAudio, `dbus-daemon`, and the interposers. `selkies session` started from its `bin/` takes each of those from the bundle, so a host needs no X server, sound server, or bus of its own:
+`selkies-<version>-linux-<architecture>.tar.gz` is one directory, unpacked anywhere, that brings the whole session with it on any distribution with glibc 2.28 or newer: the server and the desktop shell, XLibre's Xvfb with Selkies' patches, Xwayland, `xkbcomp` and the xkb data, PulseAudio, `dbus-daemon`, the CUPS scheduler the print queue runs, and the interposers. `selkies session` started from its `bin/` takes each of those from the bundle, so a host needs no X server, sound server, bus, or CUPS of its own (the bundled queue takes the PDF browsers and desktop applications print; a host whose CUPS has cups-filters converts other formats too):
 
 ```bash
 tar -xzf "selkies-${SELKIES_VERSION}-linux-$(uname -m).tar.gz"

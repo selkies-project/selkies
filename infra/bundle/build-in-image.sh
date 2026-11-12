@@ -9,7 +9,8 @@
 # (crates/selkies/src/commands/bundle.rs reads it):
 #
 #   bin/selkies, bin/selkies-desktop
-#   libexec/selkies/  Xvfb, Xwayland, xkbcomp (xservers.sh), pulseaudio, dbus-daemon
+#   libexec/selkies/  Xvfb, Xwayland, xkbcomp (xservers.sh), pulseaudio, dbus-daemon,
+#                     cups/, the print queue's scheduler (cups.sh)
 #   lib/selkies/      the libraries those link that are not glibc's or the GPU
 #                     driver's, pulse/modules/, and preload/, the interposers
 #   share/selkies/    the xkb data and the buses' configuration
@@ -48,6 +49,7 @@ export PATH="/opt/python/cp312-cp312/bin:${PATH}"
 . "${REPO}/infra/packaging/xkbcommon.sh"
 
 "${REPO}/infra/bundle/xservers.sh" "${TREE}"
+"${REPO}/infra/bundle/cups.sh" "${TREE}"
 
 
 # The server links the libgbm loader and pixman from the archives the X servers
@@ -139,7 +141,8 @@ fi
 # libgcc_s, and the graphics stack, each copied once under its soname
 HOST_LIBS='^(ld-linux.*|linux-vdso|lib(c|m|dl|pthread|rt|resolv|util|mvec|anl|nsl|crypt|BrokenLocale|gcc_s|stdc\+\+)|lib(GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]_CM|GLESv2|gbm|drm|vulkan|va|va-drm|va-x11|va-wayland|cuda|nvidia-.*))\.so'
 LIBDIR="${TREE}/lib/selkies"
-queue="$(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}/pulse/modules" -type f)"
+queue="$(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}/pulse/modules" -type f \
+    -exec sh -c 'head -c4 "$1" | grep -q ELF' _ {} \; -print)"
 while [ -n "${queue}" ]; do
     next=""
     for elf in ${queue}; do
