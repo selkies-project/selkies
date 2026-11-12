@@ -51,6 +51,7 @@ use rand::Rng;
 use regex::Regex;
 use serde_json::{Value as Json, json};
 
+use super::bundle::{self, Bundle};
 use super::session_gpu;
 use super::sessions::{Desktops, Entry, which};
 use crate::settings::Settings;
@@ -297,6 +298,8 @@ pub struct Session {
     sockets_before: BTreeSet<String>,
     /// The X display the launcher's environment named, which an X server takes where free.
     requested_display: Option<String>,
+    /// The release bundle the executable runs from, whose programs the session takes first.
+    bundle: Option<Bundle>,
 }
 
 impl Session {
@@ -395,6 +398,10 @@ impl Session {
         rand::rng().fill_bytes(&mut id);
         let id: String = id.iter().map(|b| format!("{b:02x}")).collect();
         env.insert(SESSION_ID_VAR.to_string(), id);
+        let bundle = Bundle::locate();
+        if let Some(bundle) = &bundle {
+            bundle.session_env(&mut env, bundle::host_xkb());
+        }
         Session {
             runtime_dir,
             runtime_kind,
@@ -406,6 +413,7 @@ impl Session {
             desktop: None,
             sockets_before: BTreeSet::new(),
             requested_display,
+            bundle,
         }
     }
 
@@ -447,6 +455,16 @@ impl Session {
         Ok(self.children.len() - 1)
     }
 
+    /// The program `name` the session runs: the bundle's where it carries one, else the host's
+    /// by name.
+    fn program(&self, name: &str) -> String {
+        self.bundle
+            .as_ref()
+            .and_then(|b| b.program(name))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.to_string())
+    }
+
     /// The session's buses, which an isolated session starts for itself: one session bus that
     /// Selkies, its window manager, and the desktop all join, at `$XDG_RUNTIME_DIR/bus`, where
     /// libdbus, GDBus, and sd-bus look when no address is named, so a shell a container opens
@@ -458,10 +476,15 @@ impl Session {
         if self.host {
             return;
         }
-        if which("dbus-daemon").is_none() {
+        let daemon = self.program("dbus-daemon");
+        if which(&daemon).is_none() {
             log("no dbus-daemon; the session runs without buses");
             return;
         }
+        let bundled = self
+            .bundle
+            .clone()
+            .filter(|b| b.program("dbus-daemon").is_some());
         let session = self.runtime_dir.join("bus");
         let system = self.runtime_dir.join("dbus-system-bus");
         for (kind, socket, var) in [
@@ -469,11 +492,22 @@ impl Session {
             ("--system", system, "DBUS_SYSTEM_BUS_ADDRESS"),
         ] {
             let address = format!("unix:path={}", socket.display());
-            let argv: Vec<String> = ["dbus-daemon", kind, "--nofork", "--nopidfile", "--nosyslog"]
-                .iter()
-                .map(|a| a.to_string())
-                .chain([format!("--address={address}")])
-                .collect();
+            // The bundled daemon's compiled-in configuration is the build machine's.
+            let config = match &bundled {
+                Some(b) => format!("--config-file={}", b.dbus_config(&kind[2..]).display()),
+                None => kind.to_string(),
+            };
+            let argv: Vec<String> = [
+                daemon.as_str(),
+                &config,
+                "--nofork",
+                "--nopidfile",
+                "--nosyslog",
+            ]
+            .iter()
+            .map(|a| a.to_string())
+            .chain([format!("--address={address}")])
+            .collect();
             let index = match self.spawn(&argv, None, None) {
                 Ok(index) => index,
                 Err(err) => {
@@ -555,14 +589,31 @@ impl Session {
                 vec!["pipewire-pulse".into()],
             ]);
         }
-        candidates.push(vec![vec![
-            "pulseaudio".into(),
-            "--daemonize=no".into(),
-            "--exit-idle-time=-1".into(),
-            "--use-pid-file=no".into(),
-            "-n".into(),
-            "--load=module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0".into(),
-        ]]);
+        let mut pulseaudio = vec![self.program("pulseaudio")];
+        if let Some(bundle) = self
+            .bundle
+            .as_ref()
+            .filter(|b| b.program("pulseaudio").is_some())
+        {
+            pulseaudio.push(format!(
+                "--dl-search-path={}",
+                bundle.pulse_modules().display()
+            ));
+        }
+        candidates.push(vec![
+            [
+                pulseaudio,
+                vec![
+                    "--daemonize=no".into(),
+                    "--exit-idle-time=-1".into(),
+                    "--use-pid-file=no".into(),
+                    "-n".into(),
+                    "--load=module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0"
+                        .into(),
+                ],
+            ]
+            .concat(),
+        ]);
         for servers in candidates {
             if !servers.iter().all(|argv| which(&argv[0]).is_some()) {
                 continue;
@@ -594,7 +645,11 @@ impl Session {
                 "PULSE_SERVER".to_string(),
                 format!("unix:{}", own.display()),
             );
-            log(&format!("{} serves the session's audio", servers[0][0]));
+            let server = Path::new(&servers[0][0])
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            log(&format!("{server} serves the session's audio"));
             return true;
         }
         log("no sound server came up; the session has no audio");
@@ -612,7 +667,16 @@ impl Session {
             ));
         }
         self.env.extend(files);
-        let probe = session_gpu::probe(exe, &self.env, session_gpu::PROBE_TIMEOUT);
+        let mut probe_env = self.env.clone();
+        if let Some(bundle) = &self.bundle {
+            // The probe's throwaway X server is the session's.
+            let path = probe_env.get("PATH").cloned().unwrap_or_default();
+            probe_env.insert(
+                "PATH".to_string(),
+                format!("{}:{path}", bundle.libexec().display()),
+            );
+        }
+        let probe = session_gpu::probe(exe, &probe_env, session_gpu::PROBE_TIMEOUT);
         let plan = session_gpu::plan(
             &probe,
             wayland,
@@ -645,7 +709,8 @@ impl Session {
     /// external EGL platform: a vendor's GBM has nothing to offer it, and NVIDIA's takes the
     /// server down where the container has no DRM device at all.
     pub fn x11(&mut self, render_node: &str) -> Result<(), String> {
-        if which("Xvfb").is_none() {
+        let xvfb = self.program("Xvfb");
+        if which(&xvfb).is_none() {
             return Err(
                 "the X11 backend needs Xvfb; install it, or set SELKIES_WAYLAND=true".into(),
             );
@@ -662,7 +727,7 @@ impl Session {
         fs::write(&auth, xauth_wildcard_entry(&cookie))
             .map_err(|e| format!("cannot write {}: {e}", auth.display()))?;
         let node = render_node.to_string();
-        let usage = Command::new("Xvfb")
+        let usage = Command::new(&xvfb)
             .arg("-help")
             .output()
             .map(|o| {
@@ -690,7 +755,7 @@ impl Session {
         }
         for extra in attempts {
             let (read, write) = pipe()?;
-            let mut argv = vec!["Xvfb".to_string()];
+            let mut argv = vec![xvfb.clone()];
             if let Some(number) = requested {
                 argv.push(format!(":{number}"));
             }
@@ -873,7 +938,10 @@ impl Session {
     fn start_selkies(&mut self, command: &[String]) -> Result<(), String> {
         self.sockets_before = Self::wayland_sockets(&self.runtime_dir);
         let preload = std::env::var("SELKIES_PRELOAD").unwrap_or_default();
-        let env = for_selkies(&self.env, &preload);
+        let mut env = for_selkies(&self.env, &preload);
+        if let Some(bundle) = &self.bundle {
+            bundle.selkies_env(&mut env);
+        }
         let index = self
             .spawn(command, Some(&env), None)
             .map_err(|e| format!("selkies did not start: {e}"))?;

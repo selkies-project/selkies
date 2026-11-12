@@ -26,7 +26,9 @@
 //! Where the host has no DRM render node, the EGL vendor library a GPU container runtime injects
 //! (NVIDIA's) segfaults inside Xwayland's EGL initialization, and glamor would have nothing to
 //! accelerate there anyway, so Xwayland starts pinned to Mesa's EGL vendor, loading no external
-//! EGL platform, with its buffers in shared memory (`-shm`, `no_render_node_launch`).
+//! EGL platform, with its buffers in shared memory (`-shm`, `no_render_node_launch`). An
+//! Xwayland a caller ships beside its own executables is named by `PIXELFLUX_XWAYLAND`
+//! ([`XWAYLAND_VAR`]) and found ahead of the host's for that child alone.
 
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
@@ -170,22 +172,57 @@ impl Extras {
     }
 }
 
-/// The environment and arguments Xwayland starts with: none where the host has a DRM render
-/// node, else Mesa's EGL vendor where it is installed, no external EGL platform, and `-shm`.
-fn no_render_node_launch() -> (Vec<(&'static str, &'static str)>, Vec<&'static str>) {
+/// Where the Xwayland a caller ships is named, an executable called `Xwayland`; unset, the
+/// first on the `PATH`.
+pub const XWAYLAND_VAR: &str = "PIXELFLUX_XWAYLAND";
+
+/// The `PATH` Xwayland is looked up on: the directory of the one [`XWAYLAND_VAR`] names ahead of
+/// the process's own, so a bundle's Xwayland is found first for this child alone and the
+/// session's applications keep the host's programs; `None` where none is named or it is not
+/// there.
+fn xwayland_path(
+    named: Option<std::ffi::OsString>,
+    path: Option<std::ffi::OsString>,
+) -> Option<String> {
+    let named = std::path::PathBuf::from(named?);
+    let dir = named.parent()?.to_string_lossy().into_owned();
+    if !named.is_file() || dir.is_empty() {
+        return None;
+    }
+    let rest = path
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(if rest.is_empty() {
+        dir
+    } else {
+        format!("{dir}:{rest}")
+    })
+}
+
+/// The environment and arguments Xwayland starts with: the `PATH` that finds a named Xwayland
+/// ([`xwayland_path`]); nothing more where the host has a DRM render node, else Mesa's EGL
+/// vendor where it is installed, no external EGL platform, and `-shm`.
+fn no_render_node_launch() -> (Vec<(&'static str, String)>, Vec<&'static str>) {
+    let mut env = Vec::new();
+    if let Some(path) = xwayland_path(std::env::var_os(XWAYLAND_VAR), std::env::var_os("PATH")) {
+        env.push(("PATH", path));
+    }
     let has_render_node = std::fs::read_dir("/dev/dri").is_ok_and(|dir| {
         dir.flatten()
             .any(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
     });
     if has_render_node {
-        return (Vec::new(), Vec::new());
+        return (env, Vec::new());
     }
     println!(
         "[Wayland] No DRM render node: Xwayland starts on Mesa's EGL with shared-memory buffers."
     );
-    let mut env = vec![("__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", "")];
+    env.push(("__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", String::new()));
     if std::path::Path::new(MESA_EGL_VENDOR).exists() {
-        env.push(("__EGL_VENDOR_LIBRARY_FILENAMES", MESA_EGL_VENDOR));
+        env.push((
+            "__EGL_VENDOR_LIBRARY_FILENAMES",
+            MESA_EGL_VENDOR.to_string(),
+        ));
     }
     (env, vec!["-shm"])
 }
@@ -1028,5 +1065,32 @@ impl XwmHandler for AppState {
         self.xwm.display = None;
         self.xwm.extras = None;
         self.xwm.restart_at = Some(Instant::now() + RESTART_DELAY);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_named_xwayland_is_found_first_and_a_missing_one_is_not_named() {
+        let dir = std::env::temp_dir().join(format!("pixelflux-xwayland-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("Xwayland");
+        std::fs::write(&bin, "").unwrap();
+        assert_eq!(
+            xwayland_path(Some(bin.clone().into()), Some("/usr/bin:/bin".into())),
+            Some(format!("{}:/usr/bin:/bin", dir.display()))
+        );
+        assert_eq!(
+            xwayland_path(Some(bin.into()), None),
+            Some(dir.display().to_string())
+        );
+        assert_eq!(
+            xwayland_path(Some(dir.join("missing").into()), Some("/usr/bin".into())),
+            None
+        );
+        assert_eq!(xwayland_path(None, Some("/usr/bin".into())), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
