@@ -12,8 +12,8 @@
 //! * GTK on Wayland and libadwaita read GSettings' `org.gnome.desktop.interface` instead
 //!   (`color-scheme`, `gtk-theme`, `icon-theme`, `cursor-theme`), which `gsettings` sets. Those
 //!   writes go through a D-Bus service, so they are made only when the decision differs from the
-//!   one last made, recorded in `toolkits.state` under the desktop's config directory, and a start
-//!   with unchanged settings spawns nothing.
+//!   one last made, recorded in `toolkits.state` under the desktop's config directory once every
+//!   write succeeded, and a start with unchanged settings spawns nothing.
 //! * The accent reaches GTK through its user style sheets: each `gtk.css` imports a file under the
 //!   desktop's config directory that this module owns and rewrites, holding GTK's named selection
 //!   and accent colors and, for GTK 4, libadwaita's accent variables. The import is the first line
@@ -33,6 +33,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use tiny_skia::Color;
 
@@ -450,10 +451,20 @@ fn apply_xsettings(decision: &Decision) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Sets the GSettings keys through `gsettings` when the decision differs from the one last made;
-/// without `gsettings` nothing is recorded, so the keys are set once it appears. Each `gsettings`
-/// runs with the environment given over this process's, which names the session bus its write
-/// goes through, and is reaped on a thread of its own so the caller never waits on the bus.
+/// How long the `gsettings` writes of one decision may take before they count as failed.
+const GSETTINGS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Sets the GSettings keys through `gsettings` when the decision differs from the one last made.
+/// The decision is recorded in `toolkits.state` only once every write succeeded, so a failed one
+/// is tried again with the next apply; without `gsettings` nothing is recorded, so the keys are
+/// set once it appears. Each `gsettings` runs with the environment given over this process's,
+/// which names the session bus its write goes through. The writes run side by side and are
+/// waited for at most [`GSETTINGS_TIMEOUT`], so a bus that does not answer costs the caller that
+/// long once rather than hanging it.
+///
+/// # Errors
+/// A `gsettings` could not start, failed, outlasted the timeout, or stored its key in GSettings'
+/// memory backend, which no other process reads.
 fn apply_gsettings(decision: &Decision, env: &[(String, String)]) -> std::io::Result<bool> {
     let Some(program) = crate::apps::resolve_program("gsettings") else {
         return Ok(false);
@@ -463,22 +474,48 @@ fn apply_gsettings(decision: &Decision, env: &[(String, String)]) -> std::io::Re
         .iter()
         .map(|(key, value)| format!("{key}={value}\n"))
         .collect();
-    if !write_if_changed(&desktop_config_dir().join("toolkits.state"), &state)? {
+    let state_file = desktop_config_dir().join("toolkits.state");
+    if std::fs::read_to_string(&state_file).is_ok_and(|recorded| recorded == state) {
         return Ok(false);
     }
-    for (key, value) in values {
+    let mut children = Vec::new();
+    for (key, value) in &values {
         let child = Command::new(&program)
-            .args(["set", INTERFACE_SCHEMA, key, &value])
+            .args(["set", INTERFACE_SCHEMA, key, value])
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        if let Ok(mut child) = child {
-            std::thread::spawn(move || child.wait());
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| std::io::Error::other(format!("gsettings did not start: {e}")))?;
+        children.push((*key, child));
+    }
+    let deadline = Instant::now() + GSETTINGS_TIMEOUT;
+    let mut failures = Vec::new();
+    for (key, mut child) in children {
+        let mut timed_out = false;
+        while child.try_wait()?.is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                timed_out = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if timed_out {
+            failures.push(format!("{key}: no answer within {GSETTINGS_TIMEOUT:?}"));
+        } else if !output.status.success() {
+            failures.push(format!("{key}: {}", stderr.trim()));
+        } else if stderr.contains("'memory' GSettings backend") {
+            failures.push(format!("{key}: no persistent GSettings backend"));
         }
     }
-    Ok(true)
+    if !failures.is_empty() {
+        return Err(std::io::Error::other(failures.join("; ")));
+    }
+    write_if_changed(&state_file, &state)
 }
 
 /// Writes the toolkit settings, style sheets, XSETTINGS, and GSettings the desktop's colors and

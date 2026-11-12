@@ -244,8 +244,10 @@ pub const SCHEMES: [(&str, [&str; 4]); 5] = [
 ];
 
 /// Writes settings into a `key = value` file, replacing the lines of the keys given and keeping
-/// every other line, comments included. The file is replaced in one rename, since the shell and
-/// the window manager both write it and each reads it as it changes; a link is followed, so the
+/// every other line, comments included. The shell and the window manager both write the file
+/// and each reads it as it changes, so a write holds an exclusive lock on a `.lock` file beside
+/// it from its read to its rename, and the file is replaced in that one rename: two writers
+/// never drop each other's keys, and a reader never sees half a file. A link is followed, so the
 /// file it names is the one replaced.
 ///
 /// # Arguments
@@ -259,6 +261,14 @@ pub fn save_values(path: &std::path::Path, changes: &[(&str, String)]) -> std::i
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(PathBuf::from(lock_path))?;
+    lock.lock()?;
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut lines: Vec<String> = Vec::new();
     let mut written: Vec<&str> = Vec::new();
@@ -422,6 +432,33 @@ pub fn surface_shade_in(surface: Surface, base: Color, v: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two writers saving at once each keep the other's keys, since each holds the lock from its
+    /// read to its rename.
+    #[test]
+    fn writers_saving_at_once_keep_each_others_keys() {
+        let dir = std::env::temp_dir().join(format!("selkies-draw-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config");
+        let writers: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|key| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for round in 0..200 {
+                        save_values(&path, &[(key, round.to_string())]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let values = parse_values(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(values.get("first").map(String::as_str), Some("199"));
+        assert_eq!(values.get("second").map(String::as_str), Some("199"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// An image's defaults under the system directories give way to the user's file, and both
     /// to the environment; of two system directories the first wins.
