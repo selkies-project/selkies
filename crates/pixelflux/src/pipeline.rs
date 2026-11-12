@@ -6221,6 +6221,36 @@ mod refresh_tests {
         }
     }
 
+    /// A capped SVT-AV1 quantizer its peak bound while the page scrolled codes the still page it
+    /// leaves again once the peak lets go, without a key frame, to the uncapped session's
+    /// quality, and leaves no coarse block.
+    #[test]
+    #[cfg(svtav1_sequence_qp)]
+    fn a_capped_svtav1_quantizer_refreshes_what_it_coded_bound() {
+        let (plain, plain_still, _, _, plain_bytes) =
+            scroll_then_still_painted(Codec::Av1, true, 0, 0, 150, false, false, 0);
+        let (capped, still, keys, coarse, bytes) =
+            scroll_then_still_painted(Codec::Av1, true, 100, 100_000, 150, false, false, 0);
+        println!(
+            "Av1: uncapped {plain:.2} dB ({plain_still} frames, {plain_bytes} bytes while still), \
+             capped and refreshed {capped:.2} dB ({still} frames, {bytes} bytes)"
+        );
+        assert_eq!(keys, 0, "a key frame");
+        assert!(!coarse, "coarse blocks left");
+        assert!(still > 0, "nothing refreshed the still page");
+        assert!(
+            capped >= plain,
+            "refreshed to {capped:.2} dB against {plain:.2}"
+        );
+    }
+
+    /// `comes_to_the_paint_over` on SVT-AV1.
+    #[test]
+    #[cfg(svtav1_sequence_qp)]
+    fn a_capped_svtav1_quantizer_comes_to_the_paint_over_once_its_peak_lets_go() {
+        comes_to_the_paint_over(Codec::Av1, true);
+    }
+
     /// NVENC's capped constant quantizer, bound while the page scrolled, codes the still page
     /// again once the peak lets go, without a key frame, to the uncapped session's quality.
     /// Ignored by default.

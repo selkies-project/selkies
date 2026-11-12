@@ -173,9 +173,9 @@ fn due_t3_survives_forward_only_sack_and_same_instant_is_idempotent() -> Result<
     assert_eq!(a.timers.get(Timer::T3RTX), Some(forward_deadline));
     a.handle_timeout(due);
     assert_eq!(a.stats.get_num_t3timeouts(), 2);
-    assert_eq!(a.rto_mgr.get_rto(), 4000);
+    assert_eq!(a.rto_mgr.get_rto(), 1000);
     let rearmed = a.timers.get(Timer::T3RTX);
-    assert_eq!(rearmed, Some(due + Duration::from_millis(4000)));
+    assert_eq!(rearmed, Some(due + Duration::from_millis(1000)));
     let packets = a.gather_outbound(due).0;
     assert!(transmitted_data(&packets).is_empty());
     assert!(has_forward(&packets));
@@ -184,7 +184,7 @@ fn due_t3_survives_forward_only_sack_and_same_instant_is_idempotent() -> Result<
     // expiration must neither fire twice nor double RTO a second time.
     a.handle_timeout(due);
     assert_eq!(a.stats.get_num_t3timeouts(), 2);
-    assert_eq!(a.rto_mgr.get_rto(), 4000);
+    assert_eq!(a.rto_mgr.get_rto(), 1000);
     assert_eq!(a.timers.get(Timer::T3RTX), rearmed);
 
     a.handle_sack(

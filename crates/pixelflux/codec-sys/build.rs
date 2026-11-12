@@ -112,6 +112,11 @@ const PATCHED: &[(&str, &str, &str)] = &[
         "svtav1_constant_blocks_skip",
         "constant_blocks_skip",
     ),
+    (
+        "svtav1",
+        "svtav1_sequence_qp",
+        "SVT_AV1_QP_FILE_KEEPS_SEQUENCE",
+    ),
 ];
 
 fn main() {

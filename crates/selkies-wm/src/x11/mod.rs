@@ -50,15 +50,17 @@ pub mod frame;
 pub mod props;
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::{Read as _, Write as _};
 use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use pixelflux::wm::{
-    Command, Event, Extents, Frame, KeyEvent, Modifiers, OutputInfo, PointerEvent, PointerKind, Rect,
-    Request, ResizeEdge, Size, SizeHints, States, Transform, Under, Verdict, WindowId, WindowPolicy,
+    Command, DesktopView, Event, Extents, Frame, KeyEvent, Modifiers, OutputInfo, PointerEvent, PointerKind,
+    Rect, Request, ResizeEdge, Size, SizeHints, States, Transform, Under, Verdict, WindowId, WindowPolicy,
 };
 use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::protocol::randr::{self, ConnectionExt as _};
@@ -286,9 +288,57 @@ struct Client {
 pub struct ManagerHandle {
     running: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    remote: Remote,
+}
+
+/// What another thread asks of the manager's thread.
+enum Ask {
+    /// The desktop as the engine holds it.
+    View(mpsc::Sender<DesktopView>),
+    /// A request about a window, answered with whether the window is managed.
+    Request(WindowId, Request, mpsc::Sender<bool>),
+}
+
+/// How another thread reaches the manager's thread: what it asks goes on a channel and a byte
+/// on a pipe the thread polls beside its X connection, so the answer does not wait for the next
+/// X event or timer. Every call blocks until that thread answers, for two seconds at most.
+#[derive(Clone)]
+pub struct Remote {
+    sender: mpsc::Sender<Ask>,
+    wake: Arc<UnixStream>,
+}
+
+impl Remote {
+    fn ask<T>(&self, ask: Ask, answer: mpsc::Receiver<T>) -> Option<T> {
+        self.sender.send(ask).ok()?;
+        (&*self.wake).write_all(&[0]).ok()?;
+        answer.recv_timeout(Duration::from_secs(2)).ok()
+    }
+
+    /// The desktop as the engine holds it, in the engine's logical coordinates, which the
+    /// session's scale ([`pixelflux::wm::OutputInfo::scale`]) multiplies into the server's
+    /// pixels. `None` once the manager's thread has ended, or where it does not answer in time.
+    pub fn view(&self) -> Option<DesktopView> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Ask::View(reply), answer)
+    }
+
+    /// Ask the engine to act on a window (activate, close, minimize, and the like), as a
+    /// taskbar asks. False for a window the manager does not manage, and where it does not
+    /// answer.
+    pub fn request(&self, id: WindowId, request: Request) -> bool {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Ask::Request(id, request, reply), answer)
+            .unwrap_or(false)
+    }
 }
 
 impl ManagerHandle {
+    /// What reaches this manager from any thread.
+    pub fn remote(&self) -> Remote {
+        self.remote.clone()
+    }
+
     /// Ask the manager to stop and wait for its thread.
     pub fn stop(mut self) {
         self.running.store(false, Ordering::Relaxed);
@@ -337,6 +387,9 @@ pub struct Manager {
     /// Whether the pointer is grabbed for a move or resize a client asked for through
     /// `_NET_WM_MOVERESIZE`, where no frame press holds it; released with the engine's grab.
     moveresize_grab: bool,
+    /// What other threads ask ([`Remote`]) and the pipe that wakes the loop for them; absent
+    /// until [`spawn`] hands them over.
+    queries: Option<(mpsc::Receiver<Ask>, UnixStream)>,
 }
 
 /// Start the manager on `display`, with the session environment programs are started in and
@@ -350,6 +403,14 @@ pub fn spawn(
     let running = Arc::new(AtomicBool::new(true));
     let mut manager = Manager::connect(display, env.clone(), control.clone(), running.clone())?;
     manager.shell = Some(ShellSupervisor::new(env, control));
+    let (sender, receiver) = mpsc::channel();
+    let (wake, woken) = UnixStream::pair().map_err(|e| e.to_string())?;
+    woken.set_nonblocking(true).map_err(|e| e.to_string())?;
+    manager.queries = Some((receiver, woken));
+    let remote = Remote {
+        sender,
+        wake: Arc::new(wake),
+    };
     let flag = running.clone();
     let thread = std::thread::Builder::new()
         .name("selkies-wm-x11".to_string())
@@ -373,6 +434,7 @@ pub fn spawn(
     Ok(ManagerHandle {
         running,
         thread: Some(thread),
+        remote,
     })
 }
 
@@ -619,6 +681,7 @@ impl Manager {
             client_grabs: Vec::new(),
             scale,
             moveresize_grab: false,
+            queries: None,
         })
     }
 
@@ -762,6 +825,7 @@ impl Manager {
                 self.dispatch(Event::Tick(now));
             }
             let _ = self.conn.flush();
+            self.answer_queries();
             let mut handled = false;
             loop {
                 match self.conn.poll_for_event() {
@@ -786,18 +850,52 @@ impl Manager {
                 deadline = deadline.min(at);
             }
             let timeout = deadline.saturating_duration_since(Instant::now());
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
+            let wake = self.queries.as_ref().map_or(-1, |(_, woken)| woken.as_raw_fd());
+            let mut pfds = [
+                libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: wake,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
             let ms = timeout.as_millis().clamp(1, 1000) as i32;
-            // SAFETY: pollfd is a valid, initialized array of one entry for the call's duration.
+            // SAFETY: pfds is a valid, initialized array of two entries for the call's duration;
+            // poll skips an entry whose descriptor is negative.
             unsafe {
-                libc::poll(&mut pfd, 1, ms);
+                libc::poll(pfds.as_mut_ptr(), 2, ms);
             }
         }
         self.shutdown();
+    }
+
+    /// Answer everything waiting on the channel, a view with the engine's and a request by
+    /// running it through the engine, and drain the bytes that woke the loop for them.
+    fn answer_queries(&mut self) {
+        let mut asked = Vec::new();
+        if let Some((receiver, woken)) = self.queries.as_mut() {
+            let mut drained = [0u8; 64];
+            while matches!(woken.read(&mut drained), Ok(n) if n > 0) {}
+            asked.extend(receiver.try_iter());
+        }
+        for ask in asked {
+            match ask {
+                Ask::View(reply) => {
+                    let _ = reply.send(self.engine.view());
+                }
+                Ask::Request(id, request, reply) => {
+                    let managed = self.by_id.contains_key(&id);
+                    if managed {
+                        self.dispatch(Event::Request { id, request });
+                    }
+                    let _ = reply.send(managed);
+                }
+            }
+        }
     }
 
     /// Hand the clients back to the root as they stand, so a manager that follows adopts them.

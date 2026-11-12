@@ -21,5 +21,5 @@ log = { version = "0.4", features = ["std"] }
 x11rb = { version = "0.14", features = ["randr", "shape", "xfixes", "xkb", "cursor", "render", "xtest", "xinput"] }
 xkbcommon = { version = "0.9", default-features = false }
 # rc.xml and menu.xml.
-quick-xml = "0.41"
+quick-xml = "0.42"
 libc = "0.2"

@@ -17,9 +17,9 @@
  * @module
  */
 import type * as React from "react";
-import { Clipboard as ClipboardIcon, FileText, Gamepad2, Joystick, Keyboard, LayoutGrid, Mic, Monitor, Printer, Share2, Volume2, Webcam,
+import { Bot, Clipboard as ClipboardIcon, FileText, Gamepad2, Joystick, Keyboard, LayoutGrid, Mic, Monitor, Printer, Share2, Volume2, Webcam,
   type LucideIcon } from "lucide-react";
-import { AppsAction, FilesActions, GamepadsBody, SharingBody } from "@/panels/catalog-bodies";
+import { AppsAction, FilesActions, GamepadsBody, PelorusBody, SharingBody } from "@/panels/catalog-bodies";
 import { Clipboard } from "@/panels/clipboard";
 import { Printing } from "@/panels/printing";
 import { AudioDeviceSettings, AudioQualitySettings, DisplaySettings, FormatSettings, PerformanceSettings, ResolutionSettings } from "@/panels/settings";
@@ -74,10 +74,16 @@ export interface PanelSpec {
   /** Classes of the menu popup that draws the body, where it needs a width of its own. */
   menuClass?: string;
   /** A layout with a bar floats it beside the bar rather than listing it in a menu. */
-  floats?: boolean;
-}
+  floats?: boolean;}
 
 export const PANELS: PanelSpec[] = [
+  {
+    id: "pelorus", contentId: "pelorus-content", title: "sections.pelorus.title", icon: Bot, kind: "panel", floats: true,
+    // First of all panels: a server that has Pelorus on has it on to be used. The server says at load
+    // whether it serves Pelorus; a viewer has no dashboard and never reaches this.
+    shown: ({ primary }) => primary && window.__SELKIES_PELORUS__ === true, Body: PelorusBody,
+    menuClass: "w-[340px] max-w-[calc(100vw-1rem)]",
+  },
   {
     id: "video", contentId: "settings-content", title: "sections.video.title", tab: "settingsTabs.video", kind: "settings",
     shown: ({ panels }) => panels.video,

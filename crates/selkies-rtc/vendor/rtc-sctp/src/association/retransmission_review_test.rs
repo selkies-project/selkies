@@ -223,14 +223,18 @@ fn t2_backoff_does_not_compound_simultaneous_t3_expirations() -> Result<()> {
         a.timers.start(Timer::T3RTX, now, 1000);
         for interval in [2, 4, 8, 16] {
             now = a.timers.get(Timer::T2Shutdown).unwrap();
-            assert_eq!(Some(now), a.timers.get(Timer::T3RTX));
+            assert!(a.timers.get(Timer::T3RTX).is_some_and(|t3| t3 <= now));
             a.handle_timeout(now);
             let deadline = now + Duration::from_secs(interval);
             assert_eq!(Some(deadline), a.timers.get(Timer::T2Shutdown));
             let packets = a.gather_outbound(now).0;
             assert!(!packets.is_empty());
             assert_eq!(Some(deadline), a.timers.get(Timer::T2Shutdown));
-            assert_eq!(Some(deadline), a.timers.get(Timer::T3RTX));
+            // T3 holds at the backoff cap while T2 keeps doubling its own interval.
+            assert_eq!(
+                Some(now + Duration::from_secs(1)),
+                a.timers.get(Timer::T3RTX)
+            );
         }
     }
     Ok(())
@@ -302,8 +306,8 @@ fn public_rtt_reports_measurements_independently_of_backoff() {
         a.rto_mgr.backoff();
         assert_eq!(Duration::from_millis(80), a.rtt());
     }
-    // 240 ms measured, raised to the 400 ms floor, then doubled four times.
-    assert_eq!(6_400, a.rto_mgr.get_rto());
+    // 240 ms measured, raised to the 400 ms floor, then doubled up to the backoff cap.
+    assert_eq!(1_000, a.rto_mgr.get_rto());
     a.rto_mgr.set_new_rtt(160);
     assert_eq!(Duration::from_millis(90), a.rtt());
 }

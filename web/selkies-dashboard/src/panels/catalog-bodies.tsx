@@ -7,16 +7,19 @@
 /**
  * The bodies of the catalog's panels (`catalog.ts`) that are no panel of
  * their own: the files' actions, the apps button, the sharing and gamepad
- * panels as each place draws them, and a settings panel's cards as a list.
+ * panels as each place draws them, the Pelorus chat, and a settings panel's
+ * cards as a list.
  * @module
  */
 import { FileUp, FolderOpen, LayoutGrid } from "lucide-react";
 import type { PanelCard, PanelPlace } from "@/panels/catalog";
 import { ActionButton, Clip } from "@/panels/controls";
 import { GamepadControls } from "@/panels/gamepads";
+import { PelorusCompact } from "@/pelorus/compact";
 import { Sharing } from "@/panels/sharing";
 import { useDashboard } from "@/state/dashboard";
 import { t } from "@/i18n";
+import { getRoutePrefix } from "@/utils";
 
 /** The files: an upload, and the file manager's dialog. */
 export function FilesActions() {
@@ -55,6 +58,12 @@ export function SharingBody({ place }: { place: PanelPlace }) {
 /** The gamepads: floating, with the input switch a layout with sections has as a toggle of its own; in a section, rumble as a pressed button. */
 export function GamepadsBody({ place }: { place: PanelPlace }) {
   return <GamepadControls showInput={place === "float"} rumbleButton={place === "section"} />;
+}
+
+/** The Pelorus prompt against this server's API, with the page of its own one press away. */
+export function PelorusBody() {
+  const prefix = getRoutePrefix();
+  return <PelorusCompact base={`${prefix}/pelorus/api`} popoutHref={`${prefix}/pelorus/`} />;
 }
 
 /** A settings panel's cards one after the other, as a section lists them. */

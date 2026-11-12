@@ -176,10 +176,11 @@ impl RefinePace {
 }
 
 /// Quality index steps finer than the session's own a capped constant quality's refresh codes its
-/// coarse blocks at (`BlockLedger::refresh`), so a predicted frame refreshing them comes to what
-/// the uncapped session's picture stands at: x264 refreshing a 720p page of text it coded at
-/// quantizer 51 brought it to 35.3 dB at the session's own quality where the uncapped session's
-/// stood at 37.9, to 37.7 three steps finer, and to 42.5 six steps finer at twice the bytes.
+/// coarse blocks at (`BlockLedger::refresh`, `Codec::refresh_index`), so a predicted frame
+/// refreshing them comes to what the uncapped session's picture stands at: refreshing a 720p
+/// page of text a scroll left coarse, libvpx's VP8 and VP9 came to 44.8 and 41.7 dB against the
+/// uncapped sessions' 44.5 and 40.5, and NVENC's H.264 to 41.1 against 38.8. x264 takes a step
+/// more (`X264_REFRESH_FINER` in the software encoder).
 pub const REFRESH_FINER: u32 = 3;
 
 /// Quality index steps further finer a refresh codes a block a capped key frame left coarse at

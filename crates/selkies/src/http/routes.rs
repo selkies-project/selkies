@@ -52,7 +52,8 @@ pub fn json_error(status: StatusCode, message: &str) -> Response {
 }
 
 /// `GET /api/status`: the active mode, the modes available, and what the dashboard paints
-/// before any stream connects (the dual-mode toggle, the layout and the layouts allowed).
+/// before any stream connects (the dual-mode toggle, the layout and the layouts allowed, and
+/// whether Pelorus is served, which decides whether its panel is offered).
 async fn handle_status(State(state): State<AppState>) -> Response {
     let body = json!({
         "current_mode": state.supervisor.current_mode(),
@@ -60,6 +61,7 @@ async fn handle_status(State(state): State<AppState>) -> Response {
         "enable_dual_mode": state.config.enable_dual_mode,
         "ui_layout": state.config.ui_layout,
         "ui_layout_allowed": state.config.ui_layout_allowed,
+        "pelorus": state.config.pelorus,
     });
     axum::Json(body).into_response()
 }

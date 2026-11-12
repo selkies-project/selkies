@@ -10,11 +10,18 @@
 //! encoder with the next picture where the release takes one (`HAS_EVENTS`); a quality,
 //! frame-rate, or VBV change re-opens it, as a bitrate change does on an earlier release.
 //!
-//! The constant quantizer runs uncapped where a caller asks for a capped one
-//! (`RateSettings::capped`): the library's capped CRF (`max_bit_rate`) needs its temporal
+//! A capped constant quantizer (`RateSettings::capped`) holds its peak beside the library
+//! (`PeakOffset`), as x264 does: the library's own capped CRF (`max_bit_rate`) needs its temporal
 //! dependency model, which the low-delay structure a real-time session codes in leaves off, so
-//! the library drops the cap there (4.3.0: "Maximum bit rate only supported with tpl on"); its
-//! constant rate codes a picture of its own at the bitrate, not the quantizer's.
+//! the library drops the cap there (4.3.0: "Maximum bit rate only supported with tpl on"), and
+//! its constant rate cannot be switched to live. The session opens with per-picture quantizers
+//! (`use_qp_file`) and names none while its peak does not bind, which the patched library codes
+//! at the sequence's quantizer (`patches/svtav1`, `svtav1_sequence_qp`), so a session the peak
+//! never binds codes as an uncapped one; while it binds, a picture is forced at the quality
+//! raised by the peak's offset, and from then until the encoder next opens a change of quality
+//! is forced on the pictures it applies to rather than re-opening on a key frame
+//! (`SvtAv1Encoder::forced_level`). A library without the patch runs the constant quantizer
+//! uncapped.
 //!
 //! A constant-rate session on such a release names its references: it predicts every frame
 //! from the one before in a flat structure and has the library store anchors on the schedule
@@ -55,13 +62,18 @@ use super::codec::{
     push_video_header, vpx_level,
 };
 use super::reference::{Reference, ReferenceSlots, SlotPlan, SlotRefresh};
-use super::session::{Pending, Planes, Quality, RateSettings, encode_threads};
+use super::session::{PeakOffset, Pending, Planes, Quality, RateSettings, encode_threads};
 use crate::CaptureSettings;
 
 /// The lowest quantizer level the real-time mode runs at. Below three the library faults, and
 /// below ten it codes every other frame of a scrolling text desktop with the lower third of
 /// the picture wrong, at three times the bytes of level ten.
 const RTC_MIN_LEVEL: u32 = 10;
+
+/// The lowest quantizer level a forced picture finer than the session's quality codes at
+/// (`SvtAv1Encoder::forced_level`): the library's own floor, below which it faults.
+#[cfg(svtav1_sequence_qp)]
+const FORCED_MIN_LEVEL: u32 = 3;
 
 /// The preset frames are coded at: in the real-time mode, a quarter less encode time than preset
 /// 10 for more bytes at a fixed quantizer, which the quantizer table absorbs; the presets above
@@ -141,6 +153,19 @@ pub struct SvtAv1Encoder {
     constant: Vec<u8>,
     /// The quality index the rate control last coded a frame at, held frames aside.
     last_quality: Option<u32>,
+    /// A capped constant quantizer's peak (`PeakOffset`), where the release forces a picture's
+    /// quantizer and keeps the sequence's for one that names none (`svtav1_sequence_qp`).
+    peak: Option<PeakOffset>,
+    /// Whether the peak has bound a frame since the encoder last opened, from which a change
+    /// of quality is forced on the pictures it applies to rather than re-opening.
+    bound_since_open: bool,
+    /// Whether the last frame was coded coarser than the session's quality for its peak.
+    last_capped: bool,
+    /// The quality index the last frame was asked for, which bounds the peak's offset.
+    last_crf: u32,
+    /// The quality index the session codes at (`quality`), from which a forced finer quality
+    /// is measured (`forced_level`).
+    quality_index: u32,
 }
 
 /// The id an anchor is stored under: its timestamp, off the zero the library reserves.
@@ -166,6 +191,19 @@ impl SvtAv1Encoder {
         let _ = rgba;
         let width = settings.width.max(1) as usize;
         let height = settings.height.max(1) as usize;
+        let rate = RateSettings::new(settings);
+        let rate = if cfg!(svtav1_sequence_qp) {
+            rate
+        } else {
+            rate.uncapped()
+        };
+        let peak = (rate.capped && !rate.cbr).then(|| {
+            PeakOffset::new(
+                rate.bitrate_kbps,
+                (rate.vbv() / 1000) as i32,
+                rate.fps.fps(),
+            )
+        });
         let mut me = Self {
             handle: ptr::null_mut(),
             config: Box::new(unsafe { std::mem::zeroed() }),
@@ -182,7 +220,7 @@ impl SvtAv1Encoder {
             ),
             threads: encode_threads(settings),
             quality: Quality::new(Codec::Av1.quantizer(settings.video_crf)),
-            rate: RateSettings::new(settings).uncapped(),
+            rate,
             omit_headers: settings.omit_stripe_headers,
             fresh: true,
             events: Events::default(),
@@ -196,6 +234,11 @@ impl SvtAv1Encoder {
             restate_target: false,
             constant: Vec::new(),
             last_quality: None,
+            peak,
+            bound_since_open: false,
+            last_capped: false,
+            last_crf: settings.video_crf.max(0) as u32,
+            quality_index: settings.video_crf.max(0) as u32,
         };
         me.open()?;
         Ok(me)
@@ -243,6 +286,10 @@ impl SvtAv1Encoder {
             cfg.matrix_coefficients = 1;
             cfg.color_range = 0;
             cfg.intra_refresh_type = 2;
+            #[cfg(svtav1_sequence_qp)]
+            {
+                cfg.use_qp_file = self.peak.is_some();
+            }
             if rate.cbr {
                 let (lo, hi) = (
                     Codec::Av1.quantizer_bound(rate.min_qp),
@@ -308,6 +355,7 @@ impl SvtAv1Encoder {
         self.events = Events::default();
         self.references = tracks.then(ReferenceSlots::new);
         self.anchors.clear();
+        self.bound_since_open = self.peak.is_some_and(|p| p.offset > 0.0);
         Ok(())
     }
 
@@ -439,13 +487,94 @@ impl SvtAv1Encoder {
         self.held = Some(Codec::Av1.quantizer(crf as i32));
     }
 
+    /// The quantizer level a capped constant quantizer forces the next picture at, or 0 for the
+    /// sequence's own (`svtav1_sequence_qp`): the quality index `crf` asks for raised by the
+    /// peak's offset while it binds, and from the first binding since the encoder opened, any
+    /// quality other than the one it opened at, which it would otherwise re-open for. A session
+    /// that never binds forces none and codes as an uncapped one.
+    ///
+    /// A forced picture takes none of the library's key-frame or layer offsets, which code its own
+    /// pictures finer than their quality says, and the shortfall grows with how far finer than the
+    /// session's the quality asked for stands: a refresh of a 320x240 page of text the peak left at
+    /// the coarsest quantizer came to 39.3 dB forced at its quality three steps finer, where the
+    /// uncapped session stood at 42.9, and to 43.7 four steps further; the paint-over seven steps
+    /// finer reached 46.4 forced four steps further and 51.8 eight steps further, against the
+    /// uncapped session's 51.6 from a key frame. So a quality finer than the session's is forced
+    /// one step past twice its distance below it, and at the library's own floor rather than
+    /// `RTC_MIN_LEVEL`, whose failure is a scroll's and such a picture codes a still page. A forced
+    /// picture asks for no constant-block skip (`constant_blocks_skip`): the refresh after a bound
+    /// scroll, its still superblocks coded as skips, decoded at 13.7 dB where it decoded at 39.3
+    /// without them.
+    #[cfg(svtav1_sequence_qp)]
+    fn forced_level(&self, crf: u32) -> u32 {
+        let Some(peak) = self.peak.filter(|_| self.bound_since_open) else {
+            return 0;
+        };
+        let session = self.quality_index as f64;
+        let finer = (session - crf as f64).max(0.0);
+        if peak.offset <= 0.0
+            && finer == 0.0
+            && Codec::Av1.quantizer(crf as i32) == self.quality.current
+        {
+            return 0;
+        }
+        if finer > 0.0 {
+            let index = (session - 2.0 * finer - 1.0 + peak.offset)
+                .round()
+                .clamp(0.0, 51.0) as i32;
+            return vpx_level(Codec::Av1, Codec::Av1.quantizer(index)).max(FORCED_MIN_LEVEL);
+        }
+        let index = (crf as f64 + peak.offset).round().min(51.0) as i32;
+        Self::level(Codec::Av1.quantizer(index))
+    }
+
+    /// Whether the constant quantizer runs under a peak (`RateSettings::capped`).
+    pub fn capped(&self) -> bool {
+        self.peak.is_some()
+    }
+
+    /// Whether that peak binds the session: its quality stands above the session's.
+    pub fn peak_bound(&self) -> bool {
+        self.peak.is_some_and(|p| p.offset > 0.0)
+    }
+
+    /// Whether the last frame was coded coarser than the session's quality for its peak.
+    pub fn coded_capped(&self) -> bool {
+        self.last_capped
+    }
+
+    /// A tick that codes no frame (`FrameEncoder::idle`): the peak's bucket drains as for an
+    /// empty frame.
+    pub fn idle(&mut self) {
+        if let Some(peak) = self.peak.as_mut() {
+            peak.note(0.0, true, 51.0 - self.last_crf as f64);
+        }
+    }
+
+    /// Whether a change of the session's quality re-opens it: until its peak binds, as an
+    /// uncapped session does; from then until it next opens, the quality is forced on the
+    /// pictures it applies to (`forced_level`).
+    pub fn reopens_on_quality(&self) -> bool {
+        !(self.peak.is_some() && self.bound_since_open)
+    }
+
     /// Apply a rate or frame-rate change: a new bitrate with the next picture where the library
-    /// takes one live, since the VBV it holds spans the same time at any bitrate; anything else
-    /// re-opens the encoder.
+    /// takes one live, since the VBV it holds spans the same time at any bitrate, and a capped
+    /// constant quantizer's new peak beside the library; anything else re-opens the encoder.
     pub fn reconfigure_rate(&mut self, settings: &CaptureSettings) -> Result<(), String> {
         let Some(rate) = self.rate.changed(settings) else {
             return Ok(());
         };
+        if let Some(peak) = self.peak.as_mut() {
+            peak.follow(
+                rate.bitrate_kbps,
+                (rate.vbv() / 1000) as i32,
+                rate.fps.fps(),
+            );
+            let reopen = rate.fps != self.rate.fps;
+            self.rate = rate;
+            return if reopen { self.open() } else { Ok(()) };
+        }
         let live = HAS_EVENTS
             && rate.fps == self.rate.fps
             && rate.vbv_multiplier == self.rate.vbv_multiplier
@@ -468,11 +597,16 @@ impl SvtAv1Encoder {
         crf: u32,
         force_idr: bool,
     ) -> Result<Vec<u8>, String> {
+        let forces = self.peak.is_some() && self.bound_since_open;
         let quality_changed = !self.rate.cbr
+            && !forces
             && self
                 .quality
                 .update(Codec::Av1.quantizer(crf as i32))
                 .is_some();
+        if quality_changed {
+            self.quality_index = crf;
+        }
         if quality_changed || (force_idr && !self.fresh && KEYFRAME_BY_REOPEN) {
             self.open()?;
         }
@@ -521,6 +655,8 @@ impl SvtAv1Encoder {
             }
             self.events.clear = if key { 0 } else { released.unwrap_or(0) };
         }
+        #[cfg(svtav1_sequence_qp)]
+        let forced = self.forced_level(crf);
         {
             let header = &mut self.input.0;
             header.n_filled_len = header.n_alloc_len;
@@ -542,9 +678,20 @@ impl SvtAv1Encoder {
             }
             #[cfg(svtav1_constant_blocks_skip)]
             {
-                header.constant_blocks_skip = u8::from(!self.rate.cbr && self.references.is_none());
+                #[cfg(svtav1_sequence_qp)]
+                let forced_skip_ok = forced == 0;
+                #[cfg(not(svtav1_sequence_qp))]
+                let forced_skip_ok = true;
+                header.constant_blocks_skip =
+                    u8::from(!self.rate.cbr && self.references.is_none() && forced_skip_ok);
+            }
+            #[cfg(svtav1_sequence_qp)]
+            {
+                header.qp = forced;
             }
         }
+        let offset = self.peak.map_or(0.0, |p| p.offset);
+        self.last_crf = crf;
         if self.rate.cbr && HAS_EVENTS {
             let held_key = key && self.held.is_some();
             // The held key frame at the open preset; any other at its own, as the references
@@ -610,6 +757,11 @@ impl SvtAv1Encoder {
             unsafe { svt_av1_enc_release_out_buffer(&mut packet) };
             let id = self.pending.take(packet_pts).unwrap_or(frame_number as u16);
             let is_key = av1_is_key(&bytes);
+            if let Some(peak) = self.peak.as_mut() {
+                self.last_capped = offset > 0.0;
+                let next = peak.note(bytes.len() as f64 * 8.0, !is_key, 51.0 - crf as f64);
+                self.bound_since_open |= next > 0.0;
+            }
             let mut anchor = 0;
             if let Some(references) = self.references.as_mut() {
                 if !is_key && references.shared_anchor(plan) {
@@ -650,6 +802,8 @@ impl SvtAv1Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(svtav1_sequence_qp)]
+    use crate::encoders::codec::{FRAME_DELTA, parse_video_type};
 
     /// A session let go before its first frame closes.
     #[test]
@@ -863,6 +1017,133 @@ mod tests {
         enc.encode_host(&frame, 64 * 4, false, 3, 30, false)
             .expect("the frame after");
         assert_ne!(enc.preset, KEY_PRESET);
+    }
+
+    /// A 640x360 session at 30 fps and quality 25, capped at `peak_kbps` where one is given.
+    #[cfg(svtav1_sequence_qp)]
+    fn scroll_settings(peak_kbps: Option<i32>) -> CaptureSettings {
+        let plain = CaptureSettings {
+            width: 640,
+            height: 360,
+            target_fps: 30.0,
+            codec: Codec::Av1,
+            video_crf: 25,
+            ..Default::default()
+        };
+        match peak_kbps {
+            Some(kbps) => CaptureSettings {
+                video_bitrate_kbps: kbps,
+                video_vbv_multiplier: crate::encoders::CAPPED_VBV_FRAMES,
+                ..plain
+            },
+            None => plain,
+        }
+    }
+
+    /// Frame `t` of a 640x360 page of text scrolling a step a frame.
+    #[cfg(svtav1_sequence_qp)]
+    fn scrolled(t: usize) -> Vec<u8> {
+        crate::encoders::scrolled_text(640, 360, t)
+    }
+
+    /// The kbps a run of frames of `bits` comes to at 30 fps.
+    #[cfg(svtav1_sequence_qp)]
+    fn kbps(bits: &[usize]) -> f64 {
+        bits.iter().sum::<usize>() as f64 * 30.0 / bits.len() as f64 / 1000.0
+    }
+
+    /// A capped constant quantizer under a peak its picture never reaches forces no picture's
+    /// quantizer and codes every frame as the uncapped session does, its key frames and a
+    /// change of quality among them.
+    #[test]
+    #[cfg(svtav1_sequence_qp)]
+    fn a_capped_quantizer_codes_as_uncapped_under_a_peak_it_never_reaches() {
+        let mut plain = SvtAv1Encoder::new(&scroll_settings(None), false).expect("session");
+        let mut capped =
+            SvtAv1Encoder::new(&scroll_settings(Some(100_000)), false).expect("session");
+        assert!(capped.capped() && !plain.capped());
+        for t in 0..40 {
+            let key = t == 0 || t == 15;
+            let (at, crf) = if t < 30 { (t, 25) } else { (30, 18) };
+            let a = plain
+                .encode_host(&scrolled(at), 640 * 4, false, t as u64, crf, key)
+                .unwrap();
+            let b = capped
+                .encode_host(&scrolled(at), 640 * 4, false, t as u64, crf, key)
+                .unwrap();
+            assert_eq!(a, b, "frame {t}");
+        }
+        assert!(!capped.peak_bound(), "bound to a peak it never reached");
+    }
+
+    /// A capped constant quantizer holds a scroll its quality codes at twice the peak to the
+    /// peak, coding no key frame past the first: once the bucket has drained the first key frame,
+    /// the scroll runs within the peak and at no less than nine tenths of it, where the uncapped
+    /// session runs at twice it.
+    #[test]
+    #[cfg(svtav1_sequence_qp)]
+    fn a_capped_quantizer_holds_a_scroll_at_its_peak() {
+        const FRAMES: usize = 450;
+        const SETTLED: usize = 250;
+        let run = |settings: &CaptureSettings| {
+            let mut enc = SvtAv1Encoder::new(settings, false).expect("session");
+            let mut bits = Vec::new();
+            let mut capped = false;
+            for t in 0..FRAMES {
+                let out = enc
+                    .encode_host(&scrolled(t), 640 * 4, false, t as u64, 25, t == 0)
+                    .unwrap();
+                assert!(
+                    t == 0 || parse_video_type(out[1]).map(|(_, k)| k) == Some(FRAME_DELTA),
+                    "frame {t} is a key frame"
+                );
+                bits.push((out.len() - VIDEO_HEADER_LEN) * 8);
+                capped |= enc.coded_capped();
+            }
+            (kbps(&bits[SETTLED..]), capped)
+        };
+        let (uncapped, _) = run(&scroll_settings(None));
+        let peak = (uncapped * 0.5) as i32;
+        let (held, bound) = run(&scroll_settings(Some(peak)));
+        println!("uncapped {uncapped:.0} kbps, capped at {peak} kbps {held:.0} kbps");
+        assert!(bound, "the peak never bound");
+        assert!(
+            (0.9 * peak as f64..=1.1 * peak as f64).contains(&held),
+            "the scroll ran at {held:.0} kbps under a {peak} kbps peak"
+        );
+    }
+
+    /// A capped constant quantizer takes each new peak live, as congestion control steers it: no
+    /// key frame, and a scroll after a cut to 60% of what it ran at under the high peak codes
+    /// within the lower one.
+    #[test]
+    #[cfg(svtav1_sequence_qp)]
+    fn a_capped_quantizer_moves_its_peak_without_a_key_frame() {
+        const CUT: usize = 20;
+        const AFTER: usize = 150;
+        let mut s = scroll_settings(Some(100_000));
+        let mut enc = SvtAv1Encoder::new(&s, false).expect("session");
+        let mut bits = Vec::new();
+        for t in 0..CUT + AFTER {
+            if t == CUT {
+                s.video_bitrate_kbps = (kbps(&bits[1..]) * 0.6) as i32;
+            }
+            enc.reconfigure_rate(&s).expect("rate");
+            let out = enc
+                .encode_host(&scrolled(t), 640 * 4, false, t as u64, 25, t == 0)
+                .unwrap();
+            assert!(
+                t == 0 || parse_video_type(out[1]).map(|(_, k)| k) == Some(FRAME_DELTA),
+                "frame {t} is a key frame"
+            );
+            bits.push((out.len() - VIDEO_HEADER_LEN) * 8);
+        }
+        let after = kbps(&bits[CUT + 10..]);
+        assert!(
+            after <= 1.1 * s.video_bitrate_kbps as f64,
+            "the scroll ran at {after:.0} kbps under a {} kbps peak",
+            s.video_bitrate_kbps
+        );
     }
 
     /// Sessions opened and closed on many threads at once each encode their frame.

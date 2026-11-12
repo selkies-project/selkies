@@ -7,12 +7,13 @@ Subject: [PATCH 2/4] Code the blocks the caller marks constant as skips
 A screen encoder knows which 16x16 blocks of a picture are the frame before's; the analysis of
 a coding unit of such blocks still derives and costs merge candidates, searches motion, tries
 intra modes, and recurses into the split. x265_picture.constantBlocks carries that map, one
-byte a block, and a P-slice coding unit whose every block is marked is coded as a 2Nx2N skip
-from the zero-motion merge candidate of the first reference, with the motion compensation, the
-skip's rate-distortion cost, and the delta-QP bookkeeping the full path gives a skip, and
-nothing else; where no merge candidate is that vector the full path decides as before. A block
-left unmarked is analysed as before, so the caller marks only blocks whose reference already
-holds them at the quality wanted.
+byte a block over the picture as the caller gives it (the blocks a padding to the minimum
+coding unit adds count as unmarked), and a P-slice coding unit whose every block is marked is
+coded as a 2Nx2N skip from the zero-motion merge candidate of the first reference, with the
+motion compensation, the skip's rate-distortion cost, and the delta-QP bookkeeping the full
+path gives a skip, and nothing else; where no merge candidate is that vector the full path
+decides as before. A block left unmarked is analysed as before, so the caller marks only blocks
+whose reference already holds them at the quality wanted.
 
 A still 1920x1080 screen, every block marked, took 8.4 ms a frame on one thread where it took
 15.1 and 4.5 on eight where it took 5.2; a 256x256 change beside marked blocks 27.8 against
@@ -24,8 +25,8 @@ for bit.
  source/common/frame.h       |  2 +
  source/encoder/analysis.cpp | 90 ++++++++++++++++++++++++++++++++++++-
  source/encoder/analysis.h   |  2 +
- source/encoder/encoder.cpp  | 26 +++++++++++
- 5 files changed, 129 insertions(+), 1 deletion(-)
+ source/encoder/encoder.cpp  | 33 ++++++++++++++
+ 5 files changed, 136 insertions(+), 1 deletion(-)
 
 diff --git a/source/common/frame.cpp b/source/common/frame.cpp
 index ac54c34..d462928 100644
@@ -204,7 +205,7 @@ index 9dfb34d..a3b7ec8 100644
  
      /* measure inter options */
 diff --git a/source/encoder/encoder.cpp b/source/encoder/encoder.cpp
-index b20a0b1..0bd8c58 100644
+index b20a0b1..4571310 100644
 --- a/source/encoder/encoder.cpp
 +++ b/source/encoder/encoder.cpp
 @@ -1723,6 +1723,23 @@ int Encoder::encode(const x265_picture* pic_in, x265_picture* pic_out)
@@ -231,14 +232,21 @@ index b20a0b1..0bd8c58 100644
              /* Copy input picture into a Frame and PicYuv, send to lookahead */
              inFrame[layer]->m_fencPic->copyFromPicture(*inputPic[!m_param->format ? (m_param->numScalableLayers > 1) ? 0 : layer : 0], *m_param, m_sps.conformanceWindow.rightOffset, m_sps.conformanceWindow.bottomOffset, !layer);
  
-@@ -1786,6 +1803,15 @@ int Encoder::encode(const x265_picture* pic_in, x265_picture* pic_out)
+@@ -1786,6 +1803,22 @@ int Encoder::encode(const x265_picture* pic_in, x265_picture* pic_out)
              memcpy(inFrame[0]->m_quantOffsets, inputPic[0]->quantOffsets, cuCount * sizeof(float));
          }
  
 +        if (inputPic[0]->constantBlocks && inFrame[0]->m_constantBlocksBuf)
 +        {
-+            uint32_t blocks = ((m_param->sourceWidth + 15) >> 4) * ((m_param->sourceHeight + 15) >> 4);
-+            memcpy(inFrame[0]->m_constantBlocksBuf, inputPic[0]->constantBlocks, blocks);
++            /* the caller's map covers the picture as given, the frame's the picture padded to
++             * the minimum coding unit, whose blocks past the picture are not constant */
++            uint32_t cols = (m_param->sourceWidth + 15) >> 4;
++            uint32_t rows = (m_param->sourceHeight + 15) >> 4;
++            uint32_t givenCols = (m_param->sourceWidth - m_conformanceWindow.rightOffset + 15) >> 4;
++            uint32_t givenRows = (m_param->sourceHeight - m_conformanceWindow.bottomOffset + 15) >> 4;
++            memset(inFrame[0]->m_constantBlocksBuf, 0, cols * rows);
++            for (uint32_t row = 0; row < givenRows; row++)
++                memcpy(inFrame[0]->m_constantBlocksBuf + row * cols, inputPic[0]->constantBlocks + row * givenCols, givenCols);
 +            inFrame[0]->m_constantBlocks = inFrame[0]->m_constantBlocksBuf;
 +        }
 +        else

@@ -2347,7 +2347,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "congestion_control",
         kind: Kind::Bool,
         default: "True",
-        help: "Adapt a display's video rate to what its path carries, a CBR display's below the bitrate the client chose: over WebRTC from the transport-wide-cc receiver feedback (loss, and one-way delay standing past the path's own), over WebSockets from the queue a display's frame round trip shows past the path's own and its jitter. A stall, the path holding the stream a second or more and then delivering it at once, cuts the rate only until round trips are back at the path's own, which return it to the rate before the stall. A still screen whose rate was cut is padded up to that rate, so the path is tested and the rate climbs back without the screen moving; a probe that meets a queue waits 15 s before the next, longer each time one does. A page keeps the rate its display held for 10 s, and a restarted server starts that page's stream there, for a day or until the user sets a bitrate. In CRF rate-control mode the same steer sets the encoder's peak, where CBR's is its target, under the video_bitrate range's high end, which the chosen bitrate does not move: the stream opens capped at the page's remembered rate, else 4000 kbps, and climbs as CBR does until the path queues, while the CRF picks the picture wherever the path carries it; a still CRF screen is never padded. Software H.264 (x264), VP8 and VP9 (libvpx), and NVENC take the peak and code as an uncapped CRF until the CRF's own output overflows it, then hold to it, x264 by raising its rate factor and libvpx and NVENC by switching to their constant rate at the peak, never finer than the CRF, until the content fits under it again, when the blocks they coded under it are coded again at the CRF, a share a frame within the peak; x265, SVT-AV1, VA-API, OpenH264, and kvazaar have no capped CRF, so their CRF displays run unsteered at their CRF, as do the V4L2 M2M and Tegra encoders, which have no CRF and run at the chosen bitrate. False holds the chosen bitrate whatever the path carries, so a path slower than it lags or drops frames, and leaves a CRF stream uncapped.",
+        help: "Adapt a display's video rate to what its path carries, a CBR display's below the bitrate the client chose: over WebRTC from the transport-wide-cc receiver feedback (loss, and one-way delay standing past the path's own), over WebSockets from the queue a display's frame round trip shows past the path's own and its jitter. A stall, the path holding the stream a second or more and then delivering it at once, cuts the rate only until round trips are back at the path's own, which return it to the rate before the stall. A still screen whose rate was cut is padded up to that rate, so the path is tested and the rate climbs back without the screen moving; a probe that meets a queue waits 15 s before the next, longer each time one does. A page keeps the rate its display held for 10 s, and a restarted server starts that page's stream there, for a day or until the user sets a bitrate. In CRF rate-control mode the same steer sets the encoder's peak, where CBR's is its target, under the video_bitrate range's high end, which the chosen bitrate does not move: the stream opens capped at the page's remembered rate, else 4000 kbps, and climbs as CBR does until the path queues, while the CRF picks the picture wherever the path carries it; a still CRF screen is never padded. Software H.264 (x264), VP8 and VP9 (libvpx), AV1 (SVT-AV1), and NVENC take the peak and code as an uncapped CRF until the CRF's own output overflows it, then hold to it, x264 and SVT-AV1 by raising their quality index and libvpx and NVENC by switching to their constant rate at the peak, never finer than the CRF, until the content fits under it again, when the blocks they coded under it are coded again at the CRF, a share a frame within the peak; x265, VA-API, OpenH264, and kvazaar have no capped CRF, so their CRF displays run unsteered at their CRF, as do the V4L2 M2M and Tegra encoders, which have no CRF and run at the chosen bitrate. False holds the chosen bitrate whatever the path carries, so a path slower than it lags or drops frames, and leaves a CRF stream uncapped.",
         env_vars: &[],
         allowed: &[],
         value_range: None,
@@ -2451,6 +2451,134 @@ pub static DEFINITIONS: &[SettingDef] = &[
         value_range: None,
         min: None,
         max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Serve Pelorus under /pelorus: the desktop described as text (windows, their controls, and where to click them) and the actions on it, for an agent or a script. A caller there holds what the session's user holds, so it takes a controller's credential. Locked (true|locked), the agent's model is the one these settings name and nothing of it is configured or shown in a browser.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_provider",
+        kind: Kind::Enum,
+        default: "anthropic",
+        help: "Whose API the Pelorus agent's model is asked through: anthropic (the Messages API), or one of the others, each through its OpenAI-compatible chat completions endpoint at its own public address; ollama, lmstudio, and llamacpp are local servers at their usual addresses, and custom is any other such server, named by pelorus_endpoint.",
+        env_vars: &[],
+        allowed: &[
+            "anthropic",
+            "openai",
+            "gemini",
+            "openrouter",
+            "groq",
+            "mistral",
+            "deepseek",
+            "xai",
+            "together",
+            "fireworks",
+            "cerebras",
+            "ollama",
+            "lmstudio",
+            "llamacpp",
+            "custom",
+        ],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_endpoint",
+        kind: Kind::Str,
+        default: "",
+        help: "Base URL of the model API the Pelorus agent calls; empty for the provider's own. A local or custom provider is where this is usually set.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_model",
+        kind: Kind::Str,
+        default: "",
+        help: "Model the Pelorus agent runs on; empty for the provider's default, which only anthropic has (claude-opus-5-5): every other provider needs one named.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_api_key",
+        kind: Kind::Str,
+        default: "",
+        help: "API key the Pelorus agent sends to its model API.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: true,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_vision",
+        kind: Kind::Bool,
+        default: "False",
+        help: "Whether the Pelorus agent's model takes images, which gives it the screenshot tool for what applications do not describe as text.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_effort",
+        kind: Kind::Enum,
+        default: "default",
+        help: "How much the Pelorus agent's model reasons per step, where its API takes an effort (Anthropic's current models): default leaves it to the model, low is the fastest and cheapest.",
+        env_vars: &[],
+        allowed: &["default", "low", "medium", "high", "xhigh", "max"],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
+        name: "pelorus_max_steps",
+        kind: Kind::Int,
+        default: "50",
+        help: "Most model turns one Pelorus agent run may take before it is stopped.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: Some(1.0),
+        max: Some(500.0),
         default_value: None,
         sensitive: false,
         client_excluded: true,
@@ -3209,6 +3337,38 @@ impl Settings {
 
     pub fn webrtc_statistics_dir(&self) -> &str {
         self.str_value("webrtc_statistics_dir")
+    }
+
+    pub fn pelorus(&self) -> BoolSetting {
+        self.bool_setting("pelorus")
+    }
+
+    pub fn pelorus_provider(&self) -> &str {
+        self.str_value("pelorus_provider")
+    }
+
+    pub fn pelorus_endpoint(&self) -> &str {
+        self.str_value("pelorus_endpoint")
+    }
+
+    pub fn pelorus_model(&self) -> &str {
+        self.str_value("pelorus_model")
+    }
+
+    pub fn pelorus_api_key(&self) -> &str {
+        self.str_value("pelorus_api_key")
+    }
+
+    pub fn pelorus_vision(&self) -> BoolSetting {
+        self.bool_setting("pelorus_vision")
+    }
+
+    pub fn pelorus_effort(&self) -> &str {
+        self.str_value("pelorus_effort")
+    }
+
+    pub fn pelorus_max_steps(&self) -> i64 {
+        self.int_value("pelorus_max_steps")
     }
 
     pub fn enable_metrics_http(&self) -> BoolSetting {
