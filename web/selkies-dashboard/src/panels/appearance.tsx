@@ -10,8 +10,11 @@
  * mirrors), the layout, which cycles the registry and stores the pick under
  * the prefixed `ui_layout` key, and the translucency (`useBarPrefs`). Icons name the state they show, as the
  * theme toggle does: the moon while dark, the layout's own mark while shown.
+ * A theme its user picked is also the color scheme the session's desktop
+ * follows (`DesktopColorScheme`).
  * @module
  */
+import { useEffect } from "react";
 import { Blend, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useBarPrefs, type Translucency } from "@/layouts/actions";
@@ -23,10 +26,10 @@ import { t } from "@/i18n";
 
 /** Flips between dark and light. */
 export function ThemeToggle() {
-  const { theme, setTheme } = useTheme();
+  const { resolvedTheme, setTheme } = useTheme();
   return (
     <Button variant="outline" size="icon-sm" className="theme-toggle" aria-label={t('toggleThemeTitle')} title={t('toggleThemeTitle')}
-      onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
+      onClick={() => setTheme(resolvedTheme === "light" ? "dark" : "light")}>
       <Sun className="size-3.5 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
       <Moon className="absolute size-3.5 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
     </Button>
@@ -35,14 +38,30 @@ export function ThemeToggle() {
 
 /** The theme as a pill with the moon and the sun sliding through it, the sidebar's own control. */
 export function ThemePill() {
-  const { theme, setTheme } = useTheme();
+  const { resolvedTheme, setTheme } = useTheme();
   return (
     <button type="button" className="theme-toggle theme-pill" aria-label={t('toggleThemeTitle')} title={t('toggleThemeTitle')}
-      onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
+      onClick={() => setTheme(resolvedTheme === "light" ? "dark" : "light")}>
       <Moon className="moon" fill="currentColor" strokeWidth={1} />
       <Sun className="sun" strokeWidth={2.5} />
     </button>
   );
+}
+
+/**
+ * Hands the core the theme its user picked as the color scheme the session's
+ * desktop follows (`setColorScheme`, the core's lib/color-scheme.ts), on every
+ * change of the theme; with no pick stored, the theme follows the browser's
+ * preference and `null` leaves the core on that same preference. Renders
+ * nothing.
+ */
+export function DesktopColorScheme() {
+  const { theme } = useTheme();
+  useEffect(() => {
+    const value = theme === "light" || theme === "dark" ? theme : null;
+    window.postMessage({ type: "setColorScheme", value }, window.location.origin);
+  }, [theme]);
+  return null;
 }
 
 /** Steps to the next layout the server allows; hidden while there is only one. */

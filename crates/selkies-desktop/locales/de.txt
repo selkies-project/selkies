@@ -278,6 +278,7 @@ A file or folder with this name already exists = Eine Datei oder ein Ordner mit 
 Cannot create the folder: {error} = Der Ordner kann nicht erstellt werden: {error}
 Application icon = Anwendungssymbol
 Light or dark = Hell oder dunkel
+Follow the browser = Dem Browser folgen
 Automatic = Automatisch
 Float = Schwebend
 Mint = Minze

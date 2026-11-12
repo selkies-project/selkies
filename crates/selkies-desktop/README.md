@@ -130,7 +130,7 @@ people reach for in a multi-application container:
   platform theme (`QT_QPA_PLATFORMTHEME=gtk3`), and Chromium and Electron
   through the GTK theme they load.
 * **The Settings portal** carries the same scheme and accent to the
-  applications that ask the desktop for them: the shell serves
+  applications that ask the desktop for them: the desktop serves
   `org.freedesktop.portal.Settings` on the session bus under the name
   `org.freedesktop.portal.Desktop`, with `org.freedesktop.appearance`'s
   `color-scheme`, `accent-color` and `contrast` and the
@@ -138,7 +138,12 @@ people reach for in a multi-application container:
   change, so libadwaita, Qt 6, Chromium and Electron windows already open
   flip between light and dark and take the accent at once.  No
   xdg-desktop-portal is needed; an image that runs one keeps it, since the
-  shell takes the name only while nothing else holds it.
+  desktop takes the name only while nothing else holds it.  Under the
+  Selkies window manager the manager writes these settings and serves the
+  portal instead of the shell (`toolkits` below), so they hold while the
+  session is the application alone as well, and the browser's light or
+  dark scheme picks between Light and Dark until a scheme is picked here
+  (`scheme_follows_browser`).
 * **Files**, a small file manager in the start menu, opened by `xdg-open` for
   folders and by the wallpaper picker: a sidebar with the home, Desktop,
   Documents, Downloads, Pictures, Music and Videos folders that exist, icon
@@ -196,10 +201,12 @@ applies within a moment.
 | `panel_every_display` | `true` | Give every display but the primary one a bar of its own with the primary's settings, each listing the windows on its display; without, the primary bar lists them all |
 | `start_label` | | Text shown on the start button beside its icon |
 | `menu_layout` | `columns` | How the start menu lists applications: `columns` (categories and rows), `grid` (categories and a grid of icons) or `tiles` (every application in a list with the favorites as tiles beside it) |
-| `color_accent` | `#7967c5` | Color of markers, selections, switches and the chosen option |
-| `color_panel` | `#0a0e17` | Color of the bar |
-| `color_popup` | `#121826` | Color of menus, popups and windows |
-| `color_text` | `#eef2f8` | Color of text; hover, separator and field shades derive from it |
+| `color_accent` | `#3daee9` | Color of markers, selections, switches and the chosen option |
+| `color_panel` | `#292c30` | Color of the bar |
+| `color_popup` | `#202326` | Color of menus, popups and windows |
+| `color_text` | `#fcfcfc` | Color of text; hover, separator and field shades derive from it |
+| `scheme_follows_browser` | `true` | Let the light or dark scheme of the browser the session is streamed to pick between the Light and Dark schemes, which the Selkies window manager carries out; a scheme or a color picked in the settings window turns it off, and the Theme page's Follow the browser switch, or resetting the page, turns it back on |
+| `toolkits` | `true` | Keep the applications' theme and the Settings portal from the shell; the Selkies window manager keeps them itself, the application alone included, and starts the shell with this off |
 | `theme_windows` | `true` | Generate the window manager's theme from the colors and the frame settings, and reload it; `false` removes the generated theme |
 | `window_surface` | `flat` | Shading of title bars, the bar and the popups: `flat`, `gradient` or `glossy` |
 | `window_buttons` | `right` | Side of a title bar the buttons sit on: `right` or `left` |

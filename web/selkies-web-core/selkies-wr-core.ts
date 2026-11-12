@@ -67,7 +67,8 @@
  * `gamepadControl`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `clipboardCopySecret`, `audioDeviceSelected`, `requestFullscreen`, `setSynth`,
  * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`, `setRawPointerMotion`,
- * `setTrackpadSpeed`, `setGamepadRumble`, `touchinput:trackpad`, `touchinput:touch`, `statsOpen`, plus the `requestFileUpload` DOM
+ * `setTrackpadSpeed`, `setGamepadRumble`, `touchinput:trackpad`, `touchinput:touch`, `statsOpen`,
+ * `setColorScheme` (lib/color-scheme.ts, which takes it itself), plus the `requestFileUpload` DOM
  * event. Window messages posted: `sidebarButtonStatusUpdate`,
  * `pipelineStatusUpdate`, `effectiveCursorState`, `scalingDpiFollowed`,
  * `serverSettings`, `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
@@ -89,6 +90,7 @@ import { createClipboardSync, createClipboardGestures, createDeferredClipboardWr
 import { createFileUploader } from "./lib/file-upload.ts";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.ts';
 import { detectKeyboardLayout } from './lib/keyboard-layout.ts';
+import { currentColorScheme, onColorSchemeChange } from './lib/color-scheme.ts';
 import { installAuthGuard } from './lib/auth-guard.ts';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders } from './lib/session-token.ts';
 import { urlFragmentKeyword } from './lib/page-url.ts';
@@ -124,6 +126,15 @@ detectKeyboardLayout().then((layout: any): any => {
             activeWebrtcClient.sendDataChannelMessage(`SETTINGS,${JSON.stringify({ keyboardLayout: layout })}`);
         } catch (e) { /* session may not be up yet */ }
     }
+});
+
+// The desktop follows the page's color scheme as it changes (lib/color-scheme.ts); this
+// core sends its settings once per session, so a change after that send follows on its own.
+onColorSchemeChange((scheme: string): void => {
+    if (!persistentSettingsSent || !activeWebrtcClient) return;
+    try {
+        activeWebrtcClient.sendDataChannelMessage(`SETTINGS,${JSON.stringify({ color_scheme: scheme })}`);
+    } catch (e) { /* session may not be up yet */ }
 });
 
 /** Per-transfer id, so concurrent multipart clipboard sends never interleave. */
@@ -1455,6 +1466,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		if (detectedKeyboardLayout) {
 			settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
 		}
+		settingsToSend['color_scheme'] = currentColorScheme();
 		settingsToSend['useCssScaling'] = useCssScaling;
 		settingsToSend['displayScale'] = reportedDisplayScale = measuredDisplayScale();
 

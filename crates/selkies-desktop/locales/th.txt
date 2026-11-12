@@ -278,6 +278,7 @@ A file or folder with this name already exists = มีไฟล์หรือ�
 Cannot create the folder: {error} = สร้างโฟลเดอร์ไม่ได้: {error}
 Application icon = ไอคอนแอปพลิเคชัน
 Light or dark = สว่างหรือมืด
+Follow the browser = ตามเบราว์เซอร์
 Automatic = อัตโนมัติ
 Float = ลอย
 Mint = มินต์

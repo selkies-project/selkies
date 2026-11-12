@@ -278,6 +278,7 @@ A file or folder with this name already exists = इस नाम की फ़�
 Cannot create the folder: {error} = फ़ोल्डर नहीं बनाया जा सका: {error}
 Application icon = ऐप्लिकेशन आइकन
 Light or dark = हल्का या गहरा
+Follow the browser = ब्राउज़र का अनुसरण करें
 Automatic = स्वचालित
 Float = तैरता हुआ
 Mint = पुदीना

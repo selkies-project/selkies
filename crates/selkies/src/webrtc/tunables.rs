@@ -469,6 +469,7 @@ impl WebRtcService {
     /// Apply a client `SETTINGS` payload to the display that sent it. Video keys apply to the sending
     /// display only; audio and the clipboard policy are stream-global whichever display asserts them.
     /// A `scaling_dpi` in the primary's payload, or in any display's on Wayland, runs `handle_scaling`;
+    /// the primary's `color_scheme` goes to the desktop;
     /// a secondary's `displayPosition` may move it to any side of the primary after joining.
     pub async fn handle_update_settings(&self, payload: &Json, display: &str) {
         let Some(map) = payload.as_object() else {
@@ -484,6 +485,13 @@ impl WebRtcService {
         ) && !layout.is_empty()
         {
             input.apply_client_keyboard_layout(layout).await;
+        }
+        if display == "primary"
+            && let (Some(scheme), Some(input)) = (map.get("color_scheme"), self.input())
+            && let Some(scheme) =
+                sanitize("color_scheme", scheme).and_then(|v| v.as_str().map(str::to_string))
+        {
+            input.apply_client_color_scheme(&scheme);
         }
         if let Some(dpi) = map.get("scaling_dpi").filter(|d| !d.is_null())
             && (display == "primary" || self.wayland())
