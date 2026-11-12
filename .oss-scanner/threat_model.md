@@ -9,7 +9,8 @@
   Screen capture, video encode, virtual-webcam decode, and Computer Use live in `crates/pixelflux`; audio capture,
   Opus encode/decode, RFC 2198 RED, and Ogg output live in `crates/pcmflux`. Both are Rust libraries by default,
   with optional PyO3 bridges used only by their standalone wheels.
-- Network input, weakest principal first: any peer that reaches the port (HTTP, the data WebSocket, WebRTC
+- Network input, weakest principal first: any peer that reaches a listening port (`port`, and the HTTPS
+  `https_port` beside it, which serves the same router behind the same gate; HTTP, the data WebSocket, WebRTC
   signaling, ICE/STUN/TURN, DTLS, SCTP, RTP/RTCP); a viewer token (watch only); a gamepad slot token; a read-write
   collaborator; the controller (full token or Basic auth user); the orchestrator holding the master token
   (`POST /api/tokens`, the signaling server peer).

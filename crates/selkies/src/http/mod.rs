@@ -28,8 +28,9 @@
 //! The server's life: [`require_configured_credentials`] and [`require_one_listen_setting`]
 //! refuse a misconfiguration with exit status [`EXIT_CONFIG_ERROR`] before anything binds, and
 //! [`Server::start`] brings up the rest: the certificate ([`tls::build`]), the tokens-file
-//! watcher, every listener with the contract line `Selkies server running on <endpoint>`
-//! ([`listen::start`]), and the certificate watcher. Disk-bound and CPU-bound work (the tokens
+//! watcher, every listener (the `port` one and the `https_port` one beside it) with the one
+//! contract line `Selkies server running on <endpoint>` ([`listen::start_each`]), and the
+//! certificate watcher. Disk-bound and CPU-bound work (the tokens
 //! file, certificate files, name resolution, a web root's checks, inflating an embedded file
 //! for a client that takes no gzip) runs on blocking threads, never on the runtime's workers.
 
@@ -113,6 +114,8 @@ pub struct HttpConfig {
     pub web_root: String,
     pub tokens_file: String,
     pub listen: listen::ListenConfig,
+    /// The port of the second listener, always HTTPS, on `listen`'s addresses; 0 opens none.
+    pub https_port: u16,
     pub tls: tls::TlsConfig,
     pub audit: audit::AuditConfig,
 }
@@ -144,6 +147,7 @@ impl HttpConfig {
                 idle_timeout: IDLE_CONNECTION_TIMEOUT,
                 access_log: false,
             },
+            https_port: s.https_port().clamp(0, u16::MAX as i64) as u16,
             tls: tls::TlsConfig {
                 enable_https: s.enable_https().on,
                 cert: s.https_cert().to_string(),
@@ -186,6 +190,7 @@ impl Default for HttpConfig {
             web_root: String::new(),
             tokens_file: String::new(),
             listen: listen::ListenConfig::default(),
+            https_port: 0,
             tls: tls::TlsConfig::default(),
             audit: audit::AuditConfig::default(),
         }
@@ -446,11 +451,20 @@ pub struct Server {
 impl Server {
     /// Serve `router`, built from `state` by [`build`]: the certificate first, so a bad one
     /// fails before anything binds, then the tokens-file watcher when one is set, the
-    /// listener, and under HTTPS the certificate watcher. Bring the supervisor's first mode up
+    /// listeners, and under HTTPS the certificate watcher. Bring the supervisor's first mode up
     /// before this, so a page connecting the moment the port accepts finds its transport.
+    ///
+    /// `listen` serves HTTPS under `enable_https` and plain HTTP otherwise; an `https_port`
+    /// adds a TCP listener on the same addresses that serves the same certificate whatever
+    /// `enable_https` says, so a reverse proxy can speak HTTP to one port while browsers reach
+    /// the other directly in a secure context. Both run the one router, so every route, the
+    /// auth gate, and the client are the same on either.
     pub async fn start(state: &AppState, router: Router) -> Result<Server, ServeError> {
         let config = state.config.clone();
-        let tls_config = config.tls.clone();
+        let tls_config = tls::TlsConfig {
+            enable_https: config.tls.enable_https || config.https_port != 0,
+            ..config.tls.clone()
+        };
         let tls = tokio::task::spawn_blocking(move || tls::build(&tls_config))
             .await?
             .inspect_err(|exc| log::error!(target: "server", "Failed to create SSL context at startup: {exc}"))?
@@ -464,8 +478,20 @@ impl Server {
                 tokens::TOKENS_FILE_POLL,
             )));
         }
-        let accepting = tls.as_ref().map(|t| t.server_config.clone());
-        let listener = match listen::start(router, &config.listen, accepting).await {
+        let secure = tls.as_ref().map(|t| t.server_config.clone());
+        let mut sides = vec![(
+            config.listen.clone(),
+            secure.clone().filter(|_| config.tls.enable_https),
+        )];
+        if config.https_port != 0 {
+            let https = listen::ListenConfig {
+                port: config.https_port,
+                unix_socket: String::new(),
+                ..config.listen.clone()
+            };
+            sides.push((https, secure));
+        }
+        let listener = match listen::start_each(router, &sides).await {
             Ok(listener) => listener,
             Err(exc) => {
                 watchers.iter().for_each(JoinHandle::abort);
