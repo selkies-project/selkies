@@ -769,6 +769,45 @@ async fn screenshot(args: &Json) -> Output {
     }
 }
 
+/// The widest a picture of the screen made for a person watching is sent.
+const WATCH_WIDTH: u32 = 1280;
+
+/// The screen as a JPEG for a person watching a run, scaled down to [`WATCH_WIDTH`]: a picture
+/// a step, so small enough that a long run does not weigh on the page that shows it. `None`
+/// where the screen cannot be captured.
+pub async fn watch_screen() -> Option<Vec<u8>> {
+    tokio::task::spawn_blocking(|| {
+        let png = pixelflux::screenshot_png(0).ok()?;
+        let picture = image::load_from_memory_with_format(&png, image::ImageFormat::Png).ok()?;
+        let picture = if picture.width() > WATCH_WIDTH {
+            let height = (u64::from(picture.height()) * u64::from(WATCH_WIDTH)
+                / u64::from(picture.width())) as u32;
+            picture.resize_exact(
+                WATCH_WIDTH,
+                height.max(1),
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            picture
+        };
+        let mut jpeg = Vec::new();
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 72);
+        picture.to_rgb8().write_with_encoder(encoder).ok()?;
+        Some(jpeg)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Whether a tool changes what is on the screen, so a watcher is shown the screen after it.
+pub fn acts(name: &str) -> bool {
+    matches!(
+        name,
+        "click" | "type" | "key" | "scroll" | "drag" | "window" | "launch" | "shell"
+    )
+}
+
 /// Carry out one tool call. An unknown tool, or one this session does not offer, fails with a
 /// sentence the model can act on.
 pub async fn call(name: &str, args: &Json, capabilities: Capabilities) -> Output {

@@ -11,7 +11,9 @@
 //! answers without calling one, declines, is cut off, or has taken the most steps a run may.
 //! Everything that happens is an [`Event`], sent to whoever asked as it happens (a
 //! server-sent stream) or gathered into one answer, and a listener that goes away ends the
-//! run at its next step, which is how a run is stopped.
+//! run at its next step, which is how a run is stopped. A person watching can ask for the
+//! screen as well ([`Watch::screens`]): a picture before the run, after each tool that acted,
+//! and at the end, for their eyes alone, since the model works from text.
 //!
 //! A conversation outlives its run under a session id, so a later prompt continues it with
 //! everything the model did before in view. The history is append-only (`model` module): a
@@ -45,6 +47,9 @@ use crate::settings::settings;
 /// The most conversations kept at once.
 const SESSIONS_KEPT: usize = 16;
 
+/// The most characters of a person's own instructions a run takes.
+const SUFFIX_MOST: usize = 2000;
+
 /// The longest a tool's text is shown in an event; the model is given all of it.
 const EVENT_TEXT: usize = 4000;
 
@@ -54,6 +59,14 @@ pub enum Event {
     Start {
         session: String,
         model: String,
+    },
+    /// A model turn begins, counted from one.
+    Step(usize),
+    /// The screen for a person watching: before the run (`start`), after a tool that acted
+    /// (`step`), and at the end (`end`), as a JPEG. Never sent to the model.
+    Screen {
+        when: &'static str,
+        jpeg: Vec<u8>,
     },
     /// The model's summary of its reasoning before a step.
     Thinking(String),
@@ -84,6 +97,11 @@ impl Event {
         match self {
             Event::Start { session, model } => {
                 json!({"type": "start", "session": session, "model": model})
+            }
+            Event::Step(number) => json!({"type": "step", "number": number}),
+            Event::Screen { when, jpeg } => {
+                let image = base64::engine::general_purpose::STANDARD.encode(jpeg);
+                json!({"type": "screen", "when": when, "image": image})
             }
             Event::Thinking(text) => json!({"type": "thinking", "text": text}),
             Event::Text(text) => json!({"type": "text", "text": text}),
@@ -163,19 +181,53 @@ fn return_session(id: &str, turns: Vec<Turn>) {
     }
 }
 
+/// What a run is asked for beside its task.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Watch {
+    /// Send the screen to the listener as the run goes.
+    pub screens: bool,
+    /// Instructions of the person's own, added after the server's.
+    pub suffix: String,
+}
+
+/// The instructions a run works by: the server's, then the person's own where they gave any.
+fn instructions(capabilities: ::pelorus::tools::Capabilities, suffix: &str) -> String {
+    let date = chrono::Local::now().format("%A, %B %-d, %Y").to_string();
+    let mut system = system_prompt(capabilities, &date);
+    if !suffix.trim().is_empty() {
+        system.push_str("\nThe user's standing instructions:\n");
+        system.push_str(suffix.trim());
+        system.push('\n');
+    }
+    system
+}
+
+/// The screen for a person watching, where they asked for it and it can be captured.
+async fn screen(watch: &Watch, when: &'static str) -> Option<Event> {
+    if !watch.screens {
+        return None;
+    }
+    let jpeg = tools::watch_screen().await?;
+    Some(Event::Screen { when, jpeg })
+}
+
 /// Run the model on a conversation until it ends, telling `emit` each event; `emit` answers
 /// whether anyone still listens. Returns the conversation with the run added.
 pub async fn run(
     model: &Model,
     mut turns: Vec<Turn>,
     max_steps: usize,
-    mut emit: impl FnMut(Event) -> bool,
+    watch: &Watch,
+    mut emit: impl FnMut(Event) -> bool + Send,
 ) -> Vec<Turn> {
     let capabilities = tools::capabilities(model.vision).await;
-    let date = chrono::Local::now().format("%A, %B %-d, %Y").to_string();
-    let system = system_prompt(capabilities, &date);
+    let system = instructions(capabilities, &watch.suffix);
     let tool_list = definitions(capabilities);
-    for _ in 0..max_steps {
+    if let Some(event) = screen(watch, "start").await {
+        emit(event);
+    }
+    for step in 1..=max_steps {
+        emit(Event::Step(step));
         let reply = match model::complete(model, &system, &tool_list, &turns).await {
             Ok(reply) => reply,
             Err(e) => {
@@ -193,6 +245,9 @@ pub async fn run(
             || emit(Event::Text(reply.text.clone()));
         match reply.stop {
             Stop::Done => {
+                if let Some(event) = screen(watch, "end").await {
+                    emit(event);
+                }
                 emit(Event::Done {
                     success: true,
                     text: reply.text,
@@ -244,6 +299,12 @@ pub async fn run(
                             failed: output.failed,
                             image: output.image.clone(),
                         });
+                    if heard
+                        && tools::acts(&call.name)
+                        && let Some(event) = screen(watch, "step").await
+                    {
+                        emit(event);
+                    }
                     returns.push(Return {
                         id: call.id.clone(),
                         text: output.text,
@@ -268,7 +329,9 @@ pub async fn run(
 /// `POST /pelorus/api/run`: give the agent a task. The body names the `prompt`, a `session`
 /// to continue (a new one where absent), `stream` for a server-sent stream of events instead
 /// of one answer, the `config` to run on (the default where absent), and what of it the
-/// request changes (`model`, `effort`, `vision`), with `max_steps` to end sooner.
+/// request changes (`model`, `effort`, `vision`), with `max_steps` to end sooner, `suffix`
+/// for instructions of the person's own after the server's, and `screenshots` to be sent the
+/// screen as the run goes.
 /// Closing a stream stops its run. With `transcript`, an answer that is not a stream carries
 /// the conversation as it would next be sent to the model, in the provider's own format: the
 /// instructions, the tools, and every turn, for someone studying what the model is given.
@@ -308,6 +371,17 @@ pub async fn handle_run(ceiling: Ceiling, body: Bytes) -> Response {
         .and_then(Json::as_str)
         .filter(|id| !id.is_empty() && id.len() <= 64)
         .map_or_else(|| format!("{:016x}", rand::random::<u64>()), str::to_string);
+    let watch = Watch {
+        screens: request
+            .get("screenshots")
+            .and_then(Json::as_bool)
+            .unwrap_or(false),
+        suffix: request
+            .get("suffix")
+            .and_then(Json::as_str)
+            .map(|suffix| suffix.chars().take(SUFFIX_MOST).collect())
+            .unwrap_or_default(),
+    };
     let Some(mut turns) = take_session(&session, model.provider.wire) else {
         return json_error(
             StatusCode::CONFLICT,
@@ -325,11 +399,11 @@ pub async fn handle_run(ceiling: Ceiling, body: Bytes) -> Response {
         .and_then(Json::as_bool)
         .unwrap_or(false)
     {
-        let (tx, rx) = mpsc::channel::<Event>(64);
+        let (tx, rx) = mpsc::unbounded_channel::<Event>();
         tokio::spawn(async move {
-            let _ = tx.send(start).await;
-            let turns = run(&model, turns, max_steps, |event| {
-                tx.try_send(event).is_ok() || !tx.is_closed()
+            let _ = tx.send(start);
+            let turns = run(&model, turns, max_steps, &watch, |event| {
+                tx.send(event).is_ok()
             })
             .await;
             return_session(&session, turns);
@@ -345,7 +419,7 @@ pub async fn handle_run(ceiling: Ceiling, body: Bytes) -> Response {
     }
     let mut events = vec![start.json()];
     let mut outcome = (false, String::new());
-    let turns = run(&model, turns, max_steps, |event| {
+    let turns = run(&model, turns, max_steps, &watch, |event| {
         match &event {
             Event::Done { success, text } => outcome = (*success, text.clone()),
             Event::Error(message) => outcome = (false, message.clone()),
@@ -361,10 +435,9 @@ pub async fn handle_run(ceiling: Ceiling, body: Bytes) -> Response {
         .unwrap_or(false)
     {
         let capabilities = tools::capabilities(model.vision).await;
-        let date = chrono::Local::now().format("%A, %B %-d, %Y").to_string();
         model::request_body(
             &model,
-            &system_prompt(capabilities, &date),
+            &instructions(capabilities, &watch.suffix),
             &definitions(capabilities),
             &turns,
         )
