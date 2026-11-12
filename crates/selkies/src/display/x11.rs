@@ -213,6 +213,8 @@ pub struct RandrQuery {
 /// A mode set made ready ahead of the grab that applies it (`X11::prepare_mode_set`): the
 /// mode is made and on the output, and the CRTC it goes on is read.
 pub struct ModeSet {
+    /// The connected output the mode was made for.
+    output: u32,
     request: (i32, i32),
     screen: (u32, u32),
     root: (i32, i32),
@@ -224,6 +226,14 @@ pub struct ModeSet {
     rotation: randr::Rotation,
     outputs: Vec<u32>,
     rate: f64,
+}
+
+impl ModeSet {
+    /// The connected output the mode was made for, read with the resources whose
+    /// configuration timestamp the mode set carries.
+    pub fn output(&self) -> u32 {
+        self.output
+    }
 }
 
 type Result<T> = std::result::Result<T, DisplayError>;
@@ -756,6 +766,7 @@ impl X11 {
             (0, 0)
         };
         Ok(ModeSet {
+            output: state.out_id,
             request: (w_req, h_req),
             screen: (screen_w, screen_h),
             root: self.root_size()?,

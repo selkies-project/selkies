@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: thelamer <ryankuba@gmail.com>
 Date: Sat, 7 Nov 2026 19:27:00 -0500
-Subject: [PATCH 2/2] Code the superblocks the caller marks constant as skips
+Subject: [PATCH 2/3] Code the superblocks the caller marks constant as skips
  without analysis
 
 A 64x64 superblock whose every 16x16 block the picture's constant-block map marks is the frame
@@ -11,10 +11,11 @@ asks for it (EbBufferHeaderType.constant_blocks_skip), such a superblock takes m
 static bypass whatever its zero-motion SAD measures, is coded by the light PD1 path as one 64x64
 GLOBALMV skip through the existing bypass, with no partition pass, candidate search, transform, or
 chroma complexity check, and its map travels with the library's own copy of it so the processes
-behind read it after the caller's is gone. A superblock the regular path codes, a cyclic-refresh
-or base-layer one under a constant rate, is left to it: that path refreshes a still picture at a
-finer quantizer, which a map would hold at its old one and let the rate control's quantizer fall
-until a frame coded whole came out at many times the budget.
+behind read it after the caller's is gone. The request, like the map, is read only from a header
+whose size reaches it. A superblock the regular path codes, a cyclic-refresh or base-layer one
+under a constant rate, is left to it: that path refreshes a still picture at a finer quantizer,
+which a map would hold at its old one and let the rate control's quantizer fall until a frame
+coded whole came out at many times the budget.
 
 At a constant quantizer a still 1920x1080 frame took 1.08 ms on six logical processors where it
 took 1.70, and 1.13 on one where it took 2.00; at 2560x1600 1.88 against 2.86 and 2.90 against
@@ -23,15 +24,15 @@ A still frame codes to 21 bytes where it coded to 22, a frame with the change to
 coded to 36199, and a frame of a scroll, which marks nothing, the same stream bit for bit.
 ---
  Source/API/EbSvtAv1.h                  |  6 +++++
- Source/Lib/Codec/enc_dec_process.c     | 20 ++++++++++++++++-
+ Source/Lib/Codec/enc_dec_process.c     | 20 +++++++++++++++-
  Source/Lib/Codec/md_process.h          |  3 +++
  Source/Lib/Codec/motion_estimation.c   | 13 +++++++----
- Source/Lib/Codec/pcs.c                 | 19 ++++++++++++++++
+ Source/Lib/Codec/pcs.c                 | 19 +++++++++++++++
  Source/Lib/Codec/pcs.h                 |  7 +++++-
- Source/Lib/Codec/product_coding_loop.c | 18 ++++++++++-----
- Source/Lib/Globals/enc_handle.c        | 31 +++++++++++++++++++++-----
+ Source/Lib/Codec/product_coding_loop.c | 18 +++++++++++----
+ Source/Lib/Globals/enc_handle.c        | 32 +++++++++++++++++++++-----
  Source/Lib/Globals/enc_handle.h        |  3 +++
- 9 files changed, 103 insertions(+), 17 deletions(-)
+ 9 files changed, 104 insertions(+), 17 deletions(-)
 
 diff --git a/Source/API/EbSvtAv1.h b/Source/API/EbSvtAv1.h
 index 6f96676..fe1b468 100644
@@ -257,7 +258,7 @@ index 785a04a..35043b1 100644
      }
  
 diff --git a/Source/Lib/Globals/enc_handle.c b/Source/Lib/Globals/enc_handle.c
-index 4582d37..36041db 100644
+index 119dc17..8d3eb36 100644
 --- a/Source/Lib/Globals/enc_handle.c
 +++ b/Source/Lib/Globals/enc_handle.c
 @@ -966,10 +966,16 @@ static void free_stale_maps(EbEncHandle* enc_handle_ptr) {
@@ -277,7 +278,7 @@ index 4582d37..36041db 100644
      enc_handle_ptr->stale_blocks = 0;
  }
  
-@@ -5316,14 +5322,15 @@ static int pool_index(const EbSystemResource* res, const EbObjectWrapper* wrappe
+@@ -5320,14 +5326,15 @@ static int pool_index(const EbSystemResource* res, const EbObjectWrapper* wrappe
  /* Size the stale maps for pictures of `blocks` 16x16 blocks, every block of every buffer stale
   * where they did not already fit. Returns false where they could not be allocated. */
  static bool size_stale_maps(EbEncHandle* h, uint32_t blocks) {
@@ -295,7 +296,7 @@ index 4582d37..36041db 100644
          free_stale_maps(h);
          return false;
      }
-@@ -5336,8 +5343,9 @@ static bool size_stale_maps(EbEncHandle* h, uint32_t blocks) {
+@@ -5340,8 +5347,9 @@ static bool size_stale_maps(EbEncHandle* h, uint32_t blocks) {
          memset(h->y8b_stale[i], 1, blocks);
      }
      for (uint32_t i = 0; i < in_count; i++) {
@@ -307,10 +308,10 @@ index 4582d37..36041db 100644
              free_stale_maps(h);
              return false;
          }
-@@ -5981,8 +5989,19 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
-     const int      y8b_idx = pool_index(enc_handle_ptr->input_y8b_buffer_resource_ptr, y8b_wrapper);
-     const int      in_idx  = pool_index(enc_handle_ptr->input_buffer_resource_ptr, eb_wrapper_ptr);
-     const uint8_t* constant = app_hdr->p_buffer != NULL ? app_hdr->constant_blocks : NULL;
+@@ -5987,8 +5995,20 @@ EB_API EbErrorType svt_av1_enc_send_picture(EbComponentType* svt_enc_component,
+     const uint8_t* constant = app_hdr->p_buffer != NULL && HEADER_HAS(app_hdr, constant_blocks)
+         ? app_hdr->constant_blocks
+         : NULL;
 -    const bool     partial  = constant && !is_16bit_input && !scs->first_pass_downsample && y8b_idx >= 0 &&
 -        in_idx >= 0 && size_stale_maps(enc_handle_ptr, mb_cols * mb_rows);
 +    const bool     mapped   = constant && y8b_idx >= 0 && in_idx >= 0 &&
@@ -321,7 +322,8 @@ index 4582d37..36041db 100644
 +    if (mapped) {
 +        memcpy(enc_handle_ptr->in_constant[in_idx], constant, mb_cols * mb_rows);
 +        lib_reg_hdr->constant_blocks      = enc_handle_ptr->in_constant[in_idx];
-+        lib_reg_hdr->constant_blocks_skip = app_hdr->constant_blocks_skip;
++        lib_reg_hdr->constant_blocks_skip = HEADER_HAS(app_hdr, constant_blocks_skip) ? app_hdr->constant_blocks_skip
++                                                                                       : 0;
 +    } else {
 +        lib_reg_hdr->constant_blocks      = NULL;
 +        lib_reg_hdr->constant_blocks_skip = 0;

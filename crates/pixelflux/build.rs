@@ -16,6 +16,7 @@ const PATCHED: &[&str] = &[
     "x265_qp_offsets",
     "svtav1_constant_blocks",
     "svtav1_constant_blocks_skip",
+    "svtav1_sequence_qp",
 ];
 
 fn main() {

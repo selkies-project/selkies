@@ -22,6 +22,7 @@ WORKDIR /src
 # need its 2.3.2 rate-control ABI and Debian's package is older.
 RUN scripts/ci/server-build-deps.sh && sh crates/pixelflux/scripts/build-kvazaar.sh /usr/local && ldconfig \
     && rm -rf /var/lib/apt/lists/* && cargo fetch --locked \
+    && for manifest in crates/selkies-rtc/vendor/*/Cargo.toml; do cargo fetch --locked --manifest-path "$manifest" || exit 1; done \
     && chown -R tester:tester /opt/cargo /opt/rustup
 RUN python3 -m venv /opt/venv && pip install --no-cache-dir pytest
 RUN for dir in addons/input-interposer addons/v4l2-interposer addons/fake-udev tests/tools; do \
@@ -32,7 +33,8 @@ RUN scripts/ci/build-web.sh
 RUN runuser -u tester -- cargo test --offline --locked --workspace --no-run \
     && runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --features python --no-run \
     && runuser -u tester -- cargo test --offline --locked -p pixelflux --lib --no-default-features --features openh264 --no-run \
-    && runuser -u tester -- cargo test --offline --locked -p pcmflux --lib --features python --no-run
+    && runuser -u tester -- cargo test --offline --locked -p pcmflux --lib --features python --no-run \
+    && runuser -u tester -- scripts/ci/test-vendored.sh --offline --no-run
 
 # As an unprivileged user, since the suites check that permission errors are handled. The sound server the audio
 # tests drive is the one CI's suites stream from.
@@ -45,5 +47,7 @@ RUN runuser -u tester -- sh -c 'scripts/ci/test-stack.sh > /dev/null \
       || echo "WARNING: pixelflux OpenH264 tests reported failures"; \
     runuser -u tester -- cargo test --offline --locked -p pcmflux --lib --features python \
       || echo "WARNING: pcmflux Python tests reported failures"; \
+    runuser -u tester -- scripts/ci/test-vendored.sh --offline \
+      || echo "WARNING: the vendored rtc crates' tests reported failures"; \
     runuser -u tester -- env E2E_WORKDIR=/tmp/selkies-unit \
       python -m pytest tests -m unit -q -rs -p no:cacheprovider || echo "WARNING: the unit tier reported failures"

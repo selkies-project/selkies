@@ -373,6 +373,65 @@ impl PeakBucket {
     }
 }
 
+/// The peak of a capped constant quality held beside an encoder that codes its constant quality
+/// per frame and has no rate control to bind to it (x264, SVT-AV1), where `PeakBucket` switches
+/// one that does. A leaky bucket of the peak, its buffer the session's VBV, takes each frame: from
+/// a frame that overflows it the quality index stands `offset` steps above the session's, aimed
+/// after each frame at bringing the bucket back to half full in `DRAIN_FRAMES` frames (a size
+/// halving every six steps) and lowered at most `RELEASE_STEP` a frame, so a session that never
+/// overflows it codes as an uncapped one.
+#[derive(Clone, Copy, Debug)]
+pub struct PeakOffset {
+    /// Bits a frame drains from the bucket, and the bucket's buffer.
+    per_frame: f64,
+    buffer: f64,
+    pub(crate) fill: f64,
+    /// Quality index steps above the session's own.
+    pub(crate) offset: f64,
+}
+
+impl PeakOffset {
+    const DRAIN_FRAMES: f64 = 8.0;
+    const RELEASE_STEP: f64 = 2.0;
+
+    pub fn new(bitrate_kbps: i32, vbv_kbit: i32, fps: f64) -> Self {
+        let mut peak = PeakOffset {
+            per_frame: 0.0,
+            buffer: 0.0,
+            fill: 0.0,
+            offset: 0.0,
+        };
+        peak.follow(bitrate_kbps, vbv_kbit, fps);
+        peak
+    }
+
+    /// Take a live peak and buffer.
+    pub fn follow(&mut self, bitrate_kbps: i32, vbv_kbit: i32, fps: f64) {
+        self.per_frame = bitrate_kbps.max(1) as f64 * 1000.0 / fps.max(1.0);
+        self.buffer = vbv_kbit.max(1) as f64 * 1000.0;
+    }
+
+    /// Fold in a frame of `bits` and return the offset the next frame takes. A key frame, or a
+    /// frame held at a quantizer of its own (`steers` false), fills the bucket but says nothing
+    /// of what the session's own frames come to.
+    pub fn note(&mut self, bits: f64, steers: bool, max_offset: f64) -> f64 {
+        self.fill = (self.fill - self.per_frame).max(0.0) + bits;
+        if !steers || (self.offset <= 0.0 && self.fill <= self.buffer) {
+            return self.offset;
+        }
+        let target = (self.per_frame + (self.buffer / 2.0 - self.fill) / Self::DRAIN_FRAMES)
+            .max(self.per_frame / 4.0);
+        let step = 6.0 * (bits.max(1.0) / target).log2();
+        self.offset = (self.offset + step.max(-Self::RELEASE_STEP)).clamp(0.0, max_offset.max(0.0));
+        self.offset
+    }
+
+    /// The bits the next frame has before the bucket overflows.
+    pub fn room(&self) -> f64 {
+        self.buffer - (self.fill - self.per_frame).max(0.0)
+    }
+}
+
 /// The frames handed to an encoder and not yet answered, by the timestamp each was submitted
 /// with, so a packet names the frame it encodes rather than the one submitted alongside it.
 /// An encoder that pipelines answers a frame several later, and one that drops a frame never
