@@ -8,15 +8,14 @@
 //! reports how they ended.
 //!
 //! A command runs in the session's environment, so a launched application lands on the display
-//! and session bus the desktop uses: the server's own, with the apps repository as the runner
-//! reads it, `DISPLAY`, `WAYLAND_DISPLAY`, and `XDG_SESSION_TYPE` set for where the applications
-//! run ([`AppSession`]), and the session bus plus desktop identity adopted from that session's
-//! processes when the server has none of its own. A launch failure or any nonzero exit, above
-//! all 127, the command-not-installed case, is reported with the runtime, the reason its output
-//! gives, and the echoed command, because the dashboards' apps UI marks the action done
-//! optimistically and needs a counter-signal to roll back. A clean exit settles a pending
-//! install; the dashboards decide relevance by age, since a long-lived app quitting nonzero
-//! hours later is application lifecycle rather than a launch failure.
+//! and session bus the desktop uses. Under the server's window manager that is the environment
+//! the manager starts every program in (`crate::wm::launch_env`); without one it is found here
+//! ([`SessionEnvCache`]): the server's own, `DISPLAY`, `WAYLAND_DISPLAY`, and
+//! `XDG_SESSION_TYPE` set for where the applications run ([`AppSession`]), and the session bus
+//! plus desktop identity adopted from that session's processes. Either way the apps repository
+//! is set as the runner reads it. A launch failure or any nonzero exit, above all 127, the
+//! command-not-installed case, is reported with the runtime, the reason its output gives, and
+//! the echoed command; a clean exit as done.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::OwnedFd;
@@ -366,14 +365,29 @@ pub enum CommandOutcome {
     Error(String),
 }
 
-/// Launch `command` through the shell in `env`, from the home directory, and return once it is
-/// running; `on_end` hears how it ended. The output is read rather than discarded so a failure
-/// can say why, and read continuously so a chatty application never blocks on a full pipe.
+/// Launch `command` through the shell in `env` and watch it ([`run_watched`]).
 pub async fn run_client_command<F>(command: String, env: HashMap<String, String>, on_end: F)
 where
     F: FnOnce(CommandOutcome) + Send + 'static,
 {
-    let spawned = spawn_shell(&command, &env);
+    let mut shell = tokio::process::Command::new("/bin/sh");
+    shell.arg("-c").arg(&command);
+    run_watched(shell, command, env, on_end).await;
+}
+
+/// Launch `program` in `env`, from the home directory, and return once it is running; `on_end`
+/// hears how it ended, and `command` names it in the log and in a failure's text. The output is
+/// read rather than discarded so a failure can say why, and read continuously so a chatty
+/// application never blocks on a full pipe.
+pub async fn run_watched<F>(
+    program: tokio::process::Command,
+    command: String,
+    env: HashMap<String, String>,
+    on_end: F,
+) where
+    F: FnOnce(CommandOutcome) + Send + 'static,
+{
+    let spawned = spawn_merged(program, &env);
     let (mut child, reader) = match spawned {
         Ok(pair) => pair,
         Err(e) => {
@@ -446,17 +460,20 @@ where
     });
 }
 
-/// `sh -c command` with stdout and stderr on one pipe, whose read end comes back.
-fn spawn_shell(
-    command: &str,
+/// Spawn `command` in `env` alone, from the home directory, with no input and its stdout and
+/// stderr on one pipe, whose read end comes back: one stream keeps what a program printed in
+/// the order it printed it. Both ends are close-on-exec, so the child holds the pipe only as its
+/// stdout and stderr: a stray copy under another number would keep the stream open for whatever
+/// the child leaves running with its output sent elsewhere.
+pub fn spawn_merged(
+    mut command: tokio::process::Command,
     env: &HashMap<String, String>,
 ) -> std::io::Result<(tokio::process::Child, tokio::net::unix::pipe::Receiver)> {
-    let (read, write): (OwnedFd, OwnedFd) = nix::unistd::pipe().map_err(std::io::Error::from)?;
+    let (read, write): (OwnedFd, OwnedFd) =
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(std::io::Error::from)?;
     let stderr = write.try_clone()?;
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let child = tokio::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
+    let child = command
         .env_clear()
         .envs(env)
         .current_dir(home)

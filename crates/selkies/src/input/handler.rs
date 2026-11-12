@@ -31,7 +31,7 @@ use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 
 use super::command::{
-    AppSession, CommandOutcome, SessionEnvCache, live_x_displays, run_client_command,
+    AppSession, CommandOutcome, SessionEnvCache, live_x_displays, run_client_command, run_watched,
 };
 use super::cursor::{CursorEncoder, CursorMessage, DEFAULT_MAX_CURSOR_SIZE};
 use super::keysyms::{
@@ -47,7 +47,8 @@ use super::x11_worker::XWorker;
 use super::{ClipboardSink, GamepadSink, InputHost, NullSink, PointerSink, VirtualDeviceSink};
 use crate::clipboard::{PasteKeys, Session};
 use crate::gamepad::ConnId;
-use crate::session_screens::{AppCompositor, AppsRunner};
+use crate::session_screens::app_jobs::{JobOp, Refused};
+use crate::session_screens::{AppCompositor, AppsRunner, JobHost};
 
 /// Ctrl+V and Shift+Insert: the keysym pasted and the modifiers either needs held.
 pub const PASTE_CHORDS: &[(u32, [u32; 2])] = &[
@@ -68,6 +69,8 @@ const APP_WL_NEGCACHE_TTL: Duration = Duration::from_secs(2);
 const WL_TEXT_FLUSH_AFTER: Duration = Duration::from_millis(50);
 /// How long after a failed attempt the input X connection is tried again.
 const X_REPROBE_AFTER: Duration = Duration::from_secs(5);
+/// How long after an app launch its failure is the launch's rather than the application's.
+const LAUNCH_FAILURE_WINDOW: Duration = Duration::from_secs(15);
 
 /// What the handler is configured with; `from_settings` reads the process settings.
 #[derive(Clone, Debug)]
@@ -397,13 +400,6 @@ impl Dispatcher {
             self.cfg.max_cursor_size.max(self.cfg.cursor_size as u32)
         } else {
             self.cfg.max_cursor_size
-        }
-    }
-
-    /// Re-read and announce the installed set after an apps command ran.
-    async fn note_app_command_finished(&self, command: &str) {
-        if let Some(action) = self.apps.note_command_finished(command).await {
-            self.send_command_status(&action, None);
         }
     }
 
@@ -2024,44 +2020,136 @@ impl Dispatcher {
     }
 
     /// Launch a client's command in the session's environment and report how it ended to the
-    /// connection that asked (`command` module). `app_session` reads the display sockets and
-    /// the environment scan walks `/proc`, so both run off the runtime.
+    /// connection that asked (`command` module).
     pub(crate) async fn launch_command(&self, command: String, conn: Option<ConnId>) {
         let Some(me) = self.me.upgrade() else { return };
-        let session_me = me.clone();
-        let env = tokio::task::spawn_blocking(move || {
-            let session = session_me.app_session();
-            let repo = crate::settings::settings().apps_repo_path();
-            session_me
-                .state
-                .lock()
-                .session_env
-                .launch_env(&session, &repo)
-        })
-        .await;
-        let env = match env {
-            Ok(env) => env,
-            Err(e) => {
-                error!(target: "input", "Failed to prepare the environment of '{command}': {e}");
-                self.send_command_status(
-                    &format!("command_error,failed to launch: {command}"),
-                    conn,
-                );
-                return;
-            }
+        let Some(env) = self.session_launch_env().await else {
+            self.send_command_status(&format!("command_error,failed to launch: {command}"), conn);
+            return;
         };
         let echoed = command.clone();
         run_client_command(command, env, move |outcome| match outcome {
             CommandOutcome::Done => {
                 me.send_command_status(&format!("command_done,{echoed}"), conn);
-                let finished = me.clone();
-                tokio::spawn(async move { finished.note_app_command_finished(&echoed).await });
             }
             CommandOutcome::Error(text) => {
                 me.send_command_status(&format!("command_error,{text}"), conn)
             }
         })
         .await;
+    }
+
+    /// The environment a command or an apps job runs in, with the apps repository where the
+    /// runner reads it. Under the window manager it is the one the manager starts every program
+    /// in ([`crate::wm::launch_env`]), so a launch from here matches one from the shell or a
+    /// menu; without one, the session's display and bus are found (`SessionEnvCache`), which
+    /// reads the display sockets and walks `/proc`, so that runs off the runtime.
+    async fn session_launch_env(&self) -> Option<HashMap<String, String>> {
+        let repo = crate::settings::settings().apps_repo_path();
+        if let Some(mut env) = crate::wm::launch_env() {
+            if repo.is_empty() {
+                env.remove("PA_REPO_FOLDER");
+            } else {
+                env.insert("PA_REPO_FOLDER".into(), repo);
+            }
+            return Some(env);
+        }
+        let me = self.me.upgrade()?;
+        let env = tokio::task::spawn_blocking(move || {
+            let session = me.app_session();
+            let repo = crate::settings::settings().apps_repo_path();
+            me.state.lock().session_env.launch_env(&session, &repo)
+        })
+        .await;
+        match env {
+            Ok(env) => Some(env),
+            Err(e) => {
+                error!(target: "input", "Failed to prepare the session environment: {e}");
+                None
+            }
+        }
+    }
+
+    /// `apps,<json>`: the apps panel's request, `{"op": ..., "app"?: ..., "id"?: ...}`.
+    ///
+    /// `install`, `remove`, and `update` queue a job (`app_jobs`) and `cancel` and `clear` act
+    /// on one by its `id` (`clear` without one drops every finished job); each change is told to
+    /// every page. `list` answers the page that asked with `apps_state`. `launch` starts the
+    /// application the way its desktop entry does, through the runner's `run`, and reports a
+    /// failure to the page that asked only within [`LAUNCH_FAILURE_WINDOW`]: an application
+    /// that ran and later exited nonzero is its own lifecycle, not a failed launch. An
+    /// application name is checked before anything runs and reaches the runner as an argument,
+    /// never through a shell.
+    pub(crate) async fn apps_request(&self, body: &str, conn: Option<ConnId>) {
+        let Ok(request) = serde_json::from_str::<serde_json::Value>(body) else {
+            warn!(target: "input", "Rejecting an apps request that is not JSON");
+            return;
+        };
+        let op = request.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        let app = request.get("app").and_then(|v| v.as_str()).unwrap_or("");
+        let id = request.get("id").and_then(|v| v.as_u64());
+        match op {
+            "list" => {
+                let state = self.apps.state_action().await;
+                self.send_command_status(&state, conn);
+            }
+            "launch" => {
+                if !crate::session_screens::app_jobs::valid_app_name(app) {
+                    warn!(target: "input", "Rejecting an app launch for an invalid name");
+                    return;
+                }
+                let Some(me) = self.me.upgrade() else { return };
+                let Some(env) = self.session_launch_env().await else {
+                    return;
+                };
+                let mut runner = tokio::process::Command::new(crate::session_screens::APP_RUNNER);
+                runner.arg("run").arg(app);
+                let command = format!("{} run {app}", crate::session_screens::APP_RUNNER);
+                let started = Instant::now();
+                run_watched(runner, command, env, move |outcome| {
+                    if let CommandOutcome::Error(text) = outcome
+                        && started.elapsed() < LAUNCH_FAILURE_WINDOW
+                    {
+                        me.send_command_status(&format!("command_error,{text}"), conn);
+                    }
+                })
+                .await;
+            }
+            "cancel" => {
+                if let Some(action) = id.and_then(|id| self.apps.jobs.cancel(id)) {
+                    self.send_command_status(&action, None);
+                }
+            }
+            "clear" => {
+                if self.apps.jobs.clear(id) {
+                    let state = self.apps.state_action().await;
+                    self.send_command_status(&state, None);
+                }
+            }
+            _ => {
+                let Some(job_op) = JobOp::parse(op) else {
+                    warn!(target: "input", "Rejecting an unknown apps request");
+                    return;
+                };
+                match self.apps.jobs.enqueue(job_op, app) {
+                    Ok((action, start)) => {
+                        self.send_command_status(&action, None);
+                        if start && let Some(me) = self.me.upgrade() {
+                            tokio::spawn(async move { me.apps.drive(&*me).await });
+                        }
+                    }
+                    Err(Refused::BadName) => {
+                        warn!(target: "input", "Rejecting an app {op} for an invalid name");
+                    }
+                    Err(Refused::Busy) => {
+                        debug!(target: "input", "App {op} {app} not queued: a job for it is pending");
+                    }
+                    Err(Refused::Full) => {
+                        warn!(target: "input", "App {op} {app} not queued: the apps queue is full");
+                    }
+                }
+            }
+        }
     }
 
     /// The client `keyboardLayout` hint noted last.
@@ -2094,6 +2182,17 @@ impl PasteKeys for PasteChord {
 
     fn modifier_held(&self, keysym: u32) -> bool {
         self.0.state.lock().active_modifiers.contains(&keysym)
+    }
+}
+
+#[async_trait]
+impl JobHost for Dispatcher {
+    async fn job_env(&self) -> Option<HashMap<String, String>> {
+        self.session_launch_env().await
+    }
+
+    fn broadcast(&self, action: &str) {
+        self.send_command_status(action, None);
     }
 }
 

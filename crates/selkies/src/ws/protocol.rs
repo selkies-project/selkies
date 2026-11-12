@@ -65,6 +65,7 @@ pub const SECURE_INPUT_PREFIXES: &[&str] = &[
     "m2",
     "co",
     "cmd",
+    "apps",
     "sf",
     "sfe",
     "cws",

@@ -1,0 +1,986 @@
+#! /bin/bash
+#
+# proot-apps, from https://github.com/linuxserver/proot-apps
+# Copyright (C) LinuxServer.io
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version. It is distributed WITHOUT ANY WARRANTY; without even the implied
+# warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+# https://www.gnu.org/licenses/gpl-3.0.html for the full license.
+#
+# Modified by the Selkies project, 2026-11-12: the default repository filled in
+# as the release builds fill it; `##pa phase` lines and curl's --progress-bar
+# under PA_STATUS; an INT or TERM during a download removes the partial folder;
+# a folder still marked DOWNLOADING is started over by install and get and is
+# absent to run and update; a `list` command; and the system socket's listener
+# started under umask 077.
+
+TYPE=$1
+DEFAULT_GH_USER=linuxserver
+DEFAULT_GH_REPO=proot-apps
+DEFAULT_REPO=${PA_DEFAULT_REPO:-ghcr.io/${DEFAULT_GH_USER}/${DEFAULT_GH_REPO}}
+DEFAULT_REPO=${DEFAULT_REPO%/}
+
+if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+  ROOT_DIR=$PA_REPO_FOLDER
+else
+  ROOT_DIR=$HOME/proot-apps
+fi
+
+# Check for deps
+if [[ ! -f /usr/bin/curl ]]; then
+  echo "Curl was not found on this system please install them to continue"
+  exit 1
+fi
+
+#### Functions ####
+
+# Print a machine-readable status line when PA_STATUS is set
+pa_status() {
+  if [[ ! -z ${PA_STATUS+x} ]]; then
+    echo "##pa $*"
+  fi
+}
+
+# Whether an app folder holds a finished download
+app_present() {
+  [ -d "$ROOT_DIR/${1}" ] && [ ! -f "$ROOT_DIR/${1}/DOWNLOADING" ]
+}
+
+# Get sha for image to download
+get_blob_sha() {
+  MULTIDIGEST=$(curl -s -f --retry 3 --retry-max-time 20 --retry-connrefused \
+    --location \
+    --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+    --header "Accept: application/vnd.oci.image.index.v1+json" \
+    --header "Authorization: Bearer ${1}" \
+    --user-agent "${UA}" \
+    "${2}/${3}")
+  if $HOME/.local/bin/jq -e '.layers // empty' <<< "${MULTIDIGEST}" >/dev/null 2>&1; then
+    # If there's a layer element it's a single-arch manifest so just get that digest
+    $HOME/.local/bin/jq -r '.layers[0].digest' <<< "${MULTIDIGEST}";
+  else
+    # Otherwise it's multi-arch or has manifest annotations
+    if $HOME/.local/bin/jq -e '.manifests[]?.annotations // empty' <<< "${MULTIDIGEST}" >/dev/null 2>&1; then
+      # Check for manifest annotations and delete if found
+      MULTIDIGEST=$($HOME/.local/bin/jq 'del(.manifests[] | select(.annotations))' <<< "${MULTIDIGEST}")
+    fi
+    if [[ $($HOME/.local/bin/jq '.manifests | length' <<< "${MULTIDIGEST}") -gt 1 ]]; then
+      # If there's still more than one digest, it's multi-arch
+      MULTIDIGEST=$($HOME/.local/bin/jq -r ".manifests[] | select(.platform.architecture == \"${4}\").digest?" <<< "${MULTIDIGEST}")
+      if [[ -z "${MULTIDIGEST}" ]]; then
+        cleanup
+      fi
+    else
+      # Otherwise it's single arch
+      MULTIDIGEST=$($HOME/.local/bin/jq -r ".manifests[].digest?" <<< "${MULTIDIGEST}")
+    fi
+    if DIGEST=$(curl -s -f --retry 3 --retry-max-time 20 --retry-connrefused \
+      --location \
+      --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+      --header "Accept: application/vnd.oci.image.manifest.v1+json" \
+      --header "Authorization: Bearer ${1}" \
+      --user-agent "${UA}" \
+      "${2}/${MULTIDIGEST}"); then
+      $HOME/.local/bin/jq -r '.layers[0].digest' <<< "${DIGEST}";
+    fi
+  fi
+}
+
+# Trigger panel reload for selkies-desktop
+function trigger_panel_reload() {
+  if [ -f "$HOME/.config/panel-reload" ]; then
+    touch "$HOME/.config/panel-reload"
+  fi
+  if ls "$HOME"/Desktop/*.desktop >/dev/null 2>&1; then
+    (sleep 6; touch "$HOME"/Desktop/*.desktop) >/dev/null 2>&1 &
+  fi
+}
+
+# Get registry endpoint and auth
+registry_setup() {
+  IMAGE=$1
+  # Determine endpoints and auth
+  case "${IMAGE}" in
+    ghcr.io/* )
+    GHIMAGE=$(echo ${IMAGE} | sed 's|ghcr.io/||g')
+    ENDPOINT="${GHIMAGE%%:*}"
+    USERNAME="${GHIMAGE%%/*}"
+    TAG="${GHIMAGE#*:}"
+    REGISTRY="ghcr.io"
+    AUTH_URL="https://ghcr.io/token?scope=repository%3A${ENDPOINT}%3Apull"
+    ;;
+  * )
+    ENDPOINT="${IMAGE%%:*}"
+    USERNAME="${IMAGE%%/*}"
+    TAG="${IMAGE#*:}"
+    REGISTRY="registry-1.docker.io"
+    AUTH_URL="https://auth.docker.io/token?service=registry.docker.io&scope=repository:${ENDPOINT}:pull"
+    ;;
+  esac
+  MANIFEST_URL="https://${REGISTRY}/v2/${ENDPOINT}/manifests"
+  BLOB_URL="https://${REGISTRY}/v2/${ENDPOINT}/blobs/"
+  TOKEN="$( 
+    curl -s -f --retry 3 --retry-max-time 20 --retry-connrefused \
+      "${AUTH_URL}" |
+      $HOME/.local/bin/jq -r '.token'
+  )"
+}
+
+# Download layer
+function dl_layer() {
+  mkdir -p $ROOT_DIR
+  # CLI vars
+  IMAGE=$1
+  IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+  ARCH=$(uname -m| sed 's/x86_64/amd64/g'| sed 's/aarch64/arm64/')
+  UA="Mozilla/5.0 (Linux $(uname -m)) kasmweb.com"
+
+  # Destination directory
+  mkdir -p "${ROOT_DIR}/${IMAGE_FOLDER}"
+  touch "${ROOT_DIR}/${IMAGE_FOLDER}/DOWNLOADING"
+
+  ## Functions ##
+
+  # Cleanup and exit 1 if something went wrong
+  cleanup() {
+    rm -Rf "${ROOT_DIR}/${IMAGE_FOLDER}"
+    exit 1
+  }
+  # An interrupted download leaves nothing behind
+  trap cleanup INT TERM
+  
+  if [[ -z ${SHALAYER+x} ]]; then
+    if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
+      SHALAYER=$(cat $PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER)
+    else
+      registry_setup ${IMAGE}
+      SHALAYER=$(get_blob_sha "${TOKEN}" "${MANIFEST_URL}" "${TAG}" "${ARCH}")
+    fi
+  fi
+  if [[ $? -eq 1 ]]; then
+    echo "No manifest available for ${IMAGE}, cannot fetch"
+    cleanup
+  elif [[ -z "${SHALAYER}" ]]; then
+    echo "${IMAGE} digest could not be fetched from ${REGISTRY}"
+    cleanup
+  fi
+
+  # Download layer
+  pa_status phase download
+  PROGRESS=()
+  if [[ ! -z ${PA_STATUS+x} ]]; then
+    PROGRESS=(--progress-bar)
+  fi
+  if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
+    echo "Extracting from local repo"
+    tar -xf \
+      $PA_REPO_FOLDER/${IMAGE_FOLDER}/app.tar.gz -C \
+      "${ROOT_DIR}/${IMAGE_FOLDER}/"
+  else
+    if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+      curl -f --retry 3 --retry-max-time 20 "${PROGRESS[@]}" \
+        -o ${ROOT_DIR}/${IMAGE_FOLDER}/app.tar.gz \
+        --location \
+        --header "Authorization: Bearer ${TOKEN}" \
+        --user-agent "${UA}" \
+        "${BLOB_URL}${SHALAYER}" 
+    else
+      curl -f --retry 3 --retry-max-time 20 "${PROGRESS[@]}" \
+        --location \
+        --header "Authorization: Bearer ${TOKEN}" \
+        --user-agent "${UA}" \
+        "${BLOB_URL}${SHALAYER}" \
+        | tar -xzf - -C "${ROOT_DIR}/${IMAGE_FOLDER}/"
+    fi
+    if [[ $? -ne 0 ]]; then
+      echo "Error downloading ${IMAGE}"
+      cleanup
+    fi
+  fi
+  # Tag image
+  echo "${SHALAYER}" > "${ROOT_DIR}/${IMAGE_FOLDER}/SHALAYER"
+
+  # Cleanup
+  rm -f "${ROOT_DIR}/${IMAGE_FOLDER}/DOWNLOADING"
+  trap - INT TERM
+}
+
+# Update Icon cache
+function update_icon_cache() {
+  if [ ! -f "$HOME/.local/share/icons/hicolor/index.theme" ]; then
+    mkdir -p $HOME/.local/share/icons/hicolor
+    cp \
+      /usr/share/icons/hicolor/index.theme \
+      $HOME/.local/share/icons/hicolor/
+  fi
+  if which gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache $HOME/.local/share/icons/hicolor >/dev/null 2>&1 
+  elif which update-icon-caches >/dev/null 2>&1; then
+    update-icon-caches $HOME/.local/share/icons/hicolor >/dev/null 2>&1
+  fi
+}
+
+# Run a unix socket to relay commands to the host
+start_system_socket() {
+  if ! pgrep -f ${1}system.socket; then
+    rm -f ${1}system.socket
+    (umask 077; exec $HOME/.local/bin/ncat -k -U -l ${1}system.socket) | bash &
+    BG_PIDS=$(jobs -p)
+    chmod 600 ${1}system.socket || :
+    tail --pid=$2 -f /dev/null
+    kill -9 $BG_PIDS || :
+  fi
+}
+
+# Run update
+function update() {
+  IMAGE_FOLDER=$1
+  IMAGE=$(echo "${IMAGE_FOLDER}"| sed 's/\(.*\)_/\1:/' | sed 's|_|/|g')
+  if ! app_present "${IMAGE_FOLDER}"; then
+    echo "${IMAGE} not present on system run install or get first"
+    exit 1
+  fi
+  LOCAL_SHA=$(cat "$ROOT_DIR/${IMAGE_FOLDER}/SHALAYER")
+  if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ -z ${LOCALREPO+x} ]]; then
+    if [ ! -f $PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER ]; then
+      echo "${IMAGE} is not available in local repo"
+      exit 1
+    fi
+    # Use local SHA
+    SHALAYER=$(cat $PA_REPO_FOLDER/${IMAGE_FOLDER}/SHALAYER)
+  else
+    # Check remote SHA
+    ARCH=$(uname -m| sed 's/x86_64/amd64/g'| sed 's/aarch64/arm64/')
+    UA="Mozilla/5.0 (Linux $(uname -m)) kasmweb.com"
+    registry_setup ${IMAGE}
+    SHALAYER=$(get_blob_sha "${TOKEN}" "${MANIFEST_URL}" "${TAG}" "${ARCH}")
+  fi
+  if [[ "${SHALAYER}" == "${LOCAL_SHA}" ]]; then
+    echo "${IMAGE} is up to date: ${LOCAL_SHA}"
+  else
+    echo "Updating ${IMAGE_FOLDER}"
+    # Run remove logic
+    if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+      echo "Removing app root local"
+      rm -Rf $ROOT_DIR/${IMAGE_FOLDER}/
+      dl_layer ${IMAGE}
+    else
+      pa_status phase remove
+      if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/remove" ]; then
+        $HOME/.local/bin/proot \
+          -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+          /remove
+      fi
+      # Remove app layer
+      echo "Removing app root"
+      rm -Rf $ROOT_DIR/${IMAGE_FOLDER}/
+      dl_layer ${IMAGE}
+      pa_status phase install
+      $HOME/.local/bin/proot \
+        -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+        /install >/dev/null 2>&1
+      # Refresh icon cache
+      update_icon_cache
+      # Install
+      $HOME/.local/bin/proot \
+        -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+        /install
+    fi
+    trigger_panel_reload
+  fi
+}
+
+# Run remove
+function remove() {
+  IMAGE_FOLDER=$1
+  IMAGE=$(echo "${IMAGE_FOLDER}"| sed 's/\(.*\)_/\1:/' | sed 's|_|/|g')
+  echo "Removing ${IMAGE}"
+  if [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}/" ]; then
+    echo "${IMAGE} not present on system run install or get first"
+    exit 1
+  fi
+  pa_status phase remove
+  if [[ ! -z ${LOCALREPO+x} ]] && [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+    echo "localremove ${IMAGE}"
+  else
+    # Run remove logic
+    if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/remove" ]; then
+      $HOME/.local/bin/proot \
+        -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+        /remove
+    fi
+    # Remove bin wrapper if defined
+    if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/bin-name" ]; then
+      rm -f $HOME/.local/bin/$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name)
+    fi
+  fi
+  # Remove app layer
+  echo "Removing app root"
+  rm -Rf $ROOT_DIR/${IMAGE_FOLDER}/
+  trigger_panel_reload
+}
+
+# Run uninstall
+function uninstall() {
+  IMAGE_FOLDER=$1
+  IMAGE=$(echo "${IMAGE_FOLDER}"| sed 's/\(.*\)_/\1:/' | sed 's|_|/|g')
+  echo "Uninstalling ${IMAGE}"
+  if [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}/" ]; then
+    echo "${IMAGE} not present on system run install or get first"
+    exit 1
+  fi
+  # Run remove logic
+  if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/remove" ]; then
+    $HOME/.local/bin/proot \
+      -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+      /remove
+  fi
+  # Remove bin wrapper if defined
+  if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/bin-name" ]; then
+    rm -f $HOME/.local/bin/$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name)
+  fi
+  trigger_panel_reload
+}
+
+# Install
+function install_app() {
+  IMAGE=$1
+  IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+  echo "Installing ${IMAGE}"
+  # A download that never finished is started over
+  if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/DOWNLOADING" ]; then
+    echo "Discarding an unfinished download of ${IMAGE}"
+    rm -Rf "$ROOT_DIR/${IMAGE_FOLDER}"
+  fi
+  # Download if not present
+  if [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}" ]; then
+    dl_layer ${IMAGE}
+  fi
+  pa_status phase install
+  # Add bin wrapper if defined
+  if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/bin-name" ]; then
+    echo "\$HOME/.local/bin/proot-apps run ${IMAGE} \"\$@\"" > $HOME/.local/bin/$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name)
+    chmod +x $HOME/.local/bin/$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name)
+    echo "$(cat $ROOT_DIR/${IMAGE_FOLDER}/bin-name) is now available from the command line"
+  fi
+  $HOME/.local/bin/proot \
+    -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+    /install >/dev/null 2>&1
+  # Refresh icon cache
+  update_icon_cache
+  # Install
+  $HOME/.local/bin/proot \
+    -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+    /install
+  trigger_panel_reload
+}
+
+# Get
+function get_app() {
+  IMAGE=$1
+  IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+  echo "Getting ${IMAGE}"
+  if [ -f "$ROOT_DIR/${IMAGE_FOLDER}/DOWNLOADING" ]; then
+    echo "Discarding an unfinished download of ${IMAGE}"
+    rm -Rf "$ROOT_DIR/${IMAGE_FOLDER}"
+  fi
+  # Download if not present
+  if [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}" ]; then
+    dl_layer ${IMAGE}
+  else
+    echo "${IMAGE} present on this system use update to update"
+  fi
+}
+
+# Print nvidia debug output if PA_DEBUG is set
+nvidia_debug() {
+  if [[ ! -z ${PA_DEBUG+x} ]]; then
+    echo "nvidia: ${1}" >&2
+  fi
+}
+
+# Print loader cache, ldconfig is in sbin which is not always in PATH
+nvidia_ldcache() {
+  for BIN in "$(which ldconfig 2>/dev/null)" /usr/sbin/ldconfig /sbin/ldconfig; do
+    if [ -x "${BIN}" ]; then
+      "${BIN}" -p 2>/dev/null
+      return 0
+    fi
+  done
+  for FILE in \
+    "${HOST_LIB}"/lib*nvidia*.so* "${HOST_LIB}"/libcuda*.so* "${HOST_LIB}"/libnvcuvid.so* "${HOST_LIB}"/libnvoptix.so* \
+    /usr/lib64/lib*nvidia*.so* /usr/lib64/libcuda*.so* /usr/lib64/libnvcuvid.so* /usr/lib64/libnvoptix.so* \
+    /usr/lib/lib*nvidia*.so* /usr/lib/libcuda*.so* /usr/lib/libnvcuvid.so* /usr/lib/libnvoptix.so*; do
+    if [ -e "${FILE}" ]; then
+      echo "$(basename "${FILE}") (libc6,${LDTAG}) => ${FILE}"
+    fi
+  done
+}
+
+# Check for nvidia driver in the current environment
+nvidia_present() {
+  if [[ ! -z ${PA_NO_NVIDIA+x} ]]; then
+    nvidia_debug "disabled by PA_NO_NVIDIA"
+    return 1
+  fi
+  # Driver libs are glibc only
+  if grep -q -E "^ID=alpine" /etc/os-release 2>/dev/null; then
+    nvidia_debug "alpine environment, skipping"
+    return 1
+  fi
+  if [ ! -e /lib64/ld-linux-x86-64.so.2 ] && [ ! -e /lib/ld-linux-aarch64.so.1 ]; then
+    nvidia_debug "no glibc in this environment, skipping"
+    return 1
+  fi
+  if [ ! -e /dev/nvidiactl ]; then
+    return 1
+  fi
+  if ! nvidia_ldcache | grep -q -E "libGLX_nvidia\.so|libEGL_nvidia\.so"; then
+    nvidia_debug "/dev/nvidiactl present but no driver libraries in the loader cache"
+    return 1
+  fi
+  return 0
+}
+
+# Print guest glibc libdir, fails for musl guests
+nvidia_guest_libdir() {
+  if grep -q -E "^ID=alpine" "${1}/etc/os-release" 2>/dev/null; then
+    nvidia_debug "alpine guest, skipping"
+    return 1
+  fi
+  for DIR in \
+    usr/lib/$(uname -m)-linux-gnu \
+    usr/lib64 \
+    usr/lib; do
+    if [ -e "${1}/${DIR}/libc.so.6" ]; then
+      echo "/${DIR}"
+      return 0
+    fi
+  done
+  nvidia_debug "no glibc found in guest, skipping"
+  return 1
+}
+
+# Add a bind if the file exists and the guest path is not taken
+nvidia_add() {
+  if [ -f "${1}" ] && [ -z "${NVIDIA_SEEN[${2}]}" ]; then
+    NVIDIA_SEEN[${2}]=1
+    NVIDIA_BIND+=("-b" "$(realpath "${1}"):${2}")
+  fi
+}
+
+# Build proot binds for nvidia acceleration
+nvidia_binds() {
+  NVIDIA_BIND=()
+  declare -g -A NVIDIA_SEEN=()
+  case "$(uname -m)" in
+    x86_64) LDTAG="x86-64" ;;
+    aarch64) LDTAG="AArch64" ;;
+    *) return 0 ;;
+  esac
+  HOST_LIB="/usr/lib/$(uname -m)-linux-gnu"
+  if ! nvidia_present; then
+    return 0
+  fi
+  GUEST_LIB=$(nvidia_guest_libdir "${1}") || return 0
+  # Driver libs
+  while read -r NAME LIBPATH; do
+    REAL=$(realpath "${LIBPATH}")
+    nvidia_add "${REAL}" "${GUEST_LIB}/${NAME}"
+    nvidia_add "${REAL}" "${GUEST_LIB}/$(basename "${REAL}")"
+  done < <(nvidia_ldcache | awk -v tag="${LDTAG}" \
+    '$1 ~ /^(libnvidia-|libcuda\.|libcudadebugger\.|libnvcuvid\.|libnvoptix\.|libEGL_nvidia\.|libGLX_nvidia\.|libGLESv1_CM_nvidia\.|libGLESv2_nvidia\.)/ && $1 !~ /^libnvidia-container/ && $2 ~ tag {print $1, $NF}')
+  # VDPAU and GBM backends
+  VDPAU_DIR=$(nvidia_ldcache | awk -v tag="${LDTAG}" \
+    '$1 ~ /^libvdpau_nvidia\./ && $2 ~ tag {print $NF; exit}' | xargs -r realpath | xargs -r dirname)
+  for FILE in \
+    ${VDPAU_DIR:+"${VDPAU_DIR}"/libvdpau_nvidia.so*} \
+    "${HOST_LIB}"/vdpau/libvdpau_nvidia.so* \
+    /usr/lib64/vdpau/libvdpau_nvidia.so* \
+    /usr/lib/vdpau/libvdpau_nvidia.so*; do
+    nvidia_add "${FILE}" "${GUEST_LIB}/vdpau/$(basename "${FILE}")"
+  done
+  for FILE in \
+    ${HOST_LIB}/gbm/nvidia-drm_gbm.so \
+    /usr/lib64/gbm/nvidia-drm_gbm.so \
+    /usr/lib/gbm/nvidia-drm_gbm.so \
+    /usr/local/lib/gbm/nvidia-drm_gbm.so \
+    /usr/local/lib64/gbm/nvidia-drm_gbm.so \
+    ${HOST_LIB}/nvidia-drm_gbm.so \
+    /usr/lib64/nvidia-drm_gbm.so \
+    /usr/lib/nvidia-drm_gbm.so; do
+    nvidia_add "${FILE}" "${GUEST_LIB}/gbm/nvidia-drm_gbm.so"
+  done
+  # GBM backend fallback to the allocator
+  ALLOCATOR=$(nvidia_ldcache | awk -v tag="${LDTAG}" \
+    '$1 ~ /^libnvidia-allocator\.so\.1$/ && $2 ~ tag {print $NF; exit}')
+  if [ ! -z "${ALLOCATOR}" ]; then
+    nvidia_add "${ALLOCATOR}" "${GUEST_LIB}/gbm/nvidia-drm_gbm.so"
+  fi
+  # ICD files
+  STAGE="${ROOT_DIR}/.nvidia"
+  ICD=$(find /etc/vulkan/icd.d /usr/share/vulkan/icd.d -name '*nvidia*.json' 2>/dev/null | head -n1)
+  if [ -z "${ICD}" ]; then
+    mkdir -p "${STAGE}"
+    ICD="${STAGE}/nvidia_icd.json"
+    echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.3.0"}}' > "${ICD}"
+  fi
+  nvidia_add "${ICD}" /etc/vulkan/icd.d/nvidia_icd.json
+  EGL=$(find /etc/glvnd/egl_vendor.d /usr/share/glvnd/egl_vendor.d -name '*nvidia*.json' 2>/dev/null | head -n1)
+  if [ -z "${EGL}" ]; then
+    mkdir -p "${STAGE}"
+    EGL="${STAGE}/10_nvidia.json"
+    echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' > "${EGL}"
+  fi
+  nvidia_add "${EGL}" /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+  OCL=$(find /etc/OpenCL/vendors -name '*nvidia*.icd' 2>/dev/null | head -n1)
+  if [ -z "${OCL}" ]; then
+    mkdir -p "${STAGE}"
+    OCL="${STAGE}/nvidia.icd"
+    echo 'libnvidia-opencl.so.1' > "${OCL}"
+  fi
+  nvidia_add "${OCL}" /etc/OpenCL/vendors/nvidia.icd
+  while read -r FILE; do
+    nvidia_add "${FILE}" "/etc/vulkan/implicit_layer.d/$(basename "${FILE}")"
+  done < <(find /etc/vulkan/implicit_layer.d /usr/share/vulkan/implicit_layer.d -name '*nvidia*.json' 2>/dev/null)
+  while read -r FILE; do
+    nvidia_add "${FILE}" "/usr/share/egl/egl_external_platform.d/$(basename "${FILE}")"
+  done < <(find /etc/egl/egl_external_platform.d /usr/share/egl/egl_external_platform.d -name '*nvidia*.json' 2>/dev/null)
+  # Tools
+  if which nvidia-smi >/dev/null 2>&1; then
+    nvidia_add "$(which nvidia-smi)" /usr/bin/nvidia-smi
+  fi
+  nvidia_debug "guest libdir ${GUEST_LIB}, $(( ${#NVIDIA_BIND[@]} / 2 )) binds"
+  if [[ ! -z ${PA_DEBUG+x} ]]; then
+    printf '%s\n' "${NVIDIA_BIND[@]}" | grep -v '^-b$' >&2
+  fi
+}
+
+#### Runtime ####
+
+# If a non docker endpoint is passed assume the default repo
+if [[ ! -z ${2+x} ]]; then
+  if ([[ "${2}" != *"/"* ]] || [[ "${2}" != *":"* ]]) && [[ "${2}" != "all" ]]; then
+    IMAGE=${DEFAULT_REPO}:${2}
+  else
+    IMAGE=${2}
+  fi
+fi
+
+# Run the application
+if [ "${TYPE}" == "run" ]; then
+  if [[ -z ${2+x} ]]; then
+    echo "The image is required"
+    echo "Usage: proot-apps run myorg/myimage:tag"
+    exit 1
+  fi
+  IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+  if [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}/" ] && [[ ! -z ${PA_DEFAULT_REPO+x} ]]; then
+    DEFAULT_FOLDER=$(echo "${DEFAULT_REPO}:${IMAGE##*:}"| sed 's|/|_|g'| sed 's|:|_|g')
+    if [ -d "$ROOT_DIR/${DEFAULT_FOLDER}/" ]; then
+      IMAGE_FOLDER=${DEFAULT_FOLDER}
+    fi
+  fi
+  if ! app_present "${IMAGE_FOLDER}"; then
+    echo "${IMAGE} not present on system run install or get first"
+    exit 1
+  fi
+  # Docker shims for known desktop containers
+  if [ -d "/defaults" ]; then
+    PULSE_BIND="-b /defaults:/defaults"
+  elif [ -d "/var/run/pulse" ]; then
+    PULSE_BIND="-b /var/run/pulse:/var/run/pulse"
+  fi
+  # Mount repo location for the gui app
+  if [[ ! -z ${PA_REPO_FOLDER+x} ]] && [[ "${IMAGE_FOLDER}" == *gui ]]; then
+    REPO_BIND="-b ${PA_REPO_FOLDER}:${PA_REPO_FOLDER}"
+    mkdir -p "$ROOT_DIR/${IMAGE_FOLDER}${PA_REPO_FOLDER}"
+  fi
+  # Fonts
+  if [ -d "/usr/share/fonts" ] && [ -d "/usr/share/fontconfig" ] && [ -d "/etc/fonts" ]; then
+    FONTS_BIND="-b /usr/share/fonts:/usr/share/fonts -b /usr/share/fontconfig:/usr/share/fontconfig -b /etc/fonts:/etc/fonts"
+  fi
+  # Cursor theme
+  CURSOR_BIND=()
+  if [[ -n "${XCURSOR_THEME}" ]] && [ -d "/usr/share/icons/${XCURSOR_THEME}" ] && [ ! -d "$ROOT_DIR/${IMAGE_FOLDER}/usr/share/icons/${XCURSOR_THEME}" ]; then
+    CURSOR_BIND=(-b "/usr/share/icons/${XCURSOR_THEME}:/usr/share/icons/${XCURSOR_THEME}")
+  fi
+  # Let Qt fall back to X11
+  if [ "${QT_QPA_PLATFORM}" == "wayland" ]; then
+    export QT_QPA_PLATFORM="wayland;xcb"
+  fi
+  # NVIDIA acceleration
+  nvidia_binds "$ROOT_DIR/${IMAGE_FOLDER}"
+  $HOME/.local/bin/proot \
+    ${PULSE_BIND} ${FONTS_BIND} ${REPO_BIND} "${CURSOR_BIND[@]}" "${NVIDIA_BIND[@]}" \
+    -R $ROOT_DIR/${IMAGE_FOLDER}/ \
+    /entrypoint "${@:3}" &
+  start_system_socket "$ROOT_DIR/${IMAGE_FOLDER}/" $!
+fi
+
+# Run installation
+if [ "${TYPE}" == "install" ]; then
+  if [[ -z ${2+x} ]]; then
+    echo "The image is required"
+    echo "Usage: proot-apps install myorg/myimage:tag"
+    exit 1
+  fi
+  # Install multiple
+  if [[ ! -z ${3+x} ]]; then
+    for APP in "${@:2}"; do
+      if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then
+        install_app ${DEFAULT_REPO}:${APP}
+      else
+        install_app "${APP}"
+      fi
+      unset SHALAYER
+    done
+  # Install single or all
+  else
+    if [[ "${IMAGE}" != "all" ]]; then
+      install_app "${IMAGE}"
+    else
+      if [ -n "$(ls -A $ROOT_DIR 2>/dev/null)" ]; then
+        for IMAGE_FOLDER in $(ls $ROOT_DIR); do
+          IMAGE=$(echo "${IMAGE_FOLDER}"| sed 's/\(.*\)_/\1:/' | sed 's|_|/|g')
+          install_app "${IMAGE}"
+        done
+      else
+        echo "no apps to install"
+      fi
+    fi
+  fi
+fi
+
+# Run remove
+if [ "${TYPE}" == "remove" ]; then
+  if [[ -z ${2+x} ]]; then
+    echo "The image is required"
+    echo "Usage: proot-apps remove myorg/myimage:tag"
+    exit 1
+  fi
+  # Remove multiple
+  if [[ ! -z ${3+x} ]]; then
+    for APP in "${@:2}"; do
+      if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then
+        IMAGE=${DEFAULT_REPO}:${APP}
+        IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+        remove "${IMAGE_FOLDER}"
+      else
+        IMAGE_FOLDER=$(echo "${APP}"| sed 's|/|_|g'| sed 's|:|_|g')
+        remove "${IMAGE_FOLDER}"
+      fi
+    done
+  # Uninstall single or all
+  else
+    if [[ "${IMAGE}" != "all" ]]; then
+      IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+      remove "${IMAGE_FOLDER}"
+    else
+      if [ -n "$(ls -A $ROOT_DIR 2>/dev/null)" ]; then
+        for IMAGE_FOLDER in $(ls $ROOT_DIR); do
+          remove "${IMAGE_FOLDER}"
+        done
+      else
+        echo "no apps to remove"
+      fi
+    fi
+  fi
+fi
+
+# Run uninstall
+if [ "${TYPE}" == "uninstall" ]; then
+  if [[ -z ${2+x} ]]; then
+    echo "The image is required"
+    echo "Usage: proot-apps uninstall myorg/myimage:tag"
+    exit 1
+  fi
+  # Uninstall multiple
+  if [[ ! -z ${3+x} ]]; then
+    for APP in "${@:2}"; do
+      if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then 
+        IMAGE=${DEFAULT_REPO}:${APP}
+        IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+        uninstall "${IMAGE_FOLDER}"
+      else
+        IMAGE_FOLDER=$(echo "${APP}"| sed 's|/|_|g'| sed 's|:|_|g')
+        uninstall "${IMAGE_FOLDER}"
+      fi
+    done
+  # Uninstall single or all
+  else
+    if [[ "${IMAGE}" != "all" ]]; then
+      IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+      uninstall "${IMAGE_FOLDER}"
+    else
+      if [ -n "$(ls -A $ROOT_DIR 2>/dev/null)" ]; then
+        for IMAGE_FOLDER in $(ls $ROOT_DIR); do
+          uninstall "${IMAGE_FOLDER}"
+        done
+      else
+        echo "no apps to uninstall"
+      fi
+    fi
+  fi
+fi
+
+# Run update
+if [ "${TYPE}" == "update" ]; then
+  if [[ -z ${2+x} ]]; then
+    echo "The image is required"
+    echo "Usage: proot-apps update myorg/myimage:tag"
+    exit 1
+  fi
+  # Update multiple
+  if [[ ! -z ${3+x} ]]; then
+    for APP in "${@:2}"; do
+      if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then
+        IMAGE=${DEFAULT_REPO}:${APP}
+        IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+        update "${IMAGE_FOLDER}"
+      else
+        IMAGE_FOLDER=$(echo "${APP}"| sed 's|/|_|g'| sed 's|:|_|g')
+        update "${IMAGE_FOLDER}"
+      fi
+    done
+  # Update single or all
+  else
+    if [[ "${IMAGE}" != "all" ]]; then
+      IMAGE_FOLDER=$(echo "${IMAGE}"| sed 's|/|_|g'| sed 's|:|_|g')
+      update "${IMAGE_FOLDER}"
+    else
+      if [ -n "$(ls -A $ROOT_DIR 2>/dev/null)" ]; then
+        for IMAGE_FOLDER in $(ls $ROOT_DIR); do
+          update "${IMAGE_FOLDER}"
+        done
+      else
+        echo "no apps to update"
+      fi
+    fi
+  fi
+fi
+
+# Run get
+if [ "${TYPE}" == "get" ]; then
+  if [[ -z ${2+x} ]]; then
+    echo "The image is required"
+    echo "Usage: proot-apps get myorg/myimage:tag"
+    exit 1
+  fi
+  # Get multiple
+  if [[ ! -z ${3+x} ]]; then
+    for APP in "${@:2}"; do
+      if [[ "${APP}" != *"/"* ]] || [[ "${APP}" != *":"* ]]; then
+        IMAGE=${DEFAULT_REPO}:${APP}
+        get_app "${IMAGE}"
+      else
+        get_app "${APP}"
+      fi
+      unset SHALAYER
+    done
+  # Get single
+  else
+    get_app "${IMAGE}"
+  fi
+fi
+
+# Run localrepo actions
+if [ "${TYPE}" == "localrepo" ]; then
+  if [ -z ${PA_REPO_FOLDER+x} ]; then
+    echo "error: PA_REPO_FOLDER is not set in env"
+    exit 1
+  fi
+  if [[ -z ${2+x} ]] || [[ -z ${3+x} ]]; then
+    echo "Usage: proot-apps localrepo [get,remove,update] myorg/myimage:tag"
+    exit 1
+  fi
+  export LOCALREPO=true
+  if [[ "${2}" =~ ^(get|remove|update)$ ]]; then
+    "$(realpath "$0")" "${@:2}"
+  fi
+fi
+
+# Usage
+if [[ -z ${1+x} ]]; then
+  echo "+-----------------------------------------------------------+"
+  echo "| Usage:    | proot-apps [type] [image_name]                |"
+  echo "+-----------------------------------------------------------+"
+  echo "| Run       | proot-apps run myorg/myimage:tag              |"
+  echo "| Install   | proot-apps install [myorg/myimage:tag|all]    |"
+  echo "| Uninstall | proot-apps uninstall [myorg/myimage:tag|all]  |"
+  echo "| Remove    | proot-apps remove [myorg/myimage:tag|all]     |"
+  echo "| Get       | proot-apps get myorg/myimage:tag              |"
+  echo "| Update    | proot-apps update [myorg/myimage:tag|all]     |"
+  echo "| List      | proot-apps list                               |"
+  echo "+-----------------------------------------------------------+"
+fi
+
+#### Completion ####
+
+# Convert an image folder to the name used on the command line
+completion_name() {
+  IMAGE_FOLDER=$1
+  DEFAULT_PREFIX="$(echo "${DEFAULT_REPO}"| sed 's|/|_|g'| sed 's|:|_|g')_"
+  if [[ "${IMAGE_FOLDER}" == "${DEFAULT_PREFIX}"* ]]; then
+    # Default repo apps use the short name
+    echo "${IMAGE_FOLDER#"${DEFAULT_PREFIX}"}"
+  else
+    echo "${IMAGE_FOLDER}"| sed 's/\(.*\)_/\1:/' | sed 's|_|/|g'
+  fi
+}
+
+# Only pass names that are safe to hand to the shell completion
+completion_filter() {
+  grep -E '^[A-Za-z0-9._/:-]+$'
+}
+
+# List app names from a folder of image folders
+completion_folders() {
+  APP_DIR=$1
+  for IMAGE_FOLDER in $(ls ${APP_DIR} 2>/dev/null); do
+    # Skip loose files and local repo metadata
+    if [ ! -d "${APP_DIR}/${IMAGE_FOLDER}" ] || [ "${IMAGE_FOLDER}" == "metadata" ]; then
+      continue
+    fi
+    completion_name "${IMAGE_FOLDER}"
+  done | completion_filter
+}
+
+# List apps available to install
+completion_apps() {
+  # Local repo folder is the app list when set never reach out
+  if [[ ! -z ${PA_REPO_FOLDER+x} ]]; then
+    completion_folders "${PA_REPO_FOLDER}"
+    return 0
+  fi
+  if [[ ! -z ${PA_DEFAULT_REPO+x} ]]; then
+    return 1
+  fi
+  CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/proot-apps"
+  CACHE_FILE="${CACHE_DIR}/completion-apps"
+  # Ingest remote metadata on first use or when this script is newer than the cache
+  if [ ! -s "${CACHE_FILE}" ] || [ "$(realpath "$0")" -nt "${CACHE_FILE}" ]; then
+    ARCH=$(uname -m| sed 's/x86_64/amd64/g'| sed 's/aarch64/arm64/')
+    META_URL="https://raw.githubusercontent.com/${DEFAULT_GH_USER}/${DEFAULT_GH_REPO}/master/metadata/metadata.yml"
+    mkdir -p "${CACHE_DIR}"
+    CACHE_TMP=$(mktemp "${CACHE_DIR}/completion-apps.XXXXXX")
+    # Parse out app names skipping disabled apps and other arches
+    curl -s -f --max-time 3 \
+      --location \
+      "${META_URL}" 2>/dev/null \
+      | awk -v arch="linux/${ARCH}" '
+        function flush() { if (n != "" && !d && (a == "" || index(a, arch))) print n }
+        /^ *- name:/ { flush(); n=$3; d=0; a="" }
+        /^ *arch:/ { a=$2 }
+        /^ *disabled: *[Tt]rue/ { d=1 }
+        END { flush() }' \
+      | completion_filter > "${CACHE_TMP}"
+    # Only a good list becomes the cache
+    if [ -s "${CACHE_TMP}" ]; then
+      mv -f "${CACHE_TMP}" "${CACHE_FILE}"
+    else
+      rm -f "${CACHE_TMP}"
+      # Keep using a stale list without retrying on every tab
+      if [ -s "${CACHE_FILE}" ]; then
+        touch "${CACHE_FILE}"
+      fi
+    fi
+  fi
+  if [ ! -s "${CACHE_FILE}" ]; then
+    return 1
+  fi
+  cat "${CACHE_FILE}"
+}
+
+# Print the bash completion script
+completion_bash() {
+  cat <<'EOF'
+# bash completion for proot-apps
+_proot_apps() {
+  local cur words cword apps
+  # Keep image names with a tag as one word when bash-completion is present
+  if declare -F _get_comp_words_by_ref >/dev/null 2>&1; then
+    _get_comp_words_by_ref -n : cur words cword
+  else
+    cur=${COMP_WORDS[COMP_CWORD]}
+    words=("${COMP_WORDS[@]}")
+    cword=${COMP_CWORD}
+  fi
+  COMPREPLY=()
+  # Actions
+  if [[ ${cword} -eq 1 ]]; then
+    COMPREPLY=($(compgen -W "run install uninstall remove get update list localrepo" -- "${cur}"))
+    return
+  fi
+  case "${words[1]}" in
+    get)
+      apps=$("$1" _complete_apps 2>/dev/null) || return
+      ;;
+    install)
+      apps=$("$1" _complete_apps 2>/dev/null) || return
+      apps="all ${apps}"
+      ;;
+    remove|uninstall|update)
+      apps=$("$1" _complete_installed 2>/dev/null) || return
+      apps="all ${apps}"
+      ;;
+    run)
+      # Anything after the app is passed to the app
+      if [[ ${cword} -gt 2 ]]; then
+        compopt -o filenames 2>/dev/null
+        COMPREPLY=($(compgen -f -- "${cur}"))
+        return
+      fi
+      apps=$("$1" _complete_installed 2>/dev/null) || return
+      ;;
+    localrepo)
+      if [[ ${cword} -eq 2 ]]; then
+        COMPREPLY=($(compgen -W "get remove update" -- "${cur}"))
+      fi
+      return
+      ;;
+    *)
+      return
+      ;;
+  esac
+  COMPREPLY=($(compgen -W "${apps}" -- "${cur}"))
+  if declare -F __ltrim_colon_completions >/dev/null 2>&1; then
+    __ltrim_colon_completions "${cur}"
+  fi
+}
+complete -F _proot_apps proot-apps
+EOF
+}
+
+# Print completion script
+if [ "${TYPE}" == "completion" ]; then
+  if [[ "${2}" != "bash" ]]; then
+    echo "Usage: proot-apps completion bash"
+    exit 1
+  fi
+  completion_bash
+fi
+
+# List available apps for completion
+if [ "${TYPE}" == "_complete_apps" ]; then
+  completion_apps || exit 1
+fi
+
+# List installed apps for completion
+if [ "${TYPE}" == "_complete_installed" ]; then
+  completion_folders "${ROOT_DIR}"
+fi
+
+# List installed apps by the name the other commands take, skipping unfinished downloads
+if [ "${TYPE}" == "list" ]; then
+  for IMAGE_PATH in "${ROOT_DIR}"/*; do
+    IMAGE_FOLDER="${IMAGE_PATH##*/}"
+    if app_present "${IMAGE_FOLDER}"; then
+      completion_name "${IMAGE_FOLDER}"
+    fi
+  done
+  exit 0
+fi

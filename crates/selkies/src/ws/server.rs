@@ -1649,7 +1649,7 @@ impl WsService {
     /// The client settings snapshot as it applies to one display: the boot payload patched with
     /// what the display streams with, since clients key their wire-format demux off its encoder,
     /// plus `ws_max_message_bytes`, `second_screen` and `ui_sidebar_show_apps` as effective
-    /// availability, and `apps_installed` once the runner answered.
+    /// availability.
     pub(crate) fn settings_payload_for_display(&self, display_id: &str) -> Map<String, Json> {
         let mut payload = settings().client_payload();
         let mut live = {
@@ -1673,15 +1673,11 @@ impl WsService {
         {
             entry.insert("value".into(), json!(false));
         }
-        let input = self.input();
-        if input.as_ref().is_some_and(|i| !i.apps_available())
+        if self.input().is_some_and(|i| !i.apps_available())
             && let Some(Json::Object(entry)) = payload.get_mut("ui_sidebar_show_apps")
             && entry.get("value") == Some(&Json::Bool(true))
         {
             entry.insert("value".into(), json!(false));
-        }
-        if let Some(installed) = input.and_then(|i| i.installed_apps()) {
-            payload.insert("apps_installed".into(), json!({"value": installed}));
         }
         payload
     }
@@ -1820,7 +1816,7 @@ impl WsService {
     }
 
     /// Send a system action to one connection, or to every one for none (`command_error,...`,
-    /// `apps_installed,...`, `rumble,...`, `pointer,...`).
+    /// `apps_job,...`, `rumble,...`, `pointer,...`).
     pub fn send_system_action(&self, action: &str, conn: Option<ClientId>) {
         let message = format!("system,{}", json!({"action": action}));
         let service = self.arc();

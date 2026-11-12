@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""The apps panel while one of its commands is running, and what it knows after.
+"""The apps panel while one of its jobs is running, and what it knows after.
 
-Driven over both transports: the installed set rides the settings payload and an
-`apps_installed` system action, which each transport carries its own way.
+Driven over both transports: the jobs and the installed set ride the
+`apps_job` and `apps_state` system actions, which each transport carries its
+own way.
 
-An install is a shell command on the session that takes a minute or more, and a
+An install is a job the server runs on the session for a minute or more, and a
 panel that goes back to looking idle the moment it is clicked reads as one that
-dropped the click. So a posted command is tracked until the server settles it,
-and the button that started it says so meanwhile and holds the row. What ends
-up installed is the session's fact rather than the browser's, so a page that
-kept no record of the install is still told about it.
+dropped the click. So the button that started it says so while it runs and
+holds the row, and what the runner prints streams into the panel's console as
+it prints it, without the status lines the runner adds for the server. The
+console stays when the job ends, however quickly, until the user clears it.
+What ends up installed is read from the session, so a page that kept no record
+of the install is still told about it.
 
 A session on a proot-apps local repository installs only what that folder holds,
 so the panel lists the folder's own catalog, served by the server, and never
@@ -61,8 +64,15 @@ state="{{STATE}}"
 case "$1" in
   check) exit 0 ;;
   list) [ -f "$state" ] && cat "$state"; exit 0 ;;
-  install) sleep {INSTALL_SECONDS}; echo "$2" >> "$state"; exit 0 ;;
-  remove) if [ -f "$state" ]; then grep -vx "$2" "$state" > "$state.new" || true; mv "$state.new" "$state"; fi; exit 0 ;;
+  install)
+    echo "Installing $2"
+    echo "##pa phase download"
+    for p in 10 40 70 100; do printf '\\r####  %s.0%%' "$p"; sleep {INSTALL_SECONDS / 4}; done
+    printf '\\n'
+    echo "##pa phase install"
+    echo "Adding icon"
+    echo "$2" >> "$state"; exit 0 ;;
+  remove) echo "Removing $2"; if [ -f "$state" ]; then grep -vx "$2" "$state" > "$state.new" || true; mv "$state.new" "$state"; fi; exit 0 ;;
   *) exit 0 ;;
 esac
 """
@@ -146,8 +156,20 @@ def run(mode: str, res: "H.Results") -> None:
                     held = install.is_disabled()
                     break
                 time.sleep(0.2)
-            res.check(f"{mode}: the button that started the command reports it running", running)
+            res.check(f"{mode}: the button that started the job reports it running", running)
             res.check(f"{mode}: and holds the row while it runs", held)
+            console = page.locator('[role="dialog"] .app-job-console').first
+            streamed = ""
+            deadline = time.time() + INSTALL_SECONDS
+            while time.time() < deadline:
+                streamed = console.inner_text() if console.count() else ""
+                if "Installing e2eapp" in streamed and "%" in streamed:
+                    break
+                time.sleep(0.2)
+            res.check(f"{mode}: what the runner prints streams into the console while it runs",
+                      "Installing e2eapp" in streamed and "%" in streamed, streamed[-200:])
+            res.check(f"{mode}: without the status lines the runner adds for the server",
+                      "##pa" not in streamed, streamed[-200:])
 
             settled = False
             deadline = time.time() + INSTALL_SECONDS + 20
@@ -156,13 +178,44 @@ def run(mode: str, res: "H.Results") -> None:
                     settled = True
                     break
                 time.sleep(0.3)
-            res.check(f"{mode}: the server settling the command clears it", settled)
+            res.check(f"{mode}: the job ending stops the spinner", settled)
             res.check(f"{mode}: the panel then offers the app as installed",
                       page.locator('[role="dialog"] button:has-text("Remove")').count() > 0)
+            finished = console.inner_text() if console.count() else ""
+            res.check(f"{mode}: the console stays after the job, at its last state",
+                      console.get_attribute("data-state") == "done" and "Adding icon" in finished
+                      and "100.0%" in finished and "40.0%" not in finished, finished[-200:])
+            page.locator('[role="dialog"] .app-job-console .app-job-button.clear').first.click()
+            cleared = False
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if page.locator('[role="dialog"] .app-job-console').count() == 0:
+                    cleared = True
+                    break
+                time.sleep(0.2)
+            res.check(f"{mode}: clearing it takes it away", cleared)
+
+            page.locator('[role="dialog"] button:has-text("Remove")').first.click()
+            removed = ""
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                removed_console = page.locator('[role="dialog"] .app-job-console[data-state="done"]')
+                if removed_console.count() and page.locator('[role="dialog"] button:has-text("Install")').count():
+                    removed = removed_console.first.inner_text()
+                    break
+                time.sleep(0.2)
+            res.check(f"{mode}: an instant removal still leaves its console for the user to clear",
+                      "Removing e2eapp" in removed, removed[-200:])
+            page.locator('[role="dialog"] button:has-text("Install")').first.click()
+            deadline = time.time() + INSTALL_SECONDS + 20
+            while time.time() < deadline:
+                if page.locator('[role="dialog"] button:has-text("Remove")').count() > 0:
+                    break
+                time.sleep(0.3)
 
             # What is installed belongs to the session, not to one browser: a
             # page with no stored record of the install must still be told.
-            page.evaluate("localStorage.removeItem('prootInstalledApps')")
+            page.evaluate("localStorage.clear()")
             page.reload(wait_until="load")
             time.sleep(8.0)
             reopened = open_apps_modal(page)

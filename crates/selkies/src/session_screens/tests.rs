@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use pixelflux::{Error, OutputDesc, ScreenCapture};
 
-use super::apps::{changes_installed_set, runner_env};
+use super::app_jobs::JobOp;
+use super::apps::runner_env;
 use super::layout::{self, PrimaryCapture};
 use super::testing::{PrivateLabwc, Scratch, isolated, run_isolated, script};
 use super::*;
@@ -810,12 +811,28 @@ fn scratch_directories_made_at_once_are_distinct() {
     assert_eq!(distinct.len(), made.len());
 }
 
+/// Leave a socket file at `path` that nothing listens on. It is bound and never listened on, so
+/// it stays refused even while a fork another test thread makes holds its descriptor for the
+/// instant before that child's exec closes it; a listener dropped there would still accept.
+fn stale_socket(path: &Path) {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, bind, socket};
+    use std::os::fd::AsRawFd;
+    let fd = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .expect("socket");
+    bind(fd.as_raw_fd(), &UnixAddr::new(path).expect("address")).expect("bind");
+}
+
 #[tokio::test]
 async fn a_stale_socket_file_is_no_control() {
     let pf = FakeScreens::new(false);
     let session = FakeSession::nested(SESSION);
     let (screens, runtime) = ladder(&pf, &session);
-    drop(tokio::net::UnixListener::bind(runtime.path(SESSION_IPC_SOCKET)).expect("bind"));
+    stale_socket(&runtime.path(SESSION_IPC_SOCKET));
     assert!(runtime.path(SESSION_IPC_SOCKET).exists());
     assert!(!screens.probe_ipc().await);
 }
@@ -1807,7 +1824,7 @@ async fn the_panel_shows_only_what_the_runner_can_do() {
     let absent = AppsRunner::named("selkies-no-such-runner");
     assert!(!absent.available(), "no wrapper, no panel");
     absent.probe().await;
-    assert_eq!(absent.installed(), None);
+    assert_eq!(absent.list().await, None);
 
     let dir = Scratch::new("runner");
     std::fs::write(dir.path("listed"), "firefox\n\n  gimp \n").expect("listed");
@@ -1816,15 +1833,10 @@ async fn the_panel_shows_only_what_the_runner_can_do() {
         runner.available(),
         "assumed good until the probe has spoken"
     );
-    assert_eq!(
-        runner.installed(),
-        None,
-        "None until a read succeeds, never published as empty"
-    );
     runner.probe().await;
     assert!(runner.available());
     assert_eq!(
-        runner.installed(),
+        runner.list().await,
         Some(vec!["firefox".to_string(), "gimp".to_string()]),
         "a usable runner is asked what it has"
     );
@@ -1836,84 +1848,173 @@ async fn the_panel_shows_only_what_the_runner_can_do() {
         !denied.available(),
         "a host the wrapper refuses drops the panel"
     );
-    assert_eq!(denied.installed(), None, "and is not asked what it has");
     let asked = std::fs::read_to_string(dir.path("asked")).expect("asked");
-    assert_eq!(asked.lines().count(), 1, "{asked}");
+    assert_eq!(
+        asked.lines().count(),
+        1,
+        "and is not asked what it has: {asked}"
+    );
 }
 
 #[tokio::test]
-async fn a_failed_read_leaves_the_last_answer_standing() {
+async fn what_is_installed_is_read_each_time_and_a_failed_read_says_nothing() {
     settings_installed();
     let dir = Scratch::new("runner");
     let runner = AppsRunner::named(runner_script(&dir, 0));
     std::fs::write(dir.path("listed"), "firefox\n").expect("listed");
-    assert!(runner.refresh().await, "the first read changes the set");
-    assert!(!runner.refresh().await, "the same answer does not");
+    assert_eq!(runner.list().await, Some(vec!["firefox".to_string()]));
+    std::fs::write(dir.path("listed"), "").expect("listed");
+    assert_eq!(
+        runner.list().await,
+        Some(Vec::new()),
+        "nothing installed is an answer too"
+    );
     std::fs::write(dir.path("list-fails"), b"").expect("failing");
-    std::fs::write(dir.path("listed"), "").expect("listed");
-    assert!(!runner.refresh().await);
-    assert_eq!(runner.installed(), Some(vec!["firefox".to_string()]));
-    std::fs::remove_file(dir.path("list-fails")).expect("recovered");
-    assert!(runner.refresh().await, "nothing installed is an answer too");
-    assert_eq!(runner.installed(), Some(Vec::new()));
+    assert_eq!(
+        runner.list().await,
+        None,
+        "a failed read is never an empty set"
+    );
+    assert!(
+        runner
+            .state_action()
+            .await
+            .starts_with(r#"apps_state,{"installed":null"#),
+        "and is published as unknown"
+    );
+}
+
+/// A [`JobHost`] that records what it was told to broadcast.
+#[derive(Default)]
+struct RecordingHost {
+    told: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl JobHost for RecordingHost {
+    async fn job_env(&self) -> Option<HashMap<String, String>> {
+        Some(std::env::vars().collect())
+    }
+
+    fn broadcast(&self, action: &str) {
+        self.told.lock().push(action.to_string());
+    }
+}
+
+/// A runner whose `install` prints what proot-apps does under `PA_STATUS`, lists the app after,
+/// and leaves two processes running as proot-apps' menu reload does, one with its output sent
+/// elsewhere and one still holding it; whose `update` fails; and whose `remove` runs until it is
+/// ended.
+fn job_runner_script(dir: &Scratch) -> PathBuf {
+    let path = dir.path(APP_RUNNER);
+    let root = dir.text();
+    script(
+        &path,
+        &format!(
+            r###"case "$1" in
+list) [ -e "{root}/listed" ] && cat "{root}/listed"; exit 0 ;;
+install)
+  echo "Installing $2 status=$PA_STATUS"
+  echo "##pa phase download"
+  printf '\r###      30.0%%\r##########100.0%%\n'
+  echo "##pa phase install"
+  echo "Adding icon"
+  echo $$ > "{root}/group"
+  (sleep 30; touch "{root}/late") > /dev/null 2>&1 &
+  sleep 30 &
+  echo "$2" > "{root}/listed" ;;
+update) echo "error: no manifest for $2" >&2; exit 4 ;;
+remove) echo "Removing $2"; exec sleep 30 ;;
+esac"###
+        ),
+    );
+    path
 }
 
 #[tokio::test]
-async fn a_finished_install_is_announced_where_the_set_changed() {
+async fn a_job_streams_its_console_and_ends_with_what_is_installed() {
     settings_installed();
     let dir = Scratch::new("runner");
-    let runner = AppsRunner::named(runner_script(&dir, 0));
-    std::fs::write(dir.path("listed"), "firefox\n").expect("listed");
-    assert_eq!(
-        runner
-            .note_command_finished("selkies-proot install firefox")
-            .await
-            .as_deref(),
-        Some(r#"apps_installed,["firefox"]"#)
+    let runner = AppsRunner::named(job_runner_script(&dir));
+    let host = RecordingHost::default();
+    let (_, start) = runner
+        .jobs
+        .enqueue(JobOp::Install, "firefox")
+        .expect("queued");
+    assert!(start);
+    runner.jobs.enqueue(JobOp::Update, "gimp").expect("queued");
+    tokio::time::timeout(Duration::from_secs(5), runner.drive(&host))
+        .await
+        .expect("a job ends when its runner exits, whatever it left running");
+    let group: i32 = std::fs::read_to_string(dir.path("group"))
+        .expect("the install ran")
+        .trim()
+        .parse()
+        .expect("its group");
+    // The other session tests scan the live processes; what this one left running must not
+    // outlive it.
+    let _ = nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(group),
+        nix::sys::signal::Signal::SIGKILL,
     );
-    assert_eq!(
-        runner
-            .note_command_finished("/usr/bin/selkies-proot update firefox")
-            .await,
-        None,
-        "nothing changed, nothing to say"
+    let told = host.told.lock().clone();
+    let all = told.join("\n");
+    assert!(
+        all.contains("Installing firefox status=1"),
+        "the runner is told to say its phases: {all}"
     );
-    std::fs::write(dir.path("listed"), "").expect("listed");
-    assert_eq!(
-        runner
-            .note_command_finished("selkies-proot run firefox")
-            .await,
-        None,
-        "a launch changes nothing and reads nothing"
+    assert!(
+        !all.contains("##pa"),
+        "and those lines are not shown: {all}"
     );
-    assert_eq!(runner.note_command_finished("rm -rf install").await, None);
-    assert_eq!(
-        runner
-            .note_command_finished("selkies-proot remove firefox")
-            .await
-            .as_deref(),
-        Some("apps_installed,[]")
+    assert!(
+        all.contains("##########100.0%"),
+        "the meter's last state is: {all}"
     );
+    assert!(!all.contains("30.0%"), "not each of its frames: {all}");
+    assert!(all.contains(r#""state":"done""#), "{all}");
+    assert!(all.contains(r#""state":"failed""#), "{all}");
+    assert!(all.contains(r#""code":4"#), "{all}");
+    let state = told.last().expect("told");
+    assert!(
+        state.starts_with(r#"apps_state,{"installed":["firefox"]"#),
+        "the installed set is read after the last job: {state}"
+    );
+    assert!(runner.jobs.start_next().is_none(), "the queue ran out");
 }
 
-#[test]
-fn which_commands_change_the_installed_set() {
-    for yes in [
-        "selkies-proot install a",
-        "selkies-proot remove a",
-        "/opt/bin/selkies-proot update a",
-    ] {
-        assert!(changes_installed_set(yes), "{yes}");
-    }
-    for no in [
-        "",
-        "selkies-proot",
-        "selkies-proot run a",
-        "proot-apps install a",
-        "selkies-proot-x install a",
-    ] {
-        assert!(!changes_installed_set(no), "{no}");
-    }
+#[tokio::test]
+async fn a_canceled_job_ends_its_process_group() {
+    settings_installed();
+    let dir = Scratch::new("runner");
+    let runner = std::sync::Arc::new(AppsRunner::named(job_runner_script(&dir)));
+    let host = std::sync::Arc::new(RecordingHost::default());
+    runner
+        .jobs
+        .enqueue(JobOp::Remove, "firefox")
+        .expect("queued");
+    let (driver, driving) = (runner.clone(), host.clone());
+    let task = tokio::spawn(async move { driver.drive(&*driving).await });
+    let id = loop {
+        if let Some(job) = runner.jobs.snapshot().first()
+            && job["state"] == "running"
+            && job["lines"].as_array().is_some_and(|l| !l.is_empty())
+        {
+            break job["id"].as_u64().expect("id");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert!(runner.jobs.cancel(id).is_none());
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("the job ends well before its sleep would")
+        .expect("joined");
+    assert!(
+        host.told
+            .lock()
+            .iter()
+            .any(|a| a.contains(r#""state":"canceled""#))
+    );
 }
 
 #[test]

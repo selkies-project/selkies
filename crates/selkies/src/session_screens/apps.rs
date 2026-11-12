@@ -4,8 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The apps panel's runner: whether the panel has anything to work through here, and what the
-//! session has installed.
+//! The apps panel's runner: whether the panel has anything to work through here, what the
+//! session has installed, and the jobs it runs for the panel (`app_jobs`).
 //!
 //! Availability is the wrapper plus an environment it can work in; where either is missing,
 //! dashboards are told to drop the panel rather than offer buttons that can never succeed. A
@@ -21,28 +21,36 @@
 //! availability: with it off the panel still shows and the client explains why its actions are
 //! disabled, so an operator flipping the flag does not make the panel appear and vanish.
 //!
-//! Only the runner knows what a session has, and the client cannot run anything, so the server
-//! asks (`list`), at startup so the first client to connect is told rather than having to
-//! remember, and after a command that changes the set. The set is `None` until a read succeeds,
-//! which a caller must not publish as empty: a client told nothing is installed clears its own
-//! record. A failed read leaves the last answer standing.
+//! What a session has installed is the runner's install directory and nothing else: the runner
+//! is asked (`list`) whenever a page wants to know -- the panel opening, a job ending -- and its
+//! answer is never kept, since listing a directory costs less than keeping a second record
+//! current against installs made from a terminal.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use log::{debug, info, warn};
 use parking_lot::Mutex;
+use serde_json::json;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use super::app_jobs::{FLUSH_INTERVAL, JobBoard, JobOp, JobState};
 use crate::commands::sessions::which;
+use crate::input::command::spawn_merged;
 use crate::settings::settings;
 
 /// The wrapper the apps panel works through.
 pub const APP_RUNNER: &str = "selkies-proot";
 /// How long a runner question may take; a stuck child is killed.
 const RUNNER_TIMEOUT: Duration = Duration::from_secs(10);
+/// The terminal width a job's runner is told, which curl sizes its progress bar to.
+const JOB_COLUMNS: &str = "60";
+/// How long a job's output is still read once its runner exited.
+const JOB_DRAIN: Duration = Duration::from_millis(300);
 
 /// The runner's environment: the server's, with the repository where the runner reads it.
 pub fn runner_env(repo_folder: &str) -> HashMap<String, String> {
@@ -53,18 +61,6 @@ pub fn runner_env(repo_folder: &str) -> HashMap<String, String> {
         env.insert("PA_REPO_FOLDER".into(), repo_folder.to_string());
     }
     env
-}
-
-/// Whether a finished command changes the installed set: the runner's `install`, `remove`, or
-/// `update`; a launch does not.
-pub fn changes_installed_set(command: &str) -> bool {
-    let mut parts = command.split_whitespace();
-    let is_runner = parts.next().is_some_and(|program| {
-        Path::new(program)
-            .file_name()
-            .is_some_and(|n| n == APP_RUNNER)
-    });
-    is_runner && matches!(parts.next(), Some("install" | "remove" | "update"))
 }
 
 /// One question to the runner: its exit status and what it wrote, `Err` when it could not run or
@@ -102,13 +98,55 @@ async fn ask(
     }
 }
 
+/// Decode output that may end inside a character: the complete text comes back, and the bytes of
+/// a character the read split stay in `carry` for the next read.
+pub fn decode_chunk(carry: &mut Vec<u8>, bytes: &[u8]) -> String {
+    carry.extend_from_slice(bytes);
+    let mut text = String::new();
+    loop {
+        match std::str::from_utf8(carry) {
+            Ok(valid) => {
+                text.push_str(valid);
+                carry.clear();
+                return text;
+            }
+            Err(e) => {
+                let (valid, rest) = carry.split_at(e.valid_up_to());
+                text.push_str(std::str::from_utf8(valid).unwrap_or_default());
+                match e.error_len() {
+                    // A character the next read completes.
+                    None => {
+                        *carry = rest.to_vec();
+                        return text;
+                    }
+                    Some(bad) => {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        *carry = rest[bad..].to_vec();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// What running the panel's jobs needs from the session: the environment its applications run
+/// in, and a way to tell every page.
+#[async_trait]
+pub trait JobHost: Send + Sync {
+    /// The environment a job's runner starts in: the session's display, bus, and repository.
+    async fn job_env(&self) -> Option<HashMap<String, String>>;
+    /// Send a system action to every page.
+    fn broadcast(&self, action: &str);
+}
+
 /// The apps panel's runner as this session sees it; see the module docs.
 pub struct AppsRunner {
     /// The name or path the runner resolves through.
     name: PathBuf,
     /// The probe's answer, `None` until it has spoken.
     usable: Mutex<Option<bool>>,
-    installed: Mutex<Option<Vec<String>>>,
+    /// The panel's jobs.
+    pub jobs: JobBoard,
 }
 
 impl Default for AppsRunner {
@@ -123,7 +161,7 @@ impl AppsRunner {
         AppsRunner {
             name: name.into(),
             usable: Mutex::new(None),
-            installed: Mutex::new(None),
+            jobs: JobBoard::default(),
         }
     }
 
@@ -136,13 +174,8 @@ impl AppsRunner {
         self.resolved().is_some() && *self.usable.lock() != Some(false)
     }
 
-    /// The app names the runner reports installed, as last read; `None` until a read succeeds.
-    pub fn installed(&self) -> Option<Vec<String>> {
-        self.installed.lock().clone()
-    }
-
     /// Ask the runner whether apps can install and launch here, once, and a usable one what it
-    /// already has installed.
+    /// already has installed, for the log.
     pub async fn probe(&self) {
         let Some(runner) = self.resolved() else {
             return;
@@ -175,35 +208,7 @@ impl AppsRunner {
         } else {
             warn!(target: "input", "Apps panel enabled: {APP_RUNNER} can run here, but the local repository {folder} is not a directory; the catalog fails to load until it is mounted.");
         }
-        self.refresh().await;
-    }
-
-    /// Re-read the runner's installed set; whether it changed, so a caller can skip announcing.
-    pub async fn refresh(&self) -> bool {
-        let Some(runner) = self.resolved() else {
-            return false;
-        };
-        let folder = settings().apps_repo_path();
-        let output = match ask(&runner, "list", &folder, false).await {
-            Ok((true, output)) => output,
-            Ok((false, _)) => {
-                debug!(target: "input", "{APP_RUNNER} list failed; keeping the installed set as it was");
-                return false;
-            }
-            Err(e) => {
-                warn!(target: "input", "{APP_RUNNER} list failed to run: {e}");
-                return false;
-            }
-        };
-        let names: Vec<String> = output
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect();
-        let mut installed = self.installed.lock();
-        let changed = installed.as_ref() != Some(&names);
-        if changed {
+        if let Some(names) = self.list().await {
             let listed = if names.is_empty() {
                 "none".to_string()
             } else {
@@ -211,21 +216,136 @@ impl AppsRunner {
             };
             info!(target: "input", "Apps installed in this session: {listed}");
         }
-        *installed = Some(names);
-        changed
     }
 
-    /// Re-read the set after `command` finished, returning the `apps_installed,<json>` action to
-    /// broadcast where it changed: the requester applied the change optimistically, and the
-    /// session's other pages have no other way to hear.
-    pub async fn note_command_finished(&self, command: &str) -> Option<String> {
-        if !changes_installed_set(command) || !self.refresh().await {
-            return None;
+    /// The app names the runner finds installed now, `None` where it could not say: a caller
+    /// must not publish that as empty, since a page told nothing is installed offers to install
+    /// what the session has.
+    pub async fn list(&self) -> Option<Vec<String>> {
+        let runner = self.resolved()?;
+        let folder = settings().apps_repo_path();
+        match ask(&runner, "list", &folder, false).await {
+            Ok((true, output)) => Some(
+                output
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            Ok((false, _)) => {
+                debug!(target: "input", "{APP_RUNNER} list failed");
+                None
+            }
+            Err(e) => {
+                warn!(target: "input", "{APP_RUNNER} list failed to run: {e}");
+                None
+            }
         }
-        let names = self.installed()?;
-        Some(format!(
-            "apps_installed,{}",
-            serde_json::to_string(&names).ok()?
-        ))
+    }
+
+    /// The `apps_state,<json>` action: what is installed, read now (`null` where the runner could
+    /// not say), and every job kept, each with its whole console.
+    pub async fn state_action(&self) -> String {
+        let installed = self.list().await;
+        let state = json!({"installed": installed, "jobs": self.jobs.snapshot()});
+        format!("apps_state,{state}")
+    }
+
+    /// Run the queue until it is empty, telling every page how each job goes and, after each,
+    /// what is installed. Started by whoever queued a job onto an idle queue
+    /// ([`JobBoard::enqueue`]), so one task runs it at a time.
+    pub async fn drive(&self, host: &dyn JobHost) {
+        while let Some((id, op, app, started)) = self.jobs.start_next() {
+            host.broadcast(&started);
+            let code = self.run_job(id, op, &app, host).await;
+            if let Some(ended) = self.jobs.finish(id, code) {
+                host.broadcast(&ended.action);
+                let detail = if ended.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" -- {}", ended.reason)
+                };
+                match ended.state {
+                    JobState::Done => {
+                        info!(target: "input", "App {} {} in {:.1}s", ended.app, ended.op.done(), ended.seconds)
+                    }
+                    JobState::Canceled => {
+                        info!(target: "input", "App {} {} canceled after {:.1}s", ended.op.verb(), ended.app, ended.seconds)
+                    }
+                    _ => {
+                        let status = ended.code.map_or("could not run".to_string(), |c| {
+                            format!("exited with status {c}")
+                        });
+                        warn!(target: "input", "App {} {} failed: {APP_RUNNER} {status} after {:.1}s{detail}", ended.op.verb(), ended.app, ended.seconds)
+                    }
+                }
+            }
+            host.broadcast(&self.state_action().await);
+        }
+    }
+
+    /// Run one job's runner to its end, streaming what it prints; its exit status, signal deaths
+    /// negative, `None` where it could not start. The job ends when the runner exits, its output
+    /// read for [`JOB_DRAIN`] more, rather than when the output stream closes: whatever the runner
+    /// leaves running on the session's behalf may hold the stream long after.
+    async fn run_job(&self, id: u64, op: JobOp, app: &str, host: &dyn JobHost) -> Option<i32> {
+        let runner = self.resolved()?;
+        let mut env = host.job_env().await?;
+        env.insert("PA_STATUS".into(), "1".into());
+        env.insert("COLUMNS".into(), JOB_COLUMNS.into());
+        let mut command = Command::new(&runner);
+        command
+            .arg(op.verb())
+            .arg(app)
+            .process_group(0)
+            .kill_on_drop(true);
+        let (mut child, mut reader) = match spawn_merged(command, &env) {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.jobs
+                    .feed(id, &format!("{APP_RUNNER} could not start: {e}\n"));
+                return None;
+            }
+        };
+        if let Some(pid) = child.id() {
+            self.jobs.set_group(id, pid as i32);
+        }
+        let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut chunk = vec![0u8; 4096];
+        let mut carry = Vec::new();
+        let mut exited = None;
+        let drained = tokio::time::sleep(Duration::MAX);
+        tokio::pin!(drained);
+        loop {
+            tokio::select! {
+                read = reader.read(&mut chunk) => match read {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => self.jobs.feed(id, &decode_chunk(&mut carry, &chunk[..n])),
+                },
+                status = child.wait(), if exited.is_none() => {
+                    exited = Some(status);
+                    drained.as_mut().reset(tokio::time::Instant::now() + JOB_DRAIN);
+                }
+                _ = &mut drained, if exited.is_some() => break,
+                _ = ticker.tick() => {
+                    if let Some(update) = self.jobs.take_update(id) {
+                        host.broadcast(&update);
+                    }
+                }
+            }
+        }
+        use std::os::unix::process::ExitStatusExt;
+        let status = match exited {
+            Some(status) => status,
+            None => child.wait().await,
+        }
+        .ok()?;
+        Some(
+            status
+                .code()
+                .unwrap_or_else(|| -status.signal().unwrap_or(1)),
+        )
     }
 }

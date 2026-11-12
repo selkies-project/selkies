@@ -49,6 +49,9 @@ def run(cell: Any) -> None:
     page.locator(".toggle-handle").first.click()
     time.sleep(0.5)
     R.check("the Apps panel opens its catalog", AP.open_apps_modal(page))
+    # The catalog opens on one category; the search looks through all of them.
+    page.locator('[role="dialog"] input[type="text"]').first.fill(LABEL)
+    time.sleep(0.5)
     card = page.locator(f'[role="dialog"] [data-slot="card"]:has-text("{LABEL}")').first
     if not card.count():
         R.check(f"the catalog lists {LABEL}", False, "catalog without it (offline?)")
@@ -62,12 +65,17 @@ def run(cell: Any) -> None:
     else:
         install.click()
         done = settle(page, 600)
-        listed = cell.target.out("selkies-proot list 2>/dev/null; proot-apps list 2>/dev/null")
+        listed = cell.target.out("selkies-proot list 2>/dev/null")
         R.check(f"Install puts {LABEL} on the session", done and page.locator(".app-action-button.remove").count() > 0
                 and APP in listed, f"settled={done}; runner lists {listed[:120]!r}")
+        console = page.locator('[role="dialog"] .app-job-console').first
+        shown = console.inner_text() if console.count() else ""
+        R.check("the install's console shows what proot-apps printed, its status lines left out",
+                "Installing" in shown and "##pa" not in shown and console.get_attribute("data-state") == "done",
+                shown[-200:])
     remove = page.locator(".app-action-button.remove").first
     if remove.count():
         remove.click()
         done = settle(page, 300)
-        listed = cell.target.out("selkies-proot list 2>/dev/null; proot-apps list 2>/dev/null")
+        listed = cell.target.out("selkies-proot list 2>/dev/null")
         R.check(f"Remove takes {LABEL} off the session again", done and APP not in listed, listed[:120])

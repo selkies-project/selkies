@@ -766,10 +766,12 @@ fn modifiers(state: &AppState) -> Modifiers {
     }
 }
 
-/// Where a button or a scroll is judged: where the policy took the last motion while it keeps
-/// taking pointer events, else the seat's pointer. The seat's pointer follows a motion the policy
-/// takes only while no client holds a pointer grab, so with a client's popup grab held a click
-/// on the policy's menu would otherwise land where the pointer stood before the menu took it.
+/// Where a button or a scroll is judged, and where a relative delta adds to: where the policy
+/// took the last motion while it keeps taking pointer events, else the seat's pointer. The seat's
+/// pointer follows a motion the policy takes only while no client holds a pointer grab, so with
+/// a client's popup grab held a click on the policy's menu would otherwise land where the pointer
+/// stood before the menu took it, and every delta of a frame drag, whose press grabs for the
+/// client, would start from where the drag began.
 pub fn judged_location(state: &AppState, seat: Point<f64, Logical>) -> Point<f64, Logical> {
     state
         .wm
@@ -781,7 +783,7 @@ pub fn judged_location(state: &AppState, seat: Point<f64, Logical>) -> Point<f64
 
 /// What the compositor's hit test found, for the policy.
 pub fn under_of(_state: &AppState, target: &Option<(FocusTarget, Point<f64, Logical>)>) -> Under {
-    match target {
+    match target.as_ref().map(|(target, at)| (target.owner(), at)) {
         Some((FocusTarget::Window(window), _)) => Under {
             window: window_id(window),
             top_layer: false,
@@ -797,7 +799,8 @@ pub fn under_of(_state: &AppState, target: &Option<(FocusTarget, Point<f64, Logi
             top_layer: true,
             desktop: false,
         },
-        None => Under::default(),
+        // `owner` is never a subsurface.
+        None | Some((FocusTarget::Subsurface(..), _)) => Under::default(),
     }
 }
 
@@ -805,7 +808,10 @@ pub fn under_of(_state: &AppState, target: &Option<(FocusTarget, Point<f64, Logi
 /// the clients see the pointer leave, so a frame drag never scrolls or clicks what lies under
 /// the frame, and still moves the seat's pointer, since a button is judged at the seat's
 /// location: a menu whose motion the policy took would otherwise see every click at the spot
-/// it opened on.
+/// it opened on. Under a client's grab the seat's pointer is not moved, so the first event the
+/// policy passes after taking some brings it to where the policy last took the pointer: the
+/// release that ends a frame drag reaches the client there, and the next relative delta adds to
+/// the drag's end rather than its start.
 pub fn pointer(
     state: &mut AppState,
     kind: PointerKind,
@@ -822,8 +828,30 @@ pub fn pointer(
         modifiers: modifiers(state),
         time: wayland_time().millis(),
     };
+    let behind = state
+        .wm
+        .as_ref()
+        .filter(|wm| wm.pointer_taken)
+        .and_then(|wm| wm.taken_at);
     let verdict = dispatch(state, Event::Pointer(event, under));
     let taken = verdict == Verdict::Consumed;
+    if !taken
+        && let Some(at) = behind
+        && let Some(pointer) = state.seat.get_pointer()
+        && pointer.current_location() != at
+    {
+        let focus = state.pointer_target_under(at);
+        pointer.motion(
+            state,
+            focus,
+            &smithay::input::pointer::MotionEvent {
+                location: at,
+                serial: next_serial(),
+                time: wayland_time(),
+            },
+        );
+        pointer.frame(state);
+    }
     if let Some(wm) = state.wm.as_mut() {
         wm.pointer_taken = taken;
         if !taken {

@@ -19,7 +19,8 @@
 //! clients), XDND, `_NET_CLIENT_LIST`, `_NET_WM_STATE`, and `_NET_WM_MOVERESIZE`; what it does
 //! not publish and a desktop reads (`_NET_WORKAREA`, `_NET_ACTIVE_WINDOW`,
 //! `_NET_CLIENT_LIST_STACKING`, `_NET_FRAME_EXTENTS`) is written here over a second connection to
-//! the same server, since the manager's own is private to it. A crashed Xwayland is started
+//! the same server, since the manager's own is private to it, and so is the name it answers to
+//! on its check window (`publish_name`). A crashed Xwayland is started
 //! again after a short wait, so an X11 client started later still finds a server.
 //!
 //! Where the host has no DRM render node, the EGL vendor library a GPU container runtime injects
@@ -104,6 +105,9 @@ x11rb::atom_manager! {
         _NET_CLIENT_LIST_STACKING,
         _NET_FRAME_EXTENTS,
         _NET_SUPPORTED,
+        _NET_SUPPORTING_WM_CHECK,
+        _NET_WM_NAME,
+        UTF8_STRING,
         _NET_WM_STATE_HIDDEN,
         _NET_WM_ACTION_MOVE,
         _NET_WM_ACTION_RESIZE,
@@ -247,6 +251,7 @@ pub fn start(
                         eprintln!("[Wayland] Xwayland :{display_number}: no second connection; _NET_WORKAREA and _NET_ACTIVE_WINDOW stay unset.");
                     }
                     publish_supported(state);
+                    publish_name(state);
                     publish_workarea(state);
                     println!("[Wayland] Xwayland on display :{display_number}; X11 clients are managed with the Wayland ones.");
                     for n in state.xwm.notify.drain(..) {
@@ -452,6 +457,45 @@ fn publish_supported(state: &mut AppState) {
         }
     }
     extras.set_atoms(extras.root, a._NET_SUPPORTED, &all);
+    extras.flush();
+}
+
+/// The manager's name on the supporting check window, which clients read to decide how to
+/// behave: Chromium and Electron draw their own frame only under a window manager they know by
+/// this name and ask for a server frame under any other, Smithay's own among them, so the
+/// manager answers to the name the X11 backend's manager gives, the one whose behavior the
+/// policy carries.
+const NET_WM_NAME: &str = "Openbox";
+
+/// Rename Smithay's supporting check window to [`NET_WM_NAME`].
+fn publish_name(state: &mut AppState) {
+    let Some(extras) = state.xwm.extras.as_ref() else {
+        return;
+    };
+    let a = &extras.atoms;
+    let check = extras
+        .conn
+        .get_property(
+            false,
+            extras.root,
+            a._NET_SUPPORTING_WM_CHECK,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        )
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .and_then(|r| r.value32().and_then(|mut v| v.next()));
+    let Some(check) = check else {
+        return;
+    };
+    let _ = extras.conn.change_property8(
+        PropMode::REPLACE,
+        check,
+        a._NET_WM_NAME,
+        a.UTF8_STRING,
+        NET_WM_NAME.as_bytes(),
+    );
     extras.flush();
 }
 

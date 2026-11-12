@@ -156,7 +156,12 @@
 
 ## Anything to leave alone
 - A controller can do whatever the desktop user can: that is the product. Shell commands from the client
-  (`command_enabled`, off by default) are a feature when the operator turns them on.
+  (`command_enabled`, off by default) are a feature when the operator turns them on, and so are the apps panel's
+  requests under the same setting (the `apps,<json>` verb, controller-only and held to secure mode's input token
+  like `cmd`: `input/handler.rs` `apps_request`, `session_screens/app_jobs.rs`). Those name an operation and an
+  application and never a command line: the name is checked against what the runner takes as one application
+  (`valid_app_name`, never `all` or an option) and passed to `selkies-proot` as an argument, a launch as well as a
+  job, so no app name reaches a shell; every page of the session is told each job's output.
 - With authentication turned off (no password, no tokens), any connector controls the desktop by design; operators
   front such deployments with their own proxy.
 - The documented placeholder container password (`mypasswd`) and the turn-rest addon's public openrelay secret are

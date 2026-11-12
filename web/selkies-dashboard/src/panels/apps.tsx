@@ -4,65 +4,98 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
-import { Clip, NativeSelect } from "@/panels/controls";
+import { Clip } from "@/panels/controls";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { Check, ChevronLeft, CircleAlert, Download, Info, Loader2, Play, RotateCw, Search, SearchX, Trash2, X } from "lucide-react";
+import {
+    Ban, Check, ChevronLeft, CircleAlert, Clapperboard, Clock, Code, Cpu, Download, FileText, FlaskConical,
+    Gamepad2, Globe, GraduationCap, Info, LayoutGrid, Loader2, Network, PackageCheck, Palette, Play, RotateCw,
+    Search, SearchX, Shapes, Sparkles, Trash2, Wrench, X,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import * as yaml from "js-yaml";
 import { t } from "@/i18n";
 import { getLastServerSettings, onCoreMessage } from "@/utils";
 import { withSessionToken } from "../../../selkies-web-core/lib/session-token.ts";
 import {
-    APP_COMMAND_STATE_EVENT,
-    INSTALLED_APPS_ROLLBACK_EVENT,
-    INSTALLED_APPS_SERVER_EVENT,
-    applyServerInstalledApps,
     appsCatalog,
-    pendingAppAction,
-    postAppCommand,
-    readInstalledApps,
-    writeInstalledApps,
+    appsSnapshot,
+    jobFinished,
+    jobForApp,
+    sendAppsRequest,
+    subscribeApps,
+    type AppJob,
 } from "../../../selkies-web-core/lib/app-commands.ts";
 
 /**
- * The apps modal: the proot-apps catalog, with install, remove, update, and
- * launch actions.
+ * The apps modal: the proot-apps catalog by category, with install, remove,
+ * update, and launch actions and the console of every job the server runs.
  *
- * Actions go through the apps command contract of the core
- * (`selkies-web-core/lib/app-commands.ts`): it posts the selkies-proot wrapper
- * commands to the core and tracks them for rollback, and its `appsCatalog`
- * says where the catalog is read from (the remote repository's metadata, or
- * this server's `api/apps/` for a local repository). Which apps are installed
- * comes from the server (`apps_installed` in the settings payload, and an
- * `appsInstalled` message when a command changes it), with localStorage holding
- * the last answer. Commands run server-side only while the `command_enabled`
- * server setting is on; without it the core suppresses every `cmd,` send, so
- * the modal says why instead of pretending the install happened. Listens for
- * `serverSettings` and `appsInstalled` messages and the rollback event the
- * contract dispatches on a failed command.
+ * Requests go through the apps contract of the core
+ * (`selkies-web-core/lib/app-commands.ts`), whose store holds what the server
+ * reports: what is installed, read from the session's disk when the modal
+ * opens and after every job, and the jobs with their consoles, shared by every
+ * page of the session. Nothing about the session is kept in this browser
+ * beyond the tab last chosen. Requests run server-side only while the
+ * `command_enabled` server setting is on; without it the core drops them, so
+ * the modal says why. Its catalog location is `appsCatalog`'s answer (the
+ * remote repository's metadata, or this server's `api/apps/` for a local
+ * repository). Listens for `serverSettings` messages.
  * @module
  */
 
 const METADATA_FETCH_TIMEOUT_MS = 10000;
+/** Where the tab last chosen is remembered, a convenience of this browser's. */
+const TAB_STORAGE_KEY = "selkiesAppsTab";
+/** The tab of every app. */
+const ALL_TAB = "__all";
+/** The width the catalog grid is given, and the narrower one a single app's view takes. */
+const GRID_WIDTH = "sm:w-[min(90vw,72rem)]!";
+const DETAIL_WIDTH = "sm:w-[min(90vw,38rem)]!";
+/** The margin a single app's view keeps from the viewport's top and bottom edges together. */
+const DETAIL_MARGIN_PX = 64;
+/**
+ * The grid's height: four fifths of the viewport less its margins, but never less than the
+ * whole of that or 36rem, whichever is smaller, so a short screen keeps every row it has.
+ */
+const GRID_HEIGHT = "max(calc((100dvh - 4rem) * 0.8), min(calc(100dvh - 4rem), 36rem))";
+/** The categories a first visit opens on, the first the catalog has. */
+const DEFAULT_CATEGORIES = ["WebBrowser", "Network"];
 
 /** One catalog entry of the proot-apps metadata. */
 interface App {
-    /** Package name, the argument of every command. */
+    /** Package name, the argument of every request. */
     name: string;
     /** Display name. */
     full_name: string;
     description: string;
     /** Icon file name under the catalog's image directory. */
     icon: string;
-    /** The one category the catalog files it under (`Game`, `Office`, `AudioVideo`), absent from a catalog that names none. */
+    /** The one category the catalog files it under (`WebBrowser`, `Game`, `AudioVideo`), absent from a catalog that names none. */
     category?: string;
     /** Listed but not installable. */
     disabled?: boolean;
 }
+
+/** The icon of each category proot-apps files apps under; another gets a generic one. */
+const CATEGORY_ICONS: Record<string, LucideIcon> = {
+    WebBrowser: Globe,
+    Network,
+    Game: Gamepad2,
+    Creative: Palette,
+    AudioVideo: Clapperboard,
+    Office: FileText,
+    Development: Code,
+    Utility: Wrench,
+    AI: Sparkles,
+    System: Cpu,
+    Science: FlaskConical,
+    Education: GraduationCap,
+};
 
 /**
  * The name a category is shown by: the catalog's own value, with a space
@@ -70,10 +103,44 @@ interface App {
  * names come from the catalog, as an app's name and description do, so a
  * category it adds later lists without a change here.
  * @param category A catalog `category` value.
- * @returns The label for the filter.
+ * @returns The label for its tab.
  */
 function categoryLabel(category: string): string {
     return category.replace(/([a-z])([A-Z])/g, '$1 $2');
+}
+
+/**
+ * The tab remembered from an earlier visit, nothing where storage is refused.
+ * @returns The tab's value, or null.
+ */
+function rememberedTab(): string | null {
+    try {
+        return localStorage.getItem(TAB_STORAGE_KEY);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Remembers the tab chosen, where storage allows.
+ * @param tab The tab's value.
+ */
+function rememberTab(tab: string): void {
+    try {
+        localStorage.setItem(TAB_STORAGE_KEY, tab);
+    } catch {
+        // A refused storage only forgets the tab.
+    }
+}
+
+/**
+ * The label a job is shown by: its operation on its app.
+ * @param job The job.
+ * @returns The label.
+ */
+function jobLabel(job: AppJob): string {
+    const key = { install: 'apps.installApp', remove: 'apps.removeApp', update: 'apps.updateApp' }[job.op];
+    return t(key, { name: job.app });
 }
 
 /**
@@ -122,24 +189,121 @@ function AppIcon({ app, src, className }: { app: App; src: string; className?: s
 }
 
 /**
- * Renders the catalog grid, its search box and category filter, and the
- * per-app detail view inside a dialog controlled by the parent. The filter
- * lists the categories the catalog's entries carry (`category` in the
- * proot-apps metadata) and narrows the grid together with the search; it is
- * left out of a catalog that names fewer than two.
+ * The icon of a job's state: a spinner while it runs, a clock while it waits,
+ * and how it ended after.
+ * @param props The job.
+ * @returns The icon.
+ */
+function JobStateIcon({ job }: { job: AppJob }) {
+    switch (job.state) {
+        case 'queued': return <Clock className="size-4 shrink-0 text-muted-foreground" />;
+        case 'running': return <Loader2 className="size-4 shrink-0 animate-spin text-primary" />;
+        case 'done': return <Check className="size-4 shrink-0 text-primary" />;
+        case 'failed': return <CircleAlert className="size-4 shrink-0 text-destructive" />;
+        default: return <Ban className="size-4 shrink-0 text-muted-foreground" />;
+    }
+}
+
+/**
+ * A job's header: its state, what it does, its download progress, and the
+ * button that cancels it while pending or clears it once finished.
+ * @param props The job.
+ * @returns The header row.
+ */
+function JobHeader({ job }: { job: AppJob }) {
+    const finished = jobFinished(job);
+    return (
+        <div className="flex min-w-0 items-center gap-2">
+            <JobStateIcon job={job} />
+            <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                    <Clip className="text-sm font-medium">{jobLabel(job)}</Clip>
+                    {job.state === 'failed' && job.code !== null && (
+                        <span className="shrink-0 font-mono text-[0.625rem] text-destructive">{job.code}</span>
+                    )}
+                </div>
+                {job.progress !== null && !finished && (
+                    <div className="mt-1 h-1 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full bg-primary transition-[width]" style={{ width: `${job.progress}%` }} />
+                    </div>
+                )}
+            </div>
+            <Button
+                variant="ghost"
+                size="icon-sm"
+                className={cn("app-job-button shrink-0", finished ? "clear" : "cancel")}
+                aria-label={finished ? t('common.close') : t('files.cancel')}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    sendAppsRequest(finished ? 'clear' : 'cancel', undefined, job.id);
+                }}
+            >
+                {finished ? <X /> : <Ban />}
+            </Button>
+        </div>
+    );
+}
+
+/**
+ * A job's console: the header, then everything it printed, the line being
+ * written last, kept scrolled to the end unless the reader scrolled up.
+ * @param props The job.
+ * @returns The console.
+ */
+function JobConsole({ job }: { job: AppJob }) {
+    const scroller = useRef<HTMLPreElement>(null);
+    const pinned = useRef(true);
+    const text = job.current ? [...job.lines, job.current].join('\n') : job.lines.join('\n');
+    useEffect(() => {
+        const node = scroller.current;
+        if (node && pinned.current) node.scrollTop = node.scrollHeight;
+    }, [text]);
+    return (
+        <div className="app-job-console space-y-2 rounded-lg border bg-muted/30 p-3" data-state={job.state}>
+            <JobHeader job={job} />
+            {text && (
+                <pre
+                    ref={scroller}
+                    onScroll={(event) => {
+                        const node = event.currentTarget;
+                        pinned.current = node.scrollHeight - node.scrollTop - node.clientHeight < 8;
+                    }}
+                    className="thin-scroll max-h-56 overflow-auto rounded-md bg-background/60 p-2 font-mono text-[0.6875rem] leading-relaxed whitespace-pre-wrap break-all text-muted-foreground"
+                >
+                    {text}
+                </pre>
+            )}
+        </div>
+    );
+}
+
+/**
+ * Renders the catalog grid under a category picker, the search box and the
+ * installed filter that both look through every category, and the per-app
+ * view with its job's console, inside a dialog controlled by the parent. The
+ * categories are the ones the catalog's entries carry (`category` in the
+ * proot-apps metadata), plus one of every app, as rows of chips wrapped and
+ * centered under the header; a first visit opens on web browsers where the
+ * catalog files any, a later one on the category last chosen.
  *
- * The popup holds no fixed width: it spans the viewport on small screens and
- * tracks 90% of it up to 72rem on larger ones, and the grid reflows between
- * two and six columns to the width it is given. Its height is the viewport
- * minus 2rem at each edge rather than content-capped: the scroll region
- * sizes itself as a percentage of the popup, and a browser resolves that
- * percentage only against a definite height, so a content-capped popup
- * leaves the region the height of its content with nothing to scroll. The
- * header stays outside the scroll region.
+ * The popup holds no fixed width: it spans the viewport on small screens and,
+ * on larger ones, tracks 90% of it up to 72rem for the grid, which reflows
+ * between three and eight columns, and up to 38rem for a single app. Its
+ * height is always definite, because the scroll region sizes itself as a
+ * percentage of the popup and a browser resolves that only against a definite
+ * height: four fifths of the viewport less 2rem at each edge for the grid,
+ * which the categories leave more than enough, but no shorter than that whole
+ * or 36rem, so a short screen keeps its rows; and for a single app the height
+ * its content measures, up to the viewport less 2rem at each edge. Both are set as
+ * lengths rather than `auto`, so the popup glides between the two sizes, and
+ * it stays centered while it does; a reader who asked for reduced motion gets
+ * the change at once. The header and the category picker stay outside the
+ * scroll region.
  *
  * The catalog is fetched once per modal open, plus explicit Retry presses; a
  * failure settles into the error view rather than refetching. The fetch is
- * aborted after a timeout and on close or unmount.
+ * aborted after a timeout and on close or unmount. Each open asks the server
+ * what is installed.
  */
 export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     const [serverSettings, setServerSettings] = useState<any>(() => getLastServerSettings());
@@ -150,36 +314,30 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     const [error, setError] = useState<string | null>(null);
     const [fetchAttempt, setFetchAttempt] = useState(0);
     const [searchTerm, setSearchTerm] = useState('');
-    // The category the grid is narrowed to; empty lists every category.
-    const [category, setCategory] = useState('');
+    const [chosenTab, setChosenTab] = useState<string | null>(rememberedTab);
+    const [installedOnly, setInstalledOnly] = useState(false);
     const [selectedApp, setSelectedApp] = useState<App | null>(null);
-    const [installedApps, setInstalledApps] = useState<string[]>(readInstalledApps);
-    const [commandTick, setCommandTick] = useState(0);
-
+    const apps = useSyncExternalStore(subscribeApps, appsSnapshot);
+    // A single app's view is as tall as its content: the header and the view
+    // are measured, and the popup takes their sum as a length it can glide to.
+    // While that sum fits the viewport the view never scrolls, so content that
+    // grows ahead of the glide (a console appearing) shows no scrollbar.
+    const headerRef = useRef<HTMLDivElement>(null);
+    const bodyRef = useRef<HTMLDivElement>(null);
+    const [detailHeight, setDetailHeight] = useState<number | null>(null);
+    const detailFits = detailHeight !== null && detailHeight <= window.innerHeight - DETAIL_MARGIN_PX;
     useEffect(() => {
-        writeInstalledApps(installedApps);
-    }, [installedApps]);
-
-    // The running set lives in app-commands.ts; this only re-reads it.
-    useEffect(() => {
-        const onCommandState = () => setCommandTick((tick) => tick + 1);
-        window.addEventListener(APP_COMMAND_STATE_EVENT, onCommandState);
-        return () => window.removeEventListener(APP_COMMAND_STATE_EVENT, onCommandState);
-    }, []);
-
-    // A failed command already rolled the stored list back; mirror it here so
-    // the badge flips without a remount.
-    useEffect(() => {
-        const onRollback = (event: Event) => {
-            const { app, action } = (event as CustomEvent).detail || {};
-            if (action === 'install')
-                setInstalledApps(prev => prev.filter(name => name !== app));
-            else if (action === 'remove')
-                setInstalledApps(prev => prev.includes(app) ? prev : [...prev, app]);
-        };
-        window.addEventListener(INSTALLED_APPS_ROLLBACK_EVENT, onRollback);
-        return () => window.removeEventListener(INSTALLED_APPS_ROLLBACK_EVENT, onRollback);
-    }, []);
+        if (!selectedApp) return;
+        const header = headerRef.current;
+        const body = bodyRef.current;
+        if (!header || !body) return;
+        const measure = () => setDetailHeight(header.offsetHeight + body.scrollHeight);
+        const observer = new ResizeObserver(measure);
+        observer.observe(header);
+        observer.observe(body);
+        measure();
+        return () => observer.disconnect();
+    }, [selectedApp]);
 
     useEffect(() => onCoreMessage((message) => {
         if (message.type === 'serverSettings') setServerSettings(message.payload);
@@ -187,25 +345,10 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     const commandsKnown = serverSettings != null;
     const commandsAvailable = serverSettings?.command_enabled?.value === true;
 
-    // The runner's answer replaces what this browser remembered, which a private
-    // window or cleared site data leaves empty while the session has apps.
-    const installedFromServer = serverSettings?.apps_installed?.value;
+    // What is installed is read from the session's disk each time it is shown.
     useEffect(() => {
-        const adopt = (apps: string[] | undefined) => {
-            if (applyServerInstalledApps(apps)) setInstalledApps(readInstalledApps());
-        };
-        adopt(installedFromServer);
-        const onServerList = (event: Event) =>
-            setInstalledApps((event as CustomEvent).detail?.apps || []);
-        window.addEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
-        const offMessages = onCoreMessage((message) => {
-            if (message.type === 'appsInstalled') adopt(message.apps);
-        });
-        return () => {
-            window.removeEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
-            offMessages();
-        };
-    }, [installedFromServer]);
+        if (isOpen && commandsAvailable) sendAppsRequest('list');
+    }, [isOpen, commandsAvailable]);
 
     const handleModalClose = (open: boolean) => {
         if (!open && onClose) {
@@ -252,94 +395,97 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         };
     }, [isOpen, appData, fetchAttempt, catalog.metadata]);
 
-    const handleSearchChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-        setSearchTerm(event.target.value);
-    };
-
-    const handleAppClick = (app: App) => {
-        setSelectedApp(app);
-    };
-
-    const handleBackToGrid = () => {
-        setSelectedApp(null);
-    };
-
-    const handleInstall = (appName: string) => {
-        if (!commandsAvailable) return;
-        postAppCommand('install', appName);
-        setInstalledApps(prev => prev.includes(appName) ? prev : [...prev, appName]);
-    };
-
-    const handleRemove = (appName: string) => {
-        if (!commandsAvailable) return;
-        postAppCommand('remove', appName);
-        setInstalledApps(prev => prev.filter(name => name !== appName));
-    };
-
-    const handleUpdate = (appName: string) => {
-        if (!commandsAvailable) return;
-        postAppCommand('update', appName);
-    };
-
-    const handleLaunch = (appName: string) => {
-        if (!commandsAvailable) return;
-        postAppCommand('launch', appName);
-    };
+    const installable = useMemo(() => (appData?.include ?? []).filter(app => !app.disabled), [appData]);
+    const installed = useMemo(() => new Set(apps.installed ?? []), [apps.installed]);
+    const isAppInstalled = (appName: string) => installed.has(appName);
 
     // The categories the installable apps are filed under, sorted by their
-    // shown name. A catalog that names fewer than two has nothing to choose
-    // between.
+    // shown name.
     const categories = useMemo(() => {
         const names = new Set<string>();
-        for (const app of appData?.include ?? []) {
-            if (!app.disabled && app.category) names.add(app.category);
-        }
-        return [...names]
-            .map(name => ({ value: name, label: categoryLabel(name) }))
-            .sort((a, b) => a.label.localeCompare(b.label));
-    }, [appData]);
-    const categoryOptions = [{ value: '', label: t('appsModal.allCategories') }, ...categories];
+        for (const app of installable) if (app.category) names.add(app.category);
+        return [...names].sort((a, b) => categoryLabel(a).localeCompare(categoryLabel(b)));
+    }, [installable]);
+    const tabs = useMemo(() => {
+        const list: { value: string; label: string; icon: LucideIcon }[] = categories.map(category => (
+            { value: category, label: categoryLabel(category), icon: CATEGORY_ICONS[category] ?? Shapes }));
+        list.push({ value: ALL_TAB, label: t('appsModal.allCategories'), icon: LayoutGrid });
+        return list;
+    }, [categories]);
+    const installedCount = installable.filter(app => installed.has(app.name)).length;
+    const tab = (chosenTab && tabs.some(each => each.value === chosenTab))
+        ? chosenTab
+        : DEFAULT_CATEGORIES.find(category => categories.includes(category)) ?? categories[0] ?? ALL_TAB;
+    const chooseTab = (value: string) => {
+        setChosenTab(value);
+        rememberTab(value);
+    };
 
-    const needle = searchTerm.toLowerCase();
-    const filteredApps = appData?.include?.filter(app =>
-        !app.disabled &&
-        (!category || app.category === category) &&
-        (app.full_name?.toLowerCase().includes(needle) ||
-         app.name?.toLowerCase().includes(needle) ||
-         app.description?.toLowerCase().includes(needle))
-    ) || [];
+    // The search and the installed filter look through every category.
+    const needle = searchTerm.trim().toLowerCase();
+    const acrossCategories = !!needle || installedOnly;
+    const filteredApps = installable.filter(app =>
+        (!installedOnly || installed.has(app.name)) &&
+        (needle
+            ? (app.full_name?.toLowerCase().includes(needle) ||
+               app.name?.toLowerCase().includes(needle) ||
+               app.description?.toLowerCase().includes(needle))
+            : installedOnly || tab === ALL_TAB || app.category === tab)
+    );
 
-    const isAppInstalled = (appName: string) => installedApps.includes(appName);
+    const request = (op: 'install' | 'remove' | 'update' | 'launch', appName: string) => {
+        if (commandsAvailable) sendAppsRequest(op, appName);
+    };
+    const selectedJob = selectedApp ? jobForApp(apps, selectedApp.name) : null;
 
     return (
         <Dialog open={isOpen} onOpenChange={handleModalClose}>
             <DialogContent
                 showCloseButton={false}
-                className="allow-native-input flex! flex-col gap-0! h-[calc(100dvh-4rem)]! p-0! overflow-hidden sm:max-w-[min(90vw,72rem)]!"
+                style={{
+                    height: selectedApp && detailHeight !== null
+                        ? `min(${detailHeight}px, calc(100dvh - ${DETAIL_MARGIN_PX}px))`
+                        : GRID_HEIGHT,
+                }}
+                className={cn(
+                    "allow-native-input flex! flex-col gap-0! p-0! overflow-hidden max-w-none! w-[calc(100vw-2rem)]!",
+                    // Transition properties of their own, so the dialog's open and close animations keep their timing.
+                    "transition-[width,height] [transition-duration:300ms] [transition-timing-function:cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none",
+                    selectedApp ? DETAIL_WIDTH : GRID_WIDTH,
+                )}
             >
-                <DialogHeader className="gap-4 border-b p-5 sm:flex-row sm:items-center sm:justify-between">
+                <DialogHeader
+                    ref={headerRef}
+                    className={cn(
+                        "gap-4 border-b p-5",
+                        // Without the search, the title and the close button share a row at every width.
+                        selectedApp ? "flex-row items-center justify-between" : "sm:flex-row sm:items-center sm:justify-between",
+                    )}
+                >
                     <div className="min-w-0">
                         <DialogTitle>{t('sections.apps.title')}</DialogTitle>
                         <DialogDescription>{t('apps.subtitle')}</DialogDescription>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                        {categories.length > 1 && (
-                            <NativeSelect
-                                aria-label={t('appsModal.categoryLabel')}
-                                title={t('appsModal.categoryLabel')}
-                                value={category}
-                                options={categoryOptions}
-                                onValueChange={setCategory}
-                                className="h-9 w-36 text-sm sm:w-44"
-                            />
+                        {!selectedApp && appData && installedCount > 0 && (
+                            <Button
+                                variant={installedOnly ? 'default' : 'outline'}
+                                onClick={() => setInstalledOnly(on => !on)}
+                                aria-pressed={installedOnly}
+                                aria-label={t('appsModal.installedBadge')}
+                                className="app-installed-filter shrink-0"
+                            >
+                                <PackageCheck />
+                                <span className="tabular-nums">{installedCount}</span>
+                            </Button>
                         )}
-                        <div className="relative">
+                        <div className={cn("relative min-w-0 flex-1", selectedApp && "hidden")}>
                             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
                             <Input
                                 type="text"
                                 placeholder={t('appsModal.searchPlaceholder')}
                                 value={searchTerm}
-                                onChange={handleSearchChange}
+                                onChange={(event) => setSearchTerm(event.target.value)}
                                 className="w-full pl-8 sm:w-56"
                             />
                         </div>
@@ -354,10 +500,34 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                     </div>
                 </DialogHeader>
 
+                {appData && !selectedApp && !acrossCategories && tabs.length > 1 && (
+                    <div className="flex flex-wrap justify-center gap-1.5 border-b px-4 py-3 animate-in fade-in-0 duration-300">
+                        {tabs.map(({ value, label, icon: Icon }) => (
+                            <button
+                                key={value}
+                                type="button"
+                                aria-pressed={tab === value}
+                                data-tab={value}
+                                onClick={() => chooseTab(value)}
+                                className={cn(
+                                    "app-tab inline-flex h-7 items-center gap-1.5 rounded-full border px-3 text-xs font-medium whitespace-nowrap transition-colors",
+                                    "focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:outline-none [&_svg]:size-3.5 [&_svg]:shrink-0",
+                                    tab === value
+                                        ? "border-primary bg-primary text-primary-foreground"
+                                        : "border-border bg-muted/40 text-muted-foreground hover:bg-accent hover:text-foreground",
+                                )}
+                            >
+                                <Icon />
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                )}
+
                 {/* A native scroller: the catalog runs to hundreds of tiles, and
                     each is laid out and painted only as it scrolls into view. */}
-                <div className="thin-scroll min-h-0 flex-1 overflow-y-auto">
-                    <div className="p-5">
+                <div className={cn("thin-scroll min-h-0 flex-1", selectedApp && detailFits ? "overflow-y-hidden" : "overflow-y-auto")}>
+                    <div ref={bodyRef} className="p-5">
                         {commandsKnown && !commandsAvailable && (
                             <div className="mb-4 flex items-start gap-2.5 rounded-lg border bg-muted/40 p-3.5 text-muted-foreground">
                                 <Info className="mt-0.5 size-4 shrink-0" />
@@ -389,8 +559,8 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                         )}
                         {!isLoading && !error && appData && (
                             selectedApp ? (
-                                <div className="space-y-4">
-                                    <Button variant="ghost" size="sm" onClick={handleBackToGrid} className="-ml-2">
+                                <div key="detail" className="space-y-4 animate-in fade-in-0 duration-300">
+                                    <Button variant="ghost" size="sm" onClick={() => setSelectedApp(null)} className="-ml-2">
                                         <ChevronLeft />
                                         {t('appsModal.backButton')}
                                     </Button>
@@ -415,93 +585,79 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                                 </div>
                                             </div>
                                         </CardHeader>
-                                        <CardFooter className="justify-end gap-2 border-t">
+                                        <CardFooter className="flex-wrap justify-end gap-2 border-t">
                                             {(() => {
-                                                const running = commandTick >= 0 && pendingAppAction(selectedApp.name);
-                                                const held = !commandsAvailable || !!running;
-                                                const spin = (action: string) =>
-                                                    running === action ? <Loader2 className="animate-spin" /> : null;
-                                                // A running install or removal keeps the buttons it was started from,
-                                                // the pressed one spinning, though the stored list already moved.
-                                                const installed = running === 'install' ? false
-                                                    : running === 'remove' ? true : isAppInstalled(selectedApp.name);
-                                                return installed ? (
-                                                    <>
-                                                        <Button
-                                                            variant="default"
-                                                            onClick={() => handleLaunch(selectedApp.name)}
-                                                            disabled={held}
-                                                            className="min-w-0"
-                                                            title={t('apps.launchApp', { name: selectedApp.name })}
-                                                        >
-                                                            {spin('launch')}
-                                                            <Play />
-                                                            <Clip>{t('apps.launchApp', { name: selectedApp.name })}</Clip>
-                                                        </Button>
-                                                        <Button
-                                                            variant="outline"
-                                                            onClick={() => handleUpdate(selectedApp.name)}
-                                                            disabled={held}
-                                                            className="min-w-0"
-                                                            title={t('apps.updateApp', { name: selectedApp.name })}
-                                                        >
-                                                            {spin('update')}
-                                                            <RotateCw />
-                                                            <Clip>{t('apps.updateApp', { name: selectedApp.name })}</Clip>
-                                                        </Button>
-                                                        <Button
-                                                            variant="destructive"
-                                                            onClick={() => handleRemove(selectedApp.name)}
-                                                            disabled={held}
-                                                            className="min-w-0"
-                                                            title={t('apps.removeApp', { name: selectedApp.name })}
-                                                        >
-                                                            {spin('remove')}
-                                                            <Trash2 />
-                                                            <Clip>{t('apps.removeApp', { name: selectedApp.name })}</Clip>
-                                                        </Button>
-                                                    </>
-                                                ) : (
+                                                const name = selectedApp.name;
+                                                const pending = selectedJob && !jobFinished(selectedJob) ? selectedJob.op : null;
+                                                const held = !commandsAvailable || !!pending;
+                                                const spin = (op: string) =>
+                                                    pending === op ? <Loader2 className="animate-spin" /> : null;
+                                                // A pending job keeps the buttons it was started from, the pressed one spinning.
+                                                const shownInstalled = pending === 'install' ? false
+                                                    : pending === 'remove' ? true : isAppInstalled(name);
+                                                const button = (op: 'install' | 'remove' | 'update' | 'launch', label: string,
+                                                    icon: React.ReactNode, variant: 'default' | 'outline' | 'destructive') => (
                                                     <Button
-                                                        variant="default"
-                                                        onClick={() => handleInstall(selectedApp.name)}
+                                                        variant={variant}
+                                                        onClick={() => request(op, name)}
                                                         disabled={held}
-                                                            className="min-w-0"
-                                                            title={t('apps.installApp', { name: selectedApp.name })}
+                                                        className={cn("app-action-button min-w-0", op, pending === op && "running")}
+                                                        title={label}
                                                     >
-                                                        {spin('install')}
-                                                        <Download />
-                                                        <Clip>{t('apps.installApp', { name: selectedApp.name })}</Clip>
+                                                        {spin(op)}
+                                                        {icon}
+                                                        <Clip>{label}</Clip>
                                                     </Button>
                                                 );
+                                                return shownInstalled ? (
+                                                    <>
+                                                        {button('launch', t('apps.launchApp', { name }), <Play />, 'default')}
+                                                        {button('update', t('apps.updateApp', { name }), <RotateCw />, 'outline')}
+                                                        {button('remove', t('apps.removeApp', { name }), <Trash2 />, 'destructive')}
+                                                    </>
+                                                ) : button('install', t('apps.installApp', { name }), <Download />, 'default');
                                             })()}
                                         </CardFooter>
                                     </Card>
+                                    {selectedJob && <JobConsole key={selectedJob.id} job={selectedJob} />}
                                 </div>
                             ) : (
-                                <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">
+                                <div key="grid" className="grid grid-cols-3 gap-3 animate-in fade-in-0 duration-300 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">
                                     {filteredApps.length > 0 ? (
-                                        filteredApps.map(app => (
-                                            <Card
-                                                key={app.name}
-                                                size="sm"
-                                                className="group/tile relative cursor-pointer transition-colors hover:bg-accent/50 hover:ring-primary/30 [content-visibility:auto] [contain-intrinsic-size:auto_7rem]"
-                                                onClick={() => handleAppClick(app)}
-                                            >
-                                                {isAppInstalled(app.name) && (
-                                                    <span className="absolute top-1.5 right-1.5 flex size-4 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                                                        <Check className="size-2.5" />
-                                                        <span className="sr-only">{t('appsModal.installedBadge')}</span>
-                                                    </span>
-                                                )}
-                                                <CardContent className="flex flex-col items-center gap-2">
-                                                    <AppIcon app={app} src={catalog.icon(app.icon)} className="size-10 object-contain" />
-                                                    <CardTitle className="line-clamp-2 text-center text-xs group-hover/tile:text-primary">
-                                                        {app.full_name}
-                                                    </CardTitle>
-                                                </CardContent>
-                                            </Card>
-                                        ))
+                                        filteredApps.map(app => {
+                                            const job = jobForApp(apps, app.name);
+                                            const pending = job && !jobFinished(job) ? job : null;
+                                            return (
+                                                <Card
+                                                    key={app.name}
+                                                    size="sm"
+                                                    className="group/tile relative cursor-pointer transition-colors hover:bg-accent/50 hover:ring-primary/30 [content-visibility:auto] [contain-intrinsic-size:auto_7rem]"
+                                                    onClick={() => setSelectedApp(app)}
+                                                >
+                                                    {pending ? (
+                                                        <span className="absolute top-1.5 right-1.5">
+                                                            <JobStateIcon job={pending} />
+                                                        </span>
+                                                    ) : isAppInstalled(app.name) && (
+                                                        <span className="absolute top-1.5 right-1.5 flex size-4 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                                                            <Check className="size-2.5" />
+                                                            <span className="sr-only">{t('appsModal.installedBadge')}</span>
+                                                        </span>
+                                                    )}
+                                                    <CardContent className="flex flex-col items-center gap-2">
+                                                        <AppIcon app={app} src={catalog.icon(app.icon)} className="size-10 object-contain" />
+                                                        <CardTitle className="line-clamp-2 text-center text-xs group-hover/tile:text-primary">
+                                                            {app.full_name}
+                                                        </CardTitle>
+                                                    </CardContent>
+                                                    {pending?.progress != null && (
+                                                        <div className="absolute inset-x-2 bottom-1.5 h-0.5 overflow-hidden rounded-full bg-muted">
+                                                            <div className="h-full bg-primary transition-[width]" style={{ width: `${pending.progress}%` }} />
+                                                        </div>
+                                                    )}
+                                                </Card>
+                                            );
+                                        })
                                     ) : (
                                         <div className="col-span-full flex flex-col items-center justify-center gap-3 py-16 text-center">
                                             <SearchX className="size-8 text-muted-foreground/50" />
@@ -513,6 +669,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                         )}
                     </div>
                 </div>
+
             </DialogContent>
         </Dialog>
     );

@@ -1757,7 +1757,10 @@ impl AppState {
     /// a bottom or background layer surface, each through its popup where one lies under the
     /// point, since a popup takes pointer events on its own surface. That is the order they are
     /// drawn in. Layer geometry is output-local, so layers are hit-tested with the point local to
-    /// the output under it.
+    /// the output under it. Whatever is found is then resolved to the subsurface of its tree that
+    /// takes input at the point ([`FocusTarget::under_point`]): a subsurface takes pointer events
+    /// on its own surface too, and handed to the surface below it, a click on a browser's bubble
+    /// lands on the page under the bubble.
     ///
     /// While an X11 popup menu is open, the pointer is that menu's wherever it is, outside the
     /// menu too: an X11 client grabs the pointer for its menu and closes the menu on a click
@@ -1797,7 +1800,7 @@ impl AppState {
         if let Some(menu) = self.x11_menu_open() {
             return Some(menu);
         }
-        layer_hit(&[Layer::Overlay])
+        let found = layer_hit(&[Layer::Overlay])
             .or_else(|| {
                 self.space
                     .element_under(p)
@@ -1813,7 +1816,8 @@ impl AppState {
                         .unwrap_or_else(|| (FocusTarget::Window(window.clone()), loc.to_f64()))
                 })
             })
-            .or_else(|| layer_hit(&[Layer::Bottom, Layer::Background]))
+            .or_else(|| layer_hit(&[Layer::Bottom, Layer::Background]));
+        found.map(|(target, origin)| target.under_point(origin, p))
     }
 
     /// The topmost X11 popup menu that is open, with where it lies.
@@ -1976,17 +1980,23 @@ impl AppState {
         serial: Serial,
         time: InputTime,
     ) {
-        let Some((FocusTarget::Window(next), _)) = under else {
+        let Some(FocusTarget::Window(next)) = under.as_ref().map(|(t, _)| t.owner()) else {
             return;
         };
         let Some(GrabStartData {
-            focus: Some((FocusTarget::Window(held), _)),
+            focus: Some((start, _)),
             ..
         }) = pointer.grab_start_data()
         else {
             return;
         };
-        if held == *next || pointer.current_focus() != Some(FocusTarget::Window(held.clone())) {
+        let FocusTarget::Window(held) = start.owner().clone() else {
+            return;
+        };
+        let focused = pointer.current_focus();
+        if held == *next
+            || focused.as_ref().map(FocusTarget::owner) != Some(&FocusTarget::Window(held.clone()))
+        {
             return;
         }
         let client_of = |w: &Window| w.wl_surface().and_then(|s| s.client()).map(|c| c.id());
@@ -1995,11 +2005,20 @@ impl AppState {
         }
     }
 
-    /// The display id under the pointer (primary when indeterminate).
-    pub(crate) fn pointer_display(&self) -> u32 {
+    /// Where the pointer is shown: where the window policy took it while it takes the pointer's
+    /// motion, else the seat's pointer ([`crate::wayland::wm::judged_location`]). A frame drag
+    /// whose press grabbed for the client moves the window and not the seat's pointer, so the
+    /// cursor drawn into the stream, the position the page is told, and the display the pointer
+    /// is on would otherwise stay where the drag began until it ends.
+    pub(crate) fn pointer_shown_at(&self) -> Option<Point<f64, Logical>> {
         self.seat
             .get_pointer()
-            .map(|p| p.current_location())
+            .map(|p| crate::wayland::wm::judged_location(self, p.current_location()))
+    }
+
+    /// The display id under the pointer (primary when indeterminate).
+    pub(crate) fn pointer_display(&self) -> u32 {
+        self.pointer_shown_at()
             .and_then(|pos| self.node_idx_under(pos))
             .map(|idx| self.output_nodes[idx].id)
             .unwrap_or(0)
@@ -2899,6 +2918,42 @@ pub enum FocusTarget {
     Window(Window),
     Popup(PopupKind),
     LayerSurface(DesktopLayerSurface),
+    /// A subsurface under the pointer, which takes the pointer's events on its own surface
+    /// (a browser draws its permission and menu bubbles so), with the window, popup, or layer
+    /// surface it belongs to, which everything but those events goes by: the keyboard, the
+    /// window policy, a grab's window.
+    Subsurface(WlSurface, Box<FocusTarget>),
+}
+
+impl FocusTarget {
+    /// The window, popup, or layer surface this target is, or a subsurface belongs to.
+    pub(crate) fn owner(&self) -> &FocusTarget {
+        match self {
+            FocusTarget::Subsurface(_, owner) => owner.owner(),
+            target => target,
+        }
+    }
+
+    /// This target, or the subsurface of its surface tree that takes input at the logical
+    /// point `p` where one does, with the origin pointer events there are local to; `origin`
+    /// is where this target's own surface lies. A point the tree takes no input at leaves the
+    /// target as it is.
+    fn under_point(
+        self,
+        origin: Point<f64, Logical>,
+        p: Point<f64, Logical>,
+    ) -> (FocusTarget, Point<f64, Logical>) {
+        let Some(root) = self.wl_surface().map(Cow::into_owned) else {
+            return (self, origin);
+        };
+        match under_from_surface_tree(&root, p, origin.to_i32_round(), WindowSurfaceType::ALL) {
+            Some((surface, at)) if surface != root => (
+                FocusTarget::Subsurface(surface, Box::new(self)),
+                at.to_f64(),
+            ),
+            _ => (self, origin),
+        }
+    }
 }
 
 /// The popup of `root`, whose popups are placed from `origin`, that lies under the logical
@@ -2944,6 +2999,7 @@ impl IsAlive for FocusTarget {
             FocusTarget::Window(w) => w.alive(),
             FocusTarget::Popup(p) => p.alive(),
             FocusTarget::LayerSurface(l) => l.alive(),
+            FocusTarget::Subsurface(surface, owner) => surface.alive() && owner.alive(),
         }
     }
 }
@@ -2956,6 +3012,7 @@ impl WaylandFocus for FocusTarget {
             FocusTarget::Window(w) => w.wl_surface(),
             FocusTarget::Popup(p) => Some(Cow::Borrowed(p.wl_surface())),
             FocusTarget::LayerSurface(l) => Some(Cow::Borrowed(l.wl_surface())),
+            FocusTarget::Subsurface(surface, _) => Some(Cow::Borrowed(surface)),
         }
     }
     fn same_client_as(&self, object_id: &ObjectId) -> bool {
@@ -2963,12 +3020,15 @@ impl WaylandFocus for FocusTarget {
             FocusTarget::Window(w) => w.same_client_as(object_id),
             FocusTarget::Popup(p) => p.wl_surface().id().same_client_as(object_id),
             FocusTarget::LayerSurface(l) => l.wl_surface().id().same_client_as(object_id),
+            FocusTarget::Subsurface(surface, _) => surface.id().same_client_as(object_id),
         }
     }
 }
 
 /// Forward every keyboard event (enter / leave / key / modifiers) to the wrapped target's
-/// underlying `wl_surface`, which carries Smithay's real keyboard-target implementation.
+/// underlying `wl_surface`, which carries Smithay's real keyboard-target implementation; a
+/// subsurface's events go to the surface it belongs to, since keyboard focus is a whole
+/// window's.
 impl KeyboardTarget<AppState> for FocusTarget {
     fn enter(
         &self,
@@ -2977,7 +3037,7 @@ impl KeyboardTarget<AppState> for FocusTarget {
         keys: Vec<KeysymHandle<'_>>,
         serial: Serial,
     ) {
-        if let Some(surface) = self.wl_surface() {
+        if let Some(surface) = self.owner().wl_surface() {
             smithay::input::keyboard::KeyboardTarget::enter(
                 surface.as_ref(),
                 seat,
@@ -2988,7 +3048,7 @@ impl KeyboardTarget<AppState> for FocusTarget {
         }
     }
     fn leave(&self, seat: &Seat<AppState>, data: &mut AppState, serial: Serial) {
-        if let Some(surface) = self.wl_surface() {
+        if let Some(surface) = self.owner().wl_surface() {
             smithay::input::keyboard::KeyboardTarget::leave(surface.as_ref(), seat, data, serial);
         }
     }
@@ -3001,7 +3061,7 @@ impl KeyboardTarget<AppState> for FocusTarget {
         serial: Serial,
         time: InputTime,
     ) {
-        if let Some(surface) = self.wl_surface() {
+        if let Some(surface) = self.owner().wl_surface() {
             smithay::input::keyboard::KeyboardTarget::key(
                 surface.as_ref(),
                 seat,
@@ -3020,7 +3080,7 @@ impl KeyboardTarget<AppState> for FocusTarget {
         modifiers: ModifiersState,
         serial: Serial,
     ) {
-        if let Some(surface) = self.wl_surface() {
+        if let Some(surface) = self.owner().wl_surface() {
             smithay::input::keyboard::KeyboardTarget::modifiers(
                 surface.as_ref(),
                 seat,

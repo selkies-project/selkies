@@ -113,6 +113,8 @@ list_installed() {
     [ -d "${root}" ] || return 0
     for app in "${root}"/*; do
         [ -d "${app}" ] || continue
+        # A download that never finished is not an install
+        [ -e "${app}/DOWNLOADING" ] && continue
         name="$(basename "${app}")"
         # A bare app name never contains an underscore, so the last one ends the
         # image reference; a folder without one is a name already.

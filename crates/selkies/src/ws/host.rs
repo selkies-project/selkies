@@ -103,9 +103,6 @@ pub trait Input: Send + Sync {
 
     /// Whether the apps runner answered, so the dashboards may offer the apps panel.
     fn apps_available(&self) -> bool;
-
-    /// The installed apps the runner reports, or `None` until it answered.
-    fn installed_apps(&self) -> Option<Vec<String>>;
 }
 
 /// The clipboard policy a page may change.
