@@ -3654,6 +3654,7 @@ dependencies = [
  "regex",
  "rmp-serde",
  "rustls",
+ "selkies-draw",
  "selkies-rtc",
  "selkies-wm",
  "serde",
@@ -3672,6 +3673,7 @@ dependencies = [
  "x11rb 0.14.0",
  "xkbcommon",
  "xxhash-rust",
+ "zbus",
  "zip",
 ]
 
@@ -3703,6 +3705,7 @@ dependencies = [
  "libc",
  "resvg",
  "tiny-skia",
+ "zbus",
 ]
 
 [[package]]

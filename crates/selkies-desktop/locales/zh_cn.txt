@@ -278,6 +278,7 @@ A file or folder with this name already exists = 已存在同名的文件或文�
 Cannot create the folder: {error} = 无法创建文件夹：{error}
 Application icon = 应用程序图标
 Light or dark = 浅色或深色
+Follow the browser = 跟随浏览器
 Automatic = 自动
 Float = 浮动
 Mint = 薄荷

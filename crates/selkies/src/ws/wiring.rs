@@ -502,6 +502,10 @@ impl Input for DispatcherInput {
         self.0.apply_client_keyboard_layout(layout).await;
     }
 
+    fn apply_client_color_scheme(&self, scheme: &str) {
+        self.0.apply_client_color_scheme(scheme);
+    }
+
     fn finger_scroll_available(&self) -> bool {
         self.0.finger_scroll_available()
     }

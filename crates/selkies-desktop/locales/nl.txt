@@ -278,6 +278,7 @@ A file or folder with this name already exists = Er bestaat al een bestand of ma
 Cannot create the folder: {error} = Kan de map niet aanmaken: {error}
 Application icon = Toepassingspictogram
 Light or dark = Licht of donker
+Follow the browser = Browser volgen
 Automatic = Automatisch
 Float = Zwevend
 Mint = Munt

@@ -2130,7 +2130,7 @@ impl WsService {
     /// Under the reconfigure lock: resolves the geometry, stores sanitized per-display tunables
     /// for the keys the payload carries (a primary's also become session seeds, save an encoder
     /// the page fell back to, which stays that page's), applies the DPI, cursor, and keyboard
-    /// side effects, and applies video changes live where possible; only structural switches
+    /// side effects and the primary's color scheme, and applies video changes live where possible; only structural switches
     /// restart the display's capture. A dimensional or initial change runs a full reconfigure
     /// after the lock is released. A payload carrying no position keeps the display's: a late
     /// partial `SETTINGS` from a secondary is no move.
@@ -2278,6 +2278,13 @@ impl WsService {
             && !layout.is_empty()
         {
             input.apply_client_keyboard_layout(layout).await;
+        }
+        if did == PRIMARY_DISPLAY
+            && let (Some(input), Some(scheme)) = (self.input(), s.color_scheme.as_ref())
+            && let Some(scheme) = sanitize("color_scheme", Some(&json!(scheme)))
+                .and_then(|v| v.as_str().map(str::to_string))
+        {
+            input.apply_client_color_scheme(&scheme);
         }
         if new_dpi.is_some() && new_dpi != old_dpi {
             self.apply_dpi_change(did, new_dpi.as_deref().unwrap_or(""), old_dpi.as_deref())

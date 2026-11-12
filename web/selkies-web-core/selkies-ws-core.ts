@@ -71,7 +71,8 @@
  * `settings`, `getStats`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `clipboardCopySecret`, `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
  * `gamepadControl`, `requestFullscreen`, `command`, `touchinput:trackpad`,
- * `touchinput:touch`, `sidebarVisibilityChanged`, and `statsOpen`, and posts
+ * `touchinput:touch`, `sidebarVisibilityChanged`, `statsOpen`, and
+ * `setColorScheme` (lib/color-scheme.ts, which takes it itself), and posts
  * `pipelineStatusUpdate`, `sidebarButtonStatusUpdate`, `serverSettings`,
  * `systemApps`, `stats` (to the parent window), `clientRoleUpdate`,
  * `effectiveCursorState`, `scalingDpiFollowed`, `trackpadModeUpdate`,
@@ -123,6 +124,7 @@ import {
   createFileUploader
 } from './lib/file-upload.ts';
 import { detectKeyboardLayout } from './lib/keyboard-layout.ts';
+import { currentColorScheme, onColorSchemeChange } from './lib/color-scheme.ts';
 import { installAuthGuard } from './lib/auth-guard.ts';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.ts';
 import { urlFragmentKeyword } from './lib/page-url.ts';
@@ -3602,6 +3604,11 @@ function sendFullSettingsUpdateToServer(reason: string, picked: string[] | null 
     }
 }
 
+// The desktop follows the page's color scheme as it changes (lib/color-scheme.ts).
+onColorSchemeChange((scheme: string): void => {
+    sendFullSettingsUpdateToServer(`color scheme ${scheme}`);
+});
+
 // The late keyboard layout hint; the session state it checks lives in this closure.
 keyboardLayoutProbe.then((layout: any): any => {
     if (layout && initialSettingsSent && !isSharedMode && websocket && websocket.readyState === WebSocket.OPEN) {
@@ -3662,7 +3669,8 @@ function followDisplayFramerate(reason: string): any {
  * for an untouched setting; `scaling_dpi` is the exception, being
  * client-authoritative (the derived default or the dashboard's pick, sent
  * live so it reaches the running server; the desktop DPI is independent of
- * the resolution). The payload also carries the keyboard layout, the client
+ * the resolution). The payload also carries the keyboard layout, the color
+ * scheme the desktop is asked to follow (lib/color-scheme.ts), the client
  * geometry or manual resolution, the display identity, the audio-RED
  * capability that makes the server enable Opus redundancy, and
  * `encoderFallback` beside an encoder a fallback chose.
@@ -3713,6 +3721,7 @@ function getCurrentSettingsPayload(): Record<string, any> {
     if (detectedKeyboardLayout) {
         settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
     }
+    settingsToSend['color_scheme'] = currentColorScheme();
     if (window.manual_resolution && manual_width != null && manual_height != null) {
         settingsToSend['manual_resolution'] = true;
         settingsToSend['manual_width'] = alignResolution(manual_width);
@@ -7780,6 +7789,7 @@ class WorkerWebSocket {
       if (detectedKeyboardLayout) {
         settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
       }
+      settingsToSend['color_scheme'] = currentColorScheme();
       settingsToSend['useCssScaling'] = useCssScaling;
       settingsToSend['displayId'] = displayId;
       settingsToSend['tabId'] = pageTabId();
