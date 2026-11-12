@@ -24,9 +24,12 @@
 //! and each style as a card with the desktop rendered as it would look
 //! under it, the one in effect ringed with the accent; the cards of a group
 //! share one line when they fit.  A style also sets the bar's layout and
-//! margin and the start menu's layout, which live on the Panel page.  The
-//! Wallpaper page's preview is the monitor shown, painted as the desktop
-//! paints it.
+//! margin and the start menu's layout, which live on the Panel page.  Under
+//! the Selkies window manager the schemes sit under a switch that lets the
+//! browser's light or dark scheme pick between Light and Dark; a scheme or
+//! a color picked here turns it off ([`selkies_draw::appearance`]), and
+//! resetting the page turns it back on.  The Wallpaper page's preview is the
+//! monitor shown, painted as the desktop paints it.
 //!
 //! The Shortcuts page edits what the keyboard does.  It lists the binds the
 //! window manager publishes ([`keybinds`]), read again every second while the
@@ -66,6 +69,8 @@ use crate::keybinds::{self, Published};
 use crate::render::{Align, Canvas, color_to_hsv, hsv_to_color, parse_color};
 use crate::ui::{self, popups, preview};
 use crate::xkb::Key;
+use selkies_draw::appearance::FOLLOW_BROWSER;
+use selkies_draw::style::SCHEMES;
 
 /// Width the settings window opens at.
 pub const WIDTH: i32 = 900;
@@ -215,21 +220,6 @@ const LANGUAGES: [(&str, &str); 19] = [
     ("vi", "Tiếng Việt"),
     ("zh_cn", "简体中文"),
     ("zh_tw", "繁體中文"),
-];
-
-/// The color schemes: the four colors of each, as accent, bar, menus and
-/// text.  Dark, the default, and Light share a sky-blue accent on neutral
-/// grays, the bar the shade of a window's header and the menus a window's
-/// own; Ember is a copper accent on warm charcoal, dark enough to take
-/// white text; Mint is a green accent on pale sage, a light desktop of a
-/// warmer cast than Light; and Graphite is flat neutral grays with a light
-/// gray accent, a dark desktop without a hue.
-const SCHEMES: [(&str, [&str; 4]); 5] = [
-    ("Dark", ["#3daee9", "#292c30", "#202326", "#fcfcfc"]),
-    ("Light", ["#3daee9", "#dee0e2", "#eff0f1", "#232629"]),
-    ("Ember", ["#b9671b", "#1c1917", "#272220", "#f4ede4"]),
-    ("Mint", ["#13866a", "#d8e9e2", "#f2f8f5", "#14302a"]),
-    ("Graphite", ["#cccccc", "#2c2c2c", "#303030", "#dfdfdf"]),
 ];
 
 /// A style: a name and the frame, bar and menu settings it bundles.
@@ -1426,8 +1416,13 @@ fn chip_width(label: &str) -> i32 {
 /// The keys a page's reset removes; none for a page that holds no setting.
 fn page_keys(d: &Desktop) -> Vec<&'static str> {
     match d.settings.page {
-        Page::Theme => COLOR_KEYS.iter().chain(WINDOW_KEYS.iter()).copied().collect(),
-        Page::Colors => COLOR_KEYS.to_vec(),
+        Page::Theme => COLOR_KEYS
+            .iter()
+            .chain(WINDOW_KEYS.iter())
+            .copied()
+            .chain([FOLLOW_BROWSER])
+            .collect(),
+        Page::Colors => COLOR_KEYS.iter().copied().chain([FOLLOW_BROWSER]).collect(),
         Page::Windows => WINDOW_KEYS.to_vec(),
         Page::Wallpaper => {
             let mut keys: Vec<&'static str> = WALLPAPER_KEYS.iter().map(|k| wallpaper_key(d, k)).collect();
@@ -2633,6 +2628,9 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
         Page::Theme => {
             let scheme = current_scheme(d.config.theme);
             groups.group(tr("Scheme"));
+            if !d.config.toolkits {
+                groups.switch(tr("Follow the browser"), FOLLOW_BROWSER, d.config.follow_browser);
+            }
             let schemes: Vec<PresetCard> = SCHEMES
                 .iter()
                 .map(|(name, colors)| {

@@ -278,6 +278,7 @@ A file or folder with this name already exists = Já existe um arquivo ou pasta 
 Cannot create the folder: {error} = Não foi possível criar a pasta: {error}
 Application icon = Ícone do aplicativo
 Light or dark = Claro ou escuro
+Follow the browser = Seguir o navegador
 Automatic = Automático
 Float = Flutuante
 Mint = Menta

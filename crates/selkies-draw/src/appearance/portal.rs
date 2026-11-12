@@ -1,6 +1,6 @@
-//! The desktop Settings portal, served by the shell itself so applications
-//! flip between light and dark and take the accent the moment the shell's
-//! theme changes.
+//! The desktop Settings portal, served by whichever of the window manager or the shell keeps the
+//! session's appearance ([`super`]), so applications flip between light and dark and take the
+//! accent the moment the desktop's theme changes.
 //!
 //! Toolkits that follow the desktop's scheme ask
 //! `org.freedesktop.portal.Settings` at `/org/freedesktop/portal/desktop` on
@@ -19,23 +19,22 @@
 //!   `org.gnome.desktop.interface` keys through the portal instead.
 //!
 //! xdg-desktop-portal is a frontend that relays this interface from a
-//! backend, and the images ship neither, so the shell owns the frontend's
+//! backend, and the images ship neither, so the desktop owns the frontend's
 //! name itself rather than installing a portal to be the backend of: the
-//! values are the shell's own [`Decision`], the one [`crate::toolkits`]
+//! values are the desktop's own [`Decision`], the one [`super::toolkits`]
 //! writes to the GTK files and GSettings, so every path a toolkit takes
 //! reads the same scheme.  The name is requested without replacing its owner
 //! and without queuing, so an image that runs a portal of its own keeps it
-//! and the shell serves nothing.  Only the Settings interface is served: a
+//! and nothing is served here.  Only the Settings interface is served: a
 //! toolkit that probes another portal interface's `version` finds none and
 //! keeps its own dialogs.
 //!
 //! zbus serves calls on its own executor thread, so the decision sits behind
 //! a mutex the interface reads and [`Portal::update`] replaces; each call
-//! from the shell's loop runs to completion with [`zbus::block_on`].  The
-//! bus is the session's, through `DBUS_SESSION_BUS_ADDRESS`, which the
-//! window manager exports to the shell; without one, or with the name
-//! taken, nothing is served and a line says why under
-//! `SELKIES_DESKTOP_DEBUG`.
+//! from the caller's loop runs to completion with [`zbus::block_on`].  The
+//! bus is the session's: the address the caller names, else
+//! `DBUS_SESSION_BUS_ADDRESS`; without one, or with the name taken, nothing
+//! is served and the caller is told why.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -45,7 +44,7 @@ use zbus::fdo::RequestNameFlags;
 use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::{OwnedVariant, Variant};
 
-use crate::toolkits::Decision;
+use super::toolkits::Decision;
 
 /// The well-known name of the portal frontend.
 const NAME: &str = "org.freedesktop.portal.Desktop";
@@ -220,21 +219,21 @@ pub struct Portal {
 }
 
 impl Portal {
-    /// Serves the portal on the session bus, or returns `None` when there is
-    /// no bus or another process holds the portal's name.
+    /// Serves the portal on the session bus.
     ///
     /// # Arguments
     /// * `decision` - The decision to serve first.
-    pub fn start(decision: &Decision) -> Option<Portal> {
-        match Portal::serve(Builder::session(), decision) {
-            Ok(portal) => Some(portal),
-            Err(error) => {
-                if std::env::var_os("SELKIES_DESKTOP_DEBUG").is_some() {
-                    eprintln!("selkies-desktop: not serving the settings portal: {error}");
-                }
-                None
-            }
-        }
+    /// * `address` - The session bus, or `None` for the one `DBUS_SESSION_BUS_ADDRESS` names.
+    ///
+    /// # Errors
+    /// There is no bus, it refused the connection, or another process holds the portal's name
+    /// ([`zbus::Error::NameTaken`]).
+    pub fn start(decision: &Decision, address: Option<&str>) -> zbus::Result<Portal> {
+        let builder = match address {
+            Some(address) => Builder::address(address),
+            None => Builder::session(),
+        };
+        Portal::serve(builder, decision)
     }
 
     /// Serves the portal on the bus a builder connects to.
@@ -260,8 +259,11 @@ impl Portal {
     /// Serves a new decision and signals every setting whose value changed.
     ///
     /// # Arguments
-    /// * `decision` - The decision the shell's settings now imply.
-    pub fn update(&mut self, decision: &Decision) {
+    /// * `decision` - The decision the desktop's settings now imply.
+    ///
+    /// # Errors
+    /// A signal could not be sent; the new decision is served all the same.
+    pub fn update(&mut self, decision: &Decision) -> zbus::Result<()> {
         let before = {
             let mut shared = self.decision.lock().unwrap_or_else(PoisonError::into_inner);
             let before = settings(&shared);
@@ -272,22 +274,14 @@ impl Portal {
             .into_iter()
             .filter(|entry| !before.contains(entry))
             .collect();
-        if changed.is_empty() {
-            return;
-        }
-        let result = zbus::block_on(async {
+        zbus::block_on(async {
             for (namespace, key, setting) in &changed {
                 self.interface
                     .setting_changed(namespace, key, setting.variant())
                     .await?;
             }
-            Ok::<(), zbus::Error>(())
-        });
-        if let Err(error) = result
-            && std::env::var_os("SELKIES_DESKTOP_DEBUG").is_some()
-        {
-            eprintln!("selkies-desktop: cannot signal the settings portal: {error}");
-        }
+            Ok(())
+        })
     }
 }
 
@@ -442,7 +436,7 @@ mod tests {
             .build()
             .unwrap();
         let mut stream = zbus::block_on(MessageStream::for_match_rule(rule, &client, None)).unwrap();
-        portal.update(&decision(false));
+        portal.update(&decision(false)).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             zbus::block_on(async {

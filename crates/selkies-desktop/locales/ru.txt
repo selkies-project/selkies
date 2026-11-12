@@ -278,6 +278,7 @@ A file or folder with this name already exists = Файл или папка с �
 Cannot create the folder: {error} = Не удалось создать папку: {error}
 Application icon = Значок приложения
 Light or dark = Светлый или тёмный
+Follow the browser = Как в браузере
 Automatic = Автоматически
 Float = Плавающая
 Mint = Мята

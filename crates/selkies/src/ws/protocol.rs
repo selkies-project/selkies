@@ -166,6 +166,8 @@ pub struct ClientSettings {
     /// The browser tab the page runs in, at most 64 characters; empty becomes `None`.
     pub tab_id: Option<String>,
     pub keyboard_layout: Option<String>,
+    /// The light or dark scheme the page asks the desktop to follow, unsanitized.
+    pub color_scheme: Option<String>,
     /// Whether `encoder` is a fallback the page took on its own rather than its user's pick.
     pub encoder_fallback: Option<bool>,
     /// The keys the user just picked, at most 64, which is what applies from a page beside
@@ -285,6 +287,7 @@ impl ClientSettings {
             audio_redundancy: get_bool("audioRedundancy"),
             tab_id,
             keyboard_layout: get_str("keyboardLayout"),
+            color_scheme: get_str("color_scheme"),
             encoder_fallback: get_bool("encoderFallback"),
             picked,
             cc_start_kbps: map.get("ccStartKbps").cloned(),

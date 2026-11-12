@@ -145,6 +145,9 @@ pub struct ThemeWatch {
     pub icon_theme: Option<String>,
     /// The number of virtual desktops the desktop's `desktops` setting names.
     pub desktops: Option<u32>,
+    /// Whether the desktop's colors follow the browser's light or dark scheme
+    /// ([`selkies_draw::appearance::follows_browser`]).
+    pub follows_browser: bool,
 }
 
 impl ThemeWatch {
@@ -160,6 +163,7 @@ impl ThemeWatch {
             look: Look::from_values(&values),
             icon_theme: icon_theme(&values),
             desktops: desktops(&values),
+            follows_browser: selkies_draw::appearance::follows_browser(&values),
         }
     }
 
@@ -179,10 +183,15 @@ impl ThemeWatch {
         let look = Look::from_values(&values);
         let icon_theme = icon_theme(&values);
         let desktops = desktops(&values);
-        let changed = look != self.look || icon_theme != self.icon_theme || desktops != self.desktops;
+        let follows_browser = selkies_draw::appearance::follows_browser(&values);
+        let changed = look != self.look
+            || icon_theme != self.icon_theme
+            || desktops != self.desktops
+            || follows_browser != self.follows_browser;
         self.look = look;
         self.icon_theme = icon_theme;
         self.desktops = desktops;
+        self.follows_browser = follows_browser;
         changed
     }
 

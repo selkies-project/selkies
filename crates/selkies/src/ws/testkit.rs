@@ -514,6 +514,8 @@ pub struct FakeInput {
     pub released: Mutex<u32>,
     pub gamepads: Mutex<Vec<ClientId>>,
     pub lost_slots: Mutex<Vec<(ClientId, Vec<u32>)>>,
+    /// Every color scheme handed to the desktop, in order.
+    pub color_schemes: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -533,6 +535,9 @@ impl Input for FakeInput {
         self.lost_slots.lock().push((conn_id, lost.to_vec()));
     }
     async fn apply_client_keyboard_layout(&self, _layout: &str) {}
+    fn apply_client_color_scheme(&self, scheme: &str) {
+        self.color_schemes.lock().push(scheme.to_string());
+    }
     fn finger_scroll_available(&self) -> bool {
         false
     }
