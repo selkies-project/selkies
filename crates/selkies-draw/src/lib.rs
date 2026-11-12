@@ -14,8 +14,11 @@
 //! search, and [`apps`] the desktop entries both the shell's start menu and the window manager's
 //! applications menu list, and [`desktop_icons`] where the shell's desktop icons stand, which
 //! the window manager reads to leave a click on one to the shell. Nothing here knows a display
-//! server: a caller presents the pixmaps it gets back.
+//! server: a caller presents the pixmaps it gets back. [`appearance`] carries the desktop's theme
+//! past its own surfaces, to the toolkits and the Settings portal, from whichever of the two keeps
+//! the session's appearance.
 
+pub mod appearance;
 pub mod apps;
 pub mod desktop_icons;
 pub mod dirs;

@@ -2291,3 +2291,66 @@ fn a_request_during_a_pass_outlives_its_realized_read() {
         &[],
     );
 }
+
+/// The desktop follows the primary display's page alone, through the shared sanitizer: a
+/// secondary's page and a viewer's ask for nothing, and a value outside the list asks for the
+/// server's own.
+#[tokio::test]
+async fn the_color_scheme_is_the_primary_pages_alone() {
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    settle().await;
+    owner
+        .say(r#"SETTINGS,{"tabId":"a","color_scheme":"dark"}"#)
+        .await;
+    settle().await;
+    let mut second = rig.controller().await;
+    second
+        .say(r#"SETTINGS,{"displayId":"display2","displayPosition":"left","initialClientWidth":800,"initialClientHeight":600,"color_scheme":"light"}"#)
+        .await;
+    let mut viewer = rig.viewer().await;
+    viewer
+        .say(r#"SETTINGS,{"tabId":"v","color_scheme":"light"}"#)
+        .await;
+    owner
+        .say(r#"SETTINGS,{"tabId":"a","color_scheme":"sepia"}"#)
+        .await;
+    settle().await;
+    assert_eq!(
+        *rig.input.color_schemes.lock(),
+        ["dark", "off"],
+        "the primary's page asks, and a scheme outside the list is the server's own"
+    );
+}
+
+#[tokio::test]
+#[ignore = "run by an_operators_color_scheme_is_locked, in a process of its own"]
+async fn an_operators_color_scheme_is_locked_in_its_process() {
+    if !crate::session_screens::testing::isolated() {
+        return;
+    }
+    crate::settings::install(crate::settings::Settings::parse(
+        &["--color-scheme=dark".to_string()],
+        &|_| None,
+    ));
+    let rig = Rig::new();
+    let mut owner = rig.owner("a").await;
+    settle().await;
+    owner
+        .say(r#"SETTINGS,{"tabId":"a","color_scheme":"light"}"#)
+        .await;
+    settle().await;
+    assert_eq!(
+        *rig.input.color_schemes.lock(),
+        ["dark"],
+        "a page's scheme gives way to the one the operator locked"
+    );
+}
+
+#[test]
+fn an_operators_color_scheme_is_locked() {
+    crate::session_screens::testing::run_isolated(
+        "ws::server_tests::an_operators_color_scheme_is_locked_in_its_process",
+        &[],
+    );
+}

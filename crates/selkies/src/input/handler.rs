@@ -1353,6 +1353,12 @@ impl Dispatcher {
         }
     }
 
+    /// The primary display's sanitized `SETTINGS` `color_scheme`, handed to the window manager
+    /// that keeps the desktop's appearance ([`crate::wm::browser_color_scheme`]). Returns at once.
+    pub fn apply_client_color_scheme(&self, scheme: &str) {
+        crate::wm::browser_color_scheme(scheme);
+    }
+
     /// Record a hint; whether it was the one noted already, so a re-assert logs nothing.
     fn note_layout_hint(&self, hint: &str) -> bool {
         let mut st = self.state.lock();

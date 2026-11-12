@@ -5,7 +5,8 @@
  */
 
 /**
- * Root of the primary-display dashboard: the theme, the shared state, the
+ * Root of the primary-display dashboard: the theme (which a pick of its user's
+ * also hands the desktop as its color scheme), the shared state, the
  * stream settings, and under them the layout the page shows beside what
  * every layout shares: the dialogs, the stats over the stream (the layout's
  * own, from its registry entry), the placement
@@ -28,6 +29,7 @@ import { ScreenPlacement } from "@/panels/screen-placement";
 import { SettingsProvider } from "@/state/settings-context";
 import { DashboardProvider, useDashboard } from "@/state/dashboard";
 import { useBarPrefs } from "@/layouts/actions";
+import { DesktopColorScheme } from "@/panels/appearance";
 
 /** The layout and what sits beside it, read from the shared state. */
 function Chrome() {
@@ -61,7 +63,8 @@ interface AppProps {
 /** Wraps the chrome in the providers every panel relies on. */
 export default function App({ dashboardRoot }: AppProps) {
   return (
-    <ThemeProvider defaultTheme="dark" storageKey="theme">
+    <ThemeProvider defaultTheme="system" storageKey="theme">
+      <DesktopColorScheme />
       <DashboardProvider>
         <SettingsProvider>
           <TooltipProvider>
