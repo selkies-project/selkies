@@ -597,7 +597,7 @@ pub static DEFINITIONS: &[SettingDef] = &[
         name: "color_scheme",
         kind: Kind::Enum,
         default: "off",
-        help: "The light or dark color scheme the session's desktop follows under the Selkies window manager (`--wm`), on the desktop and for an application alone. By default every value is allowed and the primary display's page asks for its browser's preference, or the theme its user picked in the dashboard, and the desktop takes its Light or Dark scheme, until its user picks a scheme or a color in the desktop's settings; the Follow the browser switch there hands the choice back to the page. A single value locks it: \"light\" or \"dark\" whatever the page asks, \"off\" leaving the desktop's scheme alone. A page asking for a scheme outside the list gets the first value listed; the default value, \"off\", is only what such a page gets.",
+        help: "The light or dark color scheme the session's desktop follows under the Selkies window manager (`--wm`), on the desktop and for an application alone. By default every value is allowed and the primary display's page asks for its browser's preference, or the theme its user picked in the dashboard, and the desktop takes its Light or Dark scheme, until its user picks a scheme or a color in the desktop's settings; the Follow the browser switch there hands the choice back to the page. A single value locks it: \"light\" or \"dark\" whatever the page asks, \"off\" leaving the desktop's scheme alone. A page asking for a scheme outside the list gets the server's own value: \"off\" by default, the locked value where one is.",
         env_vars: &[],
         allowed: &["light", "dark", "off"],
         value_range: None,
