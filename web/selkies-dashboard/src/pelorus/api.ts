@@ -13,7 +13,8 @@
  * what the tool returned, the end), handed to the caller as it arrives.
  * Aborting the request is how a run is stopped: the server ends it at its
  * next step. Model configurations are listed without their keys, which the
- * server takes and never gives back.
+ * server takes and never gives back; a key this browser sealed (`keys.ts`) is
+ * listed sealed, and sent opened with each run and model listing.
  * @module
  */
 
@@ -28,6 +29,8 @@ export interface ModelConfig {
   vision: boolean;
   /** Whether a key is set; the key itself is never sent. */
   has_key: boolean;
+  /** The key as the browser that saved it sealed it; empty where the server keeps the key. */
+  sealed: string;
   default: boolean;
   /** False for the server's own configuration, which only its settings change. */
   editable: boolean;
@@ -70,6 +73,8 @@ export interface ModelDraft {
   endpoint?: string;
   model?: string;
   api_key?: string;
+  /** A key this browser sealed, kept in place of `api_key`; empty to drop a sealed one. */
+  sealed?: string;
   effort?: string;
   vision?: boolean;
   default?: boolean;
@@ -96,6 +101,8 @@ export interface RunRequest {
   config?: string;
   model?: string;
   effort?: string;
+  /** The opened key of a sealed configuration, for this run alone. */
+  api_key?: string;
   /** Ask for the screen as the run goes. */
   screenshots?: boolean;
   /** Instructions of the person's own, added after the server's. */

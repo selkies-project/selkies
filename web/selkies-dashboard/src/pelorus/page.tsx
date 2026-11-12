@@ -7,9 +7,11 @@
 /**
  * The Pelorus page, served at `pelorus/`: the agent's work in full.
  *
- * A bar across the top names the page and carries the model the next task
- * runs on, its effort, the light and dark switch the dashboard keeps (the
- * same stored choice), and the settings. Under it, tabs hold conversations
+ * A bar across the top names the page and carries what the next task runs
+ * on: the configuration, the model of its provider (picked from the
+ * provider's list, `names.ts`, or typed), and its effort, each remembered by
+ * this browser, then the light and dark switch the dashboard keeps (the same
+ * stored choice) and the settings. Under it, tabs hold conversations
  * side by side; the one in front fills the page, and the prompt sits at the
  * bottom.
  *
@@ -23,8 +25,14 @@
  * once it answers), and its answer with the screen as it left it. A step is
  * one turn of the model: its reasoning, what it said, each tool it called
  * with what the tool returned, and the screen after a tool that acted. Any
- * picture opens full size on a press. The pictures are for the person alone:
+ * picture opens full size on a press. The account keeps its newest step in
+ * view as it grows, pictures included, until the person scrolls up to read
+ * (`follow.ts`). The pictures are for the person alone:
  * the model works from text, and they can be turned off in the settings.
+ *
+ * A configuration whose key a browser sealed (`keys.ts`) runs with the key
+ * this browser opens for each run; one sealed by another browser cannot run
+ * here, and the prompt says so.
  *
  * The settings are a dialog of two parts: the model configurations
  * (`settings.tsx`), which a locked server neither shows nor takes, and what
@@ -35,6 +43,7 @@
  */
 import * as React from "react";
 import { ArrowUp, ChevronRight, Loader2, Moon, Plus, Settings2, Square, Sun, X } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -43,11 +52,16 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useTheme } from "@/components/ui/theme-provider";
-import { SelkiesLogo } from "@/components/logo";
 import { t } from "@/i18n";
-import { listModels, type ModelList } from "@/pelorus/api";
+import { listModels, type ModelConfig, type ModelList } from "@/pelorus/api";
 import { conversationFor, describeCall, type Exchange, type Step } from "@/pelorus/conversation";
-import { ModelSettings, selectClass } from "@/pelorus/settings";
+import { useFollowEnd } from "@/pelorus/follow";
+import { Inline, Markdown } from "@/pelorus/markdown";
+import logoUrl from "@/pelorus/logo.svg";
+import { unseal, useHeld } from "@/pelorus/keys";
+import { listingKey, useModelNames } from "@/pelorus/names";
+import { Choice, ModelPicker } from "@/pelorus/pickers";
+import { ModelSettings } from "@/pelorus/settings";
 
 /** What this browser keeps of the person's own choices. */
 interface ClientSettings {
@@ -62,80 +76,54 @@ interface ClientSettings {
 const CLIENT_KEY = "pelorus.client";
 const CLIENT_DEFAULTS: ClientSettings = { suffix: "", maxSteps: 0, screenshots: true };
 
-/** The stored client settings, the defaults where none are stored or they do not read. */
-function loadClient(): ClientSettings {
-  try {
-    const stored: unknown = JSON.parse(localStorage.getItem(CLIENT_KEY) ?? "null");
-    if (stored && typeof stored === "object") return { ...CLIENT_DEFAULTS, ...(stored as Partial<ClientSettings>) };
-  } catch { /* unreadable: the defaults stand */ }
-  return CLIENT_DEFAULTS;
+/** What the bar was last set to run on. */
+interface Choices {
+  /** The configuration chosen; the default one where it is gone. */
+  config: string;
+  /** The effort asked for; the configuration's own where empty. */
+  effort: string;
+  /** The model asked for in place of each configuration's own, by configuration. */
+  models: Record<string, string>;
 }
 
-/** Draws the inline marks of a line: `**bold**` and `` `code` ``. */
-function Inline({ text }: { text: string }) {
-  const pieces = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
-  return (
-    <>
-      {pieces.map((piece, index) => {
-        if (piece.startsWith("**") && piece.endsWith("**") && piece.length > 4) return <strong key={index}>{piece.slice(2, -2)}</strong>;
-        if (piece.startsWith("`") && piece.endsWith("`") && piece.length > 2) {
-          return <code key={index} className="rounded bg-muted px-1 py-0.5 font-mono text-[0.9em]">{piece.slice(1, -1)}</code>;
-        }
-        return <React.Fragment key={index}>{piece}</React.Fragment>;
-      })}
-    </>
-  );
+const CHOICES_KEY = "pelorus.choices";
+
+/**
+ * A stored object over its defaults.
+ * @param key The storage key.
+ * @param defaults What stands where nothing is stored or it does not read.
+ * @returns The stored fields over the defaults.
+ */
+function loadStored<T extends object>(key: string, defaults: T): T {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(key) ?? "null");
+    if (stored && typeof stored === "object") return { ...defaults, ...(stored as Partial<T>) };
+  } catch { /* unreadable: the defaults stand */ }
+  return defaults;
 }
 
 /**
- * Draws an answer written in the Markdown models reach for: paragraphs,
- * headings, bulleted and numbered lists, fenced code, and the inline marks.
- * Anything else is shown as written.
+ * Keeps an object for the next visit.
+ * @param key The storage key.
+ * @param value The object.
  */
-function Markdown({ text }: { text: string }) {
-  const blocks: React.ReactNode[] = [];
-  const lines = text.split("\n");
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index];
-    if (line.startsWith("```")) {
-      const code: string[] = [];
-      index += 1;
-      while (index < lines.length && !lines[index].startsWith("```")) code.push(lines[index++]);
-      index += 1;
-      blocks.push(<pre key={blocks.length} className="overflow-x-auto rounded-md bg-muted p-2 font-mono text-xs">{code.join("\n")}</pre>);
-      continue;
-    }
-    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
-    if (heading) {
-      blocks.push(<div key={blocks.length} className="mt-1 font-semibold"><Inline text={heading[2]} /></div>);
-      index += 1;
-      continue;
-    }
-    const bullet = /^\s*([-*]|\d+[.)])\s+/;
-    if (bullet.test(line)) {
-      const items: string[] = [];
-      const ordered = /^\s*\d/.test(line);
-      while (index < lines.length && bullet.test(lines[index])) items.push(lines[index++].replace(bullet, ""));
-      const List = ordered ? "ol" : "ul";
-      blocks.push(
-        <List key={blocks.length} className={`ml-5 ${ordered ? "list-decimal" : "list-disc"}`}>
-          {items.map((item, at) => <li key={at}><Inline text={item} /></li>)}
-        </List>,
-      );
-      continue;
-    }
-    if (line.trim() === "") {
-      index += 1;
-      continue;
-    }
-    const paragraph: string[] = [];
-    while (index < lines.length && lines[index].trim() !== "" && !lines[index].startsWith("```") && !bullet.test(lines[index]) && !/^#{1,4}\s/.test(lines[index])) {
-      paragraph.push(lines[index++]);
-    }
-    blocks.push(<p key={blocks.length} className="whitespace-pre-wrap"><Inline text={paragraph.join("\n")} /></p>);
-  }
-  return <div className="flex flex-col gap-2 text-sm leading-relaxed">{blocks}</div>;
+function store(key: string, value: object): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch { /* storage refused: the choice lasts for the page */ }
+}
+
+/** The Pelorus mark, a compass rose. */
+function PelorusMark({ size }: { size: number }) {
+  return <img src={logoUrl} width={size} height={size} alt="" aria-hidden className="shrink-0 select-none" draggable={false} />;
+}
+
+/** The model picker of the bar, over the list of the chosen configuration's provider. */
+function BarModelPicker({ base, config, value, onChange }: { base: string; config: ModelConfig; value: string; onChange: (model: string) => void }) {
+  const probe = { id: config.id, provider: config.provider, endpoint: config.endpoint };
+  const names = useModelNames(base, config.endpoint ? listingKey(config.provider, config.endpoint) : "",
+    config.sealed ? async () => ({ ...probe, api_key: await unseal(config.sealed) }) : probe);
+  return <ModelPicker className="order-first w-full md:order-none md:w-72" value={value} names={names} onChange={(model) => onChange(model || config.model)} />;
 }
 
 /** A picture of the screen, small in the account and full size on a press. */
@@ -238,28 +226,25 @@ function TabLabel({ base, id, number, active, closable, onSelect, onClose }: { b
 }
 
 /** The conversation in front, with the prompt under it. */
-function Pane({ base, id, list, config, effort, client, onOpen }: { base: string; id: number; list: ModelList; config: string; effort: string; client: ClientSettings; onOpen: (source: string) => void }) {
+function Pane({ base, id, list, config, model, effort, client, onOpen }: { base: string; id: number; list: ModelList; config: string; model: string; effort: string; client: ClientSettings; onOpen: (source: string) => void }) {
   const conversation = conversationFor(base, String(id));
   const { exchanges, running } = React.useSyncExternalStore(conversation.subscribe, conversation.read);
   const [prompt, setPrompt] = React.useState("");
-  const scroller = React.useRef<HTMLDivElement>(null);
-  const follow = React.useRef(true);
-
-  // The account follows its own end while the person is at it, and stays put once they scroll up to read.
-  React.useEffect(() => {
-    const element = scroller.current;
-    if (element && follow.current) element.scrollTop = element.scrollHeight;
-  }, [exchanges]);
+  const { scroller, content, stick } = useFollowEnd(exchanges);
 
   const selected = list.models.find((m) => m.id === config);
-  const canRun = !!selected?.usable && !running && prompt.trim().length > 0;
-  const send = () => {
+  const held = useHeld(selected?.sealed ?? "");
+  const canRun = !!selected?.usable && held !== false && !running && prompt.trim().length > 0;
+  const send = async () => {
     if (!canRun) return;
     const text = prompt.trim();
     setPrompt("");
-    follow.current = true;
+    stick();
+    const apiKey = selected?.sealed ? await unseal(selected.sealed) : undefined;
     void conversation.send(text, {
       config: config || undefined,
+      api_key: apiKey,
+      model: model && model !== selected?.model ? model : undefined,
       effort: effort || undefined,
       screenshots: client.screenshots,
       suffix: client.suffix || undefined,
@@ -269,36 +254,37 @@ function Pane({ base, id, list, config, effort, client, onOpen }: { base: string
 
   return (
     <>
-      <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto"
-        onScroll={(event) => {
-          const element = event.currentTarget;
-          follow.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
-        }}>
-        <div className="mx-auto flex w-full max-w-[1800px] flex-col gap-6 px-6 py-6">
+      <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
+        <div ref={content} className="mx-auto flex w-full max-w-[1800px] flex-col gap-6 px-6 py-6">
           {exchanges.length === 0 && (
-            <div className="mx-auto mt-16 flex max-w-md flex-col items-center gap-3 text-center text-sm text-muted-foreground">
-              <SelkiesLogo width={44} height={44} />
-              <div>{t("pelorus.hint")}</div>
-              {!list.windows && <div>{t("pelorus.noWindows")}</div>}
+            <div className="mx-auto mt-[12vh] flex max-w-lg flex-col items-center gap-4 text-center">
+              <PelorusMark size={88} />
+              <div className="flex flex-col gap-1">
+                <h1 className="text-2xl font-semibold tracking-tight">{t("pelorus.title")}</h1>
+                <p className="text-base text-muted-foreground">{t("pelorus.tagline")}</p>
+              </div>
+              <p className="text-sm leading-relaxed text-muted-foreground">{t("pelorus.hint")}</p>
+              {!list.windows && <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{t("pelorus.noWindows")}</p>}
             </div>
           )}
           {exchanges.map((exchange, index) => <ExchangeView key={index} exchange={exchange} onOpen={onOpen} />)}
         </div>
       </div>
-      <div className="border-t border-border bg-card/60">
-        <div className="mx-auto flex w-full max-w-[1800px] items-end gap-2 px-6 py-3">
-          <Textarea className="max-h-64 min-h-16 flex-1 resize-none" rows={2} value={prompt} placeholder={t("pelorus.placeholder")} aria-label={t("pelorus.placeholder")}
+      <div className="px-4 pb-4 sm:px-6">
+        {held === false && <p className="mx-auto mb-2 w-full max-w-4xl rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">{t("pelorus.heldElsewhere")}</p>}
+        <div className="mx-auto flex w-full max-w-4xl items-end gap-2 rounded-2xl border border-border bg-card p-2 shadow-sm focus-within:border-ring">
+          <Textarea className="max-h-64 min-h-14 flex-1 resize-none border-0 bg-transparent text-base shadow-none focus-visible:ring-0 md:text-sm dark:bg-transparent" rows={2} value={prompt} placeholder={t("pelorus.placeholder")} aria-label={t("pelorus.placeholder")}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
-                send();
+                void send();
               }
             }} />
           {running ? (
-            <Button size="icon" variant="destructive" onClick={() => conversation.stop()} title={t("pelorus.stop")} aria-label={t("pelorus.stop")}><Square /></Button>
+            <Button size="icon" className="rounded-xl" variant="destructive" onClick={() => conversation.stop()} title={t("pelorus.stop")} aria-label={t("pelorus.stop")}><Square /></Button>
           ) : (
-            <Button size="icon" onClick={send} disabled={!canRun} title={t("pelorus.send")} aria-label={t("pelorus.send")}><ArrowUp /></Button>
+            <Button size="icon" className="rounded-xl" onClick={() => void send()} disabled={!canRun} title={t("pelorus.send")} aria-label={t("pelorus.send")}><ArrowUp /></Button>
           )}
         </div>
       </div>
@@ -311,19 +297,17 @@ export function PelorusPage({ base }: { base: string }) {
   const { theme, setTheme } = useTheme();
   const [list, setList] = React.useState<ModelList | null>(null);
   const [loadError, setLoadError] = React.useState<string | null>(null);
-  const [config, setConfig] = React.useState("");
-  const [effort, setEffort] = React.useState("");
+  const [choices, setChoices] = React.useState<Choices>(() => loadStored(CHOICES_KEY, { config: "", effort: "", models: {} }));
   const [tabs, setTabs] = React.useState<number[]>([1]);
   const [active, setActive] = React.useState(1);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
-  const [client, setClient] = React.useState<ClientSettings>(loadClient);
+  const [client, setClient] = React.useState<ClientSettings>(() => loadStored(CLIENT_KEY, CLIENT_DEFAULTS));
   const [enlarged, setEnlarged] = React.useState<string | null>(null);
   const nextTab = React.useRef(2);
 
   const apply = React.useCallback((next: ModelList) => {
     setList(next);
     setLoadError(null);
-    setConfig((current) => (next.models.some((m) => m.id === current) ? current : next.models.find((m) => m.default)?.id ?? next.models[0]?.id ?? ""));
   }, []);
   const failed = React.useCallback((error: unknown) => setLoadError(error instanceof Error ? error.message : String(error)), []);
   const reload = React.useCallback(() => listModels(base).then(apply, failed), [base, apply, failed]);
@@ -333,12 +317,15 @@ export function PelorusPage({ base }: { base: string }) {
     return () => { mounted = false; };
   }, [base, apply, failed]);
 
+  const choose = (change: Partial<Choices>) => {
+    const next = { ...choices, ...change };
+    setChoices(next);
+    store(CHOICES_KEY, next);
+  };
   const saveClient = (change: Partial<ClientSettings>) => {
     const next = { ...client, ...change };
     setClient(next);
-    try {
-      localStorage.setItem(CLIENT_KEY, JSON.stringify(next));
-    } catch { /* storage refused: the choice lasts for the page */ }
+    store(CLIENT_KEY, next);
   };
 
   const addTab = () => {
@@ -368,43 +355,64 @@ export function PelorusPage({ base }: { base: string }) {
 
   if (list.models.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center overflow-y-auto p-4">
-        <div className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-border bg-card p-6">
-          <div className="flex flex-col items-center gap-1 text-center">
-            <SelkiesLogo width={48} height={48} />
-            <h1 className="text-xl font-bold">{t("pelorus.title")}</h1>
-            <p className="text-sm text-muted-foreground">{t("pelorus.tagline")}</p>
+      <div className="flex h-full justify-center overflow-y-auto px-4 py-10 sm:items-center">
+        <div className="flex h-fit w-full max-w-xl flex-col gap-6 rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8">
+          <div className="flex flex-col items-center gap-3 text-center">
+            <PelorusMark size={80} />
+            <div className="flex flex-col gap-1">
+              <h1 className="text-2xl font-semibold tracking-tight">{t("pelorus.title")}</h1>
+              <p className="text-sm text-muted-foreground">{t("pelorus.tagline")}</p>
+            </div>
           </div>
-          {list.locked
-            ? <p className="text-center text-sm text-muted-foreground">{t("pelorus.noModelLocked")}</p>
-            : <div className="flex min-h-96 flex-col"><ModelSettings base={base} list={list} onChanged={reload} onClose={() => undefined} /></div>}
+          {list.locked ? (
+            <p className="text-center text-sm text-muted-foreground">{t("pelorus.noModelLocked")}</p>
+          ) : (
+            <div className="flex flex-col gap-4 border-t border-border pt-6">
+              <div className="flex flex-col gap-1">
+                <h2 className="text-base font-semibold">{t("pelorus.add")}</h2>
+                <p className="text-sm text-muted-foreground">{t("pelorus.setupHint")}</p>
+              </div>
+              <ModelSettings base={base} list={list} onChanged={reload} />
+            </div>
+          )}
           <div className="flex justify-center">{themeToggle}</div>
         </div>
       </div>
     );
   }
 
-  const selected = list.models.find((m) => m.id === config);
+  const selected = list.models.find((m) => m.id === choices.config) ?? list.models.find((m) => m.default) ?? list.models[0];
+  const model = (selected && choices.models[selected.id]) || selected?.model || "";
+  const effort = list.efforts.includes(choices.effort) ? choices.effort : "";
   return (
     <div className="flex h-full flex-col" data-testid="pelorus-page">
-      <div className="flex items-center gap-3 border-b border-border bg-card/60 px-4 py-2">
-        <div className="flex items-center gap-2 font-semibold"><SelkiesLogo width={22} height={22} />{t("pelorus.title")}</div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card/60 px-4 py-2.5">
+        <div className="flex items-center gap-2 pr-2 text-lg font-semibold tracking-tight"><PelorusMark size={30} />{t("pelorus.title")}</div>
         {list.locked ? (
-          selected && <span className="truncate rounded-md border border-border px-2 py-1 text-xs text-muted-foreground">{selected.model}</span>
-        ) : (
-          <>
-            <select className={selectClass} value={config} onChange={(event) => setConfig(event.target.value)} aria-label={t("pelorus.model")}>
-              {list.models.map((m) => <option key={m.id} value={m.id}>{m.name} · {m.model}</option>)}
-            </select>
-            <select className={selectClass} value={effort} onChange={(event) => setEffort(event.target.value)} aria-label={t("pelorus.effort")}>
-              <option value="">{t("pelorus.effort")}: {selected?.effort ?? "default"}</option>
-              {list.efforts.map((level) => <option key={level} value={level}>{t("pelorus.effort")}: {level}</option>)}
-            </select>
-          </>
+          selected && <Badge variant="secondary" className="h-7 px-3 text-xs">{selected.model}</Badge>
+        ) : selected && (
+          <div className="order-last flex w-full min-w-0 flex-wrap items-center gap-2 md:order-none md:w-auto">
+            {list.models.length > 1 && (
+              <Choice className="flex-1 md:w-48 md:flex-none" label={t("pelorus.configuration")} value={selected.id}
+                options={list.models.map((m) => ({ value: m.id, label: m.name, detail: list.providers.find((p) => p.name === m.provider)?.label ?? m.provider }))}
+                onChange={(config) => choose({ config })} />
+            )}
+            <BarModelPicker base={base} config={selected} value={model}
+              onChange={(next) => {
+                const models = { ...choices.models };
+                if (next === selected.model) delete models[selected.id];
+                else models[selected.id] = next;
+                choose({ config: selected.id, models });
+              }} />
+            <Choice className="flex-1 md:w-40 md:flex-none" label={t("pelorus.effort")} prefix={`${t("pelorus.effort")}:`} value={effort}
+              options={[{ value: "", label: selected.effort }, ...list.efforts.filter((level) => level !== selected.effort).map((level) => ({ value: level, label: level }))]}
+              onChange={(next) => choose({ effort: next })} />
+          </div>
         )}
-        <div className="flex-1" />
-        {themeToggle}
-        <Button variant="ghost" size="icon-sm" onClick={() => setSettingsOpen(true)} title={t("pelorus.settings")} aria-label={t("pelorus.settings")}><Settings2 className="size-4" /></Button>
+        <div className="ml-auto flex items-center gap-1">
+          {themeToggle}
+          <Button variant="ghost" size="icon-sm" onClick={() => setSettingsOpen(true)} title={t("pelorus.settings")} aria-label={t("pelorus.settings")}><Settings2 className="size-4" /></Button>
+        </div>
       </div>
 
       <div className="flex items-center overflow-x-auto border-b border-border px-2">
@@ -416,36 +424,36 @@ export function PelorusPage({ base }: { base: string }) {
         </button>
       </div>
 
-      <Pane key={active} base={base} id={active} list={list} config={config} effort={effort} client={client} onOpen={setEnlarged} />
+      <Pane key={active} base={base} id={active} list={list} config={selected?.id ?? ""} model={model} effort={effort} client={client} onOpen={setEnlarged} />
 
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent className="max-h-[90dvh] gap-4 overflow-y-auto sm:max-w-xl">
-          <DialogHeader><DialogTitle>{t("pelorus.settings")}</DialogTitle></DialogHeader>
-          <Tabs defaultValue={list.locked ? "client" : "models"}>
+        <DialogContent className="max-h-[90dvh] gap-5 overflow-y-auto sm:max-w-2xl sm:p-8">
+          <DialogHeader><DialogTitle className="text-lg">{t("pelorus.settings")}</DialogTitle></DialogHeader>
+          <Tabs defaultValue={list.locked ? "client" : "models"} className="gap-5">
             <TabsList>
               {!list.locked && <TabsTrigger value="models">{t("pelorus.models")}</TabsTrigger>}
               <TabsTrigger value="client">{t("pelorus.client")}</TabsTrigger>
             </TabsList>
             {!list.locked && (
               <TabsContent value="models">
-                <div className="flex min-h-96 flex-col"><ModelSettings base={base} list={list} onChanged={reload} onClose={() => setSettingsOpen(false)} /></div>
+                <ModelSettings base={base} list={list} onChanged={reload} onClose={() => setSettingsOpen(false)} />
               </TabsContent>
             )}
             <TabsContent value="client">
-              <div className="flex flex-col gap-4 pt-2 text-sm">
+              <div className="flex flex-col gap-5 text-sm">
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="pelorus-suffix">{t("pelorus.suffix")}</Label>
-                  <Textarea id="pelorus-suffix" rows={3} value={client.suffix} placeholder={t("pelorus.suffixHint")} onChange={(event) => saveClient({ suffix: event.target.value })} />
+                  <Textarea id="pelorus-suffix" rows={4} value={client.suffix} placeholder={t("pelorus.suffixHint")} onChange={(event) => saveClient({ suffix: event.target.value })} />
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="pelorus-steps">{t("pelorus.maxSteps")}</Label>
-                  <Input id="pelorus-steps" type="number" min={1} max={list.max_steps} value={client.maxSteps > 0 ? client.maxSteps : list.max_steps}
+                  <Input id="pelorus-steps" className="w-32" type="number" min={1} max={list.max_steps} value={client.maxSteps > 0 ? client.maxSteps : list.max_steps}
                     onChange={(event) => saveClient({ maxSteps: Math.max(0, Math.min(list.max_steps, Number(event.target.value) || 0)) })} />
                 </div>
-                <div className="flex items-center justify-between gap-2">
-                  <Label htmlFor="pelorus-shots">{t("pelorus.screenshots")}</Label>
+                <label htmlFor="pelorus-shots" className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
+                  <span className="font-medium">{t("pelorus.screenshots")}</span>
                   <Switch id="pelorus-shots" checked={client.screenshots} onCheckedChange={(screenshots) => saveClient({ screenshots })} />
-                </div>
+                </label>
               </div>
             </TabsContent>
           </Tabs>
