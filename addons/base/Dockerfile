@@ -346,6 +346,10 @@ ARG TZ="UTC"
 ENV PASSWD="mypasswd"
 # The one knob for the generated locale; the ENV block below reuses it.
 ARG LOCALE="en_US.UTF-8"
+# The distribution archive's state, which CI reads before the build: an archive
+# update rebuilds the layers from here where a build cache would hand back the
+# packages of the last build. Empty in a build that does not read it.
+ARG DISTRIB_ARCHIVE=""
 RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get install --no-install-recommends -y \
         apt-utils \
         dbus-user-session \

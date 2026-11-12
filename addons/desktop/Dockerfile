@@ -58,6 +58,11 @@ RUN printf '%s\n' \
         'path-include=/usr/share/wallpapers/Flow/*' \
         'path-include=/usr/share/wallpapers/Kay/*' \
         > /etc/dpkg/dpkg.cfg.d/selkies-wallpapers
+# The upstream states the layers from here fetch from, which CI reads before the
+# build: a change rebuilds the layer that fetches it where a build cache would
+# hand back the last build's. The distribution archive's state first, then each
+# floating source above its layer; empty values take the newest.
+ARG DISTRIB_ARCHIVE=""
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
         # The icon sets selkies-desktop, the window manager's menus, and GTK
         # resolve names
@@ -126,9 +131,10 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 # shell sets. Its build needs a newer C library than some bases carry, and apt
 # refuses it there, so GNOME Text Editor takes its place. Resources, the system monitor, comes where the
 # distribution carries it.
+ARG FERRISPAD_VERSION=""
 RUN --mount=type=secret,id=github_token,uid=1000 set -eu; \
     apt-get clean && apt-get update; \
-    fetch-verified release fedro86/ferrispad latest \
+    fetch-verified release fedro86/ferrispad "${FERRISPAD_VERSION:-latest}" \
         "FerrisPad-v{version}-ubuntu-$(dpkg --print-architecture).deb" /tmp/ferrispad.deb > /dev/null; \
     if ! apt-get install --no-install-recommends -y /tmp/ferrispad.deb; then \
         apt-get install --no-install-recommends -y gnome-text-editor; \
@@ -157,6 +163,7 @@ RUN --mount=type=secret,id=github_token,uid=1000 set -eu; \
 # rewrites google-chrome.sources to trust a key it carries itself, and writes
 # one on a first install; the entry here is named apart from it and the
 # package's defaults file keeps it from writing its own.
+ARG BROWSER_ARCHIVES=""
 RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d && \
     fetch-verified key "https://packages.mozilla.org/apt/repo-signing-key.gpg" \
         35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 /etc/apt/keyrings/packages.mozilla.org.asc && \
@@ -186,8 +193,9 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
 # copy that runs.
 # The release is checked against its digest, looked up with the build's token
 # where one is given (mounted for uid 1000, which these layers run as).
+ARG PROOT_APPS_VERSION=""
 RUN --mount=type=secret,id=github_token,uid=1000 mkdir -pm755 /opt/proot-apps && \
-    PAPPS_RELEASE="$(fetch-verified release linuxserver/proot-apps latest \
+    PAPPS_RELEASE="$(fetch-verified release linuxserver/proot-apps "${PROOT_APPS_VERSION:-latest}" \
         "proot-apps-$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/aarch64/').tar.gz" /tmp/proot-apps.tar.gz)" && \
     tar -xzf /tmp/proot-apps.tar.gz -C /opt/proot-apps/ && rm -f /tmp/proot-apps.tar.gz && \
     printf '%s\n' "${PAPPS_RELEASE}" > /opt/proot-apps/pversion && \
