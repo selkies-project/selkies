@@ -75,12 +75,12 @@ pub fn parse(text: &str) -> Result<Node, String> {
         let event = reader.read_event().map_err(|e| e.to_string())?;
         match event {
             Event::Start(start) => {
-                let name = local_name(&String::from_utf8_lossy(start.name().as_ref()));
+                let name = local_name(start.name().as_ref());
                 let mut attrs = Vec::new();
                 for attr in start.attributes().flatten() {
-                    let key = local_name(&String::from_utf8_lossy(attr.key.as_ref()));
+                    let key = local_name(attr.key.as_ref());
                     let value = attr
-                        .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, reader.decoder())
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                         .map(|v| v.to_string())
                         .unwrap_or_default();
                     attrs.push((key, value));
@@ -102,15 +102,13 @@ pub fn parse(text: &str) -> Result<Node, String> {
                 }
             }
             Event::Text(text) => {
-                if let Some(node) = stack.last_mut()
-                    && let Ok(text) = text.decode()
-                {
-                    node.text.push_str(&text);
+                if let Some(node) = stack.last_mut() {
+                    node.text.push_str(&text.into_inner());
                 }
             }
             Event::CData(data) => {
                 if let Some(node) = stack.last_mut() {
-                    node.text.push_str(&String::from_utf8_lossy(&data));
+                    node.text.push_str(&data.into_inner());
                 }
             }
             Event::Eof => break,
