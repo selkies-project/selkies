@@ -206,7 +206,8 @@ RUN --mount=type=secret,id=github_token,uid=1000 mkdir -pm755 /opt/proot-apps &&
     mkdir -pm755 /opt/proot-apps-cap && \
     cp /opt/proot-apps/proot /opt/proot-apps-cap/proot
 COPY --chown=1000:1000 addons/desktop/selkies-proot /usr/local/bin/selkies-proot
-RUN chmod -f 755 /usr/local/bin/selkies-proot
+COPY addons/desktop/proot-apps /opt/proot-apps/proot-apps
+RUN chmod -f 755 /usr/local/bin/selkies-proot /opt/proot-apps/proot-apps
 
 # Titlebar buttons for applications that draw their own client-side decoration.
 # The session runs no GNOME settings layer, so the compiled-in default applies
