@@ -245,7 +245,8 @@ pub fn require_configured_credentials(s: &Settings) -> Result<(), ConfigError> {
     }
     let text = "Basic authentication is enabled but no password was set. Set one with \
                 --basic-auth-password, or the SELKIES_BASIC_AUTH_PASSWORD, PASSWORD, or \
-                PASSWD environment variable; or serve without a login by passing \
+                PASSWD environment variable, or name a file holding it with \
+                --basic-auth-password-file; or serve without a login by passing \
                 --enable-basic-auth=false.";
     log::error!(target: "server", "{text}");
     Err(ConfigError(text.to_string()))

@@ -280,6 +280,7 @@ const SECTIONS: &[Section] = &[
             "enable_basic_auth",
             "basic_auth_user",
             "basic_auth_password",
+            "basic_auth_password_file",
             "basic_auth_viewonly_password",
             "master_token",
             "tokens_file",

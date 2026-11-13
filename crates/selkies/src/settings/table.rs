@@ -1322,6 +1322,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "basic_auth_password_file",
+        kind: Kind::Str,
+        default: "",
+        help: "File holding the basic-authentication password, read once at startup with its trailing newline dropped, so the password is in neither the environment nor the command line (a container secret, a systemd credential, a file of the user's own mode 0600). A password given directly through --basic-auth-password or its variables takes precedence; a file that cannot be read leaves the password unset, so the server will not start with basic authentication enabled.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "basic_auth_viewonly_password",
         kind: Kind::Str,
         default: "",
@@ -3037,6 +3051,10 @@ impl Settings {
 
     pub fn basic_auth_password(&self) -> &str {
         self.str_value("basic_auth_password")
+    }
+
+    pub fn basic_auth_password_file(&self) -> &str {
+        self.str_value("basic_auth_password_file")
     }
 
     pub fn basic_auth_viewonly_password(&self) -> &str {

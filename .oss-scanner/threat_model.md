@@ -118,7 +118,9 @@
   control; under `--host` the session joins the host's buses and sound server instead and starts none of these.
   `selkies` run with no arguments serves the user's own desktop and home on `localhost:8080`, as that user
   (`commands/standalone.rs`), behind the placeholder login below unless the environment sets one; every local
-  account reaches the loopback addresses, and choosing a password is the user's, as it is a container operator's. The screen is no account's to map: Xvfb starts without `-shmem`, whose
+  account reaches the loopback addresses, and choosing a password is the user's, as it is a container operator's.
+  `--basic-auth-password-file` reads the password from a file at startup, so it is in neither the environment nor
+  the command line another local account can read; the file's own mode is its access control. The screen is no account's to map: Xvfb starts without `-shmem`, whose
   segment any local account could read and write, and shares its framebuffer (`SELKIES-FRAMEBUFFER`) only with a
   local X client that may read the root, read-only.
 

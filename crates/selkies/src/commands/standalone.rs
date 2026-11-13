@@ -14,9 +14,11 @@
 //! backend, and serve it over HTTPS. So a bare `selkies` re-executes itself as `selkies session`
 //! with [`defaults`] added to its environment: the backend, the shell, HTTPS on the port, which
 //! the server gives a self-signed certificate it keeps under the state directory, and the login
-//! the containers document, `ubuntu` with the placeholder password `mypasswd`. The session runs
-//! as the user who started it, on the loopback addresses alone, so choosing a password of their
-//! own is theirs, as it is for a container's operator. Each default is the environment's own
+//! the containers document, `ubuntu` with the placeholder password `mypasswd`, which is for trying
+//! it out. The session runs as the user who started it, on the loopback addresses alone, so
+//! choosing a password of their own is theirs, as it is for a container's operator, and the log
+//! says how: a file named in `SELKIES_BASIC_AUTH_PASSWORD_FILE`, which keeps the password out of
+//! the environment other processes see. Each default is the environment's own
 //! `SELKIES_` setting, set only where the environment leaves it unset, so a variable the user
 //! exports still wins and the server's settings parser stays the one place they are read.
 //!
@@ -80,7 +82,12 @@ pub fn defaults(get: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
         PLACEHOLDER_USER,
     );
     default(
-        &["SELKIES_BASIC_AUTH_PASSWORD", "PASSWORD", "PASSWD"],
+        &[
+            "SELKIES_BASIC_AUTH_PASSWORD",
+            "PASSWORD",
+            "PASSWD",
+            "SELKIES_BASIC_AUTH_PASSWORD_FILE",
+        ],
         PLACEHOLDER_PASSWORD,
     );
     env
@@ -105,9 +112,15 @@ fn banner(settings: &Settings) -> String {
         "with no login".to_string()
     } else if settings.basic_auth_password() == PLACEHOLDER_PASSWORD {
         format!(
-            "signing in as {} with the password {PLACEHOLDER_PASSWORD} (set SELKIES_BASIC_AUTH_PASSWORD \
-             for your own)",
+            "signing in as {} with the placeholder password {PLACEHOLDER_PASSWORD}; name a file \
+             holding your own in SELKIES_BASIC_AUTH_PASSWORD_FILE",
             settings.basic_auth_user()
+        )
+    } else if !settings.basic_auth_password_file().is_empty() {
+        format!(
+            "signing in as {} with the password in {}",
+            settings.basic_auth_user(),
+            settings.basic_auth_password_file()
         )
     } else {
         format!(
@@ -214,5 +227,12 @@ mod tests {
         assert!(!added.contains_key("SELKIES_BASIC_AUTH_USER"));
         assert!(!added.contains_key("SELKIES_BASIC_AUTH_PASSWORD"));
         assert_eq!(added["SELKIES_DESKTOP"], "true");
+        let file = env(&[("SELKIES_BASIC_AUTH_PASSWORD_FILE", "/run/secrets/selkies")]);
+        let added: HashMap<String, String> =
+            defaults(|k| file.get(k).cloned()).into_iter().collect();
+        assert!(
+            !added.contains_key("SELKIES_BASIC_AUTH_PASSWORD"),
+            "a password file is the user's own login"
+        );
     }
 }

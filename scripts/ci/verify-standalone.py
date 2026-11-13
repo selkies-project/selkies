@@ -80,7 +80,7 @@ def main() -> None:
         if status != 401:
             fail(f"{URL} never asked for a login (last status {status})", log)
         text = log.read_text(errors="replace")
-        if f"your desktop is at {URL.rstrip('/')}, signing in as {USER} with the password {PASSWORD}" not in text:
+        if f"your desktop is at {URL.rstrip('/')}, signing in as {USER} with the placeholder password {PASSWORD}" not in text:
             fail("the log does not say where the desktop is and how to sign in", log)
         if fetch(PASSWORD) != 200:
             fail("the placeholder login does not sign in", log)
