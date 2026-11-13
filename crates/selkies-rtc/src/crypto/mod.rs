@@ -479,6 +479,7 @@ impl ActiveKeyExchange for KeyExchange {
     }
 }
 
+/// The key pair of a [`PrivateKey`], by the scheme it signs with.
 enum PrivateKeyKind {
     Ed25519(signature::Ed25519KeyPair),
     EcdsaP256(signature::EcdsaKeyPair),

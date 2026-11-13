@@ -581,3 +581,83 @@ fn a_dtls_handshake_and_a_record_each_way_succeed_under_every_suite() {
         }
     }
 }
+
+/// A client that offers no AES-GCM SRTP profile is given SRTP_AES128_CM_HMAC_SHA1_80 by a
+/// server offering Selkies' three, and the keys both sides export from the handshake carry
+/// RTP and RTCP each way: the profile's whole path, AES-CM keystream included, on this
+/// provider.
+#[test]
+fn a_client_without_aes_gcm_srtp_gets_aes_cm_end_to_end() {
+    use rtc_dtls::extension::extension_use_srtp::SrtpProtectionProfile;
+
+    use crate::srtp::{KEYING_LABEL, SrtpProfile, SrtpSession};
+
+    let client_addr = SocketAddr::from(([127, 0, 0, 1], 4444));
+    let server_addr = SocketAddr::from(([127, 0, 0, 1], 4445));
+    let suite = CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256;
+    let config = |is_client: bool, profiles: Vec<SrtpProtectionProfile>| {
+        let provider: Arc<dyn RTCCryptoProvider> = Arc::new(AwsLcProvider::new());
+        let mut builder = ConfigBuilder::default()
+            .with_crypto_provider(provider.clone())
+            .with_cipher_suites(vec![suite])
+            .with_srtp_protection_profiles(profiles)
+            .with_insecure_skip_verify(true);
+        if !is_client {
+            let certificate =
+                Certificate::generate_self_signed(vec!["localhost".to_owned()], provider.crypto())
+                    .unwrap();
+            builder = builder.with_certificates(vec![certificate]);
+        }
+        Arc::new(builder.build(is_client, None).unwrap())
+    };
+    let mut server = Endpoint::new(
+        server_addr,
+        TransportProtocol::UDP,
+        Some(config(
+            false,
+            vec![
+                SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm,
+                SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+                SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+            ],
+        )),
+    );
+    let mut client = Endpoint::new(client_addr, TransportProtocol::UDP, None);
+    let offered = vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80];
+    client
+        .connect(Instant::now(), server_addr, config(true, offered), None)
+        .unwrap();
+    for _ in 0..32 {
+        deliver(&mut client, &mut server, client_addr);
+        deliver(&mut server, &mut client, server_addr);
+    }
+
+    let session = |endpoint: &mut Endpoint, peer: SocketAddr, is_client: bool| {
+        let state = endpoint.get_connection_state(peer).expect("a connection");
+        let profile = SrtpProfile::from_dtls(state.srtp_protection_profile()).expect("a profile");
+        assert_eq!(profile, SrtpProfile::Aes128CmHmacSha1_80);
+        let material = state
+            .export_keying_material(KEYING_LABEL, &[], profile.keying_material_len())
+            .unwrap();
+        SrtpSession::from_keying_material(profile, material.as_ref(), is_client).unwrap()
+    };
+    let mut client_srtp = session(&mut client, server_addr, true);
+    let mut server_srtp = session(&mut server, client_addr, false);
+
+    let mut rtp = vec![0x80, 96, 0, 1, 0, 0, 0, 1, 0x12, 0x34, 0x56, 0x78];
+    rtp.extend([0xA5; 1200]);
+    let rtcp = [0x80, 200, 0, 1, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0];
+    for server_sends in [true, false] {
+        let (from, to) = if server_sends {
+            (&mut server_srtp, &mut client_srtp)
+        } else {
+            (&mut client_srtp, &mut server_srtp)
+        };
+        let sealed = from.tx.protect_rtp(&rtp).unwrap();
+        assert_eq!(sealed.len(), rtp.len() + 10);
+        assert_ne!(sealed[12..rtp.len()], rtp[12..]);
+        assert_eq!(to.rx.unprotect_rtp(&sealed).unwrap().as_ref(), rtp);
+        let sealed = from.tx.protect_rtcp(&rtcp).unwrap();
+        assert_eq!(to.rx.unprotect_rtcp(&sealed).unwrap().as_ref(), rtcp);
+    }
+}
