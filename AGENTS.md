@@ -47,8 +47,17 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   `// SAFETY:` comment; intra-doc links (`` [`Name`] ``) for the items it names.
   Code is formatted by rustfmt and linted by clippy with warnings denied
   (`cargo clippy --workspace --all-targets -- -D warnings`); a lint is fixed in the code, never `#[allow]`ed where
-  the code can be written its way. Tests sit beside the code they test (`mod tests`, or a `tests.rs` beside a large
-  module) and are named for the behavior they hold, as a sentence.
+  the code can be written its way. Borrow before cloning: a `.clone()` is for a value that must outlive its
+  source, and a parameter is `&str`, a slice or `&T` unless the function keeps the value or runs a thread with it.
+  Integer types are sized to their domain; a conversion is `T::from` where it cannot lose and `T::try_from` where
+  it can, and `as` is left for the narrowing and sign-changing conversions of C interfaces and the pixel arithmetic
+  at them. The workspace lint table (`[workspace.lints.clippy]` in the root `Cargo.toml`, which the crates inherit
+  and pixelflux, pcmflux and the fuzz crates, built outside the workspace, repeat) refuses the rest: redundant,
+  assigned and implicit clones, needless collects, `Arc<Vec<_>>` buffers, small values passed by reference and
+  large ones by value, and widening `as` casts. A site whose alternative would cost a copy on a frame, packet or
+  sample path keeps its form under `#[expect(clippy::..., reason = "...")]`.
+  Tests sit beside the code they test (`mod tests`, or a `tests.rs` beside a large module) and are named for the
+  behavior they hold, as a sentence.
 - TypeScript (`.ts`/`.tsx`): JSDoc blocks with `@param name description`, `@returns`, `@throws`, and no types in
   the tags — the signature is the type. Props are an `interface` or `type` with a line per field. No `any`: a
   value whose shape is not known is `unknown` and narrowed before use (a wire message once, where it is parsed, by
