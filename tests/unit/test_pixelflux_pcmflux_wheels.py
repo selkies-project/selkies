@@ -55,7 +55,7 @@ for project in ("pixelflux", "pcmflux"):
     check(f"{project} opt-ins separate full-API and 3.11 stable-ABI extensions",
           'extension-module = ["python", "pyo3/extension-module"]' in cargo
           and 'abi3-extension-module = ["extension-module", "pyo3/abi3-py311"]' in cargo
-          and 'python = ["dep:pyo3"]' in cargo)
+          and re.search(r'^python = \["dep:pyo3"[,\]]', cargo, re.M) is not None)
     check(f"{project} retains full-API source builds on Python 3.9+",
           'options={"bdist_wheel": {"py_limited_api": "cp311"}} if _abi3 else {}' in setup
           and '"abi3-extension-module" if _abi3 else "extension-module"' in setup
