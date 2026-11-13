@@ -4,50 +4,115 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What the client puts on the wire for a modifier chord, under every engine that
-// describes the same physical keyboard differently. One physical action is
-// rendered as each engine reports it and driven through the real handler: the wire
-// has to come out identical, and equal to what the action means.
-//
-// The engines genuinely disagree about the Alt-position key. macOS Option is a
-// level-3 shift, and Gecko reports it as AltGraph, Blink only as altKey, WebKit as
-// a Meta key; a PC AltGr reports as AltGraph, or as Ctrl+Alt on an older engine.
-// Reading those flags to tell a level shift from a shortcut therefore gives a
-// different answer per browser, which is the defect this matrix exists to catch.
-//
-// They disagree about macOS Command too: WebKit and Gecko never deliver the keyup
-// of a key let go while Command is down, where Blink does (Safari 26, Firefox 157
-// and Chrome 154, measured from a HID keyboard).
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * What the client puts on the wire for a modifier chord, under every engine that
+ * describes the same physical keyboard differently. One physical action is
+ * rendered as each engine reports it and driven through the real handler: the wire
+ * has to come out identical, and equal to what the action means.
+ *
+ * The engines genuinely disagree about the Alt-position key. macOS Option is a
+ * level-3 shift, and Gecko reports it as AltGraph, Blink only as altKey, WebKit as
+ * a Meta key; a PC AltGr reports as AltGraph, or as Ctrl+Alt on an older engine.
+ * Reading those flags to tell a level shift from a shortcut therefore gives a
+ * different answer per browser, which is the defect this matrix exists to catch.
+ *
+ * They disagree about macOS Command too: WebKit and Gecko never deliver the keyup
+ * of a key let go while Command is down, where Blink does (Safari 26, Firefox 157
+ * and Chrome 154, measured from a HID keyboard).
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
+import type { StandIn } from './stand_in.ts';
 
-globalThis.window = globalThis;
-globalThis.document = { body: null, activeElement: null, fullscreenElement: null };
+/** An `Input` that records what it would send. */
+type AuditedInput = Input & { sent: string[] };
+
+/** The modifier flags an engine reports for the keys down. */
+interface Flags {
+    shift?: boolean;
+    ctrl?: boolean;
+    alt?: boolean;
+    meta?: boolean;
+    altGraph?: boolean;
+}
+
+/** What a step forces: a flag, or how the event came about. */
+interface Forced extends Flags {
+    replay?: boolean;
+    physical?: boolean;
+    repeat?: boolean;
+    native?: boolean;
+}
+
+/** One physical step of an action: the key, the character the layout gives it, and what is forced. */
+type Step = [action: 'down' | 'up' | 'lost', code: string, char?: string, forced?: Forced];
+
+/** How one engine on one platform describes the keyboard. */
+interface Engine {
+    platform: string;
+    ua: string;
+    chrome: boolean;
+    /** Whether its events are trusted; true where absent. */
+    trusted?: boolean;
+    /** The modifier codes it names differently. */
+    key?: Record<string, string>;
+    /** The modifier flags it reports for the codes physically down. */
+    flags: (down: Set<string>) => Flags;
+}
+
+/** One physical action, the engines that can perform it, and the wire it means. */
+interface Action {
+    name: string;
+    engines: string[];
+    steps: Step[];
+    wire: string;
+}
+
+/** What a recorded key event carried. */
+interface KeyArg {
+    key: string;
+    code: string;
+    keyCode?: number;
+    alt?: boolean;
+    composing?: boolean;
+}
+
+/** One recorded event of a composition: a key event, or the text of a composition or text event. */
+type ComposeStep = ['keydown' | 'keyup', KeyArg]
+    | ['compositionstart' | 'compositionupdate' | 'compositionend' | 'textInput', string];
+
+// A page with no body yet, which no interface of the DOM describes.
+Object.assign(globalThis, {
+    window: globalThis,
+    document: { body: null, activeElement: null, fullscreenElement: null },
+});
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [keyboard-chords] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [keyboard-chords] ${label}  ${String(detail)}`);
 }
 
-const MOD_CODES = {
+const MOD_CODES: Record<string, string> = {
     ShiftLeft: 'Shift', ShiftRight: 'Shift', ControlLeft: 'Control',
     ControlRight: 'Control', AltLeft: 'Alt', AltRight: 'Alt',
     MetaLeft: 'Meta', MetaRight: 'Meta',
 };
-const LOCATION = { ShiftLeft: 1, ShiftRight: 2, ControlLeft: 1, ControlRight: 2,
+const LOCATION: Record<string, number> = { ShiftLeft: 1, ShiftRight: 2, ControlLeft: 1, ControlRight: 2,
                    AltLeft: 1, AltRight: 2, MetaLeft: 1, MetaRight: 2 };
-const held = (down, side) => down.has(side + 'Left') || down.has(side + 'Right');
+const held = (down: Set<string>, side: string): boolean => down.has(side + 'Left') || down.has(side + 'Right');
 
 /**
  * How one engine on one platform describes the keyboard. `key` names the
  * modifier codes it reports differently, and `flags` turns the set of codes
  * physically down into the modifier flags it would report for them.
  */
-const ENGINES = {
+const ENGINES: Record<string, Engine> = {
     'blink-mac': {
         platform: 'MacIntel', ua: 'Mozilla/5.0 (Macintosh) Chrome/151', chrome: true,
         // Option reaches Blink as optionKey, which it maps to kAltKey alone.
@@ -88,19 +153,20 @@ const ENGINES = {
     },
 };
 
-function setPlatform(engine) {
+/** Stands the page on an engine's platform. */
+function setPlatform(engine: Engine): void {
     Object.defineProperty(globalThis, 'navigator', {
         value: { platform: engine.platform, userAgent: engine.ua,
-                 userAgentData: engine.chrome ? { brands: [{ brand: 'Google Chrome' }] } : undefined },
+                 userAgentData: engine.chrome ? { brands: [{ brand: 'Google Chrome' }] } : undefined } satisfies StandIn<Navigator>,
         configurable: true, writable: true });
-    globalThis.chrome = engine.chrome ? { runtime: {} } : undefined;
+    Object.assign(globalThis, { chrome: (engine.chrome ? { runtime: {} } : undefined) satisfies Window['chrome'] });
 }
 
 /** An Input with only what the key handlers touch, capturing what it would send. */
-function makeInput() {
-    const input = Object.create(Input.prototype);
+function makeInput(): AuditedInput {
+    const input = Object.create(Input.prototype) as AuditedInput;
     input.sent = [];
-    input.send = (msg) => input.sent.push(msg);
+    input.send = (msg: string) => input.sent.push(msg);
     input._keyDownList = {};
     input._momentaryChordMods = new Set();
     input._momentaryChordModsTimer = null;
@@ -110,7 +176,7 @@ function makeInput() {
     input.isComposing = false;
     input.gamingMode = false;
     input._isSynth = false;
-    input._EVENT_MARKER = '_AUDIT_MARK';
+    input._EVENT_MARKER = '_GUAC_KEYBOARD_HANDLED_BY_0';
     input._startKeyHeartbeat = () => {};
     input._stopKeyHeartbeat = () => {};
     return input;
@@ -129,38 +195,38 @@ function makeInput() {
  * an event on a control the dashboards keep native. `opts.synth` raises
  * synthetic mode, as the dashboards do while a soft modifier is held.
  */
-function wire(engineName, steps, opts = {}) {
+function wire(engineName: string, steps: Step[], opts: { synth?: boolean } = {}): string {
     const engine = ENGINES[engineName];
     setPlatform(engine);
     const input = makeInput();
     input._isSynth = !!opts.synth;
-    const down = new Set();
+    const down = new Set<string>();
     for (const [action, code, char, forced] of steps) {
         if (action === 'down') down.add(code); else down.delete(code);
         if (action === 'lost') continue;
         const { replay, physical, repeat, native, ...override } = forced || {};
-        const flags = {
+        const flags: Flags = {
             shift: held(down, 'Shift'), ctrl: held(down, 'Control'),
             alt: held(down, 'Alt'), meta: held(down, 'Meta'),
             ...engine.flags(down), ...override,
         };
         const key = char !== undefined ? char
             : ((engine.key && engine.key[code]) || MOD_CODES[code] || code);
-        const state = { Alt: flags.alt, Control: flags.ctrl, Meta: flags.meta,
+        const state: Record<string, boolean | undefined> = { Alt: flags.alt, Control: flags.ctrl, Meta: flags.meta,
                         Shift: flags.shift, AltGraph: flags.altGraph };
         const event = {
             key, code, location: LOCATION[code] || 0, keyCode: 0, isComposing: false,
             timeStamp: 0, repeat: !!repeat,
             isTrusted: physical === true || (!replay && engine.trusted !== false),
             altKey: flags.alt, ctrlKey: flags.ctrl, metaKey: flags.meta, shiftKey: flags.shift,
-            target: { classList: { contains: (name) => !!native && name === 'allow-native-input' },
+            target: { classList: { contains: (name: string) => !!native && name === 'allow-native-input' },
                       parentElement: null },
-            getModifierState: (name) => !!state[name],
+            getModifierState: (name: string) => !!state[name],
             preventDefault() {}, stopPropagation() {},
-        };
+        } as StandIn<KeyboardEvent>;
         if (replay) event.__selkiesClipReplay = true;
-        if (action === 'down') input._handleKeyDown(event);
-        else input._handleKeyUp(event);
+        if (action === 'down') input._handleKeyDown(event as KeyboardEvent);
+        else input._handleKeyUp(event as KeyboardEvent);
     }
     clearTimeout(input._momentaryChordModsTimer);
     return input.sent.join(' ');
@@ -174,7 +240,7 @@ const XK = { Alt_L: 65513, Mode_switch: 65406, ISO_Level3_Shift: 65027, Control_
  * One physical action, the engines that can perform it, and the wire it means.
  * Every engine listed has to produce that same wire, whatever it calls Option.
  */
-const ACTIONS = [
+const ACTIONS: Action[] = [
     // -- macOS: Option is the layout's level-3 shift, and the client sends it
     // -- as one, so a chord that produced a character carries the character.
     { name: 'Option+Z types the omega it produced',
@@ -330,15 +396,15 @@ const ACTIONS = [
 
 // The left Option is Mode_switch and a PC AltGr is ISO_Level3_Shift; both are
 // the level-3 shift, and which one an action gets is the platform's business.
-const LEVEL3 = { 'blink-mac': XK.Mode_switch, 'gecko-mac': XK.Mode_switch,
+const LEVEL3: Record<string, number | undefined> = { 'blink-mac': XK.Mode_switch, 'gecko-mac': XK.Mode_switch,
                  'webkit-mac': XK.Meta_L };
 
 for (const action of ACTIONS) {
-    const seen = new Map();
+    const seen = new Map<string, string>();
     for (const engine of action.engines) {
         seen.set(engine, wire(engine, action.steps));
     }
-    const want = action.engines.map((e) =>
+    const want = action.engines.map((e): [string, string] =>
         [e, action.wire.replaceAll('LEVEL3', String(LEVEL3[e] ?? XK.ISO_Level3_Shift))]);
     const wrong = want.filter(([e, w]) => seen.get(e) !== w);
     check(action.name, wrong.length === 0,
@@ -348,16 +414,16 @@ for (const action of ACTIONS) {
 // The same physical action reaches the server the same way whatever the browser
 // calls the Alt-position key, which is the invariant the flags cannot hold up.
 for (const action of ACTIONS) {
-    const platforms = new Map();
+    const platforms = new Map<string, Array<[string, string]>>();
     for (const engine of action.engines) {
         const family = engine.split('-')[1];
         if (!platforms.has(family)) platforms.set(family, []);
-        platforms.get(family).push([engine, wire(engine, action.steps)]);
+        platforms.get(family)!.push([engine, wire(engine, action.steps)]);
     }
     for (const [family, runs] of platforms) {
         if (runs.length < 2) continue;
         // The macOS engines differ only in which keysym they name Option with.
-        const normal = runs.map(([e, w]) =>
+        const normal = runs.map(([e, w]): [string, string] =>
             [e, w.replaceAll(String(LEVEL3[e] ?? XK.ISO_Level3_Shift), 'LEVEL3')]);
         const agreed = normal.every(([, w]) => w === normal[0][1]);
         check(`${family} engines agree on '${action.name}'`, agreed,
@@ -386,8 +452,8 @@ check('a Control whose keydown was swallowed still names the shortcut',
 
 // clipboard-sync holds a paste chord while a transfer is in flight and
 // re-dispatches it after, so the replay is the physical key, deferred.
-const paste = [['down', 'MetaLeft'], ['down', 'KeyV', 'v'], ['up', 'KeyV', 'v']];
-const replayed = [['down', 'MetaLeft'], ['down', 'KeyV', 'v', { replay: true }],
+const paste: Step[] = [['down', 'MetaLeft'], ['down', 'KeyV', 'v'], ['up', 'KeyV', 'v']];
+const replayed: Step[] = [['down', 'MetaLeft'], ['down', 'KeyV', 'v', { replay: true }],
                   ['up', 'KeyV', 'v', { replay: true }]];
 const replayedPaste = wire('blink-mac', replayed);
 const physicalPaste = wire('blink-mac', paste);
@@ -405,7 +471,7 @@ check('a soft modifier survives a physical key pressed under it',
 
 // macOS Command: remapped to Control by default, and sent as the Super it is
 // when the session's window manager wants that modifier for itself.
-const cmdChord = [['down', 'MetaLeft'], ['down', 'KeyC', 'c']];
+const cmdChord: Step[] = [['down', 'MetaLeft'], ['down', 'KeyC', 'c']];
 const asCtrl = wire('blink-mac', cmdChord);
 check('Cmd+C reaches the server as its Ctrl chord while the setting is on',
       asCtrl === `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99 ku,99`, asCtrl);
@@ -429,7 +495,7 @@ check('the setting back on restores the Ctrl chord',
 // in their order: Blink's dead keydown comes before the composition it starts,
 // and WebKit commits the letter with no update before it and then reports the
 // keydown.
-const DEAD_KEY = {
+const DEAD_KEY: Record<string, ComposeStep[]> = {
     'blink-mac': [
         ['keydown', { key: 'Alt', code: 'AltLeft', alt: true }],
         ['keydown', { key: 'Dead', code: 'KeyE', alt: true, keyCode: 229 }],
@@ -453,7 +519,7 @@ const DEAD_KEY = {
 };
 
 /** Runs recorded key and composition events through the handlers and returns the wire. */
-async function compose(engineName, steps) {
+async function compose(engineName: string, steps: ComposeStep[]): Promise<string[]> {
     setPlatform(ENGINES[engineName]);
     const input = makeInput();
     input.compositionString = '';
@@ -468,12 +534,12 @@ async function compose(engineName, steps) {
             const event = { ...base, key: arg.key, code: arg.code, location: LOCATION[arg.code] || 0,
                             keyCode: arg.keyCode || 0, isComposing: !!arg.composing, repeat: false,
                             altKey: !!arg.alt, ctrlKey: false, metaKey: false, shiftKey: false,
-                            getModifierState: (name) => name === 'Alt' && !!arg.alt };
+                            getModifierState: (name: string) => name === 'Alt' && !!arg.alt } as StandIn<KeyboardEvent> as KeyboardEvent;
             if (type === 'keydown') input._handleKeyDown(event); else input._handleKeyUp(event);
-        } else if (type === 'compositionstart') input._compositionStart({ ...base, data: arg });
-        else if (type === 'compositionupdate') input._compositionUpdate({ ...base, data: arg });
-        else if (type === 'compositionend') input._compositionEnd({ ...base, data: arg });
-        else input._handleTextInput({ ...base, data: arg });
+        } else if (type === 'compositionstart') input._compositionStart({ ...base, data: arg } as StandIn<CompositionEvent> as CompositionEvent);
+        else if (type === 'compositionupdate') input._compositionUpdate({ ...base, data: arg } as StandIn<CompositionEvent> as CompositionEvent);
+        else if (type === 'compositionend') input._compositionEnd({ ...base, data: arg } as StandIn<CompositionEvent> as CompositionEvent);
+        else input._handleTextInput({ ...base, data: arg } as StandIn<InputEvent> as InputEvent);
     }
     // The chord a composition held back goes out on a timer once it ends.
     await new Promise((resolve) => { setTimeout(resolve, 10); });
@@ -481,8 +547,8 @@ async function compose(engineName, steps) {
 }
 
 /** What a wire of presses leaves typed, a BackSpace erasing the character before it. */
-function typed(sent) {
-    const text = [];
+function typed(sent: string[]): string {
+    const text: string[] = [];
     for (const msg of sent) {
         const [verb, keysym] = msg.split(',');
         if (verb !== 'kd') continue;

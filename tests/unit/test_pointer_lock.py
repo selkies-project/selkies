@@ -11,8 +11,8 @@ NotSupportedError -- which
 must still end in a lock, must not be mistaken for a real failure, and must not
 slip past the guards its caller checked before it asked -- gaming mode among
 them, since plain fullscreen leaves the pointer to the browser. The checks live
-in tests/tools/pointer_lock_audit.mjs, because the path under test is
-JavaScript.
+in tests/tools/pointer_lock_audit.ts, because the path under test is
+TypeScript.
 """
 import os
 import shutil
@@ -20,7 +20,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "pointer_lock_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "pointer_lock_audit.ts")
 
 node = shutil.which("node")
 if not node:

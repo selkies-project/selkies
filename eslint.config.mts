@@ -23,16 +23,10 @@ const rules = {
 
 export default [
   {
-    // The audits run in Node over the web core's browser modules, stubbing
-    // the browser globals those touch.
-    files: ['tests/tools/**/*.mjs'],
-    languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: { ...globals.node, ...globals.browser } },
-    rules,
-  },
-  {
-    // TypeScript Node runs with the types stripped, the audits, the site's
-    // build scripts and configs, and this config, held to the type-checked
-    // rules through the projects that compile them.
+    // TypeScript Node runs with the types stripped, held to the type-checked
+    // rules through the projects that compile them: the audits, which run the
+    // web core's browser modules over stand-ins for the browser globals those
+    // touch, the site's build scripts and configs, and this config.
     files: [
       'tests/tools/**/*.ts',
       'website/scripts/**/*.ts',

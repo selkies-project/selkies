@@ -44,17 +44,60 @@ const CORE = join(WEB, 'selkies-ws-core.ts');
 const WEBCAM = join(WEB, 'lib', 'webcam-capture.ts');
 
 /** A web-core source as the JavaScript its types strip to, which is what a worker runs. */
-const readSource = (file) => stripTypeScriptTypes(readFileSync(file, 'utf8'));
+const readSource = (file: string): string => stripTypeScriptTypes(readFileSync(file, 'utf8'));
+
+/** What a worker posts: the fields of its messages the checks read. */
+interface WorkerMessage {
+    type?: string;
+    mode?: string;
+    track?: object;
+    jpegDecode?: boolean;
+    shown?: { presented: number; superseded: number };
+}
+
+/** One `postMessage` of the video worker. */
+interface Post {
+    msg: WorkerMessage;
+    transfer?: unknown[];
+}
+
+/** A worker's message handler, as the worker leaves it on `self`. */
+type Handler = ((event: { data: object }) => void) | null;
+
+/** What a run of the video worker left behind. */
+interface WorkerRun {
+    constructed: boolean;
+    readReadable: boolean;
+    posts: Post[];
+    onmessage?: Handler;
+}
+
+/** What a run of the webcam's encode worker left behind. */
+interface EncodeRun {
+    posts: Array<WorkerMessage | undefined>;
+    processorTrack: object | null;
+    track?: object;
+}
+
+/** A decoded frame that counts its closes. */
+interface CountedFrame {
+    id: number;
+    displayWidth: number;
+    displayHeight: number;
+    timestamp: number;
+    closes: number;
+    close(): void;
+}
 
 let passed = 0, failed = 0;
-const check = (label, ok, detail = '') => {
-    (ok ? passed++ : failed++);
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [track-generator] ${label}  ${detail}`);
+const check = (label: string, ok: boolean | undefined, detail: unknown = ''): void => {
+    if (ok) passed++; else failed++;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [track-generator] ${label}  ${String(detail)}`);
 };
 
 /** Where `name` is declared in `text`: a `const` or a function, exported or
  *  not, with the offset of its value and of the declaration itself. */
-function declarationAt(text, name) {
+function declarationAt(text: string, name: string): { from: number; value: number } {
     const m = new RegExp(`(?:export\\s+)?(?:const|function)\\s+${name}\\s*(=\\s*|\\()`).exec(text);
     if (!m) throw new Error(`${name} not found`);
     const from = m.index + (m[0].startsWith('export ') ? 'export '.length : 0);
@@ -63,7 +106,7 @@ function declarationAt(text, name) {
 
 /** The declaration of `name`, to the brace that closes it, so a helper the
  *  page splices into a worker comes over whole and stays a valid expression. */
-function declaration(text, name) {
+function declaration(text: string, name: string): string {
     const { from } = declarationAt(text, name);
     let depth = 0, seen = false;
     for (let i = from; i < text.length; i++) {
@@ -75,7 +118,7 @@ function declaration(text, name) {
 }
 
 /** The value `name` is declared with, up to the semicolon that ends it. */
-function literal(text, name) {
+function literal(text: string, name: string): string {
     const { value } = declarationAt(text, name);
     let depth = 0;
     for (let i = value; i < text.length; i++) {
@@ -88,17 +131,17 @@ function literal(text, name) {
 }
 
 /** Helpers a worker source splices in that its own module imports. */
-const IMPORTED = { createStripeClock, createChunkStamp, createFrameFit, createPresentMeter, isSkiaWebKit };
+const IMPORTED: Record<string, (...args: never[]) => unknown> = { createStripeClock, createChunkStamp, createFrameFit, createPresentMeter, isSkiaWebKit };
 
 /** Module sources a worker splices in whole, by their `?raw` import name. */
-const RAW_SOURCES = {
+const RAW_SOURCES: Record<string, () => string> = {
     wireCodecsSource: () => readSource(join(WEB, 'lib', 'wire-codecs.ts')).replace(/^export /gm, ''),
     decodeGateSource: () => readSource(join(WEB, 'lib', 'decode-gate.ts')).replace(/^export /gm, ''),
     decodePaceSource: () => readSource(join(WEB, 'lib', 'decode-pace.ts')).replace(/^export /gm, ''),
 };
 
 /** Resolves one `${...}` the client would have interpolated. */
-function splice(text, token) {
+function splice(text: string, token: string): string {
     let m = token.match(/^(\w+)\.replace\(\/\^export \/gm, ''\)$/);
     if (m && RAW_SOURCES[m[1]]) return RAW_SOURCES[m[1]]();
     m = token.match(/^(\w+)\.toString\(\)$/);
@@ -120,7 +163,7 @@ function splice(text, token) {
  * out of the same module, and the template's own escapes are resolved by
  * evaluating it as one.
  */
-function workerSource(text, name) {
+function workerSource(text: string, name: string): string {
     const open = text.indexOf(`const ${name} = \``);
     if (open < 0) throw new Error(`${name} not found`);
     const start = text.indexOf('`', open) + 1;
@@ -139,22 +182,25 @@ function workerSource(text, name) {
     // declares the same names it interpolates, and a search over the whole
     // file would answer with the placeholder instead of the value.
     const outside = text.slice(0, open) + text.slice(end);
-    const values = [];
-    body = body.replace(/(^|[^\\])\$\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g, (whole, lead, token) => {
+    const values: string[] = [];
+    body = body.replace(/(^|[^\\])\$\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g, (whole, lead: string, token: string) => {
         values.push(splice(outside, token));
         return `${lead}__SPLICE${values.length - 1}__`;
     });
     // The module holds this as a template literal, so its `\$` and backtick
     // escapes are the outer template's; evaluating one resolves them exactly.
-    body = new Function('return `' + body + '`;')();
+    body = vm.runInThisContext('`' + body + '`') as string;
     return values.reduce((out, value, i) => out.replace(`__SPLICE${i}__`, () => value), body);
 }
 
 /** An IDL-faithful `VideoTrackGenerator`: no constructor arguments, a
  *  `WritableStream` and a `MediaStreamTrack`, and nothing else. */
-function generatorStub(state) {
+function generatorStub(state: WorkerRun): new (...args: unknown[]) => object {
     return class VideoTrackGenerator {
-        constructor(...args) {
+        writable: WritableStream;
+        track: object;
+        muted: boolean;
+        constructor(...args: unknown[]) {
             if (args.length) throw new TypeError('VideoTrackGenerator takes no arguments');
             state.constructed = true;
             this.writable = new WritableStream({ write: () => {} });
@@ -167,9 +213,9 @@ function generatorStub(state) {
 
 /** Evaluates the worker source with a dedicated worker's globals, over which
  *  `globals` goes; returns what it posted and whether it built a generator. */
-function runWorker({ withGenerator, globals = {} }) {
-    const state = { constructed: false, readReadable: false, posts: [] };
-    const scope = {
+function runWorker({ withGenerator, globals = {} }: { withGenerator: boolean; globals?: Record<string, unknown> }): WorkerRun {
+    const state: WorkerRun = { constructed: false, readReadable: false, posts: [] };
+    const scope: Record<string, unknown> = {
         VideoDecoder: class { constructor() {} },
         VideoEncoder: class {},
         VideoFrame: class { constructor() {} close() {} },
@@ -182,7 +228,7 @@ function runWorker({ withGenerator, globals = {} }) {
     };
     if (withGenerator) scope.VideoTrackGenerator = generatorStub(state);
     Object.assign(scope, globals);
-    const self = {
+    const self: { postMessage: (msg: WorkerMessage, transfer?: unknown[]) => void; onmessage: Handler } = {
         postMessage: (msg, transfer) => state.posts.push({ msg, transfer }),
         onmessage: null,
     };
@@ -217,26 +263,35 @@ check('and nothing is transferred with it',
       canvasMode && !canvasMode.transfer, canvasMode && canvasMode.transfer);
 
 /** A decoded frame that counts its closes. */
-const frame = (id) => ({ id, displayWidth: 1280, displayHeight: 800, timestamp: id, closes: 0,
+const frame = (id: number): CountedFrame => ({ id, displayWidth: 1280, displayHeight: 800, timestamp: id, closes: 0,
                          close() { this.closes++; } });
 /** The worker's clock, which a draw advances by what it costs. */
 let clock = 1000;
 const DRAW_MS = 10, FRAME_MS = 16.7;
-const decoders = [], draws = [];
+/** A decoder the worker made: what it was made with, and its state. */
+interface FakeDecoder {
+    init: { output: (frame: CountedFrame) => void };
+    state: string;
+    decodeQueueSize: number;
+}
+const decoders: FakeDecoder[] = [], draws: number[] = [];
 const sink = runWorker({ withGenerator: false, globals: {
     performance: { now: () => clock, timeOrigin: 0 },
-    VideoDecoder: class {
-        constructor(init) { this.init = init; this.state = 'unconfigured'; this.decodeQueueSize = 0; decoders.push(this); }
+    VideoDecoder: class implements FakeDecoder {
+        init: FakeDecoder['init'];
+        state = 'unconfigured';
+        decodeQueueSize = 0;
+        constructor(init: FakeDecoder['init']) { this.init = init; decoders.push(this); }
         configure() { this.state = 'configured'; }
         decode() {}
         close() { this.state = 'closed'; }
         static isConfigSupported() { return Promise.resolve({ supported: true }); }
     },
 } });
-const tell = (data) => sink.onmessage({ data });
+const tell = (data: object): void => sink.onmessage!({ data });
 tell({ canvas: { width: 300, height: 150, getContext: () => ({
     // A browser refuses to draw a closed frame.
-    drawImage: (f) => {
+    drawImage: (f: CountedFrame) => {
         if (f.closes) throw new Error(`frame ${f.id} drawn after its close`);
         draws.push(f.id);
         clock += DRAW_MS;
@@ -244,8 +299,8 @@ tell({ canvas: { width: 300, height: 150, getContext: () => ({
 }) } });
 tell({ type: 'statsOpen', open: true });
 tell({ type: 'decoderConfig', codec: 'avc1.42e01f', codedWidth: 1280, codedHeight: 800 });
-const decoded = (f) => decoders[decoders.length - 1].init.output(f);
-const nextTask = () => new Promise((resolve) => setTimeout(resolve, 5));
+const decoded = (f: CountedFrame): void => decoders[decoders.length - 1].init.output(f);
+const nextTask = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
 
 const kept = [frame(1), frame(2)];
 decoded(kept[0]);
@@ -271,7 +326,7 @@ check('a frame its decoder left behind is dropped, never drawn over what replace
 tell({ type: 'decodeStats' });
 const stats = sink.posts.filter((p) => p.msg && p.msg.type === 'decodeStats').pop();
 check('the frames it never drew count as not shown',
-      stats && stats.msg.shown.presented === 4 && stats.msg.shown.superseded === 3,
+      stats && stats.msg.shown!.presented === 4 && stats.msg.shown!.superseded === 3,
       stats && JSON.stringify(stats.msg.shown));
 const all = [...kept, ...burst, paced, stale];
 check('every frame is closed exactly once, drawn or not', all.every((f) => f.closes === 1), all.map((f) => f.closes));
@@ -281,9 +336,10 @@ check('and the page hears once that the canvas holds a picture',
 
 /** An IDL-faithful `MediaStreamTrackProcessor`: a dictionary carrying a video
  *  track, and a `ReadableStream` of frames. */
-function processorStub(state) {
+function processorStub(state: EncodeRun): new (init?: { track?: object }) => object {
     return class MediaStreamTrackProcessor {
-        constructor(init) {
+        readable: ReadableStream;
+        constructor(init?: { track?: object }) {
             if (!init || typeof init !== 'object' || !init.track) {
                 throw new TypeError('MediaStreamTrackProcessor takes { track }');
             }
@@ -294,9 +350,9 @@ function processorStub(state) {
 }
 
 /** Runs the webcam's encode worker and hands it a transferred camera track. */
-function runEncodeWorker({ withProcessor }) {
-    const state = { posts: [], processorTrack: null };
-    const scope = {
+function runEncodeWorker({ withProcessor }: { withProcessor: boolean }): EncodeRun {
+    const state: EncodeRun = { posts: [], processorTrack: null };
+    const scope: Record<string, unknown> = {
         VideoEncoder: class { constructor() {} static isConfigSupported() { return Promise.resolve({ supported: false }); } },
         VideoFrame: class { constructor() {} close() {} },
         OffscreenCanvas: class { constructor() {} getContext() { return null; } },
@@ -306,14 +362,15 @@ function runEncodeWorker({ withProcessor }) {
         console,
     };
     if (withProcessor) scope.MediaStreamTrackProcessor = processorStub(state);
-    const self = { postMessage: (msg) => state.posts.push(msg), onmessage: null };
+    const self: { postMessage: (msg?: WorkerMessage) => void; onmessage: Handler } = {
+        postMessage: (msg) => state.posts.push(msg), onmessage: null };
     Object.assign(self, scope);
     scope.self = self;
     vm.createContext(scope);
     new vm.Script(workerSource(readSource(WEBCAM), 'ENCODE_WORKER_SRC'),
                   { filename: 'encode-worker.js' }).runInContext(scope);
     const track = { kind: 'video', __mediaStreamTrack: true };
-    self.onmessage({ data: { type: 'track', track } });
+    self.onmessage!({ data: { type: 'track', track } });
     state.track = track;
     return state;
 }

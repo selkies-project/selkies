@@ -57,7 +57,7 @@ fi
 # root, with the same ESLint.
 echo "eslint: tests/tools tests/browserstack website tests/image/site eslint.config.mts"
 web/selkies-dashboard/node_modules/.bin/eslint --flag "${flag}" --max-warnings 0 \
-    'tests/tools/**/*.mjs' 'tests/tools/**/*.ts' 'tests/browserstack/*.ts' 'website/scripts/**/*.ts' \
+    'tests/tools/**/*.ts' 'tests/browserstack/*.ts' 'website/scripts/**/*.ts' \
     website/next.config.ts website/postcss.config.ts 'tests/image/site/**/*.js' eslint.config.mts
 
 # The dashboard's own build runs tsc as well, but that is downstream of this gate.

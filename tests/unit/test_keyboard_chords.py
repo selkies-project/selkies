@@ -11,7 +11,7 @@ server as Alt+z instead of the omega it produced. The checks drive one physical
 action through the real handler once per engine and require the same wire from
 each, so an engine that describes the keyboard in a new way fails here rather
 than losing someone's keystrokes. They live in
-tests/tools/keyboard_chord_audit.mjs, because the path under test is JavaScript.
+tests/tools/keyboard_chord_audit.ts, because the path under test is TypeScript.
 """
 import os
 import shutil
@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "keyboard_chord_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "keyboard_chord_audit.ts")
 
 node = shutil.which("node")
 if not node:

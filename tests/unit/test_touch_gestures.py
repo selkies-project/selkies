@@ -4,8 +4,8 @@
 Trackpad mode turns a touchscreen into a laptop touchpad, and the direct mode
 maps it onto the pointer; both decide from a stream of touch events what a
 gesture was, and when. The checks drive the client's own handlers on a virtual
-clock and read the messages it sends, in tests/tools/touch_gesture_audit.mjs,
-because the path under test is JavaScript.
+clock and read the messages it sends, in tests/tools/touch_gesture_audit.ts,
+because the path under test is TypeScript.
 """
 import os
 import shutil
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "touch_gesture_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "touch_gesture_audit.ts")
 
 node = shutil.which("node")
 if not node:

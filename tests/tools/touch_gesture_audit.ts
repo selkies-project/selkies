@@ -4,40 +4,47 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What the client puts on the wire for touch gestures, on a virtual clock.
-// Trackpad mode turns a touchscreen into a laptop touchpad: a tap has to click
-// as the finger lifts, since holding the press back until the double-tap window
-// closes is latency every click pays, and only the release may wait on what the
-// next touch turns out to be -- a drag, or the second click of a double click.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * What the client puts on the wire for touch gestures, on a virtual clock.
+ * Trackpad mode turns a touchscreen into a laptop touchpad: a tap has to click
+ * as the finger lifts, since holding the press back until the double-tap window
+ * closes is latency every click pays, and only the release may wait on what the
+ * next touch turns out to be -- a drag, or the second click of a double click.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
+import type { StandIn, VirtualTimer } from './stand_in.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [touch-gestures] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [touch-gestures] ${label}  ${String(detail)}`);
 }
 
 // --- a virtual clock --------------------------------------------------------
 let now = 1000;
-let timers = [];
+let timers: VirtualTimer[] = [];
 let timerSeq = 0;
 Object.defineProperty(globalThis, 'performance', { value: { now: () => now }, configurable: true });
-globalThis.setTimeout = (fn, ms = 0) => {
-    const id = ++timerSeq;
-    timers.push({ id, at: now + Math.max(0, ms), fn });
-    return id;
-};
-globalThis.clearTimeout = (id) => { timers = timers.filter((t) => t.id !== id); };
-globalThis.setInterval = () => 0;
-globalThis.clearInterval = () => {};
+Object.assign(globalThis, {
+    setTimeout: (fn: () => void, ms = 0) => {
+        const id = ++timerSeq;
+        timers.push({ id, at: now + Math.max(0, ms), fn });
+        return id;
+    },
+    clearTimeout: (id: number) => { timers = timers.filter((t) => t.id !== id); },
+    setInterval: () => 0,
+    clearInterval: () => {},
+});
 Date.now = () => now;
 
 /** Runs every timer due within `ms`, in order, then leaves the clock there. */
-function advance(ms) {
+function advance(ms: number): void {
     const end = now + ms;
     for (;;) {
         timers.sort((a, b) => a.at - b.at || a.id - b.id);
@@ -51,7 +58,7 @@ function advance(ms) {
 }
 
 /** Holds the main thread for `ms`: the timers that fell due meanwhile run late, as it frees. */
-function stall(ms) {
+function stall(ms: number): void {
     now += ms;
     const due = timers.filter((t) => t.at <= now).sort((a, b) => a.at - b.at || a.id - b.id);
     timers = timers.filter((t) => t.at > now);
@@ -59,7 +66,7 @@ function stall(ms) {
 }
 
 // --- a page with nothing but an overlay element -----------------------------
-const element = {
+const element: StandIn<HTMLElement> = {
     style: { setProperty() {} },
     classList: { contains: () => false },
     contains: (node) => node === element,
@@ -68,25 +75,51 @@ const element = {
     offsetHeight: 720,
     focus() {},
 };
-globalThis.window = {
-    devicePixelRatio: 1,
-    requestAnimationFrame: () => 0,
-    addEventListener() {},
-    removeEventListener() {},
-    location: { origin: 'http://localhost' },
-};
-globalThis.document = {
-    createElement: () => ({ style: {}, getContext: () => ({}) }),
-    body: { appendChild() {} },
-    getElementById: () => null,
-    pointerLockElement: null,
-    activeElement: null,
-};
+Object.assign(globalThis, {
+    window: {
+        devicePixelRatio: 1,
+        requestAnimationFrame: () => 0,
+        addEventListener() {},
+        removeEventListener() {},
+        location: { origin: 'http://localhost' },
+    } satisfies StandIn<Window>,
+});
+Object.assign(globalThis, {
+    document: {
+        createElement: () => ({ style: {}, getContext: () => ({}) }) satisfies StandIn<HTMLCanvasElement>,
+        body: { appendChild() {} },
+        getElementById: () => null,
+        pointerLockElement: null,
+        activeElement: null,
+    } satisfies StandIn<Document>,
+});
+
+/** What an input sent, with when on the audit's clock. */
+type Sent = Array<[at: number, message: string]>;
+
+/** One finger of a touch event. */
+interface Finger {
+    identifier: number;
+    clientX: number;
+    clientY: number;
+    screenX: number;
+    screenY: number;
+    /** `stylus` where iPadOS reports a Pencil. */
+    touchType?: string;
+}
+
+/** Scroll notches per direction. */
+interface Notches {
+    down: number;
+    up: number;
+    left: number;
+    right: number;
+}
 
 /** A fresh Input in trackpad mode (or direct touch), recording what it sends. */
-function makeInput(trackpad = true) {
-    const sent = [];
-    const input = new Input(element, (msg) => sent.push([now, msg]));
+function makeInput(trackpad = true): { input: Input; sent: Sent } {
+    const sent: Sent = [];
+    const input = new Input(element as HTMLElement, (msg) => sent.push([now, msg]));
     input.sendMotion = (msg) => sent.push([now, msg]);
     input.inputAttached = true;
     input.setTrackpadMode(trackpad);
@@ -94,23 +127,23 @@ function makeInput(trackpad = true) {
     return { input, sent };
 }
 
-const touch = (id, x, y) => ({ identifier: id, clientX: x, clientY: y, screenX: x, screenY: y });
+const touch = (id: number, x: number, y: number): Finger => ({ identifier: id, clientX: x, clientY: y, screenX: x, screenY: y });
 
 /**
  * Dispatches one touch event of `type` whose changed touches are `changed` and whose live touches
  * are `live`, stamped with the clock or with `stamp`, when the finger moved before its handler ran.
  */
-function fire(input, type, changed, live, stamp = now) {
+function fire(input: Input, type: string, changed: Finger[], live: Finger[], stamp = now): void {
     const event = {
         type, changedTouches: changed, touches: live, target: element, timeStamp: stamp,
         preventDefault() {}, stopPropagation() {},
     };
-    input._handleTouchEvent(event);
+    input._handleTouchEvent(event as StandIn<TouchEvent> as TouchEvent);
 }
 
 /** The left-button transitions on the wire, as [time, 'down'|'up'], from the mask each message carries. */
-function leftTransitions(sent, bit = 1) {
-    const out = [];
+function leftTransitions(sent: Sent, bit = 1): Array<[at: number, edge: string]> {
+    const out: Array<[at: number, edge: string]> = [];
     let held = false;
     for (const [t, msg] of sent) {
         const p = msg.split(',');
@@ -214,15 +247,15 @@ function leftTransitions(sent, bit = 1) {
 // --- two-finger scroll follows finger travel -------------------------------
 
 /** Scroll notches on the wire per direction, from each rising edge of a scroll bit times its magnitude. */
-function notches(sent) {
-    const bits = { down: 8, up: 16, left: 64, right: 128 };
-    const out = { down: 0, up: 0, left: 0, right: 0 };
+function notches(sent: Sent): Notches {
+    const bits: Notches = { down: 8, up: 16, left: 64, right: 128 };
+    const out: Notches = { down: 0, up: 0, left: 0, right: 0 };
     let prev = 0;
     for (const [, msg] of sent) {
         const p = msg.split(',');
         if (p[0] !== 'm' && p[0] !== 'm2') continue;
         const mask = Number(p[3]);
-        for (const [name, bit] of Object.entries(bits)) {
+        for (const [name, bit] of Object.entries(bits) as Array<[keyof Notches, number]>) {
             if ((mask & bit) && !(prev & bit)) out[name] += Number(p[4]);
         }
         prev = mask;
@@ -231,7 +264,7 @@ function notches(sent) {
 }
 
 /** Two fingers 100 px apart travel (dx, dy) in `steps` equal touchmoves. */
-function swipe(input, dx, dy, steps, x0 = 400, y0 = 500) {
+function swipe(input: Input, dx: number, dy: number, steps: number, x0 = 400, y0 = 500): void {
     const a = touch(1, x0, y0);
     const b = touch(2, x0 + 100, y0);
     fire(input, 'touchstart', [a], [a]);
@@ -252,8 +285,9 @@ function swipe(input, dx, dy, steps, x0 = 400, y0 = 500) {
 
 for (const trackpad of [true, false]) {
     const mode = trackpad ? 'trackpad' : 'direct touch';
-    const counts = [];
-    for (const [steps, label] of [[10, '10 x 20 px'], [40, '40 x 5 px'], [100, '100 x 2 px'], [200, '200 x 1 px']]) {
+    const counts: Array<[label: string, notches: Notches]> = [];
+    const strokes: Array<[steps: number, label: string]> = [[10, '10 x 20 px'], [40, '40 x 5 px'], [100, '100 x 2 px'], [200, '200 x 1 px']];
+    for (const [steps, label] of strokes) {
         const { input, sent } = makeInput(trackpad);
         swipe(input, 0, -200, steps);
         counts.push([label, notches(sent)]);
@@ -290,7 +324,7 @@ for (const trackpad of [true, false]) {
 // --- the finger left over from a multi-finger gesture ----------------------
 
 /** Net relative motion on the wire, in server pixels. */
-function travel(sent) {
+function travel(sent: Sent): [x: number, y: number] {
     let x = 0;
     let y = 0;
     for (const [, msg] of sent) {
@@ -301,7 +335,7 @@ function travel(sent) {
 }
 
 /** Two fingers scroll 100 px up, then one lifts and the other stays down. */
-function scrollThenLiftOne(input) {
+function scrollThenLiftOne(input: Input): void {
     const a = touch(1, 400, 500);
     const b = touch(2, 500, 500);
     fire(input, 'touchstart', [a], [a]);
@@ -331,7 +365,7 @@ function scrollThenLiftOne(input) {
     const moved = travel(sent);
     check('the finger left after a two-finger scroll moves the pointer again',
           moved[0] - before[0] === 100 && moved[1] === before[1], `${moved[0] - before[0]},${moved[1] - before[1]}`);
-    check('but not while the other one is still leaving', rolled[0] === 0 && rolled[1] === 0, `${rolled}`);
+    check('but not while the other one is still leaving', rolled[0] === 0 && rolled[1] === 0, `${String(rolled)}`);
     fire(input, 'touchend', [touch(1, 504, 401)], []);
     advance(500);
     const clicks = leftTransitions(sent);
@@ -388,7 +422,7 @@ function scrollThenLiftOne(input) {
             const x = 300 + (frame - 1) * 20 + 5 * i;
             const before = sent.length;
             input._handleRawPointerUpdate({ type: 'pointerrawupdate', pointerType: 'touch', isPrimary: true,
-                                            clientX: x, clientY: 300, target: element });
+                                            clientX: x, clientY: 300, target: element } as StandIn<PointerEvent> as PointerEvent);
             immediate.push(sent.length > before);
         }
         t = touch(1, 300 + frame * 20, 300);
@@ -410,7 +444,7 @@ const CONTROL_L = 0xffe3;
  * Zoom notches on the wire and whether every one went out under a Control
  * that went down just before it and up right after.
  */
-function zooms(sent) {
+function zooms(sent: Sent): { in: number; out: number; wrapped: boolean; bare: number } {
     let control = false;
     let wrapped = true;
     let prev = 0;
@@ -421,7 +455,7 @@ function zooms(sent) {
         if (p[0] === 'ku' && Number(p[1]) === CONTROL_L) control = false;
         if (p[0] !== 'm' && p[0] !== 'm2') continue;
         const mask = Number(p[3]);
-        const rise = (bit) => (mask & bit) && !(prev & bit);
+        const rise = (bit: number): boolean => (mask & bit) !== 0 && !(prev & bit);
         if (rise(16) || rise(8)) {
             if (!control) { wrapped = false; out.bare += Number(p[4]); }
             if (rise(16)) out.in += Number(p[4]); else out.out += Number(p[4]);
@@ -433,10 +467,10 @@ function zooms(sent) {
 }
 
 /** Two fingers, midpoint fixed, from `from` to `to` px apart in `steps` touchmoves. */
-function pinch(input, from, to, steps) {
+function pinch(input: Input, from: number, to: number, steps: number): void {
     const cx = 600;
     const cy = 400;
-    const at = (d) => [touch(1, cx - d / 2, cy), touch(2, cx + d / 2, cy)];
+    const at = (d: number): Finger[] => [touch(1, cx - d / 2, cy), touch(2, cx + d / 2, cy)];
     const [a0, b0] = at(from);
     fire(input, 'touchstart', [a0], [a0]);
     advance(5);
@@ -477,9 +511,9 @@ for (const trackpad of [true, false]) {
 }
 
 /** A wheel event as the page receives it. */
-const wheel = (deltaY, ctrlKey, deltaMode = 0) => ({
+const wheel = (deltaY: number, ctrlKey: boolean, deltaMode = 0): WheelEvent => ({
     type: 'wheel', deltaY, deltaX: 0, deltaMode, ctrlKey, target: element, preventDefault() {},
-});
+}) as StandIn<WheelEvent> as WheelEvent;
 {
     // Chromium's touchpad pinch: Ctrl+wheel steps of -100 ln(scale).
     const { input, sent } = makeInput(false);
@@ -521,15 +555,15 @@ const wheel = (deltaY, ctrlKey, deltaMode = 0) => ({
 // same swipe goes as far whether the digitizer reports it in 10 events or 50.
 
 /** One finger's swipe of `px` along x in `n` reports `dt` ms apart, stamped; the x travel sent. */
-function accelSwipe(px, n, dt, speed) {
+function accelSwipe(px: number, n: number, dt: number, speed?: number): number {
     const { input, sent } = makeInput();
     if (speed !== undefined) {
         if (typeof input.setTrackpadSpeed !== 'function') return NaN;
         input.setTrackpadSpeed(speed);
     }
     advance(1000);
-    const stamped = (type, t) => ({ type, changedTouches: [t], touches: type === 'touchend' ? [] : [t],
-                                    target: element, timeStamp: now, preventDefault() {}, stopPropagation() {} });
+    const stamped = (type: string, t: Finger): TouchEvent => ({ type, changedTouches: [t], touches: type === 'touchend' ? [] : [t],
+        target: element, timeStamp: now, preventDefault() {}, stopPropagation() {} }) as StandIn<TouchEvent> as TouchEvent;
     let t = touch(1, 100, 300);
     input._handleTouchEvent(stamped('touchstart', t));
     for (let i = 1; i <= n; i++) {
@@ -566,15 +600,15 @@ function accelSwipe(px, n, dt, speed) {
 // finger on the trackpad.
 
 /** A pen pointer event of `type` at (x, y), the tip down for a press and a move. */
-const pen = (type, x, y) => ({
+const pen = (type: string, x: number, y: number): PointerEvent => ({
     type, pointerType: 'pen', isPrimary: true, button: type === 'pointerup' ? 0 : (type === 'pointerdown' ? 0 : -1),
     buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, screenX: x, screenY: y,
     ctrlKey: false, shiftKey: false, target: element, timeStamp: now, preventDefault() {},
-});
-const stylus = (id, x, y) => ({ ...touch(id, x, y), touchType: 'stylus' });
+}) as StandIn<PointerEvent> as PointerEvent;
+const stylus = (id: number, x: number, y: number): Finger => ({ ...touch(id, x, y), touchType: 'stylus' });
 
 /** One Pencil tap at (x, y) as iPadOS reports it: the pen pointer events around the touch events. */
-function pencilTap(input, x, y) {
+function pencilTap(input: Input, x: number, y: number): void {
     const t = stylus(1, x, y);
     input._handlePointerDown(pen('pointerdown', x, y));
     fire(input, 'touchstart', [t], [t]);

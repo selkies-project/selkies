@@ -68,7 +68,7 @@ repos:
         entry: scripts/ci/lint-web.sh
         language: script
         pass_filenames: false
-        files: ^(web/(selkies-dashboard/.*\.(js|jsx|ts|tsx|json)|selkies-web-core/.*\.(js|mjs|ts)|universal-touch-gamepad/.*\.ts|eslint\.config\.mts)|tests/tools/.*\.(mjs|ts|json)|website/(scripts/.*\.ts|[^/]*\.(ts|json))|tests/browserstack/[^/]*\.(ts|json)|tests/image/site/.*\.js|eslint\.config\.mts)$
+        files: ^(web/(selkies-dashboard/.*\.(js|jsx|ts|tsx|json)|selkies-web-core/.*\.(js|mjs|ts)|universal-touch-gamepad/.*\.ts|eslint\.config\.mts)|tests/tools/.*\.(ts|json)|website/(scripts/.*\.ts|[^/]*\.(ts|json))|tests/browserstack/[^/]*\.(ts|json)|tests/image/site/.*\.js|eslint\.config\.mts)$
 
       - id: settings-doc
         name: settings reference (docs/settings.md)

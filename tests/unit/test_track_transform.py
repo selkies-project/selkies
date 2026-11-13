@@ -17,8 +17,8 @@ frame source. The canvas sink an engine without a generator gets runs there
 too, on frames that count their closes: it draws each frame at once while it
 keeps up and only the newest of a burst that arrives while its last draw is
 still recent, and every frame is closed exactly once. They live in
-tests/tools/track_generator_probe.mjs, because the path under test is
-JavaScript.
+tests/tools/track_generator_probe.ts, because the path under test is
+TypeScript.
 """
 import os
 import shutil
@@ -26,7 +26,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROBE = os.path.join(TESTS, "tools", "track_generator_probe.mjs")
+PROBE = os.path.join(TESTS, "tools", "track_generator_probe.ts")
 
 node = shutil.which("node")
 if not node:
