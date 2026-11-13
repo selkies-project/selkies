@@ -8,8 +8,8 @@ carry their own remainder, so on any client whose scale is not a whole number
 the deltas arrive as a stream that only adds up over several events: quantizing
 each one on its own turns that into a sensitivity error that grows with speed,
 drops slow motion entirely, and drifts on motion that should cancel out. The
-checks live in tests/tools/relative_motion_audit.mjs, because the path under
-test is JavaScript.
+checks live in tests/tools/relative_motion_audit.ts, because the path under
+test is TypeScript.
 """
 import os
 import shutil
@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "relative_motion_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "relative_motion_audit.ts")
 
 node = shutil.which("node")
 if not node:

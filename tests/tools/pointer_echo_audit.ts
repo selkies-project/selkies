@@ -4,38 +4,45 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// Where trackpad mode draws the cursor, on a virtual clock. The page asks the
-// server to echo the pointer, draws the cursor at the echo moved on by the
-// deltas it sent past the message the echo includes, and has the cursor
-// composited into the video instead when no echo comes.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * Where trackpad mode draws the cursor, on a virtual clock. The page asks the
+ * server to echo the pointer, draws the cursor at the echo moved on by the
+ * deltas it sent past the message the echo includes, and has the cursor
+ * composited into the video instead when no echo comes.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
+import type { StandIn, VirtualTimer } from './stand_in.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [pointer-echo-client] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [pointer-echo-client] ${label}  ${String(detail)}`);
 }
 
 // --- a virtual clock --------------------------------------------------------
 let now = 1000;
-let timers = [];
+let timers: VirtualTimer[] = [];
 let timerSeq = 0;
 Object.defineProperty(globalThis, 'performance', { value: { now: () => now }, configurable: true });
-globalThis.setTimeout = (fn, ms = 0) => {
-    const id = ++timerSeq;
-    timers.push({ id, at: now + Math.max(0, ms), fn });
-    return id;
-};
-globalThis.clearTimeout = (id) => { timers = timers.filter((t) => t.id !== id); };
-globalThis.setInterval = () => 0;
-globalThis.clearInterval = () => {};
+Object.assign(globalThis, {
+    setTimeout: (fn: () => void, ms = 0) => {
+        const id = ++timerSeq;
+        timers.push({ id, at: now + Math.max(0, ms), fn });
+        return id;
+    },
+    clearTimeout: (id: number) => { timers = timers.filter((t) => t.id !== id); },
+    setInterval: () => 0,
+    clearInterval: () => {},
+});
 Date.now = () => now;
 
-function advance(ms) {
+function advance(ms: number): void {
     const end = now + ms;
     for (;;) {
         timers.sort((a, b) => a.at - b.at || a.id - b.id);
@@ -49,7 +56,7 @@ function advance(ms) {
 }
 
 // --- a page whose stream fills a 1280x720 element, one stream pixel per CSS pixel
-const element = {
+const element: StandIn<HTMLElement> = {
     style: { setProperty() {} },
     classList: { contains: () => false },
     contains: (node) => node === element,
@@ -58,30 +65,34 @@ const element = {
     offsetHeight: 720,
     focus() {},
 };
-globalThis.window = {
-    devicePixelRatio: 1,
-    requestAnimationFrame: () => 0,
-    addEventListener() {},
-    removeEventListener() {},
-    location: { origin: 'http://localhost' },
-};
-globalThis.document = {
-    createElement: () => ({ style: {}, getContext: () => ({}) }),
-    body: { appendChild() {} },
-    getElementById: () => null,
-    pointerLockElement: null,
-    activeElement: null,
-};
+Object.assign(globalThis, {
+    window: {
+        devicePixelRatio: 1,
+        requestAnimationFrame: () => 0,
+        addEventListener() {},
+        removeEventListener() {},
+        location: { origin: 'http://localhost' },
+    } satisfies StandIn<Window>,
+});
+Object.assign(globalThis, {
+    document: {
+        createElement: () => ({ style: {}, getContext: () => ({}) }) satisfies StandIn<HTMLCanvasElement>,
+        body: { appendChild() {} },
+        getElementById: () => null,
+        pointerLockElement: null,
+        activeElement: null,
+    } satisfies StandIn<Document>,
+});
 
-const settle = () => new Promise((resolve) => setImmediate(resolve));
+const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /** A page in trackpad mode with a cursor image, recording what it sends. */
-async function makeInput() {
-    const sent = [];
-    const input = new Input(element, (msg) => sent.push(msg));
+async function makeInput(): Promise<{ input: Input; sent: string[] }> {
+    const sent: string[] = [];
+    const input = new Input(element as HTMLElement, (msg) => sent.push(msg));
     input.sendMotion = (msg) => sent.push(msg);
     input.inputAttached = true;
-    input._cursorImageBitmap = { width: 16, height: 16 };
+    input._cursorImageBitmap = { width: 16, height: 16 } as ImageBitmap;
     input.setTrackpadMode(true);
     input.resumePointerEcho();
     await settle();
@@ -89,13 +100,13 @@ async function makeInput() {
 }
 
 /** Where the cursor's hotspot is drawn, or null while it is hidden. */
-function cursorAt(input) {
+function cursorAt(input: Input): number[] | null {
     if (input.cursorDiv.style.display !== 'block') return null;
     const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(input.cursorDiv.style.transform || '');
     return m ? [Number(m[1]) + input.cursorHotspot.x, Number(m[2]) + input.cursorHotspot.y] : null;
 }
 
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 {
     const { input, sent } = await makeInput();
@@ -137,7 +148,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     input.onPointerEcho('pointer,primary,1279,40,1,7');
     check('until an echo names this display again', same(cursorAt(input), [1279, 40]), cursorAt(input));
 
-    input._mouseButtonMovement({ type: 'mousemove', clientX: 5, clientY: 5, target: element });
+    input._mouseButtonMovement({ type: 'mousemove', clientX: 5, clientY: 5, target: element } as StandIn<MouseEvent> as MouseEvent);
     check('a mouse over the page does not move the trackpad cursor',
           same(cursorAt(input), [1279, 40]), cursorAt(input));
 

@@ -5,8 +5,8 @@ Where the session takes a finger's scroll (Wayland), a wheel the page
 classifies as a touchpad sends its travel in stream pixels and an end once it
 pauses; a wheel's notches, line deltas, and a session that does not take one
 keep the notch pulses. The checks drive the client's own Input on a virtual
-clock, in tests/tools/finger_scroll_audit.mjs, because the path under test is
-JavaScript; the server half is test_finger_scroll.py.
+clock, in tests/tools/finger_scroll_audit.ts, because the path under test is
+TypeScript; the server half is test_finger_scroll.py.
 """
 import os
 import shutil
@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "finger_scroll_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "finger_scroll_audit.ts")
 
 node = shutil.which("node")
 if not node:

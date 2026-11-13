@@ -4,30 +4,51 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What the client releases when its page stops getting input. A press whose
-// release goes to another tab or app (a tab switched mid-press, a touch the
-// system took for a gesture) leaves the remote button down: every motion after
-// it drags, and the next press goes to a button already down and does nothing.
-// Hidden, blurred or leaving, the page lets go of every key, button and touch it
-// holds, and a touch whose end went elsewhere is forgotten when the next lands.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * What the client releases when its page stops getting input. A press whose
+ * release goes to another tab or app (a tab switched mid-press, a touch the
+ * system took for a gesture) leaves the remote button down: every motion after
+ * it drags, and the next press goes to a button already down and does nothing.
+ * Hidden, blurred or leaving, the page lets go of every key, button and touch it
+ * holds, and a touch whose end went elsewhere is forgotten when the next lands.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
+import type { StandIn } from './stand_in.ts';
+
+/** An `Input` that records what it would send and how many keys it released. */
+type AuditedInput = Input & { sent: string[]; keysReleased: number };
+/** A touch the input tracks on the surface. */
+type ActiveTouch = Parameters<Input['_activeTouches']['set']>[1];
+/** A touch the input tracks on the trackpad. */
+type TrackpadTouch = Parameters<Input['_trackpadTouches']['set']>[1];
+
+/** The stand-in document of the last input made, whose visibility a check turns. */
+let page: { pointerLockElement: object | null; visibilityState: DocumentVisibilityState } = {
+    pointerLockElement: null, visibilityState: 'visible',
+};
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [held-input] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [held-input] ${label}  ${String(detail)}`);
 }
 
-function makeInput({ locked = false } = {}) {
-    globalThis.window = { devicePixelRatio: 1, requestAnimationFrame: () => {} };
+/** An `Input` with only what the release paths touch, over a fresh window and document. */
+function makeInput({ locked = false } = {}): AuditedInput {
     const element = {};
-    globalThis.document = { pointerLockElement: locked ? element : null, visibilityState: 'visible' };
-    const input = Object.create(Input.prototype);
-    input.element = element;
+    page = { pointerLockElement: locked ? element : null, visibilityState: 'visible' };
+    Object.assign(globalThis, {
+        window: { devicePixelRatio: 1, requestAnimationFrame: () => {} } satisfies StandIn<Window>,
+        document: page satisfies StandIn<Document>,
+    });
+    const input = Object.create(Input.prototype) as AuditedInput;
+    input.element = element as HTMLElement;
     input.buttonMask = 0;
     input.x = 0;
     input.y = 0;
@@ -49,7 +70,7 @@ function makeInput({ locked = false } = {}) {
     input._stopKeyHeartbeat = () => {};
     input._sendKeyEvent = () => { input.keysReleased += 1; };
     input.sent = [];
-    input.send = (msg) => input.sent.push(msg);
+    input.send = (msg: string) => input.sent.push(msg);
     return input;
 }
 
@@ -57,7 +78,7 @@ function makeInput({ locked = false } = {}) {
     const input = makeInput();
     input.x = 640; input.y = 360; input.buttonMask = 1;
     input._keyDownList = { KeyA: 0x61 };
-    globalThis.document.visibilityState = 'hidden';
+    page.visibilityState = 'hidden';
     input._onVisibilityChange();
     check('a page hidden mid-press releases the button where the pointer is',
           input.buttonMask === 0 && input.sent.length === 1 && input.sent[0].startsWith('m,640,360,0,0,'),
@@ -68,7 +89,7 @@ function makeInput({ locked = false } = {}) {
 {
     const input = makeInput();
     input.x = 10; input.y = 20; input.buttonMask = 0;
-    globalThis.document.visibilityState = 'hidden';
+    page.visibilityState = 'hidden';
     input._onVisibilityChange();
     check('one holding no button sends no pointer message', input.sent.length === 0, JSON.stringify(input.sent));
 }
@@ -76,7 +97,7 @@ function makeInput({ locked = false } = {}) {
 {
     const input = makeInput();
     input.buttonMask = 1;
-    globalThis.document.visibilityState = 'visible';
+    page.visibilityState = 'visible';
     input._onVisibilityChange();
     check('a page shown again releases nothing', input.buttonMask === 1 && input.sent.length === 0,
           JSON.stringify(input.sent));
@@ -104,10 +125,10 @@ function makeInput({ locked = false } = {}) {
 
 {
     const input = makeInput();
-    input._activeTouches.set(7, { identifier: 7 });
+    input._activeTouches.set(7, { identifier: 7 } as ActiveTouch);
     input._isTwoFingerGesture = true;
-    input._trackpadTouches.set(3, { id: 3 });
-    globalThis.document.visibilityState = 'hidden';
+    input._trackpadTouches.set(3, { id: 3 } as TrackpadTouch);
+    page.visibilityState = 'hidden';
     input._onVisibilityChange();
     check('a page hidden mid-touch forgets the touches and the gesture in progress',
           input._activeTouches.size === 0 && input._trackpadTouches.size === 0 && !input._isTwoFingerGesture);
@@ -115,13 +136,13 @@ function makeInput({ locked = false } = {}) {
 
 // A touch whose end went elsewhere stays tracked: Edge numbers each touch anew, so the next tap is a second
 // finger, a two-finger gesture that scrolls and never clicks.
-const touchstart = (ids, changed) => ({
+const touchstart = (ids: number[], changed: number[]): TouchEvent => ({
     touches: ids.map((identifier) => ({ identifier })),
     changedTouches: changed.map((identifier) => ({ identifier })),
-});
+}) as StandIn<TouchEvent> as TouchEvent;
 {
     const input = makeInput();
-    input._activeTouches.set(11, { identifier: 11 });
+    input._activeTouches.set(11, { identifier: 11 } as ActiveTouch);
     input._activeTouchIdentifier = 11;
     input.buttonMask = 1;
     input.x = 300; input.y = 200;
@@ -132,7 +153,7 @@ const touchstart = (ids, changed) => ({
 }
 {
     const input = makeInput();
-    input._activeTouches.set(21, { identifier: 21 });
+    input._activeTouches.set(21, { identifier: 21 } as ActiveTouch);
     input._isTwoFingerGesture = false;
     input._forgetLiftedTouches(input._activeTouches, touchstart([21, 22], [22]));
     check('a finger still down is kept: the second makes the two-finger gesture it should',
@@ -140,7 +161,7 @@ const touchstart = (ids, changed) => ({
 }
 {
     const input = makeInput();
-    input._trackpadTouches.set(5, { id: 5 });
+    input._trackpadTouches.set(5, { id: 5 } as TrackpadTouch);
     input._trackpadGestureMode = 'scroll';
     input._forgetLiftedTouches(input._trackpadTouches, touchstart([6], [6]));
     check("the trackpad's touches heal the same way", input._trackpadTouches.size === 0

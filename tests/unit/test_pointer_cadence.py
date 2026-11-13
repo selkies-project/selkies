@@ -5,8 +5,8 @@ A sample has to leave as it arrives, from pointerrawupdate where the engine
 fires it, and never wait longer than the send interval, while a 1000 Hz mouse
 is thinned to one message per interval and a transport that is not draining
 gets one per frame. The checks drive the client's own handlers on a virtual
-clock and read the messages it sends, in tests/tools/pointer_cadence_audit.mjs,
-because the path under test is JavaScript.
+clock and read the messages it sends, in tests/tools/pointer_cadence_audit.ts,
+because the path under test is TypeScript.
 """
 import os
 import shutil
@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "pointer_cadence_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "pointer_cadence_audit.ts")
 
 node = shutil.which("node")
 if not node:

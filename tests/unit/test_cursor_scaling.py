@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cursor size and hotspot follow the displayed stream in both transports.
 
-The JavaScript audit drives Input with fitted and exact video/canvas sinks at
+The Node audit drives Input with fitted and exact video/canvas sinks at
 multiple densities and checks that cursor rendering does not alter input.
 """
 import os
@@ -15,7 +15,7 @@ if not node:
     print("SKIP node not found, so the cursor scaling audit cannot run", flush=True)
     sys.exit(77)
 
-result = subprocess.run([node, os.path.join(TESTS, "tools", "cursor_scaling_audit.mjs")],
+result = subprocess.run([node, os.path.join(TESTS, "tools", "cursor_scaling_audit.ts")],
                         capture_output=True, text=True, timeout=120)
 lines = [line for line in result.stdout.splitlines() if line.startswith(("PASS", "FAIL"))]
 for line in lines:

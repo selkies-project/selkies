@@ -6,8 +6,8 @@ keysym instead relies on the X keymap binding Shift as a real modifier, which a
 keymap-less server does not do -- so capitals arrive lowercase and nothing
 reports an error. The soft-input and text-echo paths share one implementation
 here so they cannot diverge again, which is how the defect survived a fix to
-only one of them. The checks live in tests/tools/client_typing_audit.mjs,
-because the paths under test are JavaScript.
+only one of them. The checks live in tests/tools/client_typing_audit.ts,
+because the paths under test are TypeScript.
 """
 import os
 import shutil
@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "client_typing_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "client_typing_audit.ts")
 
 node = shutil.which("node")
 if not node:

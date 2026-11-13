@@ -4,38 +4,50 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The dashboards' special-key palette: what a chord the user writes is read
-// as, and what reaches the wire when it is played as the synthetic key events
-// the soft keys dispatch, through the real input handler. A soft modifier the
-// user already holds has to stay held across a chord that names it too.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * The dashboards' special-key palette: what a chord the user writes is read
+ * as, and what reaches the wire when it is played as the synthetic key events
+ * the soft keys dispatch, through the real input handler. A soft modifier the
+ * user already holds has to stay held across a chord that names it too.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
 import {
     PALETTE_CHORDS, PALETTE_KEYS, chordEvents, formatChord, parseChord, readUserChords, writeUserChords,
 } from '../../web/selkies-web-core/lib/touch-controls.ts';
+import type { ChordEvent } from '../../web/selkies-web-core/lib/touch-controls.ts';
+import type { StandIn } from './stand_in.ts';
 
-globalThis.window = globalThis;
-globalThis.document = { body: null, activeElement: null, fullscreenElement: null };
+/** An `Input` that records what it would send. */
+type AuditedInput = Input & { sent: string[] };
+
+// A page with no body yet, which no interface of the DOM describes.
+Object.assign(globalThis, {
+    window: globalThis,
+    document: { body: null, activeElement: null, fullscreenElement: null },
+    chrome: { runtime: {} } satisfies Window['chrome'],
+});
 Object.defineProperty(globalThis, 'navigator', {
     value: { platform: 'Linux x86_64', userAgent: 'Mozilla/5.0 (X11; Linux) Chrome/154',
-             userAgentData: { brands: [{ brand: 'Google Chrome' }] } },
+             userAgentData: { brands: [{ brand: 'Google Chrome' }] } } satisfies StandIn<Navigator>,
     configurable: true, writable: true });
-globalThis.chrome = { runtime: {} };
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [key-palette] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [key-palette] ${label}  ${String(detail)}`);
 }
 
 /** An Input with only what the key handlers touch, capturing what it would send. */
-function makeInput() {
-    const input = Object.create(Input.prototype);
+function makeInput(): AuditedInput {
+    const input = Object.create(Input.prototype) as AuditedInput;
     input.sent = [];
-    input.send = (msg) => input.sent.push(msg);
+    input.send = (msg: string) => input.sent.push(msg);
     input._keyDownList = {};
     input._momentaryChordMods = new Set();
     input._momentaryChordModsTimer = null;
@@ -45,22 +57,22 @@ function makeInput() {
     input.isComposing = false;
     input.gamingMode = false;
     input._isSynth = true;
-    input._EVENT_MARKER = '_AUDIT_MARK';
+    input._EVENT_MARKER = '_GUAC_KEYBOARD_HANDLED_BY_0';
     input._startKeyHeartbeat = () => {};
     input._stopKeyHeartbeat = () => {};
     return input;
 }
 
 /** Plays key events the way a dashboard dispatches them: constructed, not trusted. */
-function play(input, events) {
+function play(input: AuditedInput, events: ChordEvent[]): string[] {
     for (const { type, key, code, state } of events) {
-        const event = {
+        const event = ({
             key, code, location: 0, keyCode: 0, isComposing: false, timeStamp: 0, isTrusted: false,
             altKey: !!state.Alt, ctrlKey: !!state.Control, metaKey: !!state.Meta, shiftKey: !!state.Shift,
             target: { classList: { contains: () => false }, parentElement: null },
-            getModifierState: (name) => !!state[name],
+            getModifierState: (name: string) => !!state[name],
             preventDefault() {}, stopPropagation() {},
-        };
+        }) as StandIn<KeyboardEvent> as KeyboardEvent;
         if (type === 'keydown') input._handleKeyDown(event);
         else input._handleKeyUp(event);
     }
@@ -92,13 +104,13 @@ const XK = { Control_L: 65507, Alt_L: 65513, Shift_L: 65505, Super_L: 65515, Del
 
 // --- what reaches the wire ---------------------------------------------------
 {
-    const wire = play(makeInput(), chordEvents(parseChord('Ctrl+Alt+Del')));
+    const wire = play(makeInput(), chordEvents(parseChord('Ctrl+Alt+Del')!));
     const want = [`kd,${XK.Control_L}`, `kd,${XK.Alt_L}`, `kd,${XK.Delete}`, `ku,${XK.Delete}`,
                   `ku,${XK.Alt_L}`, `ku,${XK.Control_L}`];
     check('Ctrl+Alt+Del goes out as its keys pressed in order and released in reverse',
           JSON.stringify(wire) === JSON.stringify(want), wire.join(' '));
 
-    const shifted = play(makeInput(), chordEvents(parseChord('ctrl+shift+t')));
+    const shifted = play(makeInput(), chordEvents(parseChord('ctrl+shift+t')!));
     check('a letter under Shift goes out as the capital a keyboard sends',
           shifted.includes(`kd,${XK.T}`) && shifted[0] === `kd,${XK.Control_L}` && shifted.includes(`kd,${XK.Shift_L}`),
           shifted.join(' '));
@@ -107,7 +119,7 @@ const XK = { Control_L: 65507, Alt_L: 65513, Shift_L: 65505, Super_L: 65515, Del
     const input = makeInput();
     play(input, [{ type: 'keydown', key: 'Control', code: 'ControlLeft', state: { Control: true } }]);
     input.sent.length = 0;
-    const kept = play(input, chordEvents(parseChord('Ctrl+Alt+F4'), { Control: true }));
+    const kept = play(input, chordEvents(parseChord('Ctrl+Alt+F4')!, { Control: true }));
     check('a soft modifier already held is neither pressed nor released by a chord naming it',
           !kept.some((m) => m.endsWith(`,${XK.Control_L}`)) && kept.includes(`kd,${XK.F4}`)
           && Object.keys(input._keyDownList).includes('ControlLeft'), kept.join(' '));
@@ -115,8 +127,10 @@ const XK = { Control_L: 65507, Alt_L: 65513, Shift_L: 65505, Super_L: 65515, Del
 
 // --- the user's own chords ---------------------------------------------------
 {
-    const store = new Map();
-    const storage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v) };
+    const store = new Map<string, string>();
+    const storage = {
+        getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v),
+    } as StandIn<Storage> as Storage;
     writeUserChords(storage, 'x_user_chords', ['ctrl+shift+t', 'Ctrl+Shift+T', 'nonsense', 'Win+E']);
     const back = readUserChords(storage, 'x_user_chords');
     check('the user\'s chords come back written one way, without repeats or anything unreadable',

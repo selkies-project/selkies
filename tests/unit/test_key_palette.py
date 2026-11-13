@@ -2,8 +2,8 @@
 """The touch clients' special-key palette: what a chord the user writes is read
 as, and what reaches the wire when it is played as the synthetic key events
 the dashboards' soft keys dispatch, through the real input handler. The checks
-live in tests/tools/key_palette_audit.mjs, because the path under test is
-JavaScript.
+live in tests/tools/key_palette_audit.ts, because the path under test is
+TypeScript.
 """
 import os
 import shutil
@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "key_palette_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "key_palette_audit.ts")
 
 node = shutil.which("node")
 if not node:

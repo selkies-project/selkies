@@ -4,29 +4,37 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What the client puts on the wire when text is typed, pasted, or re-typed. Both
-// text-entry paths must emit the character's OWN keysym: a capital sent as Shift plus
-// the lowercase keysym arrives lowercase wherever the X keymap names Shift without
-// binding it as a modifier, and that failure is invisible until someone types one.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * What the client puts on the wire when text is typed, pasted, or re-typed. Both
+ * text-entry paths must emit the character's OWN keysym: a capital sent as Shift plus
+ * the lowercase keysym arrives lowercase wherever the X keymap names Shift without
+ * binding it as a modifier, and that failure is invisible until someone types one.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
+import type { StandIn } from './stand_in.ts';
+
+/** An `Input` that records what it would send. */
+type AuditedInput = Input & { sent: string[] };
 
 const XK_Shift_L = 0xffe1;
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [client-typing] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [client-typing] ${label}  ${String(detail)}`);
 }
 
 /** An Input with only what the text paths touch, capturing what it would send. */
-function makeInput() {
-    const input = Object.create(Input.prototype);
+function makeInput(): AuditedInput {
+    const input = Object.create(Input.prototype) as AuditedInput;
     input.sent = [];
-    input.send = (msg) => input.sent.push(msg);
+    input.send = (msg: string) => input.sent.push(msg);
     input._momentaryChordMods = new Set();
     input._keyDownList = {};
     input._assistTyped = '';
@@ -36,20 +44,22 @@ function makeInput() {
 }
 
 /** The keysyms pressed, in order, from a captured wire sequence. */
-function pressed(sent) {
+function pressed(sent: string[]): number[] {
     return sent.filter((m) => m.startsWith('kd,')).map((m) => Number(m.slice(3)));
 }
 
-function typeMobile(text, input = makeInput()) {
+/** Types `text` through the soft-input field. */
+function typeMobile(text: string, input = makeInput()): { sent: string[]; target: { value: string } } {
     const target = { value: text };
-    input.keyboardInputAssist = target;
-    input._handleMobileInput({ target });
+    input.keyboardInputAssist = target as StandIn<HTMLInputElement> as HTMLInputElement;
+    input._handleMobileInput({ target } as StandIn<InputEvent> as InputEvent);
     return { sent: input.sent, target };
 }
 
-function typeText(text) {
+/** Types `text` through the text-echo path. */
+function typeText(text: string): { sent: string[] } {
     const input = makeInput();
-    input._handleTextInput({ data: text });
+    input._handleTextInput({ data: text } as StandIn<InputEvent> as InputEvent);
     return { sent: input.sent };
 }
 

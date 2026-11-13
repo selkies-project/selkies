@@ -8,7 +8,7 @@ elsewhere counted as a finger down for good, so every tap after it was a
 two-finger gesture that scrolled and never clicked. Hidden, blurred or leaving,
 the page releases every key, button and touch it holds, and a touch no longer
 on the surface is forgotten when the next lands. The checks live in
-tests/tools/held_input_audit.mjs, because the path under test is JavaScript.
+tests/tools/held_input_audit.ts, because the path under test is TypeScript.
 """
 import os
 import shutil
@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "held_input_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "held_input_audit.ts")
 
 node = shutil.which("node")
 if not node:

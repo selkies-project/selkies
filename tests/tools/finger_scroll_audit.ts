@@ -4,42 +4,50 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What a touchpad's scroll puts on the wire, on a virtual clock. Where the
-// session takes a finger's scroll (Wayland), a wheel classified as a touchpad
-// sends its travel in stream pixels and an end once it pauses; a wheel's
-// notches, line deltas, and a session that does not take one keep the notch
-// pulses. A macOS wheel is told from a touchpad there by what each engine was
-// measured to report for one, since the system's acceleration leaves its
-// deltas no notch size, and a WebKitGTK wheel by the notches it reports
-// beside its pixels, since its notch shrinks with the view.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * What a touchpad's scroll puts on the wire, on a virtual clock. Where the
+ * session takes a finger's scroll (Wayland), a wheel classified as a touchpad
+ * sends its travel in stream pixels and an end once it pauses; a wheel's
+ * notches, line deltas, and a session that does not take one keep the notch
+ * pulses. A macOS wheel is told from a touchpad there by what each engine was
+ * measured to report for one, since the system's acceleration leaves its
+ * deltas no notch size, and a WebKitGTK wheel by the notches it reports
+ * beside its pixels, since its notch shrinks with the view.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
+import type { StandIn, VirtualTimer } from './stand_in.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [finger-scroll] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [finger-scroll] ${label}  ${String(detail)}`);
 }
 
 // --- a virtual clock --------------------------------------------------------
 let now = 1000;
-let timers = [];
+let timers: VirtualTimer[] = [];
 let timerSeq = 0;
 Object.defineProperty(globalThis, 'performance', { value: { now: () => now }, configurable: true });
-globalThis.setTimeout = (fn, ms = 0) => {
-    const id = ++timerSeq;
-    timers.push({ id, at: now + Math.max(0, ms), fn });
-    return id;
-};
-globalThis.clearTimeout = (id) => { timers = timers.filter((t) => t.id !== id); };
-globalThis.setInterval = () => 0;
-globalThis.clearInterval = () => {};
+Object.assign(globalThis, {
+    setTimeout: (fn: () => void, ms = 0) => {
+        const id = ++timerSeq;
+        timers.push({ id, at: now + Math.max(0, ms), fn });
+        return id;
+    },
+    clearTimeout: (id: number) => { timers = timers.filter((t) => t.id !== id); },
+    setInterval: () => 0,
+    clearInterval: () => {},
+});
 Date.now = () => now;
 
-function advance(ms) {
+/** Runs every timer due within `ms`, in order, and leaves the clock there. */
+function advance(ms: number): void {
     const end = now + ms;
     for (;;) {
         timers.sort((a, b) => a.at - b.at || a.id - b.id);
@@ -53,7 +61,7 @@ function advance(ms) {
 }
 
 // --- a page whose stream fills a 1280x720 element, one stream pixel per CSS pixel
-const element = {
+const element: StandIn<HTMLElement> = {
     style: { setProperty() {} },
     classList: { contains: () => false },
     contains: (node) => node === element,
@@ -62,37 +70,43 @@ const element = {
     offsetHeight: 720,
     focus() {},
 };
-globalThis.window = {
-    devicePixelRatio: 1,
-    requestAnimationFrame: () => 0,
-    addEventListener() {},
-    removeEventListener() {},
-    location: { origin: 'http://localhost' },
-};
+Object.assign(globalThis, {
+    window: {
+        devicePixelRatio: 1,
+        requestAnimationFrame: () => 0,
+        addEventListener() {},
+        removeEventListener() {},
+        location: { origin: 'http://localhost' },
+    } satisfies StandIn<Window>,
+});
+/** A platform and the user agent of an engine on it. */
+type Platform = [platform: string, userAgent: string];
 /** Stands the page on a platform and engine; the wheel's reading depends on both. */
-function setPlatform(platform, userAgent) {
+function setPlatform(platform: string, userAgent: string): void {
     Object.defineProperty(globalThis, 'navigator', {
-        value: { platform, userAgent, maxTouchPoints: 0 }, configurable: true, writable: true });
+        value: { platform, userAgent, maxTouchPoints: 0 } satisfies StandIn<Navigator>, configurable: true, writable: true });
 }
-const LINUX = ['Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64) Chrome/154'];
-const MAC_BLINK = ['MacIntel', 'Mozilla/5.0 (Macintosh) Chrome/154 Safari/537.36'];
-const MAC_WEBKIT = ['MacIntel', 'Mozilla/5.0 (Macintosh) Version/26.6 Safari/605.1.15'];
-const MAC_GECKO = ['MacIntel', 'Mozilla/5.0 (Macintosh; rv:157.0) Gecko/20100101 Firefox/157.0'];
+const LINUX: Platform = ['Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64) Chrome/154'];
+const MAC_BLINK: Platform = ['MacIntel', 'Mozilla/5.0 (Macintosh) Chrome/154 Safari/537.36'];
+const MAC_WEBKIT: Platform = ['MacIntel', 'Mozilla/5.0 (Macintosh) Version/26.6 Safari/605.1.15'];
+const MAC_GECKO: Platform = ['MacIntel', 'Mozilla/5.0 (Macintosh; rv:157.0) Gecko/20100101 Firefox/157.0'];
 setPlatform(...LINUX);
 
-globalThis.document = {
-    createElement: () => ({ style: {}, getContext: () => ({}) }),
-    body: { appendChild() {} },
-    getElementById: () => null,
-    pointerLockElement: null,
-    activeElement: null,
-};
+Object.assign(globalThis, {
+    document: {
+        createElement: () => ({ style: {}, getContext: () => ({}) }) satisfies StandIn<HTMLCanvasElement>,
+        body: { appendChild() {} },
+        getElementById: () => null,
+        pointerLockElement: null,
+        activeElement: null,
+    } satisfies StandIn<Document>,
+});
 
 
 /** A page recording what it sends, with the session taking a finger's scroll or not. */
-function makeInput(finger) {
-    const sent = [];
-    const input = new Input(element, (msg) => sent.push(msg));
+function makeInput(finger: boolean): { input: Input; sent: string[] } {
+    const sent: string[] = [];
+    const input = new Input(element as HTMLElement, (msg) => sent.push(msg));
     input.sendMotion = (msg) => sent.push(msg);
     input.inputAttached = true;
     input.setFingerScroll(finger);
@@ -100,15 +114,16 @@ function makeInput(finger) {
 }
 
 /** One wheel event through the page's own handler, `ms` after the previous. */
-function wheel(input, deltaY, { deltaX = 0, deltaMode = 0, ms = 16, shiftKey = false,
-                               wheelDeltaX = undefined, wheelDeltaY = undefined } = {}) {
+function wheel(input: Input, deltaY: number, { deltaX = 0, deltaMode = 0, ms = 16, shiftKey = false,
+    wheelDeltaX = undefined, wheelDeltaY = undefined }: { deltaX?: number; deltaMode?: number; ms?: number;
+        shiftKey?: boolean; wheelDeltaX?: number; wheelDeltaY?: number } = {}): void {
     advance(ms);
     input._mouseWheelWrapper({ type: 'wheel', deltaY, deltaX, deltaMode, ctrlKey: false, shiftKey,
-                               wheelDeltaX, wheelDeltaY, preventDefault() {} });
+                               wheelDeltaX, wheelDeltaY, preventDefault() {} } as StandIn<WheelEvent> as WheelEvent);
 }
 
-const pulses = (sent) => sent.filter((m) => m.startsWith('m,') || m.startsWith('m2,'));
-const fingers = (sent) => sent.filter((m) => m.startsWith('sf,') || m === 'sfe');
+const pulses = (sent: string[]): string[] => sent.filter((m) => m.startsWith('m,') || m.startsWith('m2,'));
+const fingers = (sent: string[]): string[] => sent.filter((m) => m.startsWith('sf,') || m === 'sfe');
 
 {
     const { input, sent } = makeInput(true);
@@ -200,13 +215,14 @@ const fingers = (sent) => sent.filter((m) => m.startsWith('sf,') || m === 'sfe')
 const MAC_SLOW = [4.000244140625, 4.000244140625, 4.000244140625];
 const MAC_SPIN = [4.000244140625, 21.70654296875, 67.843017578125, 132.9052734375, 211.6064453125, 361.2994384765625];
 /** Notches sent on the buttons of `mask`: each pulse raises its bit once, carrying its count. */
-const notches = (sent, mask) => sent.map((m) => m.split(','))
+const notches = (sent: string[], mask: number): number => sent.map((m) => m.split(','))
     .filter((f) => f[0] === 'm2' && (Number(f[3]) & mask))
     .reduce((sum, f) => sum + Number(f[4]), 0);
-const downs = (sent) => notches(sent, 8);
-const sideways = (sent) => notches(sent, 192);
+const downs = (sent: string[]): number => notches(sent, 8);
+const sideways = (sent: string[]): number => notches(sent, 192);
 
-for (const [engine, platform] of [['Blink', MAC_BLINK], ['WebKit', MAC_WEBKIT]]) {
+const MAC_ENGINES: Array<[engine: string, platform: Platform]> = [['Blink', MAC_BLINK], ['WebKit', MAC_WEBKIT]];
+for (const [engine, platform] of MAC_ENGINES) {
     for (const finger of [true, false]) {
         const session = finger ? 'a session taking finger scroll' : 'a session taking notches';
         setPlatform(...platform);
@@ -286,9 +302,10 @@ setPlatform(...LINUX);
 // tall view, 71 in 600, 99 in 1000; sideways the width's, under Shift the
 // height's), with a legacy wheelDelta of 120 against it. Its synthetic precise
 // deltas are 40 px per 120, and its touchpads report 2.5 (GTK 4) or 40 (GTK 3).
-const LINUX_WEBKIT = ['Linux x86_64',
+const LINUX_WEBKIT: Platform = ['Linux x86_64',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15'];
-function view(width, height) {
+/** Sizes the window's view. */
+function view(width: number, height: number): void {
     window.innerWidth = width;
     window.innerHeight = height;
 }

@@ -4,44 +4,51 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// When the client puts pointer motion on the wire, on a virtual clock. A sample
-// has to leave as it arrives -- from pointerrawupdate where the engine fires
-// it, since mousemove waits for the next frame -- and never be held longer
-// than the send interval, while a 1000 Hz mouse is still thinned to one
-// message per interval and a transport that is not draining gets one per
-// frame. The frame-aligned mousemove that follows a raw update reports the
-// same motion, so it must not send it again: under pointer lock that would be
-// a doubled delta.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * When the client puts pointer motion on the wire, on a virtual clock. A sample
+ * has to leave as it arrives -- from pointerrawupdate where the engine fires
+ * it, since mousemove waits for the next frame -- and never be held longer
+ * than the send interval, while a 1000 Hz mouse is still thinned to one
+ * message per interval and a transport that is not draining gets one per
+ * frame. The frame-aligned mousemove that follows a raw update reports the
+ * same motion, so it must not send it again: under pointer lock that would be
+ * a doubled delta.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
+import type { StandIn, VirtualTimer } from './stand_in.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [pointer-cadence] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [pointer-cadence] ${label}  ${String(detail)}`);
 }
 
 // --- a virtual clock, with animation frames every 16 ms ---------------------
 let now = 1000;
-let timers = [];
+let timers: VirtualTimer[] = [];
 let timerSeq = 0;
 Object.defineProperty(globalThis, 'performance', { value: { now: () => now }, configurable: true });
-globalThis.setTimeout = (fn, ms = 0) => {
-    const id = ++timerSeq;
-    timers.push({ id, at: now + Math.max(0, ms), fn });
-    return id;
-};
-globalThis.clearTimeout = (id) => { timers = timers.filter((t) => t.id !== id); };
-globalThis.setInterval = () => 0;
-globalThis.clearInterval = () => {};
-let frames = [];
-const nextFrameAt = () => Math.ceil((now + 0.001) / 16) * 16;
+Object.assign(globalThis, {
+    setTimeout: (fn: () => void, ms = 0) => {
+        const id = ++timerSeq;
+        timers.push({ id, at: now + Math.max(0, ms), fn });
+        return id;
+    },
+    clearTimeout: (id: number) => { timers = timers.filter((t) => t.id !== id); },
+    setInterval: () => 0,
+    clearInterval: () => {},
+});
+let frames: FrameRequestCallback[] = [];
+const nextFrameAt = (): number => Math.ceil((now + 0.001) / 16) * 16;
 
 /** Runs every timer and animation frame due within `ms`, in order. */
-function advance(ms) {
+function advance(ms: number): void {
     const end = now + ms;
     for (;;) {
         timers.sort((a, b) => a.at - b.at || a.id - b.id);
@@ -62,7 +69,7 @@ function advance(ms) {
     now = end;
 }
 
-const element = {
+const element: StandIn<HTMLElement> = {
     style: { setProperty() {} },
     classList: { contains: () => false },
     contains: (node) => node === element,
@@ -71,34 +78,42 @@ const element = {
     offsetHeight: 720,
     focus() {},
 };
-globalThis.window = {
-    devicePixelRatio: 1,
-    requestAnimationFrame: (cb) => { frames.push(cb); return frames.length; },
-    addEventListener() {},
-    removeEventListener() {},
-    location: { origin: 'http://localhost' },
-};
-globalThis.document = {
-    createElement: () => ({ style: {}, getContext: () => ({}) }),
+Object.assign(globalThis, {
+    window: {
+        devicePixelRatio: 1,
+        requestAnimationFrame: (cb: FrameRequestCallback) => { frames.push(cb); return frames.length; },
+        addEventListener() {},
+        removeEventListener() {},
+        location: { origin: 'http://localhost' },
+    } satisfies StandIn<Window>,
+});
+/** The stand-in document, whose pointer lock a check takes and gives up. */
+const page = {
+    createElement: () => ({ style: {}, getContext: () => ({}) }) satisfies StandIn<HTMLCanvasElement>,
     body: { appendChild() {} },
     getElementById: () => null,
-    pointerLockElement: null,
+    pointerLockElement: null as object | null,
     activeElement: null,
 };
+Object.assign(globalThis, { document: page satisfies StandIn<Document> });
 
-function makeInput() {
-    const sent = [];
-    const input = new Input(element, (msg) => sent.push([now, msg]));
+/** What an input sent, with when on the audit's clock. */
+type Sent = Array<[at: number, message: string]>;
+
+/** An input recording what it sends, and when. */
+function makeInput(): { input: Input; sent: Sent } {
+    const sent: Sent = [];
+    const input = new Input(element as HTMLElement, (msg) => sent.push([now, msg]));
     input.sendMotion = (msg) => sent.push([now, msg]);
     input.inputAttached = false;
     return { input, sent };
 }
 
-const motion = (sent) => sent.filter(([, m]) => m.startsWith('m,') || m.startsWith('m2,'));
-const move = (type, x, extra = {}) => ({
+const motion = (sent: Sent): Sent => sent.filter(([, m]) => m.startsWith('m,') || m.startsWith('m2,'));
+const move = (type: string, x: number, extra: StandIn<PointerEvent> = {}): PointerEvent => ({
     type, target: element, clientX: x, clientY: 300, screenX: x, screenY: 300,
     buttons: 0, pointerType: 'mouse', movementX: 0, movementY: 0, timeStamp: now, ...extra,
-});
+}) as StandIn<PointerEvent> as PointerEvent;
 
 // --- a sample after a pause goes out as it arrives --------------------------
 {
@@ -151,7 +166,7 @@ const move = (type, x, extra = {}) => ({
 // --- the frame-aligned mousemove after a raw update sends nothing more ------
 {
     const { input, sent } = makeInput();
-    globalThis.document.pointerLockElement = element;
+    page.pointerLockElement = element;
     advance(100);
     let total = 0;
     for (let frame = 0; frame < 30; frame++) {
@@ -165,7 +180,7 @@ const move = (type, x, extra = {}) => ({
         input._mouseButtonMovement(move('mousemove', 0, { movementX: frameSum }));
     }
     advance(50);
-    globalThis.document.pointerLockElement = null;
+    page.pointerLockElement = null;
     const travel = motion(sent).reduce((sum, [, m]) => sum + Number(m.split(',')[1]), 0);
     check('under pointer lock a delta counts once, not again on its mousemove',
           travel === total, `${travel} of ${total}`);
@@ -202,7 +217,7 @@ const move = (type, x, extra = {}) => ({
     input.buttonMask = 1;
     advance(100);
     const t0 = now;
-    const samples = [];
+    const samples: PointerEvent[] = [];
     for (let i = 0; i < 20; i++) {
         samples.push(move('pointerrawupdate', 100 + 5 * i, { buttons: 1, timeStamp: t0 + i }));
     }
@@ -225,9 +240,9 @@ const move = (type, x, extra = {}) => ({
 // polyline they draw strays from the one the pen drew, and whether each
 // event's own position, the newest, leaves as the event is handled rather
 // than behind the ones it coalesced.
-function penStroke(input, sent) {
+function penStroke(input: Input, sent: Sent): { perSecond: number; err: number; newestAtOnce: number } {
     const t0 = now;
-    const pen = (i) => {
+    const pen = (i: number): PointerEvent => {
         const a = (i * 4.1667) / 15;
         const x = 640 + i * 0.4 + 15 * Math.cos(a);
         const y = 360 + 15 * Math.sin(a);
@@ -249,7 +264,7 @@ function penStroke(input, sent) {
     }
     advance(50);
     const pts = motion(sent).map(([, m]) => m.split(',').slice(1, 3).map(Number));
-    const seg = (p, a, b) => {
+    const seg = (p: number[], a: number[], b: number[]): number => {
         const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
         const len = dx * dx + dy * dy;
         const t = len ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len)) : 0;
@@ -289,10 +304,10 @@ function penStroke(input, sent) {
         total += d;
         if (Math.floor(total / 100) > before) due.push(now);
         input._mouseWheelWrapper({ type: 'wheel', deltaY: d, deltaX: 0, deltaMode: 0, ctrlKey: false,
-                                   target: element, preventDefault() {} });
+                                   target: element, preventDefault() {} } as StandIn<WheelEvent> as WheelEvent);
     }
     advance(500);
-    const rises = [];
+    const rises: number[] = [];
     let prev = 0;
     for (const [t, m] of sent) {
         const p = m.split(',');

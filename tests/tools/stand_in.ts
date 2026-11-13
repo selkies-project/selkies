@@ -18,12 +18,13 @@
 /**
  * Any of the members of `T`, each of the real member's type or a stand-in
  * for it; a function takes the real one's arguments and returns a stand-in
- * for its result, or nothing where the module drops the result, and a
- * promise settles to one. A function compares its parameters both ways, as
- * the DOM's own methods do, so a stand-in may take the one kind of listener
- * or option its audit passes. The DOM's types refer to each other without
- * end, so past six levels a member is the real type, and a stand-in nested
- * deeper than that is named where it is built.
+ * for its result, or nothing where the module drops the result, a promise
+ * settles to one, and a list (an array, a `TouchList`) is anything indexable
+ * that holds them. A function compares its parameters both ways, as the
+ * DOM's own methods do, so a stand-in may take the one kind of listener or
+ * option its audit passes. The DOM's types refer to each other without end,
+ * so past six levels a member is the real type, and a stand-in nested deeper
+ * than that is named where it is built.
  */
 export type StandIn<T, Depth extends unknown[] = []> = Depth['length'] extends 6
     ? T
@@ -31,4 +32,16 @@ export type StandIn<T, Depth extends unknown[] = []> = Depth['length'] extends 6
         ? { method(...args: A): StandIn<R, [...Depth, unknown]> | void }['method']
         : T extends Promise<infer U>
             ? Promise<StandIn<U, [...Depth, unknown]>>
-            : T extends object ? { [K in keyof T]?: StandIn<T[K], [...Depth, unknown]> } : T;
+            : T extends readonly (infer E)[]
+                ? ArrayLike<StandIn<E, [...Depth, unknown]>>
+                : T extends TouchList
+                    ? ArrayLike<StandIn<Touch, [...Depth, unknown]>>
+                    : T extends object ? { [K in keyof T]?: StandIn<T[K], [...Depth, unknown]> } : T;
+
+/** One timer of an audit's virtual clock: what `setTimeout` was handed, and when it is due. */
+export interface VirtualTimer {
+    id: number;
+    /** When it runs, on the audit's clock. */
+    at: number;
+    fn: () => void;
+}

@@ -4,32 +4,53 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What the client does with relative motion, which pointer lock and the
-// trackpad both produce. Engines report movementX/Y in whole CSS pixels,
-// carrying their own sub-pixel remainder, so a client whose scale is not a
-// whole number sees a stream of deltas that only add up over several events --
-// rounding each one on its own loses or invents a fraction of a pixel every
-// time. The size and the sign of that error depend on how fast the pointer is
-// moving, which is indistinguishable from an acceleration curve, and motion
-// that should cancel out drifts instead.
-//
-// `engineCss` is the measured behavior of Chrome and Firefox: at a device
-// pixel ratio of 1.25 a stream of one-device-pixel motions arrives as
-// 1,1,0,1,1, and at 1.5 as 1,0,1 -- exactly a carried division by the ratio.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * What the client does with relative motion, which pointer lock and the
+ * trackpad both produce. Engines report movementX/Y in whole CSS pixels,
+ * carrying their own sub-pixel remainder, so a client whose scale is not a
+ * whole number sees a stream of deltas that only add up over several events --
+ * rounding each one on its own loses or invents a fraction of a pixel every
+ * time. The size and the sign of that error depend on how fast the pointer is
+ * moving, which is indistinguishable from an acceleration curve, and motion
+ * that should cancel out drifts instead.
+ *
+ * `engineCss` is the measured behavior of Chrome and Firefox: at a device
+ * pixel ratio of 1.25 a stream of one-device-pixel motions arrives as
+ * 1,1,0,1,1, and at 1.5 as 1,0,1 -- exactly a carried division by the ratio.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { Input } from '../../web/selkies-web-core/lib/input.ts';
+import type { StandIn } from './stand_in.ts';
+
+/** An `Input` that records what it would send. */
+type AuditedInput = Input & { sent: string[] };
+
+/** A canvas presenting the stream: the members the stream box reads. */
+interface Sink {
+    tagName: string;
+    width: number;
+    height: number;
+    getBoundingClientRect: () => { left: number; top: number; width: number; height: number };
+}
+
+/** The stand-in document of the last input made, whose pointer lock a check takes and gives up. */
+let page: { pointerLockElement: object | null; getElementById: (id: string) => Sink | null } = {
+    pointerLockElement: null, getElementById: () => null,
+};
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [relative-motion] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [relative-motion] ${label}  ${String(detail)}`);
 }
 
 /** The CSS-pixel deltas an engine reports for a device-pixel motion. */
-function engineCss(devicePx, dpr) {
+function engineCss(devicePx: number[], dpr: number): number[] {
     let carry = 0;
     return devicePx.map((d) => {
         carry += d / dpr;
@@ -39,25 +60,28 @@ function engineCss(devicePx, dpr) {
     });
 }
 
-const steps = (n, delta) => new Array(n).fill(delta);
+const steps = (n: number, delta: number): number[] => new Array<number>(n).fill(delta);
 
 /**
  * An Input with only what the relative-motion path touches. `sink` gives the
  * stream box a manual-resolution or shared session maps through.
  */
-function makeInput({ dpr = 1, sink = null } = {}) {
-    globalThis.window = {
-        devicePixelRatio: dpr,
-        manual_resolution: !!sink,
-        manualResolution: !!sink,
-        requestAnimationFrame: (cb) => frames.push(cb),
-    };
-    globalThis.document = {
+function makeInput({ dpr = 1, sink = null }: { dpr?: number; sink?: Sink | null } = {}): AuditedInput {
+    page = {
         pointerLockElement: null,
         getElementById: (id) => (sink && id === 'videoCanvas' ? sink : null),
     };
-    const input = Object.create(Input.prototype);
-    input.element = {};
+    Object.assign(globalThis, {
+        window: {
+            devicePixelRatio: dpr,
+            manual_resolution: !!sink,
+            manualResolution: !!sink,
+            requestAnimationFrame: (cb: FrameRequestCallback) => frames.push(cb),
+        } satisfies StandIn<Window>,
+        document: page satisfies StandIn<Document>,
+    });
+    const input = Object.create(Input.prototype) as AuditedInput;
+    input.element = {} as HTMLElement;
     input.isSharedMode = false;
     input.useCssScaling = false;
     input.buttonMask = 0;
@@ -71,14 +95,14 @@ function makeInput({ dpr = 1, sink = null } = {}) {
     input.m = { mouseMultiX: 1, mouseMultiY: 1, mouseOffsetX: 0, mouseOffsetY: 0,
                 elementClientX: 0, elementClientY: 0, frameW: 1920, frameH: 1080 };
     input.sent = [];
-    input.send = (msg) => input.sent.push(msg);
+    input.send = (msg: string) => input.sent.push(msg);
     return input;
 }
 
-let frames = [];
+let frames: FrameRequestCallback[] = [];
 
 /** A canvas presenting `w`x`h` stream pixels in a `boxW`-wide CSS box. */
-function makeSink(w, h, boxW, boxH) {
+function makeSink(w: number, h: number, boxW: number, boxH: number): Sink {
     return {
         tagName: 'CANVAS', width: w, height: h,
         getBoundingClientRect: () => ({ left: 0, top: 0, width: boxW, height: boxH }),
@@ -86,7 +110,7 @@ function makeSink(w, h, boxW, boxH) {
 }
 
 /** Push CSS deltas through the coalescer, flushing every `perFrame` events. */
-function drive(input, deltas, perFrame = 4) {
+function drive(input: AuditedInput, deltas: number[], perFrame = 4): void {
     frames = [];
     deltas.forEach((d, i) => {
         input._queueCoalescedMouseMove('m2', d, 0, input.buttonMask);
@@ -100,7 +124,7 @@ function drive(input, deltas, perFrame = 4) {
 }
 
 /** Net server-pixel travel the client put on the wire. */
-function travel(input) {
+function travel(input: AuditedInput): number {
     return input.sent.reduce((sum, msg) => {
         const parts = msg.split(',');
         return parts[0] === 'm2' ? sum + Number(parts[1]) : sum;
@@ -109,9 +133,10 @@ function travel(input) {
 
 // --- what a fractional scale does to a stream of small deltas -------------
 for (const dpr of [1, 1.25, 1.5, 2]) {
-    for (const [name, devicePx] of [['1px steps', steps(40, 1)],
-                                    ['2px steps', steps(40, 2)],
-                                    ['8px flick', steps(20, 8)]]) {
+    const motions: Array<[name: string, devicePx: number[]]> = [['1px steps', steps(40, 1)],
+                                                                 ['2px steps', steps(40, 2)],
+                                                                 ['8px flick', steps(20, 8)]];
+    for (const [name, devicePx] of motions) {
         const input = makeInput({ dpr });
         const want = devicePx.reduce((a, b) => a + b, 0);
         drive(input, engineCss(devicePx, dpr));
@@ -169,13 +194,13 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
 {
     const sink = makeSink(1920, 1080, 960, 540);
     const input = makeInput({ dpr: 1, sink });
-    input._applySinkCoordinates(100, 50, sink, null);
+    input._applySinkCoordinates(100, 50, sink as StandIn<HTMLCanvasElement> as HTMLCanvasElement, null);
     check('a click maps through the stream box', input.x === 200 && input.y === 100,
           `${input.x},${input.y}`);
     const [dx, dy] = input._relativeToServer(100, 50);
     check('a delta of the same size covers the same ground',
           dx === 200 && dy === 100, `${dx},${dy}`);
-    input._applySinkCoordinates(5000, -20, sink, null);
+    input._applySinkCoordinates(5000, -20, sink as StandIn<HTMLCanvasElement> as HTMLCanvasElement, null);
     check('a click outside the box is clamped to the stream',
           input.x === 1920 && input.y === 0, `${input.x},${input.y}`);
 }
@@ -183,7 +208,7 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
 // --- the remainder does not outlive the lock ------------------------------
 {
     const input = makeInput({ dpr: 1.5 });
-    input.cursorDiv = { style: {} };
+    input.cursorDiv = { style: {} } as StandIn<HTMLCanvasElement> as HTMLCanvasElement;
     input.resetKeyboard = () => {};
     drive(input, [1], 1);
     check('a partial pixel is left over to carry', input._relCarryX !== 0,
@@ -210,12 +235,12 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     const input = makeInput({ dpr: 1 });
     input.x = 999; input.y = 777;
     input.buttonMask = 1;
-    globalThis.document.pointerLockElement = input.element;
+    page.pointerLockElement = input.element;
     input._sendMouseState();
     check('a locked button change sends no motion',
           input.sent[input.sent.length - 1] === 'm2,0,0,1,0,1',
           `${input.sent[input.sent.length - 1]}`);
-    globalThis.document.pointerLockElement = null;
+    page.pointerLockElement = null;
     input.buttonMask = 0;
     input._sendMouseState();
     check('an unlocked button change sends the position',
@@ -225,7 +250,7 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
 {
     const sink = makeSink(1920, 1080, 1920, 1080);
     const input = makeInput({ dpr: 1, sink });
-    globalThis.document.pointerLockElement = sink;
+    page.pointerLockElement = sink;
     input.x = 400; input.y = 300;
     input._sendMouseState();
     check('a lock held on the canvas counts as a stream lock',
@@ -239,7 +264,7 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     // odd server pixels unreachable at a device pixel ratio of 2.
     const input = makeInput({ dpr: 2 });
     input._mouseButtonMovement({ type: 'mousemove', target: input.element,
-                                 clientX: 100.3, clientY: 0 });
+                                 clientX: 100.3, clientY: 0 } as StandIn<MouseEvent> as MouseEvent);
     input._flushCoalescedMouseMove();
     const last = input.sent[input.sent.length - 1];
     check('absolute motion reaches every server pixel at dpr 2',
@@ -251,18 +276,18 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     // The lock leaves movement deltas behind, so a release that arrives after
     // it ends has no position of its own unless it maps one.
     const input = makeInput({ dpr: 1 });
-    globalThis.document.pointerLockElement = input.element;
+    page.pointerLockElement = input.element;
     input._mouseButtonMovement({ type: 'mousemove', target: input.element,
-                                 movementX: 37, movementY: -21 });
-    globalThis.document.pointerLockElement = null;
+                                 movementX: 37, movementY: -21 } as StandIn<MouseEvent> as MouseEvent);
+    page.pointerLockElement = null;
     input.buttonMask = 1;
     input._mouseButtonMovement({ type: 'mouseup', target: input.element,
-                                 button: 0, clientX: 640, clientY: 360 });
+                                 button: 0, clientX: 640, clientY: 360 } as StandIn<MouseEvent> as MouseEvent);
     check('a button event after the lock ends carries its own position',
           input.sent[input.sent.length - 1] === 'm,640,360,0,0,2',
           `${input.sent[input.sent.length - 1]}`);
     check('the locked motion before it went out as a delta',
-          input.sent.includes('m2,37,-21,0,0,1'), `${input.sent}`);
+          input.sent.includes('m2,37,-21,0,0,1'), `${String(input.sent)}`);
 }
 
 // --- a Control-click is the primary button on every engine ----------------
@@ -271,20 +296,20 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     // `buttons` holds the primary alone, after a move stating that primary.
     const input = makeInput({ dpr: 1 });
     const at = { target: input.element, clientX: 10, clientY: 10, ctrlKey: true };
-    input._mouseButtonMovement({ type: 'mousemove', buttons: 1, ...at });
-    input._mouseButtonMovement({ type: 'mousedown', button: 2, buttons: 1, ...at });
-    input._mouseButtonMovement({ type: 'mouseup', button: 2, buttons: 0, ...at });
+    input._mouseButtonMovement({ type: 'mousemove', buttons: 1, ...at } as StandIn<MouseEvent> as MouseEvent);
+    input._mouseButtonMovement({ type: 'mousedown', button: 2, buttons: 1, ...at } as StandIn<MouseEvent> as MouseEvent);
+    input._mouseButtonMovement({ type: 'mouseup', button: 2, buttons: 0, ...at } as StandIn<MouseEvent> as MouseEvent);
     const masks = input.sent.filter((m) => m.startsWith('m,')).map((m) => Number(m.split(',')[3]));
     check('a Control-click reported as the secondary button presses the primary alone',
-          masks.every((m) => (m & ~1) === 0) && masks.includes(1), `${input.sent}`);
+          masks.every((m) => (m & ~1) === 0) && masks.includes(1), `${String(input.sent)}`);
     check('and its release leaves no button held', input.buttonMask === 0, `${input.buttonMask}`);
 }
 {
     const input = makeInput({ dpr: 1 });
     const at = { target: input.element, clientX: 10, clientY: 10, ctrlKey: true };
-    input._mouseButtonMovement({ type: 'mousedown', button: 2, buttons: 2, ...at });
+    input._mouseButtonMovement({ type: 'mousedown', button: 2, buttons: 2, ...at } as StandIn<MouseEvent> as MouseEvent);
     const held = input.buttonMask;
-    input._mouseButtonMovement({ type: 'mouseup', button: 2, buttons: 0, ...at });
+    input._mouseButtonMovement({ type: 'mouseup', button: 2, buttons: 0, ...at } as StandIn<MouseEvent> as MouseEvent);
     check('a secondary button pressed under Control stays the secondary',
           held === 4 && input.buttonMask === 0, `${held} ${input.buttonMask}`);
 }
