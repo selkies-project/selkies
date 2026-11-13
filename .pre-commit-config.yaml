@@ -6,7 +6,8 @@
 # Run over the whole tree at any time with `pre-commit run --all-files`. rustfmt
 # and clippy come with the Rust toolchain (`rustup component add rustfmt
 # clippy`); clippy builds the workspace, so it needs the native libraries a
-# test build does and the pixelflux and pcmflux the workspace links.
+# test build does and the pixelflux and pcmflux the workspace links. The
+# generated-file hooks build crates/xtask, which needs the toolchain alone.
 #
 # The revisions here and the linter pins in .github/workflows/ci.yaml name the
 # same tools; bump them together. CI additionally runs actionlint over the
@@ -73,18 +74,18 @@ repos:
         name: settings reference (docs/settings.md)
         # The page is rendered from the setting definitions; a change to either
         # side without regenerating it fails here
-        entry: scripts/generate-settings-doc.py
+        entry: cargo run --quiet --package xtask -- settings-doc
         args: [--check]
-        language: script
+        language: system
         pass_filenames: false
-        files: ^(crates/selkies/src/settings/(table|mod)\.rs|docs/settings\.md|scripts/generate-settings-doc\.py)$
+        files: ^(crates/selkies/src/settings/(table|mod)\.rs|docs/settings\.md|crates/xtask/src/(main|settings_doc)\.rs)$
 
       - id: file-index
         name: nginx fancyindex fragments
         # The fragments are the served file index's own two halves; a change to
         # one side without regenerating them fails here
-        entry: scripts/generate-file-index.py
+        entry: cargo run --quiet --package xtask -- file-index
         args: [--check]
-        language: script
+        language: system
         pass_filenames: false
-        files: ^(crates/selkies/src/files/index_html\.rs|web/selkies-web-core/nginx/.*\.html|scripts/generate-file-index\.py)$
+        files: ^(crates/selkies/src/files/index_html\.rs|web/selkies-web-core/nginx/.*\.html|crates/xtask/src/(main|file_index)\.rs)$

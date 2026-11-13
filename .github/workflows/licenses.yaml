@@ -6,8 +6,9 @@ name: Licenses
 
 # License gate for what the server links and the web client ships
 # (docs/licensing.md, "How this is kept up to date"). Everything here resolves
-# the crate graph with `cargo metadata` and reads the web packages' lockfiles; nothing
-# is built, so no native packages are installed.
+# the crate graph with `cargo metadata` and reads the web packages' lockfiles; the
+# only thing built is the gate itself (crates/xtask), which links no native
+# library, so no native packages are installed.
 
 on:
   workflow_dispatch:
@@ -41,9 +42,9 @@ jobs:
       - name: Inventory check, both builds, and the page
         # Fails on a copyleft component outside the GPL build's libx264 and
         # x265, on missing license metadata, on a native binding, direct
-        # dependency, or vendored crate the script does not describe, and on a
+        # dependency, or vendored crate the gate does not describe, and on a
         # docs/licensing.md that differs from what the graphs yield.
-        run: python3 scripts/check-licenses.py
+        run: cargo xtask licenses
 
       - name: cargo-deny, the shipped (GPL) graph
         # deny.toml: the permissive allow list, and crates.io and the pinned

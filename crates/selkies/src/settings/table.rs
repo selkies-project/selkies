@@ -7,7 +7,7 @@
 //! Every setting the server takes, as one declarative table.
 //!
 //! The definition of record: a setting is added or changed here, its typed accessor on
-//! `Settings` at the end beside it, and `scripts/generate-settings-doc.py` renders
+//! `Settings` at the end beside it, and `cargo xtask settings-doc` renders
 //! `docs/settings.md` from this table. Each entry names a setting, its type, the default as the
 //! text an operator would type, its bounds and menu, the environment variables it also reads,
 //! and whether it is a secret or kept from the client payload.

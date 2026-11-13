@@ -1,0 +1,19 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "xtask"
+description = "The repository's own tooling, run as `cargo xtask`: the generated pages and fragments, and the license gate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# No crate of the workspace and nothing native, so the tool builds where the server does not.
+regex = "1"
+serde = "1"
+serde_json = "1"

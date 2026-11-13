@@ -12,7 +12,7 @@
 # RustSec advisories are gated by the [advisories] policy (that check fetches the
 # database, so it needs the network). The non-GPL build (pixelflux's `openh264` in
 # place of `gpl`) is not a Cargo feature of this workspace, so cargo-deny cannot
-# select it; scripts/check-licenses.py resolves it from a copy of the manifest and
+# select it; `cargo xtask licenses` resolves it from a copy of the manifest and
 # fails on any copyleft component there, and covers the native libraries crate
 # metadata cannot see.
 
@@ -47,7 +47,7 @@ allow = [
 ]
 confidence-threshold = 0.8
 # libx264 and x265, the GPL libraries of pixelflux's `gpl` feature, are bound
-# by codec-sys, whose own license is permissive; scripts/check-licenses.py
+# by codec-sys, whose own license is permissive; `cargo xtask licenses`
 # accounts for them by the codec-sys features that link them.
 
 [licenses.private]
