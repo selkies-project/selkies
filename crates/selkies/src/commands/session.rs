@@ -326,7 +326,9 @@ impl Session {
 
     /// An isolated session whose runtime directory is made under `base`, where that exists and
     /// is writable, else the system's temporary directory, with `env` as the launcher's
-    /// environment.
+    /// environment. The directory is its owner's alone from the moment it exists, whatever the
+    /// umask, as the runtime directory specification asks: the buses and the sound server listen
+    /// in it.
     pub fn new_in(base: Option<&Path>, env: Env) -> io::Result<Session> {
         let usable = base.filter(|b| {
             b.is_dir()
@@ -335,13 +337,14 @@ impl Session {
                     .tempfile_in(b)
                     .is_ok()
         });
+        use std::os::unix::fs::PermissionsExt;
+        let mut builder = tempfile::Builder::new();
+        builder
+            .prefix("selkies-session-")
+            .permissions(fs::Permissions::from_mode(0o700));
         let runtime_dir = match usable {
-            Some(base) => tempfile::Builder::new()
-                .prefix("selkies-session-")
-                .tempdir_in(base),
-            None => tempfile::Builder::new()
-                .prefix("selkies-session-")
-                .tempdir(),
+            Some(base) => builder.tempdir_in(base),
+            None => builder.tempdir(),
         }?
         .keep();
         Ok(Self::build(runtime_dir, RuntimeDir::Temporary, env, false))
@@ -1845,6 +1848,19 @@ mod tests {
             "a usable runtime directory holds the session's"
         );
         fs::remove_dir_all(&session.runtime_dir).unwrap();
+    }
+
+    #[test]
+    fn a_temporary_runtime_directory_is_its_owners_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let session = Session::new_in(Some(base.path()), Env::new()).unwrap();
+        let mode = fs::metadata(&session.runtime_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]
