@@ -16,7 +16,7 @@
 //! After writing, the running window manager is told to reload with the
 //! signal each one takes.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use tiny_skia::Color;
 
@@ -662,6 +662,9 @@ fn write_theme(name: &str, theme: Theme, style: WindowStyle) -> std::io::Result<
     for sub in ["labwc", "openbox-3"] {
         let dir = themes_dir().join(name).join(sub);
         let themerc_path = dir.join("themerc");
+        if !(themerc_path.is_absolute() && !themerc_path.components().any(|c| c == Component::ParentDir)) {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
         let ours = std::fs::read_to_string(&themerc_path).is_ok_and(|text| text.starts_with(MARKER));
         if !style.decorate {
             if ours {

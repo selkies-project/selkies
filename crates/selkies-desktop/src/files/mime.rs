@@ -4,7 +4,7 @@
 //! and the `mimeinfo.cache` of every applications directory.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::config;
 
@@ -228,6 +228,9 @@ impl MimeDb {
         let mut added: HashMap<String, Vec<String>> = HashMap::new();
         let mut removed: HashMap<String, Vec<String>> = HashMap::new();
         for path in mimeapps_files() {
+            if !(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)) {
+                continue;
+            }
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };

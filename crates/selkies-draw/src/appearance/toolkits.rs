@@ -31,7 +31,7 @@
 //! Every file is written only when its content changes. What was updated and what failed comes
 //! back to the caller as lines to log, and a failure is never fatal.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -339,6 +339,9 @@ fn with_import(css: &str, import: &str) -> Option<String> {
 /// # Returns
 /// Whether the file changed.
 fn write_if_changed(path: &Path, content: &str) -> std::io::Result<bool> {
+    if !(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
     if std::fs::read_to_string(path).is_ok_and(|current| current == content) {
         return Ok(false);
     }
@@ -351,6 +354,9 @@ fn write_if_changed(path: &Path, content: &str) -> std::io::Result<bool> {
 
 /// The content of a file that may be missing, empty when it is.
 fn read_or_empty(path: &Path) -> std::io::Result<String> {
+    if !(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
     match std::fs::read_to_string(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         other => other,
@@ -580,11 +586,11 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("selkies-desktop-toolkits-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        tempfile::Builder::new()
+            .prefix(&format!("selkies-desktop-toolkits-{name}-"))
+            .tempdir()
+            .unwrap()
+            .keep()
     }
 
     #[test]

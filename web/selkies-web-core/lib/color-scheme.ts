@@ -62,19 +62,22 @@ export function onColorSchemeChange(listener: (scheme: ColorScheme) => void): ()
 
 darkQuery?.addEventListener('change', announce);
 
+/** Takes a `setColorScheme` message from this page's own origin. */
+const onSchemeMessage = (event: MessageEvent): void => {
+  if (event.origin !== window.location.origin) return;
+  const message = event.data;
+  if (typeof message !== 'object' || message === null || message.type !== 'setColorScheme') return;
+  if (message.value === 'light' || message.value === 'dark') {
+    picked = message.value;
+  } else if (message.value === null) {
+    picked = null;
+  } else {
+    console.warn('Ignoring setColorScheme with a value that names no scheme:', message.value);
+    return;
+  }
+  announce();
+};
+
 if (typeof window !== 'undefined') {
-  window.addEventListener('message', (event: MessageEvent) => {
-    if (event.origin !== window.location.origin) return;
-    const message = event.data;
-    if (typeof message !== 'object' || message === null || message.type !== 'setColorScheme') return;
-    if (message.value === 'light' || message.value === 'dark') {
-      picked = message.value;
-    } else if (message.value === null) {
-      picked = null;
-    } else {
-      console.warn('Ignoring setColorScheme with a value that names no scheme:', message.value);
-      return;
-    }
-    announce();
-  });
+  window.addEventListener('message', onSchemeMessage);
 }

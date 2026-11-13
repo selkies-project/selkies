@@ -25,7 +25,7 @@
 //! the name of the key's unshifted keysym, a letter in lower case, so the
 //! chord the user pressed and the one the configuration names compare equal.
 
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use xkeysym::Keysym;
 
@@ -141,7 +141,11 @@ fn published_path() -> Option<PathBuf> {
 
 /// Reads the published binds; `None` when nothing is published.
 pub fn read_published() -> Option<Published> {
-    let text = std::fs::read_to_string(published_path()?).ok()?;
+    let path = published_path()?;
+    if !(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)) {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
     Some(parse(&text))
 }
 

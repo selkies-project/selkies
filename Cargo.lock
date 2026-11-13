@@ -3724,6 +3724,7 @@ dependencies = [
  "image",
  "libc",
  "resvg",
+ "tempfile",
  "tiny-skia",
  "zbus",
 ]
@@ -3774,6 +3775,7 @@ dependencies = [
  "pixelflux",
  "quick-xml 0.42.0",
  "selkies-draw",
+ "tempfile",
  "x11rb 0.14.0",
  "xkbcommon",
 ]

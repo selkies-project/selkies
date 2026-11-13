@@ -7,12 +7,20 @@
 //! The XDG base directories, read from the environment with the specification's defaults, so
 //! the icon lookup and every caller searching user files agree on where they are.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-/// The user's home directory, the root when `HOME` is unset.
+/// `dir` where it is absolute and names no parent. The XDG Base Directory specification has a
+/// relative path in its variables ignored, and no file these directories hold is named through
+/// a parent.
+fn usable(dir: PathBuf) -> Option<PathBuf> {
+    (dir.is_absolute() && !dir.components().any(|c| c == Component::ParentDir)).then_some(dir)
+}
+
+/// The user's home directory, the root when `HOME` is unset or unusable.
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
+        .and_then(usable)
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
@@ -21,6 +29,7 @@ pub fn config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+        .and_then(usable)
         .unwrap_or_else(|| home().join(".config"))
 }
 
@@ -29,6 +38,7 @@ pub fn state_home() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+        .and_then(usable)
         .unwrap_or_else(|| home().join(".local/state"))
 }
 
@@ -37,6 +47,7 @@ pub fn data_home() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+        .and_then(usable)
         .unwrap_or_else(|| home().join(".local/share"))
 }
 
@@ -49,6 +60,7 @@ pub fn data_dirs() -> Vec<PathBuf> {
         .split(':')
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
+        .filter_map(usable)
         .collect();
     for required in ["/usr/share", "/usr/local/share"] {
         if !dirs.iter().any(|d| d == Path::new(required)) {
@@ -66,6 +78,7 @@ pub fn config_dirs() -> Vec<PathBuf> {
         .split(':')
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
+        .filter_map(usable)
         .collect();
     if !dirs.iter().any(|d| d == Path::new("/etc/xdg")) {
         dirs.push(PathBuf::from("/etc/xdg"));

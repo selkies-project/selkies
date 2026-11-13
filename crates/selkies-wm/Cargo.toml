@@ -23,3 +23,6 @@ xkbcommon = { version = "0.9", default-features = false }
 # rc.xml and menu.xml.
 quick-xml = "0.42"
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -273,8 +273,9 @@ impl SessionControl {
         let kept = if policy.locked {
             None
         } else {
-            std::fs::read_to_string(&state_file)
-                .ok()
+            (state_file.is_absolute() && !state_file.components().any(|c| c == Component::ParentDir))
+                .then(|| std::fs::read_to_string(&state_file).ok())
+                .flatten()
                 .and_then(|text| match text.trim() {
                     "desktop" => Some(true),
                     "application" => Some(false),
@@ -755,10 +756,11 @@ mod tests {
 
     /// A fresh directory of the test's own under the temporary directory.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("selkies-wm-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        tempfile::Builder::new()
+            .prefix(&format!("selkies-wm-{name}-"))
+            .tempdir()
+            .unwrap()
+            .keep()
     }
 
     /// A switchable policy for a shell program, starting in the desktop or not.

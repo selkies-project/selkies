@@ -11,7 +11,7 @@ use std::ffi::CString;
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1062,7 +1062,10 @@ fn read_user_dirs() -> HashMap<String, PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(|| config::home().join(".config"))
         .join("user-dirs.dirs");
-    let Ok(text) = std::fs::read_to_string(path) else {
+    if !(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)) {
+        return dirs;
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
         return dirs;
     };
     let home = config::home().to_string_lossy().to_string();

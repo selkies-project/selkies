@@ -15,7 +15,7 @@
 //! file, the window manager sees it change.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use tiny_skia::Color;
 
@@ -176,11 +176,20 @@ fn layered_values(
 ) -> HashMap<String, String> {
     let mut values = HashMap::new();
     for dir in system.iter().rev() {
-        if let Ok(text) = std::fs::read_to_string(dir.join("selkies-desktop/config")) {
+        let path = dir.join("selkies-desktop/config");
+        if !(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)) {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
             values.extend(parse_values(&text));
         }
     }
-    let text = std::fs::read_to_string(user).unwrap_or_default();
+    let text = 'user: {
+        if !(user.is_absolute() && !user.components().any(|c| c == Component::ParentDir)) {
+            break 'user String::new();
+        }
+        std::fs::read_to_string(user).unwrap_or_default()
+    };
     values.extend(parse_values(&text));
     for (key, value) in env {
         if let Some(name) = key.strip_prefix("SELKIES_DESKTOP_")
@@ -437,9 +446,8 @@ mod tests {
     /// read to its rename.
     #[test]
     fn writers_saving_at_once_keep_each_others_keys() {
-        let dir = std::env::temp_dir().join(format!("selkies-draw-save-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("config");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
         let writers: Vec<_> = ["first", "second"]
             .into_iter()
             .map(|key| {

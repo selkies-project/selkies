@@ -368,6 +368,9 @@ async fn run_xrdb(dpi: i32) -> bool {
     let written = tokio::task::spawn_blocking({
         let path = xsettingsd.clone();
         move || {
+            if !(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)) {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
             let existing = std::fs::read_to_string(&path).unwrap_or_default();
             atomic_write_text(&path, &merge_xsettings_font(&existing, dpi))
         }

@@ -177,7 +177,8 @@ mod tests {
     /// and what it started in the background is killed with it.
     #[test]
     fn a_pipe_menu_that_never_finishes_is_killed_at_its_deadline() {
-        let pid_file = std::env::temp_dir().join(format!("selkies-wm-pipe-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
         let command = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
         let started = Instant::now();
         let result = run(&command, &[], Duration::from_millis(300));
@@ -187,8 +188,8 @@ mod tests {
             "the deadline did not hold"
         );
         let pid = std::fs::read_to_string(&pid_file).unwrap();
-        let _ = std::fs::remove_file(&pid_file);
-        let stat = format!("/proc/{}/stat", pid.trim());
+        let pid: u32 = pid.trim().parse().unwrap();
+        let stat = format!("/proc/{pid}/stat");
         let deadline = Instant::now() + Duration::from_secs(2);
         while std::fs::read_to_string(&stat).is_ok_and(|s| !s.contains(") Z ")) {
             assert!(
