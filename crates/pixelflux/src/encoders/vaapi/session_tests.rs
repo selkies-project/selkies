@@ -30,7 +30,7 @@ fn settings(codec: Codec, cbr: bool) -> CaptureSettings {
 /// The stood-in driver on a placeholder node.
 fn device() -> Arc<Device> {
     let node = std::fs::File::open("/dev/null").unwrap();
-    Arc::new(Device::on(mock::api(), node.into(), "stand-in").unwrap())
+    Arc::new(Device::on(&mock::api(), node.into(), "stand-in").unwrap())
 }
 
 fn open(codec: Codec, settings: &CaptureSettings) -> Result<VaapiEncoder, String> {
@@ -1935,7 +1935,7 @@ fn an_h264_picture_on_vce_is_one_slice() {
     ] {
         mock::reset(Driver::generous());
         let node = std::fs::File::open("/dev/null").unwrap();
-        let mut device = Device::on(mock::api(), node.into(), "stand-in").unwrap();
+        let mut device = Device::on(&mock::api(), node.into(), "stand-in").unwrap();
         assert!(
             !device.vce,
             "a node the kernel does not answer for is not VCE"
@@ -1974,7 +1974,7 @@ fn h264_avoids_a_low_power_encoder_that_codes_one_slice() {
         driver.entrypoints = entrypoints.clone();
         mock::reset(driver);
         let node = std::fs::File::open("/dev/null").unwrap();
-        let mut device = Device::on(mock::api(), node.into(), "stand-in").unwrap();
+        let mut device = Device::on(&mock::api(), node.into(), "stand-in").unwrap();
         assert!(
             !device.whole_picture_vdenc,
             "a node the kernel names no PCI device for is not such a part"

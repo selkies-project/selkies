@@ -365,7 +365,7 @@ impl Drop for Device {
 impl Device {
     /// Open the render node behind `encode_node_index` (`renderD128` when none is named) and
     /// initialize the driver on it.
-    pub(crate) fn open(api: VaApi, encode_node_index: i32) -> Result<Self, String> {
+    pub(crate) fn open(api: &VaApi, encode_node_index: i32) -> Result<Self, String> {
         let render_node = format!("/dev/dri/renderD{}", 128 + encode_node_index.max(0));
         // NVIDIA's VA driver only decodes, and its constructor calls cuInit under the loader's
         // lock, while a cuInit in another thread loads libraries under CUDA's: each would wait
@@ -388,7 +388,7 @@ impl Device {
 
     /// Initialize the driver on the open render node `fd`, with its messages routed to the
     /// log; `render_node` names it in errors.
-    pub(crate) fn on(api: VaApi, fd: OwnedFd, render_node: &str) -> Result<Self, String> {
+    pub(crate) fn on(api: &VaApi, fd: OwnedFd, render_node: &str) -> Result<Self, String> {
         let display = unsafe { (api.vaGetDisplayDRM)(fd.as_raw_fd()) };
         if display.is_null() {
             return Err(format!("{render_node} carries no VA display"));
@@ -402,7 +402,7 @@ impl Device {
         if status != VA_STATUS_SUCCESS as VAStatus {
             return Err(format!(
                 "{render_node}: no VA driver initialized ({})",
-                error_text(&api, status)
+                error_text(api, status)
             ));
         }
         let vendor = unsafe {
@@ -416,7 +416,7 @@ impl Device {
         let vce = amd_vce(fd.as_raw_fd());
         let whole_picture_vdenc = whole_picture_vdenc(fd.as_raw_fd());
         Ok(Self {
-            api,
+            api: *api,
             display,
             _fd: fd,
             vendor,
@@ -705,7 +705,7 @@ fn error_text(api: &VaApi, status: VAStatus) -> String {
 /// opens it and released. An error names the step that failed: no such node, no VA driver on
 /// it, or a libva the probe cannot reach.
 pub(crate) fn probe_codecs(encode_node_index: i32) -> Result<Vec<Served>, String> {
-    probe_codecs_on(&Device::open(libva()?, encode_node_index)?)
+    probe_codecs_on(&Device::open(&libva()?, encode_node_index)?)
 }
 
 /// A codec a device encodes, with the formats it encodes the codec in.
@@ -1157,7 +1157,7 @@ impl VaapiEncoder {
             return Err("JPEG has no VA-API encoder".into());
         }
         Self::on_device(
-            Arc::new(Device::open(libva()?, settings.encode_node_index)?),
+            Arc::new(Device::open(&libva()?, settings.encode_node_index)?),
             settings,
             codec,
             input,

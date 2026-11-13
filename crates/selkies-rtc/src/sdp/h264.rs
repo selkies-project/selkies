@@ -39,7 +39,7 @@ struct BitPattern {
 }
 
 impl BitPattern {
-    const fn new(pattern: &[u8; 8]) -> BitPattern {
+    const fn new(pattern: [u8; 8]) -> BitPattern {
         let mut mask = 0u8;
         let mut value = 0u8;
         let mut i = 0;
@@ -64,31 +64,31 @@ impl BitPattern {
 const PROFILE_PATTERNS: [(u8, BitPattern, H264Profile); 9] = [
     (
         0x42,
-        BitPattern::new(b"x1xx0000"),
+        BitPattern::new(*b"x1xx0000"),
         H264Profile::ConstrainedBaseline,
     ),
     (
         0x4D,
-        BitPattern::new(b"1xxx0000"),
+        BitPattern::new(*b"1xxx0000"),
         H264Profile::ConstrainedBaseline,
     ),
     (
         0x58,
-        BitPattern::new(b"11xx0000"),
+        BitPattern::new(*b"11xx0000"),
         H264Profile::ConstrainedBaseline,
     ),
-    (0x42, BitPattern::new(b"x0xx0000"), H264Profile::Baseline),
-    (0x58, BitPattern::new(b"10xx0000"), H264Profile::Baseline),
-    (0x4D, BitPattern::new(b"0x0x0000"), H264Profile::Main),
-    (0x64, BitPattern::new(b"00000000"), H264Profile::High),
+    (0x42, BitPattern::new(*b"x0xx0000"), H264Profile::Baseline),
+    (0x58, BitPattern::new(*b"10xx0000"), H264Profile::Baseline),
+    (0x4D, BitPattern::new(*b"0x0x0000"), H264Profile::Main),
+    (0x64, BitPattern::new(*b"00000000"), H264Profile::High),
     (
         0x64,
-        BitPattern::new(b"00001100"),
+        BitPattern::new(*b"00001100"),
         H264Profile::ConstrainedHigh,
     ),
     (
         0xF4,
-        BitPattern::new(b"00000000"),
+        BitPattern::new(*b"00000000"),
         H264Profile::PredictiveHigh444,
     ),
 ];

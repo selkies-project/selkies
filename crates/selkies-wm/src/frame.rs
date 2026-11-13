@@ -343,7 +343,7 @@ impl Renderer {
         let mut parts = Vec::new();
         let origin_x = -e.left;
         let origin_y = -e.top;
-        let shadow = Shadow::cast(appearance, style, Rect::new(origin_x, origin_y, w, h));
+        let shadow = Shadow::cast(appearance, *style, Rect::new(origin_x, origin_y, w, h));
         if let Some(image) = self.render_titlebar(look, &layout, appearance, shadow.as_ref(), scale) {
             parts.push(FramePart {
                 rect: Rect::new(origin_x, origin_y, w, e.top),
@@ -730,7 +730,7 @@ struct Shadow {
 impl Shadow {
     /// The shadow of a frame at `frame` (relative to the client area), when the appearance asks
     /// for one and the window is not maximized.
-    fn cast(appearance: &Appearance<'_>, style: &WindowStyle, frame: Rect) -> Option<Shadow> {
+    fn cast(appearance: &Appearance<'_>, style: WindowStyle, frame: Rect) -> Option<Shadow> {
         if !appearance.shadow || appearance.maximized {
             return None;
         }

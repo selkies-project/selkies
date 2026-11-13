@@ -418,14 +418,14 @@ impl<T> Negotiated<T> {
 /// The reconfigure params re-initializing with `init` at API `(maj, min)`, resetting the encoder
 /// and forcing an IDR as asked; below 12.2 the driver reads the two flags from the tail.
 fn reconfigure_params(
-    init: NV_ENC_INITIALIZE_PARAMS,
+    init: &NV_ENC_INITIALIZE_PARAMS,
     (maj, min): (u32, u32),
     reset: bool,
     force_idr: bool,
 ) -> Negotiated<NV_ENC_RECONFIGURE_PARAMS> {
     let mut p = Negotiated::new(NV_ENC_RECONFIGURE_PARAMS {
         version: nvenc_struct_ver(NvStruct::ReconfigureParams, maj, min),
-        reInitEncodeParams: init,
+        reInitEncodeParams: *init,
         ..Default::default()
     });
     if (maj << 4) | min < 0xC2 {
@@ -3582,7 +3582,7 @@ impl NvencEncoder {
     /// as asked.
     unsafe fn reconfigure(&mut self, reset: bool, force_idr: bool) -> NVENCSTATUS {
         self.init_params.encodeConfig = &mut self.encode_config;
-        let mut params = reconfigure_params(self.init_params, nvenc_cur_ver(), reset, force_idr);
+        let mut params = reconfigure_params(&self.init_params, nvenc_cur_ver(), reset, force_idr);
         (self.nvenc_funcs.nvEncReconfigureEncoder.unwrap())(self.encoder_session, &mut params.value)
     }
 
@@ -7230,7 +7230,7 @@ pub(crate) mod gpu_tests {
             (funcs.nvEncDestroyEncoder.unwrap())(session);
             assert_eq!(status, NVENCSTATUS::NV_ENC_SUCCESS, "initialize");
             let reconfigure = guarded(reconfigure_params(
-                enc.init_params,
+                &enc.init_params,
                 nvenc_cur_ver(),
                 true,
                 true,
@@ -10331,7 +10331,7 @@ mod version_tests {
             (13, 0, 1808),
         ] {
             let params =
-                reconfigure_params(NV_ENC_INITIALIZE_PARAMS::default(), (maj, min), true, true);
+                reconfigure_params(&NV_ENC_INITIALIZE_PARAMS::default(), (maj, min), true, true);
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     (&params as *const Negotiated<_>).cast::<u8>(),

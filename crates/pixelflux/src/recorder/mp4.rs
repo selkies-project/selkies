@@ -264,15 +264,15 @@ pub fn parse_sps_dimensions(sps_nal: &[u8]) -> Option<(u32, u32)> {
     Some((width, height))
 }
 
-fn mk_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+fn mk_box(fourcc: [u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut b = Vec::with_capacity(8 + payload.len());
     b.extend_from_slice(&((8 + payload.len()) as u32).to_be_bytes());
-    b.extend_from_slice(fourcc);
+    b.extend_from_slice(&fourcc);
     b.extend_from_slice(payload);
     b
 }
 
-fn mk_full_box(fourcc: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
+fn mk_full_box(fourcc: [u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
     let mut p = Vec::with_capacity(4 + payload.len());
     p.push(version);
     p.extend_from_slice(&flags.to_be_bytes()[1..]);
@@ -324,8 +324,8 @@ pub fn opus_sample_entry(head: &super::ogg::OpusHead) -> Vec<u8> {
     dops_p.extend_from_slice(&head.output_gain.to_be_bytes());
     dops_p.push(head.mapping_family);
     dops_p.extend_from_slice(&head.mapping);
-    entry_p.extend_from_slice(&mk_box(b"dOps", &dops_p));
-    mk_box(b"Opus", &entry_p)
+    entry_p.extend_from_slice(&mk_box(*b"dOps", &dops_p));
+    mk_box(*b"Opus", &entry_p)
 }
 
 /// One buffered access unit awaiting its duration (known when the next one arrives).
@@ -369,22 +369,22 @@ pub struct FragmentWriter<W: Write> {
 
 /// The data reference every track shares: an empty `url ` entry flagged self-contained.
 fn dinf() -> Vec<u8> {
-    let url = mk_full_box(b"url ", 0, 1, &[]);
+    let url = mk_full_box(*b"url ", 0, 1, &[]);
     let mut dref_p = 1u32.to_be_bytes().to_vec();
     dref_p.extend_from_slice(&url);
-    mk_box(b"dinf", &mk_full_box(b"dref", 0, 0, &dref_p))
+    mk_box(*b"dinf", &mk_full_box(*b"dref", 0, 0, &dref_p))
 }
 
 /// A sample table holding only the sample entry: every sample lives in a fragment.
 fn stbl(sample_entry: &[u8]) -> Vec<u8> {
     let mut stsd_p = 1u32.to_be_bytes().to_vec();
     stsd_p.extend_from_slice(sample_entry);
-    let stsd = mk_full_box(b"stsd", 0, 0, &stsd_p);
-    let stts = mk_full_box(b"stts", 0, 0, &0u32.to_be_bytes());
-    let stsc = mk_full_box(b"stsc", 0, 0, &0u32.to_be_bytes());
-    let stsz = mk_full_box(b"stsz", 0, 0, &[0u8; 8]);
-    let stco = mk_full_box(b"stco", 0, 0, &0u32.to_be_bytes());
-    mk_box(b"stbl", &[stsd, stts, stsc, stsz, stco].concat())
+    let stsd = mk_full_box(*b"stsd", 0, 0, &stsd_p);
+    let stts = mk_full_box(*b"stts", 0, 0, &0u32.to_be_bytes());
+    let stsc = mk_full_box(*b"stsc", 0, 0, &0u32.to_be_bytes());
+    let stsz = mk_full_box(*b"stsz", 0, 0, &[0u8; 8]);
+    let stco = mk_full_box(*b"stco", 0, 0, &0u32.to_be_bytes());
+    mk_box(*b"stbl", &[stsd, stts, stsc, stsz, stco].concat())
 }
 
 /// The `tkhd` fields that differ by media: a video track states its display size, an audio
@@ -399,7 +399,7 @@ enum TrakMedia {
 fn trak(
     track_id: u32,
     timescale: u32,
-    handler: &[u8; 4],
+    handler: [u8; 4],
     media_header: Vec<u8>,
     sample_entry: &[u8],
     media: TrakMedia,
@@ -422,7 +422,7 @@ fn trak(
     tkhd_p.extend_from_slice(&MATRIX_IDENTITY);
     tkhd_p.extend_from_slice(&(width << 16).to_be_bytes());
     tkhd_p.extend_from_slice(&(height << 16).to_be_bytes());
-    let tkhd = mk_full_box(b"tkhd", 0, 3, &tkhd_p);
+    let tkhd = mk_full_box(*b"tkhd", 0, 3, &tkhd_p);
 
     // mdhd payload in field order: creation/modification time, timescale, duration,
     // language (0x55c4 = "und"), pre_defined.
@@ -432,22 +432,22 @@ fn trak(
     mdhd_p.extend_from_slice(&0u32.to_be_bytes());
     mdhd_p.extend_from_slice(&0x55c4u16.to_be_bytes());
     mdhd_p.extend_from_slice(&[0u8; 2]);
-    let mdhd = mk_full_box(b"mdhd", 0, 0, &mdhd_p);
+    let mdhd = mk_full_box(*b"mdhd", 0, 0, &mdhd_p);
 
     // hdlr payload in field order: pre_defined, the handler type, reserved, the name.
     let mut hdlr_p = Vec::new();
     hdlr_p.extend_from_slice(&[0u8; 4]);
-    hdlr_p.extend_from_slice(handler);
+    hdlr_p.extend_from_slice(&handler);
     hdlr_p.extend_from_slice(&[0u8; 12]);
     hdlr_p.extend_from_slice(b"pixelflux\0");
-    let hdlr = mk_full_box(b"hdlr", 0, 0, &hdlr_p);
+    let hdlr = mk_full_box(*b"hdlr", 0, 0, &hdlr_p);
 
     let minf = mk_box(
-        b"minf",
+        *b"minf",
         &[media_header, dinf(), stbl(sample_entry)].concat(),
     );
-    let mdia = mk_box(b"mdia", &[mdhd, hdlr, minf].concat());
-    mk_box(b"trak", &[tkhd, mdia].concat())
+    let mdia = mk_box(*b"mdia", &[mdhd, hdlr, minf].concat());
+    mk_box(*b"trak", &[tkhd, mdia].concat())
 }
 
 /// A `trex` whose fragments state their own durations, sizes, and flags unless
@@ -458,7 +458,7 @@ fn trex(track_id: u32, default_duration: u32) -> Vec<u8> {
     trex_p.extend_from_slice(&1u32.to_be_bytes());
     trex_p.extend_from_slice(&default_duration.to_be_bytes());
     trex_p.extend_from_slice(&[0u8; 8]);
-    mk_full_box(b"trex", 0, 0, &trex_p)
+    mk_full_box(*b"trex", 0, 0, &trex_p)
 }
 
 impl<W: Write> FragmentWriter<W> {
@@ -504,7 +504,7 @@ impl<W: Write> FragmentWriter<W> {
         for brand in [b"isom", b"iso5", b"iso6", b"avc1", b"mp41"] {
             ftyp_p.extend_from_slice(brand);
         }
-        let ftyp = mk_box(b"ftyp", &ftyp_p);
+        let ftyp = mk_box(*b"ftyp", &ftyp_p);
 
         // mvhd payload in field order: creation/modification time, timescale, duration
         // (0 = unknown, as it must be in a fragmented movie), rate 1.0, volume 1.0, reserved,
@@ -519,13 +519,13 @@ impl<W: Write> FragmentWriter<W> {
         mvhd_p.extend_from_slice(&MATRIX_IDENTITY);
         mvhd_p.extend_from_slice(&[0u8; 24]);
         mvhd_p.extend_from_slice(&(if self.audio.is_some() { 3u32 } else { 2u32 }).to_be_bytes());
-        let mvhd = mk_full_box(b"mvhd", 0, 0, &mvhd_p);
+        let mvhd = mk_full_box(*b"mvhd", 0, 0, &mvhd_p);
 
-        let vmhd = mk_full_box(b"vmhd", 0, 1, &[0u8; 8]);
+        let vmhd = mk_full_box(*b"vmhd", 0, 1, &[0u8; 8]);
         let mut traks = trak(
             1,
             TIMESCALE,
-            b"vide",
+            *b"vide",
             vmhd,
             &cfg.sample_entry,
             TrakMedia::Video {
@@ -535,20 +535,20 @@ impl<W: Write> FragmentWriter<W> {
         );
         let mut mvex_p = trex(1, 0);
         if let Some(audio) = &self.audio {
-            let smhd = mk_full_box(b"smhd", 0, 0, &[0u8; 4]);
+            let smhd = mk_full_box(*b"smhd", 0, 0, &[0u8; 4]);
             traks.extend(trak(
                 2,
                 OPUS_TIMESCALE,
-                b"soun",
+                *b"soun",
                 smhd,
                 &audio.sample_entry,
                 TrakMedia::Audio { volume: 0x0100 },
             ));
             mvex_p.extend(trex(2, 0));
         }
-        let mvex = mk_box(b"mvex", &mvex_p);
+        let mvex = mk_box(*b"mvex", &mvex_p);
 
-        let moov = mk_box(b"moov", &[mvhd, traks, mvex].concat());
+        let moov = mk_box(*b"moov", &[mvhd, traks, mvex].concat());
 
         self.out.write_all(&ftyp)?;
         self.out.write_all(&moov)?;
@@ -596,11 +596,11 @@ impl<W: Write> FragmentWriter<W> {
         // are relative to the start of this moof.
         let mut tfhd_p = Vec::new();
         tfhd_p.extend_from_slice(&1u32.to_be_bytes());
-        let tfhd = mk_full_box(b"tfhd", 0, 0x020000, &tfhd_p);
+        let tfhd = mk_full_box(*b"tfhd", 0, 0x020000, &tfhd_p);
 
         let mut tfdt_p = Vec::new();
         tfdt_p.extend_from_slice(&s.dts.to_be_bytes());
-        let tfdt = mk_full_box(b"tfdt", 1, 0, &tfdt_p);
+        let tfdt = mk_full_box(*b"tfdt", 1, 0, &tfdt_p);
 
         // sample flags: sync = "depends on nothing"; non-sync also sets the non-sync bit.
         let sample_flags: u32 = if s.sync { 0x0200_0000 } else { 0x0101_0000 };
@@ -613,7 +613,7 @@ impl<W: Write> FragmentWriter<W> {
         trun_p.extend_from_slice(&duration.to_be_bytes());
         trun_p.extend_from_slice(&(s.data.len() as u32).to_be_bytes());
         trun_p.extend_from_slice(&sample_flags.to_be_bytes());
-        let mut trun = mk_full_box(b"trun", 0, 0x000701, &trun_p);
+        let mut trun = mk_full_box(*b"trun", 0, 0x000701, &trun_p);
 
         let traf_len = 8 + tfhd.len() + tfdt.len() + trun.len();
         // A moof box header is 8 bytes and the mfhd inside it 16.
@@ -624,9 +624,9 @@ impl<W: Write> FragmentWriter<W> {
         let off_pos = trun.len() - trun_p.len() + 4;
         trun[off_pos..off_pos + 4].copy_from_slice(&data_offset.to_be_bytes());
 
-        let mfhd = mk_full_box(b"mfhd", 0, 0, &self.seq.to_be_bytes());
-        let traf = mk_box(b"traf", &[tfhd, tfdt, trun].concat());
-        let moof = mk_box(b"moof", &[mfhd, traf].concat());
+        let mfhd = mk_full_box(*b"mfhd", 0, 0, &self.seq.to_be_bytes());
+        let traf = mk_box(*b"traf", &[tfhd, tfdt, trun].concat());
+        let moof = mk_box(*b"moof", &[mfhd, traf].concat());
         debug_assert_eq!(moof.len(), moof_len);
 
         self.out.write_all(&moof)?;
@@ -683,8 +683,8 @@ impl<W: Write> FragmentWriter<W> {
         // with default-base-is-moof.
         let mut tfhd_p = 2u32.to_be_bytes().to_vec();
         tfhd_p.extend_from_slice(&0x0200_0000u32.to_be_bytes());
-        let tfhd = mk_full_box(b"tfhd", 0, 0x020020, &tfhd_p);
-        let tfdt = mk_full_box(b"tfdt", 1, 0, &self.audio_batch_dts.to_be_bytes());
+        let tfhd = mk_full_box(*b"tfhd", 0, 0x020020, &tfhd_p);
+        let tfdt = mk_full_box(*b"tfdt", 1, 0, &self.audio_batch_dts.to_be_bytes());
         // trun payload in field order: sample_count, a data_offset placeholder patched in
         // below, then each sample's duration and size (data-offset | sample-duration |
         // sample-size).
@@ -695,7 +695,7 @@ impl<W: Write> FragmentWriter<W> {
             trun_p.extend_from_slice(&duration.to_be_bytes());
             trun_p.extend_from_slice(&(s.len() as u32).to_be_bytes());
         }
-        let mut trun = mk_full_box(b"trun", 0, 0x000301, &trun_p);
+        let mut trun = mk_full_box(*b"trun", 0, 0x000301, &trun_p);
 
         let traf_len = 8 + tfhd.len() + tfdt.len() + trun.len();
         let moof_len = 8 + 16 + traf_len;
@@ -703,9 +703,9 @@ impl<W: Write> FragmentWriter<W> {
         let off_pos = trun.len() - trun_p.len() + 4;
         trun[off_pos..off_pos + 4].copy_from_slice(&data_offset.to_be_bytes());
 
-        let mfhd = mk_full_box(b"mfhd", 0, 0, &self.seq.to_be_bytes());
-        let traf = mk_box(b"traf", &[tfhd, tfdt, trun].concat());
-        let moof = mk_box(b"moof", &[mfhd, traf].concat());
+        let mfhd = mk_full_box(*b"mfhd", 0, 0, &self.seq.to_be_bytes());
+        let traf = mk_box(*b"traf", &[tfhd, tfdt, trun].concat());
+        let moof = mk_box(*b"moof", &[mfhd, traf].concat());
         debug_assert_eq!(moof.len(), moof_len);
 
         let data_len: usize = samples.iter().map(|(s, _)| s.len()).sum();
@@ -828,7 +828,7 @@ impl H264SampleBuilder {
         avcc_p.push(1);
         avcc_p.extend_from_slice(&(pps.len() as u16).to_be_bytes());
         avcc_p.extend_from_slice(pps);
-        let avcc = mk_box(b"avcC", &avcc_p);
+        let avcc = mk_box(*b"avcC", &avcc_p);
 
         // avc1 sample entry in field order: reserved, data_reference_index, the
         // pre_defined/reserved block, width and height, horizontal and vertical resolution
@@ -847,7 +847,7 @@ impl H264SampleBuilder {
         entry_p.extend_from_slice(&0x0018u16.to_be_bytes());
         entry_p.extend_from_slice(&(-1i16).to_be_bytes());
         entry_p.extend_from_slice(&avcc);
-        let entry = mk_box(b"avc1", &entry_p);
+        let entry = mk_box(*b"avc1", &entry_p);
 
         Some(TrackConfig {
             sample_entry: entry,
