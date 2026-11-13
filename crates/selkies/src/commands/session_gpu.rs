@@ -25,7 +25,9 @@
 //!    server's glamor draws on, Mesa reaches a GPU it has no driver of its own for through Zink
 //!    where the Vulkan driver can present into a window, and a Wayland session whose compositor
 //!    cannot reach a GPU that is here runs on X11 instead, where the session still gets it, unless
-//!    `SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland in software. `SELKIES_DISABLE_ZINK=true` keeps
+//!    `SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland in software. A GPU X11 cannot reach either,
+//!    one with no render node and no NVIDIA device (a virtual machine's display-only card), keeps
+//!    Wayland in software too, since the move would cost the session its backend for nothing. `SELKIES_DISABLE_ZINK=true` keeps
 //!    Zink out. The facts are exported as the probe names them, for what reads them later.
 
 use std::collections::BTreeMap;
@@ -415,7 +417,9 @@ pub fn plan(
 
     if wayland && fact(&facts, "SELKIES_GPU_PRESENT") == "true" && accelerated == "false" {
         let fallback = get("SELKIES_WAYLAND_X11_FALLBACK");
-        if fallback.is_none() || is_true(fallback.as_deref()) {
+        // X11 keeps a GPU only through a render node its server draws on or NVIDIA's GLX
+        let x11_reaches = !node.is_empty() || !first_node.is_empty() || nvidia_device;
+        if x11_reaches && (fallback.is_none() || is_true(fallback.as_deref())) {
             out.lines.push(
                 "GPU: the compositor cannot reach it; starting X11 so the session keeps it".into(),
             );
@@ -548,6 +552,21 @@ mod tests {
             kept.unset
                 .contains(&"__GLX_VENDOR_LIBRARY_NAME".to_string())
         );
+    }
+
+    #[test]
+    fn a_gpu_without_a_render_node_or_nvidia_keeps_wayland_in_software() {
+        let facts = report(&[
+            ("SELKIES_GPU_RENDER_NODE", ""),
+            ("SELKIES_GPU_DRIVER", ""),
+            ("SELKIES_GPU_PRESENT", "true"),
+            ("SELKIES_GPU_ACCELERATED", "false"),
+        ]);
+        let display_only = plan(&facts, true, "", false, no_env);
+        assert!(display_only.wayland, "X11 would reach nothing more");
+        assert_eq!(display_only.set["SELKIES_WAYLAND_RENDERER"], "pixman");
+        let nvidia = plan(&facts, true, "", true, no_env);
+        assert!(!nvidia.wayland, "NVIDIA's GLX still reaches its GPU on X11");
     }
 
     #[test]
