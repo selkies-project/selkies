@@ -26,7 +26,6 @@
     "../selkies-web-core/vite.config.ts",
     "../eslint.config.mts",
     "../../eslint.config.mts",
-    "../../tests/tools/*.mts",
     "../selkies-web-core/lib/gamepad.ts",
     "../universal-touch-gamepad/universalTouchGamepad.ts"
   ]

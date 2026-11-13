@@ -5,7 +5,8 @@
 #
 # ESLint over the dashboard, the web core, the touch gamepad and the scripts
 # outside them, plus the TypeScript check of the dashboard, the web core, the
-# BrowserStack smoke and the site. Run from the repository root; requires npm.
+# Node audits, the BrowserStack smoke and the site. Run from the repository
+# root; requires npm.
 #
 # The CI lint gate and the pre-commit hook both call this, so the two cannot
 # drift apart.
@@ -56,7 +57,7 @@ fi
 # root, with the same ESLint.
 echo "eslint: tests/tools tests/browserstack website tests/image/site eslint.config.mts"
 web/selkies-dashboard/node_modules/.bin/eslint --flag "${flag}" --max-warnings 0 \
-    'tests/tools/**/*.mjs' 'tests/tools/**/*.mts' 'tests/browserstack/*.ts' 'website/scripts/**/*.ts' \
+    'tests/tools/**/*.mjs' 'tests/tools/**/*.ts' 'tests/browserstack/*.ts' 'website/scripts/**/*.ts' \
     website/next.config.ts website/postcss.config.ts 'tests/image/site/**/*.js' eslint.config.mts
 
 # The dashboard's own build runs tsc as well, but that is downstream of this gate.
@@ -66,6 +67,11 @@ echo "tsc: web/selkies-dashboard"
 # The web core checks itself strictly with the TypeScript it declares.
 echo "tsc: web/selkies-web-core"
 (cd "${core}" && npm run --silent typecheck)
+
+# The Node audits check themselves and the web-core modules they import
+# against Node's types beside the DOM's, with the dashboard's TypeScript.
+echo "tsc: tests/tools"
+"${pkg}/node_modules/.bin/tsc" -p tests/tools
 
 # The BrowserStack smoke checks itself with the TypeScript it declares, against
 # the WebdriverIO and Node types its own dependencies carry.

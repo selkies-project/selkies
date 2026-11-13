@@ -7,7 +7,7 @@ re-targets, sticks whose short, still tap clicks L3 or R3, analog triggers, a
 layout the user picks and the page keeps, and a pad that exists only while the
 overlay is shown. The checks drive the module the dashboard bundles over a
 stand-in page, with the core's own poller reading the pad beside them, in
-tests/tools/touch_gamepad_audit.mts, because the path under test is TypeScript.
+tests/tools/touch_gamepad_audit.ts, because the path under test is TypeScript.
 """
 import os
 import shutil
@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "touch_gamepad_audit.mts")
+AUDIT = os.path.join(TESTS, "tools", "touch_gamepad_audit.ts")
 
 node = shutil.which("node")
 if not node:

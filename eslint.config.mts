@@ -30,11 +30,11 @@ export default [
     rules,
   },
   {
-    // TypeScript Node runs with the types stripped, an audit, the site's build
-    // scripts and configs, and this config, held to the type-checked rules
-    // through the projects that compile them.
+    // TypeScript Node runs with the types stripped, the audits, the site's
+    // build scripts and configs, and this config, held to the type-checked
+    // rules through the projects that compile them.
     files: [
-      'tests/tools/**/*.mts',
+      'tests/tools/**/*.ts',
       'website/scripts/**/*.ts',
       'website/next.config.ts',
       'website/postcss.config.ts',
@@ -46,7 +46,7 @@ export default [
       globals: { ...globals.node, ...globals.browser },
       parser: tseslint.parser,
       parserOptions: {
-        project: ['web/selkies-dashboard/tsconfig.node.json', 'website/tsconfig.json'],
+        project: ['tests/tools/tsconfig.json', 'web/selkies-dashboard/tsconfig.node.json', 'website/tsconfig.json'],
         tsconfigRootDir: import.meta.dirname,
       },
     },
