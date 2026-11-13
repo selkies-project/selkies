@@ -3305,15 +3305,20 @@ impl Desktop {
     }
 
     /// The drawing behind [`Desktop::draw_panel`].
+    ///
+    /// A new pixmap damages the whole surface, not just what it draws: a configure that
+    /// changes the scale without changing the pixel size (a 4K output at 200% and at 100%)
+    /// leaves the backend's buffers and the compositor holding the previous scale's bar,
+    /// which no damage in the new scale's coordinates reaches.
     fn draw_panel_pixels(&mut self) -> Option<BarFrame> {
         let geometry = self.panel;
         let (w, h) = (
             (geometry.width * geometry.scale) as u32,
             (geometry.height * geometry.scale) as u32,
         );
-        let mut pix = match self.panel_pix.take() {
-            Some(pix) if pix.width() == w && pix.height() == h => pix,
-            _ => Pixmap::new(w, h)?,
+        let (mut pix, fresh) = match self.panel_pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => (pix, false),
+            _ => (Pixmap::new(w, h)?, true),
         };
         let previous = std::mem::take(&mut self.panel_visible);
         let hidden = self.panel_hidden();
@@ -3338,8 +3343,15 @@ impl Desktop {
         if self.opaque_output {
             self.flatten_over_wallpaper(&mut pix, &visible);
         }
-        let mut damage: Vec<Rect> = previous.iter().map(|r| r.inflate(CLEAR_MARGIN)).collect();
-        damage.extend(visible.iter().map(|r| r.inflate(CLEAR_MARGIN)));
+        let damage: Vec<Rect> = if fresh {
+            vec![whole]
+        } else {
+            previous
+                .iter()
+                .chain(&visible)
+                .map(|r| r.inflate(CLEAR_MARGIN))
+                .collect()
+        };
         let grab = self.popup != Popup::None;
         let input = if grab {
             vec![Rect::new(0, 0, geometry.width, geometry.height)]

@@ -769,6 +769,22 @@ mod tests {
     }
 
     #[test]
+    fn a_scale_change_that_keeps_the_pixel_size_damages_the_whole_panel() {
+        let mut d = desktop();
+        for (width, height, scale) in [(1920, 1080, 2), (3840, 2160, 1)] {
+            d.handle(Event::Configured {
+                surface: SurfaceId::Panel,
+                width,
+                height,
+                scale,
+            });
+            let frame = d.render_panel().unwrap();
+            assert_eq!((frame.pixmap.width(), frame.pixmap.height()), (3840, 2160));
+            assert_eq!(frame.damage, vec![Rect::new(0, 0, width, height)]);
+        }
+    }
+
+    #[test]
     fn pager_squares_sit_side_by_side_centered_in_the_bar() {
         let bar = Rect::new(0, 0, 800, 44);
         let pills = pager_pills(100, bar, 3);
