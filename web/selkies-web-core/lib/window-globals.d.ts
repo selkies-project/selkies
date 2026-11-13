@@ -19,6 +19,26 @@ declare global {
   function clearTimeout(id: number | null): void;
   /** An interval handle the page cleared to null: the platform takes it as no timer. */
   function clearInterval(id: number | null): void;
+  /** The track an insertable-streams reader takes, which the worker typings leave out. */
+  interface MediaStreamTrackProcessorInit {
+    track: MediaStreamTrack;
+  }
+
+  /** Chromium's insertable-streams track reader, declared as the worker typings declare it for the page as well. */
+  interface MediaStreamTrackProcessor {
+    readonly readable: ReadableStream;
+  }
+
+  var MediaStreamTrackProcessor: {
+    prototype: MediaStreamTrackProcessor;
+    new(init: MediaStreamTrackProcessorInit): MediaStreamTrackProcessor;
+  };
+
+  interface VideoEncoderConfig {
+    /** The H.265 bitstream format, where the platform encodes it. */
+    hevc?: { format: 'annexb' | 'hevc' };
+  }
+
   /** Chromium's insertable-streams track source, absent from the DOM typings. */
   var MediaStreamTrackGenerator: any;
 

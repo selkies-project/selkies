@@ -47,8 +47,17 @@ export const WEBCAM_CODEC_AV1 = 4;
 /** Codec id of H.265 Annex B frames. */
 export const WEBCAM_CODEC_H265 = 5;
 
-/** Insertable-streams processor; a Chromium member this engine's DOM lib carries no type for. */
-declare const MediaStreamTrackProcessor: any;
+/** One WebCodecs encoder the camera may be encoded with. */
+interface EncoderCandidate {
+  /** The codec id frames go out under. */
+  id: number;
+  /** The name the `webcam_encoder` setting and the logs use. */
+  name: string;
+  /** The WebCodecs codec string. */
+  codec: string;
+  /** The bitstream format the codec is configured with. */
+  extra: Pick<VideoEncoderConfig, 'avc' | 'hevc'>;
+}
 
 /**
  * Candidates in preference order; support reports are no promise of speed,
@@ -57,13 +66,28 @@ declare const MediaStreamTrackProcessor: any;
  * and H.265 come after the two every engine encodes: their software encoders
  * are slower still, and H.265 exists only where the platform encodes it.
  */
-const ENCODER_CANDIDATES = [
+const ENCODER_CANDIDATES: EncoderCandidate[] = [
   { id: WEBCAM_CODEC_H264, name: "h264", codec: "avc1.42E01F", extra: { avc: { format: "annexb" } } },
   { id: WEBCAM_CODEC_VP8, name: "vp8", codec: "vp8", extra: {} },
   { id: WEBCAM_CODEC_VP9, name: "vp9", codec: "vp09.00.31.08", extra: {} },
   { id: WEBCAM_CODEC_AV1, name: "av1", codec: "av01.0.05M.08", extra: {} },
   { id: WEBCAM_CODEC_H265, name: "h265", codec: "hev1.1.6.L93.B0", extra: { hevc: { format: "annexb" } } },
 ];
+
+/** What the encode worker posts to the page. */
+type EncodeWorkerMessage =
+  | { type: 'probed'; codec: string; rate?: number }
+  | { type: 'ready'; codec: string }
+  | { type: 'slow'; codec: string }
+  | { type: 'wrongcolor'; codec: string; colErr: number }
+  | { type: 'exhausted'; codec?: string; rate?: string }
+  | { type: 'chunk'; codecId: number; keyframe: boolean; buffer: ArrayBuffer; rotation: number; flip: boolean }
+  | { type: 'track_reading' | 'track_unsupported' | 'unsupported' | 'error' };
+
+/** What the frame-source worker posts to the page. */
+type SourceWorkerMessage =
+  | { type: 'ready' | 'failed' | 'end' }
+  | { type: 'frame'; frame: VideoFrame };
 
 /**
  * A keyframe at least this often bounds recovery after a lost frame even
@@ -184,8 +208,8 @@ export function createLagGauge(fps: number): { budgetMs: number; sent: (...args:
  * nothing to close.
  * @param frame
  */
-const closeFrame = (frame: any): void => {
-  if (frame && typeof frame.close === "function") frame.close();
+const closeFrame = (frame: VideoFrame | HTMLVideoElement): void => {
+  if (frame && typeof (frame as VideoFrame).close === "function") (frame as VideoFrame).close();
 };
 /** Frames the worker source may have in flight to the page before it drops. */
 const WORKER_MAX_IN_FLIGHT = 2;
@@ -634,47 +658,47 @@ export interface WebcamCaptureOptions {
  * frame source and an encoder, and hands encoded frames to `sendFrame`.
  */
 export class WebcamCapture {
-    _sendFrame!: any;
-    _onStateChange!: any;
-    _onError!: any;
-    _canSend!: any;
-    width!: any;
-    height!: any;
-    fps!: any;
-    bitrate!: any;
-    quality!: any;
-    encoderPreference!: any;
-    _encoderCandidates!: any;
-    _stream!: any;
-    _track!: any;
-    _source!: any;
+    _sendFrame!: ((codecId: number, keyframe: boolean, bytes: Uint8Array, rotation?: number, flip?: boolean) => void);
+    _onStateChange!: ((active: boolean) => void);
+    _onError!: ((error: Error) => void);
+    _canSend!: (() => boolean);
+    width!: number;
+    height!: number;
+    fps!: number;
+    bitrate!: number;
+    quality!: number;
+    encoderPreference!: string | undefined;
+    _encoderCandidates!: EncoderCandidate[];
+    _stream!: MediaStream | null;
+    _track!: MediaStreamTrack | null;
+    _source!: { close: () => void; } | undefined | null;
     _establishing!: boolean;
-    _encoder!: any;
-    _encoderCodec!: any;
+    _encoder!: VideoEncoder | null;
+    _encoderCodec!: EncoderCandidate | null;
     _candidateIndex!: number;
-    _encodedSize!: any;
+    _encodedSize!: { w: number; h: number; rotation: number; flip: boolean; } | null;
     _forceKeyframe!: boolean;
     _chainBroken!: boolean;
     _lastKeyframeMs!: number;
     _lastFrameMs!: number;
     _frameCredit!: number;
-    _canvas!: any;
-    _ctx!: any;
+    _canvas!: OffscreenCanvas | HTMLCanvasElement | null;
+    _ctx!: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
     _jpegBusy!: boolean;
-    _pace!: any;
+    _pace!: { note: (...args: [boolean]) => void; tooSlow: () => boolean; behindRatio: () => number; reset: () => void; };
     _configuring!: boolean;
     _deriveOrientation!: boolean;
-    _orientation!: any;
-    _orientationWatch!: any;
+    _orientation!: { rotation: number; flip: boolean; };
+    _orientationWatch!: (() => void) | null;
     _active!: boolean;
     _generation!: number;
-    _encodeWorker!: any;
-    _wireProvider!: any;
+    _encodeWorker!: Worker | null;
+    _wireProvider!: (() => MessagePort | null | undefined) | null;
     _workerTrackUnsupported!: boolean;
-    _settleEncodeWorker!: any;
+    _settleEncodeWorker!: (() => void) | null;
     _workerIsSource!: boolean;
-    _encoderCodecName!: any;
-    _loggedPaths!: Set<any>;
+    _encoderCodecName!: string | null;
+    _loggedPaths!: Set<string>;
   constructor(opts: WebcamCaptureOptions) {
     this._sendFrame = opts.sendFrame;
     this._onStateChange = opts.onStateChange || ((): void => {});
@@ -687,8 +711,8 @@ export class WebcamCapture {
     this.quality = opts.quality || 0.8;
     this.encoderPreference = WEBCAM_ENCODER_PREFERENCES.indexOf(opts.encoderPreference ?? "") >= 0
       ? opts.encoderPreference : "auto";
-    this._encoderCandidates = ENCODER_CANDIDATES.some((c: any): boolean => c.name === this.encoderPreference)
-      ? ENCODER_CANDIDATES.filter((c: any): boolean => c.name === this.encoderPreference)
+    this._encoderCandidates = ENCODER_CANDIDATES.some((c: EncoderCandidate): boolean => c.name === this.encoderPreference)
+      ? ENCODER_CANDIDATES.filter((c: EncoderCandidate): boolean => c.name === this.encoderPreference)
       : ENCODER_CANDIDATES;
 
     this._stream = null;
@@ -778,22 +802,22 @@ export class WebcamCapture {
       video.deviceId = { exact: deviceId };
     }
     const asked = ++this._generation;
-    let stream: any;
+    let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
-    } catch (error: any) {
+    } catch (error) {
       if (this._generation === asked) {
-        this._onError(error);
+        this._onError(error as Error);
       }
       return;
     }
     if (this._generation !== asked) {
-      stream.getTracks().forEach((t: any): void => t.stop());
+      stream.getTracks().forEach((t: MediaStreamTrack): void => t.stop());
       return;
     }
     const track = stream.getVideoTracks()[0];
     if (!track) {
-      stream.getTracks().forEach((t: any): void => t.stop());
+      stream.getTracks().forEach((t: MediaStreamTrack): void => t.stop());
       this._onError(new Error("no video track"));
       return;
     }
@@ -830,7 +854,7 @@ export class WebcamCapture {
     if (this._encodeWorker) {
       try {
         this._encodeWorker.postMessage({ type: "keyframe" });
-      } catch (e: any) {
+      } catch (e) {
         /* ignore */
       }
     }
@@ -854,7 +878,7 @@ export class WebcamCapture {
     if (this._encoder) {
       try {
         this._encoder.close();
-      } catch (e: any) {
+      } catch (e) {
         /* already closed */
       }
       this._encoder = null;
@@ -865,10 +889,10 @@ export class WebcamCapture {
     this._orientation = UPRIGHT;
     this._unwatchOrientation();
     if (this._stream) {
-      this._stream.getTracks().forEach((t: any): void => {
+      this._stream.getTracks().forEach((t: MediaStreamTrack): void => {
         try {
           t.stop();
-        } catch (e: any) {
+        } catch (e) {
           /* ignore */
         }
       });
@@ -953,22 +977,22 @@ export class WebcamCapture {
   _tryCombinedWorker(track: MediaStreamTrack, generation: number): Promise<{ close: () => void } | null | undefined> {
     const worker = this._encodeWorker;
     if (!worker) return Promise.resolve(null);
-    let clone: any;
+    let clone: MediaStreamTrack;
     try {
       clone = track.clone();
-    } catch (error: any) {
+    } catch (error) {
       return Promise.resolve(null);
     }
-    return new Promise((resolve: any): void => {
+    return new Promise((resolve: (value: { close: () => void } | null) => void): void => {
       let settled = false;
-      const finish = (value: any): void => {
+      const finish = (value: { close: () => void; } | null): void => {
         if (settled) return;
         settled = true;
         worker.removeEventListener("message", onMessage);
         clearTimeout(timer);
         resolve(value);
       };
-      const onMessage = (e: any): void => {
+      const onMessage = (e: MessageEvent<EncodeWorkerMessage>): void => {
         const m = e.data;
         if (m.type === "track_reading") {
           if (this._generation === generation) {
@@ -982,19 +1006,19 @@ export class WebcamCapture {
           // No worker MediaStreamTrackProcessor here, so a second worker would
           // fail the same way: _openSource skips straight to the page's.
           this._workerTrackUnsupported = true;
-          try { clone.stop(); } catch (error: any) { /* ignore */ }
+          try { clone.stop(); } catch (error) { /* ignore */ }
           finish(null);
         }
       };
       const timer = setTimeout((): void => {
-        try { clone.stop(); } catch (error: any) { /* ignore */ }
+        try { clone.stop(); } catch (error) { /* ignore */ }
         finish(null);
       }, 2000);
       worker.addEventListener("message", onMessage);
       try {
         worker.postMessage({ type: "track", track: clone }, [clone]);
-      } catch (error: any) {
-        try { clone.stop(); } catch (e: any) { /* ignore */ }
+      } catch (error) {
+        try { clone.stop(); } catch (e) { /* ignore */ }
         finish(null);
       }
     });
@@ -1027,15 +1051,15 @@ export class WebcamCapture {
         this._candidateIndex >= this._encoderCandidates.length) {
       return Promise.resolve();
     }
-    let worker: any;
+    let worker: Worker;
     try {
       const url = URL.createObjectURL(new Blob([ENCODE_WORKER_SRC], { type: "text/javascript" }));
       worker = new Worker(url);
       URL.revokeObjectURL(url);
-    } catch (error: any) {
+    } catch (error) {
       return Promise.resolve();
     }
-    return new Promise((resolve: any): void => {
+    return new Promise((resolve: (value: void | PromiseLike<void>) => void): void => {
       let settled = false;
       const done = (): void => {
         if (settled) return;
@@ -1045,16 +1069,16 @@ export class WebcamCapture {
       };
       // Lets _stopEncodeWorker resolve a probe still being awaited.
       const settle = (): void => { clearTimeout(timer); done(); };
-      const drop = (why: any): void => {
+      const drop = (why: string): void => {
         console.warn("[Webcam] encode-worker unavailable, encoding on the page:", why);
         const wasSource = this._workerIsSource;
         if (this._encodeWorker === worker) this._encodeWorker = null;
         this._workerIsSource = false;
-        try { worker.terminate(); } catch (e: any) { /* ignore */ }
+        try { worker.terminate(); } catch (e) { /* ignore */ }
         done();
         if (wasSource && !this._establishing && this._active && this._generation === generation) {
           this._source = null;
-          this._openSource(this._track, generation).then((source: any): void => {
+          this._openSource(this._track!, generation).then((source: { close: () => void; } | null | undefined): void => {
             if (this._generation !== generation) {
               if (source) source.close();
               return;
@@ -1065,7 +1089,7 @@ export class WebcamCapture {
         }
       };
       const timer = setTimeout((): void => drop("probe timeout"), 8000);
-      worker.onmessage = (e: any): void => {
+      worker.onmessage = (e: MessageEvent<EncodeWorkerMessage>): void => {
         const m = e.data;
         if (m.type === "probed") {
           clearTimeout(timer);
@@ -1074,7 +1098,7 @@ export class WebcamCapture {
             try {
               const port = this._wireProvider();
               if (port) worker.postMessage({ type: "wirePort", port }, [port]);
-            } catch (error: any) { /* the page relay stands in */ }
+            } catch (error) { /* the page relay stands in */ }
           }
           this._encoderCodecName = m.codec;
           this._logPath(m.rate !== undefined
@@ -1114,13 +1138,13 @@ export class WebcamCapture {
           drop(m.type);
         }
       };
-      worker.onerror = (ev: any): void => { clearTimeout(timer); drop("worker.onerror: " + (ev && ev.message)); };
+      worker.onerror = (ev: ErrorEvent): void => { clearTimeout(timer); drop("worker.onerror: " + (ev && ev.message)); };
       this._encodeWorker = worker;
       this._settleEncodeWorker = settle;
       try {
         worker.postMessage({ type: "probe", width: this.width, height: this.height, fps: this.fps,
                              bitrate: this.bitrate, candidates: this._encoderCandidates });
-      } catch (error: any) {
+      } catch (error) {
         clearTimeout(timer);
         drop("probe postMessage threw: " + error);
       }
@@ -1160,7 +1184,7 @@ export class WebcamCapture {
     this._orientation = { rotation: deriveRotation(), flip: false };
     try {
       this._encodeWorker.postMessage({ type: "orientation", ...this._orientation });
-    } catch (e: any) {
+    } catch (e) {
       /* ignore */
     }
   }
@@ -1174,8 +1198,8 @@ export class WebcamCapture {
     this._workerIsSource = false;
     if (worker) {
       worker.onmessage = null;
-      try { worker.postMessage({ type: "stop" }); } catch (e: any) { /* ignore */ }
-      setTimeout((): void => { try { worker.terminate(); } catch (e: any) { /* ignore */ } }, 100);
+      try { worker.postMessage({ type: "stop" }); } catch (e) { /* ignore */ }
+      setTimeout((): void => { try { worker.terminate(); } catch (e) { /* ignore */ } }, 100);
     }
     if (settle) settle();
   }
@@ -1204,10 +1228,10 @@ export class WebcamCapture {
     }
     if (typeof MediaStreamTrackProcessor !== "undefined") {
       try {
-        const processor = new MediaStreamTrackProcessor({ track } as any);
+        const processor = new MediaStreamTrackProcessor({ track });
         this._logPath("capture: MediaStreamTrackProcessor on the page");
-        return this._readerSource(processor.readable.getReader(), generation);
-      } catch (error: any) {
+        return this._readerSource((processor.readable as ReadableStream<VideoFrame>).getReader(), generation);
+      } catch (error) {
         /* fall through to the other sources */
       }
     }
@@ -1243,10 +1267,10 @@ export class WebcamCapture {
   _readerSource(reader: ReadableStreamDefaultReader<VideoFrame>, generation: number): { close: () => void } {
     const loop = async (): Promise<void> => {
       for (;;) {
-        let result: any;
+        let result: ReadableStreamReadValueResult<VideoFrame> | ReadableStreamReadDoneResult<VideoFrame>;
         try {
           result = await reader.read();
-        } catch (error: any) {
+        } catch (error) {
           break;
         }
         if (result.done || this._generation !== generation) {
@@ -1261,7 +1285,7 @@ export class WebcamCapture {
       close: (): void => {
         try {
           reader.cancel();
-        } catch (e: any) {
+        } catch (e) {
           /* ignore */
         }
       },
@@ -1277,26 +1301,26 @@ export class WebcamCapture {
    * @returns
    */
   _workerSource(track: MediaStreamTrack, generation: number): Promise<{ close: () => void } | null | undefined> {
-    return new Promise((resolve: any): void => {
-      let clone: any;
+    return new Promise((resolve: (value: { close: () => void } | null) => void): void => {
+      let clone: MediaStreamTrack;
       try {
         clone = track.clone();
-      } catch (error: any) {
+      } catch (error) {
         resolve(null);
         return;
       }
-      let worker: any;
+      let worker: Worker;
       try {
         const url = URL.createObjectURL(new Blob([MEDIA_WORKER_SRC], { type: "text/javascript" }));
         worker = new Worker(url);
         URL.revokeObjectURL(url);
-      } catch (error: any) {
-        try { clone.stop(); } catch (e: any) { /* ignore */ }
+      } catch (error) {
+        try { clone.stop(); } catch (e) { /* ignore */ }
         resolve(null);
         return;
       }
       let settled = false;
-      const finish = (value: any): void => {
+      const finish = (value: { close: () => void; } | null): void => {
         if (!settled) {
           settled = true;
           resolve(value);
@@ -1304,22 +1328,22 @@ export class WebcamCapture {
       };
       const timer = setTimeout((): void => {
         worker.terminate();
-        try { clone.stop(); } catch (e: any) { /* ignore */ }
+        try { clone.stop(); } catch (e) { /* ignore */ }
         finish(null);
       }, 3000);
       const source = {
         close: (): void => {
-          try { worker.postMessage({ type: "stop" }); } catch (e: any) { /* ignore */ }
+          try { worker.postMessage({ type: "stop" }); } catch (e) { /* ignore */ }
           setTimeout((): void => worker.terminate(), 100);
         },
       };
       worker.onerror = (): void => {
         clearTimeout(timer);
         worker.terminate();
-        try { clone.stop(); } catch (e: any) { /* ignore */ }
+        try { clone.stop(); } catch (e) { /* ignore */ }
         finish(null);
       };
-      worker.onmessage = (e: any): void => {
+      worker.onmessage = (e: MessageEvent<SourceWorkerMessage>): void => {
         const m = e.data;
         if (!m) return;
         if (m.type === "ready") {
@@ -1328,7 +1352,7 @@ export class WebcamCapture {
         } else if (m.type === "failed") {
           clearTimeout(timer);
           worker.terminate();
-          try { clone.stop(); } catch (err: any) { /* ignore */ }
+          try { clone.stop(); } catch (err) { /* ignore */ }
           finish(null);
         } else if (m.type === "frame") {
           worker.postMessage({ type: "ack" });
@@ -1343,10 +1367,10 @@ export class WebcamCapture {
       };
       try {
         worker.postMessage({ type: "source", track: clone }, [clone]);
-      } catch (error: any) {
+      } catch (error) {
         clearTimeout(timer);
         worker.terminate();
-        try { clone.stop(); } catch (e: any) { /* ignore */ }
+        try { clone.stop(); } catch (e) { /* ignore */ }
         finish(null);
       }
     });
@@ -1377,11 +1401,11 @@ export class WebcamCapture {
     let canvas: HTMLCanvasElement | null = null;
     let ctx: CanvasRenderingContext2D | null = null;
     let buildFailures = 0;
-    const buildFrame = (): any => {
+    const buildFrame = (): VideoFrame | null => {
       const timestamp = Math.round(performance.now() * 1000);
       try {
         return new VideoFrame(video, { timestamp });
-      } catch (error: any) {
+      } catch (error) {
         /* fall through to the canvas */
       }
       try {
@@ -1395,7 +1419,7 @@ export class WebcamCapture {
         }
         ctx!.drawImage(video, 0, 0);
         return new VideoFrame(canvas, { timestamp });
-      } catch (error: any) {
+      } catch (error) {
         return null;
       }
     };
@@ -1430,10 +1454,10 @@ export class WebcamCapture {
     return {
       close: (): void => {
         if (handle !== null && video.cancelVideoFrameCallback) {
-          try { video.cancelVideoFrameCallback(handle); } catch (e: any) { /* ignore */ }
+          try { video.cancelVideoFrameCallback(handle); } catch (e) { /* ignore */ }
         }
         if (timer !== null) clearInterval(timer);
-        try { video.srcObject = null; } catch (e: any) { /* ignore */ }
+        try { video.srcObject = null; } catch (e) { /* ignore */ }
         video.remove();
       },
     };
@@ -1464,7 +1488,7 @@ export class WebcamCapture {
         const label = this._frameOrientation(frame);
         this._encodeWorker.postMessage({ type: "frame", frame, ...label }, [frame]);
         return;
-      } catch (error: any) {
+      } catch (error) {
         this._stopEncodeWorker();
         closeFrame(frame);
         return;
@@ -1565,8 +1589,8 @@ export class WebcamCapture {
         this._lastKeyframeMs = now;
         this._forceKeyframe = false;
       }
-    } catch (error: any) {
-      this._onEncoderFailure(error);
+    } catch (error) {
+      this._onEncoderFailure(error as Error);
     }
     frame.close();
   }
@@ -1584,13 +1608,13 @@ export class WebcamCapture {
   async _configureEncoder(w: number, h: number, rotation: number = 0, flip: boolean = false): Promise<void> {
     const generation = this._generation;
     if (this._encoder) {
-      try { this._encoder.close(); } catch (e: any) { /* ignore */ }
+      try { this._encoder.close(); } catch (e) { /* ignore */ }
       this._encoder = null;
       this._encoderCodec = null;
     }
     while (this._candidateIndex < this._encoderCandidates.length) {
       const cand = this._encoderCandidates[this._candidateIndex];
-      const config = {
+      const config: VideoEncoderConfig = {
         codec: cand.codec,
         width: w,
         height: h,
@@ -1599,10 +1623,10 @@ export class WebcamCapture {
         latencyMode: "realtime",
         ...cand.extra,
       };
-      let support: any;
+      let support: VideoEncoderSupport | null;
       try {
         support = await VideoEncoder.isConfigSupported(config);
-      } catch (error: any) {
+      } catch (error) {
         support = null;
       }
       if (this._generation !== generation) {
@@ -1614,8 +1638,8 @@ export class WebcamCapture {
       }
       try {
         const encoder = new VideoEncoder({
-          output: (chunk: any): void => this._onChunk(cand, chunk, generation),
-          error: (error: any): void => this._onEncoderFailure(error),
+          output: (chunk: EncodedVideoChunk): void => this._onChunk(cand, chunk, generation),
+          error: (error: DOMException): void => this._onEncoderFailure(error),
         });
         encoder.configure(support.config || config);
         this._encoder = encoder;
@@ -1624,7 +1648,7 @@ export class WebcamCapture {
         this._forceKeyframe = true;
         this._logPath(`encoder: ${cand.name} (${cand.codec}) at ${w}x${h}`);
         return;
-      } catch (error: any) {
+      } catch (error) {
         this._candidateIndex++;
       }
     }
@@ -1682,7 +1706,7 @@ export class WebcamCapture {
   _onEncoderTooSlow(): void {
     const name = this._encoderCodec ? this._encoderCodec.name : "the encoder";
     if (this._encoder) {
-      try { this._encoder.close(); } catch (e: any) { /* ignore */ }
+      try { this._encoder.close(); } catch (e) { /* ignore */ }
       this._encoder = null;
       this._encoderCodec = null;
     }
@@ -1702,7 +1726,7 @@ export class WebcamCapture {
   _onEncoderFailure(error: Error): void {
     console.warn("Webcam encoder failed, trying the next codec:", error);
     if (this._encoder) {
-      try { this._encoder.close(); } catch (e: any) { /* ignore */ }
+      try { this._encoder.close(); } catch (e) { /* ignore */ }
       this._encoder = null;
       this._encoderCodec = null;
     }
@@ -1745,15 +1769,15 @@ export class WebcamCapture {
     }
     try {
       if (turn) {
-        this._ctx.save();
-        this._ctx.translate(w / 2, h / 2);
-        this._ctx.rotate((turn * Math.PI) / 180);
-        this._ctx.drawImage(frame, -dw / 2, -dh / 2, dw, dh);
-        this._ctx.restore();
+        this._ctx!.save();
+        this._ctx!.translate(w / 2, h / 2);
+        this._ctx!.rotate((turn * Math.PI) / 180);
+        this._ctx!.drawImage(frame, -dw / 2, -dh / 2, dw, dh);
+        this._ctx!.restore();
       } else {
-        this._ctx.drawImage(frame, 0, 0, w, h);
+        this._ctx!.drawImage(frame, 0, 0, w, h);
       }
-    } catch (error: any) {
+    } catch (error) {
       closeFrame(frame);
       return;
     }
@@ -1761,18 +1785,18 @@ export class WebcamCapture {
     this._jpegBusy = true;
     const generation = this._generation;
     const canvas = this._canvas;
-    const jpeg = canvas.convertToBlob
-      ? canvas.convertToBlob({ type: "image/jpeg", quality: this.quality })
-      : new Promise((resolve: any, reject: any): void => canvas.toBlob(
-        (blob: any): void => (blob ? resolve(blob) : reject(new Error("the canvas gave no JPEG"))), "image/jpeg", this.quality));
+    const jpeg: Promise<Blob> = (canvas as OffscreenCanvas).convertToBlob
+      ? (canvas as OffscreenCanvas).convertToBlob({ type: "image/jpeg", quality: this.quality })
+      : new Promise((resolve: (value: Blob) => void, reject: (reason: Error) => void): void => (canvas as HTMLCanvasElement).toBlob(
+        (blob: Blob | null): void => (blob ? resolve(blob) : reject(new Error("the canvas gave no JPEG"))), "image/jpeg", this.quality));
     jpeg
-      .then((blob: any): void => blob.arrayBuffer())
-      .then((buf: any): void => {
+      .then((blob: Blob): Promise<ArrayBuffer> => blob.arrayBuffer())
+      .then((buf: ArrayBuffer): void => {
         if (this._active && this._generation === generation) {
           this._sendFrame(WEBCAM_CODEC_MJPEG, true, new Uint8Array(buf));
         }
       })
-      .catch((error: any): void => this._onError(error))
+      .catch((error: Error): void => this._onError(error))
       .finally((): void => {
         this._jpegBusy = false;
       });
