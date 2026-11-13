@@ -26,8 +26,10 @@
 //!    where the Vulkan driver can present into a window, and a Wayland session whose compositor
 //!    cannot reach a GPU that is here runs on X11 instead, where the session still gets it, unless
 //!    `SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland in software. A GPU X11 cannot reach either,
-//!    one with no render node and no NVIDIA device (a virtual machine's display-only card), keeps
-//!    Wayland in software too, since the move would cost the session its backend for nothing. `SELKIES_DISABLE_ZINK=true` keeps
+//!    one no vendor's EGL renders on in hardware and no NVIDIA driver drives (a virtual machine's
+//!    display-only card, a virtual GEM node), keeps Wayland in software too, since the move would
+//!    cost the session its backend for nothing; a probe that wedged measured nothing, so there
+//!    the X server still tries the first render node. `SELKIES_DISABLE_ZINK=true` keeps
 //!    Zink out. The facts are exported as the probe names them, for what reads them later.
 
 use std::collections::BTreeMap;
@@ -417,8 +419,9 @@ pub fn plan(
 
     if wayland && fact(&facts, "SELKIES_GPU_PRESENT") == "true" && accelerated == "false" {
         let fallback = get("SELKIES_WAYLAND_X11_FALLBACK");
-        // X11 keeps a GPU only through a render node its server draws on or NVIDIA's GLX
-        let x11_reaches = !node.is_empty() || !first_node.is_empty() || nvidia_device;
+        let x11_reaches = nvidia_device
+            || !gl_vendor.is_empty()
+            || (*probe == Probe::Wedged && !first_node.is_empty());
         if x11_reaches && (fallback.is_none() || is_true(fallback.as_deref())) {
             out.lines.push(
                 "GPU: the compositor cannot reach it; starting X11 so the session keeps it".into(),
