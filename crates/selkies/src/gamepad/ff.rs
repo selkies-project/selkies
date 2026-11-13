@@ -258,11 +258,11 @@ impl FfMixer {
                 hold_ms: (hold.as_secs_f64() * 1000.0).round() as u32,
             });
         }
-        let mut wake: Vec<Instant> = boundaries.into_iter().filter(|t| *t > now).collect();
-        if let Some(at) = self.renew_at {
-            wake.push(at);
-        }
-        self.wake = wake.into_iter().min();
+        self.wake = boundaries
+            .into_iter()
+            .filter(|t| *t > now)
+            .chain(self.renew_at)
+            .min();
         out
     }
 }

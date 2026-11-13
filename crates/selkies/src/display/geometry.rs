@@ -203,7 +203,8 @@ pub fn reconcile_realized_layout(
         reanchored,
         ..RealizedFit::default()
     };
-    for did in layouts.keys().cloned().collect::<Vec<_>>() {
+    let ids: Vec<_> = layouts.keys().cloned().collect();
+    for did in ids {
         let layout = layouts[&did];
         if did != PRIMARY_DISPLAY
             && (reanchored || layout.x >= realized_w || layout.y >= realized_h)

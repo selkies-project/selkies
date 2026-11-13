@@ -520,12 +520,14 @@ impl WaylandKeymapOwner {
 
     /// Release every held key and synthetic modifier.
     pub fn reset(&mut self) {
-        for keysym in self.pressed.keys().copied().collect::<Vec<_>>() {
+        let pressed: Vec<_> = self.pressed.keys().copied().collect();
+        for keysym in pressed {
             if self.release(keysym).is_err() {
                 self.pressed.remove(&keysym);
             }
         }
-        for m in self.mod_refs.keys().copied().collect::<Vec<_>>() {
+        let mods: Vec<_> = self.mod_refs.keys().copied().collect();
+        for m in mods {
             let _ = self.inject(m, 0);
         }
         self.mod_refs.clear();

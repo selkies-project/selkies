@@ -305,10 +305,7 @@ mod tests {
             .chain((0..100).map(|i| i as u8))
             .collect();
         let frame = annex_b(&[&sps, &pps, &slice]);
-        let ours: Vec<Bytes> = packetize(&split_bitstream(&frame))
-            .iter()
-            .map(|p| p.to_bytes())
-            .collect();
+        let ours = packetize(&split_bitstream(&frame));
         let theirs = rtc_rtp::codec::h264::H264Payloader::default()
             .payload(PACKET_MAX, &frame)
             .unwrap();

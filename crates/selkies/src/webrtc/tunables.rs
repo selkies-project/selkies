@@ -1052,8 +1052,15 @@ impl WebRtcService {
         }
         // A display that sent nothing this tick drained no feedback: an idle screen, which a cut
         // target pads from (its path idle, no queue to read) as it pads a trickle.
-        let steered: Vec<String> = self.st.lock().congestion.keys().cloned().collect();
-        for did in steered.into_iter().filter(|d| !ticked.contains(d)) {
+        let idle: Vec<String> = self
+            .st
+            .lock()
+            .congestion
+            .keys()
+            .filter(|d| !ticked.contains(d))
+            .cloned()
+            .collect();
+        for did in idle {
             let Some(pipeline) = self.pipeline(&did).filter(|p| p.rc_mode() == "cbr") else {
                 continue;
             };

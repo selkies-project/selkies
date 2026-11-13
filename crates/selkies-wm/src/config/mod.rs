@@ -1722,12 +1722,12 @@ mod tests {
 </openbox_config>"#,
             )
             .unwrap();
-        let titlebar: Vec<&MouseBind> = config
+        let titlebar = config
             .mousebinds
             .iter()
             .filter(|b| b.context == Context::Titlebar)
-            .collect();
-        assert_eq!(titlebar.len(), 1);
+            .count();
+        assert_eq!(titlebar, 1);
         assert!(config.mousebinds.iter().any(|b| b.context == Context::Close));
         assert_eq!(config.keybinds.len(), 1);
         assert_eq!(config.keybinds[0].keysym, keysym_from_name("t").unwrap());

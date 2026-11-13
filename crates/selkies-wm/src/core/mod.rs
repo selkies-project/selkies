@@ -621,7 +621,8 @@ impl Engine {
         self.apps = None;
         self.config = config;
         self.close_menu();
-        for id in self.windows.keys().copied().collect::<Vec<_>>() {
+        let ids: Vec<_> = self.windows.keys().copied().collect();
+        for id in ids {
             self.apply_decoration_choice(id);
             self.render_frame(id);
         }

@@ -799,9 +799,10 @@ async fn the_control_socket_grows_and_retires_by_the_names_it_coins() {
 #[test]
 fn scratch_directories_made_at_once_are_distinct() {
     let made: Vec<Scratch> = std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..16)
-            .map(|_| scope.spawn(|| (0..8).map(|_| Scratch::new("at-once")).collect::<Vec<_>>()))
-            .collect();
+        // An array is filled eagerly: every worker runs before the first is joined.
+        let workers: [_; 16] = std::array::from_fn(|_| {
+            scope.spawn(|| (0..8).map(|_| Scratch::new("at-once")).collect::<Vec<_>>())
+        });
         workers
             .into_iter()
             .flat_map(|worker| worker.join().expect("every directory made"))
