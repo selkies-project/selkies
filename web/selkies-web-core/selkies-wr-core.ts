@@ -85,7 +85,7 @@
 
 import { WebRTCClient } from "./lib/webrtc.ts";
 import { WebRTCSignaling } from "./lib/signaling.ts";
-import { Input } from "./lib/input.ts";
+import { Input, slotPlayerIndex } from "./lib/input.ts";
 import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale, capStreamSize, STREAM_SIDE_CAP } from "./lib/stream-density.ts";
 import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createIncomingClipboard, createLocalClipboardSender, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, digestedPayload } from "./lib/clipboard-sync.ts";
 import { createFileUploader } from "./lib/file-upload.ts";
@@ -3622,8 +3622,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 					const previousSlot = clientSlot;
 					clientRole = perms.role === CLIENT_CONTROLLER ? CLIENT_CONTROLLER : CLIENT_VIEWER;
 					clientSlot = (perms.slot === null || perms.slot === undefined) ? null : perms.slot;
-					const firstSlot = Array.isArray(clientSlot) ? clientSlot[0] : clientSlot;
-					playerInputTargetIndex = (firstSlot !== null && firstSlot > 0) ? firstSlot - 1 : undefined;
+					playerInputTargetIndex = slotPlayerIndex(clientSlot);
 					console.log(`Server role verdict: role=${clientRole}, slot=${clientSlot}`);
 					if (input) {
 						input.updateControllerSlot(clientSlot);

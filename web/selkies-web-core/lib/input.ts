@@ -376,6 +376,17 @@ export function slotList(slot: number | number[] | null | undefined): number[] |
     return slots.length ? slots : null;
 }
 
+/**
+ * The zero-based input target of the first slot a server verdict's `slot`
+ * names, which is what a page without assigned slots drives its pad on.
+ * @param slot One slot, a list of them, or none.
+ * @returns The target, or undefined where the verdict names no slot.
+ */
+export function slotPlayerIndex(slot: number | number[] | null | undefined): number | undefined {
+    const first = Array.isArray(slot) ? slot[0] : slot;
+    return (first !== null && first !== undefined && first > 0) ? first - 1 : undefined;
+}
+
 /** Finger travel, in CSS pixels, that one wheel notch of a two-finger scroll stands for. */
 const TOUCH_SCROLL_NOTCH_PX = 50;
 

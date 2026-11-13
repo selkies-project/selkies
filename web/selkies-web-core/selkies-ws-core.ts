@@ -105,7 +105,8 @@
  */
 
 import {
-  Input
+  Input,
+  slotPlayerIndex
 } from './lib/input.ts';
 import {
   createClipboardSync,
@@ -4854,8 +4855,9 @@ const initializeInput = (): void => {
     console.log("Input already initialized. Skipping.");
     return;
   }
-  if (clientSlot !== null && clientSlot > 0) {
-    playerInputTargetIndex = clientSlot - 1;
+  const slotIndex = slotPlayerIndex(clientSlot);
+  if (slotIndex !== undefined) {
+    playerInputTargetIndex = slotIndex;
     console.log(`Input Initialization: Applying server-provided slot ${clientSlot}. Gamepad will target index ${playerInputTargetIndex}.`);
   }
   inputInitialized = true;
@@ -8334,11 +8336,7 @@ class WorkerWebSocket {
                 window.webrtcInput.setSharedMode(true);
             }
             detectedSharedModeType = 'shared';
-            if (clientSlot !== null && clientSlot > 0) {
-                playerInputTargetIndex = clientSlot - 1;
-            } else {
-                playerInputTargetIndex = undefined;
-            }
+            playerInputTargetIndex = slotPlayerIndex(clientSlot);
             if (!manual_width || manual_width <= 0 || !manual_height || manual_height <= 0) {
                 manual_width = 1280; manual_height = 720;
             }

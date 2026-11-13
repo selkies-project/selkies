@@ -53,7 +53,7 @@ Object.defineProperty(globalThis, 'navigator', {
              getGamepads: () => pads },
     configurable: true, writable: true });
 
-const { Input, slotList } = await import('../../web/selkies-web-core/lib/input.ts');
+const { Input, slotList, slotPlayerIndex } = await import('../../web/selkies-web-core/lib/input.ts');
 
 const plays = [];
 const pad = (name, index) => ({
@@ -72,6 +72,11 @@ const gamepadSends = (sent, beats = false) => sent.filter((m) => m.startsWith('j
 check('a verdict names one slot as its number, several as their list, and none as null',
       JSON.stringify([slotList(3), slotList([3, 4]), slotList('2'), slotList(null), slotList(0), slotList([])])
       === JSON.stringify([[3], [3, 4], [2], null, null, null]));
+
+check('a verdict of several slots targets the first of them, as one of a single slot targets it',
+      JSON.stringify([slotPlayerIndex(3), slotPlayerIndex([3, 4]), slotPlayerIndex([2]), slotPlayerIndex(null) ?? 'none',
+                      slotPlayerIndex(undefined) ?? 'none', slotPlayerIndex(0) ?? 'none', slotPlayerIndex([]) ?? 'none'])
+      === JSON.stringify([2, 2, 1, 'none', 'none', 'none', 'none']));
 
 // --- a token holding slots 3 and 4 -------------------------------------------
 {
