@@ -11,8 +11,8 @@
 //! every address it resolves to (`localhost` covers both loopback families); an address the
 //! host does not carry (the IPv6 loopback with IPv6 disabled) is skipped with a warning while
 //! another binds, and any other failure, or nothing binding at all, fails the start. IPv6
-//! sockets are IPv6-only so `::` and `0.0.0.0` can share the port. A `unix_socket` replaces
-//! the TCP listeners: a stale socket file nothing accepts on is removed, a live one or a
+//! sockets are IPv6-only so `::` and `0.0.0.0` can share the port. A `unix_socket` is
+//! served in place of the TCP sockets: a stale socket file nothing accepts on is removed, a live one or a
 //! non-socket at the path refuses the start, and the file is unlinked on stop unless another
 //! instance took it over.
 //!

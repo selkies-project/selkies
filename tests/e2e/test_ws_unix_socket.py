@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The websockets transport served from a Unix domain socket alone.
 
-With ``unix_socket`` set the server binds that path instead of the TCP
-addr/port pair, so everything — the static client, the API, and the data
+With ``unix_socket`` set and no port named, the server binds that path instead
+of the TCP addr/port pair, so everything — the static client, the API, and the data
 WebSocket that carries the stream — has to work over AF_UNIX. A stale socket
 file left at the path by a dead server must be cleared at start (a live one
 must not be), and the server must remove its own file on shutdown.
@@ -87,7 +87,7 @@ def spawn_server(log: str) -> subprocess.Popen:
            "XDG_RUNTIME_DIR": H.RUNTIME_DIR,
            "SELKIES_MODE": "websockets", "SELKIES_ENABLE_BASIC_AUTH": "false",
            "SELKIES_ENABLE_HTTPS": "false", "SELKIES_WEB_ROOT": H.CORE_DIST,
-           "SELKIES_PORT": str(H.PORT), "SELKIES_UNIX_SOCKET": SOCK,
+           "SELKIES_PORT": "", "SELKIES_UNIX_SOCKET": SOCK,
            "SELKIES_VIDEO_STREAMING_MODE": "true", **H.inherited_env()}
     with open(log, "w") as lf:
         lf.write("")

@@ -28,7 +28,8 @@
 //! The server's life: [`require_configured_credentials`] and [`require_one_listen_setting`]
 //! refuse a misconfiguration with exit status [`EXIT_CONFIG_ERROR`] before anything binds, and
 //! [`Server::start`] brings up the rest: the certificate ([`tls::build`]), the tokens-file
-//! watcher, every listener (the `port` one and the `https_port` one beside it) with the one
+//! watcher, every listener (the Unix socket, the `port` one and the `https_port` one, whichever
+//! the settings ask for) with the one
 //! contract line `Selkies server running on <endpoint>` ([`listen::start_each`]), and the
 //! certificate watcher. Disk-bound and CPU-bound work (the tokens
 //! file, certificate files, name resolution, a web root's checks, inflating an embedded file
@@ -114,7 +115,11 @@ pub struct HttpConfig {
     pub web_root: String,
     pub tokens_file: String,
     pub listen: listen::ListenConfig,
-    /// The port of the second listener, always HTTPS, on `listen`'s addresses; 0 opens none.
+    /// Whether `listen.port` was named rather than left to its default: a named port is bound
+    /// beside a Unix socket or an `https_port`, a default one only when it is the sole listener.
+    pub port_given: bool,
+    /// The port of the listener that always serves HTTPS, on `listen`'s addresses; 0 opens
+    /// none.
     pub https_port: u16,
     pub tls: tls::TlsConfig,
     pub audit: audit::AuditConfig,
@@ -147,6 +152,7 @@ impl HttpConfig {
                 idle_timeout: IDLE_CONNECTION_TIMEOUT,
                 access_log: false,
             },
+            port_given: s.was_provided("port"),
             https_port: s.https_port().clamp(0, u16::MAX as i64) as u16,
             tls: tls::TlsConfig {
                 enable_https: s.enable_https().on,
@@ -190,6 +196,7 @@ impl Default for HttpConfig {
             web_root: String::new(),
             tokens_file: String::new(),
             listen: listen::ListenConfig::default(),
+            port_given: false,
             https_port: 0,
             tls: tls::TlsConfig::default(),
             audit: audit::AuditConfig::default(),
@@ -454,11 +461,13 @@ impl Server {
     /// listeners, and under HTTPS the certificate watcher. Bring the supervisor's first mode up
     /// before this, so a page connecting the moment the port accepts finds its transport.
     ///
-    /// `listen` serves HTTPS under `enable_https` and plain HTTP otherwise; an `https_port`
-    /// adds a TCP listener on the same addresses that serves the same certificate whatever
-    /// `enable_https` says, so a reverse proxy can speak HTTP to one port while browsers reach
-    /// the other directly in a secure context. Both run the one router, so every route, the
-    /// auth gate, and the client are the same on either.
+    /// The listeners, in the contract line's order: the Unix socket when one is set, `port`
+    /// when it was named or nothing else listens, and `https_port` when set. The socket and
+    /// `port` serve HTTPS under `enable_https` and plain HTTP otherwise; `https_port` serves the
+    /// same certificate whatever `enable_https` says, so a reverse proxy can speak HTTP to one
+    /// port or to the socket while browsers reach the other directly in a secure context, and
+    /// `https_port` alone is one HTTPS port. All run the one router, so every route, the auth
+    /// gate, and the client are the same on each.
     pub async fn start(state: &AppState, router: Router) -> Result<Server, ServeError> {
         let config = state.config.clone();
         let tls_config = tls::TlsConfig {
@@ -479,17 +488,22 @@ impl Server {
             )));
         }
         let secure = tls.as_ref().map(|t| t.server_config.clone());
-        let mut sides = vec![(
-            config.listen.clone(),
-            secure.clone().filter(|_| config.tls.enable_https),
-        )];
+        let plain = secure.clone().filter(|_| config.tls.enable_https);
+        let tcp = |port| listen::ListenConfig {
+            port,
+            unix_socket: String::new(),
+            ..config.listen.clone()
+        };
+        let socket = !config.listen.unix_socket.is_empty();
+        let mut sides = Vec::new();
+        if socket {
+            sides.push((config.listen.clone(), plain.clone()));
+        }
+        if config.port_given || (!socket && config.https_port == 0) {
+            sides.push((tcp(config.listen.port), plain));
+        }
         if config.https_port != 0 {
-            let https = listen::ListenConfig {
-                port: config.https_port,
-                unix_socket: String::new(),
-                ..config.listen.clone()
-            };
-            sides.push((https, secure));
+            sides.push((tcp(config.https_port), secure));
         }
         let listener = match listen::start_each(router, &sides).await {
             Ok(listener) => listener,

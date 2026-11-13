@@ -7,11 +7,10 @@ Setup:
   Chrome connects to that port, does WebRTC (signaling via the shim,
   media over the server's own UDP ICE sockets).
 
-The server's own --port is one nothing listens on, as under jupyter-server-proxy,
-so its signaling peer has to reach the endpoint through the socket as well.
+The server is given no --port, as under jupyter-server-proxy, so nothing listens
+on TCP and its signaling peer has to reach the endpoint through the socket as well.
 """
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -36,11 +35,8 @@ env = {"PATH": os.environ.get("PATH", ""),
        "SELKIES_MODE": "webrtc", "SELKIES_ENABLE_BASIC_AUTH": "false",
        "SELKIES_WEB_ROOT": H.CORE_DIST,
        "SELKIES_TURN_REST_URI": "", **H.inherited_env()}
-with socket.socket() as probe:
-    probe.bind(("127.0.0.1", 0))
-    UNUSED_PORT = probe.getsockname()[1]
 server = H.spawn(
-    [H.SERVER, "--port", str(UNUSED_PORT), "--unix-socket", SOCK],
+    [H.SERVER, "--unix-socket", SOCK],
     env=env, cwd=H.WORKDIR,
     stdout=open(os.path.join(H.WORKDIR, "selkies-webrtc.log"), "w"),
     stderr=subprocess.STDOUT, start_new_session=True)

@@ -1037,7 +1037,8 @@ pub fn jupyter_icon(
 /// The server process jupyter-server-proxy starts a desktop with.
 ///
 /// Jupyter authenticates the route and the proxy's Unix socket sits in a directory only this
-/// user reaches, so Selkies runs without its own login or TLS. The session follows the server
+/// user reaches, so Selkies runs without its own login or TLS, and the emptied port settings
+/// keep an inherited `SELKIES_PORT` or `SELKIES_HTTPS_PORT` from opening that server on TCP. The session follows the server
 /// down (`--follow`), which on a kill stops nothing itself. A notebook panel cannot hold the
 /// pointer or the keyboard, hence a tab. `icon` is the dashboard's `selkies.svg` as a file
 /// ([`jupyter_icon`]).
@@ -1045,7 +1046,8 @@ pub fn jupyter(selkies: &Path, icon: &Path) -> Json {
     json!({
         "command": [
             selkies.to_string_lossy(), "session", "--follow",
-            "--unix-socket", "{unix_socket}", "--enable-basic-auth=false", "--enable-https=false",
+            "--unix-socket", "{unix_socket}", "--port=", "--https-port=",
+            "--enable-basic-auth=false", "--enable-https=false",
         ],
         "unix_socket": true,
         "timeout": 120,
@@ -1410,10 +1412,12 @@ mod tests {
             [
                 "--unix-socket",
                 "{unix_socket}",
+                "--port=",
+                "--https-port=",
                 "--enable-basic-auth=false",
                 "--enable-https=false"
             ],
-            "without a login"
+            "on the socket alone, without a login"
         );
         assert_eq!(entry["unix_socket"], true);
         assert_eq!(

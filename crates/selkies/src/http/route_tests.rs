@@ -2586,6 +2586,7 @@ async fn an_https_port_serves_tls_beside_a_plain_http_port() {
             port: 0,
             ..ListenConfig::default()
         },
+        port_given: true,
         https_port,
         tls: super::tls::TlsConfig {
             enable_https: false,
@@ -2648,6 +2649,85 @@ async fn an_https_port_serves_tls_beside_a_plain_http_port() {
     );
     server.stop().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The listeners a server with `config`'s listen settings brings up, as its contract endpoint
+/// and its TCP addresses.
+async fn listeners_of(config: HttpConfig) -> (String, Vec<std::net::SocketAddr>) {
+    let state = AppState::new(config, FixedSupervisor::new(None, &[]));
+    let server = super::Server::start(&state, build(state.clone(), Vec::new()))
+        .await
+        .expect("server");
+    let up = (server.endpoint().to_string(), server.local_addrs().to_vec());
+    server.stop().await;
+    up
+}
+
+/// `https_port` with `port` left to its default is the one HTTPS port; a Unix socket takes the
+/// default port's place, and a named `port` and an `https_port` are served beside it.
+#[tokio::test]
+async fn the_listen_settings_choose_the_listeners() {
+    if super::testing::rerun_alone("http::route_tests::the_listen_settings_choose_the_listeners") {
+        return;
+    }
+    let dir = super::testing::tempfile_dir("selkies-http-sides-");
+    let free_port = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    let socket = dir.join("srv.sock").to_string_lossy().into_owned();
+    let config = |unix_socket: &str, port_given, https_port| HttpConfig {
+        listen: ListenConfig {
+            addr: "127.0.0.1".into(),
+            port: 0,
+            unix_socket: unix_socket.into(),
+            ..ListenConfig::default()
+        },
+        port_given,
+        https_port,
+        tls: super::tls::TlsConfig {
+            enable_https: false,
+            cert: dir.join("cert.pem").to_string_lossy().into_owned(),
+            key: dir.join("cert.key").to_string_lossy().into_owned(),
+            reload_interval: 0,
+        },
+        ..HttpConfig::default()
+    };
+
+    let https_port = free_port();
+    let (endpoint, addrs) = listeners_of(config("", false, https_port)).await;
+    assert_eq!(endpoint, format!("https://127.0.0.1:{https_port}"));
+    assert_eq!(addrs.len(), 1, "no plain port beside it");
+
+    let (endpoint, addrs) = listeners_of(config(&socket, false, 0)).await;
+    assert_eq!(endpoint, format!("unix://{socket}"));
+    assert!(addrs.is_empty(), "the socket alone");
+
+    let (endpoint, addrs) = listeners_of(config(&socket, true, 0)).await;
+    assert_eq!(endpoint, format!("unix://{socket}, http://{}", addrs[0]));
+    assert_eq!(addrs.len(), 1);
+
+    let https_port = free_port();
+    let (endpoint, addrs) = listeners_of(config(&socket, false, https_port)).await;
+    assert_eq!(
+        endpoint,
+        format!("unix://{socket}, https://127.0.0.1:{https_port}")
+    );
+    assert_eq!(addrs.len(), 1);
+
+    let https_port = free_port();
+    let (endpoint, addrs) = listeners_of(config(&socket, true, https_port)).await;
+    assert_eq!(
+        endpoint,
+        format!(
+            "unix://{socket}, http://{}, https://127.0.0.1:{https_port}",
+            addrs[0]
+        )
+    );
+    assert_eq!(addrs.len(), 2);
 }
 
 /// With Pelorus off nothing under `pelorus` is served, however the path spells it: the gate
