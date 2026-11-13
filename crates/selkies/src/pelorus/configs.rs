@@ -688,7 +688,7 @@ mod tests {
         let listed = sealed.listed(true);
         assert_eq!(listed["has_key"], true);
         assert_eq!(listed["usable"], true);
-        let kept = merged(sealed.clone(), &json!({"api_key": "fresh"})).unwrap();
+        let kept = merged(sealed, &json!({"api_key": "fresh"})).unwrap();
         assert_eq!(kept.api_key, "fresh");
         assert_eq!(kept.sealed, "");
         assert!(merged(saved_config(), &json!({"sealed": "<script>"})).is_err());

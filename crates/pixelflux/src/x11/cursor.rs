@@ -431,7 +431,7 @@ mod tests {
     fn application_sprite_travels_whole_within_the_cap() {
         // A 128px sprite, a game's own pointer, at the default cap: delivered at 128.
         let opaque = vec![0xff00_0000u32; 128 * 128];
-        let (t, data, _, _) = cursor_to_png(&reply(128, 128, 0, 0, opaque.clone()), 128);
+        let (t, data, _, _) = cursor_to_png(&reply(128, 128, 0, 0, opaque), 128);
         assert_eq!(t, "png");
         let img = image::load_from_memory(&data).unwrap();
         assert_eq!((img.width(), img.height()), (128, 128));

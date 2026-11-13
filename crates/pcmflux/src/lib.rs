@@ -3439,7 +3439,7 @@ mod tests {
         refused(
             AudioCaptureSettings {
                 device_name: Some("a\0b".to_string()),
-                ..defaults.clone()
+                ..defaults
             },
             "device_name",
         );
@@ -3475,14 +3475,14 @@ mod tests {
         pb_refused(
             AudioPlaybackSettings {
                 device_name: Some("in\0put".to_string()),
-                ..pb_defaults.clone()
+                ..pb_defaults
             },
             "device_name",
         );
         assert_eq!(
             AudioPlaybackSettings {
                 device_name: Some(String::new()),
-                ..pb_defaults.clone()
+                ..pb_defaults
             }
             .validate()
             .unwrap()
@@ -4280,7 +4280,7 @@ mod tests {
     fn silence_detection() {
         let silent = vec![0i16; 960 * 2];
         assert!(silent.iter().all(|&s| s == 0));
-        let mut not = silent.clone();
+        let mut not = silent;
         not[123] = 7;
         assert!(!not.iter().all(|&s| s == 0));
     }

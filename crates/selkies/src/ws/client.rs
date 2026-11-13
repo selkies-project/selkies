@@ -881,7 +881,7 @@ pub(crate) mod testing {
             let hold_stream_info = Arc::new(AtomicBool::new(false));
             let task_hold_stream_info = hold_stream_info.clone();
             let task_writes = writes.clone();
-            let task_link = link.clone();
+            let task_link = link;
             let task_client = client.clone();
             let task = tokio::spawn(async move {
                 let far_side = {

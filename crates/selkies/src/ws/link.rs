@@ -2370,7 +2370,7 @@ mod tests {
         assert!(s.rates().is_empty(), "nor two acks a window");
 
         s.reset();
-        let r = rng.clone();
+        let r = rng;
         s.run(
             &move |_| {
                 let mut g = r.borrow_mut();

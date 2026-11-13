@@ -2260,7 +2260,7 @@ async fn a_rootful_xwayland_is_read_in_its_process() {
         assert_eq!(
             session,
             AppSession {
-                x11_display: Some(display.clone()),
+                x11_display: Some(display),
                 wayland_display: None,
                 kind: "x11"
             },

@@ -830,12 +830,12 @@ mod tests {
         let mut body = vec![0x10u8];
         body.extend((0..4000u32).map(|i| i as u8));
         let key_obu = av1::tests::obu(6, &body);
-        let tu = Bytes::from([td.clone(), seq.clone(), key_obu.clone()].concat());
+        let tu = Bytes::from([td.clone(), seq, key_obu].concat());
         let payloads: Vec<Bytes> = av1::packetize(&av1::obus(&tu).unwrap(), true)
             .iter()
             .map(|p| p.to_bytes())
             .collect();
-        let delta = Bytes::from([td.clone(), av1::tests::obu(6, &[0x30, 1, 2])].concat());
+        let delta = Bytes::from([td, av1::tests::obu(6, &[0x30, 1, 2])].concat());
         let delta: Vec<Bytes> = av1::packetize(&av1::obus(&delta).unwrap(), false)
             .iter()
             .map(|p| p.to_bytes())

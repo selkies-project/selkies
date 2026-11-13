@@ -708,7 +708,7 @@ mod tests {
             paint_over_desc(
                 &CaptureSettings {
                     video_paintover_crf: 25,
-                    ..cbr.clone()
+                    ..cbr
                 },
                 None,
                 true
@@ -721,7 +721,7 @@ mod tests {
             jpeg_quality: 40,
             paint_over_jpeg_quality: 90,
             paint_over_trigger_frames: 15,
-            ..crf.clone()
+            ..crf
         };
         assert_eq!(
             paint_over_desc(&jpeg, None, false).as_deref(),

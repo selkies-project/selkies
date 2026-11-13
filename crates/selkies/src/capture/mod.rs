@@ -209,7 +209,7 @@ mod tests {
     fn fanout_shares_the_buffer_and_tells_a_lagging_subscriber() {
         let cap = DisplayCapture::new("primary".into());
         let mut rx = cap.subscribe();
-        let sink = Fanout { tx: cap.tx.clone() };
+        let sink = Fanout { tx: cap.tx };
         let data = Arc::new(vec![1u8, 2, 3]);
         sink.frames(vec![Frame {
             data: data.clone(),

@@ -820,7 +820,7 @@ mod tests {
         let file = dir.join("autostart");
         std::fs::write(&file, "sleep 1 &\n").unwrap();
         let env = SessionEnv::new(None, None);
-        let (lock_for_run, file_for_run) = (lock.clone(), file.clone());
+        let (lock_for_run, file_for_run) = (lock.clone(), file);
         let run = std::thread::spawn(move || {
             let started = Instant::now();
             run_autostart_once(&env, &file_for_run, &lock_for_run).unwrap();

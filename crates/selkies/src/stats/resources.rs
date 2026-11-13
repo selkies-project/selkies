@@ -2084,7 +2084,6 @@ mod tests {
     fn nvidia_smi_reads_the_codec_engines_and_retries_without_them() {
         let asked = Arc::new(Mutex::new(Vec::<String>::new()));
         let found = {
-            let asked = asked.clone();
             nvidia_gpus_with(|query| {
                 asked.lock().unwrap().push(query.to_string());
                 Some((0, "10, 8192, 425, 00000000:85:00.0, 70, 5\n30, 4096, 100, 00000000:86:00.0, [N/A], [N/A]\n".into()))
@@ -2099,7 +2098,6 @@ mod tests {
         assert!(asked.lock().unwrap()[0].ends_with("utilization.decoder"));
         asked.lock().unwrap().clear();
         let found = {
-            let asked = asked.clone();
             let answers = Mutex::new(
                 vec![
                     (6, String::new()),

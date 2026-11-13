@@ -5620,7 +5620,7 @@ mod tests {
         let mut p = X11Pipeline::new(s.clone());
         let live = CaptureSettings {
             use_cpu: false,
-            ..s.clone()
+            ..s
         };
         assert!(p.reshape(&live, false));
         assert!(p.settings.use_cpu, "a reshape keeps the demotion");
@@ -5871,7 +5871,7 @@ mod tests {
         assert_eq!(q(&cbr, None), 18);
         let crf = CaptureSettings {
             video_cbr_mode: false,
-            ..cbr.clone()
+            ..cbr
         };
         assert_eq!(
             q(&crf, Some(45)),

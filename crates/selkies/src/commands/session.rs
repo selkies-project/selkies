@@ -835,7 +835,7 @@ impl Session {
             let number = read_line_within(read, Duration::from_secs(30));
             if let Some(number) = number.filter(|n| !n.is_empty()) {
                 self.env.insert("DISPLAY".to_string(), format!(":{number}"));
-                self.env.insert("XAUTHORITY".to_string(), auth_text.clone());
+                self.env.insert("XAUTHORITY".to_string(), auth_text);
                 let mut line = format!("Xvfb serves display :{number}");
                 if extra.iter().any(|a| a == "-glamor") {
                     line.push_str(&format!(", rendering on {node}"));

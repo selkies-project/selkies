@@ -525,8 +525,8 @@ mod tests {
         let now = Instant::now();
         let server_cert = Arc::new(Certificate::generate().unwrap());
         let client_cert = Arc::new(Certificate::generate().unwrap());
-        let mut server = Dtls::new(server_cert.clone());
-        let mut client = Dtls::new(client_cert.clone());
+        let mut server = Dtls::new(server_cert);
+        let mut client = Dtls::new(client_cert);
         server
             .start(now, false, &client.local_parameters())
             .unwrap();

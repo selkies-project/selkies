@@ -640,7 +640,7 @@ mod tests {
         );
         nix::unistd::mkfifo(&base.join("pipe"), Mode::from_bits_truncate(0o600)).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let fifo_root = root.clone();
+        let fifo_root = root;
         std::thread::spawn(move || {
             tx.send(matches!(fifo_root.open_resolved_fd(&parts(&["pipe"])), Err(e) if e.kind() == io::ErrorKind::NotADirectory))
                 .ok();

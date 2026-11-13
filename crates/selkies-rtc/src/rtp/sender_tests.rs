@@ -431,7 +431,7 @@ fn color_space_per_codec_on_every_packet_of_a_key_frame() {
     let data = Bytes::from(vec![0x10u8; 3000]);
     s.push_frame(
         EncodedFrame {
-            data: data.clone(),
+            data,
             keyframe: true,
             ..Default::default()
         },

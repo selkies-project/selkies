@@ -435,8 +435,7 @@ pub(crate) mod tests {
         delta_payload.extend(pattern(512));
         let delta_frame = obu(6, &delta_payload);
         let padding = obu(15, &[0; 10]);
-        let tu_key =
-            Bytes::from([td.clone(), seq.clone(), key_frame.clone(), padding.clone()].concat());
+        let tu_key = Bytes::from([td.clone(), seq.clone(), key_frame.clone(), padding].concat());
         let tu_delta = Bytes::from([td.clone(), delta_frame.clone()].concat());
 
         let parsed = obus(&tu_key).unwrap();
@@ -485,7 +484,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             assemble(&payloads),
-            Bytes::from([td.clone(), seq.clone(), key_frame.clone()].concat())
+            Bytes::from([td.clone(), seq, key_frame].concat())
         );
         let payloads_delta: Vec<Bytes> = packetize(&obus(&tu_delta).unwrap(), false)
             .iter()

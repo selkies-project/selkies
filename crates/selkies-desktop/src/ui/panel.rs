@@ -830,7 +830,7 @@ mod tests {
     #[test]
     fn clicking_and_scrolling_the_pager_switch_desktops() {
         let mut d = desktop();
-        let pills = layout(&mut d).pager.clone();
+        let pills = layout(&mut d).pager;
         let center = |r: Rect| (r.x as f64 + r.w as f64 / 2.0, r.y as f64 + r.h as f64 / 2.0);
         let (x, y) = center(pills[2]);
         assert_eq!(hit(&mut d, x, y), Hover::Pager(2));

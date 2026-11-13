@@ -195,7 +195,7 @@ pub fn start(is_wayland: bool) {
     let env = Arc::new(Mutex::new(env));
     let session_env = env.clone();
     let x11 = if is_wayland {
-        if !start_wayland(env.clone(), control) {
+        if !start_wayland(env, control) {
             return;
         }
         None
@@ -207,7 +207,7 @@ pub fn start(is_wayland: bool) {
         match selkies_wm::x11::spawn(&display, env.clone(), control.clone()) {
             Ok(handle) => {
                 info!(target: "wm", "window manager on {display}{}", mode_words(&control));
-                start_autostart(env.clone(), Backend::X11, control);
+                start_autostart(env, Backend::X11, control);
                 Some(handle)
             }
             Err(e) => {

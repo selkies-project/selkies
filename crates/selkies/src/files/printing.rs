@@ -892,11 +892,7 @@ mod tests {
         std::fs::write(prefix.join("lib/cups/daemon/cups-exec"), b"").unwrap();
         assert_eq!(
             PrintQueue::programs_on(&path),
-            Some((
-                cupsd.clone(),
-                prefix.join("lib/cups"),
-                prefix.join("share/cups")
-            )),
+            Some((cupsd, prefix.join("lib/cups"), prefix.join("share/cups"))),
             "a readable one is found with its program and data directories"
         );
         assert_eq!(

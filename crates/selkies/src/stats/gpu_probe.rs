@@ -618,7 +618,7 @@ mod tests {
             "unreadable and non-EGL ICDs are skipped"
         );
         let usr_text = usr.to_string_lossy().into_owned();
-        let overridden = egl_vendors(&[etc.clone(), usr.clone()], &|k| {
+        let overridden = egl_vendors(&[etc, usr], &|k| {
             (k == "__EGL_VENDOR_LIBRARY_DIRS").then(|| usr_text.clone())
         });
         assert!(
@@ -862,7 +862,7 @@ mod tests {
             ]
         );
         assert_eq!(summary(&report, &f), "GPU: none here");
-        let mut present = f.clone();
+        let mut present = f;
         present.set("SELKIES_GPU_PRESENT", "true");
         present.set("SELKIES_GPU_DRIVER", "");
         assert_eq!(

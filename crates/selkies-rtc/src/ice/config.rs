@@ -533,7 +533,7 @@ mod tests {
         assert!(config.lite && config.servers.is_empty());
         let full = IceTopology {
             lite: false,
-            ..topology.clone()
+            ..topology
         }
         .peer_config(&IceMuxes::default());
         assert_eq!(full.servers.len(), 1);

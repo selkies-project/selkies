@@ -1623,7 +1623,7 @@ impl CompositorHandler for AppState {
                     let serial = next_serial();
                     let target = FocusTarget::Window(window.clone());
                     if let Some(keyboard) = self.seat.get_keyboard() {
-                        keyboard.set_focus(self, Some(target.clone()), serial);
+                        keyboard.set_focus(self, Some(target), serial);
                     }
                     crate::wayland::foreign_toplevel::add(self, &window);
                     self.refocus_pointer();
@@ -3997,7 +3997,6 @@ impl Dispatch<ZwpVirtualKeyboardV1, PfVirtualKeyboard> for AppState {
                 drop(vk);
                 let pressed = key_state == 1;
                 if let Some(keyboard) = state.seat.get_keyboard() {
-                    let keyboard = keyboard.clone();
                     let serial = next_serial();
                     let time = wayland_time();
                     keyboard.input(
@@ -4040,7 +4039,6 @@ impl Dispatch<ZwpVirtualKeyboardV1, PfVirtualKeyboard> for AppState {
             return;
         }
         if let Some(keyboard) = state.seat.get_keyboard() {
-            let keyboard = keyboard.clone();
             for kc in held {
                 let serial = next_serial();
                 let time = wayland_time();

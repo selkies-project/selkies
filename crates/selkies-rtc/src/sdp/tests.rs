@@ -565,7 +565,7 @@ fn a_surround_session_offers_multiopus_first_on_the_audio_it_sends() {
 /// server's sections reversed, `a=setup:active`.
 fn engine_answer(offer: &str, declined: &[&str]) -> String {
     let parsed = SessionDescription::parse(offer).expect("the offer parses");
-    let mut answer = parsed.clone();
+    let mut answer = parsed;
     answer.kind = Some(SdpType::Answer);
     for media in &mut answer.media {
         media

@@ -415,9 +415,7 @@ impl PipelineFactory for FakeFactory {
             config.capture_region,
         );
         *pipeline.rc_mode.lock() = config.rc_mode;
-        self.made
-            .lock()
-            .insert(config.display_id.clone(), pipeline.clone());
+        self.made.lock().insert(config.display_id, pipeline.clone());
         pipeline
     }
 }
@@ -1494,7 +1492,7 @@ async fn media_pipeline_starts_only_what_was_asked() {
     let (_host, weak) = host_weak();
     let make = |audio: Option<Arc<FakeAudioEngine>>| {
         let capture = Arc::new(FakeCapture::default());
-        let audio_dyn = audio.clone().map(|a| a as Arc<dyn PipelineAudio>);
+        let audio_dyn = audio.map(|a| a as Arc<dyn PipelineAudio>);
         let pipeline =
             PixelPipeline::new(config("primary"), capture.clone(), audio_dyn, weak.clone())
                 .into_dyn();

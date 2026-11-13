@@ -2510,7 +2510,7 @@ impl Backend for X11Backend {
                 self.upload(surface, image, &damage);
             }
         }
-        let mut to_blit = damage.clone();
+        let mut to_blit = damage;
         to_blit.extend(surface.visible.iter().copied());
         self.show(surface, &to_blit);
         let _ = self.conn.flush();

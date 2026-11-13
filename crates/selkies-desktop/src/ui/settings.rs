@@ -4719,7 +4719,7 @@ mod tests {
         let quiet = MenuFacts {
             dnd: true,
             notifications: false,
-            ..facts.clone()
+            ..facts
         };
         let bell = panel_menu_entries(PanelTarget::Notifications, &quiet);
         assert_eq!(labels(&bell), vec!["Allow notifications", "Clear all"]);

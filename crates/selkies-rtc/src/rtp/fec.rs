@@ -383,7 +383,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(got, want);
         assert!(recover(&one, &mut received.clone()).is_empty());
-        let mut one_missing = received.clone();
+        let mut one_missing = received;
         one_missing.insert(103, group[3].clone());
         one_missing.insert(104, group[4].clone());
         one_missing.remove(&107);

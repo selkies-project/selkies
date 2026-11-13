@@ -300,7 +300,7 @@ impl CuX11Backend {
         if cur_per == 0 || per == 0 {
             return Err("empty keymap".to_string());
         }
-        let mut restore = reply.keysyms.clone();
+        let mut restore = reply.keysyms;
         let mut changed = false;
         for &kc in chosen {
             let sym = bound_syms[((kc - span_lo) as usize) * per];

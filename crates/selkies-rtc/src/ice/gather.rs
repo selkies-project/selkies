@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn a_window_is_shuffled_and_the_default_is_ephemeral() {
         let ports = bind_ports(Some((50000, 50003)));
-        let mut sorted = ports.clone();
+        let mut sorted = ports;
         sorted.sort_unstable();
         assert_eq!(sorted, vec![50000, 50001, 50002, 50003]);
         assert_eq!(bind_ports(None), vec![0]);

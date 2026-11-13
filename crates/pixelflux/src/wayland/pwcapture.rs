@@ -1427,7 +1427,7 @@ mod tests {
         assert!(renegotiates(&cur, &resized, false));
         let capped = StreamConfig {
             fps_milli: 30_000,
-            ..resized.clone()
+            ..resized
         };
         assert!(renegotiates(&cur, &capped, true));
         assert!(renegotiates(&cur, &cfg(true), true));

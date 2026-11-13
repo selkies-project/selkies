@@ -2267,7 +2267,7 @@ mod stream_settings_line_tests {
             line(
                 &CaptureSettings {
                     video_cbr_mode: true,
-                    ..crf.clone()
+                    ..crf
                 },
                 None
             )
@@ -3100,7 +3100,7 @@ fn bootstrap_readback_pool(
     c.link_kbps
         .store(settings.video_link_kbps, Ordering::Relaxed);
     let cfg = WlEncodeConfig {
-        settings: settings.clone(),
+        settings,
         display_id,
         use_gpu,
         try_gpu,
@@ -8288,7 +8288,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         )
         .unwrap();
 
-    crate::computer_use::register_wayland_backend(command_tx.clone(), wake_tx);
+    crate::computer_use::register_wayland_backend(command_tx, wake_tx);
     #[cfg(feature = "computer-use-server")]
     crate::computer_use::server::spawn_cu_from_env();
     crate::wayland::ficlient::arm(crate::computer_use::app_wayland_socket_path());
@@ -10485,8 +10485,7 @@ impl ScreenCapture {
             let _ = tid_tx.send(thread::current().id());
             let res = crate::x11::run_capture(rs, c2, etid_tx, on_frame);
             c3.stop.store(true, Ordering::Release);
-            if let Err(e) = res {
-                let msg = e.to_string();
+            if let Err(msg) = res {
                 eprintln!("[X11] capture error: {msg}");
                 if let Ok(mut g) = err_slot2.lock() {
                     *g = Some(msg);

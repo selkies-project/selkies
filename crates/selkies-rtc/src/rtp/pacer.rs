@@ -1488,7 +1488,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let mut sorted = dropped.clone();
+        let mut sorted = dropped;
         sorted.sort_unstable();
         assert_eq!(
             sorted,
