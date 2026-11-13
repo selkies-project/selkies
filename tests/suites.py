@@ -59,8 +59,7 @@ SUITES: list = [
     {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_turn_address.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_desktop_session_scripts.py", "tier": "unit", "timeout": 600},
-    {"path": "unit/test_package_deps.py", "tier": "unit", "timeout": 120},
-    {"path": "unit/test_appimage_l4t_xcb.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_toolchain.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_fetch_verified.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_docs_tables.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_echo_client.py", "tier": "unit", "timeout": 120},
@@ -289,8 +288,6 @@ SUITES: list = [
      "selectors": ["ws-x11", "ws-wl", "wr-x11"]},
     {"path": "e2e/test_ws_unix_socket.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_jupyter_proxy.py", "tier": "e2e", "timeout": 600},
-
-    {"path": "packaging/test_packaging.py", "tier": "integration", "timeout": 600},
 
     # on request
     {"path": "perf/test_pacer.py", "tier": "perf", "timeout": 3600},

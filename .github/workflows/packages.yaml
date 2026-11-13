@@ -1,79 +1,30 @@
 name: Packages
 
-# Native packages: .deb (Ubuntu/Debian), .rpm (Fedora/EL), .apk (Alpine),
-# .pkg.tar.zst (Arch), and .AppImage (x86_64 + aarch64, via rattler-build +
-# linuxdeploy-plugin-conda). Each builds the Rust server inside a container of
-# the target distribution (the AppImage's inside the wheels' manylinux image,
-# its glibc floor); a native package installs it at /usr/bin/selkies with the web client
-# compiled in and declares the packages behind the libraries the
-# binary links and loads, as that distribution names them, and the AppImage
-# carries it in a conda environment of conda-forge's libraries. The codecs are
-# not any distribution's: the codecs job builds pixelflux's pinned, patched
-# releases once for each architecture and C library, and every build links
-# those static archives. pixelflux and pcmflux come from the workspace's copied
-# path dependencies. Only apt/apt-get, dnf,
-# apk, pacman, or micromamba are ever invoked.
+# Native packages, .deb, .rpm, .apk, and .pkg.tar.zst, and the AppImage, each
+# the bundle of its C library and architecture repackaged: the bundles
+# build-wheel.yaml builds through bundle.yaml (bundle-<libc>-<arch> in the same
+# run) are unpacked at /opt/selkies by infra/packaging/package.sh inside a
+# container of the distribution whose packaging tool the format is, or put
+# behind AppImage's runtime by infra/appimage/build.sh. Nothing is compiled
+# here, so one package of a format serves every release of every distribution
+# that takes it, down to the bundle's C library floor, and runs the binaries
+# every other channel runs. Each is then installed into pristine containers of
+# the distributions it serves, where it has to bring up a whole session with
+# nothing but what it declares (scripts/ci/verify-package.sh,
+# scripts/ci/verify-appimage.sh).
 
-# Triggered by ci.yaml on pushes to main and by release.yaml for releases; can
-# also be run standalone via the Actions tab.
+# Called by ci.yaml on pushes to main and by release.yaml for releases, after
+# build-wheel.yaml, whose bundles it reads.
 
 on:
-  workflow_dispatch:
-    inputs:
-      package_version:
-        description: Version string stamped into the packages
-        type: string
-        default: 0.0.0.dev0
   workflow_call:
-    inputs:
-      package_version:
-        description: Version string stamped into the packages
-        type: string
-        default: 0.0.0.dev0
 
 permissions:
   contents: read
 
-env:
-  NODE_VERSION: "26"
-
 jobs:
-  web:
-    name: Web client for the packages
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: |
-            web/selkies-web-core/package-lock.json
-            web/selkies-dashboard/package-lock.json
-      - name: Build the web client bundle
-        env:
-          # For the controller database's lookups (gendb.ts)
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          ./scripts/ci/build-web.sh
-          tar -C dist -cf selkies-web-client.tar web
-      # One bundle for every package and AppImage, so the browser payload is
-      # identical in every channel; one file, which the release job leaves out
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: selkies-web-client
-          path: selkies-web-client.tar
-          if-no-files-found: error
-          retention-days: 1
-
-  codecs:
-    name: Codecs (${{ matrix.libc }}, ${{ matrix.arch.name }})
-    # pixelflux's pinned, patched codecs, built once for each architecture and
-    # C library at its oldest floor and linked by every package of that pair
-    # (scripts/ci/build-codecs.sh), rather than compiled again on each
-    # distribution
+  package:
+    name: ${{ matrix.kind.name }} (${{ matrix.arch.name }})
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -83,148 +34,74 @@ jobs:
             runner: ubuntu-latest
           - name: aarch64
             runner: ubuntu-26.04-arm
-        libc: [glibc, musl]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Build the codec archives
-        run: scripts/ci/build-codecs.sh "${{ matrix.libc }}" "${{ matrix.arch.name }}" codecs
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: codecs-${{ matrix.libc }}-${{ matrix.arch.name }}
-          path: codecs
-          if-no-files-found: error
-          retention-days: 1
-
-  package:
-    name: ${{ matrix.kind.name }} (${{ matrix.arch.name }})
-    needs: [web, codecs]
-    runs-on: ${{ matrix.arch.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - name: amd64
-            machine: x86_64
-            runner: ubuntu-latest
-          - name: arm64
-            machine: aarch64
-            runner: ubuntu-26.04-arm
         kind:
-          - name: deb-ubuntu24.04
-            tag: ubuntu24.04
-            image: ubuntu:24.04
-            script: infra/packaging/deb.sh
+          - name: deb
+            libc: glibc
+            image: debian:stable-slim
+            hosts: ubuntu:24.04 ubuntu:26.04 debian:bookworm debian:trixie
             install: apt-get update -qq && apt-get install -y -qq /out/*.deb
-          - name: deb-ubuntu26.04
-            tag: ubuntu26.04
-            image: ubuntu:26.04
-            script: infra/packaging/deb.sh
-            install: apt-get update -qq && apt-get install -y -qq /out/*.deb
-          - name: deb-debianbookworm
-            tag: debianbookworm
-            image: debian:bookworm
-            script: infra/packaging/deb.sh
-            install: apt-get update -qq && apt-get install -y -qq /out/*.deb
-          - name: deb-debiantrixie
-            tag: debiantrixie
-            image: debian:trixie
-            script: infra/packaging/deb.sh
-            install: apt-get update -qq && apt-get install -y -qq /out/*.deb
-          - name: rpm-fedora
-            tag: fc
-            # The oldest Fedora still supported, not the newest: the sonames
-            # the server links are the ones its build found, so building on
-            # the oldest is what makes one package cover every release that is
-            # maintained. Bumped when Fedora retires it.
+          - name: rpm
+            libc: glibc
             image: fedora:43
-            script: infra/packaging/rpm.sh
-            install: dnf install -y -q /out/*.rpm
-          - name: rpm-el9
-            tag: el9
-            image: almalinux:9
-            script: infra/packaging/rpm.sh
-            install: dnf install -y -q /out/*.rpm
+            # Fedora's base image carries no su, which the check runs the session with
+            hosts: fedora:43 almalinux:9 almalinux:8
+            install: dnf install -y -q util-linux /out/*.rpm
           - name: apk
-            image: alpine:latest
             libc: musl
-            script: infra/packaging/apk.sh
+            image: alpine:latest
+            hosts: alpine:latest
             install: apk add --quiet --allow-untrusted /out/*.apk
           - name: arch
+            libc: glibc
             image: archlinux:base-devel
-            script: infra/packaging/arch.sh
+            hosts: archlinux:base
             install: pacman -Sy --noconfirm > /dev/null && pacman -U --noconfirm /out/*.pkg.tar.zst
         exclude:
           # Arch Linux publishes an x86_64-only image
           - arch:
-              name: arm64
+              name: aarch64
               runner: ubuntu-26.04-arm
             kind:
               name: arch
+              libc: glibc
               image: archlinux:base-devel
-              script: infra/packaging/arch.sh
+              hosts: archlinux:base
+              install: pacman -Sy --noconfirm > /dev/null && pacman -U --noconfirm /out/*.pkg.tar.zst
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Free disk space
-        uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
-        with:
-          remove_android: true
-          remove_dotnet: true
-          remove_haskell: true
-          remove_tool_cache: false
-          remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
-          remove_packages_one_command: true
-          remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
-      - name: Download the web client
+      - name: Download the bundle
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: selkies-web-client
-      - name: Unpack the web client into dist/web
-        run: mkdir -p dist && tar -C dist -xf selkies-web-client.tar && rm selkies-web-client.tar
-      - name: Download the codecs
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: codecs-${{ matrix.kind.libc || 'glibc' }}-${{ matrix.arch.machine }}
-          path: codecs
-      - name: Build the package inside the target distro container
+          name: bundle-${{ matrix.kind.libc }}-${{ matrix.arch.name }}
+          path: bundle
+      - name: Repackage the bundle inside the format's distribution
         env:
-          SELKIES_VERSION: ${{ inputs.package_version }}
-          DISTRO_TAG: ${{ matrix.kind.tag }}
           IMAGE: ${{ matrix.kind.image }}
-          SCRIPT: ${{ matrix.kind.script }}
+          FORMAT: ${{ matrix.kind.name }}
         run: |
           set -e
           mkdir -p out
           scripts/ci/retry.sh 5 60 docker pull "${IMAGE}"
-          # /repo is read-only: the scripts build under /build and stage under
-          # /pkg-root inside the container and only write their artifacts to /out
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/repo:ro" \
-            -v "${GITHUB_WORKSPACE}/out:/out" \
-            -v "${GITHUB_WORKSPACE}/codecs:/opt/selkies-codecs:ro" \
-            -e SELKIES_CODECS=/opt/selkies-codecs \
-            -e SELKIES_VERSION \
-            -e DISTRO_TAG \
-            "${IMAGE}" \
-            sh "/repo/${SCRIPT}"
+          bundle="$(echo bundle/selkies-*.tar.gz)"
+          docker run --rm -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${GITHUB_WORKSPACE}/out:/out" \
+            "${IMAGE}" sh /repo/infra/packaging/package.sh "${FORMAT}" "/repo/${bundle}" /out
           ls -la out/
-      - name: Install the package in a pristine container of the same distro
+      - name: Install the package in pristine containers of the distributions it serves
         env:
-          IMAGE: ${{ matrix.kind.image }}
+          HOSTS: ${{ matrix.kind.hosts }}
           INSTALL: ${{ matrix.kind.install }}
         run: |
           set -e
-          # Nothing but what the package itself declares: an undeclared
-          # runtime library shows up here and nowhere else, because the build
-          # container has the whole toolchain installed.
-          scripts/ci/retry.sh 5 60 docker pull "${IMAGE}"
-          docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" \
-            -e INSTALL \
-            -v "${GITHUB_WORKSPACE}/scripts/ci/verify-package.sh:/verify.sh:ro" \
-            "${IMAGE}" sh /verify.sh
+          for host in ${HOSTS}; do
+            echo "::group::${host}"
+            scripts/ci/retry.sh 5 60 docker pull "${host}"
+            docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" -e INSTALL \
+              -v "${GITHUB_WORKSPACE}/scripts/ci/verify-package.sh:/verify.sh:ro" \
+              "${host}" sh /verify.sh
+            echo "::endgroup::"
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.kind.name }}-${{ matrix.arch.name }}
@@ -237,7 +114,6 @@ jobs:
 
   appimage:
     name: AppImage (${{ matrix.arch.name }})
-    needs: [web, codecs]
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -251,58 +127,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Free disk space
-        uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
-        with:
-          remove_android: true
-          remove_dotnet: true
-          remove_haskell: true
-          remove_tool_cache: false
-          remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
-          remove_packages_one_command: true
-          remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
-      - name: Download the web client
+      - name: Download the glibc bundle
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: selkies-web-client
-      - name: Unpack the web client into dist/web
-        run: mkdir -p dist && tar -C dist -xf selkies-web-client.tar && rm selkies-web-client.tar
-      - name: Download the codecs
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: codecs-glibc-${{ matrix.arch.name }}
-          path: codecs
-      - name: Build the AppImage (rattler-build + linuxdeploy-plugin-conda)
+          name: bundle-glibc-${{ matrix.arch.name }}
+          path: bundle
+      - name: Build the AppImage
         env:
-          SELKIES_VERSION: ${{ inputs.package_version }}
-          SELKIES_CODECS_DIR: codecs
-          # For the release lookups behind the downloads' checks
+          # For the release lookup behind the runtime's check
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/ci/appimage.sh "${{ matrix.arch.name }}"
-      - name: Check the AppImage on a pristine host at its glibc floor
-        # The build checked it on this runner, whose own libraries stand in for
-        # any the AppImage forgets; here the host has the AppImage's glibc and
-        # libgbm alone: CentOS 7 on x86_64 (its packages from the vault, CentOS
-        # 7 being past its end of life), AlmaLinux 8 on aarch64
         run: |
-          case "${{ matrix.arch.name }}" in
-            x86_64)
-              host=centos:7
-              install='sed -i -e "s/^mirrorlist/#mirrorlist/" -e "s|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|" /etc/yum.repos.d/CentOS-*.repo && yum install -y -q mesa-libgbm' ;;
-            *)
-              host=almalinux:8
-              install='dnf install -y -q mesa-libgbm' ;;
-          esac
-          scripts/ci/retry.sh 5 60 docker pull "${host}"
+          sudo apt-get update -qq && sudo apt-get install -y -qq squashfs-tools
+          ./infra/appimage/build.sh bundle/selkies-*.tar.gz out
+      - name: Check the AppImage on a pristine host at its glibc floor
+        run: |
+          scripts/ci/retry.sh 5 60 docker pull almalinux:8
           docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" \
             -v "${GITHUB_WORKSPACE}/scripts/ci/verify-appimage.sh:/verify.sh:ro" \
-            "${host}" sh -c "${install} > /dev/null && sh /verify.sh /out/*.AppImage"
+            almalinux:8 sh -c 'sh /verify.sh /out/*.AppImage'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: appimage-${{ matrix.arch.name }}
           path: out/*
-          # Already-compressed payloads: the artifact is a zip either way, and
-          # re-deflating them spends CPU for a size that does not move.
           compression-level: 0
           if-no-files-found: error
           retention-days: 14

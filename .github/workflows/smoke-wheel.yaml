@@ -1,8 +1,10 @@
 name: Smoke test the wheel
 
-# Installs the built wheels into clean virtualenvs and proves they run: the
-# executable answers with the web client compiled into it, and the Jupyter
-# entry point reads the executable's configuration. Split from the build so a
+# Installs the built wheels into clean virtualenvs on hosts with nothing else
+# installed and proves they run: the executable answers with the web client
+# compiled into it, the Jupyter entry point reads the executable's
+# configuration, and a bare `selkies` serves its standalone desktop behind the
+# password it generates (scripts/ci/verify-standalone.py). Split from the build so a
 # caller can gate this alone on it.
 
 on:
@@ -86,10 +88,6 @@ jobs:
         with:
           name: ${{ inputs.artifact_name || 'selkies-wheel' }}
           path: dist/
-      - name: Install smoke-test system packages
-        # The libraries the server links that pixelflux's wheels leave to the
-        # host as well
-        run: sudo apt-get update && sudo apt-get install -y libgbm1 libpixman-1-0
       - name: Install smoke test
         # The wheel has no dependencies, and pip picks this platform's out of dist/
         run: |
@@ -99,32 +97,29 @@ jobs:
           /tmp/selkies-venv/bin/selkies --help >/dev/null && echo "selkies --help OK"
           /tmp/selkies-venv/bin/selkies --version | grep -F "web client: embedded (" && echo "embedded web client OK"
           /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()['command'][0] == '/tmp/selkies-venv/bin/selkies'; print('Jupyter entry point OK')"
+          /tmp/selkies-venv/bin/python scripts/ci/verify-standalone.py /tmp/selkies-venv/bin/selkies
       - name: Install smoke test (oldest Python, at the wheel's glibc floor)
         # The same checks on the oldest interpreter CI keeps (the wheel itself
         # names no floor) and on the glibc the wheel is built for, in the image
         # it is built in, which carries both (GitHub builds no Python 3.9 for
-        # the Ubuntu 26.04 runners): CentOS 7's 2.17 on x86_64, AlmaLinux 8's
-        # 2.28 on aarch64
+        # the Ubuntu 26.04 runners): AlmaLinux 8's 2.28
         run: |
-          case "$(uname -m)" in
-            x86_64) image="quay.io/pypa/manylinux2014_x86_64" ;;
-            *) image="quay.io/pypa/manylinux_2_28_$(uname -m)" ;;
-          esac
+          image="quay.io/pypa/manylinux_2_28_$(uname -m)"
           scripts/ci/retry.sh 5 60 docker pull "${image}"
-          docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/scripts/ci/retry.sh:/retry.sh:ro" "${image}" sh -euxc '
-            /retry.sh 5 60 yum install -y -q mesa-libgbm pixman
+          docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/scripts/ci/verify-standalone.py:/verify-standalone.py:ro" "${image}" sh -euxc '
             /opt/python/cp39-cp39/bin/python -m venv /tmp/selkies-venv
             /tmp/selkies-venv/bin/pip install --no-index --find-links /dist --only-binary=:all: selkies
             /tmp/selkies-venv/bin/selkies --version
             /tmp/selkies-venv/bin/selkies --help > /dev/null && echo "selkies --help OK"
             /tmp/selkies-venv/bin/selkies --version | grep -F "web client: embedded (" && echo "embedded web client OK"
-            /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()[\"command\"][0] == \"/tmp/selkies-venv/bin/selkies\"; print(\"Jupyter entry point OK\")"'
+            /tmp/selkies-venv/bin/python -c "from selkies.session import jupyter; assert jupyter()[\"command\"][0] == \"/tmp/selkies-venv/bin/selkies\"; print(\"Jupyter entry point OK\")"
+            /tmp/selkies-venv/bin/python /verify-standalone.py /tmp/selkies-venv/bin/selkies'
       - name: Install smoke test (musllinux, on Alpine)
         run: |
           scripts/ci/retry.sh 5 60 docker pull python:3-alpine
-          docker run --rm -v "$PWD/dist:/dist:ro" python:3-alpine sh -euxc '
-            apk add --no-cache mesa-gbm pixman
+          docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/scripts/ci/verify-standalone.py:/verify-standalone.py:ro" python:3-alpine sh -euxc '
             python3 -m venv /tmp/selkies-venv
             /tmp/selkies-venv/bin/pip install --no-index --find-links /dist --only-binary=:all: selkies
             /tmp/selkies-venv/bin/selkies --version
-            /tmp/selkies-venv/bin/selkies --version | grep -F "web client: embedded ("'
+            /tmp/selkies-venv/bin/selkies --version | grep -F "web client: embedded ("
+            /tmp/selkies-venv/bin/python /verify-standalone.py /tmp/selkies-venv/bin/selkies'

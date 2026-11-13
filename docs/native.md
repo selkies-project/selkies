@@ -1,34 +1,40 @@
 ---
 title: Native Install
-description: Install Selkies as a package or an AppImage and attach it to a display and audio server you already run.
+description: Install Selkies as a wheel, a package, an AppImage, or the bundle, and run its own desktop or attach it to a display you already run.
 ---
 
-Selkies also ships outside a container: native packages for the common distributions, and an AppImage that installs nothing. Neither brings a desktop, a display server, or an audio server — they attach to the ones you run — so [Getting Started](start.md) is the shorter road if a container will do.
-
-Each carries the Selkies server, one binary that links `pixelflux` (screen capture and video encoding) and `pcmflux` (PulseAudio capture with Opus encoding), with its web client and the interposers. Every block below uses the release version, which is the release's tag, so paste this line first (set `SELKIES_VERSION` yourself for a release other than the latest):
+Selkies also ships outside a container: the bundle, a directory you unpack anywhere, and the same bundle repackaged as the wheel (`pip install selkies`), native packages, and an AppImage. Each brings the whole session with it: the server and its desktop shell, XLibre's Xvfb with Selkies' patches, Xwayland, `xkbcomp` and the xkb data, PulseAudio, `dbus-daemon`, the CUPS scheduler the print queue runs, the GPU front end (libglvnd, on glibc), a UI font, and the interposers. A host provides its C library (glibc 2.28 or newer, or musl 1.2), the kernel, and, for the GPU, its driver: the driver's own libraries, `libgbm` among them, which a desktop machine already has. Every block below uses the release version, which is the release's tag, so paste this line first (set `SELKIES_VERSION` yourself for a release other than the latest):
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name')"
 ```
 
-## Packages
+## Your own desktop in a browser
 
-Installs the server at `/usr/bin/selkies` (with its commands `selkies session`, `selkies resize`, and `selkies gpu-probe`, and its web client compiled in), carries both interposers, and depends on the distribution's packages behind every library the server links or loads, so your package manager pulls them in. A software codec library the distribution does not carry at the release `pixelflux` needs (x264, x265, and libde265 on Fedora, all of them on Enterprise Linux) is built into the server instead. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
+Run `selkies` with no arguments and it brings up a desktop of its own on this machine: an isolated session, with its own runtime directory, buses, sound server, and display, on Selkies' own desktop shell and window manager over the Wayland backend, which shares only your home directory with you. It prints where to find it:
 
 ```bash
-# Ubuntu and Debian. The suffix names the distribution the package was built in
-# (ubuntu24.04, ubuntu26.04, debianbookworm, debiantrixie); this reads yours from os-release
-. /etc/os-release
-DISTRO="${ID}$([ "${ID}" = "ubuntu" ] && echo "${VERSION_ID}" || echo "${VERSION_CODENAME}")"
-PKG="selkies-${SELKIES_VERSION}-${DISTRO}-$(dpkg --print-architecture).deb"
+pip install selkies
+selkies
+# Selkies: your desktop is at https://localhost:8080, signing in as <you> with the password in ~/.config/selkies/password.
+```
+
+It serves HTTPS on a self-signed certificate it writes under `~/.local/state/selkies` (browsers warn once until it is trusted) and listens on the loopback addresses alone. It still asks for a login, since every account on the machine reaches those: the password is generated the first time and kept in `~/.config/selkies/password`, readable by you alone; write your own into that file to change it. Every default is a setting you can override from the environment: `SELKIES_WAYLAND=false` for X11, `SELKIES_PORT`, `SELKIES_PUBLIC=true` to listen on every interface, `SELKIES_BASIC_AUTH_PASSWORD` for a password of your own. Any argument runs the server alone, attached to the display and sound server you point it at ([Run a session](#run-a-session)); `selkies session` runs a whole session with the desktop you choose ([Jupyter, Coder, and Open OnDemand](platforms.md)).
+
+## Packages
+
+Installs the bundle at `/opt/selkies`, with `selkies` and `selkies-desktop` on `/usr/bin` and the interposers under the library directories `/usr/$LIB` names. Every package of a format is one package for every distribution that takes the format, since it carries what Selkies runs rather than linking each distribution's libraries, and it depends on the C library and its C++ runtime alone, with the graphics stack recommended. Every file is `selkies-<version>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-amd64.deb`, `selkies-2.0.0-x86_64.rpm`); inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
+
+```bash
+# Debian and Ubuntu
+PKG="selkies-${SELKIES_VERSION}-$(dpkg --print-architecture).deb"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${PKG}"
 sudo apt-get install -y "./${PKG}"
 ```
 
 ```bash
-# Fedora and Enterprise Linux
-. /etc/os-release
-PKG="selkies-${SELKIES_VERSION}-$([ "${ID}" = "fedora" ] && echo fc || echo el9)-$(uname -m).rpm"
+# Fedora and Enterprise Linux 8 and later
+PKG="selkies-${SELKIES_VERSION}-$(uname -m).rpm"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${PKG}"
 sudo dnf install -y "./${PKG}"
 ```
@@ -49,41 +55,41 @@ sudo pacman -U "./${PKG}"
 
 Every release lists its files' SHA-256 sums in `SHA256SUMS` beside them and attests each file's build provenance on GitHub, so a download can be checked against the release run that built it: `sha256sum --check --ignore-missing SHA256SUMS` in the download's directory, or `gh attestation verify "./${PKG}" --repo selkies-project/selkies` with the GitHub CLI. The packages themselves are not signed with a package key.
 
-The Arch package also carries a pacman hook that opens the CUPS scheduler's mode whenever `cups` or `selkies` is installed or upgraded: Arch installs `cupsd` readable by root alone, and the print queue runs a copy of it as the session user.
-
-For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVIDIA driver (`libnvidia-encode`), and Intel and AMD encode through VA-API (`libva2` plus your vendor's driver — `intel-media-va-driver-non-free` for Intel, or `i965-va-driver-shaders` for older generations, and the AMDGPU driver's own for AMD). `vainfo`, `intel-gpu-tools`, `radeontop`, and `nvtop` are optional monitors.
+For hardware-accelerated encoding, add your GPU's driver: NVENC comes with the NVIDIA driver (`libnvidia-encode`), and Intel and AMD encode through VA-API (`libva2` plus your vendor's driver — `intel-media-va-driver-non-free` for Intel, or `i965-va-driver-shaders` for older generations, and the AMDGPU driver's own for AMD). `vainfo`, `intel-gpu-tools`, `radeontop`, and `nvtop` are optional monitors.
 
 ## The AppImage
 
-Runs from wherever you put it, on any distribution with glibc 2.17 or newer on x86_64 (Enterprise Linux 7, Debian 8, Ubuntu 13.04, and later), or 2.28 or newer on aarch64 (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. Every native dependency is inside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
+Runs from wherever you put it, on any distribution with glibc 2.28 or newer (Enterprise Linux 8, Debian 10, Ubuntu 18.10, and later), without touching the system. It is the glibc bundle behind AppImage's runtime, so run with no arguments it is [your own desktop in a browser](#your-own-desktop-in-a-browser):
 
 ```bash
 APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${APP}"
 chmod +x "./${APP}"
+"./${APP}"
+```
+
+Given `session` as its first argument, it runs a whole session with the desktop you choose, as [Jupyter, Coder, and Open OnDemand](platforms.md) describes: `"./${APP}" session --port=8080 --enable-basic-auth=false`. Given `resize` or `gpu-probe`, it runs that command on the display already up. Given any other arguments, they are the server's: it streams the display it is pointed at, starting the bundle's `Xvfb` when that display is not up and its PulseAudio when none is listening:
+
+```bash
 "./${APP}" --public --port=8080 --basic-auth-user=user --basic-auth-password=mypasswd
 ```
 
 `--public` accepts connections on every interface, IPv4 and IPv6; without it, Selkies listens on the loopback addresses only (`127.0.0.1,::1`), for a session reached through SSH port forwarding or a reverse proxy on the same machine. `--addr=` names particular addresses to listen on instead, and is not given together with `--public`.
 
-Given `session` as its first argument, it runs a whole session instead, with its own display and sound server and the host's desktop, as [Jupyter, Coder, and Open OnDemand](platforms.md) describes: `"./${APP}" session --port=8080 --enable-basic-auth=false`. Given `resize` or `gpu-probe`, it runs that command on the display already up.
-
-What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL`, and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
-
 ## The bundle
 
-`selkies-<version>-linux-<architecture>.tar.gz` is one directory, unpacked anywhere, that brings the whole session with it on any distribution with glibc 2.28 or newer: the server and the desktop shell, XLibre's Xvfb with Selkies' patches, Xwayland, `xkbcomp` and the xkb data, PulseAudio, `dbus-daemon`, the CUPS scheduler the print queue runs, and the interposers. `selkies session` started from its `bin/` takes each of those from the bundle, so a host needs no X server, sound server, bus, or CUPS of its own (the bundled queue takes the PDF browsers and desktop applications print; a host whose CUPS has cups-filters converts other formats too):
+`selkies-<version>-<architecture>-linux-<gnu|musl>.tar.gz` is the bundle itself, one directory unpacked anywhere: the build every other channel repackages, for glibc 2.28 or newer or for musl 1.2 (Alpine). `selkies` from its `bin/` takes each program it runs from the bundle, so a host needs no X server, sound server, bus, or CUPS of its own (the bundled queue takes the PDF browsers and desktop applications print; a host whose CUPS has cups-filters converts other formats too):
 
 ```bash
-tar -xzf "selkies-${SELKIES_VERSION}-linux-$(uname -m).tar.gz"
-"./selkies-${SELKIES_VERSION}-linux-$(uname -m)/bin/selkies" session --public --port=8080 --basic-auth-password=mypasswd
+tar -xzf "selkies-${SELKIES_VERSION}-$(uname -m)-linux-gnu.tar.gz"
+"./selkies-${SELKIES_VERSION}-$(uname -m)-linux-gnu/bin/selkies"
 ```
 
-The X servers and `xkbcomp` link glibc alone and find their xkb data beside themselves. What the host still provides is glibc, `libstdc++`, and, for the GPU, its driver's own libraries: `libgbm`, `libEGL`, and `libGL` are opened at run time where the host has them, and a host without them runs the session in software. The libraries the bundled programs link that a host may lack are under `lib/selkies`, each found through a run path relative to the program, so none of them is offered to the host's GPU driver in the same process.
+The X servers and `xkbcomp` link the C library alone and find their xkb data beside themselves. On glibc, the bundle's libglvnd is the EGL and GL front end its programs open, which hands every call to the driver the host's vendor files name; `libgbm` and the driver's libraries are opened at run time where the host has them, and a host without them runs the session in software. The libraries the bundled programs link that a host may lack are under `lib/selkies`, each found through a run path relative to the program, so none of them is offered to the applications the session runs, which keep their own system's libraries.
 
 ## Run a session
 
-A native package installs Selkies but starts nothing: it attaches to a display and an audio server you provide. The container and the AppImage both bring their own, so skip this if you took one of those.
+Given arguments, `selkies` runs the server alone, attached to a display and an audio server you provide. The standalone desktop, `selkies session`, the container, and the AppImage run with no arguments all bring their own, so skip this if you took one of those.
 
 **1. Point Selkies at your display and audio server.**
 
