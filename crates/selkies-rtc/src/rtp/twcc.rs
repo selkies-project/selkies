@@ -738,7 +738,7 @@ impl TwccSender {
             if mins.len() >= 2 * TWCC_STAND_FEEDBACKS {
                 let newest = mins[mins.len() / 2..]
                     .iter()
-                    .cloned()
+                    .copied()
                     .fold(f64::INFINITY, f64::min);
                 let newest_ms = (newest - least) * 1000.0;
                 if newest_ms > TWCC_QUEUE_MS {
@@ -1909,7 +1909,7 @@ mod tests {
             })
             .collect();
         assert!(
-            readings.iter().cloned().fold(f64::INFINITY, f64::min) > 400.0,
+            readings.iter().copied().fold(f64::INFINITY, f64::min) > 400.0,
             "five minutes with loss"
         );
 
@@ -1931,7 +1931,7 @@ mod tests {
             })
             .collect();
         assert!(
-            readings[..28].iter().cloned().fold(f64::INFINITY, f64::min) > 150.0,
+            readings[..28].iter().copied().fold(f64::INFINITY, f64::min) > 150.0,
             "held full at the path's rate"
         );
 
@@ -2007,7 +2007,7 @@ mod tests {
             .map(|_| qm(tick(&mut tr, &mut clock, route, 8000.0, 5000.0, 0.1, 10)))
             .collect();
         assert!(
-            seen.iter().cloned().fold(f64::INFINITY, f64::min) > 40.0,
+            seen.iter().copied().fold(f64::INFINITY, f64::min) > 40.0,
             "delay standing with loss"
         );
 
@@ -2025,7 +2025,7 @@ mod tests {
                 ))
             })
             .collect();
-        assert!(drift.iter().cloned().fold(f64::NEG_INFINITY, f64::max) < 1.0);
+        assert!(drift.iter().copied().fold(f64::NEG_INFINITY, f64::max) < 1.0);
         let back: Vec<f64> = (0..600)
             .map(|i| {
                 qm(tick(
@@ -2039,7 +2039,7 @@ mod tests {
                 ))
             })
             .collect();
-        assert!(back.iter().cloned().fold(f64::NEG_INFINITY, f64::max) < 1.0);
+        assert!(back.iter().copied().fold(f64::NEG_INFINITY, f64::max) < 1.0);
 
         let mut tr = TwccSender::new(clock);
         for _ in 0..3 {

@@ -642,7 +642,7 @@ fn cleanup_bench() {
     if !video_psnr.is_empty() {
         let least = video_psnr
             .iter()
-            .cloned()
+            .copied()
             .fold((0, f64::INFINITY), |a, b| if b.1 < a.1 { b } else { a });
         println!(
             "  video area psnr over the still phase: mean {:.2}, least {:.2} at t={:+}",

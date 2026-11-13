@@ -427,7 +427,7 @@ pub async fn run() -> Result<(), String> {
     let mut print_watcher = None;
     let mut print_queue = None;
     if settings().printing_enabled().on {
-        let spool = files_state.print_spool().to_path_buf();
+        let spool = files_state.print_spool().clone();
         let announce = files_state.clone();
         match files::printing::SpoolWatcher::start(
             spool.clone(),

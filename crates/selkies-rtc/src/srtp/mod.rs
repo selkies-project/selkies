@@ -233,7 +233,7 @@ mod tests {
                 let started = std::time::Instant::now();
                 for seq in 0..count {
                     packet[2..4].copy_from_slice(&(seq as u16).to_be_bytes());
-                    let marshaled = packet.to_vec();
+                    let marshaled = packet.clone();
                     std::hint::black_box(session.tx.protect_rtp(&marshaled).unwrap());
                 }
                 let copying = started.elapsed() / count;

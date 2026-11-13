@@ -5772,7 +5772,7 @@ pub(crate) mod gpu_tests {
             sizes.iter().min().unwrap() * 8 / 1000,
             sizes.iter().max().unwrap() * 8 / 1000,
             psnr.iter().sum::<f64>() / n as f64,
-            psnr.iter().cloned().fold(f64::INFINITY, f64::min),
+            psnr.iter().copied().fold(f64::INFINITY, f64::min),
         );
     }
 
@@ -6939,7 +6939,7 @@ pub(crate) mod gpu_tests {
                      answer PSNR {:.2} dB mean ({:.2} worst), with the 14 after {:.2} dB mean",
                     sizes[sizes.len() / 2],
                     mean(&first),
-                    first.iter().cloned().fold(f64::INFINITY, f64::min),
+                    first.iter().copied().fold(f64::INFINITY, f64::min),
                     mean(&after),
                 );
             }
