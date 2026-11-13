@@ -62,7 +62,7 @@ dependency of the workspace's crates, by what it does:
 | `axum`, `tokio-websockets`, `hyper`, `hyper-util`, `tower`, `tower-http`, `http`, `http-body-util` | MIT; Apache-2.0 OR MIT | permissive | HTTP and WebSocket server |  |
 | `rustls`, `tokio-rustls`, `hyper-rustls`, `rustls-native-certs` | Apache-2.0 OR ISC OR MIT; Apache-2.0 OR MIT | permissive | HTTPS, TLS to TURN servers, and the outgoing requests of the TURN REST and Cloudflare sources | cryptography from `aws-lc-rs` |
 | `rcgen` | Apache-2.0 OR MIT | permissive | self-signed certificates |  |
-| `aws-lc-rs`, `rand` | (Apache-2.0 OR ISC) AND ISC; Apache-2.0 OR MIT | permissive | hashes, HMAC credentials, constant-time comparison, random identifiers |  |
+| `aws-lc-rs`, `aws-lc-sys`, `rand` | (Apache-2.0 OR ISC) AND ISC; Apache-2.0 AND (Apache-2.0 OR ISC) AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) AND BSD-3-Clause AND ISC AND MIT; Apache-2.0 OR MIT | permissive | the WebRTC stack's ciphers, key exchange, signatures, and random values; hashes, HMAC credentials, constant-time comparison, random identifiers | `aws-lc-sys` called directly for AES-CCM and MD5, which `aws-lc-rs` does not expose |
 | `x11rb` | Apache-2.0 OR MIT | permissive | X11 input injection (XTEST), the clipboard (XFixes), and the display's outputs (RandR) | speaks the X protocol itself, no libxcb |
 | `xkbcommon` | MIT | permissive | keymaps |  |
 | `libpulse-binding` | Apache-2.0 OR MIT | permissive | the sound-server control plane |  |
@@ -103,7 +103,7 @@ contains the crate: the default GPL one, or the non-GPL one with pixelflux's
 | libxkbcommon | `xkbcommon` | MIT | permissive | both | linked shared library; keymaps, in the server and in pixelflux |
 | libpulse | `libpulse-sys` | LGPL-2.1-or-later | weak copyleft | both | linked shared library, replaceable; the sound-server control plane (`libpulse-binding`) and pcmflux's capture |
 | libopus | `opusic-sys` | BSD-3-Clause | permissive | both | compiled from the source bundled in the crate and linked statically, through pcmflux; Opus |
-| AWS-LC | `aws-lc-sys` | ISC AND Apache-2.0 AND MIT AND BSD-3-Clause | permissive | both | compiled from the source vendored in the crate and linked statically; the HTTPS server's and outgoing requests' cryptography (`aws-lc-rs`) |
+| AWS-LC | `aws-lc-sys` | ISC AND Apache-2.0 AND MIT AND BSD-3-Clause | permissive | both | compiled from the source vendored in the crate and linked statically; the HTTPS server's, the WebRTC stack's, and outgoing requests' cryptography (`aws-lc-rs`) |
 | NVML (`libnvidia-ml.so.1`) | `nvml-wrapper-sys` | proprietary (NVIDIA driver) | permissive | both | `dlopen` at run time when present, never linked or shipped; GPU statistics |
 | Linux kernel ABI (no library) | `linux-raw-sys` | GPL-2.0-only WITH Linux-syscall-note (the kernel's UAPI headers) | permissive | both | syscall numbers and structures as Rust constants (rustix) |
 | C runtime: glibc and libgcc_s, or musl in the musl builds | `libc` | LGPL-2.1-or-later (glibc), GPL-3.0-or-later WITH GCC-exception-3.1 (libgcc_s), MIT (musl) | weak copyleft | both | linked shared libraries (glibc, libgcc_s) or statically (musl), as for every program |

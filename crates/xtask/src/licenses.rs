@@ -241,7 +241,7 @@ const NATIVE: &[Native] = &[
         license: "ISC AND Apache-2.0 AND MIT AND BSD-3-Clause",
         rank: Rank::Permissive,
         how: "compiled from the source vendored in the crate and linked statically; the HTTPS \
-              server's and outgoing requests' cryptography (`aws-lc-rs`)",
+              server's, the WebRTC stack's, and outgoing requests' cryptography (`aws-lc-rs`)",
         copyleft_features: &[],
     },
     Native {
@@ -369,9 +369,11 @@ const ROLES: &[Role] = &[
         notes: "",
     },
     Role {
-        crates: &["aws-lc-rs", "rand"],
-        how: "hashes, HMAC credentials, constant-time comparison, random identifiers",
-        notes: "",
+        crates: &["aws-lc-rs", "aws-lc-sys", "rand"],
+        how: "the WebRTC stack's ciphers, key exchange, signatures, and random values; hashes, \
+              HMAC credentials, constant-time comparison, random identifiers",
+        notes: "`aws-lc-sys` called directly for AES-CCM and MD5, which `aws-lc-rs` does not \
+                expose",
     },
     Role {
         crates: &["x11rb"],

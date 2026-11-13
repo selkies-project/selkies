@@ -20,7 +20,7 @@ repository = "https://github.com/webrtc-rs/rtc"
 publish = false
 
 [features]
-crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs"]
+crypto-aws-lc-rs = ["rustls/aws-lc-rs", "rcgen/aws_lc_rs"]
 crypto-ring = ["crypto/crypto-ring", "rustls/ring", "rcgen/ring"]
 default = ["crypto-ring"]
 
@@ -45,5 +45,10 @@ rkyv = "0.8.17"
 rustls = { version = "0.23.27", default-features = false, features = ["std"] }
 shared = { package = "rtc-shared", version = "0.21.1", default-features = false, features = ["replay"] }
 x509-parser = "0.16.0"
+
+# The provider is the caller's to supply, so a build compiles none in; the crate's own tests
+# run on rtc-crypto's built-in one.
+[dev-dependencies]
+crypto = { package = "rtc-crypto", version = "0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
 
 [workspace]

@@ -57,10 +57,7 @@ pub enum Class {
 pub fn crypto() -> Arc<dyn RTCCryptoProvider> {
     static PROVIDER: OnceLock<Arc<dyn RTCCryptoProvider>> = OnceLock::new();
     PROVIDER
-        .get_or_init(|| {
-            rtc_crypto::default_provider()
-                .expect("the rtc crates are built with their aws-lc-rs provider")
-        })
+        .get_or_init(|| Arc::new(crate::crypto::AwsLcProvider::new()))
         .clone()
 }
 

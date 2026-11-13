@@ -9,11 +9,13 @@
 //! Each module owns one layer: `sctp` the SCTP association
 //! and the data channels over it, `sdp` the session descriptions Selkies builds and reads,
 //! `signaling` the JSON protocol a page speaks over its WebSocket before and beside the
-//! peer connection, `ice`, `dtls`, and `srtp` the path under them, and `transport` the handle
+//! peer connection, `ice`, `dtls`, and `srtp` the path under them, `crypto` the AWS-LC
+//! provider whose primitives and random bytes all of them run on, and `transport` the handle
 //! that runs those three for one peer. `ice` and `transport` are the only modules that own
 //! sockets and tasks; for the others a datagram path, a WebSocket, and a clock are handed in
 //! by the server crate that mounts the stack.
 
+pub mod crypto;
 pub mod dtls;
 pub mod ice;
 pub mod rtp;
