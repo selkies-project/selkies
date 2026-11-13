@@ -160,6 +160,7 @@ jobs:
     uses: ./.github/workflows/build-wheel.yaml
     with:
       package_version: ${{ needs.check.outputs.version }}
+      packages: true
 
   pixelflux-pcmflux-wheels:
     name: Build pixelflux and pcmflux wheels
@@ -191,14 +192,6 @@ jobs:
       tag_prefix: ${{ needs.check.outputs.version }}
       floating_tags: ${{ needs.check.outputs.latest == 'true' }}
 
-  packages:
-    name: Build native packages
-    # The wheel's run builds the bundles every package repackages
-    needs: [check, wheel]
-    permissions:
-      contents: read
-    uses: ./.github/workflows/packages.yaml
-
   reference:
     name: Build the Developer Reference
     needs: [check]
@@ -210,7 +203,7 @@ jobs:
 
   draft-release:
     name: Assemble draft release
-    needs: [check, wheel, wheel-smoke, pixelflux-pcmflux-wheels, images, packages, reference]
+    needs: [check, wheel, wheel-smoke, pixelflux-pcmflux-wheels, images, reference]
     runs-on: ubuntu-latest
     permissions:
       contents: write

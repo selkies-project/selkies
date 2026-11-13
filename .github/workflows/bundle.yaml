@@ -1,78 +1,45 @@
 name: Bundle
-# The Selkies bundle, selkies-<version>-<arch>-linux-<gnu|musl>.tar.gz: one
-# directory tree carrying the server, the desktop shell, the X servers,
-# PulseAudio, dbus-daemon, CUPS, and the interposers, built once for each C
-# library and architecture (infra/bundle/build.sh) and the build every other
-# channel repackages. glibc's is built in manylinux_2_28, whose glibc 2.28 is
-# its floor, musl's in musllinux_1_2. Each is checked on a bare host of its C
-# library, where nothing of what it carries is installed: the session it
-# starts has to come up and answer.
-# Called by build-wheel.yaml, which repackages the bundles as wheels and leaves
-# them in the run for packages.yaml; can also be run standalone.
+# One target's release media, from its bundle down: the Selkies bundle
+# selkies-<version>-<arch>-linux-<gnu|musl>.tar.gz for a C library and an
+# architecture (infra/bundle/build.sh), the wheel repackaged from it
+# (infra/wheel/build.py), and, where `packages` is set, the native packages
+# (infra/packaging/package.sh) and, on glibc, the AppImage
+# (infra/appimage/build.sh) repackaged from it too. glibc's bundle is built in
+# manylinux_2_28, whose glibc 2.28 is its floor, musl's in musllinux_1_2.
+#
+# Each target is a call of its own (build-wheel.yaml calls this once per
+# target), so a target's wheel and packages follow its own bundle rather than
+# the slowest of all four, and only the jobs that need every target wait for
+# every target. The bundle is checked on a bare host of its C library, where
+# nothing it carries is installed, and each package in pristine containers of
+# the distributions its format serves (scripts/ci/verify-package.sh), the
+# AppImage on AlmaLinux 8, its glibc floor (scripts/ci/verify-appimage.sh).
+# The web client every target embeds is the caller's `bundle-web-client`.
 on:
-  workflow_dispatch:
-    inputs:
-      package_version:
-        description: Version string stamped into the bundles
-        type: string
-        default: 0.0.0.dev0
   workflow_call:
     inputs:
+      libc:
+        description: The C library, glibc or musl
+        type: string
+        required: true
+      arch:
+        description: The architecture, x86_64 or aarch64
+        type: string
+        required: true
       package_version:
-        description: Version string stamped into the bundles
+        description: Version string stamped into the bundle and everything made from it
         type: string
         default: 0.0.0.dev0
+      packages:
+        description: Also build the native packages and the AppImage
+        type: boolean
+        default: false
 permissions:
   contents: read
-env:
-  NODE_VERSION: "26"
 jobs:
-  web:
-    name: Web client for the bundles
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: |
-            web/selkies-web-core/package-lock.json
-            web/selkies-dashboard/package-lock.json
-      - name: Build the web client bundle
-        env:
-          # For the controller database's lookups (gendb.ts)
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          ./scripts/ci/build-web.sh
-          tar -C dist -cf selkies-web-client.tar web
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: bundle-web-client
-          path: selkies-web-client.tar
-          if-no-files-found: error
-          retention-days: 1
   bundle:
-    name: Bundle (${{ matrix.libc.name }}, ${{ matrix.arch.name }})
-    needs: web
-    runs-on: ${{ matrix.arch.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - name: x86_64
-            runner: ubuntu-latest
-          - name: aarch64
-            runner: ubuntu-26.04-arm
-        libc:
-          - name: glibc
-            host: debian:stable-slim
-            setup: apt-get update -qq > /dev/null && apt-get install -y -qq curl procps > /dev/null
-          - name: musl
-            host: alpine:3.22
-            setup: apk add --no-cache -q bash curl procps
+    name: Bundle and wheel (${{ inputs.libc }}, ${{ inputs.arch }})
+    runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,16 +63,19 @@ jobs:
       - name: Build the bundle
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
-        run: ./infra/bundle/build.sh out "${{ matrix.libc.name }}"
+        run: ./infra/bundle/build.sh out "${{ inputs.libc }}"
       - name: Start a session from the bundle on a bare host
         # Nothing the bundle carries is installed on the host: the session's
         # buses, sound server, and X server are the bundle's, and its server has
         # to answer
+        env:
+          HOST: ${{ inputs.libc == 'musl' && 'alpine:3.22' || 'debian:stable-slim' }}
+          SETUP: ${{ inputs.libc == 'musl' && 'apk add --no-cache -q bash curl procps' || 'apt-get update -qq > /dev/null && apt-get install -y -qq curl procps > /dev/null' }}
         run: |
-          scripts/ci/retry.sh 5 60 docker pull "${{ matrix.libc.host }}"
+          scripts/ci/retry.sh 5 60 docker pull "${HOST}"
           mkdir -p unpacked && tar -C unpacked -xzf out/selkies-*.tar.gz
-          docker run --rm -v "${GITHUB_WORKSPACE}/unpacked:/opt:ro" "${{ matrix.libc.host }}" sh -c '
-            ${{ matrix.libc.setup }}
+          docker run --rm -e SETUP -v "${GITHUB_WORKSPACE}/unpacked:/opt:ro" "${HOST}" sh -c '
+            sh -c "${SETUP}"
             adduser -D u 2> /dev/null || useradd -m u
             mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
             selkies="$(echo /opt/selkies-*/bin/selkies)"
@@ -117,9 +87,110 @@ jobs:
             done
             cat /tmp/log
             curl -fs http://127.0.0.1:8080/api/health'
+      - name: Repackage the bundle as its wheel
+        run: python3 infra/wheel/build.py out/selkies-*.tar.gz wheelhouse
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: bundle-${{ matrix.libc.name }}-${{ matrix.arch.name }}
+          name: bundle-${{ inputs.libc }}-${{ inputs.arch }}
+          path: out/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selkies-wheel-${{ inputs.libc }}-${{ inputs.arch }}
+          path: wheelhouse/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: ${{ matrix.kind.name }} (${{ inputs.arch }})
+    needs: bundle
+    if: inputs.packages
+    runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The formats a bundle of this C library and architecture serves: apk
+        # for musl, and for glibc deb, rpm, and, on x86_64, the pacman package,
+        # since Arch Linux publishes an x86_64-only image
+        kind: ${{ fromJSON(inputs.libc == 'musl' && '[{"name":"apk","image":"alpine:latest","hosts":"alpine:latest","install":"apk add --quiet --allow-untrusted /out/*.apk"}]' || (inputs.arch == 'x86_64' && '[{"name":"deb","image":"debian:stable-slim","hosts":"ubuntu:24.04 ubuntu:26.04 debian:bookworm debian:trixie","install":"apt-get update -qq && apt-get install -y -qq /out/*.deb"},{"name":"rpm","image":"fedora:43","hosts":"fedora:43 almalinux:9 almalinux:8","install":"dnf install -y -q util-linux /out/*.rpm"},{"name":"arch","image":"archlinux:base-devel","hosts":"archlinux:base","install":"pacman -Sy --noconfirm > /dev/null && pacman -U --noconfirm /out/*.pkg.tar.zst"}]' || '[{"name":"deb","image":"debian:stable-slim","hosts":"ubuntu:24.04 ubuntu:26.04 debian:bookworm debian:trixie","install":"apt-get update -qq && apt-get install -y -qq /out/*.deb"},{"name":"rpm","image":"fedora:43","hosts":"fedora:43 almalinux:9 almalinux:8","install":"dnf install -y -q util-linux /out/*.rpm"}]')) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle-${{ inputs.libc }}-${{ inputs.arch }}
+          path: bundle
+      - name: Repackage the bundle inside the format's distribution
+        env:
+          IMAGE: ${{ matrix.kind.image }}
+          FORMAT: ${{ matrix.kind.name }}
+        run: |
+          set -e
+          mkdir -p out
+          scripts/ci/retry.sh 5 60 docker pull "${IMAGE}"
+          bundle="$(echo bundle/selkies-*.tar.gz)"
+          docker run --rm -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${GITHUB_WORKSPACE}/out:/out" \
+            "${IMAGE}" sh /repo/infra/packaging/package.sh "${FORMAT}" "/repo/${bundle}" /out
+          ls -la out/
+      - name: Install the package in pristine containers of the distributions it serves
+        env:
+          HOSTS: ${{ matrix.kind.hosts }}
+          INSTALL: ${{ matrix.kind.install }}
+        run: |
+          set -e
+          for host in ${HOSTS}; do
+            echo "::group::${host}"
+            scripts/ci/retry.sh 5 60 docker pull "${host}"
+            docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" -e INSTALL \
+              -v "${GITHUB_WORKSPACE}/scripts/ci/verify-package.sh:/verify.sh:ro" \
+              "${host}" sh /verify.sh
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.kind.name }}-${{ inputs.arch }}
+          path: out/*
+          # Already-compressed payloads: the artifact is a zip either way, and
+          # re-deflating them spends CPU for a size that does not move.
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  appimage:
+    name: AppImage (${{ inputs.arch }})
+    needs: bundle
+    if: inputs.packages && inputs.libc == 'glibc'
+    runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle-glibc-${{ inputs.arch }}
+          path: bundle
+      - name: Build the AppImage
+        env:
+          # For the release lookup behind the runtime's check
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq squashfs-tools
+          ./infra/appimage/build.sh bundle/selkies-*.tar.gz out
+      - name: Check the AppImage on a pristine host at its glibc floor
+        run: |
+          scripts/ci/retry.sh 5 60 docker pull almalinux:8
+          docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" \
+            -v "${GITHUB_WORKSPACE}/scripts/ci/verify-appimage.sh:/verify.sh:ro" \
+            almalinux:8 sh -c 'sh /verify.sh /out/*.AppImage'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: appimage-${{ inputs.arch }}
           path: out/*
           compression-level: 0
           if-no-files-found: error
