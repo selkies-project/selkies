@@ -3,7 +3,7 @@
 //! variable, which is how Selkies containers are configured.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tiny_skia::Color;
 
@@ -318,7 +318,7 @@ fn default_wallpapers() -> Vec<PathBuf> {
     for ext in ["png", "jpg", "jpeg"] {
         candidates.push(PathBuf::from(format!("/usr/share/selkies/wallpaper.{ext}")));
     }
-    candidates.push(PathBuf::from(LOGO_PATH));
+    candidates.push(logo_path());
     candidates
 }
 
@@ -332,7 +332,7 @@ impl Config {
                 .into_iter()
                 .find(|p| p.is_file() || crate::wallpapers::is_package(p));
             if !values.contains_key("wallpaper_mode")
-                && config.wallpaper.image.as_deref() == Some(Path::new(LOGO_PATH))
+                && config.wallpaper.image.as_deref() == Some(logo_path().as_path())
             {
                 config.wallpaper.mode = WallpaperMode::Center;
             }
@@ -588,12 +588,39 @@ pub const WINDOW_KEYS: [&str; 5] = [
 /// The keys of the file manager's settings.
 pub const FILES_KEYS: [&str; 3] = ["files_view", "files_sort", "files_hidden"];
 
-/// The Selkies logo, the wallpaper when no other image is configured.
-pub const LOGO_PATH: &str = "/usr/share/selkies/www/icon.png";
+/// The image's logo, the wallpaper when no other image is configured.
+const IMAGE_LOGO: &str = "/usr/share/selkies/www/icon.png";
 
-/// The Selkies logo as a vector, the start button's icon where it is installed, which a flat
-/// start icon draws in one color.
-pub const LOGO_SVG_PATH: &str = "/usr/share/selkies/www/icon.svg";
+/// The image's logo as a vector, the start button's icon, which a flat start icon draws in one
+/// color.
+const IMAGE_LOGO_SVG: &str = "/usr/share/selkies/www/icon.svg";
+
+/// The logo file `name` under the release bundle's `share/selkies`, where Selkies runs from one.
+fn bundled_logo(name: &str) -> Option<PathBuf> {
+    selkies_draw::dirs::bundle_share()
+        .map(|share| share.join("selkies").join(name))
+        .filter(|path| path.is_file())
+}
+
+/// The logo as a picture: the image's own, else the release bundle's Selkies logo, else the
+/// image's path, which callers find missing.
+pub fn logo_path() -> PathBuf {
+    let image = PathBuf::from(IMAGE_LOGO);
+    if image.is_file() {
+        return image;
+    }
+    bundled_logo("icon.png").unwrap_or(image)
+}
+
+/// The logo as a vector, the image's own, else the release bundle's, or `None` where neither is
+/// installed.
+pub fn logo_svg_path() -> Option<PathBuf> {
+    let image = PathBuf::from(IMAGE_LOGO_SVG);
+    if image.is_file() {
+        return Some(image);
+    }
+    bundled_logo("icon.svg")
+}
 
 /// Parses a list of desktop file IDs, the `.desktop` suffix added where missing.
 ///

@@ -13,7 +13,7 @@
 #                     cups/, the print queue's scheduler (cups.sh)
 #   lib/selkies/      the libraries those link that are not glibc's or the GPU
 #                     driver's, pulse/modules/, and preload/, the interposers
-#   share/selkies/    the xkb data and the buses' configuration
+#   share/selkies/    the xkb data, the buses' configuration, and the logo
 #
 # Every program finds its libraries through a run path relative to itself
 # ($ORIGIN), a RUNPATH rather than an RPATH, so it binds that program's own
@@ -86,6 +86,10 @@ modules="$(dirname "$(find /usr/lib64 -name module-null-sink.so | head -n 1)")"
 for module in module-native-protocol-unix module-always-sink module-null-sink module-virtual-source; do
     install -m755 "${modules}/${module}.so" "${TREE}/lib/selkies/pulse/modules/"
 done
+# Selkies' logo, the desktop's start button and its application-icon wallpaper
+# where the image installs none of its own
+install -m644 "${REPO}/docs/assets/logo/selkies.svg" "${TREE}/share/selkies/icon.svg"
+install -m644 "${REPO}/docs/assets/logo/mark-512x512.png" "${TREE}/share/selkies/icon.png"
 cp /usr/share/dbus-1/session.conf "${TREE}/share/selkies/dbus-1/"
 # The session's system bus: the distribution's configuration names the account
 # the daemon drops to, which the daemon looks up even when it never drops, and

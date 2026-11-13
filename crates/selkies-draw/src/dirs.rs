@@ -70,6 +70,15 @@ pub fn data_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// The `share` directory of the Selkies release bundle the running executable belongs to, which
+/// carries what Selkies itself ships for a desktop (its logo): `share` beside the executable's
+/// `bin/` where a `libexec/selkies` marks the tree a bundle, else `None`.
+pub fn bundle_share() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let root = exe.parent()?.parent()?;
+    root.join("libexec/selkies").is_dir().then(|| root.join("share"))
+}
+
 /// The system configuration directories in precedence order (`XDG_CONFIG_DIRS`, else `/etc/xdg`).
 pub fn config_dirs() -> Vec<PathBuf> {
     let raw = std::env::var("XDG_CONFIG_DIRS").ok().filter(|v| !v.is_empty());
