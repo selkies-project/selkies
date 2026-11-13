@@ -211,12 +211,14 @@ def stalls(times: List[float]) -> float:
     return max((b - a for a, b in zip(times, times[1:])), default=float("inf"))
 
 
-def scene(wayland: bool):
-    """The moving scene on the display under test, as a process to kill at the end."""
+def scene(res: "H.Results", wayland: bool):
+    """The moving scene on the display under test, as a process to kill at the end. A Wayland
+    scene that never maps is a failed check naming what it printed: the desktop behind it stands
+    still, which would otherwise read as a stalled stream of wrong pictures."""
     if not wayland:
         return H.spawn([sys.executable, PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"])
     client = H.WlObs("wayland-1", tool="wl_motion_scene.py", WLOBS_DURATION="900")
-    client.ready(timeout=30)
+    res.check("the scene maps its window", client.ready(timeout=30), client.output[-3:])
     return client.proc
 
 
@@ -227,7 +229,7 @@ def ws_block(wayland: bool = False) -> "H.Results":
     painter = relay = None
     H.server_start(mode="websockets", wayland=wayland, extra_env=ENV)
     try:
-        painter = scene(wayland)
+        painter = scene(res, wayland)
         relay = H.spawn([sys.executable, BWRELAY, str(RELAY_PORT), str(H.PORT), str(LINK_KBIT)])
         with sync_playwright() as p:
             pages = []
@@ -322,7 +324,7 @@ def wr_block(engine: str = "chromium", wayland: bool = False) -> "H.Results":
     H.server_start("webrtc", wayland=wayland, extra_env={
         **ENV, "SELKIES_WEBRTC_PACER": "true", "SELKIES_STUN_HOST": "", "SELKIES_TURN_REST_URI": ""})
     try:
-        painter = scene(wayland)
+        painter = scene(res, wayland)
         with sync_playwright() as p:
             pages = []
             for script in (C.PC_TAP_JS, SHAPED_JS):

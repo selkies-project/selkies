@@ -1293,8 +1293,9 @@ def wl_clear(socket_name: str, timeout: float = 12) -> None:
 
 class WlObs:
     """Drive a pywayland client from tests/tools against the compositor and
-    collect its JSONL event lines from a reader thread. `tool` names the client,
-    and any keyword arguments are added to its environment."""
+    collect its JSONL event lines from a reader thread, and the rest of what it
+    prints (a traceback) in `output`. `tool` names the client, and any keyword
+    arguments are added to its environment."""
 
     def __init__(self, socket_name: str, tool: str = "wlobs.py", **env: str) -> None:
         self.proc = spawn(
@@ -1303,6 +1304,7 @@ class WlObs:
             env={**os.environ, "XDG_RUNTIME_DIR": RUNTIME_DIR,
                  "WLOBS_DURATION": "60", **env})
         self.lines: list = []
+        self.output: list = []
         self._start_reader()
 
     def _start_reader(self) -> None:
@@ -1313,8 +1315,11 @@ class WlObs:
                 if line.startswith("{"):
                     try:
                         self.lines.append(json.loads(line))
+                        continue
                     except Exception:
                         pass
+                if line:
+                    self.output.append(line)
         threading.Thread(target=read, daemon=True).start()
 
     def ready(self, timeout: float = 10) -> bool:
