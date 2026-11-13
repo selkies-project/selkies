@@ -19,10 +19,10 @@
  * own, `reference` under the workspace's (`CARGO_TARGET_DIR` is honored), so
  * the rustdoc output holds these crates alone whatever else was documented in
  * the workspace's. A tree without the workspace, a release whose server is
- * the Python package under src/selkies, is left to generate-python-docs.mjs.
+ * the Python package under src/selkies, is left to generate-python-docs.ts.
  *
  * `--archive <dir>` writes the rustdoc tree into `<dir>` instead, for the
- * download build-reference-archive.mjs attaches to a release, and leaves the
+ * download build-reference-archive.ts attaches to a release, and leaves the
  * site's pages alone. rustdoc links its pages relatively and loads its search
  * index by script tag, so the copy opens from a file as it does from the site.
  * That build has no earlier reference to fall back on and fails outright.
@@ -53,7 +53,7 @@ if (!existsSync(join(repoRoot, 'crates', 'selkies', 'Cargo.toml'))) {
   process.exit(0);
 }
 
-function cargoDoc() {
+function cargoDoc(): void {
   const packages = CRATES.flatMap((c) => ['-p', c.pkg]);
   const args = ['doc', '--no-deps', '--lib', '--locked', '--document-private-items', '--target-dir', targetDir, ...packages];
   const res = spawnSync('cargo', args, { cwd: repoRoot, stdio: 'inherit' });
@@ -66,7 +66,7 @@ const archiveAt = process.argv.indexOf('--archive');
 const archiveDir = archiveAt === -1 ? undefined : resolve(process.argv[archiveAt + 1] ?? '');
 
 /** Copies rustdoc's output to `dir`, with a page at the documentation root. */
-async function copyRustdoc(dir) {
+async function copyRustdoc(dir: string): Promise<void> {
   // Refused where it holds a NUL or names a parent: it is emptied first.
   if (!/^\/[^\0]*$/.test(dir) || dir.split('/').includes('..')) throw new Error(`generate-rust-docs: ${dir} is not a usable path`);
   await fs.rm(dir, { recursive: true, force: true });
@@ -90,15 +90,16 @@ if (archiveDir) {
 try {
   cargoDoc();
 } catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
   // A site contributor without the toolchain or the native libraries can
   // still build the rest of the site against a previously generated
   // reference; a from-scratch build has nothing to fall back on.
   if (existsSync(join(rustdocDir, 'selkies', 'index.html')) && existsSync(join(outDir, 'index.md'))) {
-    console.warn(`generate-rust-docs: cargo doc failed (${err.message}); reusing the existing public/rustdoc`);
+    console.warn(`generate-rust-docs: cargo doc failed (${message}); reusing the existing public/rustdoc`);
     process.exit(0);
   }
   console.error(
-    `generate-rust-docs: cargo doc failed and no previous public/rustdoc exists.\n${err.message}\n` +
+    `generate-rust-docs: cargo doc failed and no previous public/rustdoc exists.\n${message}\n` +
       'The Rust toolchain and the native libraries pixelflux and pcmflux build against are required to build the Developer Reference.',
   );
   process.exit(1);
@@ -124,7 +125,7 @@ await fs.mkdir(outDir, { recursive: true });
 await fs.writeFile(join(outDir, 'index.md'), index);
 
 // The folder's sidebar entry: the index page, then a link into each crate's
-// rustdoc; generate-web-docs.mjs appends the web sections.
+// rustdoc; generate-web-docs.ts appends the web sections.
 await fs.writeFile(
   join(outDir, 'meta.json'),
   JSON.stringify(

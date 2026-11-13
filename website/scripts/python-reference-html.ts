@@ -1,6 +1,6 @@
 /**
  * Renders the Python reference fumadocs-python writes as static HTML that
- * opens from a file, for the download build-reference-archive.mjs attaches to
+ * opens from a file, for the download build-reference-archive.ts attaches to
  * a release whose server is the Python package.
  *
  * fumadocs-python writes one MDX page per module and class, its members as
@@ -18,7 +18,8 @@
 import * as fs from 'node:fs/promises';
 import { dirname, join, posix } from 'node:path';
 import { evaluate } from '@mdx-js/mdx';
-import { createElement as h, Fragment } from 'react';
+import type { convert } from 'fumadocs-python';
+import { createElement as h, Fragment, type ComponentProps, type ReactNode } from 'react';
 import * as runtime from 'react/jsx-runtime';
 import { renderToStaticMarkup } from 'react-dom/server';
 
@@ -39,9 +40,24 @@ pre { background: var(--code); padding: 0.75rem; overflow-x: auto; border-radius
 details summary { cursor: pointer; color: var(--muted); }
 `;
 
+/** One page fumadocs-python writes. */
+type PythonPage = ReturnType<typeof convert>[number];
+
+/** What a fumadocs-python component is given. */
+interface MemberProps {
+  name?: string;
+  type?: string;
+  value?: string;
+  kind?: string;
+  href?: string;
+  title?: string;
+  description?: string;
+  children?: ReactNode;
+}
+
 /** The page an address into the reference opens, relative to `from`, or the address unchanged. */
-function linkFrom(from, href, pages, baseUrl) {
-  if (href !== baseUrl && !href?.startsWith(`${baseUrl}/`) && !href?.startsWith(`${baseUrl}#`)) return href;
+function linkFrom(from: string, href: string | undefined, pages: Set<string>, baseUrl: string): string | undefined {
+  if (!href || (href !== baseUrl && !href.startsWith(`${baseUrl}/`) && !href.startsWith(`${baseUrl}#`))) return href;
   const [path, hash] = href.split('#');
   const slug = path.slice(baseUrl.length).replace(/^\/|\/$/g, '');
   const target = [slug ? `${slug}.html` : 'index.html', `${slug}/index.html`.replace(/^\//, '')].find((p) =>
@@ -53,36 +69,36 @@ function linkFrom(from, href, pages, baseUrl) {
 }
 
 /** The HTML each fumadocs-python component stands for, on the page at `from`. */
-function components(from, pages, baseUrl) {
-  const signature = (name, type, value, kind) =>
+function components(from: string, pages: Set<string>, baseUrl: string) {
+  const signature = (name?: string, type?: string, value?: string, kind?: string) =>
     h('code', null, kind ? h('span', { className: 'kind' }, `${kind} `) : null, name, type ?? '', value ? ` = ${value}` : '');
   return {
-    a: ({ href, ...props }) => h('a', { ...props, href: linkFrom(from, href, pages, baseUrl) }),
-    PyAttributes: ({ children }) => h(Fragment, null, children),
-    PyAttribute: ({ name, type, value, children }) =>
+    a: ({ href, ...props }: ComponentProps<'a'>) => h('a', { ...props, href: linkFrom(from, href, pages, baseUrl) }),
+    PyAttributes: ({ children }: MemberProps) => h(Fragment, null, children),
+    PyAttribute: ({ name, type, value, children }: MemberProps) =>
       h('section', { className: 'member', id: name }, h('h3', null, signature(name, type ? `: ${type}` : '', value)), children),
-    PyFunction: ({ name, type, kind, children }) =>
+    PyFunction: ({ name, type, kind, children }: MemberProps) =>
       h('section', { className: 'member', id: name }, h('h3', null, signature(name, type, undefined, kind)), children),
-    PyParameter: ({ name, type, value, children }) =>
+    PyParameter: ({ name, type, value, children }: MemberProps) =>
       h('ul', { className: 'params' }, h('li', null, signature(name, type ? `: ${type}` : '', value), children)),
-    PyFunctionReturn: ({ type, children }) =>
+    PyFunctionReturn: ({ type, children }: MemberProps) =>
       h('p', null, 'Returns ', type ? h('code', null, type) : null, children ? ': ' : null, children),
-    PySourceCode: ({ children }) => h('details', null, h('summary', null, 'Source'), children),
-    Tabs: ({ children }) => h(Fragment, null, children),
-    Tab: ({ value, children }) => h('section', null, h('h2', null, value), children),
-    Cards: ({ children }) => h('ul', null, children),
-    Card: ({ title, href, description, children }) =>
+    PySourceCode: ({ children }: MemberProps) => h('details', null, h('summary', null, 'Source'), children),
+    Tabs: ({ children }: MemberProps) => h(Fragment, null, children),
+    Tab: ({ value, children }: MemberProps) => h('section', null, h('h2', null, value), children),
+    Cards: ({ children }: MemberProps) => h('ul', null, children),
+    Card: ({ title, href, description, children }: MemberProps) =>
       h('li', null, h('a', { href: linkFrom(from, href, pages, baseUrl) }, title), description ? ` ${description}` : null, children),
   };
 }
 
 /** The page at `path` of the reference, from fumadocs-python's MDX for it. */
-async function render({ title, content }, html, pages, heading, baseUrl) {
+async function render({ title, content }: PythonPage, html: string, pages: Set<string>, heading: string, baseUrl: string): Promise<string> {
   const { default: Content } = await evaluate(content, { ...runtime, development: false });
   const body = renderToStaticMarkup(h(Content, { components: components(html, pages, baseUrl) }));
   const home = posix.relative(posix.dirname(html), 'index.html') || 'index.html';
   const top = posix.relative(posix.dirname(html), '../index.html');
-  const escape = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;');
   return `<!DOCTYPE html>
 <html lang="en">
 <meta charset="utf-8">
@@ -105,8 +121,8 @@ ${body}
  *
  * @throws when a page fails to compile or links a page that is not among them.
  */
-export async function writeHtml(files, outDir, heading, baseUrl) {
-  const html = (path) => path.replace(/\.mdx$/, '.html');
+export async function writeHtml(files: PythonPage[], outDir: string, heading: string, baseUrl: string): Promise<number> {
+  const html = (path: string) => path.replace(/\.mdx$/, '.html');
   const pages = new Set(files.map((f) => html(f.path)));
   await fs.rm(outDir, { recursive: true, force: true });
   for (const file of files) {

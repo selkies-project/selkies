@@ -3,7 +3,7 @@
 // those names are rewritten at build time, so a rename that breaks a link is
 // invisible until something checks the output.
 //
-// The rustdoc pages generate-rust-docs.mjs copies in are targets, never
+// The rustdoc pages generate-rust-docs.ts copies in are targets, never
 // sources: links into them are checked, but rustdoc's own pages are its
 // output, whose source-line anchors its script resolves and whose inlined
 // dependency docs keep their crate's relative links.
@@ -16,8 +16,8 @@ const out = resolvePath(process.argv[2] ?? join(dirname(dirname(fileURLToPath(im
 if (!/^\/[^\0]*$/.test(out) || out.split('/').includes('..')) throw new Error(`check-links: ${out} is not a usable path`);
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
-async function walk(dir) {
-  const found = [];
+async function walk(dir: string): Promise<string[]> {
+  const found: string[] = [];
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) found.push(...(await walk(path)));
@@ -29,13 +29,13 @@ async function walk(dir) {
 const files = await walk(out);
 const exists = new Set(files.map((f) => `/${relative(out, f).split(/[\\/]/).join('/')}`));
 const pages = files.filter((f) => f.endsWith('.html'));
-const isRustdoc = (url) => url.split('/').includes('rustdoc');
+const isRustdoc = (url: string) => url.split('/').includes('rustdoc');
 
 /** Every id an exported page defines, so anchors can be checked against it. */
-const ids = new Map();
+const ids = new Map<string, Set<string>>();
 for (const page of pages) {
   const html = await readFile(page, 'utf8');
-  const set = new Set();
+  const set = new Set<string>();
   for (const [, id] of html.matchAll(/\sid="([^"]+)"/g)) set.add(id);
   ids.set(`/${relative(out, page).split(/[\\/]/).join('/')}`, set);
 }
@@ -46,13 +46,13 @@ for (const page of pages) {
  * export writes every page (`trailingSlash`); any other is the file itself,
  * that name with `.html`, or a directory Pages redirects to with the slash.
  */
-function resolve(url) {
+function resolve(url: string): string | undefined {
   const path = url.replace(/\/{2,}/g, '/');
   const candidates = path.endsWith('/') ? [`${path}index.html`] : [path, `${path}.html`, `${path}/index.html`];
   return candidates.find((candidate) => exists.has(candidate));
 }
 
-const problems = [];
+const problems: string[] = [];
 let checked = 0;
 
 for (const page of pages) {
@@ -80,7 +80,7 @@ for (const page of pages) {
       problems.push(`${url}: ${attr} "${raw}" resolves to nothing`);
       continue;
     }
-    if (hash && ids.has(file) && !ids.get(file).has(decodeURIComponent(hash))) {
+    if (hash && ids.has(file) && !ids.get(file)?.has(decodeURIComponent(hash))) {
       problems.push(`${url}: ${attr} "${raw}" has no matching id in ${file}`);
     }
   }

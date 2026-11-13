@@ -21,8 +21,8 @@ export const repoUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 export const projectUrl = 'https://selkies.io';
 
 // The path this build is served from. Empty for a plain build at a domain
-// root; a fork on a GitHub Pages project path sets it, and build-versions.mjs
-// appends the version segment. next.config.mjs applies it to routed URLs, so
+// root; a fork on a GitHub Pages project path sets it, and build-versions.ts
+// appends the version segment. next.config.ts applies it to routed URLs, so
 // anything assembled by hand here has to add it back.
 export const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
@@ -30,7 +30,7 @@ export function withBasePath(path: string): string {
   return path.startsWith('/') ? `${basePath}${path}` : path;
 }
 
-/** One version of the site, as scripts/build-versions.mjs lists it. */
+/** One version of the site, as scripts/build-versions.ts lists it. */
 export interface DocsVersion {
   /** The path segment the version is served under, which is also its name. */
   version: string;
@@ -48,7 +48,7 @@ export interface DocsVersions {
 
 /**
  * The version index when this build is one version of a versioned site, else
- * undefined. build-versions.mjs hands it to every version it builds, each
+ * undefined. build-versions.ts hands it to every version it builds, each
  * served one segment below the site root, so the base path's last segment
  * names the version this build is.
  */
@@ -73,7 +73,7 @@ export const currentVersion =
 
 /**
  * `path` as the export serves it: every page is a directory index
- * (`trailingSlash` in next.config.mjs), and its slashless address is only a
+ * (`trailingSlash` in next.config.ts), and its slashless address is only a
  * redirect there.
  */
 export function withTrailingSlash(path: string): string {

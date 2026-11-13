@@ -1,5 +1,5 @@
 /**
- * What build-versions.mjs and build-reference-archive.mjs share: running a
+ * What build-versions.ts and build-reference-archive.ts share: running a
  * command, exporting a release tag into a tree that this tree's site tooling
  * builds, and the name and address of a release's Developer Reference
  * download.
@@ -8,7 +8,7 @@
  * pages of the site, so the site's page for it and the release workflow that
  * attaches it have to agree on one name: `referenceAsset` is that name.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import { cp, mkdir, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +28,7 @@ export const repository = process.env.GITHUB_REPOSITORY || 'selkies-project/selk
  *
  * @throws when the command does not exit with status 0.
  */
-export function run(cmd, args, opts = {}) {
+export function run(cmd: string, args: string[], opts: SpawnSyncOptions = {}): void {
   const res = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
   if (res.status !== 0) {
     throw new Error(`${cmd} ${args.join(' ')} exited with ${res.status ?? res.error}`);
@@ -40,19 +40,19 @@ export function run(cmd, args, opts = {}) {
  *
  * @throws when git does not exit with status 0.
  */
-export function git(args) {
+export function git(args: string[]): string {
   const res = spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8' });
   if (res.status !== 0) throw new Error(`git ${args.join(' ')} exited with ${res.status}: ${res.stderr}`);
   return res.stdout;
 }
 
 /** The file name a release's Developer Reference is attached under, beside its packages. */
-export function referenceAsset(version) {
+export function referenceAsset(version: string): string {
   return `selkies-${version}-reference.tar.gz`;
 }
 
 /** The address the release tagged `tag` serves its Developer Reference download from. */
-export function referenceAssetUrl(tag, version) {
+export function referenceAssetUrl(tag: string, version: string): string {
   return `https://github.com/${repository}/releases/download/${encodeURIComponent(tag)}/${referenceAsset(version)}`;
 }
 
@@ -65,7 +65,7 @@ export function referenceAssetUrl(tag, version) {
  * node_modules is copied rather than linked: Turbopack refuses a node_modules
  * that resolves outside the tree it builds.
  */
-export async function exportTag(tag, tree) {
+export async function exportTag(tag: string, tree: string): Promise<void> {
   console.log(`version-tree: exporting ${tag}`);
   await mkdir(tree, { recursive: true });
   const archive = `${tree}.tar`;

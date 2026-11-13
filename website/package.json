@@ -4,15 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "node scripts/sync-assets.mjs && node scripts/generate-reference.mjs",
+    "predev": "node scripts/sync-assets.ts && node scripts/generate-reference.ts",
     "dev": "next dev",
-    "prebuild": "node scripts/sync-assets.mjs && node scripts/generate-reference.mjs",
+    "prebuild": "node scripts/sync-assets.ts && node scripts/generate-reference.ts",
     "build": "next build",
-    "postbuild": "node scripts/drop-full-payloads.mjs",
-    "build:versions": "node scripts/build-versions.mjs",
+    "postbuild": "node scripts/drop-full-payloads.ts",
+    "build:versions": "node scripts/build-versions.ts",
     "typecheck": "next typegen && tsc --noEmit",
-    "check-links": "node scripts/check-links.mjs",
-    "generate:api": "node scripts/generate-reference.mjs"
+    "check-links": "node scripts/check-links.ts",
+    "generate:api": "node scripts/generate-reference.ts"
   },
   "dependencies": {
     "@mdx-js/mdx": "^3.1.1",

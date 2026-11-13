@@ -7,7 +7,7 @@ name: Build the Developer Reference
 # The Developer Reference is a file a release carries,
 # selkies-<version>-reference.tar.gz, which that version's page of the docs
 # site links; the site hosts prose alone, for every version.
-# website/scripts/build-reference-archive.mjs builds it, and this uploads it
+# website/scripts/build-reference-archive.ts builds it, and this uploads it
 # as the run's `selkies-reference` artifact.
 #
 # A caller builds the commit it checked out: release.yaml for every release
@@ -96,10 +96,10 @@ jobs:
             git rev-parse --verify --quiet "refs/tags/${TAG}" > /dev/null \
               || { echo "::error::${TAG} is not a tag"; exit 1; }
             version="${TAG#v}"
-            node website/scripts/build-reference-archive.mjs "${version}" --tag "${TAG}" --out reference
+            node website/scripts/build-reference-archive.ts "${version}" --tag "${TAG}" --out reference
           else
             version="${VERSION}"
-            node website/scripts/build-reference-archive.mjs "${version}" --out reference
+            node website/scripts/build-reference-archive.ts "${version}" --out reference
           fi
           echo "asset=selkies-${version}-reference.tar.gz" >> "${GITHUB_OUTPUT}"
           ls -la reference/

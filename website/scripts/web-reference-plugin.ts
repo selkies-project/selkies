@@ -1,6 +1,6 @@
 /**
  * TypeDoc plugin for the web Developer Reference (loaded by
- * generate-web-docs.mjs).
+ * generate-web-docs.ts).
  *
  * TypeDoc documents exports alone, which fits a library but not the streaming
  * cores: each exports one function and keeps everything else as closures
@@ -18,7 +18,7 @@
  * HTML theme's, so a page the archive renders with that theme is left alone.
  */
 import ts from 'typescript';
-import { Converter, ReflectionKind } from 'typedoc';
+import { Converter, ReflectionKind, type Application, type Context, type DeclarationReflection, type Reflection } from 'typedoc';
 import { MarkdownPageEvent } from 'typedoc-plugin-markdown';
 
 const MEMBER_KINDS =
@@ -32,7 +32,7 @@ const MEMBER_KINDS =
   ReflectionKind.TypeAlias;
 
 /** The identifier of a documented function declaration or function-valued `const`, else undefined. */
-function documentedFunctionName(node) {
+function documentedFunctionName(node: ts.Node): ts.Identifier | undefined {
   if (ts.isFunctionDeclaration(node) && node.name) {
     return ts.getJSDocCommentsAndTags(node).length ? node.name : undefined;
   }
@@ -48,13 +48,13 @@ function documentedFunctionName(node) {
 }
 
 /** Documented functions below `sourceFile` that TypeDoc's export walk does not reach. */
-function convertNestedFunctions(context, moduleReflection) {
+function convertNestedFunctions(context: Context, moduleReflection: Reflection): void {
   const moduleSymbol = context.getSymbolFromReflection(moduleReflection);
   const sourceFile = moduleSymbol?.declarations?.find(ts.isSourceFile);
-  if (!sourceFile) return;
+  if (!moduleSymbol || !sourceFile) return;
   const exported = new Set(context.checker.getExportsOfModule(moduleSymbol).map((s) => s.name));
   const scope = context.withScope(moduleReflection);
-  const visit = (node) => {
+  const visit = (node: ts.Node): void => {
     const name = documentedFunctionName(node);
     if (name) {
       const topLevel = ts.isFunctionDeclaration(node)
@@ -70,17 +70,17 @@ function convertNestedFunctions(context, moduleReflection) {
   ts.forEachChild(sourceFile, visit);
 }
 
-export function load(app) {
-  app.converter.on(Converter.EVENT_CREATE_DECLARATION, (context, reflection) => {
+export function load(app: Application): void {
+  app.converter.on(Converter.EVENT_CREATE_DECLARATION, (context: Context, reflection: DeclarationReflection) => {
     if (reflection.kindOf(ReflectionKind.Module)) {
       convertNestedFunctions(context, reflection);
     } else if (reflection.name === 'default') {
-      const declaration = context.getSymbolFromReflection(reflection)?.declarations?.[0];
+      const declaration: ts.NamedDeclaration | undefined = context.getSymbolFromReflection(reflection)?.declarations?.[0];
       if (declaration?.name && ts.isIdentifier(declaration.name)) reflection.name = declaration.name.text;
     }
   });
 
-  app.converter.on(Converter.EVENT_RESOLVE_BEGIN, (context) => {
+  app.converter.on(Converter.EVENT_RESOLVE_BEGIN, (context: Context) => {
     const project = context.project;
     for (const reflection of Object.values(project.reflections)) {
       if (reflection.kindOf(MEMBER_KINDS) && reflection.name.startsWith('_')) {

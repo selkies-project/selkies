@@ -48,12 +48,12 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   module) and are named for the behavior they hold, as a sentence.
 - TypeScript (`.ts`/`.tsx`): JSDoc blocks with `@param name description`, `@returns`, `@throws`, and no types in
   the tags — the signature is the type. Props are an `interface` or `type` with a line per field.
-- JavaScript (`.js`/`.mjs`), left only in the site's scripts (`website/scripts`), the Node
+- JavaScript (`.js`/`.mjs`), left only in the Node
   audits under `tests/tools`, and the image tier's tester pages: the same JSDoc blocks, but the tags carry the types
   (`@param {Type} name`, `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The web core is
   TypeScript, checked strictly by its own `tsc -b` (`web/selkies-web-core/tsconfig.json`), and the dashboard's `tsc`
   compiles the `lib` modules it imports, the touch gamepad, and the build helpers Node runs with their types
-  stripped (`tsconfig.node.json`).
+  stripped (`tsconfig.node.json`); the site's `tsc` checks its scripts (`website/scripts`).
 - TypeScript and JavaScript: a `/** ... @module */` block after the license header is the module docblock;
   `_`-prefixed members are private and hidden from the reference; a React component documents what it renders and
   which core messages or `window` state it consumes. A tag TypeDoc does not know (`@constructor`) is a build

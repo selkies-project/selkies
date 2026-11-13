@@ -1,5 +1,6 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { NextConfig } from 'next';
 import { createMDX } from 'fumadocs-mdx/next';
 
 // Empty for the published site and for a local run, both served from a root.
@@ -9,8 +10,7 @@ const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
 const withMDX = createMDX();
 
-/** @type {import('next').NextConfig} */
-const config = {
+const config: NextConfig = {
   // The pages being compiled live in the repository's docs/ directory, which
   // is above this one, so the bundler has to be rooted a level up to reach it.
   turbopack: { root: join(dirname(fileURLToPath(import.meta.url)), '..') },

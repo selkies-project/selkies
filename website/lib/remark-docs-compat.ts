@@ -6,7 +6,7 @@ import { siteUrl, withBasePath } from './shared';
 
 const PROTOCOL = /^[a-z][a-z0-9+.-]*:/i;
 
-// The pages' directory, beside the site's (next.config.mjs roots the bundler above both).
+// The pages' directory, beside the site's (next.config.ts roots the bundler above both).
 const docsDir = join(process.cwd(), '..', 'docs');
 
 /**
@@ -20,7 +20,7 @@ const docsDir = join(process.cwd(), '..', 'docs');
  *   its page URL only once it is explicitly relative.
  * - Images are written relative to the Markdown file. Every page but the
  *   landing page is served one path segment deep, so the same relative URL
- *   would miss; sync-assets.mjs mirrors docs/assets to the site root and these
+ *   would miss; sync-assets.ts mirrors docs/assets to the site root and these
  *   are pointed at it (`remarkSiteImages` then gives them their address).
  * - The coTURN configuration blocks are tagged `conf`. Shiki knows that
  *   grammar as `ini`.

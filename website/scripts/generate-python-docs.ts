@@ -2,7 +2,7 @@
  * Builds the Developer Reference pages under docs/reference from the Google-
  * style docstrings and type hints in src/selkies, for a version whose server
  * is that Python package: the releases build:versions renders with this
- * tree's tooling. A tree without it is left to generate-rust-docs.mjs.
+ * tree's tooling. A tree without it is left to generate-rust-docs.ts.
  *
  * The pages are build output, not source: docs/reference is gitignored and
  * this script runs from the predev/prebuild npm hooks, so a local build and
@@ -16,17 +16,17 @@
  * argument skips extraction and converts that file instead.
  *
  * `--archive <dir>` writes the pages as static HTML into `<dir>` instead
- * (python-reference-html.mjs), for the download build-reference-archive.mjs
+ * (python-reference-html.ts), for the download build-reference-archive.ts
  * attaches to a release, and leaves the site's pages alone; that build has no
  * earlier reference to fall back on and fails outright.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as Python from 'fumadocs-python';
-import { writeHtml } from './python-reference-html.mjs';
+import { writeHtml } from './python-reference-html.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = join(root, '..');
@@ -38,14 +38,14 @@ const venvBin = join(venv, process.platform === 'win32' ? 'Scripts' : 'bin');
 // style and are not part of the Selkies API surface the reference covers.
 const EXCLUDED_MODULES = ['Xlib', 'webrtc', 'ice'];
 
-function run(cmd, args, opts = {}) {
+function run(cmd: string, args: string[], opts: SpawnSyncOptions = {}): void {
   const res = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
   if (res.status !== 0) {
     throw new Error(`${cmd} ${args.join(' ')} exited with ${res.status ?? res.error}`);
   }
 }
 
-function extract() {
+function extract(): string {
   const fumapy = join(venvBin, 'fumapy-generate');
   if (!existsSync(fumapy)) {
     run('python3', ['-m', 'venv', venv]);
@@ -72,14 +72,15 @@ if (!jsonPath) {
     jsonPath = extract();
   } catch (err) {
     if (archiveDir) throw err;
+    const message = err instanceof Error ? err.message : String(err);
     // A site contributor without a working python3 can still build the rest
     // of the site against a previously generated reference; a from-scratch
     // build has nothing to fall back on.
     if (existsSync(join(outDir, 'index.mdx'))) {
-      console.warn(`generate-python-docs: extraction failed (${err.message}); reusing the existing docs/reference`);
+      console.warn(`generate-python-docs: extraction failed (${message}); reusing the existing docs/reference`);
       process.exit(0);
     }
-    console.error(`generate-python-docs: extraction failed and no previous docs/reference exists.\n${err.message}\npython3 with the venv module is required to build the Developer Reference.`);
+    console.error(`generate-python-docs: extraction failed and no previous docs/reference exists.\n${message}\npython3 with the venv module is required to build the Developer Reference.`);
     process.exit(1);
   }
 }

@@ -30,8 +30,9 @@ export default [
     rules,
   },
   {
-    // An audit written in TypeScript, which Node runs with the types stripped.
-    files: ['tests/tools/**/*.mts'],
+    // TypeScript Node runs with the types stripped: an audit, and the site's
+    // build scripts.
+    files: ['tests/tools/**/*.mts', 'website/scripts/**/*.ts'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
@@ -58,11 +59,6 @@ export default [
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
     },
-  },
-  {
-    files: ['website/scripts/**/*.mjs'],
-    languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: globals.node },
-    rules,
   },
   {
     // Classic scripts the tester pages load with <script>.

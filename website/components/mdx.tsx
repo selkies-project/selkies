@@ -27,7 +27,7 @@ export function getMDXComponents(components?: MDXComponents) {
   return {
     ...defaultMdxComponents,
     // PyFunction/PyAttribute/... and Tabs, used by the reference pages
-    // scripts/generate-python-docs.mjs generates for a release whose server
+    // scripts/generate-python-docs.ts generates for a release whose server
     // is Python.
     ...PythonComponents,
     PySourceCode,

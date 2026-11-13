@@ -2,14 +2,14 @@
  * Builds the web halves of the Developer Reference under docs/reference from
  * the JSDoc blocks and type annotations in the web packages.
  *
- * Runs after the server's half (generate-rust-docs.mjs, or
- * generate-python-docs.mjs for a release whose server is Python) from
- * generate-reference.mjs and adds one gitignored folder per package
+ * Runs after the server's half (generate-rust-docs.ts, or
+ * generate-python-docs.ts for a release whose server is Python) from
+ * generate-reference.ts and adds one gitignored folder per package
  * beside it. Both packages are TypeScript, so TypeDoc reads them through one
  * configuration (`allowJs` stays on for the build helpers and any JavaScript
  * a tree still carries); typedoc-plugin-markdown writes the pages
  * as Markdown (not MDX, so nothing in a comment can be mistaken for JSX) and
- * web-reference-plugin.mjs adds front matter and hides `_`-prefixed members.
+ * web-reference-plugin.ts adds front matter and hides `_`-prefixed members.
  *
  * Third-party types the packages import (Base UI, lucide, ...) are not installed
  * here and render as `any`; React's are, so component signatures resolve.
@@ -18,7 +18,7 @@
  *
  * `--archive <dir> --ref <ref>` writes each package with TypeDoc's own HTML
  * theme into `<dir>/<package>` instead, for the download
- * build-reference-archive.mjs attaches to a release, its "Defined in" links
+ * build-reference-archive.ts attaches to a release, its "Defined in" links
  * naming the source at `<ref>`. That theme links its pages relatively and
  * loads its search and navigation by script tag, so it opens from a file
  * with both working; the Markdown the site renders would open as plain text.
@@ -34,8 +34,11 @@ import { Application, TSConfigReader } from 'typedoc';
 // website overrides TypeDoc's minimatch to it. TypeDoc asks whether any row of
 // the pattern partially matches a directory's path segments, which a partial
 // match of the joined path answers, as its own file test joins them.
-if (typeof Minimatch.prototype.matchOne !== 'function') {
-  Minimatch.prototype.matchOne = function matchOne(file, _pattern, partial) {
+const minimatch: Minimatch & {
+  matchOne?: (this: Minimatch, file: string | string[], pattern: unknown, partial?: boolean) => boolean;
+} = Minimatch.prototype;
+if (typeof minimatch.matchOne !== 'function') {
+  minimatch.matchOne = function matchOne(file, _pattern, partial) {
     return this.match(Array.isArray(file) ? file.join('/') : file, partial);
   };
 }
@@ -84,10 +87,10 @@ const MARKDOWN = {
 };
 
 /** Renders one package into `out`, as the site's Markdown or, for `html`, TypeDoc's own theme. */
-async function generate({ title, source, entryPoints }, out, html) {
+async function generate({ title, source, entryPoints }: (typeof PACKAGES)[number], out: string, html: boolean): Promise<void> {
   // Refused where it holds a NUL or names a parent: it is emptied first.
   if (!/^\/[^\0]*$/.test(out) || out.split('/').includes('..')) throw new Error(`generate-web-docs: ${out} is not a usable path`);
-  const plugins = [join(root, 'scripts', 'web-reference-plugin.mjs')];
+  const plugins = [join(root, 'scripts', 'web-reference-plugin.ts')];
   const app = await Application.bootstrapWithPlugins(
     {
       name: title,
@@ -141,7 +144,7 @@ for (const pkg of PACKAGES) {
 const metaPath = join(referenceDir, 'meta.json');
 let meta = { title: 'Developer Reference', pages: ['index'] };
 try {
-  meta = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+  meta = JSON.parse(await fs.readFile(metaPath, 'utf8')) as typeof meta;
 } catch {}
 const webPages = ['---Web client---', ...PACKAGES.map((a) => a.dir)];
 meta.pages = [...meta.pages.filter((p) => !webPages.includes(p)), ...webPages];

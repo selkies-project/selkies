@@ -1,13 +1,13 @@
 /**
  * Builds the Developer Reference as the one file a release carries for it,
  * `selkies-<version>-reference.tar.gz`, which the site's page for the
- * reference of that version links (generate-reference.mjs).
+ * reference of that version links (generate-reference.ts).
  *
- * Usage: node website/scripts/build-reference-archive.mjs <version> [--tag <tag>] [--out <dir>]
+ * Usage: node website/scripts/build-reference-archive.ts <version> [--tag <tag>] [--out <dir>]
  *
  * Without `--tag` the reference is of this tree, as a release builds it from
  * the commit it releases (build-reference.yaml); with one it is of that tag,
- * exported the way build-versions.mjs exports one and rendered by this tree's
+ * exported the way build-versions.ts exports one and rendered by this tree's
  * tooling, which is how a release cut before its reference was a download
  * gets one.
  * The file is written to `--out`, the working directory by default. Its
@@ -20,11 +20,11 @@
  * named after the file, with an `index.html` linking them:
  *
  * - `rustdoc/`, the server's crates as rustdoc renders them, for a tree whose
- *   server is the Rust workspace (generate-rust-docs.mjs);
+ *   server is the Rust workspace (generate-rust-docs.ts);
  * - `python/`, the server's modules as static HTML, for a tree whose server
- *   is the Python package (generate-python-docs.mjs);
+ *   is the Python package (generate-python-docs.ts);
  * - `web-core/` and `dashboard/`, the web client as TypeDoc's own HTML theme
- *   renders it (generate-web-docs.mjs).
+ *   renders it (generate-web-docs.ts).
  *
  * rustdoc and TypeDoc both link relatively and load their search by script
  * tag, which a browser runs from a file, so their search works offline.
@@ -33,12 +33,12 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { exportTag, git, referenceAsset, repoRoot, run, siteDir } from './version-tree.mjs';
+import { exportTag, git, referenceAsset, repoRoot, run, siteDir } from './version-tree.ts';
 
 // What GitHub accepts as one release asset.
 const ASSET_LIMIT = 2 * 1024 ** 3;
 
-function option(name) {
+function option(name: string): string | undefined {
   const at = process.argv.indexOf(name);
   return at === -1 ? undefined : process.argv[at + 1];
 }
@@ -46,7 +46,7 @@ function option(name) {
 // The version is part of the archive's file name: letters, digits, `.`, `_`, `+`, and `-`.
 const version = process.argv[2];
 if (!version || !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(version) || version.includes('..')) {
-  console.error('Usage: node build-reference-archive.mjs <version> [--tag <tag>] [--out <dir>]');
+  console.error('Usage: node build-reference-archive.ts <version> [--tag <tag>] [--out <dir>]');
   process.exit(2);
 }
 const tag = option('--tag');
@@ -55,7 +55,14 @@ const name = referenceAsset(version).replace(/\.tar\.gz$/, '');
 const commit = git(['rev-parse', `${tag ?? 'HEAD'}^{commit}`]).trim();
 
 /** The entry page of the archive, linking each half `halves` lists. */
-function entryPage(halves) {
+/** One half of the archive, as its entry page links it. */
+interface Half {
+  href: string;
+  title: string;
+  summary: string;
+}
+
+function entryPage(halves: Half[]): string {
   const items = halves.map(({ href, title, summary }) => `<li><a href="${href}">${title}</a>: ${summary}</li>`).join('\n');
   return `<!DOCTYPE html>
 <html lang="en">
@@ -83,9 +90,9 @@ try {
   const staging = join(work, name);
   await mkdir(staging);
 
-  const halves = [];
+  const halves: Half[] = [];
   if (existsSync(join(tree, 'crates', 'selkies', 'Cargo.toml'))) {
-    run('node', [join(scripts, 'generate-rust-docs.mjs'), '--archive', join(staging, 'rustdoc')]);
+    run('node', [join(scripts, 'generate-rust-docs.ts'), '--archive', join(staging, 'rustdoc')]);
     halves.push(
       { href: 'rustdoc/selkies/index.html', title: '<code>selkies</code>', summary: 'the streaming server and the <code>selkies</code> executable' },
       { href: 'rustdoc/selkies_rtc/index.html', title: '<code>selkies-rtc</code>', summary: 'its WebRTC stack' },
@@ -94,11 +101,11 @@ try {
     );
   }
   if (existsSync(join(tree, 'src', 'selkies', '__init__.py'))) {
-    run('node', [join(scripts, 'generate-python-docs.mjs'), '--archive', join(staging, 'python')]);
+    run('node', [join(scripts, 'generate-python-docs.ts'), '--archive', join(staging, 'python')]);
     halves.push({ href: 'python/index.html', title: 'Python server', summary: 'the <code>selkies</code> package and its modules' });
   }
   if (!halves.length) throw new Error(`build-reference-archive: ${tag ?? 'this tree'} has no server to document`);
-  run('node', [join(scripts, 'generate-web-docs.mjs'), '--archive', staging, '--ref', commit]);
+  run('node', [join(scripts, 'generate-web-docs.ts'), '--archive', staging, '--ref', commit]);
   halves.push(
     { href: 'web-core/index.html', title: 'Web client core', summary: 'the streaming cores and their library' },
     { href: 'dashboard/index.html', title: 'Dashboard', summary: 'the dashboard the web client is driven from' },

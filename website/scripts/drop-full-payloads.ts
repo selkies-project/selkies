@@ -22,7 +22,7 @@ const FULL = '__next._full.txt';
 const out = resolve(process.argv[2] ?? join(dirname(dirname(fileURLToPath(import.meta.url))), 'out'));
 if (!/^\/[^\0]*$/.test(out) || out.split('/').includes('..')) throw new Error(`drop-full-payloads: ${out} is not a usable path`);
 
-async function* payloads(dir) {
+async function* payloads(dir: string): AsyncGenerator<string> {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) yield* payloads(path);
@@ -30,7 +30,7 @@ async function* payloads(dir) {
   }
 }
 
-const differing = [];
+const differing: string[] = [];
 let dropped = 0;
 for await (const full of payloads(out)) {
   const page = join(dirname(full), 'index.txt');

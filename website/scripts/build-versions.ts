@@ -9,8 +9,8 @@
  *
  * The branch and the latest release carry their Developer Reference as pages
  * of the site, the server's half and the web client's. An older release's is
- * a download instead, attached to that release (build-reference-archive.mjs),
- * and its section is one page linking it (generate-reference.mjs): rendered
+ * a download instead, attached to that release (build-reference-archive.ts),
+ * and its section is one page linking it (generate-reference.ts): rendered
  * as pages a reference is nearly all of a version's size, and every release
  * kept so would outgrow what GitHub Pages serves.
  *
@@ -29,7 +29,8 @@ import { spawnSync } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
-import { exportTag, git, referenceAssetUrl, repoRoot, repository, run, site, siteDir } from './version-tree.mjs';
+import type { DocsVersions } from '../lib/shared.ts';
+import { exportTag, git, referenceAssetUrl, repoRoot, repository, run, site, siteDir } from './version-tree.ts';
 
 // The branch the working tree stands for; gitConfig.branch in lib/shared.ts.
 const BRANCH = 'main';
@@ -41,9 +42,24 @@ const sitePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 // The dot is required, so a tag named after a commit hash, as automated
 // pre-releases are, is never read as a version: 157a861 is not 157 alpha 861.
 const VERSION = /^v?(\d+(?:\.\d+)+)(?:[-.]?(dev|a|alpha|b|beta|rc|pre|post)[-.]?(\d*))?$/i;
-const RANK = { dev: 0, a: 1, alpha: 1, b: 2, beta: 2, rc: 3, pre: 3, final: 4, post: 5 };
+const RANK: Record<string, number> = { dev: 0, a: 1, alpha: 1, b: 2, beta: 2, rc: 3, pre: 3, final: 4, post: 5 };
 
-function parseVersion(tag) {
+/** A version tag's numbers, the release it belongs to, and where its suffix ranks. */
+interface ParsedVersion {
+  numbers: number[];
+  release: string;
+  rank: number;
+  count: number;
+}
+
+/** A release tag that carries the site, and the segment it is served under. */
+interface Release {
+  tag: string;
+  segment: string;
+  parsed: ParsedVersion;
+}
+
+function parseVersion(tag: string): ParsedVersion | undefined {
   const match = VERSION.exec(tag);
   if (!match) return undefined;
   const [, numbers, label = 'final', count] = match;
@@ -56,7 +72,7 @@ function parseVersion(tag) {
   };
 }
 
-function compareVersions(a, b) {
+function compareVersions(a: ParsedVersion, b: ParsedVersion): number {
   for (let i = 0; i < Math.max(a.numbers.length, b.numbers.length); i++) {
     const delta = (a.numbers[i] ?? 0) - (b.numbers[i] ?? 0);
     if (delta) return delta;
@@ -68,8 +84,8 @@ function compareVersions(a, b) {
  * The release tags whose tree carries the site, oldest first. A version tagged
  * both with and without the `v` prefix is one release, built from the bare tag.
  */
-function releases() {
-  const found = new Map();
+function releases(): Release[] {
+  const found = new Map<string, Release>();
   for (const tag of git(['tag', '--list']).split('\n').filter(Boolean)) {
     const parsed = parseVersion(tag);
     if (!parsed) continue;
@@ -82,12 +98,12 @@ function releases() {
 }
 
 /** Moves a directory, copying when the destination is on another filesystem. */
-async function move(from, to) {
+async function move(from: string, to: string): Promise<void> {
   await mkdir(dirname(to), { recursive: true });
   try {
     await rename(from, to);
   } catch (err) {
-    if (err.code !== 'EXDEV') throw err;
+    if (!(err instanceof Error) || !('code' in err) || err.code !== 'EXDEV') throw err;
     await cp(from, to, { recursive: true });
     await rm(from, { recursive: true });
   }
@@ -96,9 +112,9 @@ async function move(from, to) {
 /**
  * Builds the site directory under `tree` as `segment`, into `staging`. Its
  * Developer Reference is pages, or with `download`, the address of the file a
- * release carries, one page linking it (generate-reference.mjs reads both).
+ * release carries, one page linking it (generate-reference.ts reads both).
  */
-async function build(tree, segment, index, staging, download) {
+async function build(tree: string, segment: string, index: DocsVersions, staging: string, download?: string): Promise<void> {
   console.log(`build-versions: building ${segment}`);
   const cwd = join(tree, siteDir);
   run('npm', ['run', 'build'], {
@@ -113,8 +129,8 @@ async function build(tree, segment, index, staging, download) {
   await move(join(cwd, 'out'), join(staging, segment));
 }
 
-async function walkHtml(dir, prefix = '') {
-  const found = [];
+async function walkHtml(dir: string, prefix = ''): Promise<string[]> {
+  const found: string[] = [];
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = `${prefix}${entry.name}`;
     if (entry.isDirectory()) found.push(...(await walkHtml(join(dir, entry.name), `${path}/`)));
@@ -123,7 +139,7 @@ async function walkHtml(dir, prefix = '') {
   return found;
 }
 
-function redirect(to) {
+function redirect(to: string): string {
   const target = JSON.stringify(to);
   return `<!DOCTYPE html>
 <html lang="en">
@@ -145,7 +161,7 @@ function redirect(to) {
  * it is served under; any other file by its own name. Next's own
  * `_`-prefixed exports are not pages.
  */
-async function writeRedirects(staging, dir, target) {
+async function writeRedirects(staging: string, dir: string, target: string): Promise<void> {
   let written = 0;
   for (const file of await walkHtml(join(staging, target))) {
     if (file.startsWith('_') || file === '404.html' || file.startsWith('404/')) continue;
@@ -162,7 +178,7 @@ async function writeRedirects(staging, dir, target) {
  * and a redirect into the default version for the root and for every page of
  * it, so an address from before the site was versioned still resolves.
  */
-async function writeRoot(staging, index) {
+async function writeRoot(staging: string, index: DocsVersions): Promise<void> {
   await writeFile(join(staging, 'versions.json'), `${JSON.stringify(index, null, 2)}\n`);
   await writeFile(join(staging, '.nojekyll'), '');
   await cp(join(staging, index.default, '404.html'), join(staging, '404.html'));
@@ -170,23 +186,25 @@ async function writeRoot(staging, index) {
 }
 
 /** The release GitHub designates as the latest, as a version segment, or undefined where it cannot be asked. */
-async function latestRelease() {
-  return (await github('/releases/latest'))?.tag_name?.replace(/^v/, '');
+async function latestRelease(): Promise<string | undefined> {
+  const release = await github('/releases/latest');
+  if (typeof release !== 'object' || release === null || !('tag_name' in release)) return undefined;
+  return typeof release.tag_name === 'string' ? release.tag_name.replace(/^v/, '') : undefined;
 }
 
 /** GitHub's API at `path` under the repository, or undefined where it cannot be asked. */
-async function github(path) {
-  const headers = process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {};
+async function github(path: string): Promise<unknown> {
+  const headers: Record<string, string> = process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {};
   try {
     const res = await fetch(`https://api.github.com/repos/${repository}${path}`, { headers });
-    return res.ok ? await res.json() : undefined;
+    return res.ok ? ((await res.json()) as unknown) : undefined;
   } catch {
     return undefined;
   }
 }
 
 const tagged = releases();
-const releaseOf = (t) => tagged.find((r) => r.parsed.rank >= RANK.final && r.parsed.release === t.parsed.release);
+const releaseOf = (t: Release) => tagged.find((r) => r.parsed.rank >= RANK.final && r.parsed.release === t.parsed.release);
 const superseded = tagged.filter((t) => t.parsed.rank < RANK.final && releaseOf(t));
 const tags = tagged.filter((t) => !superseded.includes(t));
 // The `latest` alias follows the release GitHub designates as the latest, which a
@@ -194,11 +212,11 @@ const tags = tagged.filter((t) => !superseded.includes(t));
 // do; the newest tag stands in where that cannot be asked or names no built version.
 const designated = await latestRelease();
 const newest = tags.find((t) => t.segment === designated) ?? tags.at(-1);
-const index = {
+const index: DocsVersions = {
   default: newest ? LATEST : BRANCH,
   versions: [
     { version: BRANCH, kind: 'branch', aliases: [] },
-    ...tags.map((t) => ({ version: t.segment, kind: 'release', aliases: t === newest ? [LATEST] : [] })).reverse(),
+    ...tags.map((t) => ({ version: t.segment, kind: 'release' as const, aliases: t === newest ? [LATEST] : [] })).reverse(),
   ],
 };
 console.log(`build-versions: ${index.versions.map((v) => [v.version, ...v.aliases].join('=')).join(', ')}`);
@@ -209,7 +227,7 @@ try {
   for (const { tag, segment } of tags) {
     const tree = join(work, segment);
     await exportTag(tag, tree);
-    const latest = segment === newest.segment;
+    const latest = segment === newest?.segment;
     await build(tree, latest ? LATEST : segment, index, staging, latest ? undefined : referenceAssetUrl(tag, segment));
     await rm(tree, { recursive: true });
   }
@@ -217,14 +235,14 @@ try {
 
   // Checked before the root redirects exist, so a link that lost its version
   // segment resolves to nothing rather than to a redirect.
-  run('node', [join(site, 'scripts', 'check-links.mjs'), staging], {
+  run('node', [join(site, 'scripts', 'check-links.ts'), staging], {
     env: { ...process.env, NEXT_PUBLIC_BASE_PATH: sitePath },
   });
   await writeRoot(staging, index);
   if (newest) await writeRedirects(staging, newest.segment, LATEST);
   for (const t of superseded) {
     const release = releaseOf(t);
-    await writeRedirects(staging, t.segment, release === newest ? LATEST : release.segment);
+    if (release) await writeRedirects(staging, t.segment, release === newest ? LATEST : release.segment);
   }
 
   const out = join(site, 'out');
