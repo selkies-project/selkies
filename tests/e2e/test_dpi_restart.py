@@ -76,11 +76,12 @@ def persisted(home: str) -> dict:
         path = os.path.join(home, name)
         try:
             with open(path) as f:
-                digits = [int(t) for t in f.read().replace(":", " ").split() if t.isdigit()]
+                fields = [line.replace(":", " ").split() for line in f]
         except FileNotFoundError:
             continue
-        found[name] = (digits[-1] // (1024 if name == ".xsettingsd" else 1),
-                       os.stat(path).st_mtime_ns)
+        key, unit = ("Xft/DPI", 1024) if name == ".xsettingsd" else ("Xft.dpi", 1)
+        values = [int(f[1]) // unit for f in fields if len(f) == 2 and f[0] == key and f[1].isdigit()]
+        found[name] = (values[-1] if values else None, os.stat(path).st_mtime_ns)
     return found
 
 
