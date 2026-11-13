@@ -413,7 +413,12 @@ pub fn build(state: AppState, extra: Vec<Router>) -> Router {
     let policy = HeaderValue::from_str(&frame_policy)
         .ok()
         .filter(|_| !frame_policy.is_empty());
-    let mut app = app.layer(middleware::from_fn_with_state(state.clone(), auth::gate));
+    let mut app = app
+        .layer(middleware::from_fn_with_state(state.clone(), auth::gate))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            static_files::loopback_redirect,
+        ));
     if state.config.listen.access_log {
         app = app.layer(middleware::from_fn(listen::access_log));
     }

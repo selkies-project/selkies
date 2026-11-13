@@ -32,6 +32,7 @@ use axum::body::Body;
 use axum::extract::{OriginalUri, Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
@@ -172,7 +173,7 @@ pub async fn fallback(
             .into_response();
     }
     if decoded.is_empty() {
-        return index(&state, client, &parts).await;
+        return index(client, &parts).await;
     }
     if decoded == MANIFEST {
         return manifest(&state.config, client).await;
@@ -290,16 +291,33 @@ fn resolves_inside(root: &Path, name: &str) -> bool {
     target.starts_with(root)
 }
 
-/// The entry page: a browser on the IPv6 loopback asking for this host is moved to the IPv4
-/// literal, every other request gets `index.html`.
-async fn index(state: &AppState, client: &WebClient, parts: &Parts) -> Response {
-    let conn = parts.extensions.get::<ConnInfo>();
-    let path = format!("{}/", state.config.subfolder);
-    if let Some(conn) = conn
-        && let Some(target) = ipv6_loopback_redirect(conn, &parts.headers, &path, parts.uri.query())
+/// Move a browser on the IPv6 loopback asking for the entry page to the IPv4 literal
+/// ([`ipv6_loopback_redirect`]), ahead of the auth gate.
+///
+/// The login and a certificate exception belong to an origin, and `localhost` and `127.0.0.1`
+/// are two, so a redirect answered behind the gate would ask a user who just signed in at
+/// `localhost` to sign in again. Answered first, the browser signs in once, where the page
+/// stays. The redirect names only this listener's own literal, port, and the entry path, so
+/// it tells an unauthenticated request nothing it did not send.
+pub async fn loopback_redirect(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let entry = format!("{}/", state.config.subfolder);
+    if matches!(*request.method(), Method::GET | Method::HEAD)
+        && request.uri().path() == entry
+        && let Some(conn) = request.extensions().get::<ConnInfo>()
+        && let Some(target) =
+            ipv6_loopback_redirect(conn, request.headers(), &entry, request.uri().query())
     {
         return (StatusCode::FOUND, [(header::LOCATION, target)]).into_response();
     }
+    next.run(request).await
+}
+
+/// The entry page, `index.html`.
+async fn index(client: &WebClient, parts: &Parts) -> Response {
     let mut response = match client {
         WebClient::Embedded(table) => embedded::serve(table, parts, "index.html").await,
         WebClient::Directory(root) => {

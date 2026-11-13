@@ -2415,6 +2415,61 @@ async fn ipv6_loopback_redirect_on_the_listener() {
     app.stop().await;
 }
 
+/// Behind a login, a browser on the IPv6 loopback is moved before it is asked to sign in, so
+/// it signs in once, at the origin it stays on.
+#[tokio::test]
+async fn ipv6_loopback_redirect_precedes_the_login() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        eprintln!("SKIP the IPv6 loopback redirect: this host has no ::1");
+        return;
+    }
+    let config = HttpConfig {
+        enable_basic_auth: true,
+        basic_auth_password: "secret".into(),
+        ..HttpConfig::default()
+    };
+    let state =
+        AppState::new(config, FixedSupervisor::new(None, &[])).with_web_client(embedded_client());
+    let cfg = ListenConfig {
+        addr: "127.0.0.1,::1".into(),
+        port: 0,
+        ..ListenConfig::default()
+    };
+    let app = TestServer::start_with(build(state, Vec::new()), cfg).await;
+    let port = app.port;
+    let ask = |addr: &'static str, path: &'static str| async move {
+        let mut stream = tokio::net::TcpStream::connect((addr, port)).await.unwrap();
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        stream.read_to_end(&mut out).await.unwrap();
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let moved = ask("::1", "/").await;
+    assert!(moved.starts_with("HTTP/1.1 302"), "{moved}");
+    assert!(
+        moved
+            .to_ascii_lowercase()
+            .contains(&format!("location: http://127.0.0.1:{port}/\r\n")),
+        "{moved}"
+    );
+    assert!(
+        ask("127.0.0.1", "/").await.starts_with("HTTP/1.1 401"),
+        "the page it is moved to asks for the login"
+    );
+    assert!(
+        !ask("::1", "/api/health").await.starts_with("HTTP/1.1 302"),
+        "nothing but the entry page is moved"
+    );
+    app.stop().await;
+}
+
 /// The access line of a real request carries neither query.
 #[tokio::test]
 async fn access_log_has_no_query() {
