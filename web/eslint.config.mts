@@ -31,9 +31,14 @@ const tsRules = {
   'no-empty': ['error', { allowEmptyCatch: true }],
   'no-unused-vars': 'off',
   '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
-  // The server-settings document and the core's postMessage payloads are
-  // untyped JSON; `any` is their honest type here.
-  '@typescript-eslint/no-explicit-any': 'off',
+  // No `any`: a value of unknown shape is `unknown` and narrowed, and the
+  // type-checked rules refuse the `any` the DOM and JSON still hand over.
+  '@typescript-eslint/no-explicit-any': 'error',
+  '@typescript-eslint/no-unsafe-argument': 'error',
+  '@typescript-eslint/no-unsafe-assignment': 'error',
+  '@typescript-eslint/no-unsafe-call': 'error',
+  '@typescript-eslint/no-unsafe-member-access': 'error',
+  '@typescript-eslint/no-unsafe-return': 'error',
   // The `.js` files were never held to these three style rules, which the
   // typescript-eslint preset adds; the conversion keeps each declaration as it was.
   'no-var': 'off',
@@ -56,7 +61,12 @@ export default [
       ecmaVersion: 2020,
       globals: globals.browser,
       parser: tseslint.parser,
-      parserOptions: { ecmaFeatures: { jsx: true }, sourceType: 'module' },
+      parserOptions: {
+        ecmaFeatures: { jsx: true },
+        sourceType: 'module',
+        project: ['selkies-web-core/tsconfig.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: tsRules,
@@ -67,7 +77,12 @@ export default [
       ecmaVersion: 2020,
       globals: globals.worker,
       parser: tseslint.parser,
-      parserOptions: { ecmaFeatures: { jsx: true }, sourceType: 'module' },
+      parserOptions: {
+        ecmaFeatures: { jsx: true },
+        sourceType: 'module',
+        project: ['selkies-web-core/tsconfig.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: tsRules,

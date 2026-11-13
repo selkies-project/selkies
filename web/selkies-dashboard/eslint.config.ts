@@ -78,6 +78,8 @@ export default [
       parserOptions: {
         ecmaFeatures: { jsx: true },
         sourceType: 'module',
+        project: ['tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
       },
     },
     plugins: {
@@ -89,9 +91,14 @@ export default [
       ...js.configs.recommended.rules,
       ...tseslint.configs.recommended.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
       ...reactRules,
-      // The server-settings document and the core's postMessage payloads are
-      // untyped JSON; `any` is their honest type here.
-      '@typescript-eslint/no-explicit-any': 'off',
+      // No `any`: a value of unknown shape is `unknown` and narrowed, and the
+      // type-checked rules refuse the `any` the DOM and JSON still hand over.
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/no-unsafe-argument': 'error',
+      '@typescript-eslint/no-unsafe-assignment': 'error',
+      '@typescript-eslint/no-unsafe-call': 'error',
+      '@typescript-eslint/no-unsafe-member-access': 'error',
+      '@typescript-eslint/no-unsafe-return': 'error',
     },
   },
   {
