@@ -405,7 +405,8 @@ pub enum PointerKind {
 pub struct Under {
     /// The window whose client area, or whose popup, lies under the point.
     pub window: Option<WindowId>,
-    /// Whether a panel or an overlay surface lies under the point.
+    /// Whether a panel, an overlay surface, or a popup (an xdg popup or an X11
+    /// override-redirect window) lies under the point.
     pub top_layer: bool,
     /// Whether a desktop's wallpaper surface lies under the point: a background or bottom
     /// layer surface, the Wayland shape of an X11 desktop window, so a click there is the

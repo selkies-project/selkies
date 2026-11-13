@@ -781,9 +781,20 @@ pub fn judged_location(state: &AppState, seat: Point<f64, Logical>) -> Point<f64
         .unwrap_or(seat)
 }
 
-/// What the compositor's hit test found, for the policy.
+/// What the compositor's hit test found, for the policy. A popup, a Wayland one or an X11
+/// override-redirect window (a menu, a tooltip), is reported as the top layer: the policy never
+/// hears of an X11 one, so its id would match no window and the press would read as the root's.
 pub fn under_of(_state: &AppState, target: &Option<(FocusTarget, Point<f64, Logical>)>) -> Under {
     match target.as_ref().map(|(target, at)| (target.owner(), at)) {
+        Some((FocusTarget::Window(window), _))
+            if crate::wayland::frontend::is_override_redirect(window) =>
+        {
+            Under {
+                window: None,
+                top_layer: true,
+                desktop: false,
+            }
+        }
         Some((FocusTarget::Window(window), _)) => Under {
             window: window_id(window),
             top_layer: false,

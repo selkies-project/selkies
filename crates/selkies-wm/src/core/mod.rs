@@ -2983,7 +2983,7 @@ impl Engine {
                 button,
                 pressed: true,
             } => {
-                if under.top_layer && self.hit(event.x, event.y, &under).0 == Context::Root {
+                if under.top_layer {
                     return Verdict::Pass;
                 }
                 let (context, window) = self.hit(event.x, event.y, &under);
