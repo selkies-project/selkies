@@ -211,7 +211,7 @@ interface TouchGamepad {
         index: 0,
         connected: false,
         mapping: "standard",
-        axes: new Array(MAX_AXES).fill(0.0),
+        axes: new Array<number>(MAX_AXES).fill(0.0),
         buttons: Array.from({ length: MAX_BUTTONS }, () => ({ pressed: false, touched: false, value: 0.0 })),
         timestamp: Date.now(),
         vibrationActuator: makeVibrationActuator(),

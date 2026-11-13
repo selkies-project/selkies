@@ -88,7 +88,7 @@ if (!jsonPath) {
 // The JSON is resolved and refused where it holds a NUL or names a parent.
 jsonPath = resolve(jsonPath);
 if (!/^\/[^\0]*$/.test(jsonPath) || jsonPath.split('/').includes('..')) throw new Error(`generate-python-docs: ${jsonPath} is not a usable path`);
-const pkg = JSON.parse(await fs.readFile(jsonPath, 'utf8'));
+const pkg = JSON.parse(await fs.readFile(jsonPath, 'utf8')) as Parameters<typeof Python.convert>[0];
 for (const name of EXCLUDED_MODULES) delete pkg.modules[name];
 
 // groupBy 'none' keeps the pages at the root of the output directory, so a

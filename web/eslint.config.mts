@@ -73,22 +73,46 @@ export default [
     rules: tsRules,
   },
   {
-    files: ['selkies-web-core/vite.config.ts', 'selkies-web-core/gendb.ts'],
-    languageOptions: { globals: globals.node },
+    // Build helpers Node runs and this config, held to the type-checked rules
+    // through the dashboard's project for such scripts.
+    files: ['selkies-web-core/vite.config.ts', 'selkies-web-core/gendb.ts', 'eslint.config.mts'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      globals: globals.node,
+      parser: tseslint.parser,
+      parserOptions: {
+        sourceType: 'module',
+        project: ['selkies-dashboard/tsconfig.node.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      ...js.configs.recommended.rules,
+      ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
+    },
   },
   {
-    // Typed throughout: a message payload is `unknown` until narrowed.
+    // Typed throughout and held to the type-checked rules, through the
+    // dashboard's project that compiles it: a message payload is `unknown`
+    // until narrowed.
     files: ['universal-touch-gamepad/**/*.ts'],
     languageOptions: {
       ecmaVersion: 'latest',
       globals: globals.browser,
       parser: tseslint.parser,
-      parserOptions: { sourceType: 'module' },
+      parserOptions: {
+        sourceType: 'module',
+        project: ['selkies-dashboard/tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
       ...js.configs.recommended.rules,
-      ...tseslint.configs.recommended.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
       'no-empty': ['error', { allowEmptyCatch: true }],
       '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
     },

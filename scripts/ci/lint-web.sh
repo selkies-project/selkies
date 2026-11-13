@@ -26,8 +26,8 @@ if [ ! -d "${pkg}/node_modules" ]; then
         --fetch-retries=5 --fetch-retry-maxtimeout=120000)
 fi
 
-# The web core's build helpers are checked against the Vite it declares, so
-# its dependencies are installed before the dashboard's tsc reads them.
+# The web core's build helpers are linted and checked against the Vite it
+# declares, so its dependencies are installed before either runs.
 core=web/selkies-web-core
 if [ ! -x "${core}/node_modules/.bin/tsc" ]; then
     (cd "${core}" && npm ci --no-audit --no-fund \
@@ -41,13 +41,23 @@ echo "eslint: ${pkg}"
 # web/eslint.config.mts covers both; the web core's TypeScript is checked below.
 echo "eslint: web/selkies-web-core web/universal-touch-gamepad"
 (cd web && selkies-dashboard/node_modules/.bin/eslint --flag "${flag}" --max-warnings 0 \
-    selkies-web-core universal-touch-gamepad)
+    selkies-web-core universal-touch-gamepad eslint.config.mts)
 
-# The Node audits, the BrowserStack smoke, the site's scripts and the image
-# tier's tester pages: eslint.config.mts at the root, with the same ESLint.
-echo "eslint: tests/tools tests/browserstack website/scripts tests/image/site"
+# The site's scripts are linted against their types, which its dependencies
+# carry.
+site=website
+if [ ! -x "${site}/node_modules/.bin/tsc" ]; then
+    (cd "${site}" && npm ci --no-audit --no-fund \
+        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
+fi
+
+# The Node audits, the BrowserStack smoke, the site's scripts and configs, the
+# image tier's tester pages and this config itself: eslint.config.mts at the
+# root, with the same ESLint.
+echo "eslint: tests/tools tests/browserstack website tests/image/site eslint.config.mts"
 web/selkies-dashboard/node_modules/.bin/eslint --flag "${flag}" --max-warnings 0 \
-    'tests/tools/**/*.mjs' 'tests/tools/**/*.mts' 'tests/browserstack/*.ts' 'website/scripts/**/*.ts' 'tests/image/site/**/*.js'
+    'tests/tools/**/*.mjs' 'tests/tools/**/*.mts' 'tests/browserstack/*.ts' 'website/scripts/**/*.ts' \
+    website/next.config.ts website/postcss.config.ts 'tests/image/site/**/*.js' eslint.config.mts
 
 # The dashboard's own build runs tsc as well, but that is downstream of this gate.
 echo "tsc: web/selkies-dashboard"
@@ -70,9 +80,4 @@ fi
 # The site checks its pages, its build scripts and its configs with the
 # TypeScript it declares, after generating the route types they name.
 echo "tsc: website"
-site=website
-if [ ! -x "${site}/node_modules/.bin/tsc" ]; then
-    (cd "${site}" && npm ci --no-audit --no-fund \
-        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
-fi
 (cd "${site}" && npm run --silent typecheck)

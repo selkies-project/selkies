@@ -33,12 +33,16 @@ export default [
       ecmaVersion: 'latest',
       globals: globals.node,
       parser: tseslint.parser,
-      parserOptions: { sourceType: 'module' },
+      parserOptions: {
+        sourceType: 'module',
+        project: ['tsconfig.node.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
       ...js.configs.recommended.rules,
-      ...tseslint.configs.recommended.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
     },
   },
   {

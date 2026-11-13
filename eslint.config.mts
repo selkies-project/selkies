@@ -30,19 +30,30 @@ export default [
     rules,
   },
   {
-    // TypeScript Node runs with the types stripped: an audit, and the site's
-    // build scripts.
-    files: ['tests/tools/**/*.mts', 'website/scripts/**/*.ts'],
+    // TypeScript Node runs with the types stripped, an audit, the site's build
+    // scripts and configs, and this config, held to the type-checked rules
+    // through the projects that compile them.
+    files: [
+      'tests/tools/**/*.mts',
+      'website/scripts/**/*.ts',
+      'website/next.config.ts',
+      'website/postcss.config.ts',
+      'eslint.config.mts',
+    ],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
       globals: { ...globals.node, ...globals.browser },
       parser: tseslint.parser,
+      parserOptions: {
+        project: ['web/selkies-dashboard/tsconfig.node.json', 'website/tsconfig.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
       ...rules,
-      ...tseslint.configs.recommended.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+      ...tseslint.configs.recommendedTypeChecked.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': ['error', { caughtErrors: 'none' }],
     },

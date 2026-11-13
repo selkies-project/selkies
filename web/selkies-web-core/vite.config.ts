@@ -83,7 +83,7 @@ function restartOnChange(globs: string[]): Plugin {
       server.watcher.add(globs);
       const onChange = (file: string) => {
         const path = file.split(/[\\/]/).join('/');
-        if (patterns.some((pattern) => pattern.test(path))) server.restart();
+        if (patterns.some((pattern) => pattern.test(path))) void server.restart();
       };
       server.watcher.on('add', onChange);
       server.watcher.on('change', onChange);
