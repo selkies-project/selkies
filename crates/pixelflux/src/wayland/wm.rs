@@ -405,6 +405,26 @@ pub fn sync_layer_keyboard(state: &mut AppState) {
     }
 }
 
+/// Give the keyboard to `popup`, an X11 override-redirect window whose client grabbed it, or
+/// with `None` back to the window the policy focused; a layer surface holding the keyboard
+/// exclusively keeps it either way.
+pub fn hand_keyboard(state: &mut AppState, popup: Option<Window>) {
+    if exclusive_layer(state).is_some() {
+        return;
+    }
+    let Some(keyboard) = state.seat.get_keyboard() else {
+        return;
+    };
+    let window = popup.or_else(|| {
+        state
+            .wm
+            .as_ref()
+            .and_then(|wm| wm.focus)
+            .and_then(|id| find_window(state, id))
+    });
+    keyboard.set_focus(state, window.map(FocusTarget::Window), next_serial());
+}
+
 fn window_id(window: &Window) -> Option<WindowId> {
     window_meta(window).map(|m| m.id)
 }

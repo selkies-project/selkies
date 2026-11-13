@@ -23,6 +23,15 @@
 //! on its check window (`publish_name`). A crashed Xwayland is started
 //! again after a short wait, so an X11 client started later still finds a server.
 //!
+//! The second connection also watches each override-redirect window's focus changes, since
+//! Smithay's manager tells the compositor nothing of a keyboard grab: an X11 client that grabs
+//! the keyboard for a popup (a menu opened from a tray icon on the panel, which holds the
+//! keyboard) is given it on the grab's `NotifyGrab` focus-in, and the window the policy focused
+//! takes it back when the popup unmaps holding it, as wlroots' `grab_focus` does
+//! (`grabbed_keyboard`); Xwayland hears keys only through a surface of its own. A window is
+//! watched from its creation, as wlroots selects it, and again at its map for one that turned
+//! override-redirect in between.
+//!
 //! Where the host has no DRM render node, the EGL vendor library a GPU container runtime injects
 //! (NVIDIA's) segfaults inside Xwayland's EGL initialization, and glamor would have nothing to
 //! accelerate there anyway, so Xwayland starts pinned to Mesa's EGL vendor, loading no external
@@ -127,14 +136,35 @@ struct Extras {
     conn: RustConnection,
     root: xproto::Window,
     atoms: Atoms,
+    /// Which connection this is, so the event source of one an Xwayland restart replaced
+    /// removes itself rather than reading the next.
+    generation: u64,
 }
+
+/// The generation the next second connection takes.
+static NEXT_EXTRAS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Extras {
     fn connect(display: u32) -> Option<Extras> {
         let (conn, screen) = RustConnection::connect(Some(&format!(":{display}"))).ok()?;
         let root = conn.setup().roots.get(screen)?.root;
         let atoms = Atoms::new(&conn).ok()?.reply().ok()?;
-        Some(Extras { conn, root, atoms })
+        let generation = NEXT_EXTRAS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(Extras {
+            conn,
+            root,
+            atoms,
+            generation,
+        })
+    }
+
+    /// Report `window`'s focus changes over this connection.
+    fn watch_focus(&self, window: xproto::Window) {
+        let _ = self.conn.change_window_attributes(
+            window,
+            &xproto::ChangeWindowAttributesAux::new().event_mask(xproto::EventMask::FOCUS_CHANGE),
+        );
+        self.flush();
     }
 
     fn set_cardinals(&self, window: xproto::Window, property: xproto::Atom, values: &[u32]) {
@@ -287,6 +317,7 @@ pub fn start(
                     if state.xwm.extras.is_none() {
                         eprintln!("[Wayland] Xwayland :{display_number}: no second connection; _NET_WORKAREA and _NET_ACTIVE_WINDOW stay unset.");
                     }
+                    listen_extras(state, &loop_handle);
                     publish_supported(state);
                     publish_name(state);
                     publish_workarea(state);
@@ -443,6 +474,63 @@ pub fn window_info(
         wants_minimized: false,
         skip_taskbar: surface.is_skip_taskbar(),
         accepts_focus,
+    }
+}
+
+/// Read the second connection's events as they arrive, for as long as it is the current one.
+fn listen_extras(state: &AppState, handle: &LoopHandle<'static, AppState>) {
+    use smithay::reexports::calloop::generic::Generic;
+    use smithay::reexports::calloop::{Interest, Mode, PostAction};
+    use std::os::fd::AsFd;
+    let Some(extras) = state.xwm.extras.as_ref() else {
+        return;
+    };
+    let Ok(fd) = extras.conn.stream().as_fd().try_clone_to_owned() else {
+        return;
+    };
+    let generation = extras.generation;
+    let source = Generic::new(fd, Interest::READ, Mode::Level);
+    let inserted = handle.insert_source(source, move |_, _, state| {
+        loop {
+            let event = match state.xwm.extras.as_ref() {
+                Some(extras) if extras.generation == generation => extras.conn.poll_for_event(),
+                _ => return Ok(PostAction::Remove),
+            };
+            match event {
+                Ok(Some(x11rb::protocol::Event::FocusIn(focus)))
+                    if focus.mode == xproto::NotifyMode::GRAB =>
+                {
+                    grabbed_keyboard(state, focus.event);
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(PostAction::Continue),
+                Err(_) => return Ok(PostAction::Remove),
+            }
+        }
+    });
+    if let Err(e) = inserted {
+        eprintln!(
+            "[Wayland] Xwayland second connection not watched: {e}; X11 popups that grab the keyboard get it only through the window that has it."
+        );
+    }
+}
+
+/// Give the keyboard to the override-redirect window `window` whose client grabbed it.
+fn grabbed_keyboard(state: &mut AppState, window: xproto::Window) {
+    let popup = state
+        .space
+        .elements()
+        .find(|w| {
+            w.x11_surface().is_some_and(|s| {
+                s.is_override_redirect() && s.window_id() == window && s.wl_surface().is_some()
+            })
+        })
+        .cloned();
+    if let Some(popup) = popup {
+        crate::log::debug!(
+            "[Wayland] X11 popup {window:#x} grabbed the keyboard; it takes the seat's"
+        );
+        wm::hand_keyboard(state, Some(popup));
     }
 }
 
@@ -673,7 +761,11 @@ impl XwmHandler for AppState {
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
-    fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
+    fn new_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(extras) = self.xwm.extras.as_ref() {
+            extras.watch_focus(window.window_id());
+        }
+    }
 
     fn map_window_request(&mut self, _xwm: XwmId, surface: X11Surface) {
         let output = self.pointer_display();
@@ -731,6 +823,9 @@ impl XwmHandler for AppState {
     fn map_window_notify(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(extras) = self.xwm.extras.as_ref() {
+            extras.watch_focus(surface.window_id());
+        }
         let location = root_location(&surface);
         let window = Window::new_x11_window(surface);
         window
@@ -758,7 +853,14 @@ impl XwmHandler for AppState {
             .cloned();
         if let Some(window) = found {
             wm::snapshot(self, &window);
+            let held_keyboard = surface.is_override_redirect()
+                && self.seat.get_keyboard().is_some_and(|k| {
+                    k.current_focus() == Some(FocusTarget::Window(window.clone()))
+                });
             self.space.unmap_elem(&window);
+            if held_keyboard {
+                wm::hand_keyboard(self, None);
+            }
         }
         if let Some((id, window)) = window_of(self, &surface) {
             wm::window_unmapped(self, &window);
