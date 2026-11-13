@@ -144,7 +144,7 @@ function determineStreamingMode(): string {
  * waits two seconds so the server has switched modes before it lands.
  * @param event Same-origin window message.
  */
-function handleMessage(event: MessageEvent): void {
+function handleMessage(event: MessageEvent<{ type?: string; mode?: string }>): void {
     if (event.origin !== window.location.origin) return;
     const message = event.data;
     if (message.mode !== undefined && message.type === "mode") {

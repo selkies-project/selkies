@@ -855,7 +855,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		const key = storageKeyFor('useCssScaling');
 		const explicit = window.localStorage.getItem(`${key}_explicit_choice`) === 'true';
 		const hidpi = resolveSpec(HIDPI_SPEC, serverSettings,
-			{ manualActive: !!window.manual_resolution || window.manual_width > 0 },
+			{ manualActive: !!window.manual_resolution || window.manual_width! > 0 },
 			(): string | null => (explicit ? window.localStorage.getItem(key) : null));
 		return HIDPI_SPEC.toServer(hidpi) as boolean;
 	}
@@ -3757,8 +3757,8 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				console.log("Received server settings payload:", obj.settings);
 				lastServerSettings = obj.settings;
 				const changes = sanitizeAndStoreSettings(obj.settings);
-				if (Number.isFinite(window.video_crf)) crf = Math.round(window.video_crf);
-				if (Number.isFinite(window.video_bitrate)) videoBitRate = Math.round(window.video_bitrate);
+				if (Number.isFinite(window.video_crf)) crf = Math.round(window.video_crf!);
+				if (Number.isFinite(window.video_bitrate)) videoBitRate = Math.round(window.video_bitrate!);
 				const fr = obj.settings.framerate;
 				framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max! } : null;
 				followDisplayFramerate();

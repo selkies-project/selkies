@@ -8,11 +8,11 @@
  * The `window` state the two streaming cores publish for the dashboards and
  * for each other, and the engine properties they probe that the DOM typings
  * do not carry. A property is optional where the cores read it before they
- * write it, and typed `any` where it holds a server setting or a counter the
- * cores fill from untyped messages.
+ * write it; a server setting the cores apply by name is `unknown` until read.
  * @module
  */
-export {};
+import type { Input } from './input.ts';
+import type { StreamClient, StreamInfo, StreamStatsWindow } from './stream-stats.ts';
 
 declare global {
   /** A timer handle the page cleared to null: the platform takes it as no timer. */
@@ -55,33 +55,47 @@ declare global {
   }
 
   /** Chromium's insertable-streams track source, absent from the DOM typings. */
-  var MediaStreamTrackGenerator: any;
+  var MediaStreamTrackGenerator: { new (init: { kind: 'video' | 'audio' }): MediaStreamTrack & { writable: WritableStream<VideoFrame> } };
 
   interface Window {
     /** Server settings applied by name: the cores write `window[key]` for each setting the table names. */
-    [key: string]: any;
-    webrtcInput?: any;
-    selkiesTransport?: any;
-    selkiesLogs?: { log: any[]; debug: any[] };
-    applyTimestamp?: (msg: any) => any;
+    [key: string]: unknown;
+    /** The input handler of the page's stream. */
+    webrtcInput?: Input | null;
+    /** The WebSockets core's session socket, for the suites. */
+    selkiesTransport?: object | null;
+    /** The frame rate the page presents, as the cores measure it. */
+    fps: number;
+    /** What the server said of the stream (`lib/stream-stats.ts`). */
+    stream_info?: StreamInfo | null;
+    /** This page's half of the stream. */
+    stream_client?: StreamClient | null;
+    /** The stream's samples while the stats are open. */
+    stream_stats?: StreamStatsWindow;
+    /** The audio the playback path holds, as the WebSockets core counts it. */
+    currentAudioBufferSize?: number;
+    /** Set by the dashboard around a transport switch, so the active core leaves the old peer's teardown to the reload the switch makes. */
+    __selkiesModeSwitching?: boolean;
+    selkiesLogs?: { log: string[]; debug: string[] };
+    applyTimestamp?: (msg: unknown) => string;
     isCleaningUp?: boolean;
     isFallingBack?: boolean;
     isAudioInitializing?: boolean;
     manual_resolution?: boolean;
-    manual_width?: any;
-    manual_height?: any;
+    manual_width?: number | null;
+    manual_height?: number | null;
     manualResolution?: boolean;
     enable_resize?: boolean;
     clipboard_enabled?: boolean;
     video_fullcolor?: boolean;
     video_10bit?: boolean;
-    video_bitrate?: any;
-    video_crf?: any;
-    audio_channels?: any;
+    video_bitrate?: number;
+    video_crf?: number;
+    audio_channels?: number | string;
     displayRefreshRate?: number | null;
     streamResolutionDiverged?: boolean;
     videoChunksReceived: number;
-    videoStripeRows?: Record<string, any>;
+    videoStripeRows?: Record<string, number>;
     videoDivertOn?: boolean;
     currentAudioBufferDuration: number;
     currentAudioDropped: number;

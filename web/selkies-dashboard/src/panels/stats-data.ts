@@ -24,22 +24,6 @@ import { seriesOf, streamMeters, streamReport, streamRows, streamStrip, streamTi
 import { useSettings } from "@/state/settings-context";
 import { t } from "@/i18n";
 
-/** The stream state the cores publish on `window`. */
-declare global {
-  interface Window {
-    stream_info?: StreamInfo | null;
-    stream_client?: StreamClient;
-    stream_stats?: { open: boolean; latest: StreamSample | null; history: StreamSample[] };
-    fps?: number;
-    currentAudioBufferSize?: number;
-    /**
-     * Set by the dashboard around a transport switch so the active core
-     * leaves the old peer's teardown to the reload the switch makes.
-     */
-    __selkiesModeSwitching?: boolean;
-  }
-}
-
 /** What one read of the core's state holds. */
 export interface Snapshot {
   /** The server's description of the stream, null until it arrives. */

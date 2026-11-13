@@ -63,7 +63,7 @@ export function onColorSchemeChange(listener: (scheme: ColorScheme) => void): ()
 darkQuery?.addEventListener('change', announce);
 
 /** Takes a `setColorScheme` message from this page's own origin. */
-const onSchemeMessage = (event: MessageEvent): void => {
+const onSchemeMessage = (event: MessageEvent<{ type?: unknown; value?: unknown } | null>): void => {
   if (event.origin !== window.location.origin) return;
   const message = event.data;
   if (typeof message !== 'object' || message === null || message.type !== 'setColorScheme') return;

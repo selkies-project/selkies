@@ -287,8 +287,8 @@ export class GamepadManager {
 
                 if (!gpState) {
                     gpState = this.state[i] = {
-                        axes: new Array(currentGp.axes.length).fill(0),
-                        buttons: new Array(currentGp.buttons.length).fill(0),
+                        axes: new Array<number>(currentGp.axes.length).fill(0),
+                        buttons: new Array<number>(currentGp.buttons.length).fill(0),
                         dpadAxisState: DPAD_REST() as Record<number, boolean>,
                         remapProfile: null,
                         loadingProfile: false,
@@ -307,10 +307,10 @@ export class GamepadManager {
                 if (this.drivers.indexOf(i) < 0) continue;
 
                 if (gpState.buttons.length !== currentGp.buttons.length) {
-                    gpState.buttons = new Array(currentGp.buttons.length).fill(0);
+                    gpState.buttons = new Array<number>(currentGp.buttons.length).fill(0);
                 }
                 if (gpState.axes.length !== currentGp.axes.length) {
-                    gpState.axes = new Array(currentGp.axes.length).fill(0);
+                    gpState.axes = new Array<number>(currentGp.axes.length).fill(0);
                 }
 
                 for (let x = 0; x < currentGp.buttons.length; x++) {

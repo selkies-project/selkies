@@ -266,9 +266,9 @@ export class StreamStats {
     this._onOpenChange = onOpenChange || (() => {});
     this._client = { transport, decoder: 'unknown', decoder_evidence: '', hardware_expected: false,
       decoder_reason: '', codec: '', resolution: '', path: '', sink: '', decode_path: '', connection: 'ok' };
-    (window as unknown as { stream_info: StreamInfo | null }).stream_info = null;
-    (window as unknown as { stream_client: StreamClient }).stream_client = this._client;
-    (window as unknown as { stream_stats: StreamStatsWindow }).stream_stats = { open: false, latest: null, history: [] };
+    window.stream_info = null;
+    window.stream_client = this._client;
+    window.stream_stats = { open: false, latest: null, history: [] };
   }
 
   /** Whether a dashboard has its stats on screen. */
@@ -297,7 +297,7 @@ export class StreamStats {
     this._bytes = 0;
     this._bytesAt = performance.now();
     this._received = 0;
-    (window as unknown as { stream_stats: StreamStatsWindow }).stream_stats = { open, latest: null, history: [] };
+    window.stream_stats = { open, latest: null, history: [] };
     this.subscribe();
     this._onOpenChange(open);
     this._changed();
@@ -328,7 +328,7 @@ export class StreamStats {
 
   /** @param info The server's `stream_info`. */
   setInfo(info: StreamInfo | null): void {
-    (window as unknown as { stream_info: StreamInfo | null }).stream_info = info || null;
+    window.stream_info = info || null;
     this._changed();
   }
 
@@ -350,7 +350,7 @@ export class StreamStats {
   serverSample(stats: StreamSample): void {
     this._server = stats || {};
     this._serverAt = performance.now();
-    const latest = (window as unknown as { stream_stats: StreamStatsWindow }).stream_stats.latest;
+    const latest = window.stream_stats!.latest;
     if (this._open && latest && !latest.server) {
       Object.assign(latest, this._server, { server: true });
       this._changed();
@@ -381,7 +381,7 @@ export class StreamStats {
     sample.received_mb = Math.round(this._received / 1e4) / 100;
     this._bytes = 0;
     this._bytesAt = now;
-    const stats = (window as unknown as { stream_stats: StreamStatsWindow }).stream_stats;
+    const stats = window.stream_stats!;
     stats.latest = sample;
     stats.history.push(sample);
     if (stats.history.length > HISTORY_MAX) stats.history.shift();

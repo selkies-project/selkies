@@ -6173,7 +6173,7 @@ function sendStatsMessage(): void {
   const stats: Record<string, unknown> = {
     info: window.stream_info,
     client: window.stream_client,
-    latest: window.stream_stats.latest,
+    latest: window.stream_stats!.latest,
     clientFps: window.fps,
     audioBuffer: window.currentAudioBufferSize,
     audioUnderrunSamples: window.currentAudioUnderrunSamples,
@@ -8568,8 +8568,8 @@ class WorkerWebSocket {
                   clearAllVncStripeDecoders();
                   cleanupJpegStripeQueue();
               }
-              if (Number.isFinite(parseFloat(window['framerate']))) {
-                  framerate = parseFloat(window['framerate']);
+              if (Number.isFinite(parseFloat(window['framerate'] as string))) {
+                  framerate = parseFloat(window['framerate'] as string);
               }
               const fr = obj.settings.framerate;
               framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max } : null;
@@ -9338,7 +9338,7 @@ const MULTIOPUS_CLIENT_LAYOUTS: Record<number, { streams: number; coupled: numbe
  * @returns 1, 2, 6, or 8; 2 when unset or unknown.
  */
 function getAudioChannelCount(): number {
-  const ch = parseInt(window.audio_channels, 10);
+  const ch = parseInt(window.audio_channels as string, 10);
   return (ch === 1 || ch === 2 || ch === 6 || ch === 8) ? ch : 2;
 }
 
