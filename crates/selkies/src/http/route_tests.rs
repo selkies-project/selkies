@@ -2786,8 +2786,12 @@ async fn the_pelorus_page_is_closed_with_pelorus_off_however_its_path_is_encoded
     app.stop().await;
 }
 
-/// The Computer Use token the gate is configured with.
-const CU: &str = "unit-computer-use-token";
+static CU_TOKEN: LazyLock<String> = LazyLock::new(drawn_password);
+
+/// The Computer Use token the gate is configured with, drawn for the run.
+fn cu() -> &'static str {
+    &CU_TOKEN
+}
 const CU_REFUSAL: &str = r#"{"error":"unauthorized"}"#;
 
 /// A credential a request may present: what it is, its headers, and its query.
@@ -2813,7 +2817,7 @@ async fn computer_use_takes_its_token_and_no_other_credential() {
     use crate::core::Role;
 
     let with_token = |config: HttpConfig| HttpConfig {
-        computer_use_token: CU.into(),
+        computer_use_token: cu().into(),
         basic_auth_viewonly_password: VIEW_PASSWORD.clone(),
         ..config
     };
@@ -2884,32 +2888,32 @@ async fn computer_use_takes_its_token_and_no_other_credential() {
         ),
         (
             "its own token in a cookie",
-            vec![("cookie", cookie(CU))],
+            vec![("cookie", cookie(cu()))],
             "",
         ),
         (
             "its own token in the master token's fallback header",
-            vec![(MASTER_TOKEN_HEADER, bearer(CU))],
+            vec![(MASTER_TOKEN_HEADER, bearer(cu()))],
             "",
         ),
         (
             "its own token as a Basic password",
-            vec![("authorization", basic("user", CU))],
+            vec![("authorization", basic("user", cu()))],
             "",
         ),
         (
             "a token it is a prefix of",
-            vec![("authorization", format!("Bearer {CU}x"))],
+            vec![("authorization", format!("Bearer {}x", cu()))],
             "",
         ),
         (
             "its token and more",
-            vec![("authorization", format!("Bearer {CU} x"))],
+            vec![("authorization", format!("Bearer {} x", cu()))],
             "",
         ),
         (
             "its token under another scheme's case",
-            vec![("authorization", format!("bearer {CU}"))],
+            vec![("authorization", format!("bearer {}", cu()))],
             "",
         ),
     ];
@@ -2934,19 +2938,19 @@ async fn computer_use_takes_its_token_and_no_other_credential() {
             }
         }
         let r = app
-            .call("GET", "/record_status", &[("authorization", &bearer(CU))])
+            .call("GET", "/record_status", &[("authorization", &bearer(cu()))])
             .await;
         assert_eq!(
             (r.status, r.header("content-type"), r.body.as_str()),
             (200, Some("application/json"), r#"{"active":false}"#),
             "{mode}: the token is served"
         );
-        let cu = bearer(CU);
+        let granted = bearer(cu());
         let r = app
             .call_body(
                 "POST",
                 "/api/computer-use",
-                &[("authorization", &cu)],
+                &[("authorization", &granted)],
                 b"not json",
             )
             .await;
@@ -2958,14 +2962,14 @@ async fn computer_use_takes_its_token_and_no_other_credential() {
         assert_eq!((r.status, r.body.as_str()), (401, CU_REFUSAL), "{mode}");
         for method in ["GET", "POST", "DELETE"] {
             let r = app
-                .call(method, "/api/recording", &[("authorization", &cu)])
+                .call(method, "/api/recording", &[("authorization", &granted)])
                 .await;
             assert_eq!(
                 r.status, 200,
                 "{mode}: {method} the recorder takes the token"
             );
             let r = app
-                .call(method, "/api/recording", &[(MASTER_TOKEN_HEADER, &cu)])
+                .call(method, "/api/recording", &[(MASTER_TOKEN_HEADER, &granted)])
                 .await;
             let anonymous = app.call(method, "/api/recording", &[]).await;
             assert_eq!(
@@ -2975,7 +2979,7 @@ async fn computer_use_takes_its_token_and_no_other_credential() {
         }
 
         assert!(
-            state.tokens.lookup(CU).is_none(),
+            state.tokens.lookup(cu()).is_none(),
             "{mode}: the token is no session token, so no handshake takes it"
         );
         let elsewhere = GATED.iter().chain(&[
@@ -2987,7 +2991,7 @@ async fn computer_use_takes_its_token_and_no_other_credential() {
         for (method, path) in elsewhere {
             let anonymous = app.call(method, path, &[]).await;
             for carrier in ["authorization", MASTER_TOKEN_HEADER] {
-                let r = app.call(method, path, &[(carrier, &bearer(CU))]).await;
+                let r = app.call(method, path, &[(carrier, &bearer(cu()))]).await;
                 assert_eq!(
                     (r.status, &r.body),
                     (anonymous.status, &anonymous.body),
@@ -3029,7 +3033,7 @@ async fn computer_use_is_absent_without_a_token() {
                 for authorization in [
                     None,
                     Some(bearer(MASTER)),
-                    Some(bearer(CU)),
+                    Some(bearer(cu())),
                     Some(bearer("")),
                     Some(basic("user", &PASSWORD)),
                 ] {
@@ -3055,13 +3059,13 @@ async fn computer_use_is_absent_without_a_token() {
 async fn computer_use_answers_in_json_and_bounds_its_requests() {
     use super::computer_use::MAX_BODY;
     let config = HttpConfig {
-        computer_use_token: CU.into(),
+        computer_use_token: cu().into(),
         subfolder: "/desk".into(),
         ..secure_config()
     };
     let state = AppState::new(config, FixedSupervisor::new(None, &[]));
     let app = TestServer::start(build(state, Vec::new())).await;
-    let auth = bearer(CU);
+    let auth = bearer(cu());
     let authed = [("authorization", auth.as_str())];
     let json_of = |r: &super::testing::Reply| {
         assert_eq!(r.header("content-type"), Some("application/json"));
@@ -3135,8 +3139,9 @@ async fn computer_use_answers_in_json_and_bounds_its_requests() {
         .call_body("POST", "/desk/computer-use", &authed, &large)
         .await;
     assert_eq!(r.status, 200, "a body under the bound is read whole");
+    let token = cu();
     let declared = format!(
-        "POST /desk/computer-use HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {CU}\r\nContent-Length: {}\r\n\r\n",
+        "POST /desk/computer-use HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n",
         MAX_BODY + 1
     );
     let answer = raw_exchange(&app, declared.as_bytes()).await;
@@ -3147,7 +3152,7 @@ async fn computer_use_answers_in_json_and_bounds_its_requests() {
         "refused on the size it declares, none of it sent: {answer}"
     );
     let chunked = format!(
-        "POST /desk/computer-use HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {CU}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n"
+        "POST /desk/computer-use HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n"
     );
     let answer = raw_exchange(&app, chunked.as_bytes()).await;
     assert!(
@@ -3192,18 +3197,18 @@ async fn a_computer_use_bind_serves_only_its_routes() {
         "no token, no listener"
     );
     for bind in ["abc", "70000", ",", "127.0.0.1:0,abc"] {
-        assert!(listen(&serving(bind, CU)).await.is_err(), "{bind:?}");
+        assert!(listen(&serving(bind, cu())).await.is_err(), "{bind:?}");
     }
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port();
     assert!(
-        listen(&serving(&port.to_string(), CU)).await.is_err(),
+        listen(&serving(&port.to_string(), cu())).await.is_err(),
         "a taken port is an error"
     );
     drop(taken);
 
     let port = super::testing::free_port();
-    let listener = listen(&serving(&format!("{port}, 127.0.0.1:{port}"), CU))
+    let listener = listen(&serving(&format!("{port}, 127.0.0.1:{port}"), cu()))
         .await
         .expect("a bare port binds");
     assert!(
@@ -3219,7 +3224,7 @@ async fn a_computer_use_bind_serves_only_its_routes() {
     assert!(listener.endpoint().starts_with("http://127.0.0.1:"));
     let fallback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let app = TestServer::over(listener, fallback);
-    let auth = bearer(CU);
+    let auth = bearer(cu());
     let authed = [("authorization", auth.as_str())];
     let master = bearer(MASTER);
     for path in
@@ -3263,7 +3268,7 @@ async fn computer_use_handlers_refuse_a_request_nothing_granted() {
     let app = TestServer::start(router()).await;
     for route in ROUTES {
         let r = app
-            .call("POST", route, &[("authorization", &bearer(CU))])
+            .call("POST", route, &[("authorization", &bearer(cu()))])
             .await;
         assert_eq!((r.status, r.body.as_str()), (401, CU_REFUSAL), "{route}");
     }
