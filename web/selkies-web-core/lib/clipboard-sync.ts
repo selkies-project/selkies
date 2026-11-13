@@ -25,7 +25,122 @@
  * @module
  */
 
+import type { ClipboardDecodeStream, ClipboardWorkerBridge, DecodedClipboard } from './clipboard-worker-bridge.ts';
+
 export type LocalClipboardContent = { kind: 'text'; text: string } | { kind: 'image'; blob: Blob; mime: string } | { kind: 'flavours'; html: string; text: string };
+
+/** A payload's size and digest, standing in for bytes hashed off the main thread (`digestedPayload`). */
+export interface ClipboardDigest {
+    /** Marks the object as a digest rather than content. */
+    __clipDigest: true;
+    /** The payload's size in bytes. */
+    byteLength: number;
+    /** The djb2 digest of the payload. */
+    hash: number;
+}
+
+/** What a signature is taken of: text, bytes in one buffer or several, a blob (by its size alone), or a digest. */
+export type ClipboardPayload = string | Uint8Array | ArrayBuffer | Blob | ClipboardDigest | (Uint8Array | ArrayBuffer)[];
+
+/** Told why a send did nothing: a reason for the console and the notice code the dashboards translate. */
+export type ClipboardSkip = (reason: string, code: string) => void;
+
+/** Sends clipboard content to the session. */
+export type ClipboardSend = (data: string | ArrayBuffer, mime?: string, onSkip?: ClipboardSkip | null) => Promise<unknown>;
+
+/** A promise with its settlers, for a clipboard item part issued before its content arrives. */
+interface Deferred {
+    /** Settles with the part's content. */
+    promise: Promise<Blob>;
+    /** Fulfills the part. */
+    resolve: (value: Blob) => void;
+    /** Fails the part. */
+    reject: (reason: Error) => void;
+}
+
+/** One write of session content to the local clipboard, issued as a `ClipboardItem` of deferred parts. */
+interface Landing {
+    /** The item's parts by MIME type. */
+    parts: Record<string, Deferred>;
+    /** Whether every part has its content. */
+    settled: boolean;
+    /** Whether the write was given up. */
+    withdrawn: boolean;
+    /** Why a part could not be produced. */
+    failed: Error | null;
+    /** The signature of the text that landed. */
+    localSig: string | null;
+    /** The text that landed. */
+    text?: string;
+}
+
+/** One transfer from the session, from its first message to its landing. */
+interface IncomingTransfer {
+    /** What the content is. */
+    kind: 'text' | 'flavours' | 'image';
+    /** The MIME type the session named. */
+    mime: string;
+    /** Whether the content only refreshes the cache and never reaches the local clipboard. */
+    cacheOnly: boolean;
+    /** Whether the text is a secret. */
+    secret: boolean;
+    /** The transfer's generation. */
+    gen: number;
+    /** The write issued ahead of the content, if one was. */
+    landing: Landing | null;
+}
+
+/** What a transfer decoded to, by kind: text, HTML with its text, or an image. */
+interface LandingContent {
+    /** Plain text. */
+    text?: string;
+    /** Markup. */
+    html?: string;
+    /** An image. */
+    blob?: Blob;
+    /** The image's MIME type. */
+    mime?: string;
+}
+
+/** A write waiting for the engine to take it (`createDeferredClipboardWriter`). */
+interface PendingWrite {
+    /** Performs the write. */
+    attempt: () => Promise<void>;
+    /** Runs once the write landed. */
+    onSuccess?: () => Promise<unknown> | void;
+    /** Told why the write failed for good. */
+    onFailure?: (err: Error) => void;
+    /** Settles once the content of the write is complete. */
+    settled?: Promise<unknown>;
+    /** The write's sequence number. */
+    seq: number;
+}
+
+/** The secret the local clipboard holds until it is taken back. */
+interface HeldSecret {
+    /** The secret text. */
+    text: string;
+    /** Whether its time is up. */
+    due: boolean;
+    /** Whether a take-back is running. */
+    busy: boolean;
+    /** The timer that makes it due. */
+    timer: number | null;
+}
+
+/** A dashboard's wait for the session's clipboard (`ClipboardSync.request`). */
+interface ClipboardRequest {
+    /** Whether an image is wanted rather than text. */
+    wantBinary: boolean;
+    /** Settles the wait. */
+    resolve: (val: string | Blob) => void;
+    /** Whether the wait is over. */
+    settled: boolean;
+    /** The text held when the wait began. */
+    baselineText: string;
+    /** The image held when the wait began. */
+    baselineBlob: Blob | null;
+}
 
 /**
  * A payload the clipboard worker has already digested, standing in for its
@@ -39,7 +154,7 @@ export type LocalClipboardContent = { kind: 'text'; text: string } | { kind: 'im
  * @param hash Its digest, seeded and computed as `hashBytes` does.
  * @returns
  */
-export function digestedPayload(byteLength: number, hash: number): { __clipDigest: true; byteLength: number; hash: number } {
+export function digestedPayload(byteLength: number, hash: number): ClipboardDigest {
     return { __clipDigest: true, byteLength, hash };
 }
 
@@ -60,8 +175,8 @@ export async function reencodeBlobAsPng(blob: Blob): Promise<Blob> {
         canvas.width = bmp.width;
         canvas.height = bmp.height;
         canvas.getContext('2d')!.drawImage(bmp, 0, 0);
-        return await new Promise((resolve: any, reject: any) =>
-            canvas.toBlob((b: any) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png'));
+        return await new Promise((resolve: (value: Blob) => void, reject: (reason: Error) => void) =>
+            canvas.toBlob((b: Blob | null) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png'));
     } finally {
         bmp.close();
     }
@@ -92,15 +207,15 @@ export function localClipboardBlocker(): string | null {
 export const CLIPBOARD_FLAVOURS_MIME = 'application/x-selkies-clipboard-flavours';
 
 /** The wire payload for one copy's flavours. */
-export function packClipboardFlavours({ html, text }: { "html": any; "text": any }): any {
-    const flavours: Record<string, any> = { 'text/html': html };
+export function packClipboardFlavours({ html, text }: { html: string; text?: string }): ArrayBuffer {
+    const flavours: Record<string, string> = { 'text/html': html };
     if (text) flavours['text/plain'] = text;
     return new TextEncoder().encode(JSON.stringify(flavours)).buffer;
 }
 
 /** The flavours a wire payload carries, as `{html, text}`. */
-export function unpackClipboardFlavours(bytes: any): any {
-    const flavours = JSON.parse(new TextDecoder().decode(bytes));
+export function unpackClipboardFlavours(bytes: ArrayBuffer | Uint8Array): { html: string; text: string } {
+    const flavours = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, string | undefined>;
     return { html: flavours['text/html'] || '', text: flavours['text/plain'] || '' };
 }
 
@@ -115,7 +230,7 @@ export function unpackClipboardFlavours(bytes: any): any {
 function textOfMarkup(html: string): string {
     try {
         return new DOMParser().parseFromString(html, 'text/html').body.textContent || '';
-    } catch (_: any) {
+    } catch (_) {
         return '';
     }
 }
@@ -131,7 +246,7 @@ function textOfMarkup(html: string): string {
  * @throws Only genuinely unexpected errors, for the caller to log.
  */
 export async function readLocalClipboard(binaryEnabled: boolean): Promise<LocalClipboardContent | null> {
-    const textFallback = async (): Promise<any> => {
+    const textFallback = async (): Promise<LocalClipboardContent | null> => {
         const t = await navigator.clipboard.readText().catch((): string => '');
         return t ? { kind: 'text', text: t } : null;
     };
@@ -139,16 +254,16 @@ export async function readLocalClipboard(binaryEnabled: boolean): Promise<LocalC
         const text = await navigator.clipboard.readText();
         return text ? { kind: 'text', text } : null;
     }
-    let items: any;
+    let items: ClipboardItems;
     try {
         items = await navigator.clipboard.read();
-    } catch (err: any) {
-        if (err && err.name === 'DataError') return textFallback();
+    } catch (err) {
+        if (err && (err as Error).name === 'DataError') return textFallback();
         throw err;
     }
     if (!items || items.length === 0) return null;
     const item = items[0];
-    const imageType = item.types.find((t: any): boolean => t.startsWith('image/'));
+    const imageType = item.types.find((t: string): boolean => t.startsWith('image/'));
     try {
         // A copy whose markup carries text is text: an office application's
         // text selection offers a picture of itself beside the markup (Word's
@@ -169,8 +284,8 @@ export async function readLocalClipboard(binaryEnabled: boolean): Promise<LocalC
             const text = await blob.text();
             return text ? { kind: 'text', text } : null;
         }
-    } catch (err: any) {
-        if (err && err.name === 'DataError') return textFallback();
+    } catch (err) {
+        if (err && (err as Error).name === 'DataError') return textFallback();
         throw err;
     }
     return null;
@@ -182,7 +297,7 @@ export interface MultipartClipboardState {
   /** Hands one base64 chunk to the worker. */
   push: (b64: string) => void;
   /** Resolves with the decoded payload and resets; rejects when no transfer */
-  finish: () => Promise<{result: any, mimeType: string, byteLength: number}>;
+  finish: () => Promise<DecodedClipboard>;
   /** Drops the transfer. */
   reset: () => void;
   /** @property inProgress */
@@ -209,14 +324,14 @@ export interface MultipartClipboardState {
  *     Opens the worker-side accumulation for one transfer.
  * @returns
  */
-export function createMultipartClipboardState(openStream: (mime: string) => {push: (b64: string) => void, finish: () => Promise<any>, abort: () => void}): MultipartClipboardState {
-    let stream: any = null;
-    let mimeType: any = null;
+export function createMultipartClipboardState(openStream: (mime: string) => ClipboardDecodeStream): MultipartClipboardState {
+    let stream: ClipboardDecodeStream | null = null;
+    let mimeType: string | null = null;
     let totalSize = 0;
     let receivedSize = 0;
     let inProgress = false;
 
-    function base64DecodedSize(b64: any): any {
+    function base64DecodedSize(b64: string): number {
         if (!b64) return 0;
         const pad = b64.endsWith('==') ? 2 : (b64.endsWith('=') ? 1 : 0);
         return (b64.length / 4) * 3 - pad;
@@ -231,21 +346,21 @@ export function createMultipartClipboardState(openStream: (mime: string) => {pus
     }
 
     return {
-        begin(mime: any, total: any): void {
+        begin(mime: string, total: number): void {
             this.reset();
             mimeType = mime;
             totalSize = total;
             stream = openStream(mime);
             inProgress = true;
         },
-        push(b64: any): void {
+        push(b64: string): void {
             if (!inProgress) return;
-            stream.push(b64);
+            stream!.push(b64);
             receivedSize += base64DecodedSize(b64);
         },
-        finish(): any {
+        finish(): Promise<DecodedClipboard> {
             if (!inProgress) return Promise.reject(new Error('no transfer in progress'));
-            const pending = stream.finish();
+            const pending = stream!.finish();
             clear();
             return pending;
         },
@@ -253,10 +368,10 @@ export function createMultipartClipboardState(openStream: (mime: string) => {pus
             if (stream) stream.abort();
             clear();
         },
-        get inProgress(): any { return inProgress; },
-        get mimeType(): any { return mimeType; },
-        get totalSize(): any { return totalSize; },
-        get receivedSize(): any { return receivedSize; },
+        get inProgress(): boolean { return inProgress; },
+        get mimeType(): string | null { return mimeType; },
+        get totalSize(): number { return totalSize; },
+        get receivedSize(): number { return receivedSize; },
     };
 }
 
@@ -282,17 +397,17 @@ export interface TaggedClipboardFetch {
 export function createTaggedClipboardFetch(): TaggedClipboardFetch {
     let deadline = 0;
     let serverTags = false;
-    let pending: any = false;
+    let pending = false;
     return {
         arm(): void {
             serverTags = true;
             pending = true;
             deadline = 0;
         },
-        armLegacyWindow(ms: any): void {
+        armLegacyWindow(ms: number): void {
             deadline = Date.now() + ms;
         },
-        consume(): any {
+        consume(): boolean {
             if (pending) {
                 pending = false;
                 return true;
@@ -330,7 +445,7 @@ export interface LocalClipboardSender {
   /** Reads the local clipboard and */
   readAndSend: () => Promise<void>;
   /** Pushes content the user named, outranking a concurrent `readAndSend`. */
-  sendExplicit: (data: string|ArrayBuffer|Blob, mime?: string, onSkip?: (...args: any[]) => any) => Promise<void>;
+  sendExplicit: (data: string|ArrayBuffer|Blob, mime?: string, onSkip?: ClipboardSkip) => Promise<void>;
   /** The connect-time send: once a page, */
   maybeInitial: () => Promise<void>;
   /** The send the */
@@ -376,8 +491,8 @@ export function createLocalClipboardSender({
     sendClipboardData,
     clipboardSync,
     getDeferredWriteInFlight = null,
-}: { "isChromium": any; "isSharedMode": any; "canSync": any; "canRead": any; "binaryEnabled": any; "sendClipboardData": any; "clipboardSync": any; "getDeferredWriteInFlight"?: any }): LocalClipboardSender {
-    let sendInFlight: any = null;
+}: { isChromium: boolean; isSharedMode: () => boolean; canSync: () => boolean; canRead: () => boolean; binaryEnabled: () => boolean; sendClipboardData: ClipboardSend; clipboardSync: ClipboardSync; getDeferredWriteInFlight?: (() => Promise<boolean> | null) | null }): LocalClipboardSender {
+    let sendInFlight: Promise<void> | null = null;
     let initialAttempted = false;
     // A read whose push found no connection, or lost it mid-send, is made again
     // when the next connection's settings arrive (`maybeInitial`).
@@ -386,15 +501,15 @@ export function createLocalClipboardSender({
     let explicitSettledAt = -Infinity;
 
     /** Whether a push the user asked for is still the session's latest word. */
-    function explicitHasPrecedence(): any {
+    function explicitHasPrecedence(): boolean {
         return explicitRunning > 0
             || Date.now() - explicitSettledAt < EXPLICIT_PRECEDENCE_MS;
     }
 
     /** Runs `work` as the send the paste-ordering hold waits on. */
-    async function asSendInFlight(work: any): Promise<void> {
-        let settle: any;
-        const tracker = new Promise((resolve: any): void => { settle = resolve; });
+    async function asSendInFlight(work: Promise<void>): Promise<void> {
+        let settle!: () => void;
+        const tracker = new Promise((resolve: (value: void) => void): void => { settle = resolve; });
         sendInFlight = tracker;
         try {
             await work;
@@ -432,7 +547,7 @@ export function createLocalClipboardSender({
                 const remaining = giveUpAt - Date.now();
                 if (!w || remaining <= 0) break;
                 await Promise.race([w.catch((): void => {}),
-                    new Promise((r: any) => { setTimeout(r, remaining); })]);
+                    new Promise((r: (value: unknown) => void) => { setTimeout(r, remaining); })]);
                 if (!getDeferredWriteInFlight()) break;
             }
         }
@@ -441,7 +556,7 @@ export function createLocalClipboardSender({
             try {
                 const res = await readLocalClipboard(binaryEnabled());
                 if (!res) return;
-                let payload: any = (res as typeof res & { text?: string }).text;
+                let payload: string | ArrayBuffer | undefined = (res as typeof res & { text?: string }).text;
                 let mime = 'text/plain';
                 if (res.kind === 'image') {
                     payload = await res.blob.arrayBuffer();
@@ -450,12 +565,12 @@ export function createLocalClipboardSender({
                     payload = packClipboardFlavours(res);
                     mime = CLIPBOARD_FLAVOURS_MIME;
                 }
-                const localSig = await clipboardSync.localSig(payload, mime);
+                const localSig = await clipboardSync.localSig(payload!, mime);
                 const changed = clipboardSync.noteLocal(localSig);
                 if (!changed || explicitHasPrecedence()) return;
                 if (res.kind !== 'image' && clipboardSync.echoes(res.text)) return;
-                let skipped: any = null;
-                await sendClipboardData(payload, mime, (reason: any, code: any): void => { skipped = code || reason; });
+                let skipped = null as string | null;
+                await sendClipboardData(payload!, mime, (reason: string, code: string): void => { skipped = code || reason; });
                 if (skipped === 'clipboardSkipNotConnected' || skipped === 'clipboardSkipSendFailed') {
                     clipboardSync.forgetLocal(localSig);
                     readAgainOnConnect = true;
@@ -463,10 +578,10 @@ export function createLocalClipboardSender({
                 }
                 if (skipped) return;
                 console.log(`Sent the local clipboard (${mime}) to the session`);
-            } catch (err: any) {
-                if (err.name !== 'NotFoundError' && err.name !== 'DataError' && err.name !== 'NotAllowedError'
-                    && !(err.message && err.message.includes('not focused'))) {
-                    console.warn(`Could not read clipboard: ${err.name} - ${err.message}`);
+            } catch (err) {
+                if ((err as Error).name !== 'NotFoundError' && (err as Error).name !== 'DataError' && (err as Error).name !== 'NotAllowedError'
+                    && !((err as Error).message && (err as Error).message.includes('not focused'))) {
+                    console.warn(`Could not read clipboard: ${(err as Error).name} - ${(err as Error).message}`);
                 }
             }
         })();
@@ -477,13 +592,13 @@ export function createLocalClipboardSender({
      * Pushes content the user named. A Blob is read here, so the push counts
      * from this call rather than from whenever its bytes arrive.
      */
-    async function sendExplicit(data: any, mime: any, onSkip: any): Promise<void> {
+    async function sendExplicit(data: string | ArrayBuffer | Blob, mime?: string, onSkip?: ClipboardSkip): Promise<void> {
         explicitRunning++;
         clipboardSync.noteExplicit();
         await asSendInFlight((async (): Promise<void> => {
             try {
-                const payload = (data && typeof data.arrayBuffer === 'function')
-                    ? await data.arrayBuffer() : data;
+                const payload = (data && typeof (data as Blob).arrayBuffer === 'function')
+                    ? await (data as Blob).arrayBuffer() : data as string | ArrayBuffer;
                 await sendClipboardData(payload, mime, onSkip);
             } finally {
                 explicitRunning--;
@@ -499,9 +614,9 @@ export function createLocalClipboardSender({
         if (!isChromium || isSharedMode() || !document.hasFocus()) return;
         if (!navigator.permissions || !navigator.permissions.query) return;
         try {
-            const st = await navigator.permissions.query({ name: 'clipboard-read' as any });
+            const st = await navigator.permissions.query({ name: 'clipboard-read' });
             if (st.state === 'granted') readAndSend();
-        } catch (_: any) { /* permission name unsupported (non-Chromium engines) */ }
+        } catch (_) { /* permission name unsupported (non-Chromium engines) */ }
     }
 
     return { readAndSend, sendExplicit, maybeInitial, getSendInFlight: (): Promise<void> | null => sendInFlight };
@@ -509,7 +624,7 @@ export function createLocalClipboardSender({
 
 export interface DeferredClipboardWriter {
   /** Runs an async clipboard write now, stashing it for the next gesture on */
-  write: (attempt: () => Promise<void>, options?: {onSuccess?: () => (Promise<any>|void), onFailure?: (err: Error) => void, settled?: Promise<any>}) => Promise<boolean>;
+  write: (attempt: () => Promise<void>, options?: {onSuccess?: () => (Promise<unknown>|void), onFailure?: (err: Error) => void, settled?: Promise<unknown>}) => Promise<boolean>;
   /** Retries the stashed write. */
   flush: () => void;
   /** The most recent */
@@ -545,15 +660,15 @@ export interface DeferredClipboardWriter {
  * @returns
  */
 export function createDeferredClipboardWriter(): DeferredClipboardWriter {
-    let pending: any = null;
+    let pending: PendingWrite | null = null;
     let writeSeq = 0;
-    let inFlight: any = null;
+    let inFlight: { promise: Promise<boolean>; settled: boolean; } | null = null;
 
-    function isActivationError(err: any): any {
+    function isActivationError(err: Error | null): boolean {
         return !!err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
     }
 
-    function track(promise: any, w: any): void {
+    function track(promise: Promise<boolean>, w: PendingWrite): void {
         const entry = { promise, settled: !w.settled };
         if (w.settled) w.settled.then((): void => { entry.settled = true; }, (): void => { entry.settled = true; });
         inFlight = entry;
@@ -573,10 +688,10 @@ export function createDeferredClipboardWriter(): DeferredClipboardWriter {
      * outright where the browser exposes no clipboard -- fails the same way
      * an async one does, instead of throwing past `onFailure`.
      */
-    function attemptOnce(w: any): any {
-        return Promise.resolve().then((): void => w.attempt()).then(
-            (): any => Promise.resolve(w.onSuccess && w.onSuccess()).then((): any => true, (): any => true),
-            (err: any): any => {
+    function attemptOnce(w: PendingWrite): Promise<boolean> {
+        return Promise.resolve().then((): Promise<void> => w.attempt()).then(
+            (): Promise<boolean> => Promise.resolve(w.onSuccess && w.onSuccess()).then((): boolean => true, (): boolean => true),
+            (err: Error): boolean => {
                 if (isActivationError(err)) {
                     if (w.seq === writeSeq) pending = w;
                     return false;
@@ -603,7 +718,7 @@ export function createDeferredClipboardWriter(): DeferredClipboardWriter {
      * the next gesture. `onSuccess` fires whenever the write eventually lands,
      * `onFailure` only for errors that are neither activation nor withdrawal.
      */
-    function write(attempt: any, { onSuccess, onFailure, settled }: { onSuccess?: any; onFailure?: any; settled?: any } = {}): any {
+    function write(attempt: () => Promise<void>, { onSuccess, onFailure, settled }: Omit<PendingWrite, 'attempt' | 'seq'> = {}): Promise<boolean> {
         const w = { attempt, onSuccess, onFailure, settled, seq: ++writeSeq };
         pending = null;
         const p = attemptOnce(w);
@@ -661,8 +776,8 @@ export interface SecretClipboardGuard {
  * @param hooks.onCleared The secret was taken back.
  * @returns
  */
-export function createSecretClipboardGuard({ isChromium, writer, onCleared }: { "isChromium": any; "writer": any; "onCleared": any }): SecretClipboardGuard {
-    let secret: any = null;
+export function createSecretClipboardGuard({ isChromium, writer, onCleared }: { isChromium: boolean; writer: DeferredClipboardWriter; onCleared: () => void }): SecretClipboardGuard {
+    let secret: HeldSecret | null = null;
 
     async function takeBack(): Promise<void> {
         const s = secret;
@@ -672,7 +787,7 @@ export function createSecretClipboardGuard({ isChromium, writer, onCleared }: { 
             for (let w = writer.getInFlight(); w; w = writer.getInFlight()) await w.catch((): void => {});
             // A write the engine refused lands at the next gesture, over the secret.
             if (secret !== s || writer.hasPending() || !document.hasFocus()) return;
-            const permission = await navigator.permissions.query({ name: 'clipboard-read' as any });
+            const permission = await navigator.permissions.query({ name: 'clipboard-read' });
             if (permission.state === 'denied') secret = null;
             if (secret !== s || permission.state !== 'granted') return;
             const issued = writer.issued();
@@ -686,14 +801,14 @@ export function createSecretClipboardGuard({ isChromium, writer, onCleared }: { 
             await navigator.clipboard.writeText('');
             if (secret === s) secret = null;
             onCleared();
-        } catch (_: any) {
+        } catch (_) {
             // Unfocused again or refused: the next focus tries again.
         } finally {
             s.busy = false;
         }
     }
 
-    function due(s: any): void {
+    function due(s: HeldSecret): void {
         clearTimeout(s.timer);
         s.due = true;
         setTimeout(takeBack, 0);
@@ -704,14 +819,14 @@ export function createSecretClipboardGuard({ isChromium, writer, onCleared }: { 
     }
 
     return {
-        landed(text: any): void {
+        landed(text: string): void {
             if (!isChromium) return;
             if (secret) clearTimeout(secret.timer);
-            const s: any = { text, due: false, busy: false, timer: null };
-            s.timer = setTimeout((): any => due(s), SECRET_CLIPBOARD_TTL_MS);
+            const s: HeldSecret = { text, due: false, busy: false, timer: null };
+            s.timer = setTimeout((): void => due(s), SECRET_CLIPBOARD_TTL_MS);
             secret = s;
         },
-        holds: (text: any): boolean => !!secret && secret.text === text,
+        holds: (text: string): boolean => !!secret && secret.text === text,
         retract(): void {
             if (secret) due(secret);
         },
@@ -790,15 +905,15 @@ export interface IncomingClipboard {
 export function createIncomingClipboard({
     worker, clipboardSync, writer, toPng, canWriteLocal, binaryEnabled,
     onPreview, onImageWritten, onImageWriteFailed, isChromium = false,
-}: { "worker": any; "clipboardSync": any; "writer": any; "toPng": any; "canWriteLocal": any; "binaryEnabled": any; "onPreview": any; "onImageWritten": any; "onImageWriteFailed": any; "isChromium"?: any }): IncomingClipboard {
-    const multipart = createMultipartClipboardState((mime: any): any => worker.decodeStream(mime));
-    let current: any = null;
+}: { worker: Pick<ClipboardWorkerBridge, 'decode' | 'decodeStream'>; clipboardSync: ClipboardSync; writer: DeferredClipboardWriter; toPng: (blob: Blob) => Promise<Blob>; canWriteLocal: () => boolean; binaryEnabled: () => boolean; onPreview: (text: string, secret?: boolean) => void; onImageWritten: (mime: string) => void; onImageWriteFailed: (err: Error) => void; isChromium?: boolean }): IncomingClipboard {
+    const multipart = createMultipartClipboardState((mime: string): ClipboardDecodeStream => worker.decodeStream(mime));
+    let current: IncomingTransfer | null = null;
     let generation = 0;
-    let lastLanding: any = null;
-    let stallTimer: any = null;
+    let lastLanding: Landing | null = null;
+    let stallTimer: number | null = null;
     let secretNext = false;
     /** The session's clipboard text while it is a secret, for the copy the user asks for. */
-    let sessionSecret: any = null;
+    let sessionSecret: string | null = null;
     const guard = createSecretClipboardGuard({
         isChromium,
         writer,
@@ -821,40 +936,40 @@ export function createIncomingClipboard({
         }, INCOMING_STALL_MS);
     }
 
-    function kindOf(mime: any): any {
+    function kindOf(mime: string): "text" | "flavours" | "image" | null {
         if (mime === 'text/plain') return 'text';
         if (mime === CLIPBOARD_FLAVOURS_MIME) return 'flavours';
         if (typeof mime === 'string' && mime.startsWith('image/')) return 'image';
         return null;
     }
 
-    function wanted(kind: any, cacheOnly: any): any {
+    function wanted(kind: string, cacheOnly: boolean): boolean {
         return !cacheOnly && canWriteLocal() && (kind !== 'image' || binaryEnabled());
     }
 
-    function canWriteItems(): any {
+    function canWriteItems(): boolean {
         return typeof ClipboardItem !== 'undefined'
             && typeof navigator !== 'undefined' && !!navigator.clipboard && !!navigator.clipboard.write;
     }
 
-    function withdrawal(reason: any): any {
+    function withdrawal(reason: string): DOMException {
         return new DOMException(reason, 'AbortError');
     }
 
-    function settleable(): any {
-        let resolve: any;
-        let reject: any;
-        const promise = new Promise((res: any, rej: any): void => { resolve = res; reject = rej; });
+    function settleable(): Deferred {
+        let resolve!: (value: Blob) => void;
+        let reject!: (reason: Error) => void;
+        const promise = new Promise((res: (value: Blob) => void, rej: (reason: Error) => void): void => { resolve = res; reject = rej; });
         // Rejection is how a write is withdrawn, not an error anyone must see.
         promise.catch((): void => {});
         return { promise, resolve, reject };
     }
 
     /** Withdraws a write still waiting for its data; the local clipboard keeps its value. */
-    function withdraw(landing: any, reason: any): void {
+    function withdraw(landing: Landing | null, reason: string): void {
         if (!landing || landing.settled || landing.withdrawn) return;
         landing.withdrawn = true;
-        for (const part of Object.values(landing.parts as any)) (part as any).reject(withdrawal(reason));
+        for (const part of Object.values(landing.parts)) part.reject(withdrawal(reason));
     }
 
     /**
@@ -862,21 +977,21 @@ export function createIncomingClipboard({
      * item carries, declared now because a ClipboardItem cannot add a type.
      * A secret is handed to the guard once it landed.
      */
-    function issue(kind: any, mime: any, secret: any): any {
+    function issue(kind: string, mime: string, secret: boolean): Landing {
         withdraw(lastLanding, 'superseded');
         const types = kind === 'image' ? ['image/png']
             : kind === 'text' ? ['text/plain'] : ['text/html', 'text/plain'];
-        const landing: any = { parts: {}, settled: false, withdrawn: false, failed: null, localSig: null };
+        const landing: Landing = { parts: {}, settled: false, withdrawn: false, failed: null, localSig: null };
         for (const type of types) landing.parts[type] = settleable();
-        const settled = Promise.all(types.map((t: any): any => landing.parts[t].promise));
+        const settled = Promise.all(types.map((t: string): Promise<Blob> => landing.parts[t].promise));
         settled.then((): void => { landing.settled = true; }, (): void => {});
         lastLanding = landing;
         writer.write(async (): Promise<void> => {
-            const item: any = {};
+            const item: Record<string, Promise<Blob>> = {};
             for (const type of types) item[type] = landing.parts[type].promise;
             try {
                 await navigator.clipboard.write([new ClipboardItem(item)]);
-            } catch (err: any) {
+            } catch (err) {
                 // Engines report data that never came under names of their own
                 // choosing, an activation error's among them.
                 if (landing.withdrawn) throw withdrawal('withdrawn');
@@ -888,10 +1003,10 @@ export function createIncomingClipboard({
             onSuccess: kind === 'image' ? (): void => onImageWritten(mime)
                 : (): void => {
                     clipboardSync.noteLocal(landing.localSig);
-                    if (secret) guard.landed(landing.text);
+                    if (secret) guard.landed(landing.text!);
                 },
             onFailure: kind === 'image' ? onImageWriteFailed
-                : (err: any): void => console.error(`Could not copy the session clipboard to the local one: ${err && err.name} - ${err && err.message}`),
+                : (err: Error): void => console.error(`Could not copy the session clipboard to the local one: ${err && err.name} - ${err && err.message}`),
         });
         return landing;
     }
@@ -900,24 +1015,24 @@ export function createIncomingClipboard({
      * Hands a landing its data. A conversion still running when a newer write
      * withdraws this one resolves nothing: the part was rejected first.
      */
-    function fulfill(landing: any, kind: any, content: any): void {
+    function fulfill(landing: Landing, kind: string, content: LandingContent): void {
         if (kind === 'image') {
             const part = landing.parts['image/png'];
             if (content.mime === 'image/png') {
-                part.resolve(content.blob);
+                part.resolve(content.blob!);
             } else {
-                toPng(content.blob).catch((): any => reencodeBlobAsPng(content.blob)).then(part.resolve, (err: any): void => {
+                toPng(content.blob!).catch((): Promise<Blob> => reencodeBlobAsPng(content.blob!)).then(part.resolve, (err: Error): void => {
                     landing.failed = err;
                     part.reject(err);
                 });
             }
         } else if (kind === 'text') {
-            landing.localSig = clipboardSync.sig(content.text);
+            landing.localSig = clipboardSync.sig(content.text!);
             landing.text = content.text;
-            landing.parts['text/plain'].resolve(new Blob([content.text], { type: 'text/plain' }));
+            landing.parts['text/plain'].resolve(new Blob([content.text!], { type: 'text/plain' }));
         } else {
-            landing.parts['text/html'].resolve(new Blob([content.html], { type: 'text/html' }));
-            landing.parts['text/plain'].resolve(new Blob([content.text || textOfMarkup(content.html)],
+            landing.parts['text/html'].resolve(new Blob([content.html!], { type: 'text/html' }));
+            landing.parts['text/plain'].resolve(new Blob([content.text || textOfMarkup(content.html!)],
                 { type: 'text/plain' }));
         }
     }
@@ -926,12 +1041,12 @@ export function createIncomingClipboard({
      * Caches a complete payload, shows its preview, and lands it locally
      * through the write already issued for it or a new one.
      */
-    function land(t: any, decoded: any): void {
+    function land(t: IncomingTransfer, decoded: DecodedClipboard): void {
         if (t.gen !== generation && t.landing && t.landing.withdrawn) return;
-        let fresh: any;
-        let content: any;
+        let fresh: boolean;
+        let content: LandingContent;
         if (t.kind === 'text') {
-            const text = decoded.result;
+            const text = decoded.result as string;
             fresh = clipboardSync.shouldSend(text, 'text/plain');
             clipboardSync.resolveServer(text, null, 'text/plain');
             sessionSecret = t.secret && text ? text : null;
@@ -950,15 +1065,15 @@ export function createIncomingClipboard({
         } else {
             sessionSecret = null;
             guard.retract();
-            const digest = digestedPayload(decoded.byteLength, decoded.hash);
+            const digest = digestedPayload(decoded.byteLength, decoded.hash!);
             fresh = clipboardSync.shouldSend(digest, t.mime);
             if (t.kind === 'flavours') {
-                const flavours = unpackClipboardFlavours(decoded.result);
+                const flavours = unpackClipboardFlavours(decoded.result as ArrayBuffer);
                 clipboardSync.resolveServer(flavours.text || flavours.html, null, t.mime, digest);
                 onPreview(flavours.text || flavours.html);
                 content = flavours;
             } else {
-                const blob = new Blob([decoded.result], { type: t.mime });
+                const blob = new Blob([decoded.result as ArrayBuffer], { type: t.mime });
                 clipboardSync.resolveServer(undefined, blob, t.mime, digest);
                 content = { blob, mime: t.mime };
             }
@@ -974,23 +1089,23 @@ export function createIncomingClipboard({
         } else if (t.kind === 'image') {
             onImageWriteFailed(new Error('the local clipboard takes no images here'));
         } else if (typeof navigator !== 'undefined' && navigator.clipboard) {
-            writeText(t.kind === 'text' ? content.text : (content.text || content.html), t.secret);
+            writeText((t.kind === 'text' ? content.text : (content.text || content.html))!, t.secret);
         }
     }
 
     /** Writes text locally through the writer, a secret into the guard's care. */
-    function writeText(text: any, secret: any): any {
+    function writeText(text: string, secret: boolean): Promise<boolean> {
         return writer.write((): Promise<void> => navigator.clipboard.writeText(text), {
             onSuccess: (): void => {
                 clipboardSync.noteLocal(clipboardSync.sig(text));
                 if (secret) guard.landed(text);
             },
-            onFailure: (err: any): void => console.error(`Could not copy the session clipboard to the local one: ${err && err.name}`),
+            onFailure: (err: Error): void => console.error(`Could not copy the session clipboard to the local one: ${err && err.name}`),
         });
     }
 
     /** Opens a payload, superseding whatever was still arriving. */
-    function open(mime: any, cacheOnly: any, secret: any): any {
+    function open(mime: string, cacheOnly: boolean, secret?: boolean): IncomingTransfer | null {
         const marked = secretNext;
         secretNext = false;
         if (current) {
@@ -1005,7 +1120,7 @@ export function createIncomingClipboard({
     }
 
     return {
-        begin(mime: any, total: any, cacheOnly: any, secret: any): void {
+        begin(mime: string, total: number, cacheOnly: boolean, secret?: boolean): void {
             const t = open(mime, cacheOnly, secret);
             if (!t) return;
             multipart.begin(mime, total);
@@ -1015,7 +1130,7 @@ export function createIncomingClipboard({
             current = t;
             armStallTimer();
         },
-        push(b64: any): void {
+        push(b64: string): void {
             if (!current) return;
             multipart.push(b64);
             armStallTimer();
@@ -1032,28 +1147,28 @@ export function createIncomingClipboard({
                 withdraw(t.landing, 'incomplete');
                 return;
             }
-            multipart.finish().then((decoded: any): void => {
+            multipart.finish().then((decoded: DecodedClipboard): void => {
                 if (decoded.byteLength !== declared) {
                     withdraw(t.landing, 'incomplete');
                     return;
                 }
                 land(t, decoded);
-            }).catch((err: any): void => {
+            }).catch((err: unknown): void => {
                 withdraw(t.landing, 'undecodable');
                 console.error('Error assembling final clipboard content:', err);
             });
         },
-        single(mime: any, b64: any, cacheOnly: any, secret: any): void {
+        single(mime: string, b64: string, cacheOnly: boolean, secret?: boolean): void {
             const t = open(mime, cacheOnly, secret);
             if (!t) return;
             worker.decode(b64, t.kind === 'text' ? 'text/plain' : mime).then(
-                (decoded: any): void => land(t, decoded),
-                (err: any): void => console.error('Error processing clipboard data from the session:', err));
+                (decoded: DecodedClipboard): void => land(t, decoded),
+                (err: unknown): void => console.error('Error processing clipboard data from the session:', err));
         },
         markSecret(): void {
             secretNext = true;
         },
-        copySecret(): any {
+        copySecret(): Promise<boolean> {
             if (!sessionSecret || typeof navigator === 'undefined' || !navigator.clipboard) {
                 return Promise.resolve(false);
             }
@@ -1100,11 +1215,11 @@ export function clipboardPreviewMessage(text: string, secret: boolean = false): 
 
 export interface ClipboardSync {
   /** Content signature. */
-  sig: (data: string|Uint8Array|ArrayBuffer|Blob, mime?: string) => string;
+  sig: (data: ClipboardPayload, mime?: string) => string;
   /** Change-only gate. */
-  shouldSend: (data: string|Uint8Array|ArrayBuffer|Blob, mime?: string) => boolean;
+  shouldSend: (data: ClipboardPayload, mime?: string) => boolean;
   /** Records content as synced, on transfer success. */
-  markSynced: (data: string|Uint8Array|ArrayBuffer|Blob, mime?: string) => void;
+  markSynced: (data: ClipboardPayload, mime?: string) => void;
   /** Signature of content read from the local clipboard. */
   localSig: (data: string|ArrayBuffer, mime?: string) => Promise<string>;
   /** Records what the local */
@@ -1118,13 +1233,13 @@ export interface ClipboardSync {
   /** Whether a local read's */
   echoes: (text: string|undefined) => boolean;
   /** Caches fresh server data and settles pending requests. */
-  resolveServer: (text?: string, blob?: Blob, mime?: string, bytes?: Uint8Array) => void;
+  resolveServer: (text?: string, blob?: Blob | null, mime?: string, bytes?: Uint8Array | ClipboardDigest) => void;
   /** Records the browser's */
   captureLocalImageSig: () => Promise<void>;
   /** Requests */
   request: (wantBinary: boolean) => Promise<string|Blob>;
   /** Last-resort copy through `execCommand`. */
-  copyViaExecCommand: (textPromise: Promise<string>) => Promise<void>;
+  copyViaExecCommand: (textPromise: Promise<string | Blob>) => Promise<void>;
   /** @property {Blob|null} lastBlob */
   lastText: string;
   /** @property {string} lastMime */
@@ -1167,26 +1282,26 @@ export function sameLines(text: string): string {
     return text.replace(/\r\n?/g, '\n');
 }
 
-export function createClipboardSync({ sendRequest, digestBytes, isChromium = true, canRead = (): boolean => true }: { "sendRequest": any; "digestBytes": any; "isChromium"?: any; "canRead"?: any }): any {
+export function createClipboardSync({ sendRequest, digestBytes, isChromium = true, canRead = (): boolean => true }: { sendRequest: () => void; digestBytes?: ((buf: ArrayBuffer) => Promise<ClipboardDigest>) | null; isChromium?: boolean; canRead?: () => boolean }): ClipboardSync {
     let lastText = '';
-    let lastBlob: any = null;
+    let lastBlob: Blob | null = null;
     let lastMime = 'text/plain';
-    let lastSyncedSig: any = null;
-    let lastReencodeSig: any = null;
-    let lastLocalSig: any = null;
+    let lastSyncedSig: string | null = null;
+    let lastReencodeSig: string | null = null;
+    let lastLocalSig: string | typeof PREDATES_EXPLICIT | null = null;
     /** What the local clipboard was last seen to hold before a push the user asked for. */
-    let seenBeforeExplicit: any = null;
+    let seenBeforeExplicit: string | null = null;
     // The text of the value last synced, either way, when it is known: a local read whose text is that is
     // the same value come back in the engine's own form (its markup rewrapped, an image beside it), no copy.
-    let lastSyncedText: any = null;
-    let pending: any = [];
-    function noteSynced(s: any, text: any = null): void {
+    let lastSyncedText: string | null = null;
+    let pending: ClipboardRequest[] = [];
+    function noteSynced(s: string | null, text: string | null = null): void {
         lastSyncedSig = s;
         lastReencodeSig = null;
         lastSyncedText = typeof text === 'string' && text ? sameLines(text) : null;
     }
 
-    function hashBytes(h: any, u8: any): any {
+    function hashBytes(h: number, u8: Uint8Array): number {
         for (let i = 0; i < u8.length; i++) h = ((h << 5) + h + u8[i]) | 0;
         return h;
     }
@@ -1199,33 +1314,33 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * can be cross-matched.
      * @returns
      */
-    function sigOf(data: any, mime: any): { full: string; legacy: string | null } {
+    function sigOf(data: ClipboardPayload, mime?: string): { full: string; legacy: string | null } {
         if (typeof data === 'string') {
             const text = sameLines(data);
             let h = 5381;
             for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
             return { full: `t:${text.length}:${h}`, legacy: null };
         }
-        if (data && data.__clipDigest) {
+        if (data && (data as ClipboardDigest).__clipDigest) {
             const dm = mime || '';
-            return { full: `b:${dm}:${data.byteLength}:${data.hash}`,
-                     legacy: `b:${dm}:${data.byteLength}` };
+            return { full: `b:${dm}:${(data as ClipboardDigest).byteLength}:${(data as ClipboardDigest).hash}`,
+                     legacy: `b:${dm}:${(data as ClipboardDigest).byteLength}` };
         }
-        let parts: any = null;
+        let parts: Uint8Array[] | null = null;
         if (data instanceof Uint8Array) parts = [data];
         else if (data instanceof ArrayBuffer) parts = [new Uint8Array(data)];
-        else if (Array.isArray(data)) parts = data.map((p: any): any => (p instanceof Uint8Array ? p : new Uint8Array(p)));
+        else if (Array.isArray(data)) parts = data.map((p: Uint8Array | ArrayBuffer): Uint8Array => (p instanceof Uint8Array ? p : new Uint8Array(p)));
         const m = mime || '';
         if (parts) {
             let h = 5381, size = 0;
             for (const p of parts) { size += p.length; h = hashBytes(h, p); }
             return { full: `b:${m}:${size}:${h}`, legacy: `b:${m}:${size}` };
         }
-        const size = data && (data.byteLength !== undefined ? data.byteLength : data.size);
+        const size = data && ((data as ArrayBuffer).byteLength !== undefined ? (data as ArrayBuffer).byteLength : (data as Blob).size);
         return { full: `b:${m}:${size}`, legacy: null };
     }
 
-    function sig(data: any, mime?: any): any { return sigOf(data, mime).full; }
+    function sig(data: ClipboardPayload, mime?: string): string { return sigOf(data, mime).full; }
 
     /**
      * Change-only gate: true while this content and mime differ from the last
@@ -1235,14 +1350,14 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * compare suppresses echoes of content whose receive-side signature was
      * stored without bytes.
      */
-    function shouldSend(data: any, mime: any): any {
+    function shouldSend(data: ClipboardPayload, mime?: string): boolean {
         const { full, legacy } = sigOf(data, mime);
         if (full === lastSyncedSig || full === lastReencodeSig) return false;
         return !(legacy !== null && (legacy === lastSyncedSig || legacy === lastReencodeSig));
     }
 
     /** Records content as synced; called on transfer success. */
-    function markSynced(data: any, mime: any): void {
+    function markSynced(data: ClipboardPayload, mime?: string): void {
         noteSynced(sig(data, mime), typeof data === 'string' ? data : null);
     }
 
@@ -1253,7 +1368,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * its owner (a file manager's cut is the owner's alone).
      * @param text The read's plain text.
      */
-    function echoes(text: string | undefined): any {
+    function echoes(text: string | undefined): boolean {
         return typeof text === 'string' && !!text && lastSyncedText !== null && sameLines(text) === lastSyncedText;
     }
 
@@ -1262,7 +1377,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * `shouldSend` compares. Bytes are digested by the worker where the
      * caller supplied one, from a copy, since they are still to be sent.
      */
-    async function localSig(data: any, mime: any): Promise<any> {
+    async function localSig(data: string | ArrayBuffer, mime?: string): Promise<string> {
         if (typeof data === 'string' || !digestBytes) return sig(data, mime);
         return sig(await digestBytes(data.slice(0)), mime);
     }
@@ -1275,7 +1390,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      *     it differs from what the clipboard was last seen to hold before
      *     the push: unseen until then, it is taken to predate the push.
      */
-    function noteLocal(s: any): boolean {
+    function noteLocal(s: string | null): boolean {
         const changed = lastLocalSig === PREDATES_EXPLICIT
             ? seenBeforeExplicit !== null && s !== null && s !== seenBeforeExplicit
             : s === null || s !== lastLocalSig;
@@ -1310,7 +1425,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * next read finds it a change again. A newer reading, or a push the user
      * asked for since, stands.
      */
-    function forgetLocal(s: any): void {
+    function forgetLocal(s: string): void {
         if (lastLocalSig === s) lastLocalSig = null;
     }
 
@@ -1320,7 +1435,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * stored signature content-hashed so it matches what `shouldSend`
      * computes for the same data.
      */
-    function resolveServer(text: any, blob: any, mime: any, bytes: any): void {
+    function resolveServer(text?: string, blob?: Blob | null, mime?: string, bytes?: Uint8Array | ClipboardDigest): void {
         if (typeof text === 'string') { lastText = text; noteSynced(sig(text), text); }
         if (blob) { lastBlob = blob; noteSynced(sig(bytes != null ? bytes : blob, mime || blob.type)); }
         if (mime) { lastMime = mime; }
@@ -1337,7 +1452,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
                     if (typeof text === 'string' && text !== req.baselineText) req.resolve(text);
                     else pending.push(req);
                 }
-            } catch (_: any) { /* ignore */ }
+            } catch (_) { /* ignore */ }
         }
     }
 
@@ -1361,7 +1476,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
         try {
             const items = await navigator.clipboard.read();
             for (const it of items) {
-                const m = it.types.find((t: any): boolean => t !== 'text/plain');
+                const m = it.types.find((t: string): boolean => t !== 'text/plain');
                 if (!m) continue;
                 const b = await it.getType(m);
                 const buf = await b.arrayBuffer();
@@ -1373,7 +1488,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
                 }
                 return;
             }
-        } catch (_: any) { /* unfocused or permission denied */ }
+        } catch (_) { /* unfocused or permission denied */ }
     }
 
     /**
@@ -1389,18 +1504,18 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * @returns
      */
     function request(wantBinary: boolean): Promise<string | Blob> {
-        try { sendRequest(); } catch (_: any) { /* transport not ready */ }
-        return new Promise((resolve: any, reject: any): void => {
-            const req = { wantBinary: !!wantBinary, resolve, settled: false,
+        try { sendRequest(); } catch (_) { /* transport not ready */ }
+        return new Promise((resolve: (value: string | Blob) => void, reject: (reason: Error) => void): void => {
+            const req: ClipboardRequest = { wantBinary: !!wantBinary, resolve, settled: false,
                 baselineText: lastText, baselineBlob: lastBlob };
-            const settle = (fn: any, val: any): void => {
+            const settle = <V>(fn: (val: V) => void, val: V): void => {
                 if (req.settled) return;
                 req.settled = true;
                 const idx = pending.indexOf(req);
                 if (idx !== -1) pending.splice(idx, 1);
                 fn(val);
             };
-            req.resolve = (val: any): void => settle(resolve, val);
+            req.resolve = (val: string | Blob): void => settle(resolve, val);
             pending.push(req);
             setTimeout((): void => {
                 if (wantBinary && lastBlob && lastBlob !== req.baselineBlob) {
@@ -1423,9 +1538,9 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * with pre-copy content.
      * @param textPromise The pending server text.
      */
-    async function copyViaExecCommand(textPromise: Promise<string>): Promise<void> {
-        let text: any;
-        try { text = await textPromise; } catch (_: any) { return; }
+    async function copyViaExecCommand(textPromise: Promise<string | Blob>): Promise<void> {
+        let text: string | Blob;
+        try { text = await textPromise; } catch (_) { return; }
         if (typeof text !== 'string') return;
         if (!text) return;
         const ta = document.createElement('textarea');
@@ -1442,8 +1557,8 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
             ta.setSelectionRange(0, ta.value.length);
             const ok = document.execCommand('copy');
             if (!ok) console.warn('execCommand("copy") fallback returned false.');
-        } catch (err: any) {
-            console.warn(`execCommand("copy") fallback threw: ${err && err.name} - ${err && err.message}`);
+        } catch (err) {
+            console.warn(`execCommand("copy") fallback threw: ${err && (err as Error).name} - ${err && (err as Error).message}`);
         } finally {
             document.body.removeChild(ta);
         }
@@ -1462,10 +1577,10 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
         captureLocalImageSig,
         request,
         copyViaExecCommand,
-        get lastText(): any { return lastText; },
+        get lastText(): string { return lastText; },
         echoes,
-        get lastBlob(): any { return lastBlob; },
-        get lastMime(): any { return lastMime; },
+        get lastBlob(): Blob | null { return lastBlob; },
+        get lastMime(): string { return lastMime; },
     };
 }
 
@@ -1533,22 +1648,22 @@ export function createClipboardGestures({
     getDeferredWriteLanding,
     hasPendingServerWrite,
     readLocalClipboard,
-}: { "isChromium": any; "clipboardSync": any; "sendClipboardData": any; "canSync": any; "canRead": any; "canWrite": any; "binaryEnabled": any; "getSendInFlight": any; "getDeferredWriteLanding": any; "hasPendingServerWrite": any; "readLocalClipboard": any }): { wire: () => void; unwire: () => void } {
-    function inPageFormField(): any {
+}: { isChromium: boolean; clipboardSync: ClipboardSync; sendClipboardData: ClipboardSend; canSync: () => boolean; canRead: () => boolean; canWrite: () => boolean; binaryEnabled: () => boolean; getSendInFlight: () => Promise<void> | null; getDeferredWriteLanding?: () => Promise<boolean> | null; hasPendingServerWrite?: () => boolean; readLocalClipboard?: () => Promise<void> }): { wire: () => void; unwire: () => void } {
+    function inPageFormField(): boolean {
         const ae = document.activeElement;
         return !!(ae && ae.id !== 'overlayInput' &&
             (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' ||
-             ae.tagName === 'SELECT' || (ae as any).isContentEditable));
+             ae.tagName === 'SELECT' || (ae as HTMLElement).isContentEditable));
     }
 
-    const heldPasteEvents: any[] = [];
+    const heldPasteEvents: KeyboardEvent[] = [];
     let heldPasteReplayPending = false;
     /** The send the last paste event started, which its chord's V waits on. */
-    let pasteSendInFlight: any = null;
+    let pasteSendInFlight: Promise<void> | null = null;
     /** When the last paste event arrived. */
     let pasteSeenAt = -Infinity;
     /** The read and send the last Chromium paste chord started. */
-    let chordReadInFlight: any = null;
+    let chordReadInFlight: Promise<void> | null = null;
     // How long a held chord waits for the paste event its keydown triggers,
     // which engines dispatch right after the keydown, in the same task.
     const PASTE_EVENT_WAIT_MS = 100;
@@ -1562,7 +1677,7 @@ export function createClipboardGestures({
                 const replay = new KeyboardEvent(ev.type, ev);
                 Object.defineProperty(replay, '__selkiesClipReplay', { value: true });
                 window.dispatchEvent(replay);
-            } catch (_: any) { /* never break the key stream */ }
+            } catch (_) { /* never break the key stream */ }
         }
     }
     /**
@@ -1605,7 +1720,7 @@ export function createClipboardGestures({
      * @param ev
      */
     function holdPasteWhileClipboardInFlight(ev: KeyboardEvent): void {
-        if ((ev as any).__selkiesClipReplay) return;
+        if (ev.__selkiesClipReplay) return;
         const modHold = heldPasteReplayPending && ev.type === 'keyup' && PASTE_MOD_CODES.includes(ev.code);
         if (ev.code !== 'KeyV' && !modHold) return;
         const chord = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
@@ -1646,8 +1761,8 @@ export function createClipboardGestures({
                 if (remaining <= 0) { dropHeldPasteKeydowns(); return; }
                 Promise.race([
                     Promise.all(inflight).then((): string => 'settled', (): string => 'failed'),
-                    new Promise((r: any): void => { setTimeout((): void => r('timeout'), remaining); }),
-                ]).then((outcome: any): void => {
+                    new Promise((r: (value: unknown) => void): void => { setTimeout((): void => r('timeout'), remaining); }),
+                ]).then((outcome: unknown): void => {
                     if (outcome === 'settled') awaitClipboardQuiet();
                     else dropHeldPasteKeydowns();
                 });
@@ -1677,18 +1792,18 @@ export function createClipboardGestures({
         if (key === 'c' && canWrite()) {
             const textPromise = clipboardSync.request(false);
             const items = {
-                'text/plain': textPromise.then((t: any): Blob =>
+                'text/plain': textPromise.then((t: string | Blob): Blob =>
                     new Blob([typeof t === 'string' ? t : (clipboardSync.lastText || '')], { type: 'text/plain' }))
             };
-            let writePromise: any = null;
+            let writePromise: Promise<void> | null = null;
             try {
                 writePromise = navigator.clipboard.write([new ClipboardItem(items)]);
-            } catch (err: any) {
-                console.warn(`navigator.clipboard.write unavailable on Ctrl+C, using execCommand: ${err && err.name}`);
+            } catch (err) {
+                console.warn(`navigator.clipboard.write unavailable on Ctrl+C, using execCommand: ${err && (err as Error).name}`);
                 clipboardSync.copyViaExecCommand(textPromise);
             }
             if (writePromise && writePromise.catch) {
-                writePromise.catch((err: any): void => {
+                writePromise.catch((err: Error | null): void => {
                     console.warn(`navigator.clipboard.write rejected on Ctrl+C, using execCommand: ${err && err.name} - ${err && err.message}`);
                     clipboardSync.copyViaExecCommand(textPromise);
                 });
@@ -1715,13 +1830,13 @@ export function createClipboardGestures({
         if (hasPendingServerWrite && hasPendingServerWrite()) return;
         const cd = event.clipboardData;
         if (!cd) return;
-        let content: any = null;
+        let content: Promise<[string | ArrayBuffer, string]> | null = null;
         if (binaryEnabled() && cd.items) {
             for (let i = 0; i < cd.items.length && !content; i++) {
                 const it = cd.items[i];
                 const file = it.kind === 'file' && it.type && it.type.startsWith('image/') ? it.getAsFile() : null;
                 // Read now: the item is only valid while the event is dispatched.
-                if (file) content = file.arrayBuffer().then((buf: any): any => [buf, file.type || it.type]);
+                if (file) content = file.arrayBuffer().then((buf: ArrayBuffer): [string | ArrayBuffer, string] => [buf, file.type || it.type]);
             }
         }
         if (!content) {
@@ -1729,11 +1844,11 @@ export function createClipboardGestures({
             if (!text) return;
             content = Promise.resolve([text, 'text/plain']);
         }
-        const sending = content.then(async ([data, mime]: any[]): Promise<void> => {
+        const sending = content.then(async ([data, mime]: [string | ArrayBuffer, string]): Promise<void> => {
             if (!clipboardSync.noteLocal(await clipboardSync.localSig(data, mime))) return;
             if (typeof data === 'string' && clipboardSync.echoes(data)) return;
             await sendClipboardData(data, mime);
-        }).catch((err: any): void => console.warn(`Paste could not reach the session: ${err && err.name}`));
+        }).catch((err: Error | null): void => console.warn(`Paste could not reach the session: ${err && err.name}`));
         pasteSendInFlight = sending;
         sending.finally((): void => { if (pasteSendInFlight === sending) pasteSendInFlight = null; });
     }

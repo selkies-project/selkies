@@ -185,16 +185,16 @@ async function reencodeToPng(id: number, blob: Blob): Promise<void> {
         const png = await canvas.convertToBlob({ type: 'image/png' });
         self.postMessage({ id, success: true, result: png, mimeType: 'image/png',
                            byteLength: png!.size });
-    } catch (err: any) {
-        self.postMessage({ id, success: false, error: err.message });
+    } catch (err) {
+        self.postMessage({ id, success: false, error: (err as Error).message });
     } finally {
         if (bmp) bmp.close();
     }
 }
 
 /** Dispatches one bridge request and posts its reply. */
-self.onmessage = function(e: MessageEvent): void {
-    const { id, action, payload, mimeType } = e.data as WorkerRequest;
+self.onmessage = function(e: MessageEvent<WorkerRequest>): void {
+    const { id, action, payload, mimeType } = e.data;
 
     try {
         if (action === 'DECODE_BEGIN') {
@@ -267,7 +267,7 @@ self.onmessage = function(e: MessageEvent): void {
         } else {
             self.postMessage({ id, success: false, error: `Unknown action: ${action}` });
         }
-    } catch (err: any) {
-        self.postMessage({ id, success: false, error: err.message });
+    } catch (err) {
+        self.postMessage({ id, success: false, error: (err as Error).message });
     }
 };

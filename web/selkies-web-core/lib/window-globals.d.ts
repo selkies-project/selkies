@@ -71,6 +71,11 @@ declare global {
     brave?: object;
   }
 
+  interface Permissions {
+    /** The clipboard permissions Chromium names, which the DOM typings leave out. */
+    query(permissionDesc: { name: 'clipboard-read' | 'clipboard-write' }): Promise<PermissionStatus>;
+  }
+
   interface KeyboardEvent {
     /** Set on the keydown `lib/clipboard-sync.ts` dispatches again once the transfer it waited on settles. */
     __selkiesClipReplay?: boolean;
