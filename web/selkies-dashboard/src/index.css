@@ -5,6 +5,9 @@
  */
 
 @import "tailwindcss";
+/* Generated files are no source of class names, with or without a .gitignore that says so. */
+@source not "../public/selkies-core.js";
+@source not "../dist";
 @import "tw-animate-css";
 @import "./shadcn-tailwind.css";
 @import "@fontsource-variable/inter";
