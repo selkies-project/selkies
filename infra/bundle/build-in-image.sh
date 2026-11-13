@@ -221,6 +221,15 @@ missing="$(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}" -type f ! -path '*/p
     -exec sh -c 'head -c4 "$1" | grep -q ELF || exit 0
         ldd "$1" 2>&1 | grep "not found" | sed "s|^|$1: |"' _ {} \;)"
 [ -z "${missing}" ] || { echo "${missing}" >&2; exit 1; }
+# The server links libxcb in statically and exports none of it, and no libxcb is
+# carried, so the one a host's GPU driver loads (NVIDIA's L4T X and EGL stack
+# links the distribution's) is the only one it can bind: a bundled copy would
+# shadow it through the run path, which takes the capture thread down there
+if find "${LIBDIR}" -name 'libxcb*' | grep -q . \
+    || nm -D --defined-only "${TREE}/bin/selkies" | grep -q ' xcb_'; then
+    echo "the bundle carries or exports libxcb" >&2
+    exit 1
+fi
 "${TREE}/bin/selkies" --version
 readelf -d "${TREE}/bin/selkies" | grep -E 'NEEDED|RUNPATH'
 
