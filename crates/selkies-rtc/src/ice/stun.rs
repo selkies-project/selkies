@@ -19,7 +19,6 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 
-use rand::RngExt;
 use rtc_crypto::RTCCryptoProvider;
 use rtc_ice::attributes::control::{AttrControlled, AttrControlling};
 use rtc_ice::attributes::priority::PriorityAttr;
@@ -290,7 +289,7 @@ pub fn binding_request(
     let provider = crypto();
     let mut setters: Vec<Box<dyn Setter + '_>> = vec![
         Box::new(BINDING_REQUEST),
-        Box::new(TransactionId::new()),
+        Box::new(random_transaction_id()),
         Box::new(TextAttribute::new(
             ATTR_USERNAME,
             format!("{remote_ufrag}:{local_ufrag}"),
@@ -316,21 +315,30 @@ pub fn binding_request(
 
 /// A plain binding request, as a server-reflexive query to a STUN server sends.
 pub fn plain_binding_request() -> Result<Message, IceError> {
-    build(&[Box::new(BINDING_REQUEST), Box::new(TransactionId::new())])
+    build(&[Box::new(BINDING_REQUEST), Box::new(random_transaction_id())])
 }
 
 /// Twelve random bytes as a transaction id.
 pub fn random_transaction_id() -> TransactionId {
-    TransactionId::new()
+    TransactionId(crate::crypto::random())
 }
 
 /// A random alphanumeric string of `length` characters, as ICE credentials are made.
+///
+/// Every character is equally likely: a random byte picks one only below the largest multiple
+/// of the alphabet's size a byte holds, and is drawn again otherwise.
 pub fn random_string(length: usize) -> String {
     const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::rng();
-    (0..length)
-        .map(|_| CHARS[rng.random_range(0..CHARS.len())] as char)
-        .collect()
+    const UNBIASED: usize = 256 - 256 % CHARS.len();
+    let mut out = String::with_capacity(length);
+    while out.len() < length {
+        for byte in crate::crypto::random::<32>() {
+            if usize::from(byte) < UNBIASED && out.len() < length {
+                out.push(CHARS[usize::from(byte) % CHARS.len()] as char);
+            }
+        }
+    }
+    out
 }
 
 /// Whether `value` satisfies 4*256 ice-char, as an ICE username fragment must.
@@ -428,7 +436,7 @@ mod tests {
     /// byte by byte reaches the parser and the authenticator with no panic.
     #[test]
     fn mutated_checks_never_panic() {
-        use rand::SeedableRng;
+        use rand::{RngExt, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(0x5354_554E);
         let key = "serverpasswordserverpass";
         let valid =
@@ -538,5 +546,17 @@ mod tests {
         assert!(valid_password(&pwd));
         assert!(!valid_username("abc"));
         assert!(!valid_password("short"));
+    }
+
+    #[test]
+    fn random_strings_draw_the_whole_alphabet_and_nothing_else() {
+        let long = random_string(6200);
+        assert_eq!(long.len(), 6200);
+        assert!(long.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        let distinct: std::collections::BTreeSet<u8> = long.bytes().collect();
+        assert_eq!(distinct.len(), 62);
+        assert_ne!(random_string(22), random_string(22));
+        assert_ne!(random_transaction_id(), random_transaction_id());
+        assert!(random_string(0).is_empty());
     }
 }

@@ -811,11 +811,11 @@ pub fn uint32_gt(a: u32, b: u32) -> bool {
 /// A random 16-bit sequence number in the lower half of the range, so a stream never
 /// wraps during SRTP's first key epoch.
 pub fn random_sequence_number() -> u16 {
-    (rand::rng().next_u32() & 0x7FFF) as u16
+    u16::from_ne_bytes(crate::crypto::random()) & 0x7FFF
 }
 
 pub fn random32() -> u32 {
-    rand::rng().next_u32()
+    u32::from_ne_bytes(crate::crypto::random())
 }
 
 #[cfg(test)]

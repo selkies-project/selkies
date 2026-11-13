@@ -26,8 +26,6 @@
 
 use std::collections::HashSet;
 
-use rand::Rng;
-
 use super::codecs::{
     self, HeaderExtension, MediaKind, filter_preferred_codecs, find_common_codecs,
     find_common_header_extensions, receive_only_payload_types, with_payload_types,
@@ -182,12 +180,11 @@ pub struct Session {
 }
 
 fn random_u32() -> u32 {
-    rand::rng().next_u32()
+    u32::from_ne_bytes(crate::crypto::random())
 }
 
 pub(crate) fn random_id() -> String {
-    let mut bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut bytes);
+    let bytes: [u8; 16] = crate::crypto::random();
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     format!(
         "{}-{}-{}-{}-{}",

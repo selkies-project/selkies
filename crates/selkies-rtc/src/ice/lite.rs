@@ -106,7 +106,7 @@ impl LiteAgent {
             local_ufrag: ufrag.to_string(),
             local_pwd: pwd.to_string(),
             remote: None,
-            tie_breaker: rand::rng().random(),
+            tie_breaker: u64::from_ne_bytes(crate::crypto::random()),
             locals: Vec::new(),
             remotes: Vec::new(),
             pairs: Vec::new(),
