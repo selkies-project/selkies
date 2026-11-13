@@ -115,7 +115,7 @@ async fn first_page(server: &Server) -> Option<(Duration, Client)> {
 
 #[tokio::test]
 #[ignore = "needs a built selkies server, Xvfb, and xrdb"]
-async fn a_page_connecting_as_the_port_opens_meets_the_density_the_home_left() {
+async fn a_websockets_page_connecting_as_the_port_opens_meets_the_density_the_home_left() {
     let (display, server) = restarted("websockets").await;
     let mut checks = Checks::new("dpi-startup-order");
     let ((), page) = tokio::join!(server.ready(), first_page(&server));

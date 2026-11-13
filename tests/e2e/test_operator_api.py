@@ -36,7 +36,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import helpers as H
 import core_lib as C
 from array import array
-from test_audit_webhook import Collector
 from test_microphone_audio import CAPTURE_RATE, analyze, tone_wav
 from playwright.sync_api import sync_playwright
 
@@ -74,7 +73,7 @@ def basic(password: str) -> dict:
     return {"Authorization": "Basic " + base64.b64encode(f"{BASIC_USER}:{password}".encode()).decode()}
 
 
-def server_env(collector: Collector) -> dict:
+def server_env(collector: C.Collector) -> dict:
     env = {"SELKIES_FILE_MANAGER_PATH": FILES_DIR, "SELKIES_AUDIT_WEBHOOK_URL": collector.url}
     # A pixelflux on PYTHONPATH is the one under test rather than the installed one.
     if os.environ.get("PYTHONPATH"):
@@ -130,11 +129,11 @@ def wait_gone(session_id: str, timeout: float = 15) -> bool:
     return False
 
 
-def events(collector: Collector, kind: str) -> list:
+def events(collector: C.Collector, kind: str) -> list:
     return [e for e in collector.events if e.get("event") == kind]
 
 
-def wait_events(collector: Collector, kind: str, count: int, timeout: float = 15) -> list:
+def wait_events(collector: C.Collector, kind: str, count: int, timeout: float = 15) -> list:
     deadline = time.time() + timeout
     while time.time() < deadline and len(events(collector, kind)) < count:
         time.sleep(0.2)
@@ -209,7 +208,7 @@ def audio_track(path: str) -> Optional[dict]:
             "tone": analyze(samples[CAPTURE_RATE:2 * CAPTURE_RATE])}
 
 
-def recording_round(res: "H.Results", label: str, collector: Collector, expect_size: Optional[tuple] = None) -> None:
+def recording_round(res: "H.Results", label: str, collector: C.Collector, expect_size: Optional[tuple] = None) -> None:
     """One recording, with a tone playing into the session's sink while it
     runs, and one screenshot against the running server.
 
@@ -283,7 +282,7 @@ def transport_block(mode: str) -> "H.Results":
     res = H.Results(f"operator-{mode}")
     shutil.rmtree(FILES_DIR, ignore_errors=True)
     os.makedirs(FILES_DIR)
-    collector = Collector()
+    collector = C.Collector()
     H.server_start(mode=mode, wayland=False, extra_env=server_env(collector))
     with sync_playwright() as pw:
         browser = C.chromium_launch(pw)
@@ -322,7 +321,7 @@ def transport_block(mode: str) -> "H.Results":
     collector.stop()
 
     if mode == "websockets":
-        collector = Collector()
+        collector = C.Collector()
         H.server_start(mode=mode, wayland=False, extra_env={
             **server_env(collector), "SELKIES_ENABLE_BASIC_AUTH": "true",
             "SELKIES_BASIC_AUTH_USER": BASIC_USER, "SELKIES_BASIC_AUTH_PASSWORD": BASIC_PASSWORD,
@@ -351,7 +350,7 @@ def wayland_block() -> "H.Results":
     res = H.Results("operator-wayland")
     shutil.rmtree(FILES_DIR, ignore_errors=True)
     os.makedirs(FILES_DIR)
-    collector = Collector()
+    collector = C.Collector()
     try:
         H.server_start(mode="websockets", wayland=True, extra_env=server_env(collector))
     except RuntimeError as exc:

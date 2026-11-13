@@ -16,7 +16,8 @@
 //!   display.
 //! - [`client`] is a WebSocket page: it reads its socket for as long as it lives, as a browser
 //!   does, and keeps what arrived for the test to wait on.
-//! - [`http`] is one request against a server.
+//! - [`http`] is one request against a server, and a listener that records what a server posts
+//!   to it.
 //! - [`xvfb`] is an X server of a test's own, for a suite that restarts servers on a desktop it
 //!   prepared or needs a display nothing else touches.
 //! - [`x11`] is what a suite reads back from an X display and puts on it: the root's size, the

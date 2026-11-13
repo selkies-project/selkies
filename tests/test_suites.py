@@ -3,9 +3,10 @@
 
 Each suite runs as its own process, exactly as it does standalone, so a wedged
 server or a crashed browser cannot take the rest of the run with it. The child
-is told its budget (`SELKIES_SUITE_DEADLINE`, read by helpers.py) so a suite
-that stalls dumps every thread's stack and exits before the kill here would
-throw that record away. Select by tier with the markers:
+is told its budget (`SELKIES_SUITE_DEADLINE`, read by helpers.py and by the
+Rust suites' harness) so a suite that stalls says where it stuck and exits
+before the kill here would throw that record away. Select by tier with the
+markers:
 
     pytest tests -m unit
     pytest tests -m "integration or e2e"
@@ -133,6 +134,10 @@ def test_suite(path: str, selector: Optional[str], timeout: int, name: str) -> N
         reason = next((line for line in proc.stdout.splitlines()
                        if line.startswith("SKIP")), "subject not installed")
         pytest.skip(f"{path}: {reason}")
+    # libtest passes a filter that matches nothing, which is a selector that
+    # names no test of the target, not a suite that passed.
+    assert not path.endswith(".rs") or proc.returncode or "running 0 tests" not in proc.stdout, (
+        f"{path} {selector or ''} ran no test")
     failed = [line for line in proc.stdout.splitlines() if line.startswith("FAIL")]
     # A suite that died rather than failing checks reports through stderr, so
     # the traceback is what the message has to carry; a Rust one's panic is in

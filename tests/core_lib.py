@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Shared check routines for the transport x backend e2e matrix."""
+import http.server
 import json
 import os
 import platform
@@ -717,3 +718,41 @@ class Churn:
         self._stop.set()
         self._thread.join(5)
         self._thread = None
+
+
+class Collector:
+    """The operator's collector: records the POSTs, and stalls them on demand."""
+
+    def __init__(self) -> None:
+        self.events: list = []
+        self.headers: list = []
+        self.stall = threading.Event()
+        collector = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                while collector.stall.is_set():
+                    time.sleep(0.05)
+                collector.events.append(json.loads(body))
+                collector.headers.append(dict(self.headers))
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *_: object) -> None:
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_port}/audit"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def wait(self, count: int, timeout: float = 15) -> list:
+        """The events received once `count` of them have arrived, or time is up."""
+        end = time.time() + timeout
+        while time.time() < end and len(self.events) < count:
+            time.sleep(0.05)
+        return list(self.events)
+
+    def stop(self) -> None:
+        self.stall.clear()
+        self.httpd.shutdown()
