@@ -50,7 +50,11 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   the code can be written its way. Tests sit beside the code they test (`mod tests`, or a `tests.rs` beside a large
   module) and are named for the behavior they hold, as a sentence.
 - TypeScript (`.ts`/`.tsx`): JSDoc blocks with `@param name description`, `@returns`, `@throws`, and no types in
-  the tags — the signature is the type. Props are an `interface` or `type` with a line per field.
+  the tags — the signature is the type. Props are an `interface` or `type` with a line per field. No `any`: a
+  value whose shape is not known is `unknown` and narrowed before use (a wire message once, where it is parsed, by
+  the shape its module declares), and an untyped global or a vendor-prefixed API is declared in a `.d.ts`
+  augmentation (`web/selkies-web-core/lib/window-globals.d.ts`), never reached through a cast. ESLint refuses the
+  rest (`no-explicit-any` and the type-checked `no-unsafe-*` rules).
 - JavaScript (`.js`/`.mjs`), left only in the Node
   audits under `tests/tools`, and the image tier's tester pages: the same JSDoc blocks, but the tags carry the types
   (`@param {Type} name`, `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The web core is
