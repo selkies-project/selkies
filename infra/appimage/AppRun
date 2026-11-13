@@ -47,14 +47,27 @@ wayland="${SELKIES_WAYLAND-${PIXELFLUX_WAYLAND-}}"
 wayland="$(printf '%s' "${wayland%%|*}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 if [ "${wayland}" != "true" ] && [ "${wayland}" != "1" ]; then
     export DISPLAY="${DISPLAY:-:20}"
-    socket="/tmp/.X11-unix/X${DISPLAY#*:}"
+    # The display number alone: a screen suffix (:0.0) names no socket of its own
+    number="${DISPLAY#*:}"
+    number="${number%%.*}"
+    socket="/tmp/.X11-unix/X${number}"
     if [ ! -S "${socket}" ]; then
-        "${LIBEXEC}/Xvfb" "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension COMPOSITE \
+        log="${XDG_RUNTIME_DIR}/Xvfb_selkies.log"
+        "${LIBEXEC}/Xvfb" ":${number}" -screen 0 8192x4096x24 -s 0 -dpms +extension COMPOSITE \
             +extension DAMAGE +extension GLX +extension RANDR +extension RENDER +extension MIT-SHM \
-            +extension XFIXES +extension XTEST +render -nolisten tcp -ac \
-            > "${XDG_RUNTIME_DIR}/Xvfb_selkies.log" 2>&1 &
+            +extension XFIXES +extension XTEST +render -nolisten tcp -ac > "${log}" 2>&1 &
+        xvfb="$!"
         echo 'Waiting for X Socket'
-        until [ -S "${socket}" ]; do sleep 0.5; done
+        waited=0
+        until [ -S "${socket}" ]; do
+            if ! kill -0 "${xvfb}" 2> /dev/null || [ "${waited}" -ge 60 ]; then
+                echo "Xvfb did not come up on :${number}; its log, ${log}:" >&2
+                tail -n 20 "${log}" >&2
+                exit 1
+            fi
+            sleep 0.5
+            waited=$((waited + 1))
+        done
         echo 'X Server is ready'
     fi
 fi
