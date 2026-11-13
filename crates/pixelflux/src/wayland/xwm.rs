@@ -392,6 +392,7 @@ pub fn window_info(
     });
     let hints = surface.size_hints();
     let geometry = surface.geometry();
+    let origin = surface.last_configure().loc;
     let decoration = if surface.is_decorated() {
         Decoration::None
     } else {
@@ -422,14 +423,14 @@ pub fn window_info(
             base: surface.base_size().map(|s| Size { w: s.w, h: s.h }),
         },
         requested: Some(Rect::new(
-            geometry.loc.x,
-            geometry.loc.y,
+            origin.x,
+            origin.y,
             geometry.size.w,
             geometry.size.h,
         )),
         positioned: hints
             .as_ref()
-            .is_some_and(|h| h.position.is_some() && (geometry.loc.x != 0 || geometry.loc.y != 0))
+            .is_some_and(|h| h.position.is_some() && (origin.x != 0 || origin.y != 0))
             || !matches!(
                 window_type_of(surface),
                 WindowType::Normal | WindowType::Dialog | WindowType::Utility | WindowType::Toolbar
@@ -443,6 +444,13 @@ pub fn window_info(
         skip_taskbar: surface.is_skip_taskbar(),
         accepts_focus,
     }
+}
+
+/// Where an X11 window's visible area sits on the root: the position the X server holds for
+/// it, inside the shadow its toolkit draws (`_GTK_FRAME_EXTENTS`). [`X11Surface::geometry`]
+/// is relative to the window's own origin, so it gives that inset and never a position.
+fn root_location(surface: &X11Surface) -> Point<i32, Logical> {
+    surface.last_configure().loc + surface.geometry().loc
 }
 
 /// Carry a configure out on an X11 window: its geometry and its states.
@@ -687,8 +695,9 @@ impl XwmHandler for AppState {
         let rect = wm::rect_of(self, id)
             .filter(|r| r.w > 0 && r.h > 0)
             .unwrap_or_else(|| {
-                let g = surface.geometry();
-                Rect::new(g.loc.x, g.loc.y, g.size.w.max(1), g.size.h.max(1))
+                let at = surface.last_configure().loc;
+                let size = surface.geometry().size;
+                Rect::new(at.x, at.y, size.w.max(1), size.h.max(1))
             });
         let _ = surface.configure(Some(Rectangle::<i32, Logical>::new(
             (rect.x, rect.y).into(),
@@ -722,7 +731,7 @@ impl XwmHandler for AppState {
     fn map_window_notify(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, surface: X11Surface) {
-        let location = surface.geometry().loc;
+        let location = root_location(&surface);
         let window = Window::new_x11_window(surface);
         window
             .user_data()
@@ -783,7 +792,7 @@ impl XwmHandler for AppState {
         h: Option<u32>,
         reorder: Option<Reorder>,
     ) {
-        let mut geo = surface.geometry();
+        let mut geo = surface.last_configure();
         if let Some(x) = x {
             geo.loc.x = x;
         }
@@ -823,7 +832,7 @@ impl XwmHandler for AppState {
         &mut self,
         _xwm: XwmId,
         surface: X11Surface,
-        geometry: Rectangle<i32, Logical>,
+        _geometry: Rectangle<i32, Logical>,
         _above: Option<u32>,
     ) {
         if !surface.is_override_redirect() {
@@ -835,7 +844,8 @@ impl XwmHandler for AppState {
             .find(|w| w.x11_surface() == Some(&surface))
             .cloned();
         if let Some(window) = found {
-            self.space.map_element(window, geometry.loc, false);
+            self.space
+                .map_element(window, root_location(&surface), false);
             for node in &mut self.output_nodes {
                 if let Some(cap) = node.capture.as_mut() {
                     cap.change_pending = true;
