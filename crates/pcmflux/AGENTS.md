@@ -3,6 +3,11 @@
 pcmflux is the audio-capture and encode library in Selkies' `crates/pcmflux`, beside the server and
 [pixelflux](../pixelflux) (screen capture and video encode). Native changes and callers land in one commit.
 
+The repository's `AGENTS.md` holds the structure rules ("Structure"): pcmflux owns audio capture, encode, and
+decode. It knows no HTTP, authentication, or Selkies setting names; the server passes values in and reaches it
+through its public Rust API alone. Performance (latency, an unrestricted frame rate, zero-copy) ranks above those
+rules.
+
 Use web search, web fetch, and other available tools as necessary. Make sure that the comments or documentation are
 not too verbose (do not add comments more fit for a PR summary than a comment). Do not leave arbitrary numbers (such
 as issue or task numbers) in the code or documentation. Do not use inline comments. Do not use comments or

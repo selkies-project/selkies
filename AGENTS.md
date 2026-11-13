@@ -230,6 +230,34 @@ what runs where.
   stamping updates every public crate manifest and both lock contexts together. What a build was compiled with
   (software H.264, below) is still read, as is the host's CUDA range above.
 
+## Structure
+
+These rules rank below the engineering priorities above. End-to-end latency, an unrestricted frame rate, zero-copy
+paths, and resource usage win over structure: where a clean boundary would cost a copy, a queue, a thread hop, a
+contended lock, or a frame, keep the fast path and state the reason in the docblock of the module that crosses the
+boundary. Everywhere else, they hold.
+
+- Cohesion up, coupling down. Code lives with the concern it serves, and a module or crate has one. Moving code
+  between crates, or between modules, is justified when each side ends up owning one concern and the two meet
+  through a narrower interface than before; fewer lines, fewer files, or one server instead of two are not reasons
+  on their own. A change that moves code says what each side owns afterwards.
+- Each crate owns its concern and nothing of its neighbors'. `pixelflux`: the display (capture, encode, the
+  compositor, input injection, screenshots, recording). `pcmflux`: audio capture, encode, and decode.
+  `selkies-rtc`: the WebRTC transport. `selkies`: serving and access (HTTP, TLS, tokens, roles), settings,
+  sessions, and the orchestration of the others. `selkies-wm`: window policy. `selkies-draw`: rasterization.
+  `selkies-desktop`: the shell. A library crate knows no HTTP, authentication, or setting names: the server reads
+  its settings and passes values in.
+- Dependencies point one way: the server depends on the libraries, never the reverse, and no crate reaches into
+  another's internals. What a crate exports is what another crate calls; everything else stays private.
+- One interface per axis of variation, with the difference behind it: X11 and Wayland (and host capture), the
+  encoders and codecs, WebSockets and WebRTC, the desktop environments. A caller does not branch on the backend
+  where the interface can carry the difference, backend-specific code stays in that backend's module, and logic
+  the backends share is written once. This is what keeps the parity rule above cheap to hold.
+- One source of truth for each fact: a constant, a wire format, a setting's default, or a capability check is
+  defined once and read from there, in Rust and in the web client alike.
+- No abstraction ahead of need: an interface is introduced when a second implementation or a test seam exists,
+  and a helper when a second caller does.
+
 ## Cross-cutting invariants
 
 Each is documented in full where named; read that before changing the subsystem.
