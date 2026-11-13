@@ -91,7 +91,8 @@ def spawn_server(log: str) -> subprocess.Popen:
            "SELKIES_VIDEO_STREAMING_MODE": "true", **H.inherited_env()}
     with open(log, "w") as lf:
         lf.write("")
-    return H.spawn([H.SERVER], env=env, cwd=H.WORKDIR,
+    # Any argument runs the server alone; a bare selkies is the standalone desktop
+    return H.spawn([H.SERVER, "--mode=websockets"], env=env, cwd=H.WORKDIR,
                    stdout=open(log, "a"), stderr=subprocess.STDOUT, start_new_session=True)
 
 

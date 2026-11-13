@@ -668,8 +668,9 @@ def server_start(mode: str = "websockets", wayland: bool = False,
     server = os.path.abspath(shutil.which(SERVER) or SERVER)
     if not (os.path.isfile(server) and os.access(server, os.X_OK)):
         raise RuntimeError(f"no selkies server to run at {SERVER!r}")
+    # Any argument runs the server alone; a bare selkies is the standalone desktop
     proc = spawn(
-        [server],
+        [server, f"--mode={env['SELKIES_MODE']}"],
         env=env, cwd=WORKDIR,
         stdout=open(log, "a"), stderr=subprocess.STDOUT,
         start_new_session=True)
