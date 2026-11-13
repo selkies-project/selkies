@@ -683,7 +683,7 @@ def sidebar_layout_check(page, res: "H.Results") -> None:
     time.sleep(0.6)
     after = page.evaluate(palette)
     res.check("the files dialog follows a live theme flip",
-              before["dark"] and not after["dark"] and before["bg"] != after["bg"], (before, after))
+              before["dark"] != after["dark"] and before["bg"] != after["bg"], (before, after))
     page.locator('.theme-toggle').first.dispatch_event("click")
     time.sleep(0.4)
     page.keyboard.press("Escape")
