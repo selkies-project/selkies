@@ -125,6 +125,9 @@ interface LayoutRect {
     crossable?: boolean;
 }
 
+/** The displays of the extended desktop as the server publishes them, by display id; a page that published no stream box leaves those members out. */
+export type DisplayLayouts = Record<string, Pick<LayoutRect, 'x' | 'y' | 'w' | 'h'> & Partial<LayoutRect>>;
+
 /** The extended-desktop layout a held drag is mapped through. */
 interface DisplayLayout {
     /** This page's display. */
@@ -3973,7 +3976,7 @@ export class Input {
      * mapping.
      * @param ownId Display id this page renders.
      */
-    setDisplayLayouts(layouts: Record<string, { x: number; y: number; w: number; h: number; scale: number | undefined; originX: number | undefined; originY: number | undefined; scaleX: number | undefined; scaleY: number | undefined; crossable?: boolean }> | null, ownId: string): void {
+    setDisplayLayouts(layouts: DisplayLayouts | null, ownId: string): void {
         this._layout = null;
         if (!layouts || typeof layouts !== 'object') {
             this._watchScreenGeometry(false);

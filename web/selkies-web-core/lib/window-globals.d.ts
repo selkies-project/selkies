@@ -34,6 +34,11 @@ declare global {
     new(init: MediaStreamTrackProcessorInit): MediaStreamTrackProcessor;
   };
 
+  interface RTCRtpEncodingParameters {
+    /** The codec this encoding sends with, where the engine lets a sender choose among the negotiated ones. */
+    codec?: RTCRtpCodec;
+  }
+
   interface VideoEncoderConfig {
     /** The H.265 bitstream format, where the platform encodes it. */
     hevc?: { format: 'annexb' | 'hevc' };

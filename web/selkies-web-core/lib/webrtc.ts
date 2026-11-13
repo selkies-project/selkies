@@ -51,12 +51,191 @@
  */
 
 import type { WebRTCSignaling } from './signaling.ts';
-import type { Input } from './input.ts';
+import type { DisplayLayouts, Input } from './input.ts';
+import type { ServerSettingEntry } from './conditional-settings.ts';
+import type { StreamInfo, StreamSample } from './stream-stats.ts';
 
 /**
  * Capture hints for `setWebcam`; the `codec` name is the `webcam_encoder`
  * name (`h264`, `h265`, `vp8`, `vp9`, `av1`) or `auto`.
  */
+/** A peer connection configuration as the TURN REST answer carries it, with that answer's own members. */
+export type PeerConfig = RTCConfiguration & { lifetimeDuration?: string; blockStatus?: string };
+
+/** The remote cursor the server sends: an image, its hotspot, and the handle it is cached under. */
+export interface CursorData {
+	/** The image, base64 PNG. */
+	curdata: string;
+	/** The image's width. */
+	width?: number;
+	/** The image's height. */
+	height?: number;
+	/** The hotspot's X. */
+	hotx: string | number;
+	/** The hotspot's Y. */
+	hoty: string | number;
+	/** The handle the image is cached under. */
+	handle: string | number;
+}
+
+/** A clipboard message from the server: one whole value, or one part of a multipart transfer. */
+export interface ClipboardChannelMessage {
+	type: 'clipboard-msg' | 'clipboard-msg-start' | 'clipboard-msg-data' | 'clipboard-msg-end';
+	data?: {
+		/** The content's MIME type. */
+		mime_type?: string;
+		/** Base64 content. */
+		content?: string;
+		/** The whole transfer's size in bytes. */
+		total_size?: number;
+		/** Whether the text is a secret. */
+		secret?: boolean;
+		/** The request this answers, `cr` for the connect-time fetch. */
+		reply_to?: string;
+	} | null;
+}
+
+/** The server's settings document: each setting's entry by name. */
+export interface SettingsPayload {
+	settings?: Record<string, ServerSettingEntry> | null;
+}
+
+/** The values the display this page streams runs on, by setting name. */
+export interface DisplaySettingsPayload {
+	settings?: Record<string, unknown> | null;
+}
+
+/** The session's displays, their layout, and what the session's display server takes. */
+export interface DisplayConfig {
+	/** The ids of the displays connected. */
+	displays?: string[];
+	/** Each display's rectangle on the extended desktop. */
+	layouts?: DisplayLayouts | null;
+	/** Whether the session runs on Wayland. */
+	wayland?: boolean;
+	/** Whether the session takes a touchpad's scroll as a finger's. */
+	finger_scroll?: boolean;
+}
+
+/** A document the session printed. */
+export interface PrintDocument {
+	name: string;
+	size_bytes: number;
+}
+
+/** A server message on the data channel: `type` routes it and `data` is that type's payload. */
+export type DataChannelMessage =
+	| { type: 'pipeline'; data: { status: string } }
+	| { type: 'stream_info'; data: StreamInfo }
+	| { type: 'stream_stats'; data: StreamSample }
+	| { type: 'connection'; data?: { poor?: boolean } | null }
+	| ClipboardChannelMessage
+	| { type: 'cursor'; data: CursorData | null }
+	| { type: 'system'; data?: { action?: string | null } | null }
+	| { type: 'ping'; data?: unknown }
+	| { type: 'latency_measurement'; data: { latency_ms: number } }
+	| { type: 'server_settings'; data: SettingsPayload }
+	| { type: 'display_settings'; data: DisplaySettingsPayload }
+	| { type: 'display_owner' | 'page_visibility' }
+	| { type: 'display_config_update'; data: DisplayConfig }
+	| { type: 'print_document'; data: PrintDocument }
+	| { type: 'cc_rate'; data?: { kbps: number } | null };
+
+/** A codec report, which the DOM typings leave out. */
+interface CodecStats extends RTCStats {
+	mimeType: string;
+	sdpFmtpLine?: string;
+}
+
+/** A data channel report, which the DOM typings leave out. */
+interface DataChannelStats extends RTCStats {
+	bytesReceived?: number;
+	bytesSent?: number;
+	messagesReceived?: number;
+	messagesSent?: number;
+}
+
+/** A candidate report, which the DOM typings leave out. */
+interface CandidateStats extends RTCStats {
+	candidateType: string;
+	protocol?: string;
+	relayProtocol?: string;
+	address?: string;
+	port?: number;
+}
+
+/** A `getStats` report before its `type` says which dictionary it is; Gecko marks the pair in use with `selected`. */
+export interface StatsReport {
+	id: string;
+	timestamp: number;
+	type: string;
+	kind?: string;
+	selected?: boolean;
+}
+
+/** The `getStats` reports `WebRTCClient.getConnectionStats` keeps, by what they describe. */
+export interface ConnectionReports {
+	transports: Record<string, RTCTransportStats>;
+	candidatePairs: Record<string, RTCIceCandidatePairStats>;
+	selectedCandidatePairId: string | null;
+	remoteCandidates: Record<string, CandidateStats>;
+	localCandidates: Record<string, CandidateStats>;
+	outbound: Record<string, RTCOutboundRtpStreamStats>;
+	codecs: Record<string, CodecStats>;
+	videoRTP: RTCInboundRtpStreamStats | null;
+	videoTrack: StatsReport | null;
+	audioRTP: RTCInboundRtpStreamStats | null;
+	audioTrack: StatsReport | null;
+	dataChannel: DataChannelStats | null;
+}
+
+/** The connection's figures, read out of one `getStats` (`WebRTCClient.getConnectionStats`). */
+export interface ConnectionStats {
+	general: {
+		bytesReceived: number;
+		bytesSent: number;
+		connectionType: string;
+		currentRoundTripTime: number | null;
+		availableReceiveBandwidth: number;
+		packetsReceived?: number;
+		packetsLost?: number;
+	};
+	video: {
+		bytesReceived: number;
+		decoder: string;
+		frameHeight: number;
+		frameWidth: number;
+		framesPerSecond: number;
+		packetsReceived: number;
+		packetsLost: number;
+		codecName: string;
+		jitterBufferDelay: number;
+		jitterBufferEmittedCount: number;
+	};
+	audio: {
+		bytesReceived: number;
+		packetsReceived: number;
+		packetsLost: number;
+		codecName: string;
+		jitterBufferDelay: number;
+		jitterBufferEmittedCount: number;
+		concealedSamples: number;
+		concealmentEvents: number;
+		totalSamplesReceived: number;
+		packetsDiscarded: number;
+	};
+	data: {
+		bytesReceived: number;
+		bytesSent: number;
+		messagesReceived: number;
+		messagesSent: number;
+	};
+	/** The reports the figures were read from. */
+	reports: ConnectionReports;
+	/** Every report of the read. */
+	allReports: StatsReport[];
+}
+
 export interface WebcamHints {
 	width?: number;
 	height?: number;
@@ -122,7 +301,7 @@ export class WebRTCClient {
     element!: HTMLVideoElement;
     peer_id!: number;
     forceTurn!: boolean;
-    rtcPeerConfig!: Record<string, any>;
+    rtcPeerConfig!: PeerConfig;
     peerConnection!: RTCPeerConnection | null;
     _micTransceiver!: RTCRtpTransceiver | null | undefined;
     _micStream!: MediaStream | null | undefined;
@@ -136,31 +315,31 @@ export class WebRTCClient {
     onconnectionstatechange!: ((...args: [string]) => void) | null;
     ondatachannelopen!: (() => void) | null;
     ondatachannelclose!: (() => void) | null;
-    onstreaminfo!: ((...args: [Record<string, any>]) => void) | null;
+    onstreaminfo!: ((info: StreamInfo) => void) | null;
     onlatencymeasurement!: ((...args: [number]) => void) | null;
     onplaystreamrequired!: (() => void) | null;
-    onclipboardcontent!: ((...args: [Record<string, any>]) => void | Promise<void>) | null;
+    onclipboardcontent!: ((msg: ClipboardChannelMessage) => void | Promise<void>) | null;
     onsystemaction!: ((...args: [string]) => void) | null;
-    oncursorchange!: ((...args: [Record<string, any>]) => void) | null;
-    cursor_cache!: Map<any, any>;
-    onstreamstats!: ((...args: [Record<string, any>]) => void) | null;
+    oncursorchange!: ((cursor: CursorData) => void) | null;
+    cursor_cache!: Map<string | number, string>;
+    onstreamstats!: ((stats: StreamSample) => void) | null;
     onconnection!: ((...args: [boolean]) => void) | null;
     _connected!: boolean;
     _send_channel!: RTCDataChannel | null;
-    _motion_channel!: any;
+    _motion_channel!: RTCDataChannel | null;
     _gzTx!: boolean;
     _sendQueue!: Promise<void>;
     _recvQueue!: Promise<void>;
     input!: Input | null;
-    clipboardcontent!: any[];
-    onserversettings!: ((...args: [Record<string, any>]) => void) | null;
-    ondisplaysettings!: ((...args: [Record<string, any>]) => void) | null;
+    clipboardcontent!: string[];
+    onserversettings!: ((payload: SettingsPayload) => void) | null;
+    ondisplaysettings!: ((payload: DisplaySettingsPayload) => void) | null;
     ondisplayowner!: (() => void) | null;
     onpagevisibility!: (() => void) | null;
-    ondisplayconfig!: ((...args: [Record<string, any>]) => void) | null;
-    onprintdocument!: ((...args: [Record<string, any>]) => void) | null;
+    ondisplayconfig!: ((config: DisplayConfig) => void) | null;
+    onprintdocument!: ((doc: PrintDocument) => void) | null;
     onccrate!: ((...args: [number]) => void) | null;
-    streams!: any[];
+    streams!: [kind: string, streams: readonly MediaStream[]][];
 	/**
 	 * @param signaling Signaling connection; its `onsdp` and `onice` are taken over.
 	 * @param element Element the server's stream plays in.
@@ -298,28 +477,28 @@ export class WebRTCClient {
 	}
 
 	/** Forwards a status message to `onstatus`. */
-	_setStatus(message: any): void {
+	_setStatus(message: string): void {
 		if (this.onstatus !== null) {
 			this.onstatus(message);
 		}
 	}
 
 	/** Forwards a debug message to `ondebug`. */
-	_setDebug(message: any): void {
+	_setDebug(message: string): void {
 		if (this.ondebug !== null) {
 			this.ondebug(message);
 		}
 	}
 
 	/** Forwards an error message to `onerror`. */
-	_setError(message: any): void {
+	_setError(message: string): void {
 		if (this.onerror !== null) {
 			this.onerror(message);
 		}
 	}
 
 	/** Forwards the peer connection state to `onconnectionstatechange`. */
-	_setConnectionState(state: any): void {
+	_setConnectionState(state: string): void {
 		if (this.onconnectionstatechange !== null) {
 			this.onconnectionstatechange(state);
 		}
@@ -371,56 +550,56 @@ export class WebRTCClient {
 			this._setDebug("received SDP offer, creating answer");
 			this._prepareUplinkTransceivers(sdp.sdp);
 			this.peerConnection!.createAnswer()
-			.then((local_sdp: any): void => {
-				if (!(/[^-]sps-pps-idr-in-keyframe=1[^\d]/gm.test(local_sdp.sdp)) && (/[^-]packetization-mode=/gm.test(local_sdp.sdp))) {
+			.then((local_sdp: RTCSessionDescriptionInit): void => {
+				if (!(/[^-]sps-pps-idr-in-keyframe=1[^\d]/gm.test(local_sdp.sdp!)) && (/[^-]packetization-mode=/gm.test(local_sdp.sdp!))) {
 					console.log("Overriding WebRTC SDP to include sps-pps-idr-in-keyframe=1");
-					if (/[^-]sps-pps-idr-in-keyframe=\d+/gm.test(local_sdp.sdp)) {
-						local_sdp.sdp = local_sdp.sdp.replace(/sps-pps-idr-in-keyframe=\d+/gm, 'sps-pps-idr-in-keyframe=1');
+					if (/[^-]sps-pps-idr-in-keyframe=\d+/gm.test(local_sdp.sdp!)) {
+						local_sdp.sdp = local_sdp.sdp!.replace(/sps-pps-idr-in-keyframe=\d+/gm, 'sps-pps-idr-in-keyframe=1');
 					} else {
-						local_sdp.sdp = local_sdp.sdp.replace('packetization-mode=', 'sps-pps-idr-in-keyframe=1;packetization-mode=');
+						local_sdp.sdp = local_sdp.sdp!.replace('packetization-mode=', 'sps-pps-idr-in-keyframe=1;packetization-mode=');
 					}
 				}
-				if (local_sdp.sdp.indexOf('multiopus') === -1) {
-					if (!(/[^-]stereo=1[^\d]/gm.test(local_sdp.sdp)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp))) {
+				if (local_sdp.sdp!.indexOf('multiopus') === -1) {
+					if (!(/[^-]stereo=1[^\d]/gm.test(local_sdp.sdp!)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp!))) {
 						console.log("Overriding WebRTC SDP to allow stereo audio");
-						if (/[^-]stereo=\d+/gm.test(local_sdp.sdp)) {
-							local_sdp.sdp = local_sdp.sdp.replace(/stereo=\d+/gm, 'stereo=1');
+						if (/[^-]stereo=\d+/gm.test(local_sdp.sdp!)) {
+							local_sdp.sdp = local_sdp.sdp!.replace(/stereo=\d+/gm, 'stereo=1');
 						} else {
-							local_sdp.sdp = local_sdp.sdp.replace('useinbandfec=', 'stereo=1;useinbandfec=');
+							local_sdp.sdp = local_sdp.sdp!.replace('useinbandfec=', 'stereo=1;useinbandfec=');
 						}
 					}
 					const ptimeMatch = sdp.sdp.match(/^a=ptime:(\d+)/m);
 					const minptime = Math.max(3, Math.min(10, ptimeMatch ? parseInt(ptimeMatch[1], 10) : 10));
-					if (!(new RegExp('[^-]minptime=' + minptime + '[^\\d]', 'gm').test(local_sdp.sdp)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp))) {
+					if (!(new RegExp('[^-]minptime=' + minptime + '[^\\d]', 'gm').test(local_sdp.sdp!)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp!))) {
 						console.log("Overriding WebRTC SDP to allow low-latency audio packet (minptime=" + minptime + ")");
-						if (/[^-]minptime=\d+/gm.test(local_sdp.sdp)) {
-							local_sdp.sdp = local_sdp.sdp.replace(/minptime=\d+/gm, 'minptime=' + minptime);
+						if (/[^-]minptime=\d+/gm.test(local_sdp.sdp!)) {
+							local_sdp.sdp = local_sdp.sdp!.replace(/minptime=\d+/gm, 'minptime=' + minptime);
 						} else {
-							local_sdp.sdp = local_sdp.sdp.replace('useinbandfec=', 'minptime=' + minptime + ';useinbandfec=');
+							local_sdp.sdp = local_sdp.sdp!.replace('useinbandfec=', 'minptime=' + minptime + ';useinbandfec=');
 						}
 					}
 				}
 				console.log("Created local SDP", local_sdp);
-				const plain = local_sdp.sdp;
+				const plain = local_sdp.sdp!;
 				const surround = takeMultiopus(sdp.sdp, plain);
 				const apply = (text: string): Promise<void> => this.peerConnection!.setLocalDescription({ type: 'answer', sdp: text });
 				// Gecko sets a surround answer and keeps multiopus in its local
 				// description but not in its receivers: the server is told the
 				// answer the engine would have sent, and streams it stereo.
-				const decodesSurround = (): boolean => this.peerConnection!.getReceivers().some((r: any): boolean => r.track && r.track.kind === 'audio'
-					&& r.getParameters().codecs.some((c: any): boolean => /multiopus/i.test(c.mimeType)));
+				const decodesSurround = (): boolean => this.peerConnection!.getReceivers().some((r: RTCRtpReceiver): boolean => r.track && r.track.kind === 'audio'
+					&& r.getParameters().codecs.some((c: RTCRtpCodecParameters): boolean => /multiopus/i.test(c.mimeType)));
 				(surround === plain ? apply(plain) : apply(surround).catch((): Promise<void> => apply(plain))).then((): void => {
 					this._setDebug("Sending SDP answer");
 					const local = this.peerConnection!.localDescription!;
 					const surroundTaken = local.sdp !== plain && local.sdp.indexOf('multiopus') !== -1;
 					this.signaling.sendSDP(surroundTaken && !decodesSurround() ? ({ type: 'answer', sdp: plain } as unknown as RTCSessionDescription) : local);
-				}).catch((e: any): void => {
+				}).catch((e: unknown): void => {
 					this._setError("Error setting local description: " + e);
 				});
 			}).catch((): void => {
 				this._setError("Error creating local SDP");
 			});
-		}).catch((e: any): void => {
+		}).catch((e: unknown): void => {
 			this._setError('Error setting remote description: ' + e);
 		});
 	}
@@ -458,11 +637,11 @@ export class WebRTCClient {
 		}
 		closeSection();
 		const transceivers = this.peerConnection.getTransceivers();
-		const reserve = (mid: any): any => {
+		const reserve = (mid: string | null): RTCRtpTransceiver | null => {
 			if (mid === null) return null;
-			const tx = transceivers.find((t: any): boolean => t.mid === mid);
+			const tx = transceivers.find((t: RTCRtpTransceiver): boolean => t.mid === mid);
 			if (tx) {
-				try { tx.direction = 'sendonly'; } catch (e: any) {}
+				try { tx.direction = 'sendonly'; } catch (e) {}
 			}
 			return tx || null;
 		};
@@ -490,17 +669,17 @@ export class WebRTCClient {
 			}
 			if (this._micStream || this._micPending) return true;
 			if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
-			const audio: any = { channelCount: 1, sampleRate: 24000, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+			const audio: MediaTrackConstraints = { channelCount: 1, sampleRate: 24000, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
 			if (deviceId) audio.deviceId = { exact: deviceId };
 			const pending = this._micPending = { withdrawn: false };
-			let stream: any;
+			let stream: MediaStream;
 			try {
 				stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
 			} finally {
 				this._micPending = null;
 			}
 			if (pending.withdrawn) {
-				stream.getTracks().forEach((t: any): void => t.stop());
+				stream.getTracks().forEach((t: MediaStreamTrack): void => t.stop());
 				return null;
 			}
 			this._micStream = stream;
@@ -512,10 +691,10 @@ export class WebRTCClient {
 		}
 		if (this._micPending) this._micPending.withdrawn = true;
 		if (this._micTransceiver && this._micTransceiver.sender) {
-			try { await this._micTransceiver.sender.replaceTrack(null); } catch (e: any) {}
+			try { await this._micTransceiver.sender.replaceTrack(null); } catch (e) {}
 		}
 		if (this._micStream) {
-			this._micStream.getTracks().forEach((t: any): void => t.stop());
+			this._micStream.getTracks().forEach((t: MediaStreamTrack): void => t.stop());
 			this._micStream = null;
 		}
 		return true;
@@ -547,17 +726,17 @@ export class WebRTCClient {
 			}
 			if (this._webcamStream || this._webcamPending) return true;
 			if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
-			const video: any = { width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: fps } };
+			const video: MediaTrackConstraints = { width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: fps } };
 			if (deviceId) video.deviceId = { exact: deviceId };
 			const pending = this._webcamPending = { withdrawn: false };
-			let stream: any;
+			let stream: MediaStream;
 			try {
 				stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
 			} finally {
 				this._webcamPending = null;
 			}
 			if (pending.withdrawn) {
-				stream.getTracks().forEach((t: any): void => t.stop());
+				stream.getTracks().forEach((t: MediaStreamTrack): void => t.stop());
 				return null;
 			}
 			const track = stream.getVideoTracks()[0];
@@ -566,10 +745,10 @@ export class WebRTCClient {
 					await this._setSenderActive(this._webcamTransceiver.sender, true);
 					await this._webcamTransceiver.sender.replaceTrack(track);
 				}
-			} catch (e: any) {
+			} catch (e) {
 				// A camera the sender did not take is released, so the next
 				// attempt asks for it again rather than reporting this one as on.
-				stream.getTracks().forEach((t: any): void => t.stop());
+				stream.getTracks().forEach((t: MediaStreamTrack): void => t.stop());
 				throw e;
 			}
 			this._webcamStream = stream;
@@ -579,10 +758,10 @@ export class WebRTCClient {
 		if (this._webcamPending) this._webcamPending.withdrawn = true;
 		if (this._webcamTransceiver && this._webcamTransceiver.sender) {
 			await this._setSenderActive(this._webcamTransceiver.sender, false);
-			try { await this._webcamTransceiver.sender.replaceTrack(null); } catch (e: any) {}
+			try { await this._webcamTransceiver.sender.replaceTrack(null); } catch (e) {}
 		}
 		if (this._webcamStream) {
-			this._webcamStream.getTracks().forEach((t: any): void => t.stop());
+			this._webcamStream.getTracks().forEach((t: MediaStreamTrack): void => t.stop());
 			this._webcamStream = null;
 		}
 		return true;
@@ -605,20 +784,20 @@ export class WebRTCClient {
 		try {
 			const params = sender.getParameters();
 			if (!params.encodings || params.encodings.length === 0) return false;
-			const negotiated = (params.codecs || []).find((c: any): boolean => c.mimeType.toLowerCase() === wanted) || null;
-			const current = (params.encodings[0] as any).codec || null;
+			const negotiated = (params.codecs || []).find((c: RTCRtpCodecParameters): boolean => c.mimeType.toLowerCase() === wanted) || null;
+			const current = params.encodings[0].codec || null;
 			if (negotiated) {
 				if (current && current.mimeType.toLowerCase() === wanted) return true;
-				(params.encodings[0] as any).codec = {
+				params.encodings[0].codec = {
 					mimeType: negotiated.mimeType, clockRate: negotiated.clockRate, sdpFmtpLine: negotiated.sdpFmtpLine,
 				};
 			} else {
 				if (!current) return false;
-				delete (params.encodings[0] as any).codec;
+				delete params.encodings[0].codec;
 			}
 			await sender.setParameters(params);
 			return !!negotiated;
-		} catch (e: any) {
+		} catch (e) {
 			console.warn('Webcam codec not applied to the sender:', e);
 			return false;
 		}
@@ -634,9 +813,9 @@ export class WebRTCClient {
 			const params = sender.getParameters();
 			if (!params.encodings || params.encodings.length === 0) return;
 			let changed = false;
-			params.encodings.forEach((e: any): void => { if (e.active !== active) { e.active = active; changed = true; } });
+			params.encodings.forEach((e: RTCRtpEncodingParameters): void => { if (e.active !== active) { e.active = active; changed = true; } });
 			if (changed) await sender.setParameters(params);
-		} catch (e: any) {
+		} catch (e) {
 			console.warn('Sender encoding activation not applied:', e);
 		}
 	}
@@ -647,7 +826,7 @@ export class WebRTCClient {
 	}
 
 	/** Logs a created local description. */
-	_onLocalSDP(local_sdp: any): void {
+	_onLocalSDP(local_sdp: RTCSessionDescriptionInit): void {
 		this._setDebug("Created local SDP: " + JSON.stringify(local_sdp));
 	}
 
@@ -692,7 +871,7 @@ export class WebRTCClient {
 			if (this.ondatachannelclose !== null)
 				this.ondatachannelclose();
 		};
-		this._send_channel.onerror = (event: any): void => {
+		this._send_channel.onerror = (event: RTCErrorEvent): void => {
 			this._setError(`Unexpected error, data channel closed, ${event.error || 'unknown error'}`);
 		}
 	}
@@ -708,11 +887,11 @@ export class WebRTCClient {
 	 * the chain rejected and every later message dropped.
 	 * @param event
 	 */
-	_onPeerDataChannelMessage(event: MessageEvent): void {
+	_onPeerDataChannelMessage(event: MessageEvent<string | ArrayBuffer>): void {
 		if (event.data instanceof ArrayBuffer) {
 			const head = new Uint8Array(event.data, 0, Math.min(2, event.data.byteLength));
 			if (head[0] === 0x1f && head[1] === 0x8b) {
-				const routed = (async (): Promise<any> => {
+				const routed = (async (): Promise<DataChannelMessage | null> => {
 					const text = await new Response(new Blob([event.data]).stream()
 						.pipeThrough(new DecompressionStream('gzip'))).text();
 					const msg = this._parseDataChannelMessage(text);
@@ -721,14 +900,14 @@ export class WebRTCClient {
 					}
 					this._routeDataChannelMessage(msg);
 					return null;
-				})().catch((e: any): any => {
+				})().catch((e: unknown): null => {
 					this._setError("failed to decompress data channel message: " + e);
 					return null;
 				});
-				this._recvQueue = this._recvQueue.then(async (): Promise<any> => {
+				this._recvQueue = this._recvQueue.then(async (): Promise<void> => {
 					const msg = await routed;
 					if (msg !== null) return this._routeDataChannelMessage(msg);
-				}).catch((e: any): void => this._setError("failed to handle data channel message: " + e));
+				}).catch((e: unknown): void => this._setError("failed to handle data channel message: " + e));
 				return;
 			}
 			this._setError("unexpected binary data channel message");
@@ -745,13 +924,13 @@ export class WebRTCClient {
 		if (!this._requiresOrderedDelivery(msg)) {
 			try {
 				this._routeDataChannelMessage(msg);
-			} catch (e: any) {
+			} catch (e) {
 				this._setError("failed to handle data channel message: " + e);
 			}
 			return;
 		}
-		this._recvQueue = this._recvQueue.then((): void => this._routeDataChannelMessage(msg))
-			.catch((e: any): void => this._setError("failed to handle data channel message: " + e));
+		this._recvQueue = this._recvQueue.then((): void | Promise<void> => this._routeDataChannelMessage(msg))
+			.catch((e: unknown): void => this._setError("failed to handle data channel message: " + e));
 	}
 
 	/**
@@ -763,7 +942,7 @@ export class WebRTCClient {
 	 * @param msg
 	 * @returns
 	 */
-	_requiresOrderedDelivery(msg: Record<string, any>): boolean {
+	_requiresOrderedDelivery(msg: DataChannelMessage): boolean {
 		return typeof msg.type === 'string' &&
 			(msg.type.startsWith('clipboard-msg') || msg.type === 'server_settings' || msg.type === 'display_settings');
 	}
@@ -774,11 +953,11 @@ export class WebRTCClient {
 	 * @param data
 	 * @returns
 	 */
-	_parseDataChannelMessage(data: string): Record<string, any> | null {
-		var msg: any;
+	_parseDataChannelMessage(data: string): DataChannelMessage | null {
+		var msg: DataChannelMessage;
 		try {
-			msg = JSON.parse(data);
-		} catch (e: any) {
+			msg = JSON.parse(data) as DataChannelMessage;
+		} catch (e) {
 			if (e instanceof SyntaxError) {
 				this._setError("error parsing data channel message as JSON: " + data);
 			} else {
@@ -796,7 +975,7 @@ export class WebRTCClient {
 	 * awaits it and clipboard messages complete in arrival order.
 	 * @param msg
 	 */
-	_routeDataChannelMessage(msg: Record<string, any>): any {
+	_routeDataChannelMessage(msg: DataChannelMessage): void | Promise<void> {
 		if (msg.type === 'pipeline') {
 			this._setStatus(msg.data.status);
 		} else if (msg.type === 'stream_info') {
@@ -813,7 +992,7 @@ export class WebRTCClient {
 			}
 		} else if (typeof msg.type === 'string' && msg.type.startsWith('clipboard-msg')) {
 			if (typeof this.onclipboardcontent === 'function') {
-				return this.onclipboardcontent(msg);
+				return this.onclipboardcontent(msg as ClipboardChannelMessage);
 			}
 		} else if (msg.type === 'cursor') {
 			if (this.oncursorchange !== null && msg.data !== null) {
@@ -939,12 +1118,12 @@ export class WebRTCClient {
 	 */
 	async waitForDataChannelDrain(threshold: number = 1024 * 1024): Promise<void> {
 		if (this._sendQueue) {
-			try { await this._sendQueue; } catch (e: any) { /* queued send failed; proceed */ }
+			try { await this._sendQueue; } catch (e) { /* queued send failed; proceed */ }
 		}
 		const ch = this._send_channel;
 		if (!ch || ch.readyState !== 'open' || ch.bufferedAmount <= threshold) return;
 		ch.bufferedAmountLowThreshold = threshold;
-		await new Promise((resolve: any): void => {
+		await new Promise((resolve: (value: void) => void): void => {
 			const done = (): void => { ch.removeEventListener('bufferedamountlow', done); resolve(); };
 			ch.addEventListener('bufferedamountlow', done);
 			if (ch.readyState !== 'open' || ch.bufferedAmount <= threshold) done();
@@ -1039,9 +1218,9 @@ export class WebRTCClient {
 	 * the SDP or the packet size, never from `codecName`.
 	 * @returns
 	 */
-	getConnectionStats(): Promise<Record<string, any>> {
+	getConnectionStats(): Promise<ConnectionStats> {
 		var pc = this.peerConnection!;
-		var connectionDetails: Record<string, any> = {
+		var connectionDetails: Omit<ConnectionStats, 'reports' | 'allReports'> & Partial<ConnectionStats> = {
 			general: {
 				bytesReceived: 0,
 				bytesSent: 0,
@@ -1084,9 +1263,9 @@ export class WebRTCClient {
 			}
 		};
 
-		return new Promise(function (resolve: any, reject: any): void {
-			pc.getStats().then((stats: any): void => {
-				var reports: Record<string, any> = {
+		return new Promise(function (resolve: (value: ConnectionStats) => void, reject: (reason: unknown) => void): void {
+			pc.getStats().then((stats: RTCStatsReport): void => {
+				var reports: ConnectionReports = {
 					transports: {},
 					candidatePairs: {},
 					selectedCandidatePairId: null,
@@ -1101,22 +1280,22 @@ export class WebRTCClient {
 					dataChannel: null,
 				};
 
-				var allReports: any[] = [];
+				var allReports: StatsReport[] = [];
 
-				stats.forEach((report: any): void => {
+				stats.forEach((report: StatsReport): void => {
 					allReports.push(report);
 					if (report.type === "transport") {
-						reports.transports[report.id] = report;
+						reports.transports[report.id] = report as RTCTransportStats;
 					} else if (report.type === "candidate-pair") {
-						reports.candidatePairs[report.id] = report;
+						reports.candidatePairs[report.id] = report as RTCIceCandidatePairStats;
 						if (report.selected === true) {
 							reports.selectedCandidatePairId = report.id;
 						}
 					} else if (report.type === "inbound-rtp") {
 						if (report.kind === "video") {
-							reports.videoRTP = report;
+							reports.videoRTP = report as RTCInboundRtpStreamStats;
 						} else if (report.kind === "audio") {
-							reports.audioRTP = report;
+							reports.audioRTP = report as RTCInboundRtpStreamStats;
 						}
 					} else if (report.type === "track") {
 						if (report.kind === "video") {
@@ -1125,29 +1304,29 @@ export class WebRTCClient {
 							reports.audioTrack = report;
 						}
 					} else if (report.type === "data-channel") {
-						reports.dataChannel = report;
+						reports.dataChannel = report as DataChannelStats;
 					} else if (report.type === "remote-candidate") {
-						reports.remoteCandidates[report.id] = report;
+						reports.remoteCandidates[report.id] = report as CandidateStats;
 					} else if (report.type === "local-candidate") {
-						reports.localCandidates[report.id] = report;
+						reports.localCandidates[report.id] = report as CandidateStats;
 					} else if (report.type === "outbound-rtp") {
-						reports.outbound[report.kind] = report;
+						reports.outbound[report.kind!] = report as RTCOutboundRtpStreamStats;
 					} else if (report.type === "codec") {
-						reports.codecs[report.id] = report;
+						reports.codecs[report.id] = report as CodecStats;
 					}
 				});
 
 				var videoRTP = reports.videoRTP;
 				if (videoRTP !== null) {
-					connectionDetails.video.bytesReceived = videoRTP.bytesReceived;
+					connectionDetails.video.bytesReceived = videoRTP.bytesReceived!;
 					connectionDetails.video.decoder = videoRTP.decoderImplementation || "unknown";
-					connectionDetails.video.frameHeight = videoRTP.frameHeight;
-					connectionDetails.video.frameWidth = videoRTP.frameWidth;
-					connectionDetails.video.framesPerSecond = videoRTP.framesPerSecond;
-					connectionDetails.video.packetsReceived = videoRTP.packetsReceived;
-					connectionDetails.video.packetsLost = videoRTP.packetsLost;
+					connectionDetails.video.frameHeight = videoRTP.frameHeight!;
+					connectionDetails.video.frameWidth = videoRTP.frameWidth!;
+					connectionDetails.video.framesPerSecond = videoRTP.framesPerSecond!;
+					connectionDetails.video.packetsReceived = videoRTP.packetsReceived!;
+					connectionDetails.video.packetsLost = videoRTP.packetsLost!;
 
-					const codec = reports.codecs[videoRTP.codecId];
+					const codec = reports.codecs[videoRTP.codecId!];
 					if (codec !== undefined) {
 						connectionDetails.video.codecName = codec.mimeType.split("/")[1].toUpperCase();
 					}
@@ -1155,15 +1334,15 @@ export class WebRTCClient {
 
 				var audioRTP = reports.audioRTP;
 				if (audioRTP !== null) {
-					connectionDetails.audio.bytesReceived = audioRTP.bytesReceived;
-					connectionDetails.audio.packetsReceived = audioRTP.packetsReceived;
-					connectionDetails.audio.packetsLost = audioRTP.packetsLost;
+					connectionDetails.audio.bytesReceived = audioRTP.bytesReceived!;
+					connectionDetails.audio.packetsReceived = audioRTP.packetsReceived!;
+					connectionDetails.audio.packetsLost = audioRTP.packetsLost!;
 					if (audioRTP.concealedSamples !== undefined) connectionDetails.audio.concealedSamples = audioRTP.concealedSamples;
 					if (audioRTP.concealmentEvents !== undefined) connectionDetails.audio.concealmentEvents = audioRTP.concealmentEvents;
 					if (audioRTP.totalSamplesReceived !== undefined) connectionDetails.audio.totalSamplesReceived = audioRTP.totalSamplesReceived;
 					if (audioRTP.packetsDiscarded !== undefined) connectionDetails.audio.packetsDiscarded = audioRTP.packetsDiscarded;
 
-					const codec = reports.codecs[audioRTP.codecId];
+					const codec = reports.codecs[audioRTP.codecId!];
 					if (codec !== undefined) {
 						connectionDetails.audio.codecName = codec.mimeType.split("/")[1].toUpperCase();
 					}
@@ -1171,20 +1350,20 @@ export class WebRTCClient {
 
 				var dataChannel = reports.dataChannel;
 				if (dataChannel !== null) {
-					connectionDetails.data.bytesReceived = dataChannel.bytesReceived;
-					connectionDetails.data.bytesSent = dataChannel.bytesSent;
-					connectionDetails.data.messagesReceived = dataChannel.messagesReceived;
-					connectionDetails.data.messagesSent =  dataChannel.messagesSent;
+					connectionDetails.data.bytesReceived = dataChannel.bytesReceived!;
+					connectionDetails.data.bytesSent = dataChannel.bytesSent!;
+					connectionDetails.data.messagesReceived = dataChannel.messagesReceived!;
+					connectionDetails.data.messagesSent =  dataChannel.messagesSent!;
 				}
 
 				if (Object.keys(reports.transports).length > 0) {
 					var transport = reports.transports[Object.keys(reports.transports)[0]];
-					connectionDetails.general.bytesReceived = transport.bytesReceived;
-					connectionDetails.general.bytesSent = transport.bytesSent;
-					reports.selectedCandidatePairId = transport.selectedCandidatePairId;
+					connectionDetails.general.bytesReceived = transport.bytesReceived!;
+					connectionDetails.general.bytesSent = transport.bytesSent!;
+					reports.selectedCandidatePairId = transport.selectedCandidatePairId!;
 				} else if (reports.selectedCandidatePairId !== null) {
-					connectionDetails.general.bytesReceived = reports.candidatePairs[reports.selectedCandidatePairId].bytesReceived;
-					connectionDetails.general.bytesSent = reports.candidatePairs[reports.selectedCandidatePairId].bytesSent;
+					connectionDetails.general.bytesReceived = reports.candidatePairs[reports.selectedCandidatePairId].bytesReceived!;
+					connectionDetails.general.bytesSent = reports.candidatePairs[reports.selectedCandidatePairId].bytesSent!;
 				}
 
 				if (reports.selectedCandidatePairId !== null) {
@@ -1207,20 +1386,20 @@ export class WebRTCClient {
 				connectionDetails.general.packetsLost = connectionDetails.video.packetsLost + connectionDetails.audio.packetsLost;
 
 				if (reports.videoRTP !== null) {
-					connectionDetails.video.jitterBufferDelay = reports.videoRTP.jitterBufferDelay;
-					connectionDetails.video.jitterBufferEmittedCount = reports.videoRTP.jitterBufferEmittedCount;
+					connectionDetails.video.jitterBufferDelay = reports.videoRTP.jitterBufferDelay!;
+					connectionDetails.video.jitterBufferEmittedCount = reports.videoRTP.jitterBufferEmittedCount!;
 				}
 
 				if (reports.audioRTP !== null) {
-					connectionDetails.audio.jitterBufferDelay = reports.audioRTP.jitterBufferDelay;
-					connectionDetails.audio.jitterBufferEmittedCount = reports.audioRTP.jitterBufferEmittedCount;
+					connectionDetails.audio.jitterBufferDelay = reports.audioRTP.jitterBufferDelay!;
+					connectionDetails.audio.jitterBufferEmittedCount = reports.audioRTP.jitterBufferEmittedCount!;
 				}
 
 				connectionDetails.reports = reports;
 				connectionDetails.allReports = allReports;
 
-				resolve(connectionDetails);
-			}).catch( (e: any): void => reject(e));
+				resolve(connectionDetails as ConnectionStats);
+			}).catch( (e: unknown): void => reject(e));
 		});
 	}
 
