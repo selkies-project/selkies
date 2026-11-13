@@ -12,6 +12,7 @@ WLOBS_DURATION seconds or on SIGTERM.
 
     XDG_RUNTIME_DIR=... wl_motion_scene.py SOCKET
 """
+import ctypes
 import fcntl
 import json
 import mmap
@@ -34,6 +35,11 @@ DURATION = float(os.environ.get("WLOBS_DURATION", "60"))
 FPS = 60.0
 BUFFERS = 3
 REPLACE_FRAMES = 300
+# conda-forge's Python is built against glibc 2.17, which has no memfd_create and no seals, so
+# the memfd comes from the host's libc and its flags and seal are given by value.
+MFD_CLOEXEC, MFD_ALLOW_SEALING = 0x1, 0x2
+F_ADD_SEALS, F_SEAL_SHRINK = 1033, 0x2
+LIBC = ctypes.CDLL(None, use_errno=True)
 # XRGB8888 is little-endian: blue, green, red, unused.
 BACKGROUND = bytes((0x78, 0x28, 0x1E, 0xFF))
 BAR = bytes((0x28, 0x3C, 0xDC, 0xFF))
@@ -94,9 +100,11 @@ class Canvas:
         self.w, self.h, self.stride = w, h, w * 4
         self.noise_h = min(NOISE_H, h)
         self.size = self.stride * h
-        fd = os.memfd_create("wl-motion-scene", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        fd = LIBC.memfd_create(b"wl-motion-scene", MFD_CLOEXEC | MFD_ALLOW_SEALING)
+        if fd < 0:
+            raise OSError(ctypes.get_errno(), "memfd_create")
         os.ftruncate(fd, BUFFERS * self.size)
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK)
+        fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK)
         self.mm = mmap.mmap(fd, BUFFERS * self.size)
         self.mm[:] = BACKGROUND * (w * h * BUFFERS)
         self.pool = g["shm"].create_pool(fd, BUFFERS * self.size)
