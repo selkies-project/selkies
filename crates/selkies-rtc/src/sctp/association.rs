@@ -192,6 +192,7 @@ impl Sctp {
             _ => DEFAULT_REMOTE_MAX_MESSAGE_SIZE,
         };
         let transport = TransportConfig::default()
+            .with_random_fill(crate::crypto::fill_random)
             .with_sctp_port(SCTP_PORT)
             .with_max_receive_buffer_size(ADVERTISED_RWND)
             .with_max_message_size(remote_max_message_size)
@@ -208,10 +209,12 @@ impl Sctp {
         let server_config = side
             .is_server()
             .then(|| Arc::new(ServerConfig::new(transport.clone())));
+        let mut endpoint_config = EndpointConfig::new();
+        endpoint_config.random_fill(crate::crypto::fill_random);
         let mut endpoint = Endpoint::new(
             local_addr,
             TransportProtocol::UDP,
-            Arc::new(EndpointConfig::new()),
+            Arc::new(endpoint_config),
             server_config,
         );
         let mut state = TransportState::Connecting;

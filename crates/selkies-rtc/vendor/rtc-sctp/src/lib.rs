@@ -71,7 +71,7 @@ pub use crate::chunk::{
 
 mod config;
 pub use crate::config::{
-    ClientConfig, EndpointConfig, MIN_DATA_PACKET_MTU, ServerConfig, TransportConfig,
+    ClientConfig, EndpointConfig, MIN_DATA_PACKET_MTU, RandomFill, ServerConfig, TransportConfig,
     max_payload_size_for_mtu,
 };
 

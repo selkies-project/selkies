@@ -16,6 +16,19 @@ fn create_association(config: TransportConfig) -> Association {
     )
 }
 
+#[test]
+fn test_initial_tsn_and_state_cookie_come_from_the_configured_source() {
+    fn fixed(output: &mut [u8]) {
+        output.fill(0xA5);
+    }
+    let a = create_association(TransportConfig::default().with_random_fill(fixed));
+    assert_eq!(a.my_next_tsn, 0xA5A5_A5A5);
+    assert_eq!(
+        ParamStateCookie::new(a.random_fill).cookie.as_ref(),
+        [0xA5; 32]
+    );
+}
+
 // `create_forward_tsn` no longer rescans the in-flight window; it emits the
 // `fwd_tsn_stream_map` that the RFC 3758 C2 loops fill via
 // `note_abandoned_for_forward_tsn` as each chunk is abandoned. These unit tests

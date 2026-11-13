@@ -1,8 +1,28 @@
 diff --git a/src/association/association_test.rs b/src/association/association_test.rs
-index c91f232..1efe699 100644
+index c91f232..7bffb16 100644
 --- a/src/association/association_test.rs
 +++ b/src/association/association_test.rs
-@@ -967,10 +967,10 @@ fn test_timed_abandonment_preserves_t3_restart_for_outstanding_data() -> Result<
+@@ -16,6 +16,19 @@ fn create_association(config: TransportConfig) -> Association {
+     )
+ }
+ 
++#[test]
++fn test_initial_tsn_and_state_cookie_come_from_the_configured_source() {
++    fn fixed(output: &mut [u8]) {
++        output.fill(0xA5);
++    }
++    let a = create_association(TransportConfig::default().with_random_fill(fixed));
++    assert_eq!(a.my_next_tsn, 0xA5A5_A5A5);
++    assert_eq!(
++        ParamStateCookie::new(a.random_fill).cookie.as_ref(),
++        [0xA5; 32]
++    );
++}
++
+ // `create_forward_tsn` no longer rescans the in-flight window; it emits the
+ // `fwd_tsn_stream_map` that the RFC 3758 C2 loops fill via
+ // `note_abandoned_for_forward_tsn` as each chunk is abandoned. These unit tests
+@@ -967,10 +980,10 @@ fn test_timed_abandonment_preserves_t3_restart_for_outstanding_data() -> Result<
              ..Default::default()
          };
          a.handle_sack(&sack, at)?;
@@ -16,10 +36,39 @@ index c91f232..1efe699 100644
              "duplicate SACK must not restart T3"
          );
 diff --git a/src/association/mod.rs b/src/association/mod.rs
-index f29e75c..3973b87 100644
+index f29e75c..1e0995b 100644
 --- a/src/association/mod.rs
 +++ b/src/association/mod.rs
-@@ -223,6 +223,9 @@ pub struct Association {
+@@ -24,7 +24,10 @@ use crate::chunk::{
+     chunk_shutdown_complete::ChunkShutdownComplete,
+     chunk_type::CT_FORWARD_TSN,
+ };
+-use crate::config::{COMMON_HEADER_SIZE, DATA_CHUNK_HEADER_SIZE, ServerConfig, TransportConfig};
++use crate::config::{
++    COMMON_HEADER_SIZE, DATA_CHUNK_HEADER_SIZE, RandomFill, ServerConfig, TransportConfig,
++    default_random_fill,
++};
+ use crate::packet::{CommonHeader, Packet};
+ use crate::param::{
+     Param,
+@@ -49,7 +52,6 @@ use timer::{ACK_INTERVAL, RtoManager, Timer, TimerTable};
+ use crate::association::stream::RecvSendState;
+ use bytes::{Bytes, BytesMut};
+ use log::{debug, error, trace, warn};
+-use rand::random;
+ use rustc_hash::{FxHashMap, FxHashSet};
+ use std::collections::{HashMap, VecDeque};
+ use std::net::SocketAddr;
+@@ -194,6 +196,8 @@ pub struct Association {
+     my_max_num_inbound_streams: u16,
+     my_max_num_outbound_streams: u16,
+     my_cookie: Option<ParamStateCookie>,
++    /// Where the state cookie is drawn from; see `TransportConfig::with_random_fill`.
++    random_fill: RandomFill,
+ 
+     pub(crate) payload_queue: PayloadQueue,
+     inflight_queue: PayloadQueue,
+@@ -223,6 +227,9 @@ pub struct Association {
  
      // Congestion control parameters
      max_receive_buffer_size: u32,
@@ -29,7 +78,15 @@ index f29e75c..3973b87 100644
      // my congestion window size
      pub(crate) cwnd: u32,
      // calculated peer's receiver windows size
-@@ -318,6 +321,8 @@ impl Default for Association {
+@@ -298,6 +305,7 @@ impl Default for Association {
+             my_max_num_inbound_streams: 0,
+             my_max_num_outbound_streams: 0,
+             my_cookie: None,
++            random_fill: default_random_fill,
+ 
+             payload_queue: PayloadQueue::default(),
+             inflight_queue: PayloadQueue::default(),
+@@ -318,6 +326,8 @@ impl Default for Association {
  
              // Congestion control parameters
              max_receive_buffer_size: 0,
@@ -38,7 +95,24 @@ index f29e75c..3973b87 100644
              // my congestion window size
              cwnd: 0,
              // calculated peer's receiver windows size
-@@ -393,6 +398,7 @@ impl Association {
+@@ -382,9 +392,13 @@ impl Association {
+         // min > max) and overflowed near `u32::MAX`, both reachable through
+         // `EndpointConfig::max_payload_size` and MTU-derived payload budgets.
+         let cwnd = mtu.saturating_mul(2).max(4380).min(mtu.saturating_mul(4));
+-        // RFC 4960 requires an unpredictable initial TSN. SCTP remains usable without an RTC
+-        // crypto provider, so this deliberately uses `rand`'s thread-local CSPRNG.
+-        let mut tsn = random::<u32>();
++        // RFC 4960 requires an unpredictable initial TSN. It comes from the configured source:
++        // `rand`'s thread-local CSPRNG unless the application named its own, so SCTP remains
++        // usable without an RTC crypto provider.
++        let random_fill = config.random_fill();
++        let mut tsn_bytes = [0u8; 4];
++        random_fill(&mut tsn_bytes);
++        let mut tsn = u32::from_ne_bytes(tsn_bytes);
+         if tsn == 0 {
+             tsn += 1;
+         }
+@@ -393,6 +407,7 @@ impl Association {
              side,
              handshake_completed: false,
              max_receive_buffer_size: config.max_receive_buffer_size(),
@@ -46,7 +120,15 @@ index f29e75c..3973b87 100644
              max_message_size: config.max_message_size(),
              my_max_num_outbound_streams: config.max_num_outbound_streams(),
              my_max_num_inbound_streams: config.max_num_inbound_streams(),
-@@ -950,7 +956,14 @@ impl Association {
+@@ -408,6 +423,7 @@ impl Association {
+             transport_protocol: protocol,
+ 
+             my_verification_tag: local_aid,
++            random_fill,
+             my_next_tsn: tsn,
+             my_next_rsn: tsn,
+             min_tsn2measure_rtt: tsn,
+@@ -950,7 +966,14 @@ impl Association {
          self.handle_chunk_start();
  
          for c in &p.chunks {
@@ -62,7 +144,7 @@ index f29e75c..3973b87 100644
          }
  
          self.handle_chunk_end(now);
-@@ -997,11 +1010,20 @@ impl Association {
+@@ -997,11 +1020,20 @@ impl Association {
              }
              return Err(Error::ErrAbortChunk(err_str));
          } else if let Some(c) = chunk_any.downcast_ref::<ChunkError>() {
@@ -84,7 +166,7 @@ index f29e75c..3973b87 100644
          } else if let Some(c) = chunk_any.downcast_ref::<ChunkHeartbeat>() {
              self.handle_heartbeat(c)?
          } else if let Some(c) = chunk_any.downcast_ref::<ChunkCookieEcho>() {
-@@ -1060,6 +1082,7 @@ impl Association {
+@@ -1060,6 +1092,7 @@ impl Association {
              std::cmp::min(i.num_inbound_streams, self.my_max_num_inbound_streams);
          self.my_max_num_outbound_streams =
              std::cmp::min(i.num_outbound_streams, self.my_max_num_outbound_streams);
@@ -92,7 +174,16 @@ index f29e75c..3973b87 100644
          self.peer_verification_tag = i.initiate_tag;
          self.source_port = p.common_header.destination_port;
          self.destination_port = p.common_header.source_port;
-@@ -1154,6 +1177,7 @@ impl Association {
+@@ -1118,7 +1151,7 @@ impl Association {
+         };
+ 
+         if self.my_cookie.is_none() {
+-            self.my_cookie = Some(ParamStateCookie::new());
++            self.my_cookie = Some(ParamStateCookie::new(self.random_fill));
+         }
+ 
+         if let Some(my_cookie) = &self.my_cookie {
+@@ -1154,6 +1187,7 @@ impl Association {
              std::cmp::min(i.num_inbound_streams, self.my_max_num_inbound_streams);
          self.my_max_num_outbound_streams =
              std::cmp::min(i.num_outbound_streams, self.my_max_num_outbound_streams);
@@ -100,7 +191,7 @@ index f29e75c..3973b87 100644
          self.peer_verification_tag = i.initiate_tag;
          self.peer_last_tsn = if i.initial_tsn == 0 {
              u32::MAX
-@@ -1326,9 +1350,23 @@ impl Association {
+@@ -1326,9 +1360,23 @@ impl Association {
          );
          self.stats.inc_datas();
  
@@ -125,7 +216,7 @@ index f29e75c..3973b87 100644
              if self.get_or_create_stream(d.stream_identifier).is_some() {
                  if self.get_my_receiver_window_credit() > 0 {
                      // Pass the new chunk to stream level as soon as it arrives
-@@ -1391,7 +1429,13 @@ impl Association {
+@@ -1391,7 +1439,13 @@ impl Association {
              }
          }
  
@@ -140,7 +231,7 @@ index f29e75c..3973b87 100644
  
          if stream_handle_data && let Some(s) = self.streams.get_mut(&d.stream_identifier) {
              self.events.push_back(Event::DatagramReceived);
-@@ -1402,6 +1446,17 @@ impl Association {
+@@ -1402,6 +1456,17 @@ impl Association {
              }
          }
  
@@ -158,7 +249,7 @@ index f29e75c..3973b87 100644
          self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
      }
  
-@@ -1440,6 +1495,16 @@ impl Association {
+@@ -1440,6 +1505,16 @@ impl Association {
              return Ok(vec![]);
          }
  
@@ -175,7 +266,7 @@ index f29e75c..3973b87 100644
          // Process selective ack
          let (bytes_acked_per_stream, total_bytes_acked, htna) =
              self.process_selective_ack(d, now)?;
-@@ -1545,7 +1610,7 @@ impl Association {
+@@ -1545,7 +1620,7 @@ impl Association {
              "[{}] should send ack? newCumTSN={} peer_last_tsn={}",
              self.side, c.new_cumulative_tsn, self.peer_last_tsn
          );
@@ -184,7 +275,7 @@ index f29e75c..3973b87 100644
              trace!("[{}] sending ack on Forward TSN", self.side);
              self.ack_state = AckState::Immediate;
              self.timers.stop(Timer::Ack);
-@@ -1563,11 +1628,10 @@ impl Association {
+@@ -1563,11 +1638,10 @@ impl Association {
          //   its cumulative TSN point to the value carried in the FORWARD TSN
          //   chunk,
  
@@ -200,7 +291,7 @@ index f29e75c..3973b87 100644
  
          // Report new peer_last_tsn value and abandoned largest SSN value to
          // corresponding streams so that the abandoned chunks can be removed
-@@ -1661,8 +1725,12 @@ impl Association {
+@@ -1661,8 +1735,12 @@ impl Association {
          // Meaning, if peer_last_tsn+1 points to a chunk that is received,
          // advance peer_last_tsn until peer_last_tsn+1 points to unreceived chunk.
          //debug!("[{}] peer_last_tsn = {}", self.side, self.peer_last_tsn);
@@ -215,7 +306,7 @@ index f29e75c..3973b87 100644
              //debug!("[{}] peer_last_tsn = {}", self.side, self.peer_last_tsn);
  
              let rst_reqs: Vec<ParamOutgoingResetRequest> =
-@@ -1798,10 +1866,46 @@ impl Association {
+@@ -1798,10 +1876,46 @@ impl Association {
  
          let mut htna = d.cumulative_tsn_ack;
  
@@ -265,7 +356,7 @@ index f29e75c..3973b87 100644
  
                  let newly_acknowledged = self.inflight_queue.acknowledge(tsn);
                  let n_bytes_acked = if newly_acknowledged {
-@@ -1843,8 +1947,6 @@ impl Association {
+@@ -1843,8 +1957,6 @@ impl Association {
                              htna = tsn;
                          }
                      }
@@ -274,7 +365,7 @@ index f29e75c..3973b87 100644
                  }
              }
          }
-@@ -2103,7 +2205,7 @@ impl Association {
+@@ -2103,7 +2215,7 @@ impl Association {
          // reconfig_response_sequence_number.
          if !sis_to_reset.is_empty() {
              let rsn = self.generate_next_rsn();
@@ -283,7 +374,7 @@ index f29e75c..3973b87 100644
  
              let c = ChunkReconfig {
                  param_a: Some(Box::new(ParamOutgoingResetRequest {
-@@ -2230,14 +2332,24 @@ impl Association {
+@@ -2230,14 +2342,24 @@ impl Association {
      }
  
      pub(crate) fn get_my_receiver_window_credit(&self) -> u32 {
@@ -313,7 +404,7 @@ index f29e75c..3973b87 100644
      /// gather_outbound gathers outgoing packets. The returned bool value set to
      /// false means the association should be closed down after the final send.
      fn gather_outbound(&mut self, now: Instant) -> (Vec<Bytes>, bool) {
-@@ -2354,12 +2466,12 @@ impl Association {
+@@ -2354,12 +2476,12 @@ impl Association {
  
              if !sis_to_reset.is_empty() {
                  let rsn = self.generate_next_rsn();
@@ -328,7 +419,7 @@ index f29e75c..3973b87 100644
                      sis_to_reset
                  );
  
-@@ -3008,6 +3120,22 @@ impl Association {
+@@ -3008,6 +3130,22 @@ impl Association {
              }
          }
  
@@ -351,7 +442,7 @@ index f29e75c..3973b87 100644
          (chunks, sis_to_reset)
      }
  
-@@ -3263,6 +3391,13 @@ impl Association {
+@@ -3263,6 +3401,13 @@ impl Association {
          self.awake_write_loop();
      }
  
@@ -573,6 +664,19 @@ index e9c3c63..f94e3bc 100644
              && offset < CHUNK_HEADER_SIZE + header.value_length()
          {
              let p = build_param(&raw.slice(offset..CHUNK_HEADER_SIZE + header.value_length()))?;
+diff --git a/src/chunk/chunk_test.rs b/src/chunk/chunk_test.rs
+index 0672075..ae18ae7 100644
+--- a/src/chunk/chunk_test.rs
++++ b/src/chunk/chunk_test.rs
+@@ -608,7 +608,7 @@ fn test_init_marshal_unmarshal() -> Result<()> {
+         params: vec![],
+     };
+ 
+-    let cookie = Box::new(ParamStateCookie::new());
++    let cookie = Box::new(ParamStateCookie::new(crate::config::default_random_fill));
+     init_ack.params.push(cookie);
+ 
+     p.chunks.push(Box::new(init_ack));
 diff --git a/src/chunk/mod.rs b/src/chunk/mod.rs
 index f0ce194..cdce3ca 100644
 --- a/src/chunk/mod.rs
@@ -587,10 +691,10 @@ index f0ce194..cdce3ca 100644
          }
  
 diff --git a/src/config.rs b/src/config.rs
-index 49697e8..374abb9 100644
+index 49697e8..60e5eb6 100644
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -50,6 +50,12 @@ pub fn max_payload_size_for_mtu(mtu: u32) -> u32 {
+@@ -50,6 +50,21 @@ pub fn max_payload_size_for_mtu(mtu: u32) -> u32 {
      (mtu - (COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE)) & !3
  }
  pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: u32 = 262144;
@@ -600,10 +704,19 @@ index 49697e8..374abb9 100644
 +/// so the bound is generous; only a peer that ignores both the advertised window and the
 +/// message size reaches it.
 +pub(crate) const DEFAULT_MAX_REASSEMBLY_BYTES: u32 = 16 * 1024 * 1024;
++
++/// Fills a buffer with unpredictable bytes: the source of an association's verification tag,
++/// initial TSN, and state cookie. See [`TransportConfig::with_random_fill`].
++pub type RandomFill = fn(&mut [u8]);
++
++/// `rand`'s thread-local CSPRNG, which keeps SCTP usable without a crypto provider.
++pub(crate) fn default_random_fill(output: &mut [u8]) {
++    rand::fill(output);
++}
  
  /// Config collects the arguments to create_association construction into
  /// a single structure
-@@ -58,6 +64,7 @@ pub struct TransportConfig {
+@@ -58,9 +73,11 @@ pub struct TransportConfig {
      sctp_port: u16,
      max_receive_buffer_size: u32,
      max_message_size: u32,
@@ -611,7 +724,11 @@ index 49697e8..374abb9 100644
      max_num_outbound_streams: u16,
      max_num_inbound_streams: u16,
      timer_config: TimerConfig,
-@@ -69,6 +76,7 @@ impl Default for TransportConfig {
++    random_fill: RandomFill,
+ }
+ 
+ impl Default for TransportConfig {
+@@ -69,9 +86,11 @@ impl Default for TransportConfig {
              sctp_port: 5000,
              max_receive_buffer_size: INITIAL_RECV_BUF_SIZE,
              max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
@@ -619,7 +736,11 @@ index 49697e8..374abb9 100644
              max_num_outbound_streams: u16::MAX,
              max_num_inbound_streams: u16::MAX,
              timer_config: TimerConfig::default(),
-@@ -96,6 +104,13 @@ impl TransportConfig {
++            random_fill: default_random_fill,
+         }
+     }
+ }
+@@ -96,6 +115,13 @@ impl TransportConfig {
          self
      }
  
@@ -633,7 +754,26 @@ index 49697e8..374abb9 100644
      /// Sets how many outbound streams to request during the handshake.
      pub fn with_max_num_outbound_streams(mut self, value: u16) -> Self {
          self.max_num_outbound_streams = value;
-@@ -129,6 +144,11 @@ impl TransportConfig {
+@@ -114,6 +140,18 @@ impl TransportConfig {
+         self
+     }
+ 
++    /// Draws the initial TSN, the state cookie, and a connecting association's placeholder
++    /// peer tag from `value`, an application's own CSPRNG, rather than from `rand`.
++    pub fn with_random_fill(mut self, value: RandomFill) -> Self {
++        self.random_fill = value;
++        self
++    }
++
++    /// The configured source of unpredictable bytes.
++    pub fn random_fill(&self) -> RandomFill {
++        self.random_fill
++    }
++
+     /// The configured SCTP port.
+     pub fn sctp_port(&self) -> u16 {
+         self.sctp_port
+@@ -129,6 +167,11 @@ impl TransportConfig {
          self.max_message_size
      }
  
@@ -645,6 +785,19 @@ index 49697e8..374abb9 100644
      /// The configured outbound stream count.
      pub fn max_num_outbound_streams(&self) -> u16 {
          self.max_num_outbound_streams
+@@ -196,6 +239,12 @@ impl EndpointConfig {
+         self
+     }
+ 
++    /// Draws local association IDs, which are the verification tags, from `value` rather than
++    /// from `rand`. This replaces the AID generator factory.
++    pub fn random_fill(&mut self, value: RandomFill) -> &mut Self {
++        self.aid_generator(move || Box::new(RandomAssociationIdGenerator::with_random_fill(value)))
++    }
++
+     /// Maximum payload size accepted from peers.
+     ///
+     /// The default is suitable for typical internet applications. Applications which expect to run
 diff --git a/src/endpoint/endpoint_test.rs b/src/endpoint/endpoint_test.rs
 index 58eec59..c03132d 100644
 --- a/src/endpoint/endpoint_test.rs
@@ -659,7 +812,7 @@ index 58eec59..c03132d 100644
      pair.drive();
  
 diff --git a/src/endpoint/mod.rs b/src/endpoint/mod.rs
-index a22c139..4336b24 100644
+index a22c139..3a7bfc4 100644
 --- a/src/endpoint/mod.rs
 +++ b/src/endpoint/mod.rs
 @@ -24,7 +24,7 @@ use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
@@ -684,7 +837,18 @@ index a22c139..4336b24 100644
                  } else {
                      None
                  }
-@@ -218,7 +220,7 @@ impl Endpoint {
+@@ -184,7 +186,9 @@ impl Endpoint {
+             return Err(ConnectError::InvalidRemoteAddress(remote));
+         }
+ 
+-        let remote_aid = RandomAssociationIdGenerator::new().generate_aid();
++        let remote_aid =
++            RandomAssociationIdGenerator::with_random_fill(config.transport.random_fill())
++                .generate_aid();
+         let local_aid = self.new_aid();
+ 
+         let (ch, conn) =
+@@ -218,7 +222,7 @@ impl Endpoint {
          let server_config = if let Some(server_config) = self.server_config.as_ref() {
              server_config
          } else {
@@ -693,7 +857,7 @@ index a22c139..4336b24 100644
              return None;
          };
  
-@@ -272,6 +274,7 @@ impl Endpoint {
+@@ -272,6 +276,7 @@ impl Endpoint {
          server_config: Option<Arc<ServerConfig>>,
          transport_config: Arc<TransportConfig>,
      ) -> (AssociationHandle, Association) {
@@ -701,7 +865,7 @@ index a22c139..4336b24 100644
          let conn = Association::new(
              server_config,
              transport_config,
-@@ -292,6 +295,9 @@ impl Endpoint {
+@@ -292,6 +297,9 @@ impl Endpoint {
  
          let ch = AssociationHandle(id);
          self.association_ids.insert(local_aid, ch);
@@ -711,6 +875,80 @@ index a22c139..4336b24 100644
  
          (ch, conn)
      }
+diff --git a/src/lib.rs b/src/lib.rs
+index 928e982..f561091 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -71,7 +71,7 @@ pub use crate::chunk::{
+ 
+ mod config;
+ pub use crate::config::{
+-    ClientConfig, EndpointConfig, MIN_DATA_PACKET_MTU, ServerConfig, TransportConfig,
++    ClientConfig, EndpointConfig, MIN_DATA_PACKET_MTU, RandomFill, ServerConfig, TransportConfig,
+     max_payload_size_for_mtu,
+ };
+ 
+diff --git a/src/param/param_state_cookie.rs b/src/param/param_state_cookie.rs
+index f9fd6d7..9e0154c 100644
+--- a/src/param/param_state_cookie.rs
++++ b/src/param/param_state_cookie.rs
+@@ -1,7 +1,7 @@
+ use super::{param_header::*, param_type::*, *};
+ 
++use crate::config::RandomFill;
+ use bytes::{Bytes, BytesMut};
+-use rand::RngExt;
+ use std::fmt;
+ 
+ #[derive(Default, Debug, Clone, PartialEq)]
+@@ -50,12 +50,13 @@ impl Param for ParamStateCookie {
+ }
+ 
+ impl ParamStateCookie {
+-    pub(crate) fn new() -> Self {
+-        // This 256-bit value is an unpredictable challenge echoed by the peer. SCTP remains usable
+-        // without an RTC crypto provider, so this deliberately uses `rand`'s thread-local CSPRNG.
++    pub(crate) fn new(random_fill: RandomFill) -> Self {
++        // This 256-bit value is an unpredictable challenge echoed by the peer, drawn from the
++        // association's configured source: `rand`'s thread-local CSPRNG unless the application
++        // named its own, so SCTP remains usable without an RTC crypto provider.
+         let mut cookie = BytesMut::new();
+         cookie.resize(32, 0);
+-        rand::rng().fill(cookie.as_mut());
++        random_fill(cookie.as_mut());
+ 
+         ParamStateCookie {
+             cookie: cookie.freeze(),
+@@ -66,17 +67,26 @@ impl ParamStateCookie {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::config::default_random_fill;
+ 
+     #[test]
+     fn generated_state_cookies_have_full_entropy_width() {
+-        assert_eq!(ParamStateCookie::new().cookie.len(), 32);
++        assert_eq!(ParamStateCookie::new(default_random_fill).cookie.len(), 32);
+     }
+ 
+     #[test]
+     fn generated_state_cookies_are_distinct() {
+         assert_ne!(
+-            ParamStateCookie::new().cookie,
+-            ParamStateCookie::new().cookie
++            ParamStateCookie::new(default_random_fill).cookie,
++            ParamStateCookie::new(default_random_fill).cookie
+         );
+     }
++
++    #[test]
++    fn a_state_cookie_comes_from_the_source_given() {
++        fn fixed(output: &mut [u8]) {
++            output.fill(0xA5);
++        }
++        assert_eq!(ParamStateCookie::new(fixed).cookie.as_ref(), [0xA5; 32]);
++    }
+ }
 diff --git a/src/queue/payload_queue.rs b/src/queue/payload_queue.rs
 index 9e86a8f..930e90c 100644
 --- a/src/queue/payload_queue.rs
@@ -828,10 +1066,59 @@ index a9cb00b..207cfbe 100644
                  continue;
              }
 diff --git a/src/util.rs b/src/util.rs
-index 3c94535..1027f0d 100644
+index 3c94535..c367811 100644
 --- a/src/util.rs
 +++ b/src/util.rs
-@@ -280,7 +280,9 @@ pub(crate) fn sna32lte(i1: u32, i2: u32) -> bool {
+@@ -1,3 +1,4 @@
++use crate::config::{RandomFill, default_random_fill};
+ use crate::shared::AssociationId;
+ 
+ use bytes::Bytes;
+@@ -45,11 +46,13 @@ pub trait AssociationIdGenerator: Send + Sync {
+ /// Generates nonzero, unpredictable SCTP verification tags.
+ ///
+ /// SCTP is usable as a standalone crate and does not naturally own an RTC crypto provider. The
+-/// `rand` convenience API used here draws from its thread-local CSPRNG, preserving that standalone
+-/// API while satisfying the verification tag's security requirement.
++/// `rand` convenience API used by default draws from its thread-local CSPRNG, preserving that
++/// standalone API while satisfying the verification tag's security requirement; an application
++/// with a CSPRNG of its own names it with [`Self::with_random_fill`].
+ #[derive(Default, Debug, Clone, Copy)]
+ pub struct RandomAssociationIdGenerator {
+     lifetime: Option<Duration>,
++    random_fill: Option<RandomFill>,
+ }
+ 
+ impl RandomAssociationIdGenerator {
+@@ -58,6 +61,14 @@ impl RandomAssociationIdGenerator {
+         RandomAssociationIdGenerator::default()
+     }
+ 
++    /// A generator drawing from `random_fill` rather than from `rand`.
++    pub fn with_random_fill(random_fill: RandomFill) -> Self {
++        RandomAssociationIdGenerator {
++            lifetime: None,
++            random_fill: Some(random_fill),
++        }
++    }
++
+     /// Set the lifetime of CIDs created by this generator
+     pub fn set_lifetime(&mut self, d: Duration) -> &mut Self {
+         self.lifetime = Some(d);
+@@ -67,8 +78,11 @@ impl RandomAssociationIdGenerator {
+ 
+ impl AssociationIdGenerator for RandomAssociationIdGenerator {
+     fn generate_aid(&mut self) -> AssociationId {
++        let random_fill = self.random_fill.unwrap_or(default_random_fill);
+         loop {
+-            let association_id = rand::random::<u32>();
++            let mut bytes = [0u8; 4];
++            random_fill(&mut bytes);
++            let association_id = u32::from_ne_bytes(bytes);
+             if association_id != 0 {
+                 return association_id;
+             }
+@@ -280,7 +294,9 @@ pub(crate) fn sna32lte(i1: u32, i2: u32) -> bool {
  
  #[inline]
  pub(crate) fn sna32gt(i1: u32, i2: u32) -> bool {
@@ -842,7 +1129,7 @@ index 3c94535..1027f0d 100644
  }
  
  #[inline]
-@@ -305,7 +307,7 @@ pub(crate) fn sna16lte(i1: u16, i2: u16) -> bool {
+@@ -305,7 +321,7 @@ pub(crate) fn sna16lte(i1: u16, i2: u16) -> bool {
  
  #[inline]
  pub(crate) fn sna16gt(i1: u16, i2: u16) -> bool {
@@ -851,7 +1138,23 @@ index 3c94535..1027f0d 100644
  }
  
  #[inline]
-@@ -401,8 +403,14 @@ mod test {
+@@ -324,6 +340,15 @@ mod test {
+ 
+     use super::*;
+ 
++    #[test]
++    fn association_ids_come_from_the_source_given() {
++        fn fixed(output: &mut [u8]) {
++            output.fill(0xA5);
++        }
++        let mut generator = RandomAssociationIdGenerator::with_random_fill(fixed);
++        assert_eq!(generator.generate_aid(), 0xA5A5_A5A5);
++    }
++
+     #[test]
+     fn random_association_ids_are_nonzero() {
+         let mut generator = RandomAssociationIdGenerator::new();
+@@ -401,8 +426,14 @@ mod test {
                      s2f
                  );
                  assert!(
@@ -868,7 +1171,7 @@ index 3c94535..1027f0d 100644
                      s1,
                      s2b
                  );
-@@ -427,8 +435,8 @@ mod test {
+@@ -427,8 +458,8 @@ mod test {
                      s2f
                  );
                  assert!(
@@ -879,7 +1182,7 @@ index 3c94535..1027f0d 100644
                      s1,
                      s2b
                  );
-@@ -528,8 +536,8 @@ mod test {
+@@ -528,8 +559,8 @@ mod test {
                      s2f
                  );
                  assert!(
@@ -890,7 +1193,7 @@ index 3c94535..1027f0d 100644
                      s1,
                      s2b
                  );
-@@ -554,8 +562,8 @@ mod test {
+@@ -554,8 +585,8 @@ mod test {
                      s2f
                  );
                  assert!(

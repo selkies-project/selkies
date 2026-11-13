@@ -1,7 +1,7 @@
 use super::{param_header::*, param_type::*, *};
 
+use crate::config::RandomFill;
 use bytes::{Bytes, BytesMut};
-use rand::RngExt;
 use std::fmt;
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -50,12 +50,13 @@ impl Param for ParamStateCookie {
 }
 
 impl ParamStateCookie {
-    pub(crate) fn new() -> Self {
-        // This 256-bit value is an unpredictable challenge echoed by the peer. SCTP remains usable
-        // without an RTC crypto provider, so this deliberately uses `rand`'s thread-local CSPRNG.
+    pub(crate) fn new(random_fill: RandomFill) -> Self {
+        // This 256-bit value is an unpredictable challenge echoed by the peer, drawn from the
+        // association's configured source: `rand`'s thread-local CSPRNG unless the application
+        // named its own, so SCTP remains usable without an RTC crypto provider.
         let mut cookie = BytesMut::new();
         cookie.resize(32, 0);
-        rand::rng().fill(cookie.as_mut());
+        random_fill(cookie.as_mut());
 
         ParamStateCookie {
             cookie: cookie.freeze(),
@@ -66,17 +67,26 @@ impl ParamStateCookie {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::default_random_fill;
 
     #[test]
     fn generated_state_cookies_have_full_entropy_width() {
-        assert_eq!(ParamStateCookie::new().cookie.len(), 32);
+        assert_eq!(ParamStateCookie::new(default_random_fill).cookie.len(), 32);
     }
 
     #[test]
     fn generated_state_cookies_are_distinct() {
         assert_ne!(
-            ParamStateCookie::new().cookie,
-            ParamStateCookie::new().cookie
+            ParamStateCookie::new(default_random_fill).cookie,
+            ParamStateCookie::new(default_random_fill).cookie
         );
+    }
+
+    #[test]
+    fn a_state_cookie_comes_from_the_source_given() {
+        fn fixed(output: &mut [u8]) {
+            output.fill(0xA5);
+        }
+        assert_eq!(ParamStateCookie::new(fixed).cookie.as_ref(), [0xA5; 32]);
     }
 }

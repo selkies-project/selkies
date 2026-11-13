@@ -1,3 +1,4 @@
+use crate::config::{RandomFill, default_random_fill};
 use crate::shared::AssociationId;
 
 use bytes::Bytes;
@@ -45,17 +46,27 @@ pub trait AssociationIdGenerator: Send + Sync {
 /// Generates nonzero, unpredictable SCTP verification tags.
 ///
 /// SCTP is usable as a standalone crate and does not naturally own an RTC crypto provider. The
-/// `rand` convenience API used here draws from its thread-local CSPRNG, preserving that standalone
-/// API while satisfying the verification tag's security requirement.
+/// `rand` convenience API used by default draws from its thread-local CSPRNG, preserving that
+/// standalone API while satisfying the verification tag's security requirement; an application
+/// with a CSPRNG of its own names it with [`Self::with_random_fill`].
 #[derive(Default, Debug, Clone, Copy)]
 pub struct RandomAssociationIdGenerator {
     lifetime: Option<Duration>,
+    random_fill: Option<RandomFill>,
 }
 
 impl RandomAssociationIdGenerator {
     /// Initialize Random AID generator
     pub fn new() -> Self {
         RandomAssociationIdGenerator::default()
+    }
+
+    /// A generator drawing from `random_fill` rather than from `rand`.
+    pub fn with_random_fill(random_fill: RandomFill) -> Self {
+        RandomAssociationIdGenerator {
+            lifetime: None,
+            random_fill: Some(random_fill),
+        }
     }
 
     /// Set the lifetime of CIDs created by this generator
@@ -67,8 +78,11 @@ impl RandomAssociationIdGenerator {
 
 impl AssociationIdGenerator for RandomAssociationIdGenerator {
     fn generate_aid(&mut self) -> AssociationId {
+        let random_fill = self.random_fill.unwrap_or(default_random_fill);
         loop {
-            let association_id = rand::random::<u32>();
+            let mut bytes = [0u8; 4];
+            random_fill(&mut bytes);
+            let association_id = u32::from_ne_bytes(bytes);
             if association_id != 0 {
                 return association_id;
             }
@@ -325,6 +339,15 @@ mod test {
     use shared::error::Result;
 
     use super::*;
+
+    #[test]
+    fn association_ids_come_from_the_source_given() {
+        fn fixed(output: &mut [u8]) {
+            output.fill(0xA5);
+        }
+        let mut generator = RandomAssociationIdGenerator::with_random_fill(fixed);
+        assert_eq!(generator.generate_aid(), 0xA5A5_A5A5);
+    }
 
     #[test]
     fn random_association_ids_are_nonzero() {

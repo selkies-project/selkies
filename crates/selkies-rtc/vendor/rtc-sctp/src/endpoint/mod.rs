@@ -186,7 +186,9 @@ impl Endpoint {
             return Err(ConnectError::InvalidRemoteAddress(remote));
         }
 
-        let remote_aid = RandomAssociationIdGenerator::new().generate_aid();
+        let remote_aid =
+            RandomAssociationIdGenerator::with_random_fill(config.transport.random_fill())
+                .generate_aid();
         let local_aid = self.new_aid();
 
         let (ch, conn) =

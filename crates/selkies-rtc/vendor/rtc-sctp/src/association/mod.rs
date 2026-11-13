@@ -24,7 +24,10 @@ use crate::chunk::{
     chunk_shutdown_complete::ChunkShutdownComplete,
     chunk_type::CT_FORWARD_TSN,
 };
-use crate::config::{COMMON_HEADER_SIZE, DATA_CHUNK_HEADER_SIZE, ServerConfig, TransportConfig};
+use crate::config::{
+    COMMON_HEADER_SIZE, DATA_CHUNK_HEADER_SIZE, RandomFill, ServerConfig, TransportConfig,
+    default_random_fill,
+};
 use crate::packet::{CommonHeader, Packet};
 use crate::param::{
     Param,
@@ -49,7 +52,6 @@ use timer::{ACK_INTERVAL, RtoManager, Timer, TimerTable};
 use crate::association::stream::RecvSendState;
 use bytes::{Bytes, BytesMut};
 use log::{debug, error, trace, warn};
-use rand::random;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -194,6 +196,8 @@ pub struct Association {
     my_max_num_inbound_streams: u16,
     my_max_num_outbound_streams: u16,
     my_cookie: Option<ParamStateCookie>,
+    /// Where the state cookie is drawn from; see `TransportConfig::with_random_fill`.
+    random_fill: RandomFill,
 
     pub(crate) payload_queue: PayloadQueue,
     inflight_queue: PayloadQueue,
@@ -301,6 +305,7 @@ impl Default for Association {
             my_max_num_inbound_streams: 0,
             my_max_num_outbound_streams: 0,
             my_cookie: None,
+            random_fill: default_random_fill,
 
             payload_queue: PayloadQueue::default(),
             inflight_queue: PayloadQueue::default(),
@@ -387,9 +392,13 @@ impl Association {
         // min > max) and overflowed near `u32::MAX`, both reachable through
         // `EndpointConfig::max_payload_size` and MTU-derived payload budgets.
         let cwnd = mtu.saturating_mul(2).max(4380).min(mtu.saturating_mul(4));
-        // RFC 4960 requires an unpredictable initial TSN. SCTP remains usable without an RTC
-        // crypto provider, so this deliberately uses `rand`'s thread-local CSPRNG.
-        let mut tsn = random::<u32>();
+        // RFC 4960 requires an unpredictable initial TSN. It comes from the configured source:
+        // `rand`'s thread-local CSPRNG unless the application named its own, so SCTP remains
+        // usable without an RTC crypto provider.
+        let random_fill = config.random_fill();
+        let mut tsn_bytes = [0u8; 4];
+        random_fill(&mut tsn_bytes);
+        let mut tsn = u32::from_ne_bytes(tsn_bytes);
         if tsn == 0 {
             tsn += 1;
         }
@@ -414,6 +423,7 @@ impl Association {
             transport_protocol: protocol,
 
             my_verification_tag: local_aid,
+            random_fill,
             my_next_tsn: tsn,
             my_next_rsn: tsn,
             min_tsn2measure_rtt: tsn,
@@ -1141,7 +1151,7 @@ impl Association {
         };
 
         if self.my_cookie.is_none() {
-            self.my_cookie = Some(ParamStateCookie::new());
+            self.my_cookie = Some(ParamStateCookie::new(self.random_fill));
         }
 
         if let Some(my_cookie) = &self.my_cookie {

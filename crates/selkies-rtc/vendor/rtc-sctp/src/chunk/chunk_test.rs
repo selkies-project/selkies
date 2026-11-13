@@ -608,7 +608,7 @@ fn test_init_marshal_unmarshal() -> Result<()> {
         params: vec![],
     };
 
-    let cookie = Box::new(ParamStateCookie::new());
+    let cookie = Box::new(ParamStateCookie::new(crate::config::default_random_fill));
     init_ack.params.push(cookie);
 
     p.chunks.push(Box::new(init_ack));

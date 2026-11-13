@@ -57,6 +57,15 @@ pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: u32 = 262144;
 /// message size reaches it.
 pub(crate) const DEFAULT_MAX_REASSEMBLY_BYTES: u32 = 16 * 1024 * 1024;
 
+/// Fills a buffer with unpredictable bytes: the source of an association's verification tag,
+/// initial TSN, and state cookie. See [`TransportConfig::with_random_fill`].
+pub type RandomFill = fn(&mut [u8]);
+
+/// `rand`'s thread-local CSPRNG, which keeps SCTP usable without a crypto provider.
+pub(crate) fn default_random_fill(output: &mut [u8]) {
+    rand::fill(output);
+}
+
 /// Config collects the arguments to create_association construction into
 /// a single structure
 #[derive(Debug, Clone)]
@@ -68,6 +77,7 @@ pub struct TransportConfig {
     max_num_outbound_streams: u16,
     max_num_inbound_streams: u16,
     timer_config: TimerConfig,
+    random_fill: RandomFill,
 }
 
 impl Default for TransportConfig {
@@ -80,6 +90,7 @@ impl Default for TransportConfig {
             max_num_outbound_streams: u16::MAX,
             max_num_inbound_streams: u16::MAX,
             timer_config: TimerConfig::default(),
+            random_fill: default_random_fill,
         }
     }
 }
@@ -127,6 +138,18 @@ impl TransportConfig {
     pub fn with_timer_config(mut self, value: TimerConfig) -> Self {
         self.timer_config = value;
         self
+    }
+
+    /// Draws the initial TSN, the state cookie, and a connecting association's placeholder
+    /// peer tag from `value`, an application's own CSPRNG, rather than from `rand`.
+    pub fn with_random_fill(mut self, value: RandomFill) -> Self {
+        self.random_fill = value;
+        self
+    }
+
+    /// The configured source of unpredictable bytes.
+    pub fn random_fill(&self) -> RandomFill {
+        self.random_fill
     }
 
     /// The configured SCTP port.
@@ -214,6 +237,12 @@ impl EndpointConfig {
     ) -> &mut Self {
         self.aid_generator_factory = Arc::new(factory);
         self
+    }
+
+    /// Draws local association IDs, which are the verification tags, from `value` rather than
+    /// from `rand`. This replaces the AID generator factory.
+    pub fn random_fill(&mut self, value: RandomFill) -> &mut Self {
+        self.aid_generator(move || Box::new(RandomAssociationIdGenerator::with_random_fill(value)))
     }
 
     /// Maximum payload size accepted from peers.
