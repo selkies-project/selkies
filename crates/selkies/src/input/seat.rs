@@ -94,7 +94,7 @@ impl WaylandSeat for ScreenCapture {
     }
 
     fn type_keysyms_wayland(&self, display: String, keysyms: Vec<u32>) -> Result<(), Error> {
-        ScreenCapture::type_keysyms_wayland(self, display, keysyms)
+        ScreenCapture::type_keysyms_wayland(self, &display, &keysyms)
     }
 
     fn inject_mouse_move(&self, x: f64, y: f64) -> Result<Option<u64>, Error> {
@@ -130,6 +130,6 @@ impl WaylandSeat for ScreenCapture {
     }
 
     fn clipboard_unwatch_app(&self, display: String) {
-        ScreenCapture::clipboard_unwatch_app(self, display)
+        ScreenCapture::clipboard_unwatch_app(self, &display)
     }
 }

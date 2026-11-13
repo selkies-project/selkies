@@ -381,17 +381,15 @@ impl CompositorClipboard for pixelflux::ScreenCapture {
     }
 
     fn clipboard_types_app(&self, display: &str) -> Result<Vec<String>, String> {
-        pixelflux::ScreenCapture::clipboard_types_app(self, display.to_string())
-            .map_err(|e| e.to_string())
+        pixelflux::ScreenCapture::clipboard_types_app(self, display).map_err(|e| e.to_string())
     }
 
     fn clipboard_read_app(&self, display: &str, mime: &str) -> Result<Option<Vec<u8>>, String> {
-        pixelflux::ScreenCapture::clipboard_read_app(self, display.to_string(), mime.to_string())
-            .map_err(|e| e.to_string())
+        pixelflux::ScreenCapture::clipboard_read_app(self, display, mime).map_err(|e| e.to_string())
     }
 
     fn clipboard_write_app(&self, display: &str, entries: Vec<Entry>) -> Result<(), String> {
-        pixelflux::ScreenCapture::clipboard_write_app(self, display.to_string(), entries)
+        pixelflux::ScreenCapture::clipboard_write_app(self, display, entries)
             .map_err(|e| e.to_string())
     }
 
@@ -400,8 +398,7 @@ impl CompositorClipboard for pixelflux::ScreenCapture {
     }
 
     fn clipboard_clear_app(&self, display: &str) -> Result<(), String> {
-        pixelflux::ScreenCapture::clipboard_clear_app(self, display.to_string())
-            .map_err(|e| e.to_string())
+        pixelflux::ScreenCapture::clipboard_clear_app(self, display).map_err(|e| e.to_string())
     }
 
     fn clipboard_watch_app(
@@ -409,12 +406,12 @@ impl CompositorClipboard for pixelflux::ScreenCapture {
         display: &str,
         watch: Arc<dyn pixelflux::sink::SelectionWatch>,
     ) -> Result<(), String> {
-        pixelflux::ScreenCapture::clipboard_watch_app(self, display.to_string(), watch)
+        pixelflux::ScreenCapture::clipboard_watch_app(self, display, watch)
             .map_err(|e| e.to_string())
     }
 
     fn clipboard_unwatch_app(&self, display: &str) {
-        pixelflux::ScreenCapture::clipboard_unwatch_app(self, display.to_string())
+        pixelflux::ScreenCapture::clipboard_unwatch_app(self, display)
     }
 }
 

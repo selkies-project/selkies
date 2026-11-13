@@ -442,7 +442,7 @@ pub fn main(args: &[String]) -> i32 {
             settings.auto_gpu().to_string(),
         )
     };
-    let report = pixelflux::probe_wayland_gpu(render_dri, auto_gpu);
+    let report = pixelflux::probe_wayland_gpu(&render_dri, &auto_gpu);
     let mut found = facts(&report);
     eprintln!("{}", summary(&report, &found));
     found.extend(client_facts(&found, &RealProbes, None));

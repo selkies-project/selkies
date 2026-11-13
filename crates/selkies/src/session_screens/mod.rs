@@ -167,10 +167,7 @@ impl AppScreens for ScreenCapture {
         index: usize,
     ) -> Result<bool, String> {
         text(ScreenCapture::set_app_output_scale(
-            self,
-            display.to_string(),
-            scale,
-            index,
+            self, display, scale, index,
         ))
     }
 
@@ -183,12 +180,7 @@ impl AppScreens for ScreenCapture {
         index: usize,
     ) -> Result<bool, String> {
         text(ScreenCapture::set_app_screen_geometry(
-            self,
-            display.to_string(),
-            width,
-            height,
-            scale,
-            index,
+            self, display, width, height, scale, index,
         ))
     }
 
@@ -197,22 +189,15 @@ impl AppScreens for ScreenCapture {
         display: &str,
         rects: Vec<(i32, i32, i32, i32)>,
     ) -> Result<usize, String> {
-        text(ScreenCapture::set_app_screen_layout(
-            self,
-            display.to_string(),
-            rects,
-        ))
+        text(ScreenCapture::set_app_screen_layout(self, display, rects))
     }
 
     fn list_app_screens(&self, display: &str) -> Result<Vec<AppScreen>, String> {
-        text(ScreenCapture::list_app_screens(self, display.to_string()))
+        text(ScreenCapture::list_app_screens(self, display))
     }
 
     fn app_screen_control_offered(&self, display: &str) -> Result<bool, String> {
-        text(ScreenCapture::app_screen_control_offered(
-            self,
-            display.to_string(),
-        ))
+        text(ScreenCapture::app_screen_control_offered(self, display))
     }
 
     fn add_app_screen(
@@ -224,17 +209,12 @@ impl AppScreens for ScreenCapture {
         scale: f64,
     ) -> Result<(), String> {
         text(ScreenCapture::add_app_screen(
-            self,
-            display.to_string(),
-            name.to_string(),
-            width,
-            height,
-            scale,
+            self, display, name, width, height, scale,
         ))
     }
 
     fn remove_app_screen(&self, name: &str) -> Result<bool, String> {
-        text(ScreenCapture::remove_app_screen(self, name.to_string()))
+        text(ScreenCapture::remove_app_screen(self, name))
     }
 
     fn hold_spare_app_screens(
@@ -245,11 +225,7 @@ impl AppScreens for ScreenCapture {
         height: i32,
     ) -> Result<usize, String> {
         text(ScreenCapture::hold_spare_app_screens(
-            self,
-            display.to_string(),
-            keep,
-            width,
-            height,
+            self, display, keep, width, height,
         ))
     }
 

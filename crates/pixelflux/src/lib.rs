@@ -9936,11 +9936,11 @@ impl ScreenCapture {
     /// live under (the nested session's, or pixelflux's own in a direct session).
     /// Blocking; releases the GIL for the duration. Raises
     /// [`VirtualKeyboardUnavailable`] when the compositor lacks the protocol.
-    pub fn type_text_wayland(&self, display: String, text: String) -> Result<(), Error> {
+    pub fn type_text_wayland(&self, display: &str, text: &str) -> Result<(), Error> {
         {
-            let path = crate::wayland::wlclient::socket_path(&display)
+            let path = crate::wayland::wlclient::socket_path(display)
                 .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::vkclient::type_text_to(&path, &text)
+            crate::wayland::vkclient::type_text_to(&path, text)
         }
         .map_err(|e: String| {
             if e.contains("zwp_virtual_keyboard_manager_v1") {
@@ -9954,11 +9954,11 @@ impl ScreenCapture {
     /// Tap `keysyms` in order through `display`'s virtual keyboard, verbatim: the
     /// caller owns which keysym spells which character (selkies' policy layer);
     /// this owns delivery. Same one-shot client and errors as `type_text_wayland`.
-    pub fn type_keysyms_wayland(&self, display: String, keysyms: Vec<u32>) -> Result<(), Error> {
+    pub fn type_keysyms_wayland(&self, display: &str, keysyms: &[u32]) -> Result<(), Error> {
         {
-            let path = crate::wayland::wlclient::socket_path(&display)
+            let path = crate::wayland::wlclient::socket_path(display)
                 .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::vkclient::type_keysyms_to(&path, &keysyms)
+            crate::wayland::vkclient::type_keysyms_to(&path, keysyms)
         }
         .map_err(|e: String| {
             if e.contains("zwp_virtual_keyboard_manager_v1") {
@@ -9975,12 +9975,12 @@ impl ScreenCapture {
     /// the capture output's instead.
     pub fn set_app_output_scale(
         &self,
-        display: String,
+        display: &str,
         scale: f64,
         index: usize,
     ) -> Result<bool, Error> {
         {
-            let path = crate::wayland::wlclient::socket_path(&display)
+            let path = crate::wayland::wlclient::socket_path(display)
                 .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
             crate::wayland::outclient::set_output_scale(&path, index, scale)
         }
@@ -9998,14 +9998,14 @@ impl ScreenCapture {
     /// scale, which is the capture output's.
     pub fn set_app_screen_geometry(
         &self,
-        display: String,
+        display: &str,
         width: i32,
         height: i32,
         scale: f64,
         index: usize,
     ) -> Result<bool, Error> {
         {
-            let path = crate::wayland::wlclient::socket_path(&display)
+            let path = crate::wayland::wlclient::socket_path(display)
                 .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
             crate::wayland::outclient::set_screen_geometry(&path, index, (width, height), scale)
         }
@@ -10022,15 +10022,15 @@ impl ScreenCapture {
     /// positioned; 0 = that compositor manages no outputs for clients.
     pub fn set_app_screen_layout(
         &self,
-        display: String,
+        display: &str,
         rects: Vec<(i32, i32, i32, i32)>,
     ) -> Result<usize, Error> {
         {
-            let path = crate::wayland::wlclient::socket_path(&display)
+            let path = crate::wayland::wlclient::socket_path(display)
                 .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
             let placed = crate::wayland::outclient::set_screen_layout(&path, rects.clone())?;
             if placed == 0 {
-                crate::wayland::kdeclient::set_screen_layout(&path, rects)
+                crate::wayland::kdeclient::set_screen_layout(&path, &rects)
             } else {
                 Ok(placed)
             }
@@ -10044,12 +10044,9 @@ impl ScreenCapture {
     /// other way to be checked against. The same ladder as
     /// `set_app_screen_layout` (zwlr, then KWin's output devices). Empty =
     /// that compositor manages no outputs for clients.
-    pub fn list_app_screens(
-        &self,
-        display: String,
-    ) -> Result<Vec<crate::wayland::AppScreen>, Error> {
+    pub fn list_app_screens(&self, display: &str) -> Result<Vec<crate::wayland::AppScreen>, Error> {
         {
-            let path = crate::wayland::wlclient::socket_path(&display)
+            let path = crate::wayland::wlclient::socket_path(display)
                 .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
             let screens = crate::wayland::outclient::list_screens(&path)?;
             if screens.is_empty() {
@@ -10066,9 +10063,9 @@ impl ScreenCapture {
     /// session serves no control socket. A registry read that touches no
     /// screen: whether the compositor registers the screen it grows is proven
     /// when a display asks for one (`add_app_screen` refuses one that does not).
-    pub fn app_screen_control_offered(&self, display: String) -> Result<bool, Error> {
+    pub fn app_screen_control_offered(&self, display: &str) -> Result<bool, Error> {
         {
-            let path = crate::wayland::wlclient::socket_path(&display)
+            let path = crate::wayland::wlclient::socket_path(display)
                 .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
             crate::wayland::kdeclient::screen_control_offered(&path)
         }
@@ -10081,16 +10078,16 @@ impl ScreenCapture {
     /// size follows the capture output that adopts its host window.
     pub fn add_app_screen(
         &self,
-        display: String,
-        name: String,
+        display: &str,
+        name: &str,
         width: i32,
         height: i32,
         scale: f64,
     ) -> Result<(), Error> {
         {
-            let path = crate::wayland::wlclient::socket_path(&display)
+            let path = crate::wayland::wlclient::socket_path(display)
                 .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
-            crate::wayland::kdeclient::add_screen(&path, &name, (width, height), scale)
+            crate::wayland::kdeclient::add_screen(&path, name, (width, height), scale)
         }
         .map_err(Error::Capture)
     }
@@ -10098,8 +10095,8 @@ impl ScreenCapture {
     /// Remove a screen `add_app_screen` grew; the compositor's own
     /// output-destroy path returns its windows to the primary. False when no
     /// such screen is held.
-    pub fn remove_app_screen(&self, name: String) -> Result<bool, Error> {
-        Ok(crate::wayland::kdeclient::remove_screen(&name))
+    pub fn remove_app_screen(&self, name: &str) -> Result<bool, Error> {
+        Ok(crate::wayland::kdeclient::remove_screen(name))
     }
 
     /// Hold the app compositor's screens past the first `keep` at a small size,
@@ -10108,13 +10105,13 @@ impl ScreenCapture {
     /// resized (0 = that compositor manages no outputs for clients).
     pub fn hold_spare_app_screens(
         &self,
-        display: String,
+        display: &str,
         keep: usize,
         width: i32,
         height: i32,
     ) -> Result<usize, Error> {
         {
-            let path = crate::wayland::wlclient::socket_path(&display)
+            let path = crate::wayland::wlclient::socket_path(display)
                 .ok_or_else(|| "XDG_RUNTIME_DIR is unset".to_string())?;
             crate::wayland::outclient::hold_spare_screens(&path, keep, (width, height))
         }
@@ -10122,18 +10119,14 @@ impl ScreenCapture {
     }
 
     /// Mimes the app compositor's current selection offers (empty = nothing copied).
-    pub fn clipboard_types_app(&self, display: String) -> Result<Vec<String>, Error> {
-        (crate::wayland::dcclient::list_types(&app_socket_path(&display)?)).map_err(Error::Capture)
+    pub fn clipboard_types_app(&self, display: &str) -> Result<Vec<String>, Error> {
+        (crate::wayland::dcclient::list_types(&app_socket_path(display)?)).map_err(Error::Capture)
     }
 
     /// The app compositor selection's payload for `mime`, or None when nothing is
     /// copied or the selection does not offer that mime.
-    pub fn clipboard_read_app(
-        &self,
-        display: String,
-        mime: String,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        let data = (crate::wayland::dcclient::read(&app_socket_path(&display)?, &mime))
+    pub fn clipboard_read_app(&self, display: &str, mime: &str) -> Result<Option<Vec<u8>>, Error> {
+        let data = (crate::wayland::dcclient::read(&app_socket_path(display)?, mime))
             .map_err(Error::Capture)?;
         Ok(data)
     }
@@ -10142,10 +10135,10 @@ impl ScreenCapture {
     /// every paster from a background thread until another client copies.
     pub fn clipboard_write_app(
         &self,
-        display: String,
+        display: &str,
         entries: Vec<(String, Vec<u8>)>,
     ) -> Result<(), Error> {
-        (crate::wayland::dcclient::write(&app_socket_path(&display)?, entries))
+        (crate::wayland::dcclient::write(&app_socket_path(display)?, entries))
             .map_err(Error::Capture)
     }
 
@@ -10162,13 +10155,13 @@ impl ScreenCapture {
     }
 
     /// Drop the app compositor's selection.
-    pub fn clipboard_clear_app(&self, display: String) -> Result<(), Error> {
-        (crate::wayland::dcclient::clear(&app_socket_path(&display)?)).map_err(Error::Capture)
+    pub fn clipboard_clear_app(&self, display: &str) -> Result<(), Error> {
+        (crate::wayland::dcclient::clear(&app_socket_path(display)?)).map_err(Error::Capture)
     }
 
     /// Stop the selection watch for `display` (no-op without one).
-    pub fn clipboard_unwatch_app(&self, display: String) {
-        if let Ok(path) = app_socket_path(&display) {
+    pub fn clipboard_unwatch_app(&self, display: &str) {
+        if let Ok(path) = app_socket_path(display) {
             crate::wayland::dcclient::unwatch(&path);
         }
     }
@@ -10619,10 +10612,10 @@ impl ScreenCapture {
     /// from a thread of its own; a second watch on the same display replaces the first.
     pub fn clipboard_watch_app(
         &self,
-        display: String,
+        display: &str,
         watch: Arc<dyn crate::sink::SelectionWatch>,
     ) -> Result<(), Error> {
-        crate::wayland::dcclient::watch(&app_socket_path(&display)?, watch).map_err(Error::Capture)
+        crate::wayland::dcclient::watch(&app_socket_path(display)?, watch).map_err(Error::Capture)
     }
 }
 
@@ -10813,11 +10806,11 @@ pub struct WaylandGpuProbe {
 /// Probe the render node the compositor would run on: `render_node` explicitly, else the
 /// `auto_gpu` pick. Allocates one GBM buffer, exports it, and opens a GL context on it, so a
 /// deployment learns before starting whether the compositor renders in hardware.
-pub fn probe_wayland_gpu(render_node: String, auto_gpu: String) -> WaylandGpuProbe {
+pub fn probe_wayland_gpu(render_node: &str, auto_gpu: &str) -> WaylandGpuProbe {
     let node = if render_node.is_empty() {
-        auto_render_node(&auto_gpu)
+        auto_render_node(auto_gpu)
     } else {
-        Some(render_node)
+        Some(render_node.to_string())
     };
     let Some(node) = node else {
         return WaylandGpuProbe {
