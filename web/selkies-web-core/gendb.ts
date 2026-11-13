@@ -30,7 +30,7 @@ const VALID_MAPPINGS = new Set([
 // the raw button/axis indices differ between them, so each mapping is written
 // into a per-platform subdirectory that lib/gamepad.ts selects by user agent.
 // Platforms outside this set have no browser target and are skipped.
-const PLATFORM_DIRS = {
+const PLATFORM_DIRS: Record<string, string> = {
   'windows': 'windows',
   'mac os x': 'mac',
   'linux': 'linux',
@@ -38,7 +38,20 @@ const PLATFORM_DIRS = {
   'ios': 'ios'
 };
 
-function parseSdlLine(line) {
+/** One control of a pad as the browser reports it raw: an axis, a button, or a hat direction. */
+interface RawControl {
+  type: 'axis' | 'button' | 'hat';
+  index: number;
+  mask?: number;
+}
+
+/** A pad's mapping file: its path under the output directory and its controls by SDL name. */
+interface PadMapping {
+  filename: string;
+  mapping: Record<string, RawControl>;
+}
+
+function parseSdlLine(line: string): PadMapping | null {
   if (line.startsWith('#') || line.trim() === '') {
     return null;
   }
@@ -57,7 +70,7 @@ function parseSdlLine(line) {
   const product = (guid.substring(18, 20) + guid.substring(16, 18)).toLowerCase();
   const filename = path.join(platformDir, `${vendor}-${product}.json`);
 
-  const mapping = {};
+  const mapping: Record<string, RawControl> = {};
 
   for (let i = 2; i < parts.length; i++) {
     const mappingPart = parts[i];
@@ -89,7 +102,7 @@ function parseSdlLine(line) {
   return null;
 }
 
-async function fetchOk(url, headers = {}) {
+async function fetchOk(url: string, headers: Record<string, string> = {}): Promise<Response> {
   const response = await fetch(url, { headers });
   if (!response.ok) {
     throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
@@ -98,14 +111,14 @@ async function fetchOk(url, headers = {}) {
 }
 
 // git's object hash of a file: SHA-1 over "blob <size>\0" and the content.
-function gitBlobSha(body) {
+function gitBlobSha(body: Buffer): string {
   return crypto.createHash('sha1').update(`blob ${body.length}\0`).update(body).digest('hex');
 }
 
 // A token for the two API requests where the build has one: the build secret
 // github_token (a container build), else GITHUB_TOKEN or GH_TOKEN. Without one
 // they share the API's 60 requests an hour per address.
-function githubToken() {
+function githubToken(): string | undefined {
   try {
     const secret = fs.readFileSync('/run/secrets/github_token', 'utf8').trim();
     if (secret) return secret;
@@ -115,17 +128,23 @@ function githubToken() {
   return process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
 }
 
+// The object name a GitHub API answer carries as `sha`; undefined where it carries none.
+async function shaOf(response: Response): Promise<string | undefined> {
+  const answer: unknown = await response.json();
+  if (typeof answer !== 'object' || answer === null || !('sha' in answer)) return undefined;
+  return typeof answer.sha === 'string' ? answer.sha : undefined;
+}
+
 async function main() {
   const token = githubToken();
   const headers = { Accept: 'application/vnd.github+json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 
-  let fileContent;
-  let commit;
-  let body;
-  let blob;
+  let commit: string | undefined;
+  let body: Buffer;
+  let blob: string | undefined;
   try {
-    commit = (await (await fetchOk(`${API}/repos/${DB_REPO}/commits/${DB_BRANCH}`, headers)).json()).sha;
-    blob = (await (await fetchOk(`${API}/repos/${DB_REPO}/contents/${DB_FILE}?ref=${commit}`, headers)).json()).sha;
+    commit = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/commits/${DB_BRANCH}`, headers));
+    blob = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/contents/${DB_FILE}?ref=${commit}`, headers));
     const url = `https://raw.githubusercontent.com/${DB_REPO}/${commit}/${DB_FILE}`;
     console.log(`Fetching controller DB from ${url}...`);
     body = Buffer.from(await (await fetchOk(url)).arrayBuffer());
@@ -139,7 +158,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  fileContent = body.toString('utf8');
+  const fileContent = body.toString('utf8');
   console.log(`Fetched controller DB at ${commit} (blob ${blob}).`);
   
   console.log('Starting conversion...');
@@ -174,4 +193,4 @@ async function main() {
   console.log(`  Skipped ${skippedCount} lines (comments, empty, invalid, or an unsupported platform).`);
 }
 
-main();
+await main();

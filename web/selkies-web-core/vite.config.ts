@@ -5,7 +5,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { defineConfig, transformWithOxc } from 'vite';
+import { defineConfig, transformWithOxc, type Plugin } from 'vite';
 import { ViteMinifyPlugin } from 'vite-plugin-minify';
 
 // selkies-ws-core.ts inlines three lib modules into Blob workers by source
@@ -19,7 +19,7 @@ const RAW_TS_MODULES = new Set([
   'lib/decode-pace.ts',
   'lib/wire-codecs.ts',
 ]);
-function stripRawTs() {
+function stripRawTs(): Plugin {
   return {
     name: 'selkies-strip-raw-ts',
     enforce: 'pre',
@@ -39,10 +39,10 @@ function stripRawTs() {
 // beside the bundle for them to import on first use; no other engine loads it.
 // The generated module is renamed to .js, since a module script needs a
 // JavaScript type and servers type .mjs unevenly.
-function opusWasm() {
+function opusWasm(): Plugin {
   const pkg = new URL('./node_modules/libopus-wasm/', import.meta.url);
   const GENERATED = '"./generated/libopus.generated.mjs"';
-  const files = () => {
+  const files = (): Record<string, string | Buffer> => {
     const index = readFileSync(new URL('dist/index.js', pkg), 'utf8');
     if (!index.includes(GENERATED)) throw new Error(`libopus-wasm's index.js no longer imports ${GENERATED}`);
     return {
@@ -70,7 +70,7 @@ function opusWasm() {
 }
 
 // Restarts the dev server when a file Vite does not track as a module changes.
-function restartOnChange(globs) {
+function restartOnChange(globs: string[]): Plugin {
   const patterns = globs.map((glob) => new RegExp(
     '(^|/)' + glob.replace(/[.+^${}()|[\]\\]/g, '\\$&')
                   .replace(/\*\*/g, '\0')
@@ -81,7 +81,7 @@ function restartOnChange(globs) {
     apply: 'serve',
     configureServer(server) {
       server.watcher.add(globs);
-      const onChange = (file) => {
+      const onChange = (file: string) => {
         const path = file.split(/[\\/]/).join('/');
         if (patterns.some((pattern) => pattern.test(path))) server.restart();
       };

@@ -73,7 +73,7 @@ export default [
     rules: tsRules,
   },
   {
-    files: ['selkies-web-core/vite.config.mjs', 'selkies-web-core/gendb.js'],
+    files: ['selkies-web-core/vite.config.ts', 'selkies-web-core/gendb.ts'],
     languageOptions: { globals: globals.node },
   },
   {

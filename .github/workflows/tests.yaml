@@ -189,7 +189,7 @@ jobs:
       # The server's build embeds the bundle in dist/web, which its tests check
       - name: Build the web client
         env:
-          # For the controller database's lookups (gendb.js)
+          # For the controller database's lookups (gendb.ts)
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci/build-web.sh
       - name: Install the server's toolchain and libraries
@@ -469,7 +469,7 @@ jobs:
           python -c 'import pixelflux, pcmflux; print("pixelflux and pcmflux:", pixelflux.__file__)'
       - name: Build the web client
         env:
-          # For the controller database's lookups (gendb.js)
+          # For the controller database's lookups (gendb.ts)
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci/build-web.sh
       - name: Build the test tools

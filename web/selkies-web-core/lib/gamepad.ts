@@ -23,7 +23,7 @@
  * `hapticActuators` pulse.
  *
  * Pads the browser could not map to the standard layout are remapped through
- * the per-platform profile database that gendb.js generates: raw button and
+ * the per-platform profile database that gendb.ts generates: raw button and
  * axis indices differ across platforms for the same pad, so the lookup is
  * scoped to the platform this browser runs on, and anything unmatched
  * (ChromeOS, the BSDs) uses the evdev layout Linux browsers report. Such pads

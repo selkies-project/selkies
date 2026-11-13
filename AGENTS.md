@@ -48,10 +48,12 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   module) and are named for the behavior they hold, as a sentence.
 - TypeScript (`.ts`/`.tsx`): JSDoc blocks with `@param name description`, `@returns`, `@throws`, and no types in
   the tags — the signature is the type. Props are an `interface` or `type` with a line per field.
-- JavaScript (`.js`/`.jsx`), left only in the web core's build helpers (`gendb.js`, the vite config): the same
-  JSDoc blocks, but the tags carry the types (`@param {Type} name`, `@returns {Type}`, `@typedef`/`@callback` for
-  option bags and callbacks). The web core is TypeScript, checked strictly by its own `tsc -b`
-  (`web/selkies-web-core/tsconfig.json`), and the dashboard's `tsc` compiles the `lib` modules it imports.
+- JavaScript (`.js`/`.mjs`), left only in the ESLint configs, the site's scripts (`website/scripts`), the Node
+  audits under `tests/tools`, and the image tier's tester pages: the same JSDoc blocks, but the tags carry the types
+  (`@param {Type} name`, `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The web core is
+  TypeScript, checked strictly by its own `tsc -b` (`web/selkies-web-core/tsconfig.json`), and the dashboard's `tsc`
+  compiles the `lib` modules it imports, the touch gamepad, and the build helpers Node runs with their types
+  stripped (`tsconfig.node.json`).
 - TypeScript and JavaScript: a `/** ... @module */` block after the license header is the module docblock;
   `_`-prefixed members are private and hidden from the reference; a React component documents what it renders and
   which core messages or `window` state it consumes. A tag TypeDoc does not know (`@constructor`) is a build
@@ -65,7 +67,7 @@ Vendored code keeps upstream documentation style and is excluded from the refere
 `crates/selkies-rtc/vendor` and the shadcn/ui primitives under `web/selkies-dashboard/src/components/ui`; only
 Selkies-added comments there follow these rules. The vendored crates are vendored so that they can be changed here
 rather than worked around, so editing them is the expected way to fix what they do -- a change belongs upstream as
-well where upstream would take it. The translation tables and the build helpers (`copy-*.js`, `gendb.js`, the vite
+well where upstream would take it. The translation tables and the build helpers (`copy-*.ts`, `gendb.ts`, the vite
 and eslint configs) are excluded too.
 
 A file that takes a substantial part of its code verbatim from a BSD-, Apache- or MIT-licensed project opens with

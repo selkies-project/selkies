@@ -54,7 +54,7 @@ jobs:
             web/selkies-dashboard/package-lock.json
       - name: Build the web client bundle
         env:
-          # For the controller database's lookups (gendb.js)
+          # For the controller database's lookups (gendb.ts)
           GH_TOKEN: ${{ github.token }}
         run: |
           ./scripts/ci/build-web.sh

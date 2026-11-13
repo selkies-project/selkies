@@ -23,7 +23,7 @@ npm_install() {
 
 # The core is built first: the dashboard takes it, and the gamepad DB and WASM
 # codecs built alongside it, out of its dist through its own
-# copy-core.js/copy-assets.js build steps.
+# copy-core.ts/copy-assets.ts build steps.
 (cd web/selkies-web-core && npm_install && npm run build)
 
 (cd web/selkies-dashboard && npm_install && SELKIES_INJECT=1 npm run build)

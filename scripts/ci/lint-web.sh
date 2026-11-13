@@ -21,6 +21,15 @@ if [ ! -d "${pkg}/node_modules" ]; then
     (cd "${pkg}" && npm ci --no-audit --no-fund \
         --fetch-retries=5 --fetch-retry-maxtimeout=120000)
 fi
+
+# The web core's build helpers are checked against the Vite it declares, so
+# its dependencies are installed before the dashboard's tsc reads them.
+core=web/selkies-web-core
+if [ ! -x "${core}/node_modules/.bin/tsc" ]; then
+    (cd "${core}" && npm ci --no-audit --no-fund \
+        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
+fi
+
 echo "eslint: ${pkg}"
 (cd "${pkg}" && npm run --silent lint)
 
@@ -40,14 +49,8 @@ web/selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
 echo "tsc: web/selkies-dashboard"
 (cd web/selkies-dashboard && npm run --silent typecheck)
 
-# The web core checks itself strictly with the TypeScript it declares; its own
-# node_modules, unlike the lint's, exist only once its dependencies are installed.
+# The web core checks itself strictly with the TypeScript it declares.
 echo "tsc: web/selkies-web-core"
-core=web/selkies-web-core
-if [ ! -x "${core}/node_modules/.bin/tsc" ]; then
-    (cd "${core}" && npm ci --no-audit --no-fund \
-        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
-fi
 (cd "${core}" && npm run --silent typecheck)
 
 # The BrowserStack smoke checks itself with the TypeScript it declares, against

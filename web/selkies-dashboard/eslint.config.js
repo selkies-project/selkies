@@ -13,10 +13,9 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 // the native TypeScript 7 compiler from @typescript/native. See package.json.
 import tseslint from 'typescript-eslint'
 
-// The UI is TypeScript (src/**/*.{ts,tsx}); the plain-JS entries are the
-// node-side build scripts. Both get the same react-hooks and react-refresh
-// rules; the TS block swaps in the typed parser and typescript-eslint's
-// recommended set.
+// The UI is TypeScript (src/**/*.{ts,tsx}), with the react-hooks and
+// react-refresh rules; the build scripts beside this file are TypeScript Node
+// runs, without them. Both take typescript-eslint's recommended set.
 const reactRules = {
   ...reactHooks.configs.recommended.rules,
   'react-refresh/only-export-components': [
@@ -29,8 +28,22 @@ export default [
   // public/selkies-core.js is the bundled streaming core, not source.
   { ignores: ['dist', 'public/selkies-core.js'] },
   {
-    files: ['*.config.js', 'copy-*.js', 'selkies-accent.js'],
+    files: ['*.config.js'],
     languageOptions: { globals: globals.node },
+  },
+  {
+    files: ['*.ts'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      globals: globals.node,
+      parser: tseslint.parser,
+      parserOptions: { sourceType: 'module' },
+    },
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      ...js.configs.recommended.rules,
+      ...tseslint.configs.recommended.reduce((acc, c) => ({ ...acc, ...c.rules }), {}),
+    },
   },
   {
     files: ['**/*.{js,jsx}'],
@@ -57,7 +70,7 @@ export default [
     },
   },
   {
-    files: ['**/*.{ts,tsx}'],
+    files: ['src/**/*.{ts,tsx}'],
     languageOptions: {
       ecmaVersion: 2020,
       globals: globals.browser,

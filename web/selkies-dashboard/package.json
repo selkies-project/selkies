@@ -6,10 +6,10 @@
   "scripts": {
     "dev": "vite",
     "serve": "vite",
-    "prebuild": "node copy-core.js",
+    "prebuild": "node copy-core.ts",
     "build": "tsc -b && vite build",
-    "postbuild": "node copy-assets.js",
-    "accent": "node selkies-accent.js",
+    "postbuild": "node copy-assets.ts",
+    "accent": "node selkies-accent.ts",
     "lint": "eslint .",
     "preview": "vite preview",
     "typecheck": "tsc -b"

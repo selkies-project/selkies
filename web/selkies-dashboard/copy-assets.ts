@@ -1,5 +1,5 @@
 // Postbuild: ship what selkies-web-core's build leaves beside its bundle into
-// this dashboard's dist: the gamepad remap DB (its postbuild gendb.js) and
+// this dashboard's dist: the gamepad remap DB (its postbuild gendb.ts) and
 // libopus in WASM (its vite build), each fetched relative to the page. Built
 // at build time so neither lives in the repo.
 import fs from 'node:fs';

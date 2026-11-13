@@ -10,7 +10,7 @@
   "scripts": {
     "serve": "vite",
     "build": "vite build",
-    "postbuild": "node gendb.js",
+    "postbuild": "node gendb.ts",
     "preview": "vite preview",
     "typecheck": "tsc -b"
   },

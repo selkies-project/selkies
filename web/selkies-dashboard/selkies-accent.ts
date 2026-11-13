@@ -136,7 +136,7 @@ for (const [selector, tokens] of Object.entries(ACCENT)) {
       failed = true;
       continue;
     }
-    block = block.replace(line, (_, head) => `${head}${value};`);
+    block = block.replace(line, (_: string, head: string) => `${head}${value};`);
   }
   css = css.slice(0, open) + block + css.slice(close);
 }
