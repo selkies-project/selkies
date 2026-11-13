@@ -4,24 +4,29 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The stops the frame rate, bitrate, and CRF sliders step through, and how a
-// value lands on them. The lists and the two helpers are shared by both
-// dashboards, so they are checked here once rather than through a browser.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * The stops the frame rate, bitrate, and CRF sliders step through, and how a
+ * value lands on them. The lists and the two helpers are shared by both
+ * dashboards, so they are checked here once rather than through a browser.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
-const { FRAMERATE_STOPS, BITRATE_STOPS, CRF_STOPS, stopsWithin, stopIndex, withDisplayStop, framerateStopIndex } =
-    await import('../../web/selkies-web-core/lib/slider-stops.ts');
+import {
+    FRAMERATE_STOPS, BITRATE_STOPS, CRF_STOPS, stopsWithin, stopIndex, withDisplayStop, framerateStopIndex,
+} from '../../web/selkies-web-core/lib/slider-stops.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [slider-stops] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [slider-stops] ${label}  ${String(detail)}`);
 }
 
-const ascending = (list) => list.every((v, i) => i === 0 || v > list[i - 1]);
-const descending = (list) => list.every((v, i) => i === 0 || v < list[i - 1]);
+const ascending = (list: readonly number[]): boolean => list.every((v, i) => i === 0 || v > list[i - 1]);
+const descending = (list: readonly number[]): boolean => list.every((v, i) => i === 0 || v < list[i - 1]);
 
 {
     check('frame rate stops ascend from the server floor to its ceiling',

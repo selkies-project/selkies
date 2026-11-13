@@ -4,26 +4,30 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// Which engines the video worker gives an unaccelerated canvas. WebKit's Linux
-// ports draw a worker canvas through Skia's GPU context, which races the page's
-// paint and crashes the web process, so there alone the worker asks for a
-// canvas the CPU draws. Safari draws through CoreGraphics and keeps its
-// accelerated canvas, as do Chromium and Firefox. The user agents and platforms
-// are the ones each engine reports inside a worker.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * Which engines the video worker gives an unaccelerated canvas. WebKit's Linux
+ * ports draw a worker canvas through Skia's GPU context, which races the page's
+ * paint and crashes the web process, so there alone the worker asks for a
+ * canvas the CPU draws. Safari draws through CoreGraphics and keeps its
+ * accelerated canvas, as do Chromium and Firefox. The user agents and platforms
+ * are the ones each engine reports inside a worker.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { isSkiaWebKit } from '../../web/selkies-web-core/lib/util.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
   if (!ok) failed++;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  [worker-canvas] ${label}  ${detail}`);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  [worker-canvas] ${label}  ${String(detail)}`);
 }
 
 const SAFARI_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Safari/605.1.15';
-const CASES = [
+const CASES: Array<[label: string, userAgent: string, platform: string, unaccelerated: boolean]> = [
   ['WPE WebKit, which carries Safari\'s macOS user agent', SAFARI_UA, 'Linux x86_64', true],
   ['WebKitGTK', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15 Epiphany/605.1.15', 'Linux aarch64', true],
   ['Safari on macOS', SAFARI_UA, 'MacIntel', false],

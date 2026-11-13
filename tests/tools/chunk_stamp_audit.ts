@@ -4,21 +4,25 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The timestamps a decoder's chunks carry. A frame is matched to its chunk by
-// the timestamp WebCodecs hands back in whole microseconds, so each stamp must
-// be whole microseconds already, and no two chunks may share one: WebKit's
-// worker clock reads whole milliseconds, and a burst of chunks within one
-// would otherwise share it.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * The timestamps a decoder's chunks carry. A frame is matched to its chunk by
+ * the timestamp WebCodecs hands back in whole microseconds, so each stamp must
+ * be whole microseconds already, and no two chunks may share one: WebKit's
+ * worker clock reads whole milliseconds, and a burst of chunks within one
+ * would otherwise share it.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { createChunkStamp } from '../../web/selkies-web-core/lib/chunk-stamp.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
   if (!ok) failed++;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  [chunk-stamp] ${label}  ${detail}`);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  [chunk-stamp] ${label}  ${String(detail)}`);
 }
 
 {

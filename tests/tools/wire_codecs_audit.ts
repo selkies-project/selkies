@@ -4,24 +4,28 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The codec strings the page reads off a key frame: an AV1 sequence header read
-// whole, every operating point and its own bytes as they stand.
+/**
+ * The codec strings the page reads off a key frame: an AV1 sequence header read
+ * whole, every operating point and its own bytes as they stand.
+ * @module
+ */
 
 import { parseAv1CodecFromObus } from '../../web/selkies-web-core/lib/wire-codecs.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
   if (!ok) failed++;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  [wire-codecs] ${label}  ${detail}`);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  [wire-codecs] ${label}  ${String(detail)}`);
 }
 
 /** Bits written most significant first, into whole bytes. */
-function bits() {
-  const out = [];
+function bits(): { put: (value: number, width: number) => void; bytes: () => Uint8Array } {
+  const out: number[] = [];
   let acc = 0;
   let n = 0;
-  const put = (value, width) => {
+  const put = (value: number, width: number): void => {
     for (let i = width - 1; i >= 0; i--) {
       acc = (acc << 1) | (Math.floor(value / 2 ** i) & 1);
       if (++n === 8) {
@@ -31,15 +35,27 @@ function bits() {
       }
     }
   };
-  const bytes = () => Uint8Array.from(n ? [...out, acc << (8 - n)] : out);
+  const bytes = (): Uint8Array => Uint8Array.from(n ? [...out, acc << (8 - n)] : out);
   return { put, bytes };
+}
+
+/** The stream an `OBU_SEQUENCE_HEADER` is written for. */
+interface SequenceInit {
+  /** The operating points, each `[level, tier]`. */
+  points: Array<[level: number, tier: number]>;
+  /** The display tick of the timing info, or 0 for none. */
+  tick?: number;
+  /** Bits per sample. */
+  depth?: number;
+  /** The AV1 profile. */
+  profile?: number;
 }
 
 /**
  * An OBU_SEQUENCE_HEADER for a 1920x1080 stream with the given operating
  * points (`[level, tier]`), timing info whose tick is `tick`, and `depth` bits.
  */
-function sequenceHeader({ points, tick = 0, depth = 8, profile = 0 }) {
+function sequenceHeader({ points, tick = 0, depth = 8, profile = 0 }: SequenceInit): Uint8Array {
   const b = bits();
   b.put(profile, 3);
   b.put(0, 1); // still_picture
@@ -86,7 +102,7 @@ check('the first of two operating points names the level and tier, and the depth
   two === 'av01.0.08M.08', two);
 const twoHigh = parseAv1CodecFromObus(sequenceHeader({ points: [[13, 1], [5, 0]], depth: 10 }));
 check('likewise a high-tier first point over a 10-bit stream', twoHigh === 'av01.0.13H.10', twoHigh);
-const many = parseAv1CodecFromObus(sequenceHeader({ points: Array.from({ length: 24 }, (_, i) => [9 + (i % 3), 0]) }));
+const many = parseAv1CodecFromObus(sequenceHeader({ points: Array.from({ length: 24 }, (_, i): [number, number] => [9 + (i % 3), 0]) }));
 check('a header longer than 64 bytes, its points many, is read to its color config', many === 'av01.0.09M.08', many);
 // A display tick of 192 lays the bytes 00 00 03 down whole in the timing info.
 const ticked = sequenceHeader({ points: [[8, 0]], tick: 192 });

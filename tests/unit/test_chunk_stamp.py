@@ -5,8 +5,8 @@ A decoded frame is matched to its chunk by the timestamp WebCodecs hands back
 in whole microseconds (the decode time and arrival the stats report), so each
 stamp is whole microseconds, and no two chunks share one: WebKit's worker
 clock reads whole milliseconds, and WebKit gives frames of chunks sharing a
-timestamp other times entirely. The rule is JavaScript, so the checks live in
-tests/tools/chunk_stamp_audit.mjs.
+timestamp other times entirely. The rule is TypeScript, so the checks live in
+tests/tools/chunk_stamp_audit.ts.
 """
 import os
 import shutil
@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "chunk_stamp_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "chunk_stamp_audit.ts")
 
 node = shutil.which("node")
 if not node:

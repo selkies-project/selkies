@@ -5,8 +5,8 @@ A decoder that lets a frame go breaks every frame predicting from it, and the
 repair available depends on what the encoder says: where each frame names what
 it predicts from, the client reports the one it dropped and the encoder
 predicts past it, so nothing costs a key frame; where it names nothing, a key
-frame is the only repair. The checks live in tests/tools/decode_gate_audit.mjs,
-because the path under test is JavaScript.
+frame is the only repair. The checks live in tests/tools/decode_gate_audit.ts,
+because the path under test is TypeScript.
 """
 import os
 import shutil
@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "decode_gate_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "decode_gate_audit.ts")
 
 node = shutil.which("node")
 if not node:

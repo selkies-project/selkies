@@ -5,7 +5,7 @@ A decoder behind the stream for three seconds in a row asks for a share of the
 frames it turned out, and less again while it stays behind; keeping up, it asks
 for more after a wait, takes a rise back when it falls behind soon after, and
 waits twice as long before the next. The checks live in
-tests/tools/decode_pace_audit.mjs, because the path under test is JavaScript.
+tests/tools/decode_pace_audit.ts, because the path under test is TypeScript.
 """
 import os
 import shutil
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "decode_pace_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "decode_pace_audit.ts")
 
 node = shutil.which("node")
 if not node:

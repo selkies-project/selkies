@@ -5,7 +5,7 @@ Both dashboards move those sliders over one shared list per setting, so a stop
 owns a wide band of the track and a finger or a small mouse move lands on a
 value worth choosing rather than a frame or two away from it. The lists and the
 helpers that clip them to a server's span and place a value on them are
-JavaScript, so the checks live in tests/tools/slider_stops_audit.mjs.
+TypeScript, so the checks live in tests/tools/slider_stops_audit.ts.
 """
 import os
 import shutil
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "slider_stops_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "slider_stops_audit.ts")
 
 node = shutil.which("node")
 if not node:

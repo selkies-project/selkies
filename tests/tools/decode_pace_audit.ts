@@ -4,13 +4,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The frame rate a decoder that cannot keep up asks the server for. A decoder
-// behind for ENGAGE_S seconds in a row asks for CAP_SHARE of the frames it
-// turned out, and less again while it stays behind; one keeping up asks for
-// LIFT_STEP more after LIFT_S seconds, takes a rise back when it falls behind
-// within REGRET_S of it, and waits twice as long before the next.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * The frame rate a decoder that cannot keep up asks the server for. A decoder
+ * behind for ENGAGE_S seconds in a row asks for CAP_SHARE of the frames it
+ * turned out, and less again while it stays behind; one keeping up asks for
+ * LIFT_STEP more after LIFT_S seconds, takes a rise back when it falls behind
+ * within REGRET_S of it, and waits twice as long before the next.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import {
   CAP_CEILING, CAP_FLOOR, CAP_SHARE, DecodePace, ENGAGE_S, LIFT_S, LIFT_STEP, REGRET_S,
@@ -18,17 +21,18 @@ import {
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
   if (!ok) failed++;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  [decode-pace] ${label}  ${detail}`);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  [decode-pace] ${label}  ${String(detail)}`);
 }
 
 /**
  * Runs `seconds` seconds of `fps` frames a second through `pace`, each decided at
  * `backlog` frames, `drops` of them let go; the paces its seconds returned.
  */
-function run(pace, seconds, { fps = 60, backlog = 0, drops = 0 } = {}) {
-  const changes = [];
+function run(pace: DecodePace, seconds: number, { fps = 60, backlog = 0, drops = 0 } = {}): Array<number | null> {
+  const changes: Array<number | null> = [];
   for (let s = 0; s < seconds; s++) {
     for (let f = 0; f < fps; f++) {
       pace.decided(backlog, f < drops);
@@ -52,7 +56,7 @@ function run(pace, seconds, { fps = 60, backlog = 0, drops = 0 } = {}) {
   const engaged = run(pace, 1, { fps: 45, backlog: 6 });
   const want = Math.floor(CAP_SHARE * 45);
   check(`one behind for ${ENGAGE_S} s asks for ${CAP_SHARE} of the frames it turned out`,
-    early.length === 0 && engaged.length === 1 && engaged[0] === want, `${JSON.stringify(early)} ${engaged} want ${want}`);
+    early.length === 0 && engaged.length === 1 && engaged[0] === want, `${JSON.stringify(early)} ${String(engaged)} want ${want}`);
 }
 
 {
@@ -74,7 +78,7 @@ function run(pace, seconds, { fps = 60, backlog = 0, drops = 0 } = {}) {
 {
   const pace = new DecodePace();
   run(pace, ENGAGE_S, { fps: 45, backlog: 6 });
-  const first = pace.cap;
+  const first = pace.cap!;
   const again = run(pace, ENGAGE_S, { fps: 30, backlog: 6 });
   check('one still behind at its pace asks for less again', again.length === 1 && again[0] === Math.floor(CAP_SHARE * 30)
     && again[0] < first, `${first} -> ${JSON.stringify(again)}`);
@@ -91,7 +95,7 @@ function run(pace, seconds, { fps = 60, backlog = 0, drops = 0 } = {}) {
 {
   const pace = new DecodePace();
   run(pace, ENGAGE_S, { fps: 45, backlog: 6 });
-  const capped = pace.cap;
+  const capped = pace.cap!;
   const waiting = run(pace, LIFT_S - 1, { fps: capped, backlog: 0 });
   const rise = run(pace, 1, { fps: capped, backlog: 0 });
   const raised = Math.ceil(capped * LIFT_STEP);

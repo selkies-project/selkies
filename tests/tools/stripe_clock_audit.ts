@@ -4,16 +4,20 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// When a striped codec's frame counts as whole. Presenting on socket quiet is
-// what saves the capture period the frame-id boundary costs, so the quiet a
-// frame must show has to sit above the gaps that open INSIDE a frame (the
-// encoder's thread pool and the event loop both leave them) and below the gap
-// to the next frame. Present too early and half a frame reaches the screen;
-// too late and the composite is a frame behind for nothing.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * When a striped codec's frame counts as whole. Presenting on socket quiet is
+ * what saves the capture period the frame-id boundary costs, so the quiet a
+ * frame must show has to sit above the gaps that open INSIDE a frame (the
+ * encoder's thread pool and the event loop both leave them) and below the gap
+ * to the next frame. Present too early and half a frame reaches the screen;
+ * too late and the composite is a frame behind for nothing.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import { createStripeClock } from '../../web/selkies-web-core/lib/stripe-clock.ts';
+import type { StripeClock } from '../../web/selkies-web-core/lib/stripe-clock.ts';
 
 // The factory's floor and decay are locals there (the video worker embeds the
 // factory by toString, so it exports nothing else); pinned here so the audit
@@ -23,13 +27,23 @@ const STRIPE_WAVE_DECAY = 0.9;
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [stripe-clock] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [stripe-clock] ${label}  ${String(detail)}`);
+}
+
+/** A stripe clock with the hands of the counter it reads. */
+interface FakeClock {
+    clock: StripeClock;
+    /** Sets the counter. */
+    at: (t: number) => void;
+    /** Moves the counter on. */
+    advance: (dt: number) => void;
 }
 
 /** A clock over a hand-driven millisecond counter. */
-function fake() {
+function fake(): FakeClock {
     const state = { t: 1000 };
     const clock = createStripeClock(() => state.t);
     return { clock, at: (t) => { state.t = t; }, advance: (dt) => { state.t += dt; } };
@@ -40,7 +54,7 @@ check('settleWaitMs starts at the pinned floor',
     createStripeClock(() => 0).settleWaitMs());
 
 /** Feeds one frame's stripes at the given arrival offsets. */
-function frame(f, id, offsets) {
+function frame(f: FakeClock, id: number, offsets: number[]): void {
     for (const dt of offsets) {
         f.advance(dt);
         f.clock.note(id);

@@ -4,14 +4,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// When the webcam uplink gives up on a codec. A frame offered to a busy encoder
-// is dropped rather than queued, so an encoder that cannot keep up with the
-// camera never grows a queue -- it drops a growing share of frames while a core
-// runs flat out. That share, not a synthetic probe, is what decides; a frame
-// the encoder took and sat on counts against the same share, since a pipeline
-// deeper than encodeQueueSize shows up only as stale output.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * When the webcam uplink gives up on a codec. A frame offered to a busy encoder
+ * is dropped rather than queued, so an encoder that cannot keep up with the
+ * camera never grows a queue -- it drops a growing share of frames while a core
+ * runs flat out. That share, not a synthetic probe, is what decides; a frame
+ * the encoder took and sat on counts against the same share, since a pipeline
+ * deeper than encodeQueueSize shows up only as stale output.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import {
     createEncodePace,
@@ -23,13 +26,14 @@ import {
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [encode-pace] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [encode-pace] ${label}  ${String(detail)}`);
 }
 
 /** Offers `n` frames, `behind` of them to a busy encoder. */
-function offer(pace, n, behind) {
+function offer(pace: ReturnType<typeof createEncodePace>, n: number, behind: number): void {
     for (let i = 0; i < n; i++) pace.note(i < behind);
 }
 

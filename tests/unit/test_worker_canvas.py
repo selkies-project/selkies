@@ -3,8 +3,8 @@
 
 WebKit's Linux ports draw a worker canvas through Skia's GPU context, which
 races the page's paint and crashes the web process; Safari draws through
-CoreGraphics. The checks live in tests/tools/worker_canvas_audit.mjs, because
-the path under test is JavaScript.
+CoreGraphics. The checks live in tests/tools/worker_canvas_audit.ts, because
+the path under test is TypeScript.
 """
 import os
 import shutil
@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "worker_canvas_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "worker_canvas_audit.ts")
 
 node = shutil.which("node")
 if not node:

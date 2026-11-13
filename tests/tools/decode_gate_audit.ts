@@ -4,39 +4,44 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What the client's decoder does with each frame when it cannot keep up. A
-// decoder that lets a frame go breaks everything predicting from it, so the
-// gate has to know which repair is available: where the encoder says what each
-// frame predicts from, the frame is reported lost and the encoder predicts past
-// it; where it says nothing, only a key frame repairs the stream. A run of
-// drops the encoder never predicts past ends in that request too.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * What the client's decoder does with each frame when it cannot keep up. A
+ * decoder that lets a frame go breaks everything predicting from it, so the
+ * gate has to know which repair is available: where the encoder says what each
+ * frame predicts from, the frame is reported lost and the encoder predicts past
+ * it; where it says nothing, only a key frame repairs the stream. A run of
+ * drops the encoder never predicts past ends in that request too.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 import {
   DecodeGate, LOST_MEMORY, LOST_RECOVERY_MS, OVERLOAD_HOLD_MS, OVERLOAD_QUEUE,
 } from '../../web/selkies-web-core/lib/decode-gate.ts';
+import type { Decision } from '../../web/selkies-web-core/lib/decode-gate.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
   if (!ok) failed++;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  [decode-gate] ${label}  ${detail}`);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  [decode-gate] ${label}  ${String(detail)}`);
 }
 
 /** A gate on a clock the test moves, with `tick` to advance it. */
-function makeGate() {
+function makeGate(): { gate: DecodeGate; tick: (ms: number) => void } {
   const clock = { now: 1000 };
   const gate = new DecodeGate({ now: () => clock.now });
   gate.configured();
-  return { gate, tick: (ms) => { clock.now += ms; } };
+  return { gate, tick: (ms: number): void => { clock.now += ms; } };
 }
 
 const BACKED_UP = OVERLOAD_QUEUE + 1;
 const KEEPING_UP = 0;
 // A tracked frame names the frame before it; an untracked one names itself.
-const tracked = (gate, id, queue) => gate.decide(false, id, id - 1, queue);
-const untracked = (gate, id, queue) => gate.decide(false, id, id, queue);
+const tracked = (gate: DecodeGate, id: number, queue: number): Decision => gate.decide(false, id, id - 1, queue);
+const untracked = (gate: DecodeGate, id: number, queue: number): Decision => gate.decide(false, id, id, queue);
 
 /** A gate holding a key frame, with the backlog already standing past the hold. */
 function stalled({ track = true } = {}) {
@@ -144,7 +149,7 @@ function stalled({ track = true } = {}) {
   // A decoder at 25 frames a second under a 60 fps stream whose encoder predicts past
   // every loss and sends a key frame twice a second (loss repair on a wrapping frame_num).
   const FRAME_MS = 1000 / 60, DECODE_MS = 40, KEY_EVERY = 30;
-  const run = (flushes) => {
+  const run = (flushes: boolean) => {
     const { gate, tick } = makeGate();
     let queue = 0, done = 0, lastGood = 0, peak = 0, late = 0;
     for (let id = 0; id < 60 * 20; id++) {

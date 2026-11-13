@@ -8,7 +8,7 @@ frames dropped is what moves the uplink to the next codec and finally to the
 JPEG rung, which encodes natively. Deciding it from the live camera is the
 point -- a codec's cost depends on what the sensor is showing, and a synthetic
 probe frame ranks codecs by how cheap its own content was. The rule is
-JavaScript, so the checks live in tests/tools/encode_pace_audit.mjs.
+TypeScript, so the checks live in tests/tools/encode_pace_audit.ts.
 """
 import os
 import shutil
@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "encode_pace_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "encode_pace_audit.ts")
 
 node = shutil.which("node")
 if not node:

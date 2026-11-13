@@ -6,8 +6,8 @@ complete by the arrival of the next frame id -- a capture period later.
 Presenting on socket quiet instead puts the frame on screen in the tick its
 stripes landed, which is worth a frame period of end-to-end latency, but the
 quiet asked for has to clear the gaps that open inside a frame or half a frame
-reaches the screen. The rule is JavaScript, so the checks live in
-tests/tools/stripe_clock_audit.mjs.
+reaches the screen. The rule is TypeScript, so the checks live in
+tests/tools/stripe_clock_audit.ts.
 """
 import os
 import shutil
@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "stripe_clock_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "stripe_clock_audit.ts")
 
 node = shutil.which("node")
 if not node:

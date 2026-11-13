@@ -2,8 +2,8 @@
 """The codec string a page reads off an AV1 key frame's sequence header.
 
 Every operating point is read past, not only the first, and the header as it
-stands, since AV1 has no emulation prevention. The parser is JavaScript in the
-web core, so the checks live in tests/tools/wire_codecs_audit.mjs.
+stands, since AV1 has no emulation prevention. The parser is TypeScript in the
+web core, so the checks live in tests/tools/wire_codecs_audit.ts.
 """
 import os
 import shutil
@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "wire_codecs_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "wire_codecs_audit.ts")
 
 node = shutil.which("node")
 if not node:

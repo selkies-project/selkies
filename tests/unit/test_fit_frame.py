@@ -4,8 +4,8 @@
 A hardware encoder may code a larger picture than the stream's and name the
 stream's size in the AV1 render size, which Chromium's decoders do not apply,
 so the client crops a picture larger than the size its decoder was configured
-for and passes every other one through. The rule is JavaScript, so the checks
-live in tests/tools/fit_frame_audit.mjs.
+for and passes every other one through. The rule is TypeScript, so the checks
+live in tests/tools/fit_frame_audit.ts.
 """
 import os
 import shutil
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "fit_frame_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "fit_frame_audit.ts")
 
 node = shutil.which("node")
 if not node:
