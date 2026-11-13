@@ -65,12 +65,15 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   the shape its module declares), and an untyped global or a vendor-prefixed API is declared in a `.d.ts`
   augmentation (`web/selkies-web-core/lib/window-globals.d.ts`), never reached through a cast. ESLint refuses the
   rest (`no-explicit-any` and the type-checked `no-unsafe-*` rules).
-- JavaScript (`.js`/`.mjs`), left only in the Node
-  audits under `tests/tools`, and the image tier's tester pages: the same JSDoc blocks, but the tags carry the types
+- JavaScript (`.js`), left only in the classic scripts a browser is handed with no build step
+  (`tests/tools/pad_init.js` and the image tier's tester pages): the same JSDoc blocks, but the tags carry the types
   (`@param {Type} name`, `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The web core is
   TypeScript, checked strictly by its own `tsc -b` (`web/selkies-web-core/tsconfig.json`), and the dashboard's `tsc`
   compiles the `lib` modules it imports, the touch gamepad, and the build helpers Node runs with their types
-  stripped (`tsconfig.node.json`); the site's `tsc` checks its scripts (`website/scripts`).
+  stripped (`tsconfig.node.json`); the site's `tsc` checks its scripts (`website/scripts`). The Node audits under
+  `tests/tools` are TypeScript that Node runs with the types stripped, checked by their own project
+  (`tests/tools/tsconfig.json`) and held to the same lint rules; what they build to stand in for the browser is a
+  `StandIn` subset of the interface it stands in for (`tests/tools/stand_in.ts`), never a cast through `unknown`.
 - TypeScript and JavaScript: a `/** ... @module */` block after the license header is the module docblock;
   `_`-prefixed members are private and hidden from the reference; a React component documents what it renders and
   which core messages or `window` state it consumes. A tag TypeDoc does not know (`@constructor`) is a build
