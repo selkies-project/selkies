@@ -295,6 +295,60 @@ mod tests {
         }
     }
 
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// SRTP_AES128_CM_HMAC_SHA1_80, the profile a client without AES-GCM takes, seals to the
+    /// bytes libsrtp 2 produces from the same keying material: the key derivation, the AES-CM
+    /// keystream, and the HMAC-SHA1 tag of RTP and of RTCP all have to agree for that.
+    #[test]
+    fn aes_cm_packets_are_the_ones_libsrtp_seals() {
+        let material: Vec<u8> = (0..60).collect();
+        let mut client =
+            SrtpSession::from_keying_material(SrtpProfile::Aes128CmHmacSha1_80, &material, true)
+                .unwrap();
+        let mut server =
+            SrtpSession::from_keying_material(SrtpProfile::Aes128CmHmacSha1_80, &material, false)
+                .unwrap();
+        for (seq, sealed) in [
+            (
+                1,
+                "806000010000000112345678f0d01107026d2a03463257a5dec59a1d0e7e0665785d9d18a6f0\
+                 320ad9c8756305afc8ca8bb536087db6c08ee6a180",
+            ),
+            (
+                2,
+                "806000020000000112345678b57638a188a9f96f131bffebf20aef72022504367db7e3d3bed8\
+                 27efcf748e61913ec16db53868fda2f734f0952903",
+            ),
+        ] {
+            let packet = rtp_packet(seq, &[0xA5; 37]);
+            let protected = client.tx.protect_rtp(&packet).unwrap();
+            assert_eq!(protected.as_ref(), hex(sealed));
+            assert_eq!(
+                server.rx.unprotect_rtp(&protected).unwrap().as_ref(),
+                &packet[..]
+            );
+        }
+        let mut rtcp = vec![0x80, 200, 0, 6, 0x12, 0x34, 0x56, 0x78];
+        rtcp.extend(0..20u8);
+        let protected = client.tx.protect_rtcp(&rtcp).unwrap();
+        assert_eq!(
+            protected.as_ref(),
+            hex(
+                "80c8000612345678c188d70f0c95fefb6dd6d1e78429825659444825800000018c26946358144906a55a"
+            )
+        );
+        assert_eq!(
+            server.rx.unprotect_rtcp(&protected).unwrap().as_ref(),
+            &rtcp[..]
+        );
+    }
+
     #[test]
     fn both_directions_derive_from_one_export_in_every_profile() {
         for profile in [
