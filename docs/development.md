@@ -153,11 +153,11 @@ Links between pages are written the way GitHub resolves them (`start.md`, or `co
 Every image in the repository is the Selkies logo, and all of them are generated from two hand-authored sources: `docs/assets/logo/selkies.svg` (the mark) and `wordmark.svg` (the lettering). Everything else is composed from those — the two lockups that set the mark beside or above the wordmark, the favicons, the PWA and touch icons, the dashboards' copies of the mark, and the PNG lockups. Edit a source and regenerate; do not edit the outputs:
 
 ```bash
-python3 scripts/build-logo-assets.py           # rewrite every generated image
-python3 scripts/build-logo-assets.py --check   # report which ones are stale
+cargo xtask logo-assets           # rewrite every generated image
+cargo xtask logo-assets --check   # report which ones are stale
 ```
 
-It needs `rsvg-convert` (librsvg) and Pillow. Only layout lives in the script: the canvas each lockup uses and the transform it places the mark and the wordmark at, so the mark can never end up embedded twice with two different gradients. The app icons are composed the same way — the mark on an opaque white disc, so a launcher that masks icons to a circle crops nothing.
+It needs `rsvg-convert` (librsvg). Only layout lives in the task ([`crates/xtask`](https://github.com/selkies-project/selkies/tree/main/crates/xtask)): the canvas each lockup uses and the transform it places the mark and the wordmark at, so the mark can never end up embedded twice with two different gradients. The app icons are composed the same way — the mark on an opaque white disc, so a launcher that masks icons to a circle crops nothing.
 
 Previewing the site needs nothing but [Node.js](https://nodejs.org):
 
@@ -199,7 +199,7 @@ The reference images use the [s6 supervision suite](https://skarnet.org/software
 
 - Shell scripts and Dockerfiles should use POSIX `sh` syntax as much as possible. Despite the shell scripts being run in `bash`, avoid using syntax only available in `bash` (such as `[[ ]]`), `zsh`, or other types of shells, unless absolutely needed. If non-POSIX syntax is used, prefer using `bash` syntax, but only if there are no equivalent POSIX alternatives.
 
-- For Rust, rustfmt and clippy with warnings denied, as the pre-commit hooks run them. For the Python of the test suites and scripts, [Ruff](https://github.com/astral-sh/ruff) with Black formatting or [Black](https://github.com/psf/black) formatting are recommended. For JavaScript, HTML, CSS, Markdown, YAML, and other files, [Prettier](https://github.com/prettier/prettier) formatting is recommended. For code that is not already formatted in these formats, use the formatters with your Pull Requests if possible.
+- For Rust, rustfmt and clippy with warnings denied, as the pre-commit hooks run them. For the Python of the test suites, [Ruff](https://github.com/astral-sh/ruff) with Black formatting or [Black](https://github.com/psf/black) formatting are recommended. For JavaScript, HTML, CSS, Markdown, YAML, and other files, [Prettier](https://github.com/prettier/prettier) formatting is recommended. For code that is not already formatted in these formats, use the formatters with your Pull Requests if possible.
 
 - There should be no empty lines with whitespaces, or line endings with whitespaces. Moreover, there should be a line break at the end of each code file unless the specific code file format should not have one. If there is not, it is okay, but include the line break with your Pull Requests if possible.
 

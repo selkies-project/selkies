@@ -13,6 +13,7 @@
 //!   ([`settings_doc`]);
 //! - `file-index` writes the nginx fancyindex fragments from the file index the server
 //!   serves ([`file_index`]);
+//! - `logo-assets` regenerates every image from the logo artwork ([`logo_assets`]);
 //! - `licenses` audits the crate graphs and the web packages' lockfiles and holds the
 //!   generated tables of `docs/licensing.md` to them ([`licenses`]).
 //!
@@ -24,6 +25,7 @@ use std::process::ExitCode;
 
 mod file_index;
 mod licenses;
+mod logo_assets;
 mod settings_doc;
 
 /// The repository root, two directories above this crate.
@@ -35,6 +37,23 @@ fn repo() -> PathBuf {
         .to_path_buf()
 }
 
+/// A scratch directory of the task's own, removed when it goes out of scope.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(prefix: &str) -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
+        std::fs::create_dir(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let task = args.next().unwrap_or_default();
@@ -42,9 +61,10 @@ fn main() -> ExitCode {
     let outcome = match task.as_str() {
         "settings-doc" => check_flag(&args).and_then(settings_doc::run),
         "file-index" => check_flag(&args).and_then(file_index::run),
+        "logo-assets" => check_flag(&args).and_then(logo_assets::run),
         "licenses" => licenses::run(&args),
         _ => Err(
-            "usage: cargo xtask settings-doc [--check] | file-index [--check] | licenses \
+            "usage: cargo xtask settings-doc [--check] | file-index [--check] | logo-assets [--check] | licenses \
                   [--write | --markdown] [--set gpl|non-gpl] [--metadata FILE] [--page FILE] \
                   [--quiet]"
                 .into(),

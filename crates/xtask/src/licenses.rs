@@ -51,7 +51,7 @@ use std::sync::LazyLock;
 use regex::{NoExpand, Regex};
 use serde_json::Value;
 
-use crate::repo;
+use crate::{Scratch, repo};
 use spdx::{Expr, Rank};
 
 mod npm;
@@ -567,15 +567,6 @@ fn lock_packages(path: &Path) -> Result<BTreeSet<(String, String, String)>, Stri
         .collect())
 }
 
-/// A scratch directory that is removed when it goes out of scope.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 /// Resolve one configuration's graph with cargo.
 fn resolve(set: &str) -> Result<Value, String> {
     let repo = repo();
@@ -585,10 +576,8 @@ fn resolve(set: &str) -> Result<Value, String> {
     let manifest =
         fs::read_to_string(repo.join("Cargo.toml")).map_err(|e| format!("Cargo.toml: {e}"))?;
     let swapped = non_gpl_manifest(&manifest)?;
-    let scratch =
-        Scratch(std::env::temp_dir().join(format!("selkies-licenses-{}", std::process::id())));
+    let scratch = Scratch::new("selkies-licenses")?;
     let io = |e: std::io::Error| format!("{}: {e}", scratch.0.display());
-    fs::create_dir(&scratch.0).map_err(io)?;
     fs::write(scratch.0.join("Cargo.toml"), swapped).map_err(io)?;
     fs::copy(repo.join("Cargo.lock"), scratch.0.join("Cargo.lock")).map_err(io)?;
     std::os::unix::fs::symlink(repo.join("crates"), scratch.0.join("crates")).map_err(io)?;

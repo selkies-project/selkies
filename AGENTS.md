@@ -7,7 +7,7 @@ pixelflux's compositor on Wayland, an x11rb manager on X11), `crates/selkies-dra
 manager's frames and menus and the desktop shell draw with, and `crates/selkies-desktop` that shell, its own
 binary the server starts under `--desktop`; `crates/selkies-turn-rest` is the TURN REST credential service the
 `turn-rest` image runs, a binary of its own that shares none of the server's code, and `crates/xtask` the
-repository's own tooling (`cargo xtask`: the generated pages and fragments, and the license gate), which depends
+repository's own tooling (`cargo xtask`: the generated pages, fragments, and images, and the license gate), which depends
 on no crate of the workspace. The server links both native libraries directly as Rust crates,
 without Python. Their optional PyO3 features are only for standalone wheels. The web client is under `web/`: `selkies-web-core` (the streaming
 core), `selkies-dashboard` (the dashboard built on it), and `universal-touch-gamepad`; `addons/` holds what
@@ -62,8 +62,8 @@ so keep anything shaped like `<name>` or containing braces inside backticks.
   which core messages or `window` state it consumes. A tag TypeDoc does not know (`@constructor`) is a build
   warning. Every docblock is published, exported or not, so a closure's docblock is reference material, not a
   private note.
-- Python is left only in the test suites, the logo script (`scripts/build-logo-assets.py`), and the Jupyter
-  entry point the wheel carries (`infra/wheel/selkies`): a docstring on every module and on every function that is not self-describing, type
+- Python is left only in the test suites and the Jupyter entry point the wheel carries
+  (`infra/wheel/selkies`): a docstring on every module and on every function that is not self-describing, type
   hints on signatures, and ruff's rules (`ruff.toml`).
 
 Vendored code keeps upstream documentation style and is excluded from the reference: the crates under
