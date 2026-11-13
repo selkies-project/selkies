@@ -17,6 +17,10 @@
 //! - [`client`] is a WebSocket page: it reads its socket for as long as it lives, as a browser
 //!   does, and keeps what arrived for the test to wait on.
 //! - [`http`] is one request against a server.
+//! - [`xvfb`] is an X server of a test's own, for a suite that restarts servers on a desktop it
+//!   prepared or needs a display nothing else touches.
+//! - [`x11`] is what a suite reads back from an X display and puts on it: the root's size, the
+//!   outputs, a selection owner that answers or does not, a window that keeps the screen changing.
 //! - [`checks`] records a suite's checks, each named for the behavior it holds, and fails the test
 //!   once with every one that did not hold and the server's log.
 //!
@@ -30,6 +34,8 @@ pub mod checks;
 pub mod client;
 pub mod http;
 pub mod server;
+pub mod x11;
+pub mod xvfb;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

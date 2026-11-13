@@ -28,3 +28,6 @@ http-body-util = "0.1"
 bytes = "1"
 serde_json = "1"
 libc = "0.2"
+# What a suite reads back from the X display and puts on it: the root's size, the outputs, a
+# selection owner, damage.
+x11rb = { version = "0.14", features = ["randr", "xf86vidmode"] }

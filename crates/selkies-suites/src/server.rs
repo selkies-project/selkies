@@ -49,6 +49,7 @@ pub struct Launch {
     label: String,
     mode: String,
     wayland: bool,
+    display: Option<String>,
     env: Vec<(String, String)>,
 }
 
@@ -58,6 +59,7 @@ pub fn launch(label: &str) -> Launch {
         label: label.to_owned(),
         mode: "websockets".to_owned(),
         wayland: false,
+        display: None,
         env: Vec::new(),
     }
 }
@@ -69,6 +71,18 @@ impl Launch {
         self
     }
 
+    /// Serve over `mode` (`websockets` or `webrtc`).
+    pub fn mode(mut self, mode: &str) -> Launch {
+        mode.clone_into(&mut self.mode);
+        self
+    }
+
+    /// Capture the X display `display` (a private server's) in place of the test display.
+    pub fn display(mut self, display: &str) -> Launch {
+        self.display = Some(display.to_owned());
+        self
+    }
+
     /// Set `name` in the server's environment, over what the harness sets.
     pub fn env(mut self, name: &str, value: &str) -> Launch {
         self.env.push((name.to_owned(), value.to_owned()));
@@ -77,15 +91,27 @@ impl Launch {
 
     /// Start the server and wait until `/api/status` answers.
     ///
+    /// # Panics
+    ///
+    /// As [`Launch::spawn`] and [`Server::ready`] do.
+    pub async fn start(self) -> Server {
+        let server = self.spawn().await;
+        server.ready().await;
+        server
+    }
+
+    /// Start the server and return at once, for a test that meets it while it comes up;
+    /// [`Server::ready`] is the wait [`Launch::start`] adds.
+    ///
     /// Called from the test's own thread (a `#[tokio::test]` of the default flavor): the kernel
     /// ties the server's life to the thread that started it.
     ///
     /// # Panics
     ///
-    /// When there is no server to run, no `E2E_DISPLAY` for an X11 server, or the server exits or
-    /// stays silent through its startup; the message carries the server's log.
-    pub async fn start(self) -> Server {
+    /// When there is no server to run or no `E2E_DISPLAY` for an X11 server.
+    pub async fn spawn(self) -> Server {
         let turn = SESSION.lock().await;
+        watch_the_deadline();
         pulse_setup();
         let binary = server_binary();
         let binary = if binary.components().count() == 1 {
@@ -126,7 +152,7 @@ impl Launch {
             }
         }
         if !self.wayland {
-            command.env("DISPLAY", test_display());
+            command.env("DISPLAY", self.display.clone().unwrap_or_else(test_display));
         }
         if let Some(pulse) = pulse_server() {
             command.env("PULSE_SERVER", pulse);
@@ -137,35 +163,41 @@ impl Launch {
             .stdin(Stdio::null())
             .stdout(sink.try_clone().expect("the server log, for stdout"))
             .stderr(sink);
-        let parent = libc::pid_t::try_from(std::process::id()).expect("a process id");
-        // SAFETY: the calls are async-signal-safe and touch nothing the parent shares; the
-        // closure allocates nothing.
-        unsafe {
-            command.pre_exec(move || {
-                libc::setsid();
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // A parent that died between the fork and the prctl left no signal behind.
-                if libc::getppid() != parent {
-                    return Err(std::io::Error::other("the test process is gone"));
-                }
-                Ok(())
-            });
-        }
+        tie_to_this_thread(&mut command);
         let child = command
             .spawn()
             .unwrap_or_else(|e| panic!("{} did not start: {e}", binary.display()));
-        let mut server = Server {
-            child,
+        running_logs(|logs| logs.push(log.clone()));
+        Server {
+            pid: child.id(),
+            child: std::sync::Mutex::new(child),
             port,
             log,
             last_page: std::sync::Mutex::new(None),
             pages: std::sync::Mutex::new(Vec::new()),
             _turn: turn,
-        };
-        server.await_status().await;
-        server
+        }
+    }
+}
+
+/// Make `command`'s process a session leader the kernel kills with the thread that starts it, so
+/// an externally killed run (a timeout skips every destructor) leaves nothing on the display.
+pub(crate) fn tie_to_this_thread(command: &mut Command) {
+    let parent = libc::pid_t::try_from(std::process::id()).expect("a process id");
+    // SAFETY: the calls are async-signal-safe and touch nothing the parent shares; the closure
+    // allocates nothing.
+    unsafe {
+        command.pre_exec(move || {
+            libc::setsid();
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // A parent that died between the fork and the prctl left no signal behind.
+            if libc::getppid() != parent {
+                return Err(std::io::Error::other("the test process is gone"));
+            }
+            Ok(())
+        });
     }
 }
 
@@ -175,7 +207,8 @@ pub(crate) type PageSender = tokio::sync::mpsc::UnboundedSender<Option<tokio_web
 /// A running server. Dropping it ends the server's process group; [`Server::stop`] is the orderly
 /// end, and the drop what a panic leaves.
 pub struct Server {
-    child: Child,
+    child: std::sync::Mutex<Child>,
+    pid: u32,
     port: u16,
     log: PathBuf,
     /// When the last page set out to connect.
@@ -212,8 +245,22 @@ impl Server {
         tokio::time::sleep_until(ready.into()).await;
     }
 
-    /// Wait for `/api/status`, failing with the log when the server exits or stays silent.
-    async fn await_status(&mut self) {
+    /// The server's exit status once it has exited.
+    pub fn exited(&self) -> Option<std::process::ExitStatus> {
+        self.child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .try_wait()
+            .ok()
+            .flatten()
+    }
+
+    /// Wait for `/api/status`.
+    ///
+    /// # Panics
+    ///
+    /// When the server exits or stays silent through its startup; the message carries its log.
+    pub async fn ready(&self) {
         let deadline = Instant::now() + STARTUP;
         loop {
             let answer = http::request(
@@ -228,7 +275,7 @@ impl Server {
             if matches!(answer, Ok(ref response) if response.status == 200) {
                 return;
             }
-            if let Ok(Some(status)) = self.child.try_wait() {
+            if let Some(status) = self.exited() {
                 panic!(
                     "selkies exited during startup ({status}):\n{}",
                     self.log_tail()
@@ -300,7 +347,7 @@ impl Server {
     ///
     /// The server is asked to exit, as an operator stops it, and killed only when it does not
     /// within [`SHUTDOWN`].
-    pub async fn stop(mut self) -> String {
+    pub async fn stop(self) -> String {
         for page in self
             .pages
             .lock()
@@ -311,7 +358,7 @@ impl Server {
         }
         self.signal(libc::SIGTERM);
         let deadline = Instant::now() + SHUTDOWN;
-        while Instant::now() < deadline && matches!(self.child.try_wait(), Ok(None)) {
+        while Instant::now() < deadline && self.exited().is_none() {
             tokio::time::sleep(POLL).await;
         }
         self.log_tail()
@@ -327,7 +374,7 @@ impl Server {
 
     /// Send `signal` to the server's process group, which it leads.
     fn signal(&self, signal: libc::c_int) {
-        if let Ok(pid) = libc::pid_t::try_from(self.child.id()) {
+        if let Ok(pid) = libc::pid_t::try_from(self.pid) {
             // SAFETY: a signal to a process group this test started; no memory is involved.
             unsafe {
                 libc::kill(-pid, signal);
@@ -338,19 +385,66 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
+        if self.exited().is_none() {
             // A test that panicked still holds its pages' sockets on this thread, and a server
             // waits for those: it is given a moment, not the whole of SHUTDOWN.
             self.signal(libc::SIGTERM);
             let deadline = Instant::now() + Duration::from_secs(2);
-            while Instant::now() < deadline && matches!(self.child.try_wait(), Ok(None)) {
+            while Instant::now() < deadline && self.exited().is_none() {
                 std::thread::sleep(POLL);
             }
         }
         // Whatever the server started and left in its group goes with it.
         self.signal(libc::SIGKILL);
-        let _ = self.child.wait();
+        let _ = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wait();
+        running_logs(|logs| logs.retain(|log| *log != self.log));
     }
+}
+
+/// Run `with` on the logs of the servers of this process that are running.
+fn running_logs(with: impl FnOnce(&mut Vec<PathBuf>)) {
+    static RUNNING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    with(
+        &mut RUNNING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+}
+
+/// Hold the suite to `SELKIES_SUITE_DEADLINE`, the budget in seconds its runner gives it: at the
+/// deadline the end of every running server's log is printed and the process exits, taking its
+/// servers with it. The runner's own kill, a minute later, would leave no such record; libtest
+/// names the tests still running as they pass a minute, and every wait of the harness is bounded,
+/// so what is left to say is what the servers were doing.
+fn watch_the_deadline() {
+    static WATCHING: std::sync::Once = std::sync::Once::new();
+    WATCHING.call_once(|| {
+        let Some(budget) = std::env::var("SELKIES_SUITE_DEADLINE")
+            .ok()
+            .and_then(|seconds| seconds.parse::<f64>().ok())
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        else {
+            return;
+        };
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs_f64(budget));
+            let mut said = format!("FAIL  [{}] the suite ran past {budget:.0}s\n", suite());
+            running_logs(|logs| {
+                for log in logs.iter() {
+                    let text = String::from_utf8_lossy(&std::fs::read(log).unwrap_or_default())
+                        .into_owned();
+                    said.push_str(&format!("--- {} ---\n{}\n", log.display(), tail(&text, 40)));
+                }
+            });
+            // Straight to the descriptor: libtest holds what a running test prints.
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), said.as_bytes());
+            std::process::exit(124);
+        });
+    });
 }
 
 /// The X display the suites drive.

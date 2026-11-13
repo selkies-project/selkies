@@ -187,6 +187,18 @@ impl Client {
         timeout: Duration,
         wanted: impl Fn(&str) -> bool,
     ) -> Option<String> {
+        self.text_at(mark, timeout, wanted)
+            .await
+            .map(|(_, text)| text)
+    }
+
+    /// As [`Client::text`], with the message's index: one past it is the mark for what follows.
+    pub async fn text_at(
+        &self,
+        mark: usize,
+        timeout: Duration,
+        wanted: impl Fn(&str) -> bool,
+    ) -> Option<(usize, String)> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let arrival = self.arrived.notified();
@@ -195,8 +207,14 @@ impl Client {
             arrival.as_mut().enable();
             {
                 let inbox = self.inbox.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Some(found) = inbox.texts.iter().skip(mark).find(|t| wanted(t)) {
-                    return Some(found.clone());
+                let found = inbox
+                    .texts
+                    .iter()
+                    .enumerate()
+                    .skip(mark)
+                    .find(|(_, text)| wanted(text));
+                if let Some((at, text)) = found {
+                    return Some((at, text.clone()));
                 }
                 if inbox.closed {
                     return None;
