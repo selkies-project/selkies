@@ -510,8 +510,8 @@ impl SvtAv1Encoder {
         let Some(peak) = self.peak.filter(|_| self.bound_since_open) else {
             return 0;
         };
-        let session = self.quality_index as f64;
-        let finer = (session - crf as f64).max(0.0);
+        let session = f64::from(self.quality_index);
+        let finer = (session - f64::from(crf)).max(0.0);
         if peak.offset <= 0.0
             && finer == 0.0
             && Codec::Av1.quantizer(crf as i32) == self.quality.current
@@ -524,7 +524,7 @@ impl SvtAv1Encoder {
                 .clamp(0.0, 51.0) as i32;
             return vpx_level(Codec::Av1, Codec::Av1.quantizer(index)).max(FORCED_MIN_LEVEL);
         }
-        let index = (crf as f64 + peak.offset).round().min(51.0) as i32;
+        let index = (f64::from(crf) + peak.offset).round().min(51.0) as i32;
         Self::level(Codec::Av1.quantizer(index))
     }
 
@@ -1108,7 +1108,7 @@ mod tests {
         println!("uncapped {uncapped:.0} kbps, capped at {peak} kbps {held:.0} kbps");
         assert!(bound, "the peak never bound");
         assert!(
-            (0.9 * peak as f64..=1.1 * peak as f64).contains(&held),
+            (0.9 * f64::from(peak)..=1.1 * f64::from(peak)).contains(&held),
             "the scroll ran at {held:.0} kbps under a {peak} kbps peak"
         );
     }
@@ -1140,7 +1140,7 @@ mod tests {
         }
         let after = kbps(&bits[CUT + 10..]);
         assert!(
-            after <= 1.1 * s.video_bitrate_kbps as f64,
+            after <= 1.1 * f64::from(s.video_bitrate_kbps),
             "the scroll ran at {after:.0} kbps under a {} kbps peak",
             s.video_bitrate_kbps
         );
