@@ -6,7 +6,7 @@
 
 //! The session-screen ladder over a recording pixelflux and a live labwc, the layout passes against
 //! a model of the capture compositor's overlap rule (`test_wayland_secondary_shrink.py`), the start
-//! verdict, and the apps runner (`test_apps_local_repo.py`).
+//! verdict, and the apps runner (the `apps_local_repo` suite).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1799,7 +1799,7 @@ async fn a_wayland_start_reads_back_what_truly_happened() {
     );
 }
 
-// --- The apps runner (test_apps_local_repo.py, the runner's side) --------------------------------
+// --- The apps runner (the apps_local_repo suite, the runner's side) ------------------------------
 
 /// A runner in `dir` whose `check` exits `check` and whose `list` prints the file `listed`, or
 /// fails while `list-fails` exists, recording the repository it was given.

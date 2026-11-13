@@ -108,29 +108,29 @@ SUITES: list = [
     {"path": "integration/test_ack_latency.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_audit_webhook.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_clipboard_read_stall.py", "tier": "integration", "timeout": 300},
-    {"path": "integration/test_audio_start_stall.py", "tier": "integration", "timeout": 300},
-    {"path": "integration/test_verbs_before_settings.py", "tier": "integration", "timeout": 300},
-    {"path": "integration/test_protocol.py", "tier": "integration", "timeout": 900},
-    {"path": "integration/test_apps_gate.py", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_apps_local_repo.py", "tier": "integration", "timeout": 300},
+    {"path": RUST + "audio_start_stall.rs", "tier": "integration", "timeout": 300},
+    {"path": RUST + "verbs_before_settings.rs", "tier": "integration", "timeout": 300},
+    {"path": RUST + "protocol.rs", "tier": "integration", "timeout": 900},
+    {"path": RUST + "apps_gate.rs", "tier": "integration", "timeout": 600},
+    {"path": RUST + "apps_local_repo.rs", "tier": "integration", "timeout": 300},
     {"path": "integration/test_relative_injection.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_cursor_delivery.py", "tier": "integration", "timeout": 300},
-    {"path": "integration/test_session_dpi_owner.py", "tier": "integration", "timeout": 300},
+    {"path": RUST + "session_dpi_owner.rs", "tier": "integration", "timeout": 300},
     {"path": "integration/test_dpi_startup_order.py", "tier": "integration", "timeout": 300,
      "selectors": ["websockets", "webrtc"]},
     {"path": "integration/test_lost_frame_verb.py", "tier": "integration", "timeout": 300},
-    {"path": "integration/test_parity_checks.py", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_display_seed.py", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_display_framerate.py", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_display_rate_control.py", "tier": "integration", "timeout": 600},
-    {"path": "integration/test_state_stress.py", "tier": "integration", "timeout": 900},
+    {"path": RUST + "parity_checks.rs", "tier": "integration", "timeout": 600},
+    {"path": RUST + "display_seed.rs", "tier": "integration", "timeout": 600},
+    {"path": RUST + "display_framerate.rs", "tier": "integration", "timeout": 600},
+    {"path": RUST + "display_rate_control.rs", "tier": "integration", "timeout": 600},
+    {"path": RUST + "state_stress.rs", "tier": "integration", "timeout": 900},
     {"path": "integration/test_webrtc_unix_socket.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_wayland_multi_output.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_frame_timing.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_wayland_seam.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_gpu_probe.py", "tier": "integration", "timeout": 180},
     {"path": "integration/test_missing_libraries.py", "tier": "integration", "timeout": 900},
-    {"path": "integration/test_command_dispatch.py", "tier": "integration", "timeout": 120},
+    {"path": RUST + "command_dispatch.rs", "tier": "integration", "timeout": 120},
     {"path": "integration/test_two_display_pixels.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_locked_cursor_across_displays.py", "tier": "integration",
      "timeout": 600},
@@ -327,9 +327,9 @@ def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
 
 def name(path: str, tier: str) -> str:
     """The name a suite is selected and its logs are kept under, without its
-    selector: `integration/test_protocol` for `integration/test_protocol.py`,
-    and for the Rust target `protocol.rs` of that tier as well, so a suite
-    keeps its name in whichever language it is written."""
+    selector: `integration/test_gpu_probe` for `integration/test_gpu_probe.py`,
+    and `integration/test_protocol` for the Rust target `protocol.rs` of that
+    tier, so a suite keeps its name in whichever language it is written."""
     stem = os.path.splitext(path)[0]
     if path.endswith(".rs"):
         return f"{tier}/test_{os.path.basename(stem)}"

@@ -72,9 +72,10 @@ async fn a_second_display_inherits_crf(through_the_verb: bool) {
         .lines()
         .rfind(|line| line.contains(STREAM_SETTINGS))
         .map_or_else(|| tail(&since, 3), str::to_owned);
+    // A CBR capture names CRF as well, for its paint-over pass: the mode is the field read.
     checks.check(
         &format!("display2 inherits crf ({label})"),
-        stated.contains("CRF"),
+        stated.replace("PaintOver CRF", "").contains("CRF"),
         &stated,
     );
     checks.finish(&server.stop().await);
