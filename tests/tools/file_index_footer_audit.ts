@@ -12,7 +12,7 @@
  * mount; a sorted listing, whose every link carries the sort query, keeps its
  * directories navigable; and a session token joins a query already there.
  *
- * Usage: node file_index_footer_audit.ts <footer.html or stream_server.py>
+ * Usage: node file_index_footer_audit.ts <footer.html or index_html.rs>
  * Prints one PASS/FAIL line per check and exits non-zero if any failed.
  * @module
  */

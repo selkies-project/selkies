@@ -120,7 +120,7 @@ function reset(element: object): void {
     Input.rawPointerMotion = true;
     Input._rawMotionRefused = false;
     Object.assign(globalThis, {
-        document: { pointerLockElement: null, fullscreenElement: element, getElementById: () => null },
+        document: { pointerLockElement: null, fullscreenElement: element, getElementById: () => null } satisfies StandIn<Document>,
         window: { screenX: 0, screenY: 0 } satisfies StandIn<Window>,
     });
 }
@@ -341,7 +341,7 @@ function stage(ids: string[], locked: object | null = null): Record<string, Stag
     for (const id of ids) made[id] = { id, requestPointerLock: () => Promise.resolve() };
     Object.assign(globalThis, {
         document: { pointerLockElement: locked, fullscreenElement: null,
-                    getElementById: (id: string) => made[id] || null },
+                    getElementById: (id: string) => made[id] || null } satisfies StandIn<Document>,
     });
     return made;
 }
