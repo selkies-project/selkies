@@ -34,9 +34,19 @@ declare global {
     new(init: MediaStreamTrackProcessorInit): MediaStreamTrackProcessor;
   };
 
+  interface RTCInboundRtpStreamStats {
+    /** Whether the engine counts the decoder in use as power efficient, which Chromium reports. */
+    powerEfficientDecoder?: boolean;
+  }
+
   interface RTCRtpEncodingParameters {
     /** The codec this encoding sends with, where the engine lets a sender choose among the negotiated ones. */
     codec?: RTCRtpCodec;
+  }
+
+  interface AudioContext {
+    /** Routes the context's output to a device, where the engine has it. */
+    setSinkId(sinkId: string): Promise<void>;
   }
 
   interface VideoEncoderConfig {

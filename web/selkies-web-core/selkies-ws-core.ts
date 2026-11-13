@@ -153,6 +153,13 @@ import { DecodeGate } from './lib/decode-gate.ts';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.ts';
 import { createPrintJobs, printDocument } from './lib/print-jobs.ts';
 import { forwardAppsEvent } from './lib/app-commands.ts';
+import type { ClipboardDigest, ClipboardSkip, LocalClipboardSender } from './lib/clipboard-sync.ts';
+import type { DisplayRefreshWatch } from './lib/display-refresh.ts';
+import type { PresentFigures, VideoWatch } from './lib/present-meter.ts';
+import type { DisplayLayouts } from './lib/input.ts';
+import type { EncoderBackends, ServerSettingEntry } from './lib/conditional-settings.ts';
+import type { FramerateSpan } from './lib/display-refresh.ts';
+import type { StreamInfo, StreamSample } from './lib/stream-stats.ts';
 
 installAuthGuard();
 installSessionCookie();
@@ -166,15 +173,15 @@ installSessionCookie();
  * sent alone, it would be the first settings the server sees and start the
  * stream ahead of the payload the session waits to build, full color and all.
  */
-let detectedKeyboardLayout: any = null;
+let detectedKeyboardLayout: string | null = null;
 let initialSettingsSent = false;
-const keyboardLayoutProbe = detectKeyboardLayout().then((layout: any): any => {
+const keyboardLayoutProbe = detectKeyboardLayout().then((layout: string | null): string | null => {
     detectedKeyboardLayout = layout;
     return layout;
 });
 
 /** Timestamp of the newest Opus frame handed to the decoder; `null` before RED starts. */
-let lastAudioTs: any = null;
+let lastAudioTs: number | null = null;
 /**
  * Bit of an audio message's second byte that marks where the server's stream
  * pauses. Alone, `[0x01, AUDIO_QUIET]` carries no Opus and is sent where a
@@ -260,23 +267,75 @@ function extractOpusFrames(arrayBuffer: ArrayBuffer): ArrayBuffer[] {
  * closure state of one session; the public surface is the `window` contract
  * described in the module docblock.
  */
-export default function websockets(): any {
+export default function websockets(): void {
 let isSecondaryDisplayConnected = false;
 /** Display rectangles (+ per-page scale) from the last DISPLAY_CONFIG_UPDATE. */
-let latestDisplayLayouts: any = null;
-let audioDecoderWorker: any = null;
-let canvas: any = null;
-let canvasContext: any = null;
-let websocket: any;
-let clientMode: any = null;
-let clientRole: any = null;
-let clientSlot: any = null;
+let latestDisplayLayouts: DisplayLayouts | null = null;
+let audioDecoderWorker: Worker | null = null;
+let canvas: HTMLCanvasElement | null = null;
+let canvasContext: CanvasRenderingContext2D | null = null;
+/** A message as the session socket delivers it: a browser event, or the plain record the worker socket and a replay hand over. */
+interface SocketMessage {
+  data: string | ArrayBuffer;
+  /** When the socket's worker received it, on the page's wall clock. */
+  at?: number;
+}
+
+/** How the session socket closed, as a `CloseEvent` or the worker's record of one carries it. */
+interface SocketClose {
+  code?: number;
+  reason?: string;
+  wasClean?: boolean;
+}
+
+/** A decoded JPEG stripe: a frame or a bitmap, closed once drawn, or an image, which has nothing to close. */
+type StripeImage =
+  | (VideoFrame & { width?: undefined; height?: undefined })
+  | (ImageBitmap & { displayWidth?: undefined; displayHeight?: undefined })
+  | (HTMLImageElement & { displayWidth?: undefined; displayHeight?: undefined; close?: undefined });
+
+/**
+ * The session socket as the client drives it: a `WebSocket`, or the
+ * worker-held `WorkerWebSocket`, which has the same face and the routes only
+ * a worker can offer.
+ */
+interface SessionSocket {
+  readyState: number;
+  binaryType: string;
+  readonly bufferedAmount: number;
+  onopen: (() => void) | null;
+  onmessage: ((ev: SocketMessage) => void) | null;
+  onerror: ((ev: object) => void) | null;
+  onclose: ((ev: SocketClose) => void) | null;
+  send(data: string | ArrayBuffer | ArrayBufferView): void;
+  close(code?: number, reason?: string): void;
+  /** Starts or stops the worker's link sampling. */
+  setStats?(open: boolean): void;
+  /** Hands the worker the port video goes to. */
+  connectVideo?(port: MessagePort): void;
+  /** Sends video down that port, or back to the page. */
+  setVideoDivert?(on: boolean, ack: string): void;
+  /** Hands the worker the port audio goes to. */
+  connectAudio?(port: MessagePort): void;
+  /** Tells the worker whether audio is wanted. */
+  setAudioActive?(active: boolean): void;
+  /** Hands the worker a port whose messages it sends. */
+  connectSend?(port: MessagePort): void;
+  /** Hands the worker the port camera frames arrive on. */
+  connectWebcam?(port: MessagePort): void;
+  /** Starts the worker's frame acknowledgements over. */
+  resetVideoAck?(): void;
+}
+let websocket: SessionSocket | null;
+let clientMode: string | null = null;
+let clientRole: string | null = null;
+let clientSlot: number | null = null;
 let isTokenAuthMode = false;
-let audioContext: any;
-let audioWorkletNode: any;
-let audioGainNode: any;
+let audioContext: AudioContext | null;
+let audioWorkletNode: AudioWorkletNode | null;
+let audioGainNode: GainNode;
 let currentVolume = 1.0;
-let audioWorkletProcessorPort: any;
+let audioWorkletProcessorPort: MessagePort | null;
 window.currentAudioBufferSize = 0;
 /**
  * Concealment counters: zero-filled underrun samples and drop-oldest events
@@ -293,11 +352,11 @@ window.currentAudioDropped = 0;
  * Full-frame video only; JPEG, and browsers with neither generator, keep the
  * canvas path.
  */
-let videoElement: any = null;
-let videoFrameWriter: any = null;
-let videoTrack: any = null;
+let videoElement: HTMLVideoElement | null = null;
+let videoFrameWriter: WritableStreamDefaultWriter<VideoFrame> | null = null;
+let videoTrack: MediaStreamTrack | null = null;
 let mstgActive = false;
-let mstgLastGeom: any = null;
+let mstgLastGeom: string | null = null;
 /**
  * Consecutive frames the generator sink dropped for backpressure. A generator
  * whose consumer stopped pulling (a hide/resume starve) stays backpressured
@@ -326,14 +385,14 @@ let sinkPlayRefused = false;
  * cssText every frame.
  */
 let canvasGeomDirty = true;
-let jpegStripeRenderQueue: any[] = [];
+let jpegStripeRenderQueue: { image: StripeImage; startY: number; frameId: number; at: number }[] = [];
 /** JPEG stripes handed to a decoder that have not reached the queue yet. */
 let jpegStripeDecodesPending = 0;
 let isVideoPipelineActive = true;
 let isAudioPipelineActive = true;
 let isMicrophoneActive = false;
 let isWebcamActive = false;
-let isGamepadEnabled: any;
+let isGamepadEnabled: boolean;
 let lastReceivedVideoFrameId = -1;
 /** When that id arrived, so an ack can report how long it was held. */
 let lastReceivedVideoFrameAt = 0;
@@ -365,13 +424,13 @@ let pipelinesToggledByUser = new Set();
  * before anything was requested rather than stopping a stream just started. */
 let serverSettingsReceived = false;
 /** The last server_settings payload, posted again when the display's settings change under the dashboards. */
-let lastServerSettings: any = null;
+let lastServerSettings: Record<string, ServerSettingEntry> | null = null;
 /** Initialization wanted audio before the settings payload arrived; the
  * payload handler resolves it. */
 let pendingInitialAudioStart = false;
 let microphoneEnabled = true;
 let webcamEnabled = true;
-let webcamCapture: any = null;
+let webcamCapture: WebcamCapture | null = null;
 /** Set when a capture the server asked for was refused, so a session whose user said no is
  * not asked again at every demand; the user's own toggle clears it. */
 let micDemandRefused = false;
@@ -381,11 +440,11 @@ let webcamDemandRefused = false;
  * page can say what they are. */
 Object.defineProperty(window, 'webcamCodec', {
   configurable: true,
-  get: (): any => (webcamCapture ? webcamCapture.codec : null),
+  get: (): string | null | undefined => (webcamCapture ? webcamCapture.codec : null),
 });
 // webcam_encoder: the server default, overridden by the stored choice unless locked.
 let webcamEncoderPreference = 'auto';
-let preferredWebcamDeviceId: any = null;
+let preferredWebcamDeviceId: string | null = null;
 let displayId = 'primary';
 let displayPosition = 'right';
 /**
@@ -411,16 +470,16 @@ const PER_DISPLAY_SETTINGS = [
     'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
     'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
 ];
-let micStream: any = null;
+let micStream: MediaStream | null = null;
 /**
  * The microphone start waiting on getUserMedia, which a permission prompt holds
  * for as long as the user takes, as `{withdrawn}`: a stop meanwhile withdraws it.
  */
-let micPending: any = null;
-let micAudioContext: any = null;
-let micSourceNode: any = null;
-let micWorkletNode: any = null;
-let micEncodeWorker: any = null;
+let micPending: { withdrawn: boolean; } | null = null;
+let micAudioContext: AudioContext | null = null;
+let micSourceNode: MediaStreamAudioSourceNode | null = null;
+let micWorkletNode: AudioWorkletNode | null = null;
+let micEncodeWorker: Worker | null = null;
 /** Opus bitrate the microphone encoder is configured with, and the figure the stats report. */
 const MIC_BITRATE = 32000;
 /**
@@ -429,10 +488,10 @@ const MIC_BITRATE = 32000;
  * before the dash or the semicolon.
  */
 let currentSink = '';
-let preferredInputDeviceId: any = null;
-let preferredOutputDeviceId: any = null;
-let metricsIntervalId: any = null;
-let backpressureIntervalId: any = null;
+let preferredInputDeviceId: string | null = null;
+let preferredOutputDeviceId: string | null = null;
+let metricsIntervalId: number | null = null;
+let backpressureIntervalId: number | null = null;
 /**
  * The session socket's reconnect ladder (`scheduleReconnect`): the pending
  * attempt, whether it reloads the page rather than reconnecting in place, the
@@ -440,14 +499,14 @@ let backpressureIntervalId: any = null;
  * a row an answering server never opened, when the current socket opened, and
  * the entry page's validators as this page loaded them.
  */
-let reconnectTimer: any = null;
+let reconnectTimer: number | null = null;
 let reconnectByReload = false;
 let reconnectAttempts = 0;
 let reconnectUnopened = 0;
 let socketOpenedAt = 0;
-let entryPageValidators: any = null;
+let entryPageValidators: string | null = null;
 /** Opens a new session socket with every handler bound; set by initWebsockets. */
-let reopenSessionSocket: any = null;
+let reopenSessionSocket: (() => void) | null = null;
 /**
  * First in-place reconnect after a drop, doubled per attempt up to
  * RECONNECT_MAX_MS: an attempt is one GET while the server is away, so a
@@ -481,9 +540,9 @@ let reconnectingInPlace = false;
  * starting, and a reconnect they ended would have that MODE show the notice.
  */
 let modeSinceOpen = false;
-let reconnectNoticeTimer: any = null;
-let carriedPipelines: any = null;
-let heldInput: any[] = [];
+let reconnectNoticeTimer: number | null = null;
+let carriedPipelines: { toggled: Set<unknown>; video: boolean; audio: boolean; microphone: boolean; webcam: boolean; } | null = null;
+let heldInput: { message: string; at: number }[] = [];
 let inputHeldSince = 0;
 const RECONNECT_NOTICE_MS = 1500;
 /** How long after a drop input is held for the next socket; held longer, only a key's release still goes. */
@@ -493,7 +552,7 @@ const INPUT_HOLD_MS = 2000;
  * black stream. Armed when the tab becomes visible, cleared on the first
  * VIDEO_STARTED or video chunk.
  */
-let startVideoWatchdogTimer: any = null;
+let startVideoWatchdogTimer: number | null = null;
 let startVideoWatchdogAttempts = 0;
 const START_VIDEO_WATCHDOG_MS = 3000;
 const START_VIDEO_WATCHDOG_MAX_ATTEMPTS = 3;
@@ -510,7 +569,7 @@ const VISIBLE_FRAME_PROBE_MS = 2500;
  * server both resyncs a live capture and restarts a dead one), with
  * exponential backoff so a static stream is not spammed.
  */
-let sharedStallWatchdogId: any = null;
+let sharedStallWatchdogId: number | null = null;
 let sharedDecoderUnavailableNoticed = false;
 let lastSharedVideoChunkTime = 0;
 let sharedStallRecoveryAttempts = 0;
@@ -532,7 +591,7 @@ const AUDIO_RELAY_CEILING_MS = 80;
  * @param code The module's source.
  * @returns
  */
-const workletModuleURL = (code: any): any => `data:text/javascript;charset=utf-8,${encodeURIComponent(code)}`;
+const workletModuleURL = (code: string): string => `data:text/javascript;charset=utf-8,${encodeURIComponent(code)}`;
 const BACKPRESSURE_INTERVAL_MS = 50;
 /**
  * How often an unchanged frame id is re-acked. The server reads a frame left
@@ -558,15 +617,27 @@ const CLIPBOARD_BACKLOG_BYTES = 64 * 1024;
 /** Backlog re-check interval; the socket worker re-reports as the socket drains. */
 const CLIPBOARD_BACKLOG_POLL_MS = 20;
 window.manual_resolution = false;
-let manual_width: any = null;
-let manual_height: any = null;
-let originalWindowResizeHandler: any = null;
-let handleResizeUI_globalRef: any = null;
+let manual_width: number | null = null;
+let manual_height: number | null = null;
+let originalWindowResizeHandler: (() => void) | null = null;
+let handleResizeUI_globalRef: (() => void) | null = null;
+/** One stripe's decoder and what it is waiting on. */
+interface StripeDecoder {
+  decoder: VideoDecoder;
+  /** Chunks that arrived before the decoder was configured. */
+  pendingChunks: EncodedVideoChunkInit[];
+  width: number;
+  height: number;
+  /** Whether the stream is length-prefixed, carrying its parameter sets in `description`. */
+  framed: boolean;
+  description: Uint8Array | null | undefined;
+  hasReceivedKeyframe: boolean;
+}
 /**
  * The page's full-frame video decoder, keyed by the stripe Y its frames
  * carry, which for a full frame is always 0.
  */
-let vncStripeDecoders: Record<string, any> = {};
+let vncStripeDecoders: Record<string, StripeDecoder> = {};
 /**
  * A stripe is stale only when it trails the last drawn id by at most this
  * many frames. The id is a uint16, so a larger modular gap means the row sat
@@ -574,21 +645,21 @@ let vncStripeDecoders: Record<string, any> = {};
  * wedging the row for up to half the id space.
  */
 const JPEG_STRIPE_REORDER_WINDOW = 256;
-let stripeDecodeSoftErrors: Record<string, any> = {};
-let wakeLockSentinel: any = null;
+let stripeDecodeSoftErrors: Record<string, { count: number; last: number }> = {};
+let wakeLockSentinel: WakeLockSentinel | null = null;
 let currentEncoderMode = 'h264enc';
 /**
  * Whether an encoder wire value streams video, whole frames through one
  * decoder, rather than JPEG stripes.
  */
-const isVideoEncoder = (mode: any): any => mode !== 'jpeg';
+const isVideoEncoder = (mode: string): boolean => mode !== 'jpeg';
 let useCssScaling = false;
 /** Whether the server runs on Wayland, as the last display-config update named it. */
 let serverWayland = false;
 /** Whether the session takes a touchpad's scroll as a finger's (the display config's `finger_scroll`). */
 let serverFingerScroll = false;
 /** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.ts). */
-function streamDensity(): any {
+function streamDensity(): number {
   return streamDensityOf({ useCssScaling, localScale: scalingDPI / 96, manual: window.manual_resolution,
                            displayId, layouts: latestDisplayLayouts, shared: isSharedMode, wayland: serverWayland });
 }
@@ -597,13 +668,13 @@ let appliedStreamDensity = 0;
 /** The density the last SETTINGS reported as the display scale. */
 let reportedStreamDensity = 0;
 /** The last automatic request, as stream pixels and the CSS size it was built from. */
-let lastRequestedStreamRes: any = null;
+let lastRequestedStreamRes: number[] | null = null;
 /**
  * Hands the density to the input layer and, on a secondary whose density
  * moved (a HiDPI or UI-scaling change, or on X11 the primary's scale),
  * requests the stream at it again.
  */
-function followStreamDensity(): any {
+function followStreamDensity(): void {
   const density = streamDensity();
   if (window.webrtcInput && window.webrtcInput.setStreamDensity) {
     window.webrtcInput.setStreamDensity(density);
@@ -626,7 +697,7 @@ let scalingDPI = 96;
  */
 function autoDeriveDpi(): number {
   return window.manual_resolution
-    ? resolutionScalingDpi(manual_width, manual_height)
+    ? resolutionScalingDpi(manual_width!, manual_height!)
     : autoScalingDpi();
 }
 
@@ -697,7 +768,7 @@ let use_browser_cursors = true;
  * effect as `effectiveCursorState` so the dashboard toggle reflects the
  * override rather than the preference alone.
  */
-function applyEffectiveCursorSetting(): any {
+function applyEffectiveCursorSetting(): void {
     const userPreference = use_browser_cursors;
     const isMultiMonitorActive = (displayId === 'display2' || (displayId === 'primary' && isSecondaryDisplayConnected));
     const finalSetting = isMultiMonitorActive ? true : userPreference;
@@ -718,7 +789,7 @@ function applyEffectiveCursorSetting(): any {
  */
 let rawPointerMotion = true;
 /** Applies the raw pointer motion setting to the input handler. */
-function applyRawPointerMotion(): any {
+function applyRawPointerMotion(): void {
     if (window.webrtcInput && typeof window.webrtcInput.setRawPointerMotion === 'function') {
         window.webrtcInput.setRawPointerMotion(rawPointerMotion);
     }
@@ -726,7 +797,7 @@ function applyRawPointerMotion(): any {
 /** How far the trackpad moves the pointer: the dashboards' pick, persisted here. */
 let trackpadSpeed = 1;
 /** Applies the trackpad speed to the input handler. */
-function applyTrackpadSpeed(): any {
+function applyTrackpadSpeed(): void {
     if (window.webrtcInput && typeof window.webrtcInput.setTrackpadSpeed === 'function') {
         window.webrtcInput.setTrackpadSpeed(trackpadSpeed);
     }
@@ -734,7 +805,7 @@ function applyTrackpadSpeed(): any {
 /** Whether pads play a game's rumble: the dashboards' toggle, persisted here. */
 let gamepadRumble = true;
 /** Applies the rumble toggle to the input handler. */
-function applyGamepadRumble(): any {
+function applyGamepadRumble(): void {
     if (window.webrtcInput && typeof window.webrtcInput.setGamepadRumble === 'function') {
         window.webrtcInput.setGamepadRumble(gamepadRumble);
     }
@@ -746,7 +817,7 @@ function applyGamepadRumble(): any {
  */
 let macCmdAsCtrl = true;
 /** Applies the Command-as-Control setting to the input handler. */
-function applyMacCmdAsCtrl(): any {
+function applyMacCmdAsCtrl(): void {
     if (window.webrtcInput && typeof window.webrtcInput.setMacCmdAsCtrl === 'function') {
         window.webrtcInput.setMacCmdAsCtrl(macCmdAsCtrl);
     }
@@ -758,13 +829,13 @@ function applyMacCmdAsCtrl(): any {
  */
 let keyboardShortcuts = true;
 /** Applies the chord setting to the input handler. */
-function applyKeyboardShortcuts(): any {
+function applyKeyboardShortcuts(): void {
     if (window.webrtcInput && typeof window.webrtcInput.setShortcutsEnabled === 'function') {
         window.webrtcInput.setShortcutsEnabled(keyboardShortcuts);
     }
 }
 /** Publishes the real viewport height as the `--vh` CSS unit (mobile browser chrome excluded). */
-function setRealViewportHeight(): any {
+function setRealViewportHeight(): void {
   const vh = window.innerHeight * 0.01;
   document.documentElement.style.setProperty('--vh', `${vh}px`);
 }
@@ -776,7 +847,7 @@ const clipboardWorker = new ClipboardWorkerBridge();
  * re-encode of a large one belong; the page's own canvas covers a worker that
  * cannot do it.
  */
-const reencodePngOffThread = (blob: any): any => clipboardWorker.reencodePng(blob).then((r: any): any => r.result);
+const reencodePngOffThread = (blob: Blob): Promise<Blob> => clipboardWorker.reencodePng(blob).then((r: { result: Blob; mimeType: string; byteLength: number; }): Blob => r.result);
 let enable_binary_clipboard = true;
 /**
  * Server-clipboard cache, change-only sync, and Ctrl/Cmd+C request queue
@@ -787,26 +858,26 @@ let enable_binary_clipboard = true;
  * userAgentData brands are the authoritative signal, `window.chrome` the
  * fallback for older engines.
  */
-const isChromium = ((): any => {
+const isChromium = ((): boolean => {
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
   const isCriOS = /CriOS/.test(navigator.userAgent);
   const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
-  const isChromiumBrand = brands.some((b: any): any => /Chromium|Google Chrome/.test(b.brand));
+  const isChromiumBrand = brands.some((b: { brand: string; version: string; }): boolean => /Chromium|Google Chrome/.test(b.brand));
   const hasChromeObj = typeof window.chrome !== 'undefined';
   return (isChromiumBrand || hasChromeObj) && !isIOS && !isFirefox && !isCriOS;
 })();
 
 const clipboardSync = createClipboardSync({
     isChromium,
-    canRead: (): any => !!clipboard_in_enabled,
-    sendRequest: (): any => {
+    canRead: (): boolean => !!clipboard_in_enabled,
+    sendRequest: (): void => {
         if (websocket && websocket.readyState === WebSocket.OPEN) {
             websocket.send('REQUEST_CLIPBOARD');
         }
     },
-    digestBytes: async (buf: any): Promise<any> => {
+    digestBytes: async (buf: ArrayBuffer): Promise<ClipboardDigest> => {
         const { byteLength, hash } = await clipboardWorker.hashBytes(buf);
         return digestedPayload(byteLength, hash);
     }
@@ -822,11 +893,11 @@ const incomingClipboard = createIncomingClipboard({
   clipboardSync,
   writer: deferredClipboardWriter,
   toPng: reencodePngOffThread,
-  canWriteLocal: (): any => clipboard_out_enabled && clipboard_seamless,
-  binaryEnabled: (): any => enable_binary_clipboard,
+  canWriteLocal: (): boolean => clipboard_out_enabled && clipboard_seamless,
+  binaryEnabled: (): boolean => enable_binary_clipboard,
   isChromium,
-  onPreview: (text: any, secret: any): any => window.postMessage(clipboardPreviewMessage(text, secret), window.location.origin),
-  onImageWritten: (mime: any): any => {
+  onPreview: (text: string, secret: boolean | undefined): void => window.postMessage(clipboardPreviewMessage(text, secret), window.location.origin),
+  onImageWritten: (mime: string): Promise<void> => {
     console.log(`Successfully wrote image (${mime}) from server to local clipboard.`);
     window.postMessage({
       type: 'clipboardContentUpdate',
@@ -834,13 +905,13 @@ const incomingClipboard = createIncomingClipboard({
     }, window.location.origin);
     return clipboardSync.captureLocalImageSig();
   },
-  onImageWriteFailed: (err: any): any => notifyClipboardImageWriteFailed(err),
+  onImageWriteFailed: (err: Error): void => notifyClipboardImageWriteFailed(err),
 });
 const taggedClipboardFetch = createTaggedClipboardFetch();
-const armTaggedClipboardReply = (): any => taggedClipboardFetch.arm();
-const consumeInitClipboardFetch = (): any => taggedClipboardFetch.consume();
+const armTaggedClipboardReply = (): void => taggedClipboardFetch.arm();
+const consumeInitClipboardFetch = (): boolean => taggedClipboardFetch.consume();
 /** Local-to-server clipboard sync, built with the connection; the dashboard's own pushes go through it. */
-let localClipboardSender: any = null;
+let localClipboardSender: LocalClipboardSender | null = null;
 
 /**
  * Sends content the user named (the clipboard box, the image upload) so it
@@ -850,7 +921,7 @@ let localClipboardSender: any = null;
  * @param [onSkip] Told why nothing was sent.
  * @returns
  */
-function sendExplicitClipboard(data: string | ArrayBuffer | Blob, mime?: string, onSkip?: (...args: any[]) => any): Promise<void> {
+function sendExplicitClipboard(data: string | ArrayBuffer | Blob, mime?: string, onSkip?: ClipboardSkip): Promise<void> {
   if (!localClipboardSender) {
     if (onSkip) onSkip('not connected', 'clipboardSkipNotConnected');
     return Promise.resolve();
@@ -858,7 +929,7 @@ function sendExplicitClipboard(data: string | ArrayBuffer | Blob, mime?: string,
   return localClipboardSender.sendExplicit(data, mime, onSkip);
 }
 
-let detectedSharedModeType: any = null;
+let detectedSharedModeType: string | null = null;
 let playerInputTargetIndex: number | undefined = 0;
 
 const urlParams = new URLSearchParams(window.location.search);
@@ -922,7 +993,7 @@ if (isSharedMode) {
 if (displayId === 'display2') {
     console.log("Client is running in Secondary Display mode.");
 }
-window.onload = (): any => {
+window.onload = (): void => {
   'use strict';
 };
 
@@ -933,7 +1004,7 @@ const storageAppName = getStorageAppName();
  * @param key
  * @param value
  */
-const safeSetItem = (key: any, value: any): any => {
+const safeSetItem = (key: string, value: string): void => {
   try {
     window.localStorage.setItem(key, value);
   } catch (e) {
@@ -960,13 +1031,13 @@ const SOFTWARE_DECODE_KEY = `${storageAppName}_prefer_software_decode`;
  * @param why
  * @returns
  */
-const fallbackStamp = (why: any): any => `${new Date().toISOString()} ${why}`;
+const fallbackStamp = (why: string): string => `${new Date().toISOString()} ${why}`;
 /**
  * A stored `fallbackStamp` as text; one stored before stamps were says only that.
  * @param stamp
  * @returns
  */
-const readFallbackStamp = (stamp: any): any => {
+const readFallbackStamp = (stamp: string): string => {
   const match = /^(\S+) (.+)$/s.exec(stamp || '');
   return match ? `since ${match[1]}: ${match[2]}` : 'since an earlier load';
 };
@@ -996,7 +1067,7 @@ let sessionFullRange = false;
  * told renders a full range session wrong.
  * @param info A `stream_info` payload.
  */
-const noteSessionRange = (info: any): any => {
+const noteSessionRange = (info: StreamInfo | null): void => {
   const full = !!(info && info.full_range);
   if (full === sessionFullRange) return;
   sessionFullRange = full;
@@ -1009,7 +1080,7 @@ const noteSessionRange = (info: any): any => {
  * @param enabled
  * @param [why] What made it prefer software.
  */
-const rememberSoftwareDecode = (enabled: any, why: any = ''): any => {
+const rememberSoftwareDecode = (enabled: boolean, why: string = ''): void => {
   if (videoWorker) {
     try { videoWorker.postMessage({ type: 'wireHints', software: enabled }); } catch (e) { /* respawns fresh */ }
   }
@@ -1028,7 +1099,7 @@ const rememberSoftwareDecode = (enabled: any, why: any = ''): any => {
  * @param config
  * @returns
  */
-const decoderConfigFor = (config: any): any =>
+const decoderConfigFor = (config: VideoDecoderConfig): VideoDecoderConfig =>
   preferSoftwareDecode ? { ...config, hardwareAcceleration: 'prefer-software' } : config;
 /**
  * The config a page decoder takes: `config` where the engine supports it, and
@@ -1065,7 +1136,7 @@ const CRASH_COUNT_KEY = `${storageAppName}_crash_count`;
 const HEALTHY_SESSION_MS = 60000;
 let crashCountRetired = false;
 /** Clears the crash count once this session has proven healthy; runs on every metrics tick. */
-const retireCrashCountWhenHealthy = (): any => {
+const retireCrashCountWhenHealthy = (): void => {
   if (crashCountRetired || isSharedMode) return;
   if (!((window.fps ?? 0) > 0) || !isVideoEncoder(currentEncoderMode) || performance.now() < HEALTHY_SESSION_MS) return;
   crashCountRetired = true;
@@ -1092,7 +1163,7 @@ const retireCrashCountWhenHealthy = (): any => {
  * down while the page is hidden, or a background tab that is still sent video would be taken
  * through the retry and the ladder's reloads to JPEG.
  */
-function checkVideoOutputWatchdog(): any {
+function checkVideoOutputWatchdog(): void {
   // A software retry that is also silent has to be able to trip this again, or the
   // one shot is spent on the retry and nothing escalates: `initiateFallback` reads
   // the second trip as the software path having failed too and steps the ladder.
@@ -1107,7 +1178,7 @@ function checkVideoOutputWatchdog(): any {
   }
   const now = performance.now();
   if (now - firstConfigAskedAt < DECODER_PROBE_TIMEOUT_MS
-      && Object.values(vncStripeDecoders).some((info: any): any => info && info.decoder.state === 'unconfigured')) {
+      && Object.values(vncStripeDecoders).some((info: StripeDecoder): boolean => info && info.decoder.state === 'unconfigured')) {
     noOutputStalledSince = 0;
     return;
   }
@@ -1132,11 +1203,11 @@ function checkVideoOutputWatchdog(): any {
 
 let framerate = 60;
 /** The server's framerate setting (`min`, `max`, `default`, `overridden`), once its settings arrived. */
-let framerateSpan: any = null;
+let framerateSpan: FramerateSpan | null = null;
 /** The measurement of this page's display (lib/display-refresh.ts); null on a shared viewer. */
-let displayRefresh: any = null;
+let displayRefresh: DisplayRefreshWatch | null = null;
 /** The frame rate the last SETTINGS asked for, null where it named none. */
-let framerateAsked: any = null;
+let framerateAsked: number | null = null;
 /**
  * The rate this page's decoder keeps up with (lib/decode-pace.ts), null where
  * it keeps up with any: the video worker's where it decodes, else `pagePace`,
@@ -1144,22 +1215,22 @@ let framerateAsked: any = null;
  * no faster (`DECODE_PACE`) while this page's socket lasts, and the rate the
  * page chose stays what it asks for.
  */
-let decodePace: any = null;
+let decodePace: number | null = null;
 const pagePace = new DecodePace();
 /** What the page's own full-frame decoder does with each frame, as the video worker's does (lib/decode-gate.ts). */
 const pageGate = new DecodeGate();
 /** Tells the server the pace, or that there is none. */
-function sendDecodePace(): any {
+function sendDecodePace(): void {
   if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(`DECODE_PACE ${decodePace || 0}`);
 }
 /** Takes a pace a decoder asked for; null lifts it. */
-function followDecodePace(fps: any): any {
+function followDecodePace(fps: number | null): void {
   decodePace = fps;
   console.info(fps === null ? '[decode] the decoder keeps up; the frame rate is the chosen one again.'
     : `[decode] the decoder keeps up with ${fps} fps; asking for that.`);
   sendDecodePace();
 }
-setInterval((): any => {
+setInterval((): void => {
   if (decodeInWorker || !isVideoEncoder(currentEncoderMode)) return;
   const fps = pagePace.second();
   if (fps !== undefined) followDecodePace(fps);
@@ -1189,13 +1260,13 @@ const gamepad = {
  * pixel format of its frames and whether the engine has a hardware decoder
  * for its configuration.
  */
-const workerDecode: Record<string, any> = { format: undefined, hardware: null };
+const workerDecode = { format: undefined, hardware: null };
 /**
  * The same for the page's own full-frame decoder, which serves the stream
  * where the worker does not decode, with its decode figures, gathered only
  * while the stats are open.
  */
-const pageDecode: Record<string, any> = { starts: new Map(), arrivals: new Map(), decodeMs: 0, frames: 0, format: undefined, hardware: null, probed: '', config: null };
+const pageDecode: { starts: Map<number, number>; arrivals: Map<number, number>; decodeMs: number; frames: number; format: VideoPixelFormat | null | undefined; hardware: boolean | null; probed: string; config: VideoDecoderConfig | null } = { starts: new Map(), arrivals: new Map(), decodeMs: 0, frames: 0, format: undefined, hardware: null, probed: '', config: null };
 /** `MediaCapabilities` on the stream's codec and size, asked once per configuration. */
 const decodeCapable = new DecodeCapability();
 /** The key frames and lost frames this page asked the server for, and where they stood when the stats opened. */
@@ -1209,8 +1280,8 @@ const requests = { keyframes: 0, lost: 0, keyframesAtOpen: 0, lostAtOpen: 0 };
  * each chunk the page decodes arrived; `notShown` counts from the opening what
  * the page's and the video worker's sinks never showed.
  */
-const pageShown = createPresentMeter((land: any): any => requestAnimationFrame(land));
-let videoWatch: any = null;
+const pageShown = createPresentMeter((land: () => void): number => requestAnimationFrame(land));
+let videoWatch: VideoWatch | null = null;
 let shownSampledAt = 0, notShown = 0;
 
 /**
@@ -1222,7 +1293,7 @@ let shownSampledAt = 0, notShown = 0;
 function takeArrival(timestamp: number): number {
   const at = pageDecode.arrivals.get(timestamp);
   pageDecode.arrivals.delete(timestamp);
-  return at > 0 ? at : NaN;
+  return at! > 0 ? at! : NaN;
 }
 
 /**
@@ -1231,11 +1302,11 @@ function takeArrival(timestamp: number): number {
  * @param frame
  * @returns ms, NaN where the frame's arrival is unknown.
  */
-const videoDelay = (frame: any): any =>
+const videoDelay = (frame: VideoFrameCallbackMetadata): number =>
   performance.timeOrigin + frame.presentationTime - takeArrival(Math.round(frame.mediaTime * 1e6));
 
 /** Times one frame out of the page's decoder. */
-function notePageDecoded(frame: any): any {
+function notePageDecoded(frame: VideoFrame): void {
   const started = pageDecode.starts.get(frame.timestamp);
   if (started === undefined) return;
   pageDecode.starts.delete(frame.timestamp);
@@ -1244,27 +1315,27 @@ function notePageDecoded(frame: any): any {
 }
 
 /** Asks, once per configuration, whether the engine has a hardware decoder for the page's stream. */
-function probePageHardware(config: any): any {
+function probePageHardware(config: VideoDecoderConfig): void {
   const probed = `${config.codec}:${config.codedWidth}x${config.codedHeight}`;
   if (probed === pageDecode.probed) return;
   pageDecode.probed = probed;
   VideoDecoder.isConfigSupported({ ...config, hardwareAcceleration: 'prefer-hardware' })
-    .then((r: any): any => {
+    .then((r: VideoDecoderSupport): void => {
       if (pageDecode.probed !== probed) return;
       pageDecode.hardware = !!r.supported;
       describeClient();
     })
-    .catch((): any => {});
+    .catch((): void => {});
 }
-let streamStatsTimer: any = null;
+let streamStatsTimer: number | null = null;
 const streamStats = new StreamStats({
   transport: 'websockets',
-  send: (message: any): any => {
+  send: (message: string): void => {
     if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(message);
     else throw new Error('not connected');
   },
-  isViewer: (): any => isSharedMode || clientRole === 'viewer',
-  onOpenChange: (open: any): any => {
+  isViewer: (): boolean => isSharedMode || clientRole === 'viewer',
+  onOpenChange: (open: boolean): void => {
     pageDecode.starts.clear();
     pageDecode.arrivals.clear();
     pageDecode.decodeMs = 0;
@@ -1285,8 +1356,8 @@ const streamStats = new StreamStats({
     shownSampledAt = performance.now();
     if (videoElement) videoWatch = watchVideo(videoElement, pageShown, videoDelay);
     describeClient();
-    const sampleIn = (delay: any): any => {
-      streamStatsTimer = setTimeout((): any => {
+    const sampleIn = (delay: number): void => {
+      streamStatsTimer = setTimeout((): void => {
         sampleStreamStats();
         sampleIn(1000);
       }, delay);
@@ -1303,7 +1374,7 @@ const streamStats = new StreamStats({
  * A JPEG stream is decoded by no `VideoDecoder`, so neither a video decoder's
  * word nor the software preference a decoder fallback left says anything of it.
  */
-function describeClient(): any {
+function describeClient(): void {
   const decode = videoDivertOn ? workerDecode : pageDecode;
   const jpeg = currentEncoderMode === 'jpeg';
   const codec = codecOfEncoder(currentEncoderMode);
@@ -1331,7 +1402,7 @@ function describeClient(): any {
  * video worker decodes, it is asked for its figures and the sample is taken
  * when they arrive, so both sides cover the same interval.
  */
-function sampleStreamStats(): any {
+function sampleStreamStats(): void {
   if (videoWorker && videoWorkerReady) {
     try {
       videoWorker.postMessage({ type: 'decodeStats' });
@@ -1349,8 +1420,8 @@ function sampleStreamStats(): any {
  * @param worker The video
  *     worker's figures since the last sample, or null where there is no worker.
  */
-function takeStreamSample(worker: {bytes: number, decodeMs: number, frames: number, shown: import('./lib/present-meter.ts').PresentFigures} | null): any {
-  const decode = worker && (worker.frames > 0 || worker.bytes > 0) ? worker : { ...pageDecode };
+function takeStreamSample(worker: {bytes: number, decodeMs: number, frames: number, shown: import('./lib/present-meter.ts').PresentFigures} | null): void {
+  const decode: { decodeMs: number; frames: number; bytes?: number } = worker && (worker.frames > 0 || worker.bytes > 0) ? worker : { ...pageDecode };
   pageDecode.decodeMs = 0;
   pageDecode.frames = 0;
   if (pageDecode.starts.size > 64) pageDecode.starts.clear();
@@ -1361,11 +1432,11 @@ function takeStreamSample(worker: {bytes: number, decodeMs: number, frames: numb
   const seconds = (now - shownSampledAt) / 1000;
   shownSampledAt = now;
   const shown = [pageShown.take(), worker && worker.shown].filter(Boolean);
-  const sum = (key: any): any => shown.reduce((total: any, figures: any): any => total + figures[key], 0);
+  const sum = (key: keyof PresentFigures): number => shown.reduce((total: number, figures: PresentFigures | null): number => total + figures![key], 0);
   const video = videoWatch ? videoWatch.read() : { shown: 0, dropped: 0 };
   notShown += sum('superseded') + sum('refused') + video.dropped;
   const unobserved = !!videoWatch && !videoWatch.reported() && (mstgActive || videoWorkerMode === 'vtg');
-  const figures: Record<string, any> = {
+  const figures: StreamSample = {
     fps: unobserved || !(seconds > 0) ? window.fps : Math.round((sum('presented') + video.shown) / seconds * 10) / 10,
     lost_frames: requests.lost - requests.lostAtOpen,
     frames_not_shown: notShown,
@@ -1386,9 +1457,9 @@ let streamStarted = false;
  * Nudges the encoder with a few keyframe requests after the handshake until
  * the first frame lands; a freshly connected page has no keyframe loop of its own.
  */
-let firstFrameRecoveryTimer: any = null;
+let firstFrameRecoveryTimer: number | null = null;
 let inputInitialized = false;
-let scaleLocallyManual: any;
+let scaleLocallyManual: boolean;
 window.fps = 0;
 window.videoChunksReceived = 0;
 window.videoDivertOn = false;
@@ -1398,9 +1469,9 @@ let frameCount = 0;
 let uniqueWireFrameIdsThisPeriod = new Set();
 let lastWireFpsUpdateTime = performance.now();
 let lastFpsUpdateTime = performance.now();
-let statusDisplayElement: any;
-let playButtonElement: any;
-let overlayInput: any;
+let statusDisplayElement: HTMLDivElement;
+let playButtonElement: HTMLButtonElement;
+let overlayInput: HTMLInputElement;
 let rateControlMode = 'cbr';
 
 /**
@@ -1411,7 +1482,7 @@ let rateControlMode = 'cbr';
  * @param default_value Returned when the key is unset.
  * @returns
  */
-const getIntParam = (key: any, default_value: any): any => {
+const getIntParam = <D extends number | null>(key: string, default_value: D): number | D => {
   const prefixedKey = `${storageAppName}_${key}`;
   let finalKey = prefixedKey;
   if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -1421,7 +1492,7 @@ const getIntParam = (key: any, default_value: any): any => {
   return (value === null || value === undefined) ? default_value : parseInt(value);
 };
 /** Float variant of getIntParam, for range settings with fractional bounds. */
-const getFloatParam = (key: any, default_value: any): any => {
+const getFloatParam = <D>(key: string, default_value: D): number | D => {
   const prefixedKey = `${storageAppName}_${key}`;
   let finalKey = prefixedKey;
   if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -1432,7 +1503,7 @@ const getFloatParam = (key: any, default_value: any): any => {
   return (value === null || value === undefined || isNaN(parsed)) ? default_value : parsed;
 };
 /** Stores an integer setting; `null` removes the key. */
-const setIntParam = (key: any, value: any): any => {
+const setIntParam = (key: string, value: number | string | null | undefined): void => {
   const prefixedKey = `${storageAppName}_${key}`;
   let finalKey = prefixedKey;
   if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -1445,13 +1516,13 @@ const setIntParam = (key: any, value: any): any => {
   }
 };
 /** The localStorage key a setting is stored under, display suffix included. */
-const prefixedStorageKey = (key: any): any => {
+const prefixedStorageKey = (key: string): string => {
   const prefixedKey = `${storageAppName}_${key}`;
   return (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key))
     ? `${prefixedKey}_${displayId}` : prefixedKey;
 };
 /** Reads a boolean setting stored as `'true'`/`'false'`. */
-const getBoolParam = (key: any, default_value: any): any => {
+const getBoolParam = <D>(key: string, default_value: D): boolean | D => {
   const prefixedKey = `${storageAppName}_${key}`;
   let finalKey = prefixedKey;
   if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -1464,7 +1535,7 @@ const getBoolParam = (key: any, default_value: any): any => {
   return v.toString().toLowerCase() === 'true';
 };
 /** Stores a boolean setting; `null` removes the key. */
-const setBoolParam = (key: any, value: any): any => {
+const setBoolParam = (key: string, value: boolean | string | null | undefined): void => {
   const prefixedKey = `${storageAppName}_${key}`;
   let finalKey = prefixedKey;
   if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -1477,7 +1548,7 @@ const setBoolParam = (key: any, value: any): any => {
   }
 };
 /** Reads a string setting. */
-const getStringParam = (key: any, default_value: any): any => {
+const getStringParam = <D>(key: string, default_value: D): string | D => {
   const prefixedKey = `${storageAppName}_${key}`;
   let finalKey = prefixedKey;
   if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -1487,7 +1558,7 @@ const getStringParam = (key: any, default_value: any): any => {
   return (value === null || value === undefined) ? default_value : value;
 };
 /** Stores a string setting; `null` removes the key. */
-const setStringParam = (key: any, value: any): any => {
+const setStringParam = (key: string, value: string | number | null | undefined): void => {
   const prefixedKey = `${storageAppName}_${key}`;
   let finalKey = prefixedKey;
   if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -1515,7 +1586,7 @@ const HOLD_KEYS = holdKeys(prefixedStorageKey, storageAppName);
 const ENCODER_PICK_KEY = HOLD_KEYS.encoderPick;
 const FALLBACK_TAB_KEY = HOLD_KEYS.fallbackTab;
 /** Whether the stored encoder is a fallback rather than the user's pick. */
-function encoderIsFallback(): any {
+function encoderIsFallback(): boolean {
   try { return window.localStorage.getItem(ENCODER_PICK_KEY) !== null; } catch (e) { return false; }
 }
 /**
@@ -1523,7 +1594,7 @@ function encoderIsFallback(): any {
  * @param encoder
  * @param why What made the page fall back.
  */
-function storeFallbackEncoder(encoder: string, why: string): any {
+function storeFallbackEncoder(encoder: string, why: string): void {
   try {
     if (window.localStorage.getItem(ENCODER_PICK_KEY) === null) {
       safeSetItem(ENCODER_PICK_KEY, getStringParam('encoder', ''));
@@ -1533,7 +1604,7 @@ function storeFallbackEncoder(encoder: string, why: string): any {
   setStringParam('encoder', encoder);
 }
 /** Stores `pick` as the user's own encoder, ending any fallback. */
-function storeEncoderPick(pick: any): any {
+function storeEncoderPick(pick: string): void {
   setStringParam('encoder', pick);
   try {
     window.localStorage.removeItem(ENCODER_PICK_KEY);
@@ -1545,7 +1616,7 @@ function storeEncoderPick(pick: any): any {
  * keeping the picks they replace, the way the encoder fallback is held.
  * @param why The crash.
  */
-function holdCrashSafeSettings(why: string): any {
+function holdCrashSafeSettings(why: string): void {
   try {
     for (const [name, value] of Object.entries(CRASH_SAFE_SETTINGS)) {
       const key = prefixedStorageKey(name);
@@ -1612,12 +1683,12 @@ try {
  * @param serverSettings The `server_settings` payload.
  * @returns
  */
-function resolvedCssScaling(serverSettings: Record<string, any>): boolean {
+function resolvedCssScaling(serverSettings: Record<string, ServerSettingEntry>): boolean {
   const key = prefixedStorageKey('useCssScaling');
   const explicit = window.localStorage.getItem(`${key}_explicit_choice`) === 'true';
   const hidpi = resolveSpec(HIDPI_SPEC, serverSettings,
-    { manualActive: !!window.manual_resolution || manual_width > 0 },
-    (): any => (explicit ? window.localStorage.getItem(key) : null));
+    { manualActive: !!window.manual_resolution || manual_width! > 0 },
+    (): string | null => (explicit ? window.localStorage.getItem(key) : null));
   return HIDPI_SPEC.toServer(hidpi) as boolean;
 }
 
@@ -1629,9 +1700,9 @@ function resolvedCssScaling(serverSettings: Record<string, any>): boolean {
  * @param serverSettings The `server_settings` payload.
  * @returns
  */
-function resolvedRawPointerMotion(serverSettings: Record<string, any>): boolean {
+function resolvedRawPointerMotion(serverSettings: Record<string, ServerSettingEntry>): boolean {
   return resolveSpec(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
-    (key: any): any => getStringParam(key, null)) as boolean;
+    (key: string): string | null => getStringParam(key, null)) as boolean;
 }
 
 /**
@@ -1641,16 +1712,16 @@ function resolvedRawPointerMotion(serverSettings: Record<string, any>): boolean 
  * @param serverSettings The `server_settings` payload.
  * @returns
  */
-function resolvedMacCmdAsCtrl(serverSettings: Record<string, any>): boolean {
+function resolvedMacCmdAsCtrl(serverSettings: Record<string, ServerSettingEntry>): boolean {
   return resolveSpec(MAC_CMD_AS_CTRL_SPEC, serverSettings, { macDesktop: isMacDesktop() },
-    (key: any): any => getStringParam(key, null)) as boolean;
+    (key: string): string | null => getStringParam(key, null)) as boolean;
 }
 
-function sanitizeAndStoreSettings(serverSettings: any): any {
+function sanitizeAndStoreSettings(serverSettings: Record<string, ServerSettingEntry>): Record<string, unknown> {
   console.log("Sanitizing and storing settings based on server payload.");
-  const changes: Record<string, any> = {};
+  const changes: Record<string, unknown> = {};
 
-  const storageKeyFor = (key: any): any => {
+  const storageKeyFor = (key: string): string => {
     const prefixedKey = `${storageAppName}_${key}`;
     return (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key))
       ? `${prefixedKey}_${displayId}` : prefixedKey;
@@ -1664,7 +1735,7 @@ function sanitizeAndStoreSettings(serverSettings: any): any {
     const wasUnset = window.localStorage.getItem(finalKey) === null;
 
     if (setting.min !== undefined && setting.max !== undefined) {
-      const clientValue = getFloatParam(storeKey, setting.default);
+      const clientValue = getFloatParam(storeKey, setting.default as number);
       if (wasUnset) {
         window[key] = clientValue;
       } else if (clientValue < setting.min || clientValue > setting.max) {
@@ -1679,20 +1750,20 @@ function sanitizeAndStoreSettings(serverSettings: any): any {
     else if (setting.allowed !== undefined) {
       const isNumericEnum = !isNaN(parseFloat(setting.allowed[0]));
       const clientValueStr = isNumericEnum
-        ? getIntParam(storeKey, parseInt(setting.value, 10)).toString()
+        ? getIntParam(storeKey, parseInt(setting.value as string, 10))!.toString()
         : getStringParam(storeKey, setting.value);
-      const applyRuntime = (val: any): any => { window[key] = isNumericEnum ? parseInt(val, 10) : val; };
+      const applyRuntime = (val: unknown): void => { window[key] = isNumericEnum ? parseInt(val as string, 10) : val; };
       if (wasUnset) {
         applyRuntime(setting.value);
-      } else if (!setting.allowed.includes(clientValueStr)) {
+      } else if (!setting.allowed.includes(clientValueStr as string)) {
         console.log(`Sanitizing '${key}': stored "${clientValueStr}" not in allowed [${setting.allowed.join(', ')}]. Reverting to server default "${setting.value}".`);
         window.localStorage.removeItem(finalKey);
         applyRuntime(setting.value);
         changes[key] = setting.value;
       } else {
         applyRuntime(clientValueStr);
-        if (isNumericEnum) setIntParam(storeKey, parseInt(clientValueStr, 10));
-        else setStringParam(storeKey, clientValueStr);
+        if (isNumericEnum) setIntParam(storeKey, parseInt(clientValueStr as string, 10));
+        else setStringParam(storeKey, clientValueStr as string);
       }
     }
     else if (typeof setting.value === 'boolean') {
@@ -1784,7 +1855,7 @@ let gamingModeActive = false;
  * it exists only plain fullscreen is possible.
  * @param gaming Whether to hold the pointer and the keyboard.
  */
-const enterFullscreen = (gaming: any): any => {
+const enterFullscreen = (gaming: boolean): void => {
   gamingModeActive = !!gaming;
   const input = window.webrtcInput;
   if (input && gaming && typeof input.enterGamingMode === 'function') {
@@ -1795,12 +1866,12 @@ const enterFullscreen = (gaming: any): any => {
     // Gaming mode before the input handler exists: the browser's own keyboard
     // lock, where it has one, is all that can be asked for.
     document.documentElement.requestFullscreen((gaming ? { keyboardLock: 'browser' } : undefined) as FullscreenOptions | undefined)
-      .catch((): any => {});
+      .catch((): void => {});
   }
 };
 
 /** Hides the start overlay and keeps the screen awake once the user starts the stream. */
-const playStream = (): any => {
+const playStream = (): void => {
   if (playButtonElement) playButtonElement.classList.add('hidden');
   if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
   requestWakeLock();
@@ -1811,7 +1882,7 @@ const playStream = (): any => {
  * Shows `loadingText`, or else the sentence-cased `status` word (the internal
  * value stays lower-case for comparisons).
  */
-const updateStatusDisplay = (): any => {
+const updateStatusDisplay = (): void => {
   if (statusDisplayElement) {
     const _statusText = loadingText || status;
     statusDisplayElement.textContent = _statusText ? _statusText.charAt(0).toUpperCase() + _statusText.slice(1) : _statusText;
@@ -1823,7 +1894,7 @@ const updateStatusDisplay = (): any => {
  * @param msg
  * @returns
  */
-window.applyTimestamp = (msg: any): any => {
+window.applyTimestamp = (msg: unknown): string => {
   const now = new Date();
   const ts = `${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`;
   return `[${ts}] ${msg}`;
@@ -1835,7 +1906,7 @@ window.applyTimestamp = (msg: any): any => {
  * @param num
  * @returns
  */
-const alignResolution = (num: any): any => {
+const alignResolution = (num: number): number => {
   const alignment = force_aligned_resolution ? 16 : 2;
   return Math.floor(num / alignment) * alignment;
 };
@@ -1859,22 +1930,22 @@ const supportsWindowMSTG = (typeof MediaStreamTrackGenerator !== 'undefined');
  * has none, an OffscreenCanvas it composites onto.
  */
 let USE_OFFSCREEN_WORKER = false;
-let videoWorker: any = null;
+let videoWorker: Worker | null = null;
 /**
  * Canvas the worker composites on in `canvas` mode; separate from the main
  * canvas so the JPEG-stripe path is unaffected.
  */
-let videoWorkerCanvas: any = null;
+let videoWorkerCanvas: HTMLCanvasElement | null = null;
 /** Composite JPEG stripes in the worker; capability-gated at first use. */
 let stripeCompositeEnabled = true;
 let videoWorkerActive = false;
 let videoWorkerReady = false;
 /** Sink the worker reported from its self-probe: `vtg`, `canvas`, or `null` while handshaking. */
-let videoWorkerMode: any = null;
+let videoWorkerMode: string | null = null;
 /** VideoTrackGenerator track transferred back from the worker in `vtg` mode. */
-let videoWorkerTrack: any = null;
+let videoWorkerTrack: MediaStreamTrack | null = null;
 let videoWorkerCanvasTransferred = false;
-let videoWorkerLastGeom: any = null;
+let videoWorkerLastGeom: string | null = null;
 /**
  * Frames in flight to the worker, which acks each one it consumed; new frames
  * are dropped at the cap so GPU VideoFrames cannot pile up and stall the decoder.
@@ -1893,8 +1964,8 @@ const VIDEO_WORKER_MAX_IN_FLIGHT = 3;
  * canvas presenting.
  */
 let decodeInWorker = false;
-let workerDecoderCodec: any = null, workerDecoderW = 0, workerDecoderH = 0;
-let workerKeyframeCodec: any = null;
+let workerDecoderCodec: string | null = null, workerDecoderW = 0, workerDecoderH = 0;
+let workerKeyframeCodec: string | null = null;
 let workerDecodeFailed = false;
 // Whether 0x03/0x04 currently bypass the page (see updateVideoDivert), and
 // the wire frames the video worker counted since the last metrics tick.
@@ -2496,12 +2567,12 @@ function createVideoTrackGenerator(): {track: MediaStreamTrack, writable: Writab
  * leave even this muted element paused without a user gesture, black behind
  * its own play glyph; `playOnGesture` then starts it on the next press or key.
  */
-function playSinkVideo(): any {
+function playSinkVideo(): void {
   if (!videoElement || !videoElement.paused || !videoElement.srcObject) return;
   const p = videoElement.play();
   if (!p || !p.catch) return;
-  p.catch((e: any): any => {
-    if (!videoElement.paused || sinkPlayRefused) return;
+  p.catch((e: Error): void => {
+    if (!videoElement!.paused || sinkPlayRefused) return;
     sinkPlayRefused = true;
     console.warn(`Video playback refused (${e && e.name}): the browser waits for a user gesture; the next press or key starts it.`);
   });
@@ -2515,19 +2586,19 @@ function playSinkVideo(): any {
  * refused one asks for a key frame as it plays: a still screen would not send
  * one on its own, and the sink's play promise waits for a frame to show.
  */
-function playOnGesture(): any {
+function playOnGesture(): void {
   if (videoElement && videoElement.paused && videoElement.srcObject) {
     const p = videoElement.play();
     if (sinkPlayRefused) requestKeyframe();
     if (p && p.then) {
-      p.then((): any => {
+      p.then((): void => {
         if (!sinkPlayRefused) return;
         sinkPlayRefused = false;
         console.log('Video playback started on a user gesture.');
-      }, (): any => {});
+      }, (): void => {});
     }
   }
-  if (audioContext && audioContext.state === 'suspended') audioContext.resume().catch((): any => {});
+  if (audioContext && audioContext.state === 'suspended') audioContext.resume().catch((): void => {});
 }
 
 /**
@@ -2545,7 +2616,7 @@ function ensureMstgWriter(): boolean {
   catch (e) { console.warn('track writer failed:', e); try { videoTrack.stop(); } catch (_) {} videoTrack = null; return false; }
   if (videoFrameWriter.closed && videoFrameWriter.closed.catch) {
     const w = videoFrameWriter;
-    videoFrameWriter.closed.catch((): any => { if (videoFrameWriter === w) deactivateMstg(); });
+    videoFrameWriter.closed.catch((): void => { if (videoFrameWriter === w) deactivateMstg(); });
   }
   try { videoElement.srcObject = new MediaStream([videoTrack]); }
   catch (e) {
@@ -2559,7 +2630,7 @@ function ensureMstgWriter(): boolean {
 }
 
 /** Closes the track generator writer and detaches its stream from the `<video>`. */
-function teardownMstgWriter(): any {
+function teardownMstgWriter(): void {
   if (videoFrameWriter) { try { videoFrameWriter.close(); } catch (e) {} videoFrameWriter = null; }
   if (videoTrack) { try { videoTrack.stop(); } catch (e) {} videoTrack = null; }
   if (videoElement) { try { videoElement.srcObject = null; } catch (e) {} }
@@ -2596,7 +2667,7 @@ function presentFrameToVideo(frame: VideoFrame): boolean {
       playSinkVideo();
       if (typeof videoElement.requestVideoFrameCallback === 'function') {
         const gen = ++sinkRevealGen;
-        videoElement.requestVideoFrameCallback((): any => {
+        videoElement.requestVideoFrameCallback((): void => {
           if (gen !== sinkRevealGen || !mstgActive) return;
           mstgRendered = true;
           if (canvas) canvas.style.display = 'none';
@@ -2620,7 +2691,7 @@ function presentFrameToVideo(frame: VideoFrame): boolean {
   if (!mstgRendered && canvas && canvasContext && canvas.width > 0 && canvas.height > 0) {
     try { canvasContext.drawImage(frame, 0, 0); } catch (e) {}
   }
-  if (videoFrameWriter.desiredSize !== null && videoFrameWriter.desiredSize <= 0) {
+  if (videoFrameWriter!.desiredSize !== null && videoFrameWriter!.desiredSize <= 0) {
     frame.close();
     if (streamStats.open) pageShown.refused();
     if (++mstgConsecutiveDrops >= SINK_STALL_DROP_LIMIT) {
@@ -2631,7 +2702,7 @@ function presentFrameToVideo(frame: VideoFrame): boolean {
   }
   mstgConsecutiveDrops = 0;
   const activeWriter = videoFrameWriter;
-  videoFrameWriter.write(frame).catch((): any => {
+  videoFrameWriter!.write(frame).catch((): void => {
     try { frame.close(); } catch (e) {}
     if (videoFrameWriter === activeWriter) deactivateMstg();
   });
@@ -2673,7 +2744,7 @@ function wireSocketToVideoWorker(): void {
     // answer is forwarded once it lands, so a stripe decoder built before it
     // does not feed Annex B to an engine that refuses it.
     const worker = videoWorker;
-    h264FramingReady.then((answer: any): any => {
+    h264FramingReady.then((answer: string): void => {
       if (videoWorker !== worker) return;
       try { worker.postMessage({ type: 'wireHints', avcc: answer === 'avcc' }); } catch (e) { /* respawns fresh */ }
     });
@@ -2757,7 +2828,7 @@ function jpegDecodePath(): string {
   return '';
 }
 
-function announceSink(description: any): any {
+function announceSink(description: string): void {
   currentSink = description;
   if (announcedSinks.has(description)) return;
   announcedSinks.add(description);
@@ -2793,8 +2864,8 @@ function ensureVideoWorker(): boolean {
     if (streamStats.open) videoWorker.postMessage({ type: 'statsOpen', open: true });
     videoWorkerInFlight = 0;
     wireSocketToVideoWorker();
-    videoWorker.onerror = (e: any): any => { console.warn('video worker error:', e && e.message); deactivateVideoWorker(); };
-    videoWorker.onmessage = (e: any): any => {
+    videoWorker.onerror = (e: ErrorEvent): void => { console.warn('video worker error:', e && e.message); deactivateVideoWorker(); };
+    videoWorker.onmessage = (e: MessageEvent): void => {
       const m = e.data;
       if (!m) return;
       if (m.ack) { if (videoWorkerInFlight > 0) videoWorkerInFlight--; return; }
@@ -2868,7 +2939,7 @@ function ensureVideoWorker(): boolean {
           manual_width = m.w;
           manual_height = m.h;
           console.log(`Shared mode: stream is ${manual_width}x${manual_height} (physical).`);
-          applyManualCanvasStyle(manual_width, manual_height, true);
+          applyManualCanvasStyle(manual_width!, manual_height!, true);
         }
         return;
       }
@@ -2909,7 +2980,7 @@ function ensureVideoWorker(): boolean {
           try {
             const off = videoWorkerCanvas.transferControlToOffscreen();
             videoWorkerCanvasTransferred = true;
-            videoWorker.postMessage({ canvas: off }, [off]);
+            videoWorker!.postMessage({ canvas: off }, [off]);
           } catch (err) { console.warn('OffscreenCanvas transfer failed:', err); deactivateVideoWorker(); return; }
           // With a page generator the worker serves only the JPEG divert;
           // full-frame decode stays on the page feeding that generator.
@@ -2938,7 +3009,7 @@ function ensureVideoWorker(): boolean {
  * presentation back, and a session that ends up somewhere other than where it
  * asked to be is the one that most needs to say so.
  */
-function deactivateVideoWorker(): any {
+function deactivateVideoWorker(): void {
   const wasVtg = (videoWorkerMode === 'vtg');
   announceSink(supportsWindowMSTG
     ? 'MediaStreamTrackGenerator on the page.'
@@ -2995,9 +3066,9 @@ function activateWorkerSinkDisplay(): boolean {
     if (videoWorkerMode === 'vtg') {
       // It was started while hidden, which a browser may refuse or pause.
       playSinkVideo();
-      if (typeof target.requestVideoFrameCallback === 'function') {
+      if (typeof (target as HTMLVideoElement).requestVideoFrameCallback === 'function') {
         const gen = ++sinkRevealGen;
-        target.requestVideoFrameCallback((): any => {
+        (target as HTMLVideoElement).requestVideoFrameCallback((): void => {
           if (gen !== sinkRevealGen || !videoWorkerActive) return;
           videoWorkerRendered = true;
           if (canvas) canvas.style.display = 'none';
@@ -3040,7 +3111,7 @@ function presentFrameToWorker(frame: VideoFrame): boolean {
     return true;
   }
   try {
-    videoWorker.postMessage({ frame, at: streamStats.open ? takeArrival(frame.timestamp) : NaN }, [frame]);
+    videoWorker!.postMessage({ frame, at: streamStats.open ? takeArrival(frame.timestamp) : NaN }, [frame]);
     videoWorkerInFlight++;
   }
   catch (e) { try { frame.close(); } catch (_) {} deactivateVideoWorker(); return true; }
@@ -3058,7 +3129,7 @@ const WORKER_CFG_LOG_MIN_INTERVAL_MS = 5000;
  * @param w
  * @param h
  */
-function logWorkerDecoderConfig(codec: string, w: number, h: number): any {
+function logWorkerDecoderConfig(codec: string, w: number, h: number): void {
   const now = performance.now();
   if (now - workerCfgLogLast >= WORKER_CFG_LOG_MIN_INTERVAL_MS) {
     const suppressed = workerCfgLogSuppressed > 0 ? ` (+${workerCfgLogSuppressed} suppressed)` : '';
@@ -3094,20 +3165,20 @@ function feedWorkerDecoder(isKey: boolean, dataBuf: ArrayBuffer, w: number, h: n
     logWorkerDecoderConfig(codec, w, h);
     const description = framed ? avcDescription(new Uint8Array(dataBuf)) : null;
     try {
-      videoWorker.postMessage({ type: 'decoderConfig', codec: codec, codedWidth: w, codedHeight: h,
+      videoWorker!.postMessage({ type: 'decoderConfig', codec: codec, codedWidth: w, codedHeight: h,
                                 software: preferSoftwareDecode, description: description });
     } catch (e) { return false; }
     workerDecoderCodec = codec; workerDecoderW = w; workerDecoderH = h;
     requestKeyframe();
   }
   const data = framed ? annexbToAvcc(new Uint8Array(dataBuf)).buffer : dataBuf;
-  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: chunkStamp(), frameId: frameId, reference: reference, at: arrival }, [data]); }
+  try { videoWorker!.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: chunkStamp(), frameId: frameId, reference: reference, at: arrival }, [data]); }
   catch (e) { return false; }
   return true;
 }
 
 /** Returns presentation from the main-thread track generator to the canvas; idempotent. */
-function deactivateMstg(): any {
+function deactivateMstg(): void {
   if (!mstgActive) return;
   mstgActive = false;
   mstgConsecutiveDrops = 0;
@@ -3130,7 +3201,7 @@ function deactivateMstg(): any {
  * @param height
  * @returns
  */
-const wireCodecString = (typeByte: any, payload: any, width: any, height: any): any => {
+const wireCodecString = (typeByte: number, payload: ArrayBuffer | null, width: number, height: number): string => {
   const keyframe = (payload && wireFrameIsKey(typeByte) && payload.byteLength)
     ? new Uint8Array(payload) : null;
   return codecStringFor(wireCodecName(typeByte), keyframe, width, height, framerate, video_fullcolor, isChromium);
@@ -3143,7 +3214,7 @@ const wireCodecString = (typeByte: any, payload: any, width: any, height: any): 
  * is re-mirrored to the active sink. A filter change must also be mirrored
  * immediately when no frames are arriving from a static desktop.
  */
-const updateCanvasImageRendering = (): any => {
+const updateCanvasImageRendering = (): void => {
   if (!canvas) return;
   canvasGeomDirty = true;
   if (!antiAliasingEnabled) {
@@ -3175,7 +3246,7 @@ const updateCanvasImageRendering = (): any => {
  * handlers; an exact-size video can exceed the container and must be clipped
  * there, without clamping its box independently of its centering offsets.
  */
-const injectCSS = (): any => {
+const injectCSS = (): void => {
   const style = document.createElement('style');
   style.textContent = `
 body {
@@ -3287,7 +3358,7 @@ body {
  * The decoder is only asked where full color is on, since the session waits
  * here to start and the answer settles nothing for a stream not asking for it.
  */
-async function settleFullColorSupport(): Promise<any> {
+async function settleFullColorSupport(): Promise<void> {
     // Every 4:4:4 profile is asked now, so a later ladder step can read the answers.
     for (const c of ['h264', 'h265', 'vp9']) canDecodeFullColor(c);
     const codec = codecOfEncoder(currentEncoderMode);
@@ -3330,7 +3401,7 @@ async function declineUndecodableFullColor(reason: string): Promise<boolean> {
  * off in storage rather than asked for. The decode is only waited on where
  * 10-bit is on.
  */
-async function settleTenBitSupport(): Promise<any> {
+async function settleTenBitSupport(): Promise<void> {
     const codec = codecOfEncoder(currentEncoderMode);
     if (!codecCarriesTenBit(codec) || !getBoolParam('video_10bit', false)) return;
     // The server has said nothing yet, so both chroma formats the stream may take are asked.
@@ -3378,22 +3449,22 @@ async function declineUndecodableTenBit(reason: string): Promise<boolean> {
 }
 
 /** Whether a refused codec string names a 4:4:4 profile. */
-const isFullColorProfile = (label: any): any => /^(avc1\.F4|hev1\.4\.|vp09\.01)/i.test(label);
+const isFullColorProfile = (label: string): boolean => /^(avc1\.F4|hev1\.4\.|vp09\.01)/i.test(label);
 
 /**
  * The codec-refusal ladder: rungs taken, the encoder asked for and not yet
  * confirmed, and whether a refusal has anywhere left to go.
  */
-let codecRefusalPending: any = null;
+let codecRefusalPending: string | null = null;
 let codecRefusalUnanswerable = false;
 /** The encoder and full color an unanswerable refusal was reached under; the notice stands while the server announces the same. */
-let codecRefusalHeld: any = null;
+let codecRefusalHeld: { encoder: string; fullcolor: boolean; } | null = null;
 /** Whether the server holds the encoder: a locked setting, or a step it answered with another value. */
 let encoderLocked = false;
 /** The encoders the server allows, in its order, when it restricts them. */
-let encoderAllowed: any = null;
+let encoderAllowed: string[] | null = null;
 /** The backend of each codec on the server, `{codec: {hardware, software, fullcolor, ten_bit}}`, once it has probed. */
-let encoderBackends: any = null;
+let encoderBackends: EncoderBackends | null = null;
 
 /**
  * Whether a full-color session on `codec` streams 4:4:4 from this server: the `fullcolor` of
@@ -3440,13 +3511,13 @@ const HARDWARE_ORDER = ['av1enc', 'h265enc', 'vp9enc', 'h264enc', 'vp8enc'];
 function nextRung(refused?: string, leaving: string = currentEncoderMode): string | null {
     if (refused) refusedCodecs.add(refused);
     const allowed = Array.isArray(encoderAllowed) && encoderAllowed.length ? encoderAllowed : LADDER_ORDER;
-    const rungs = LADDER_ORDER.filter((e: any): any => allowed.includes(e));
+    const rungs = LADDER_ORDER.filter((e: string): boolean => allowed.includes(e));
     // A codec the server has an engine for costs it no CPU, so it is asked for before the ones
     // it would encode in software, the most efficient first; JPEG keeps its place at the end.
-    const accelerated = (enc: any): any => isVideoEncoder(enc)
+    const accelerated = (enc: string): boolean => isVideoEncoder(enc)
         && !!(encoderBackends && (encoderBackends[codecOfEncoder(enc)] || {}).hardware);
-    const hardware = HARDWARE_ORDER.filter((e: any): any => rungs.includes(e) && accelerated(e));
-    for (const enc of [...hardware, ...rungs.filter((e: any): any => !accelerated(e))]) {
+    const hardware = HARDWARE_ORDER.filter((e: string): boolean => rungs.includes(e) && accelerated(e));
+    for (const enc of [...hardware, ...rungs.filter((e: string): boolean => !accelerated(e))]) {
         if (enc === leaving) continue;
         if (enc === 'jpeg') return enc;
         const codec = codecOfEncoder(enc);
@@ -3463,7 +3534,7 @@ function nextRung(refused?: string, leaving: string = currentEncoderMode): strin
 }
 
 /** The encoder a pick this engine cannot decode falls back to: the ladder's first rung past it. */
-const fallbackEncoder = (pick: any): any => nextRung(codecOfEncoder(pick), pick) || 'jpeg';
+const fallbackEncoder = (pick: string): string => nextRung(codecOfEncoder(pick), pick) || 'jpeg';
 
 /**
  * Answers a stream this engine will not decode, and reports it.
@@ -3483,12 +3554,12 @@ const fallbackEncoder = (pick: any): any => nextRung(codecOfEncoder(pick), pick)
  * @param label The refused codec string or encoder.
  * @param codec The refused stream's codec name.
  */
-function answerRefusedCodec(label: string, codec: string): any {
+function answerRefusedCodec(label: string, codec: string): void {
     if (codecRefusalUnanswerable || codecRefusalPending) return;
     // A refusal under 10-bit is answered by turning 10-bit off first, which keeps
     // the codec and its chroma, where this engine shows no 10-bit picture of it.
     if (video_10bit && !tenBitLocked && !isSharedMode && codecCarriesTenBit(codec)) {
-        declineUndecodableTenBit(`no decoder for ${label}`).then((declined: any): any => {
+        declineUndecodableTenBit(`no decoder for ${label}`).then((declined: boolean): void => {
             if (!declined) answerRefusedFormat(label, codec);
         });
         return;
@@ -3501,14 +3572,14 @@ function answerRefusedCodec(label: string, codec: string): any {
  * @param label The refused codec string or encoder.
  * @param codec The refused stream's codec name.
  */
-function answerRefusedFormat(label: string, codec: string): any {
+function answerRefusedFormat(label: string, codec: string): void {
     if (codecRefusalUnanswerable || codecRefusalPending) return;
     // A refused 4:4:4 profile is answered by turning full color off, which
     // keeps the codec, unless the server holds it: then the ladder answers.
     // Once it is off, a refusal is the 4:4:4 stream still in flight.
     if (isFullColorProfile(label) && !fullColorLocked && !isSharedMode) {
         if (!video_fullcolor) return;
-        declineUndecodableFullColor(`no decoder for ${label}`).then((declined: any): any => {
+        declineUndecodableFullColor(`no decoder for ${label}`).then((declined: boolean): void => {
             if (!declined) stepRefusalLadder(label, codec);
         });
         return;
@@ -3521,7 +3592,7 @@ function answerRefusedFormat(label: string, codec: string): any {
  * @param label The refused codec string or encoder.
  * @param codec The refused stream's codec name.
  */
-function stepRefusalLadder(label: string, codec: string): any {
+function stepRefusalLadder(label: string, codec: string): void {
     if (codecRefusalUnanswerable || codecRefusalPending) return;
     const next = (!isSharedMode && !encoderLocked && currentEncoderMode !== 'jpeg') ? nextRung(codec) : null;
     if (next) {
@@ -3556,7 +3627,7 @@ function stepRefusalLadder(label: string, codec: string): any {
  * @param encoder The announced encoder.
  * @param [entry] Its settings entry.
  */
-function settleServerEncoder(encoder: string, entry?: {locked?: boolean, allowed?: string[]}): any {
+function settleServerEncoder(encoder: string, entry?: ServerSettingEntry | null): void {
     encoderLocked = !!(entry && (entry.locked || (Array.isArray(entry.allowed) && entry.allowed.length === 1)));
     encoderAllowed = entry && Array.isArray(entry.allowed) ? entry.allowed.slice() : null;
     if (codecRefusalPending) {
@@ -3566,7 +3637,7 @@ function settleServerEncoder(encoder: string, entry?: {locked?: boolean, allowed
     }
     if (!canDecodeEncoder(encoder)) { answerRefusedCodec(encoder, codecOfEncoder(encoder)); return; }
     if (codecRefusalUnanswerable
-        && (encoder !== codecRefusalHeld.encoder || video_fullcolor !== codecRefusalHeld.fullcolor)) {
+        && (encoder !== codecRefusalHeld!.encoder || video_fullcolor !== codecRefusalHeld!.fullcolor)) {
         endCodecRefusal();
     }
 }
@@ -3575,7 +3646,7 @@ function settleServerEncoder(encoder: string, entry?: {locked?: boolean, allowed
  * Ends an unanswerable refusal and its notice: the server streams something
  * else now, or this page decoded a picture of the stream after all.
  */
-function endCodecRefusal(): any {
+function endCodecRefusal(): void {
     codecRefusalUnanswerable = false;
     if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
 }
@@ -3591,7 +3662,7 @@ function endCodecRefusal(): any {
  *     beside a display's owner changes the display by; what a page changes on
  *     its own leaves it to the owner.
  */
-function sendFullSettingsUpdateToServer(reason: string, picked: string[] | null = null): any {
+function sendFullSettingsUpdateToServer(reason: string, picked: string[] | null = null): void {
     if (isSharedMode || !initialSettingsSent) return;
     if (websocket && websocket.readyState === WebSocket.OPEN) {
         const settingsToSend = getCurrentSettingsPayload();
@@ -3611,7 +3682,7 @@ onColorSchemeChange((scheme: string): void => {
 });
 
 // The late keyboard layout hint; the session state it checks lives in this closure.
-keyboardLayoutProbe.then((layout: any): any => {
+keyboardLayoutProbe.then((layout: string | null): void => {
     if (layout && initialSettingsSent && !isSharedMode && websocket && websocket.readyState === WebSocket.OPEN) {
         websocket.send(`SETTINGS,${JSON.stringify({ keyboardLayout: layout })}`);
     }
@@ -3657,7 +3728,7 @@ function requestedStreamFramerate(): number | null {
  * the display measured or remeasured, or the server's span arrived.
  * @param reason
  */
-function followDisplayFramerate(reason: string): any {
+function followDisplayFramerate(reason: string): void {
     const rate = requestedStreamFramerate();
     if (rate === null || rate === framerateAsked) return;
     framerate = rate;
@@ -3677,40 +3748,40 @@ function followDisplayFramerate(reason: string): any {
  * `encoderFallback` beside an encoder a fallback chose.
  * @returns
  */
-function getCurrentSettingsPayload(): Record<string, any> {
-    const settingsToSend: Record<string, any> = {};
+function getCurrentSettingsPayload(): Record<string, unknown> {
+    const settingsToSend: Record<string, unknown> = {};
     const dpr = streamDensity();
     reportedStreamDensity = dpr;
-    const storedKey = (key: any): any => {
+    const storedKey = (key: string): string => {
         let finalKey = `${storageAppName}_${key}`;
         if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
             finalKey = `${finalKey}_${displayId}`;
         }
         return finalKey;
     };
-    const hasStoredParam = (key: any): any => window.localStorage.getItem(storedKey(key)) !== null
+    const hasStoredParam = (key: string): boolean => window.localStorage.getItem(storedKey(key)) !== null
         && (!EXPLICIT_ONLY_SETTINGS.includes(key) || postedExplicitOnly.has(key)
             || window.localStorage.getItem(`${storedKey(key)}_explicit_choice`) === 'true');
-    const storedEntries: [string, () => any][] = [
-        ['video_crf', (): any => getIntParam('video_crf', 25)],
-        ['encoder', (): any => getStringParam('encoder', 'h264enc')],
-        ['manual_resolution', (): any => getBoolParam('manual_resolution', false)],
-        ['audio_bitrate', (): any => getIntParam('audio_bitrate', 320000)],
-        ['video_fullcolor', (): any => getBoolParam('video_fullcolor', false)],
-        ['video_10bit', (): any => getBoolParam('video_10bit', false)],
-        ['video_streaming_mode', (): any => getBoolParam('video_streaming_mode', false)],
-        ['jpeg_quality', (): any => getIntParam('jpeg_quality', 60)],
-        ['paint_over_jpeg_quality', (): any => getIntParam('paint_over_jpeg_quality', 90)],
-        ['use_cpu', (): any => getBoolParam('use_cpu', false)],
-        ['cpu_encode_threading', (): any => getBoolParam('cpu_encode_threading', true)],
-        ['video_paintover_crf', (): any => getIntParam('video_paintover_crf', 18)],
-        ['video_paintover_burst_frames', (): any => getIntParam('video_paintover_burst_frames', 5)],
-        ['use_paint_over_quality', (): any => getBoolParam('use_paint_over_quality', true)],
-        ['scaling_dpi', (): any => getIntParam('scaling_dpi', 96)],
-        ['enable_binary_clipboard', (): any => getBoolParam('enable_binary_clipboard', false)],
-        ['rate_control_mode', (): any => getStringParam('rate_control_mode', 'cbr')],
-        ['video_bitrate', (): any => getIntParam('video_bitrate', 8000)],
-        ['force_aligned_resolution', (): any => getBoolParam('force_aligned_resolution', false)],
+    const storedEntries: [string, () => unknown][] = [
+        ['video_crf', (): number | null => getIntParam('video_crf', 25)],
+        ['encoder', (): string => getStringParam('encoder', 'h264enc')],
+        ['manual_resolution', (): boolean => getBoolParam('manual_resolution', false)],
+        ['audio_bitrate', (): number | null => getIntParam('audio_bitrate', 320000)],
+        ['video_fullcolor', (): boolean => getBoolParam('video_fullcolor', false)],
+        ['video_10bit', (): boolean => getBoolParam('video_10bit', false)],
+        ['video_streaming_mode', (): boolean => getBoolParam('video_streaming_mode', false)],
+        ['jpeg_quality', (): number | null => getIntParam('jpeg_quality', 60)],
+        ['paint_over_jpeg_quality', (): number | null => getIntParam('paint_over_jpeg_quality', 90)],
+        ['use_cpu', (): boolean => getBoolParam('use_cpu', false)],
+        ['cpu_encode_threading', (): boolean => getBoolParam('cpu_encode_threading', true)],
+        ['video_paintover_crf', (): number | null => getIntParam('video_paintover_crf', 18)],
+        ['video_paintover_burst_frames', (): number | null => getIntParam('video_paintover_burst_frames', 5)],
+        ['use_paint_over_quality', (): boolean => getBoolParam('use_paint_over_quality', true)],
+        ['scaling_dpi', (): number | null => getIntParam('scaling_dpi', 96)],
+        ['enable_binary_clipboard', (): boolean => getBoolParam('enable_binary_clipboard', false)],
+        ['rate_control_mode', (): string => getStringParam('rate_control_mode', 'cbr')],
+        ['video_bitrate', (): number | null => getIntParam('video_bitrate', 8000)],
+        ['force_aligned_resolution', (): boolean => getBoolParam('force_aligned_resolution', false)],
     ];
     for (const [key, read] of storedEntries) {
         if (hasStoredParam(key)) settingsToSend[key] = read();
@@ -3757,7 +3828,7 @@ function getCurrentSettingsPayload(): Record<string, any> {
  * @param width CSS pixels, or the exact size in manual mode.
  * @param height
  */
-function sendResolutionToServer(width: number, height: number): any {
+function sendResolutionToServer(width: number, height: number): void {
   if (isSharedMode) {
     console.log("Shared mode: Resolution sending to server is blocked.");
     return;
@@ -3780,7 +3851,7 @@ function sendResolutionToServer(width: number, height: number): any {
     // A request at a density the last SETTINGS did not report: the layout
     // carries the reported scale to the other pages, so it is sent again.
     if (reportedStreamDensity > 0 && Math.abs(dprUsed - reportedStreamDensity) > 1e-6) {
-      setTimeout((): any => sendFullSettingsUpdateToServer('stream density'), 0);
+      setTimeout((): void => sendFullSettingsUpdateToServer('stream density'), 0);
     }
   }
 
@@ -3811,7 +3882,7 @@ function sendResolutionToServer(width: number, height: number): any {
  * nothing changes. Covers all three sinks (main-thread and worker generators
  * drive the `<video>`, the OffscreenCanvas worker drives `videoWorkerCanvas`).
  */
-function syncSinkToCanvasStyle(): any {
+function syncSinkToCanvasStyle(): void {
   if (!canvas) return;
   let target = null, rendered = false, isMstg = false;
   if (mstgActive && videoElement) {
@@ -3845,7 +3916,7 @@ function syncSinkToCanvasStyle(): any {
  * @param targetHeight
  * @param scaleToFit
  */
-function applyManualCanvasStyle(targetWidth: number, targetHeight: number, scaleToFit: boolean): any {
+function applyManualCanvasStyle(targetWidth: number, targetHeight: number, scaleToFit: boolean): void {
   if (!canvas || !canvas.parentElement) {
     console.error("Cannot apply manual canvas style: Canvas or parent container not found.");
     return;
@@ -3943,7 +4014,7 @@ function applyManualCanvasStyle(targetWidth: number, targetHeight: number, scale
  * @param streamWidth
  * @param streamHeight
  */
-function resetCanvasStyle(streamWidth: number, streamHeight: number): any {
+function resetCanvasStyle(streamWidth: number, streamHeight: number): void {
   if (!canvas) return;
   if (streamWidth <= 0 || streamHeight <= 0) {
     console.warn(`Cannot reset canvas style: Invalid stream dimensions ${streamWidth}x${streamHeight}`);
@@ -4016,7 +4087,7 @@ function resetCanvasStyle(streamWidth: number, streamHeight: number): any {
 }
 
 /** Switches the window resize listener to the automatic (stream follows the viewport) handler and applies it once. */
-function enableAutoResize(): any {
+function enableAutoResize(): void {
   if (directManualLocalScalingHandler) {
     console.log("Switching to Auto Mode: Removing direct manual local scaling listener.");
     window.removeEventListener('resize', directManualLocalScalingHandler);
@@ -4037,14 +4108,14 @@ function enableAutoResize(): any {
 }
 
 /** Resize listener for manual resolution: restyles the canvas box without touching the stream size. */
-const directManualLocalScalingHandler = (): any => {
+const directManualLocalScalingHandler = (): void => {
   if (window.manual_resolution && !isSharedMode && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
     applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
   }
 };
 
 /** Switches the window resize listener to the manual-resolution handler and applies it once. */
-function disableAutoResize(): any {
+function disableAutoResize(): void {
   if (originalWindowResizeHandler) {
     console.log("Switching to Manual Mode Local Scaling: Removing original (auto) resize listener.");
     window.removeEventListener('resize', originalWindowResizeHandler);
@@ -4059,7 +4130,7 @@ function disableAutoResize(): any {
 }
 
 /** Marks the container as a shared viewer (default cursor) and disables file upload. */
-function updateUIForSharedMode(): any {
+function updateUIForSharedMode(): void {
     if (!isSharedMode) return;
 
     const videoContainer = document.querySelector('.video-container');
@@ -4084,7 +4155,7 @@ function updateUIForSharedMode(): any {
  * early so its decoder is ready before the first frame, then sizes the canvas
  * for shared, manual, or automatic resolution.
  */
-const initializeUI = (): any => {
+const initializeUI = (): void => {
   injectCSS();
   setRealViewportHeight();
   window.addEventListener('resize', setRealViewportHeight);
@@ -4115,7 +4186,7 @@ const initializeUI = (): any => {
   overlayInput.id = 'overlayInput';
   videoContainer.appendChild(overlayInput);
 
-  canvas = document.getElementById('videoCanvas');
+  canvas = document.getElementById('videoCanvas') as HTMLCanvasElement | null;
   if (!canvas) {
     canvas = document.createElement('canvas');
     canvas.id = 'videoCanvas';
@@ -4142,7 +4213,7 @@ const initializeUI = (): any => {
   }
 
   if (supportsWindowMSTG || USE_OFFSCREEN_WORKER) {
-    videoElement = document.getElementById('videoStream');
+    videoElement = document.getElementById('videoStream') as HTMLVideoElement | null;
     if (!videoElement) {
       videoElement = document.createElement('video');
       videoElement.id = 'videoStream';
@@ -4160,7 +4231,7 @@ const initializeUI = (): any => {
   }
 
   if (USE_OFFSCREEN_WORKER) {
-    videoWorkerCanvas = document.getElementById('videoWorkerCanvas');
+    videoWorkerCanvas = document.getElementById('videoWorkerCanvas') as HTMLCanvasElement | null;
     if (!videoWorkerCanvas) {
       videoWorkerCanvas = document.createElement('canvas');
       videoWorkerCanvas.id = 'videoWorkerCanvas';
@@ -4176,7 +4247,7 @@ const initializeUI = (): any => {
           manual_width = 1280; manual_height = 720;
       }
       applyManualCanvasStyle(manual_width, manual_height, true);
-      window.addEventListener('resize', (): any => {
+      window.addEventListener('resize', (): void => {
           if (isSharedMode && manual_width && manual_height && manual_width > 0 && manual_height > 0) {
               applyManualCanvasStyle(manual_width, manual_height, true);
           }
@@ -4225,7 +4296,7 @@ const initializeUI = (): any => {
 };
 
 /** Closes every stripe decoder and forgets their soft-error counts. */
-function clearAllVncStripeDecoders(): any {
+function clearAllVncStripeDecoders(): void {
   console.log("Clearing all VNC stripe decoders.");
   for (const yPos in vncStripeDecoders) {
     if (Object.prototype.hasOwnProperty.call(vncStripeDecoders, yPos)) {
@@ -4257,7 +4328,7 @@ const STRIPE_SOFT_ERROR_WINDOW_MS = 10000;
  * @param e The decoder error.
  * @param vncStripeYStart The stripe's row offset, which keys its decoder.
  */
-function handleStripeDecodeError(e: any, vncStripeYStart: number): any {
+function handleStripeDecodeError(e: DOMException, vncStripeYStart: number): void {
     if (decodeInWorker && !workerDecodeFailed && isVideoEncoder(currentEncoderMode)) {
         const now = performance.now();
         const prev = stripeDecodeSoftErrors[vncStripeYStart];
@@ -4281,7 +4352,7 @@ function handleStripeDecodeError(e: any, vncStripeYStart: number): any {
  * Decodes the chunks a stripe queued while its decoder was still configuring.
  * @param stripe_y_start
  */
-function processPendingChunksForStripe(stripe_y_start: number): any {
+function processPendingChunksForStripe(stripe_y_start: number): void {
   const decoderInfo = vncStripeDecoders[stripe_y_start];
   if (!decoderInfo || decoderInfo.decoder.state !== "configured" || !decoderInfo.pendingChunks) {
     return;
@@ -4290,9 +4361,9 @@ function processPendingChunksForStripe(stripe_y_start: number): any {
   while (decoderInfo.pendingChunks.length > 0) {
     const pending = decoderInfo.pendingChunks.shift();
     const chunk = new EncodedVideoChunk({
-      type: pending.type,
-      timestamp: pending.timestamp,
-      data: pending.data
+      type: pending!.type,
+      timestamp: pending!.timestamp,
+      data: pending!.data
     });
     try {
       decoderInfo.decoder.decode(chunk);
@@ -4303,7 +4374,7 @@ function processPendingChunksForStripe(stripe_y_start: number): any {
 }
 
 /** Asks the paint loop for a tick; `schedulePaintVideoFrame` once the connection code is up. */
-let wakePaintLoop = (): any => {};
+let wakePaintLoop = (): void => {};
 /**
  * Main-thread back-buffer of the JPEG stripes. Stripes accumulate here so
  * damage-gated undamaged rows persist, and the whole frame is blitted to the
@@ -4312,12 +4383,12 @@ let wakePaintLoop = (): any => {};
  * proves it — so the display never shows a seam between frame ids. Full-frame
  * video presents one decoded frame atomically through the video sinks instead.
  */
-let stripeBackCanvas: any = null;
-let stripeBackCtx: any = null;
-let stripePendingFrameId: any = null;
+let stripeBackCanvas: HTMLCanvasElement | null = null;
+let stripeBackCtx: CanvasRenderingContext2D | null = null;
+let stripePendingFrameId: number | null = null;
 let stripePendingDirty = false;
 /** Newest frame id the JPEG composite has put on screen. */
-let lastPresentedVideoFrameId: any = null;
+let lastPresentedVideoFrameId: number | null = null;
 /** When that id was presented, for the same reason as `lastReceivedVideoFrameAt`. */
 let lastPresentedVideoFrameAt = 0;
 /** When the JPEG composite holds a whole frame; see lib/stripe-clock.ts. */
@@ -4376,10 +4447,10 @@ self.onmessage = (e) => {
   }
 };
 `;
-let stripeWorker: any = null, stripeWorkerActive = false, stripeWorkerW = 0, stripeWorkerH = 0;
+let stripeWorker: Worker | null = null, stripeWorkerActive = false, stripeWorkerW = 0, stripeWorkerH = 0;
 
 /** Terminates the stripe compositor worker. */
-function deactivateStripeWorker(): any {
+function deactivateStripeWorker(): void {
   if (stripeWorker) { try { stripeWorker.terminate(); } catch (e) { /* ignore */ } stripeWorker = null; }
   stripeWorkerActive = false; stripeWorkerW = 0; stripeWorkerH = 0;
 }
@@ -4404,8 +4475,8 @@ function ensureStripeWorker(): boolean {
     return false;
   }
   console.info('[Selkies] JPEG stripes: compositing on an OffscreenCanvas in a worker.');
-  stripeWorker.onerror = (): any => deactivateStripeWorker();
-  stripeWorker.onmessage = (ev: any): any => {
+  stripeWorker.onerror = (): void => deactivateStripeWorker();
+  stripeWorker.onmessage = (ev: MessageEvent): void => {
     const m = ev.data;
     if (!m || m.type !== 'frame') return;
     if (canvasContext && canvas && canvas.width > 0 && canvas.height > 0) {
@@ -4426,9 +4497,9 @@ function ensureStripeWorker(): boolean {
 function stripeCompositeBegin(): boolean {
   if (ensureStripeWorker()) {
     stripeWorkerActive = true;
-    if (canvas.width > 0 && canvas.height > 0 && (stripeWorkerW !== canvas.width || stripeWorkerH !== canvas.height)) {
-      stripeWorker.postMessage({ type: 'resize', width: canvas.width, height: canvas.height });
-      stripeWorkerW = canvas.width; stripeWorkerH = canvas.height;
+    if (canvas!.width > 0 && canvas!.height > 0 && (stripeWorkerW !== canvas!.width || stripeWorkerH !== canvas!.height)) {
+      stripeWorker!.postMessage({ type: 'resize', width: canvas!.width, height: canvas!.height });
+      stripeWorkerW = canvas!.width; stripeWorkerH = canvas!.height;
       stripePendingFrameId = null; stripePendingDirty = false;
     }
   } else {
@@ -4443,14 +4514,14 @@ function stripeCompositeBegin(): boolean {
  * @param stripe
  * @param yPos
  */
-function stripeCompositeDraw(stripe: VideoFrame | ImageBitmap, yPos: number): any {
+function stripeCompositeDraw(stripe: StripeImage, yPos: number): void {
   if (stripeWorkerActive && stripeWorker) {
     try { stripeWorker.postMessage({ type: 'stripe', frame: stripe, yPos: yPos }, [stripe]); return; }
     catch (e) { /* transfer failed; close below */ }
   } else if (stripeBackCtx) {
     try { stripeBackCtx.drawImage(stripe, 0, yPos); } catch (e) { /* ignore */ }
   }
-  try { stripe.close(); } catch (e) { /* ignore */ }
+  try { stripe.close!(); } catch (e) { /* ignore */ }
 }
 
 /**
@@ -4459,7 +4530,7 @@ function stripeCompositeDraw(stripe: VideoFrame | ImageBitmap, yPos: number): an
  * what `window.fps` reports for it. While the stats are open the composite is
  * dated by the arrival of its newest stripe (`compositeArrival`).
  */
-function stripeCompositePresent(): any {
+function stripeCompositePresent(): void {
   frameCount++;
   lastVideoOutputAt = performance.now();
   lastPresentedVideoFrameId = stripePendingFrameId;
@@ -4468,18 +4539,18 @@ function stripeCompositePresent(): any {
   compositeArrival = -Infinity;
   if (stripeWorkerActive && stripeWorker) {
     try { stripeWorker.postMessage({ type: 'commit', at }); } catch (e) { /* ignore */ }
-  } else if (canvasContext && canvas.width > 0 && canvas.height > 0) {
-    canvasContext.drawImage(stripeBackCanvas, 0, 0);
+  } else if (canvasContext && canvas!.width > 0 && canvas!.height > 0) {
+    canvasContext.drawImage(stripeBackCanvas!, 0, 0);
     if (streamStats.open) pageShown.drawn(at);
   }
 }
 /** The arrival of the newest stripe in the composite being built, in epoch ms. */
 let compositeArrival = -Infinity;
 /** Newest JPEG-stripe frame id drawn per row offset, so older out-of-order stripes are skipped. */
-let lastDrawnJpegStripeFrameId: Record<string, any> = {};
+let lastDrawnJpegStripeFrameId: Record<string, number> = {};
 
 /** Disarms the START_VIDEO watchdog. */
-function clearStartVideoWatchdog(): any {
+function clearStartVideoWatchdog(): void {
   if (startVideoWatchdogTimer !== null) {
     clearTimeout(startVideoWatchdogTimer);
     startVideoWatchdogTimer = null;
@@ -4494,11 +4565,11 @@ function clearStartVideoWatchdog(): any {
  * either way. A keyframe request answers the second case; if nothing arrives
  * within `VISIBLE_FRAME_PROBE_MS`, the stream really is stopped and is restarted.
  */
-function armVisibleFrameProbe(): any {
+function armVisibleFrameProbe(): void {
   if (isSharedMode) return;
   const chunksBefore = window.videoChunksReceived;
   requestKeyframe();
-  setTimeout((): any => {
+  setTimeout((): void => {
     if (document.hidden || window.videoChunksReceived !== chunksBefore) return;
     if (!isVideoPipelineActive) return;
     if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
@@ -4515,7 +4586,7 @@ function armVisibleFrameProbe(): any {
  * viewer's resume can be rate-limited by the server) or the socket is not open
  * (the reconnect logic owns recovery).
  */
-function onStartVideoWatchdogTimeout(): any {
+function onStartVideoWatchdogTimeout(): void {
   startVideoWatchdogTimer = null;
   if (document.hidden) { startVideoWatchdogAttempts = 0; return; }
   if (!websocket || websocket.readyState !== WebSocket.OPEN) { startVideoWatchdogAttempts = 0; return; }
@@ -4532,14 +4603,14 @@ function onStartVideoWatchdogTimeout(): any {
 }
 
 /** Arms the START_VIDEO watchdog with a fresh attempt count for this visibility cycle. */
-function armStartVideoWatchdog(): any {
+function armStartVideoWatchdog(): void {
   if (startVideoWatchdogTimer !== null) clearTimeout(startVideoWatchdogTimer);
   startVideoWatchdogAttempts = 0;
   startVideoWatchdogTimer = setTimeout(onStartVideoWatchdogTimeout, START_VIDEO_WATCHDOG_MS);
 }
 
 /** Disarms the shared-mode stall watchdog. */
-function clearSharedStallWatchdog(): any {
+function clearSharedStallWatchdog(): void {
   if (sharedStallWatchdogId !== null) {
     clearInterval(sharedStallWatchdogId);
     sharedStallWatchdogId = null;
@@ -4553,12 +4624,12 @@ function clearSharedStallWatchdog(): any {
  * viewer is hidden, paused, or not yet ready it expects no chunks, so the clock
  * is kept fresh and the watchdog cannot fire the instant those states end.
  */
-function armSharedStallWatchdog(): any {
+function armSharedStallWatchdog(): void {
   if (!isSharedMode || sharedStallWatchdogId !== null) return;
   lastSharedVideoChunkTime = performance.now();
   sharedStallRecoveryAttempts = 0;
   sharedStallNextRecoveryTime = 0;
-  sharedStallWatchdogId = setInterval((): any => {
+  sharedStallWatchdogId = setInterval((): void => {
     if (document.hidden || sharedVideoPaused || sharedClientState !== 'ready') {
       lastSharedVideoChunkTime = performance.now();
       return;
@@ -4586,7 +4657,7 @@ function armSharedStallWatchdog(): any {
  * @param yPos The stripe Y its frames carry, which keys the decoder.
  * @param frame
  */
-function handleDecodedVncStripeFrame(yPos: number, frame: VideoFrame): any {
+function handleDecodedVncStripeFrame(yPos: number, frame: VideoFrame): void {
   if (codecRefusalUnanswerable) endCodecRefusal();
   pageDecode.format = frame.format;
   if (streamStats.open) notePageDecoded(frame);
@@ -4617,25 +4688,25 @@ function handleDecodedVncStripeFrame(yPos: number, frame: VideoFrame): any {
 }
 
 /** HTTP uploads and the drag-drop/file-picker plumbing (lib/file-upload.ts); shared viewers never upload. */
-const fileUploader = createFileUploader({ canUpload: (): any => !isSharedMode });
+const fileUploader = createFileUploader({ canUpload: (): boolean => !isSharedMode });
 const handleRequestFileUpload = fileUploader.handleRequestFileUpload;
 const handleFileInputChange = fileUploader.handleFileInputChange;
 const handleDragOver = fileUploader.handleDragOver;
 const handleDrop = fileUploader.handleDrop;
 
 /** Requests a screen wake lock so the device does not sleep mid-session. */
-const requestWakeLock = async (): Promise<any> => {
+const requestWakeLock = async (): Promise<void> => {
   if (wakeLockSentinel !== null) return;
   if ('wakeLock' in navigator) {
     try {
       wakeLockSentinel = await navigator.wakeLock.request('screen');
-      wakeLockSentinel.addEventListener('release', (): any => {
+      wakeLockSentinel.addEventListener('release', (): void => {
         console.log('Screen Wake Lock was released automatically.');
         wakeLockSentinel = null;
       });
       console.log('Screen Wake Lock is active.');
-    } catch (err: any) {
-      console.warn(`Could not acquire Wake Lock: ${err.name}, ${err.message}`);
+    } catch (err) {
+      console.warn(`Could not acquire Wake Lock: ${(err as Error).name}, ${(err as Error).message}`);
     }
   } else {
     console.warn('Wake Lock API is not supported by this browser.');
@@ -4643,17 +4714,17 @@ const requestWakeLock = async (): Promise<any> => {
 };
 
 /** A press over the stream takes the screen wake lock. */
-const wakeOnPress = (): any => {
+const wakeOnPress = (): void => {
   requestWakeLock();
 };
 
 /** The stream's overlay takes right clicks for the remote desktop, not a browser menu. */
-const noContextMenu = (event: any): any => {
+const noContextMenu = (event: Event): void => {
   event.preventDefault();
 };
 
 /** Releases the screen wake lock if one is held. */
-const releaseWakeLock = async (): Promise<any> => {
+const releaseWakeLock = async (): Promise<void> => {
   if (wakeLockSentinel !== null) {
     await wakeLockSentinel.release();
     wakeLockSentinel = null;
@@ -4666,18 +4737,18 @@ const releaseWakeLock = async (): Promise<any> => {
  * @param delay Milliseconds of quiet before `func` runs.
  * @returns
  */
-function debounce(func: (...args: any[]) => any, delay: number): (...args: any[]) => any {
-  let timeoutId: any;
-  return function(this: any, ...args: any[]): any {
+function debounce<A extends unknown[]>(func: (...args: A) => void, delay: number): (...args: A) => void {
+  let timeoutId: number;
+  return function(this: unknown, ...args: A): void {
     clearTimeout(timeoutId);
-    timeoutId = setTimeout((): any => {
+    timeoutId = setTimeout((): void => {
       func.apply(this, args);
     }, delay);
   };
 }
 
 /** Hides the status bar and start button: a frame arrived, or the page is up with no stream to wait for. */
-function hideStreamOverlay(): any {
+function hideStreamOverlay(): void {
   if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
   if (playButtonElement) playButtonElement.classList.add('hidden');
 }
@@ -4728,7 +4799,7 @@ function flushHeldInput(): void {
   const now = performance.now();
   for (const { message, at } of held) {
     if (now - at > INPUT_HOLD_MS && !message.startsWith('ku,')) continue;
-    websocket.send(message);
+    websocket!.send(message);
   }
 }
 
@@ -4761,7 +4832,7 @@ function resumeCarriedPipelines(): void {
 }
 
 /** Marks the stream as started and hides the status bar and start button. */
-const startStream = (): any => {
+const startStream = (): void => {
   if (streamStarted || (reconnectingInPlace && !modeSinceOpen)) return;
   streamStarted = true;
   endReconnectInPlace();
@@ -4778,7 +4849,7 @@ const startStream = (): any => {
  * attaches file drop and mobile keyboard assistance. A viewer role keeps the
  * gamepad but has its pointer and keyboard context detached.
  */
-const initializeInput = (): any => {
+const initializeInput = (): void => {
   if (inputInitialized) {
     console.log("Input already initialized. Skipping.");
     return;
@@ -4791,7 +4862,7 @@ const initializeInput = (): any => {
   console.log("Initializing Input system...");
 
   let inputInstance;
-  const websocketSendInput = (message: any): any => {
+  const websocketSendInput = (message: string): void => {
     if (holdInput(message)) return;
     if (websocket && websocket.readyState === WebSocket.OPEN) {
       websocket.send(message);
@@ -4812,28 +4883,28 @@ const initializeInput = (): any => {
   inputInstance = new Input(overlayInput, sendInputFunction, isSharedMode, playerInputTargetIndex, useCssScaling, initialSlot);
   inputInstance.displayId = displayId;
   inputInstance.setFingerScroll(serverFingerScroll);
-  inputInstance.motionBacklog = (): any => (websocket ? websocket.bufferedAmount : 0);
+  inputInstance.motionBacklog = (): number => (websocket ? websocket.bufferedAmount : 0);
   inputInstance.setShortcutsEnabled(keyboardShortcuts);
 
-  inputInstance.onmenuhotkey = (): any => {
+  inputInstance.onmenuhotkey = (): void => {
     window.postMessage({ type: 'toggleDashboard' }, window.location.origin);
   };
-  inputInstance.ongamepadhotkey = (): any => {
+  inputInstance.ongamepadhotkey = (): void => {
     window.postMessage({ type: 'toggleTouchGamepad' }, window.location.origin);
   };
   inputInstance.gamingMode = gamingModeActive;
-  inputInstance.ongamingmode = (active: any): any => {
+  inputInstance.ongamingmode = (active: boolean): void => {
     gamingModeActive = active;
     window.postMessage({ type: 'gamingModeUpdate', active }, window.location.origin);
   };
-  inputInstance.onnotice = (code: any, message: any): any => {
+  inputInstance.onnotice = (code: string, message: string): void => {
     window.postMessage({
       type: 'fileUpload',
       payload: { status: 'warning', fileName: code, message, code },
     }, window.location.origin);
   };
 
-  inputInstance.getWindowResolution = (): any => {
+  inputInstance.getWindowResolution = (): number[] => {
     const videoContainer = document.querySelector('.video-container');
     if (!videoContainer) {
       console.warn('initializeInput: .video-container not found, using window inner dimensions for resolution calculation.');
@@ -4845,7 +4916,7 @@ const initializeInput = (): any => {
 
   // Runs for a pad already present during attach(), before window.webrtcInput
   // is assigned, so the manager is read off the instance.
-  inputInstance.ongamepadconnected = (gamepad_id: any): any => {
+  inputInstance.ongamepadconnected = (gamepad_id: string): void => {
     gamepad.gamepadState = 'connected';
     gamepad.gamepadName = gamepad_id;
     console.log(`Client: Gamepad "${gamepad_id}" connected. isSharedMode: ${isSharedMode}, isGamepadEnabled (global toggle): ${isGamepadEnabled}`);
@@ -4868,7 +4939,7 @@ const initializeInput = (): any => {
     }
   };
 
-  inputInstance.ongamepaddisconnected = (): any => {
+  inputInstance.ongamepaddisconnected = (): void => {
     gamepad.gamepadState = 'disconnected';
     gamepad.gamepadName = 'none';
     console.log("Gamepad disconnected.");
@@ -4903,7 +4974,7 @@ const initializeInput = (): any => {
    * the new geometry, and the divergence flag is reset for stream_resolution
    * to re-flag.
    */
-  const handleResizeUI = (): any => {
+  const handleResizeUI = (): void => {
     if (!initializationComplete) {
         return;
     }
@@ -4947,7 +5018,7 @@ const initializeInput = (): any => {
   };
 
   handleResizeUI_globalRef = handleResizeUI;
-  originalWindowResizeHandler = debounce((): any => { maybeFollowDpr(); handleResizeUI(); }, 500);
+  originalWindowResizeHandler = debounce((): void => { maybeFollowDpr(); handleResizeUI(); }, 500);
 
   /**
    * Re-runs the automatic resize when devicePixelRatio changes. The stream
@@ -4958,14 +5029,14 @@ const initializeInput = (): any => {
    * is on. matchMedia resolution queries are one-shot at a given dppx, so
    * the query is re-armed after each change.
    */
-  const watchDevicePixelRatio = (): any => {
-    let mql: any = null;
-    const onDprChange = (): any => {
+  const watchDevicePixelRatio = (): void => {
+    let mql: MediaQueryList | null = null;
+    const onDprChange = (): void => {
       maybeFollowDpr();
       if (typeof handleResizeUI_globalRef === 'function') handleResizeUI_globalRef();
       arm();
     };
-    const arm = (): any => {
+    const arm = (): void => {
       if (mql) { try { mql.removeEventListener('change', onDprChange); } catch (_) {} }
       const dpr = window.devicePixelRatio || 1;
       mql = window.matchMedia(`(resolution: ${dpr}dppx)`);
@@ -4974,7 +5045,7 @@ const initializeInput = (): any => {
     arm();
     // An emulated density change fires neither the query nor a resize;
     // a slow poll of the live value catches those too.
-    setInterval((): any => { if ((window.devicePixelRatio || 1) !== lastFollowedDpr) onDprChange(); }, 1000);
+    setInterval((): void => { if ((window.devicePixelRatio || 1) !== lastFollowedDpr) onDprChange(); }, 1000);
   };
   watchDevicePixelRatio();
 
@@ -5028,10 +5099,10 @@ const initializeInput = (): any => {
  * `<audio>` element that plays that stream on the device.
  * @type
  */
-let outputRoute: any = null;
+let outputRoute: { context: AudioContext; destination: MediaStreamAudioDestinationNode; element: HTMLAudioElement; } | null = null;
 
 /** Stops the media element a chosen output device was reached through. */
-function releaseOutputRoute(): any {
+function releaseOutputRoute(): void {
   if (!outputRoute) return;
   try { outputRoute.element.pause(); } catch (e) { /* already stopped */ }
   outputRoute.element.srcObject = null;
@@ -5047,7 +5118,7 @@ function releaseOutputRoute(): any {
  * element plays on the device (`outputRoute`). The default device keeps the
  * direct path, which that element's own output buffer would only lengthen.
  */
-async function applyOutputDevice(): Promise<any> {
+async function applyOutputDevice(): Promise<void> {
   const chosen = preferredOutputDeviceId && preferredOutputDeviceId !== 'default';
   const supportsSinkId = typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
   if (!supportsSinkId) {
@@ -5073,13 +5144,13 @@ async function applyOutputDevice(): Promise<any> {
         element.srcObject = destination.stream;
         outputRoute = { context: audioContext, destination, element };
       }
-      await outputRoute.element.setSinkId(preferredOutputDeviceId);
+      await outputRoute.element.setSinkId(preferredOutputDeviceId!);
       audioGainNode.disconnect();
       audioGainNode.connect(outputRoute.destination);
       await outputRoute.element.play();
       console.log(`Playback output set to device: ${preferredOutputDeviceId} (through a media element)`);
-    } catch (err: any) {
-      console.error(`Error routing playback to output device (ID: ${preferredOutputDeviceId}): ${err.name}`, err);
+    } catch (err) {
+      console.error(`Error routing playback to output device (ID: ${preferredOutputDeviceId}): ${(err as Error).name}`, err);
       if (audioContext && audioGainNode) {
         audioGainNode.disconnect();
         audioGainNode.connect(audioContext.destination);
@@ -5095,10 +5166,10 @@ async function applyOutputDevice(): Promise<any> {
   if (audioContext) {
     if (audioContext.state === 'running') {
       try {
-        await audioContext.setSinkId(preferredOutputDeviceId);
+        await audioContext.setSinkId(preferredOutputDeviceId!);
         console.log(`Playback AudioContext output set to device: ${preferredOutputDeviceId}`);
-      } catch (err: any) {
-        console.error(`Error setting sinkId on Playback AudioContext (ID: ${preferredOutputDeviceId}): ${err.name}`, err);
+      } catch (err) {
+        console.error(`Error setting sinkId on Playback AudioContext (ID: ${preferredOutputDeviceId}): ${(err as Error).name}`, err);
       }
     } else {
       console.warn(`Playback AudioContext not running (state: ${audioContext.state}), cannot set sinkId yet.`);
@@ -5111,7 +5182,7 @@ async function applyOutputDevice(): Promise<any> {
 window.addEventListener('message', receiveMessage, false);
 
 /** Applies the gamepad toggle to the manager's polling; a shared page always polls. */
-function applyGamepadPolling(): any {
+function applyGamepadPolling(): void {
   const manager = window.webrtcInput && window.webrtcInput.gamepadManager;
   if (!manager) {
     console.warn("Client: window.webrtcInput.gamepadManager not found; cannot apply the gamepad toggle.");
@@ -5138,18 +5209,18 @@ function applyGamepadPolling(): any {
  * toggle the browser has not persisted.
  * @param serverSettings
  */
-function applyStartPolicy(serverSettings: Record<string, {value: any, locked?: boolean}>): any {
+function applyStartPolicy(serverSettings: Record<string, ServerSettingEntry>): void {
   if (isSharedMode || displayId !== 'primary') return;
-  const setting = (key: any): any => (serverSettings && serverSettings[key]) || null;
-  const startsOn = (key: any, fallback: any): any => {
+  const setting = (key: string): ServerSettingEntry | null => (serverSettings && serverSettings[key]) || null;
+  const startsOn = (key: string, fallback: boolean): boolean => {
     const s = setting(key);
     return (s && typeof s.value === 'boolean') ? s.value : fallback;
   };
-  const lockedOff = (key: any): any => {
+  const lockedOff = (key: string): boolean => {
     const s = setting(key);
     return !!(s && s.value === false && s.locked);
   };
-  const untouched = (pipeline: any): any => !pipelinesToggledByUser.has(pipeline);
+  const untouched = (pipeline: string): boolean => !pipelinesToggledByUser.has(pipeline);
   let sidebarChanged = false;
   if (untouched('video') && !startsOn('video_on_start', true) && isVideoPipelineActive) {
     isVideoPipelineActive = false;
@@ -5188,7 +5259,7 @@ function applyStartPolicy(serverSettings: Record<string, {value: any, locked?: b
 }
 
 /** Posts `sidebarButtonStatusUpdate` with the state of every pipeline toggle to the dashboards. */
-function postSidebarButtonUpdate(): any {
+function postSidebarButtonUpdate(): void {
   const updatePayload = {
     type: 'sidebarButtonStatusUpdate',
     video: isVideoPipelineActive,
@@ -5215,7 +5286,7 @@ function postSidebarButtonUpdate(): any {
  * bug.
  * @param event
  */
-function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): any {
+function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
   if (event.origin !== window.location.origin) {
     console.warn(`Received message from unexpected origin: ${event.origin}. Expected ${window.location.origin}. Ignoring.`);
     return;
@@ -5233,15 +5304,15 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): any {
     case 'setVolume':
       if (typeof message.value === 'number' && audioGainNode) {
         currentVolume = Math.max(0, Math.min(1, message.value));
-        audioGainNode.gain.setValueAtTime(currentVolume, audioContext.currentTime);
+        audioGainNode.gain.setValueAtTime(currentVolume, audioContext!.currentTime);
       }
       break;
     case 'setMute':
       if (typeof message.value === 'boolean' && audioGainNode) {
         if (message.value === true) {
-          audioGainNode.gain.setValueAtTime(0, audioContext.currentTime);
+          audioGainNode.gain.setValueAtTime(0, audioContext!.currentTime);
         } else {
-          audioGainNode.gain.setValueAtTime(currentVolume, audioContext.currentTime);
+          audioGainNode.gain.setValueAtTime(currentVolume, audioContext!.currentTime);
         }
       }
       break;
@@ -5418,7 +5489,7 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): any {
         console.log("Clearing VNC stripe decoders due to manual resolution change.");
         clearAllVncStripeDecoders();
         if (canvasContext) canvasContext.setTransform(1, 0, 0, 1, 0, 0);
-        canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+        canvasContext!.clearRect(0, 0, canvas!.width, canvas!.height);
       }
       break;
     }
@@ -5444,7 +5515,7 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): any {
           console.log("Clearing VNC stripe decoders due to resolution reset to window.");
           clearAllVncStripeDecoders();
           if (canvasContext) canvasContext.setTransform(1, 0, 0, 1, 0, 0);
-          canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+          canvasContext!.clearRect(0, 0, canvas!.width, canvas!.height);
         }
       }
       // Before the auto path resumes: it builds its request from the pick, so
@@ -5493,7 +5564,7 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): any {
       // refocus fires a clipboard read that must already see this push.
       sendExplicitClipboard(
         message.imageBlob, message.imageBlob.type || 'image/png', notifyClipboardImageSkip
-      ).catch((e: any): any => {
+      ).catch((e: Error): void => {
         console.warn('Failed to send uploaded clipboard image:', e);
         notifyClipboardImageSkip('send failed: ' + e.message, 'clipboardSkipSendFailed');
       });
@@ -5737,7 +5808,7 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): any {
  * @param reason Human-readable reason.
  * @param code Translation key the dashboards map to a localized message.
  */
-function notifyClipboardImageSkip(reason: string, code: string): any {
+function notifyClipboardImageSkip(reason: string, code: string): void {
   console.warn('Clipboard image upload skipped: ' + reason);
   window.postMessage({
     type: 'fileUpload',
@@ -5752,7 +5823,7 @@ function notifyClipboardImageSkip(reason: string, code: string): any {
  * browser refuses would otherwise read as the feature not working at all.
  * @param error What the write threw.
  */
-function notifyClipboardImageWriteFailed(error: any): any {
+function notifyClipboardImageWriteFailed(error: Error): void {
   const reason = localClipboardBlocker() || (error && error.message) || String(error);
   console.error('Failed to write the session image to the local clipboard:', error);
   window.postMessage({
@@ -5775,8 +5846,8 @@ function notifyClipboardImageWriteFailed(error: any): any {
  * @param [mimeType] Forced to `text/plain` for text.
  * @param [onSkip] Called with reason and code when nothing was sent.
  */
-async function sendClipboardData(data: string | ArrayBuffer | Uint8Array, mimeType: string = 'text/plain', onSkip: ((...args: any[]) => any) | null = null): Promise<any> {
-    const skip = (reason: any, code: any): any => { if (onSkip) onSkip(reason, code); };
+async function sendClipboardData(data: string | ArrayBuffer | Uint8Array, mimeType: string = 'text/plain', onSkip: ClipboardSkip | null = null): Promise<void> {
+    const skip = (reason: string, code: string): void => { if (onSkip) onSkip(reason, code); };
     if (window.clipboard_enabled === undefined) {
         skip('the session has not reported its clipboard policy yet', 'clipboardSkipNotConnected');
         return;
@@ -5804,7 +5875,7 @@ async function sendClipboardData(data: string | ArrayBuffer | Uint8Array, mimeTy
     }
     // Binary content is compared by the digest the worker takes, so the page
     // does not walk a payload of any size to decide whether to send it.
-    let subject: any = data;
+    let subject: string | ArrayBuffer | Uint8Array<ArrayBufferLike> | ClipboardDigest = data;
     if (isBinary) {
         try {
             const { byteLength, hash } = await clipboardWorker.hashBytes(dataBytes.slice().buffer);
@@ -5818,11 +5889,11 @@ async function sendClipboardData(data: string | ArrayBuffer | Uint8Array, mimeTy
     let transferAborted = false;
     await sendClipboardChunked(dataBytes, mimeType, {
         worker: clipboardWorker,
-        send: (m: any): any => websocket.send(m),
-        waitDrain: async (): Promise<any> => {
-            while (websocket.bufferedAmount > CLIPBOARD_BACKLOG_BYTES) {
-                await new Promise((resolve: any): any => setTimeout(resolve, CLIPBOARD_BACKLOG_POLL_MS));
-                if (websocket.readyState !== WebSocket.OPEN) {
+        send: (m: string): void => websocket!.send(m),
+        waitDrain: async (): Promise<boolean> => {
+            while (websocket!.bufferedAmount > CLIPBOARD_BACKLOG_BYTES) {
+                await new Promise((resolve: (value: unknown) => void): number => setTimeout(resolve, CLIPBOARD_BACKLOG_POLL_MS));
+                if (websocket!.readyState !== WebSocket.OPEN) {
                     transferAborted = true;
                     return false;
                 }
@@ -5830,7 +5901,7 @@ async function sendClipboardData(data: string | ArrayBuffer | Uint8Array, mimeTy
             return true;
         },
         chunkRawBytes: CLIPBOARD_CHUNK_SIZE,
-        nextTid: (): any => ++clipboardTransferCounter,
+        nextTid: (): number => ++clipboardTransferCounter,
     });
     if (!transferAborted && websocket.readyState === WebSocket.OPEN) {
         clipboardSync.markSynced(subject, mimeType);
@@ -5850,10 +5921,10 @@ async function sendClipboardData(data: string | ArrayBuffer | Uint8Array, mimeTy
  * @param settings Keys named as the server knows them.
  * @param [fromServer]
  */
-function handleSettingsMessage(settings: Record<string, any>, fromServer?: boolean, send: any = true): any {
-  const storeInt = fromServer ? (): any => {} : setIntParam;
-  const storeBool = fromServer ? (): any => {} : setBoolParam;
-  const storeString = fromServer ? (): any => {} : setStringParam;
+function handleSettingsMessage(settings: Record<string, unknown>, fromServer?: boolean, send: boolean = true): void {
+  const storeInt = fromServer ? (): void => {} : setIntParam;
+  const storeBool = fromServer ? (): void => {} : setBoolParam;
+  const storeString = fromServer ? (): void => {} : setStringParam;
   if (!fromServer) releaseHeldSettings(prefixedStorageKey, Object.keys(settings));
   console.log('Applying settings:', settings);
   let settingsChanged = false;
@@ -5865,8 +5936,8 @@ function handleSettingsMessage(settings: Record<string, any>, fromServer?: boole
       if (videoWorker) videoWorker.postMessage({ type: 'decodePaceReset' });
       if (decodePace !== null) followDecodePace(null);
     }
-    storeString('framerate', followsDisplay ? FRAMERATE_DISPLAY : String(parseFloat(settings.framerate)));
-    const rate = followsDisplay ? requestedStreamFramerate() : parseFloat(settings.framerate);
+    storeString('framerate', followsDisplay ? FRAMERATE_DISPLAY : String(parseFloat(settings.framerate as string)));
+    const rate = followsDisplay ? requestedStreamFramerate() : parseFloat(settings.framerate as string);
     if (Number.isFinite(rate)) framerate = rate as number;
     settingsChanged = true;
   }
@@ -5886,21 +5957,21 @@ function handleSettingsMessage(settings: Record<string, any>, fromServer?: boole
     // A server-authored value is applied as announced and the settings echo
     // runs the refusal ladder for it; a dashboard's is the user's pick, and
     // one this engine cannot decode takes the ladder's fallback at once.
-    if (!fromServer) storeEncoderPick(newEncoderSetting);
-    if (!fromServer && !canDecodeEncoder(newEncoderSetting)) {
-      const fallback = fallbackEncoder(newEncoderSetting);
+    if (!fromServer) storeEncoderPick(newEncoderSetting as string);
+    if (!fromServer && !canDecodeEncoder(newEncoderSetting as string)) {
+      const fallback = fallbackEncoder(newEncoderSetting as string);
       console.warn(`This browser has no decoder for ${newEncoderSetting}; using the ${fallback} encoder.`);
       newEncoderSetting = fallback;
       storeFallbackEncoder(fallback, `no decoder for ${settings.encoder}`);
     }
     if (currentEncoderMode !== newEncoderSetting) {
-        currentEncoderMode = newEncoderSetting;
+        currentEncoderMode = newEncoderSetting as string;
         updateVideoDivert();
         storeString('encoder', currentEncoderMode);
         settingsChanged = true;
         clearAllVncStripeDecoders();
         cleanupJpegStripeQueue();
-        setTimeout((): any => {
+        setTimeout((): void => {
             if (websocket && websocket.readyState === WebSocket.OPEN) {
                 try {
                     websocket.send('REQUEST_KEYFRAME');
@@ -5911,7 +5982,7 @@ function handleSettingsMessage(settings: Record<string, any>, fromServer?: boole
     }
   }
   if (settings.video_crf !== undefined) {
-    video_crf = parseInt(settings.video_crf, 10);
+    video_crf = parseInt(settings.video_crf as string, 10);
     storeInt('video_crf', video_crf);
     settingsChanged = true;
   }
@@ -5932,12 +6003,12 @@ function handleSettingsMessage(settings: Record<string, any>, fromServer?: boole
     settingsChanged = true;
   }
   if (settings.jpeg_quality !== undefined) {
-    jpeg_quality = parseInt(settings.jpeg_quality, 10);
+    jpeg_quality = parseInt(settings.jpeg_quality as string, 10);
     storeInt('jpeg_quality', jpeg_quality);
     settingsChanged = true;
   }
   if (settings.paint_over_jpeg_quality !== undefined) {
-    paint_over_jpeg_quality = parseInt(settings.paint_over_jpeg_quality, 10);
+    paint_over_jpeg_quality = parseInt(settings.paint_over_jpeg_quality as string, 10);
     storeInt('paint_over_jpeg_quality', paint_over_jpeg_quality);
     settingsChanged = true;
   }
@@ -5954,12 +6025,12 @@ function handleSettingsMessage(settings: Record<string, any>, fromServer?: boole
     settingsChanged = true;
   }
   if (settings.video_paintover_crf !== undefined) {
-    video_paintover_crf = parseInt(settings.video_paintover_crf, 10);
+    video_paintover_crf = parseInt(settings.video_paintover_crf as string, 10);
     storeInt('video_paintover_crf', video_paintover_crf);
     settingsChanged = true;
   }
   if (settings.video_paintover_burst_frames !== undefined) {
-    video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames, 10);
+    video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames as string, 10);
     storeInt('video_paintover_burst_frames', video_paintover_burst_frames);
     settingsChanged = true;
   }
@@ -5970,7 +6041,7 @@ function handleSettingsMessage(settings: Record<string, any>, fromServer?: boole
     settingsChanged = true;
   }
   if (settings.scaling_dpi !== undefined) {
-    scalingDPI = parseInt(settings.scaling_dpi, 10);
+    scalingDPI = parseInt(settings.scaling_dpi as string, 10);
     // Not stored: the localStorage pin is the dashboard's explicit slider pick;
     // the payload builder rides the live value either way.
     settingsChanged = true;
@@ -5994,7 +6065,7 @@ function handleSettingsMessage(settings: Record<string, any>, fromServer?: boole
     storeBool('clipboard_seamless', clipboard_seamless);
   }
   if (settings.print_auto !== undefined) {
-    printJobs.setAutomatic(settings.print_auto);
+    printJobs.setAutomatic(settings.print_auto as boolean);
     storeBool('print_auto', !!settings.print_auto);
   }
   if (settings.clipboard_in_enabled !== undefined) {
@@ -6027,27 +6098,27 @@ function handleSettingsMessage(settings: Record<string, any>, fromServer?: boole
     applyMacCmdAsCtrl();
   }
   if (settings.debug !== undefined) {
-    debug = settings.debug;
+    debug = settings.debug as boolean;
     // Persisted even when server-authored: the reload settles on the stored flag.
     setBoolParam('debug', debug);
     console.log(`Applied debug setting: ${debug}. Reloading...`);
-    setTimeout((): any => { window.location.reload(); }, 700);
+    setTimeout((): void => { window.location.reload(); }, 700);
     return;
   }
   if (settings.rate_control_mode !== undefined) {
-    rateControlMode = settings.rate_control_mode;
+    rateControlMode = settings.rate_control_mode as string;
     storeString('rate_control_mode', rateControlMode);
     fetchLatestRCvalue(rateControlMode);
     settingsChanged = true;
   }
   if (settings.video_bitrate !== undefined) {
-    videoBitrate = parseInt(settings.video_bitrate, 10);
+    videoBitrate = parseInt(settings.video_bitrate as string, 10);
     storeInt('video_bitrate', videoBitrate);
     if (!fromServer) forgetCcStart(displayId);
     settingsChanged = true;
   }
   if (settings.audio_bitrate !== undefined) {
-    audio_bitrate = parseInt(settings.audio_bitrate, 10);
+    audio_bitrate = parseInt(settings.audio_bitrate as string, 10);
     storeInt('audio_bitrate', audio_bitrate);
     settingsChanged = true;
   }
@@ -6068,15 +6139,15 @@ function handleSettingsMessage(settings: Record<string, any>, fromServer?: boole
  * server's word, and shown in the dashboards.
  * @param values
  */
-function followDisplaySettings(values: Record<string, any>): any {
+function followDisplaySettings(values: Record<string, unknown>): void {
   if (isSharedMode) return;
-  const changed: Record<string, any> = holdDisplaySettings(prefixedStorageKey, storageAppName, values,
+  const changed = holdDisplaySettings(prefixedStorageKey, storageAppName, values,
     fallbackStamp('the settings of a display it shares'));
   if (Object.keys(changed).length === 0) return;
   console.log('[display] Streaming with what the display does:', changed);
   for (const [name, value] of Object.entries(changed)) window[name] = value;
   handleSettingsMessage(changed, true, false);
-  if (changed.encoder !== undefined) settleServerEncoder(changed.encoder, lastServerSettings && lastServerSettings.encoder);
+  if (changed.encoder !== undefined) settleServerEncoder(changed.encoder as string, lastServerSettings && lastServerSettings.encoder);
   if (lastServerSettings) window.postMessage({ type: 'serverSettings', payload: { ...lastServerSettings } }, window.location.origin);
 }
 
@@ -6085,7 +6156,7 @@ function followDisplaySettings(values: Record<string, any>): any {
  * `cbr`, CRF for `crf`).
  * @param newMode
  */
-function fetchLatestRCvalue(newMode: string): any {
+function fetchLatestRCvalue(newMode: string): void {
   if (newMode === "cbr") {
     videoBitrate = getIntParam('video_bitrate', videoBitrate);
   } else if (newMode === "crf") {
@@ -6098,8 +6169,8 @@ function fetchLatestRCvalue(newMode: string): any {
  * both sides, the last second's figures where the stats are open, client fps,
  * buffers, and pipeline state.
  */
-function sendStatsMessage(): any {
-  const stats: Record<string, any> = {
+function sendStatsMessage(): void {
+  const stats: Record<string, unknown> = {
     info: window.stream_info,
     client: window.stream_client,
     latest: window.stream_stats.latest,
@@ -6129,13 +6200,13 @@ function sendStatsMessage(): any {
  * and the socket with its message dispatch, reconnect, and fallback paths.
  * Called once the document has loaded.
  */
-function initWebsockets(): any {
+function initWebsockets(): void {
   if (!runPreflightChecks()) {
     return;
   }
   if (!isSharedMode) {
     window.displayRefreshRate = null;
-    displayRefresh = watchDisplayRefresh((rate: any): any => {
+    displayRefresh = watchDisplayRefresh((rate: number): void => {
       window.displayRefreshRate = rate;
       window.postMessage({ type: 'displayRefresh', rate }, window.location.origin);
       followDisplayFramerate('display refresh');
@@ -6147,41 +6218,41 @@ function initWebsockets(): any {
   /** Focus and gesture local-to-server clipboard sync (lib/clipboard-sync.ts), sending only what changed locally. */
   localClipboardSender = createLocalClipboardSender({
     isChromium,
-    getDeferredWriteInFlight: (): any => deferredClipboardWriter.getInFlight(),
-    isSharedMode: (): any => isSharedMode,
-    canSync: (): any => !!window.clipboard_enabled && clipboard_seamless,
-    canRead: (): any => !!clipboard_in_enabled,
-    binaryEnabled: (): any => !!enable_binary_clipboard,
-    sendClipboardData: (data: any, mime: any, onSkip: any): any => sendClipboardData(data, mime, onSkip),
+    getDeferredWriteInFlight: (): Promise<boolean> | null => deferredClipboardWriter.getInFlight(),
+    isSharedMode: (): boolean => isSharedMode,
+    canSync: (): boolean => !!window.clipboard_enabled && clipboard_seamless,
+    canRead: (): boolean => !!clipboard_in_enabled,
+    binaryEnabled: (): boolean => !!enable_binary_clipboard,
+    sendClipboardData: (data: string | ArrayBuffer, mime: string | undefined, onSkip: ClipboardSkip | null | undefined): Promise<void> => sendClipboardData(data, mime, onSkip),
     clipboardSync,
   });
-  const readLocalClipboardAndSend = (): any => localClipboardSender.readAndSend();
-  const maybeSendInitialClipboard = (): any => localClipboardSender.maybeInitial();
+  const readLocalClipboardAndSend = (): Promise<void> => localClipboardSender!.readAndSend();
+  const maybeSendInitialClipboard = (): Promise<void> => localClipboardSender!.maybeInitial();
 
   // Firefox and WebKit raise a paste prompt on every focus read, so only
   // Chromium reads on focus; every engine also reads on the paste gestures.
   if (isChromium) {
-    window.addEventListener('focus', (): any => { readLocalClipboardAndSend(); });
+    window.addEventListener('focus', (): void => { readLocalClipboardAndSend(); });
   }
 
   /** Paste-ordering hold and the copy/paste gestures (lib/clipboard-sync.ts); only the gates and the send are per-core. */
   const clipboardGestures = createClipboardGestures({
     isChromium,
     clipboardSync,
-    sendClipboardData: (data: any, mime: any): any => sendClipboardData(data, mime),
-    canSync: (): any => !isSharedMode && !!window.clipboard_enabled && clipboard_seamless,
-    canRead: (): any => !!clipboard_in_enabled,
-    canWrite: (): any => !!clipboard_out_enabled,
-    binaryEnabled: (): any => !!enable_binary_clipboard,
-    getSendInFlight: (): any => localClipboardSender.getSendInFlight(),
-    getDeferredWriteLanding: (): any => deferredClipboardWriter.getLanding(),
-    hasPendingServerWrite: (): any => deferredClipboardWriter.hasPending(),
+    sendClipboardData: (data: string | ArrayBuffer, mime: string | undefined): Promise<void> => sendClipboardData(data, mime),
+    canSync: (): boolean => !isSharedMode && !!window.clipboard_enabled && clipboard_seamless,
+    canRead: (): boolean => !!clipboard_in_enabled,
+    canWrite: (): boolean => !!clipboard_out_enabled,
+    binaryEnabled: (): boolean => !!enable_binary_clipboard,
+    getSendInFlight: (): Promise<void> | null => localClipboardSender!.getSendInFlight(),
+    getDeferredWriteLanding: (): Promise<boolean> | null => deferredClipboardWriter.getLanding(),
+    hasPendingServerWrite: (): boolean => deferredClipboardWriter.hasPending(),
     readLocalClipboard: readLocalClipboardAndSend,
   });
   clipboardGestures.wire();
 
   /** Clears the canvas so a paused stream does not show a stale frame. */
-  const clearVideoCanvasVisually = (): any => {
+  const clearVideoCanvasVisually = (): void => {
     if (canvasContext && canvas) {
       try {
         canvasContext.setTransform(1, 0, 0, 1, 0, 0);
@@ -6189,7 +6260,7 @@ function initWebsockets(): any {
       } catch (e) { console.error("Error clearing canvas on visibility change:", e); }
     }
   };
-  let hiddenVideoStopTimer: any = null;
+  let hiddenVideoStopTimer: number | null = null;
   /** Whether the server asked this socket's page for its tab's visibility (`PAGE_VISIBILITY`). */
   let pageVisibilityWanted = false;
   /**
@@ -6197,7 +6268,7 @@ function initWebsockets(): any {
    * primary's owner stays hidden, a visible page beside it owns the display.
    * The hide goes at once too; the server waits out a reloading page's.
    */
-  const reportPageVisibility = (): any => {
+  const reportPageVisibility = (): void => {
     if (!pageVisibilityWanted || !websocket || websocket.readyState !== WebSocket.OPEN) return;
     try { websocket.send(document.hidden ? 'PAGE_HIDDEN' : 'PAGE_SHOWN'); } catch (_) {}
   };
@@ -6209,7 +6280,7 @@ function initWebsockets(): any {
    * reconnect in a background tab), which no visibilitychange reaches: its
    * stream would flow to a page that drops every frame.
    */
-  const pauseVideoForHiddenTab = (): any => {
+  const pauseVideoForHiddenTab = (): void => {
     if (!websocket || websocket.readyState !== WebSocket.OPEN || !isVideoPipelineActive) return;
     websocket.send('STOP_VIDEO');
     isVideoPipelineActive = false;
@@ -6236,7 +6307,7 @@ function initWebsockets(): any {
    * send, never in front of it. A decoder the browser reclaimed in the
    * background is re-created lazily by the frame sink.
    */
-  document.addEventListener('visibilitychange', async (): Promise<any> => {
+  document.addEventListener('visibilitychange', async (): Promise<void> => {
     if (isSharedMode) {
       if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
       if (document.hidden) {
@@ -6265,7 +6336,7 @@ function initWebsockets(): any {
     reportPageVisibility();
     if (document.hidden) {
       if (hiddenVideoStopTimer === null) {
-        hiddenVideoStopTimer = setTimeout((): any => {
+        hiddenVideoStopTimer = setTimeout((): void => {
           hiddenVideoStopTimer = null;
           if (!document.hidden) return;
           console.log('Tab is hidden, stopping video pipeline if active.');
@@ -6309,20 +6380,20 @@ function initWebsockets(): any {
    * live stream delivers it collapses to 32 and 8.5, behind both of these, so the cache was
    * the whole of the win.
    */
-  const JPEG_ROUTES: Record<string, (data: any) => any> = {
-    imagedecoder: async (data: any): Promise<any> => {
+  const JPEG_ROUTES: Record<string, (data: ArrayBuffer | Uint8Array<ArrayBuffer>) => Promise<StripeImage>> = {
+    imagedecoder: async (data: ArrayBuffer | Uint8Array<ArrayBuffer>): Promise<VideoFrame> => {
       const d = new ImageDecoder({ data: data, type: 'image/jpeg' });
       try { return (await d.decode()).image; } finally { try { d.close(); } catch (e) { /* ignore */ } }
     },
-    bitmap: (data: any): any => createImageBitmap(new Blob([data], { type: 'image/jpeg' })),
-    img: (data: any): any => {
+    bitmap: (data: ArrayBuffer | Uint8Array<ArrayBuffer>): Promise<ImageBitmap> => createImageBitmap(new Blob([data], { type: 'image/jpeg' })),
+    img: (data: ArrayBuffer | Uint8Array<ArrayBuffer>): Promise<HTMLImageElement> => {
       const url = URL.createObjectURL(new Blob([data], { type: 'image/jpeg' }));
       const img = new Image();
       img.src = url;
       // `decode()` rather than `onload`, so the pixels are ready here instead of being
       // decoded inside the paint loop's `drawImage` on the frame that draws them.
-      return img.decode().then((): any => img, (e: any): any => { URL.revokeObjectURL(url); throw e; })
-        .then((i: any): any => { URL.revokeObjectURL(url); return i; });
+      return img.decode().then((): HTMLImageElement => img, (e: unknown): never => { URL.revokeObjectURL(url); throw e; })
+        .then((i: HTMLImageElement): HTMLImageElement => { URL.revokeObjectURL(url); return i; });
     },
   };
 
@@ -6333,7 +6404,7 @@ function initWebsockets(): any {
    * sample across the routes makes a later one measure two to four times faster than it
    * sustains, and picked the wrong route for Firefox one run in three.
    */
-  function uniqueJpeg(jpeg: any, tag: any): any {
+  function uniqueJpeg(jpeg: ArrayBuffer, tag: number): Uint8Array<ArrayBuffer> {
     const pay = new TextEncoder().encode('sel' + tag.toString(36).padStart(9, '0'));
     const src = new Uint8Array(jpeg);
     const out = new Uint8Array(src.length + 4 + pay.length);
@@ -6347,8 +6418,8 @@ function initWebsockets(): any {
   }
 
   /** The route in use, and the race that settles it; the ladder serves until it does. */
-  let jpegRoute: any = null;
-  let jpegRouteRace: any = null;
+  let jpegRoute: string | null = null;
+  let jpegRouteRace: Promise<string | null> | null = null;
 
   /**
    * Race the routes this engine has and keep the fastest, on a stripe the size the session
@@ -6369,8 +6440,8 @@ function initWebsockets(): any {
    * A small serial sample misleads the same way, measuring per-call latency rather than the
    * throughput the paint loop spends. Falls back to the first working route if it cannot run.
    */
-  async function settleJpegRoute(): Promise<any> {
-    const names = Object.keys(JPEG_ROUTES).filter((n: any): any =>
+  async function settleJpegRoute(): Promise<string | null> {
+    const names = Object.keys(JPEG_ROUTES).filter((n: string): boolean =>
       (n !== 'imagedecoder' || typeof ImageDecoder !== 'undefined')
       && (n !== 'bitmap' || typeof createImageBitmap === 'function')
       && (n !== 'img' || typeof Image !== 'undefined'));
@@ -6386,8 +6457,8 @@ function initWebsockets(): any {
         g.fillStyle = '#204080'; g.fillRect(0, 0, SW, SH);
         g.lineWidth = 3; g.strokeStyle = '#c8c828';
         for (let x = 0; x < SW; x += 40) { g.beginPath(); g.moveTo(x + i, 0); g.lineTo(x + i, SH); g.stroke(); }
-        const blob = await new Promise<Blob>((res: any): any => c.toBlob(res, 'image/jpeg', 0.75));
-        samples.push(await blob.arrayBuffer());
+        const blob = await new Promise<Blob | null>((res: BlobCallback): void => c.toBlob(res, 'image/jpeg', 0.75));
+        samples.push(await blob!.arrayBuffer());
       }
       sink = document.createElement('canvas');
       sink.width = SW; sink.height = SH * LANES;
@@ -6402,7 +6473,7 @@ function initWebsockets(): any {
       try {
         const img = await JPEG_ROUTES[name](uniqueJpeg(samples[0], tag++));
         sctx.drawImage(img, 0, 0);
-        try { img.close(); } catch (e) { /* ignore */ }
+        try { img.close!(); } catch (e) { /* ignore */ }
       } catch (e) { /* the timed pass reports it */ }
     }
     let best = null;
@@ -6410,10 +6481,10 @@ function initWebsockets(): any {
       try {
         const t0 = performance.now();
         for (let r = 0; r < ROUNDS; r++) {
-          await Promise.all(samples.map(async (data: any, i: any): Promise<any> => {
+          await Promise.all(samples.map(async (data: ArrayBuffer, i: number): Promise<void> => {
             const img = await JPEG_ROUTES[name](uniqueJpeg(data, tag++));
             sctx.drawImage(img, 0, i * SH);
-            try { img.close(); } catch (e) { /* ignore */ }
+            try { img.close!(); } catch (e) { /* ignore */ }
           }));
         }
         const ms = performance.now() - t0;
@@ -6431,17 +6502,17 @@ function initWebsockets(): any {
    * @param frameId
    * @param arrival When it arrived, in epoch ms; NaN while the stats are shut.
    */
-  async function decodeAndQueueJpegStripe(startY: number, jpegData: ArrayBuffer, frameId: number, arrival: number): Promise<any> {
+  async function decodeAndQueueJpegStripe(startY: number, jpegData: ArrayBuffer, frameId: number, arrival: number): Promise<void> {
     jpegStripeDecodesPending++;
     try {
       let route = jpegRoute;
       if (!route) {
         if (!jpegRouteRace) {
-          jpegRouteRace = settleJpegRoute().then((name: any): any => {
+          jpegRouteRace = settleJpegRoute().then((name: string | null): string | null => {
             jpegRoute = name;
             if (name) console.log(`[jpeg] decoding stripes through ${name}`);
             return name;
-          }).catch((): any => null);
+          }).catch((): null => null);
         }
         // The first stripes take whatever is there rather than waiting on the race.
         route = typeof ImageDecoder !== 'undefined' ? 'imagedecoder'
@@ -6467,10 +6538,10 @@ function initWebsockets(): any {
    * to present: a full frame never waits on it, and a chain kept alive with
    * nothing to do would still wake the page at every display refresh.
    */
-  function schedulePaintVideoFrame(): any {
+  function schedulePaintVideoFrame(): void {
     if (paintScheduled) return;
     paintScheduled = true;
-    requestAnimationFrame((): any => {
+    requestAnimationFrame((): void => {
       paintScheduled = false;
       paintVideoFrame();
     });
@@ -6487,7 +6558,7 @@ function initWebsockets(): any {
    * order. Leaving a full-frame mode tears both video sinks down
    * symmetrically, or a worker canvas would stay shown over the stripes.
    */
-  function paintVideoFrame(): any {
+  function paintVideoFrame(): void {
     if (!canvas || !canvasContext) {
       schedulePaintVideoFrame();
       return;
@@ -6545,7 +6616,7 @@ function initWebsockets(): any {
               const behindBy = (lastDrawn - segFrameId) & 0xFFFF;
               const isOlder = behindBy > 0 && behindBy <= JPEG_STRIPE_REORDER_WINDOW;
               if (isOlder) {
-                try { segment.image.close(); } catch (closeError) { /* ignore */ }
+                try { segment.image.close!(); } catch (closeError) { /* ignore */ }
                 continue;
               }
             }
@@ -6563,7 +6634,7 @@ function initWebsockets(): any {
                 if (segment.at > compositeArrival) compositeArrival = segment.at;
                 stripePendingDirty = true;
               } else {
-                try { segment.image.close(); } catch (closeError) { /* ignore */ }
+                try { segment.image.close!(); } catch (closeError) { /* ignore */ }
               }
               if (segFrameId !== undefined) {
                 lastDrawnJpegStripeFrameId[segment.startY] = segFrameId;
@@ -6614,7 +6685,7 @@ function initWebsockets(): any {
    * Called whenever either end appears; the page's own relay stays as the
    * fallback for a build where the channel never gets made.
    */
-  function wireDecoderToWorklet(): any {
+  function wireDecoderToWorklet(): void {
     if (!audioDecoderWorker || !audioWorkletProcessorPort) return;
     const channel = new MessageChannel();
     try {
@@ -6629,7 +6700,7 @@ function initWebsockets(): any {
    * Connects the socket worker to the decoder, completing a path that reaches
    * playback without the page's thread on it at any point.
    */
-  function wireSocketToDecoder(): any {
+  function wireSocketToDecoder(): void {
     if (!audioDecoderWorker || !websocket || typeof websocket.connectAudio !== 'function') return;
     const channel = new MessageChannel();
     try {
@@ -6836,12 +6907,12 @@ class WorkerWebSocket {
   /** `WebSocket.CONNECTING`, `OPEN` or `CLOSED`, as the worker last reported. */
   readyState: number;
   binaryType: string;
-  onopen: ((ev?: any) => void) | null;
-  onmessage: ((ev: any) => void) | null;
-  onerror: ((ev: any) => void) | null;
-  onclose: ((ev: any) => void) | null;
+  onopen: (() => void) | null;
+  onmessage: ((ev: SocketMessage) => void) | null;
+  onerror: ((ev: object) => void) | null;
+  onclose: ((ev: SocketClose) => void) | null;
   /** Listeners by event type. */
-  _listeners: Record<string, ((...args: any[]) => void)[]>;
+  _listeners: Record<string, ((ev: object) => void)[]>;
   _buffered: number;
   _worker: Worker;
   _retiring?: boolean;
@@ -6863,7 +6934,7 @@ class WorkerWebSocket {
     const workerURL = URL.createObjectURL(blob);
     this._worker = new Worker(workerURL);
     URL.revokeObjectURL(workerURL);
-    this._worker.onmessage = (e: any): any => {
+    this._worker.onmessage = (e: MessageEvent): void => {
       const m = e.data;
       if (m.type === 'message') {
         const ev = { data: m.data, at: m.at };
@@ -6874,7 +6945,7 @@ class WorkerWebSocket {
       if (m.type === 'buffered') { this._buffered = m.amount; return; }
       if (m.type === 'audioTick') {
         if (audioContext && audioContext.state !== 'running') {
-          audioContext.resume().catch((): any => {});
+          audioContext.resume().catch((): void => {});
         }
         return;
       }
@@ -6908,7 +6979,7 @@ class WorkerWebSocket {
    * @param fn
    * @returns
    */
-  addEventListener(type: string, fn: (...args: any[]) => void): void {
+  addEventListener(type: string, fn: (ev: object) => void): void {
     (this._listeners[type] || (this._listeners[type] = [])).push(fn);
   }
 
@@ -6917,7 +6988,7 @@ class WorkerWebSocket {
    * @param fn
    * @returns
    */
-  removeEventListener(type: string, fn: (...args: any[]) => void): void {
+  removeEventListener(type: string, fn: (ev: object) => void): void {
     const list = this._listeners[type];
     if (!list) return;
     const at = list.indexOf(fn);
@@ -6930,7 +7001,7 @@ class WorkerWebSocket {
    * @param ev
    * @returns
    */
-  _emit(type: string, ev: any): void {
+  _emit(type: string, ev: object): void {
     const list = this._listeners[type];
     if (!list) return;
     for (const fn of list.slice()) {
@@ -7060,11 +7131,11 @@ class WorkerWebSocket {
   _retire(): void {
     if (this._retiring) return;
     this._retiring = true;
-    setTimeout((): any => { try { this._worker.terminate(); } catch (e) { /* already gone */ } }, 2000);
+    setTimeout((): void => { try { this._worker.terminate(); } catch (e) { /* already gone */ } }, 2000);
   }
 }
 
-  async function initializeAudio(): Promise<any> {
+  async function initializeAudio(): Promise<true | undefined> {
     if (displayId !== 'primary') {
         console.log("Secondary display: Audio pipeline initialization skipped.");
         return;
@@ -7085,7 +7156,7 @@ class WorkerWebSocket {
       const outgoingAudioWorker = audioDecoderWorker;
       audioDecoderWorker = null;
       outgoingAudioWorker.postMessage({ type: 'close' });
-      await new Promise((resolve: any): any => setTimeout(resolve, 50));
+      await new Promise((resolve: (value: unknown) => void): number => setTimeout(resolve, 50));
       outgoingAudioWorker.terminate();
     }
     if (audioContext) {
@@ -7103,7 +7174,7 @@ class WorkerWebSocket {
       if (!(navigator.audioSession && navigator.audioSession.type === 'play-and-record')) setAudioSessionType('playback');
       audioContext = new(window.AudioContext || window.webkitAudioContext)(contextOptions);
       console.log('Playback AudioContext initialized. Actual sampleRate:', audioContext.sampleRate, 'Initial state:', audioContext.state);
-      audioContext.onstatechange = (): any => {
+      audioContext.onstatechange = (): void => {
         if (!audioContext) return; 
         
         console.log(`Playback AudioContext state changed to: ${audioContext.state}`);
@@ -7423,7 +7494,7 @@ class WorkerWebSocket {
       });
       audioWorkletProcessorPort = audioWorkletNode.port;
       wireDecoderToWorklet();
-      audioWorkletProcessorPort.onmessage = (event: any): any => {
+      audioWorkletProcessorPort.onmessage = (event: MessageEvent): void => {
         if (event.data.type === 'audioBufferSize') {
             window.currentAudioBufferSize = event.data.size;
             window.currentAudioBufferDuration = event.data.durationMs;
@@ -7454,7 +7525,7 @@ class WorkerWebSocket {
       URL.revokeObjectURL(audioDecoderWorkerURL);
       wireDecoderToWorklet();
       wireSocketToDecoder();
-      audioDecoderWorker.onmessage = (event: any): any => {
+      audioDecoderWorker.onmessage = (event: MessageEvent): void => {
         const {
           type,
           reason,
@@ -7481,7 +7552,7 @@ class WorkerWebSocket {
           if (audioWorkletProcessorPort) audioWorkletProcessorPort.postMessage({ quiet: true });
         }
       };
-      audioDecoderWorker.onerror = (error: any): any => {
+      audioDecoderWorker.onerror = (error: ErrorEvent): void => {
         console.error('[Main] Uncaught error in Audio Decoder Worker:', error.message, error);
         if (audioDecoderWorker) {
           audioDecoderWorker.terminate();
@@ -7519,7 +7590,7 @@ class WorkerWebSocket {
   }
 
   /** Reinitializes the audio decoder in its worker, building the whole pipeline first if it is missing. */
-  async function initializeDecoderAudio(): Promise<any> {
+  async function initializeDecoderAudio(): Promise<void> {
     if (audioDecoderWorker) {
       console.log('[Main] Requesting Audio Decoder Worker to reinitialize its decoder.');
       audioDecoderWorker.postMessage({
@@ -7546,7 +7617,7 @@ class WorkerWebSocket {
       wsParams.set('role', 'viewer');
       if (detectedSharedModeType && detectedSharedModeType.startsWith('player')) {
           const playerSlot = detectedSharedModeType.replace('player', '');
-          if (playerSlot >= 2 && playerSlot <= 4) {
+          if (Number(playerSlot) >= 2 && Number(playerSlot) <= 4) {
               wsParams.set('slot', playerSlot);
           }
       }
@@ -7566,18 +7637,18 @@ class WorkerWebSocket {
    * binds its handlers to it next (`bindSessionSocket`). Runs again for each
    * in-place reconnect.
    */
-  const openSessionSocket = (): any => {
+  const openSessionSocket = (): void => {
     try {
       if (!socketWorkerEnabled) throw new Error('socket_worker=false');
       websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols);
-      if (streamStats.open) websocket.setStats(true);
+      if (streamStats.open) websocket.setStats!(true);
     } catch (e) {
       // No worker to be had (a policy forbidding blob workers, say). The socket
       // then runs here, where a busy thread costs audio its cadence, which is
       // still better than no session.
       if (socketWorkerEnabled) console.warn('[websockets] socket worker unavailable, reading on the page:', e);
-      websocket = new WebSocket(websocketEndpointURL.href, tokenProtocols);
-      websocket.binaryType = 'arraybuffer';
+      websocket = new WebSocket(websocketEndpointURL.href, tokenProtocols) as SessionSocket;
+      websocket!.binaryType = 'arraybuffer';
     }
     // The socket itself is in a worker, so this handle is what page-side
     // tooling has to observe or close the transport through.
@@ -7598,7 +7669,7 @@ class WorkerWebSocket {
    * observe, so there the newest received id is the best the client knows. An unchanged id is repeated every ACK_HEARTBEAT_MS, the
    * liveness signal an idle damage-gated stream otherwise lacks.
    */
-  const sendBackpressureAck = (): any => {
+  const sendBackpressureAck = (): void => {
     // While the divert runs, the socket worker acks the newest id itself, on
     // this same cadence but immune to a stalled page.
     if (videoDivertOn) return;
@@ -7629,7 +7700,7 @@ class WorkerWebSocket {
    * sinks present outside the page — independent of whether a dashboard is
    * open.
    */
-  const sendClientMetrics = (): any => {
+  const sendClientMetrics = (): void => {
     if (audioWorkletProcessorPort) {
       audioWorkletProcessorPort.postMessage({
         type: 'getBufferSize'
@@ -7683,7 +7754,7 @@ class WorkerWebSocket {
    * suffixed per-display keys, never the primary's), advertises gzip,
    * requests the cache-only clipboard, and starts the metrics and ack timers.
    */
-  const onSocketOpen = async (): Promise<any> => {
+  const onSocketOpen = async (): Promise<void> => {
     console.log('[websockets] Connection opened!');
     socketOpenedAt = performance.now();
     reconnectUnopened = 0;
@@ -7713,18 +7784,18 @@ class WorkerWebSocket {
     await settleTenBitSupport();
     if (await h264FramingReady === 'avcc') console.info('[Selkies] H.264 decodes here with an avcC description; frames are reframed for it.');
     // The first answer is the baseline; a later one that differs is a new build.
-    entryPageChanged().then((changed: any): any => { if (changed) location.reload(); });
+    entryPageChanged().then((changed: boolean): void => { if (changed) location.reload(); });
     wsEverOpened = true;
     try { sessionStorage.removeItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
     if (typeof DecompressionStream !== 'undefined') {
-      try { websocket.send('_gz,1'); } catch (e) { /* handshake is best-effort */ }
+      try { websocket!.send('_gz,1'); } catch (e) { /* handshake is best-effort */ }
     }
     // Padding frames (0x07) are dropped unread, so the server may probe this path with them.
-    try { websocket.send('_pad,1'); } catch (e) { /* handshake is best-effort */ }
+    try { websocket!.send('_pad,1'); } catch (e) { /* handshake is best-effort */ }
     window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
     if (!isSharedMode) {
       const settingsPrefix = `${storageAppName}_`;
-      const settingsToSend: Record<string, any> = {};
+      const settingsToSend: Record<string, unknown> = {};
       const dpr = streamDensity();
 
       const knownSettings = [
@@ -7761,11 +7832,11 @@ class WorkerWebSocket {
                 && localStorage.getItem(`${key}_explicit_choice`) !== 'true') {
               continue;
             }
-            let value: any = localStorage.getItem(key);
+            let value: string | boolean | number | null = localStorage.getItem(key);
             if (booleanSettingKeys.includes(baseKey)) {
               value = (value === 'true');
             } else if (integerSettingKeys.includes(baseKey)) {
-              value = parseInt(value, 10);
+              value = parseInt(value!, 10);
               if (isNaN(value)) continue;
             }
             settingsToSend[baseKey] = value;
@@ -7813,7 +7884,7 @@ class WorkerWebSocket {
       try {
         const settingsJson = JSON.stringify(settingsToSend);
         const message = `SETTINGS,${settingsJson}`;
-        websocket.send(message);
+        websocket!.send(message);
         initialSettingsSent = true;
         // A new socket starts the display unpaced; the pace follows the settings that claim it.
         if (decodePace !== null) sendDecodePace();
@@ -7825,7 +7896,7 @@ class WorkerWebSocket {
         console.log("Shared mode: WebSocket opened. Waiting for 'MODE websockets' from server to start identification sequence.");
     }
     taggedClipboardFetch.armLegacyWindow(5000);
-    websocket.send('cr');
+    websocket!.send('cr');
     console.log('[websockets] Sent initial clipboard request (cr) to server (cache-only).');
     flushHeldInput();
 
@@ -7851,7 +7922,7 @@ class WorkerWebSocket {
    */
   let __wsCtrlChain = Promise.resolve();
   let __wsGzPending = 0;
-  const __inflateGz = async (buf: any): Promise<any> => {
+  const __inflateGz = async (buf: ArrayBuffer): Promise<string> => {
     const stream = new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip')));
     return new TextDecoder().decode(await stream.arrayBuffer());
   };
@@ -7866,25 +7937,25 @@ class WorkerWebSocket {
   let wsGzTx = false;
   let __wsSendChain = Promise.resolve();
   let __wsSendPending = 0;
-  const __compressGz05 = async (str: any): Promise<any> => {
+  const __compressGz05 = async (str: string): Promise<ArrayBuffer> => {
     const buf = await new Response(new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
     const out = new Uint8Array(buf.byteLength + 1);
     out[0] = 0x05;
     out.set(new Uint8Array(buf), 1);
     return out.buffer;
   };
-  const gzipTextSends = (sock: any): any => {
+  const gzipTextSends = (sock: SessionSocket): void => {
     const rawSend = sock.send.bind(sock);
-    sock.send = (data: any): any => {
+    sock.send = (data: string | ArrayBuffer | ArrayBufferView): void => {
       if (wsGzTx && typeof data === 'string' && data.length >= 512) {
         __wsSendPending++;
-        __wsSendChain = __wsSendChain.then(async (): Promise<any> => {
+        __wsSendChain = __wsSendChain.then(async (): Promise<void> => {
           try { rawSend(await __compressGz05(data)); }
           catch (e) { rawSend(data); }
           finally { __wsSendPending--; }
         });
       } else if (typeof data === 'string' && __wsSendPending > 0) {
-        __wsSendChain = __wsSendChain.then((): any => rawSend(data));
+        __wsSendChain = __wsSendChain.then((): void => rawSend(data));
       } else {
         rawSend(data);
       }
@@ -7900,7 +7971,7 @@ class WorkerWebSocket {
    * video ever arrived" signal the visibility probe reads.
    * @param event
    */
-  const __rawWsMessage = (event: any): any => {
+  const __rawWsMessage = (event: SocketMessage): void => {
     if (event.data instanceof ArrayBuffer) {
       const arrayBuffer = event.data;
       const dataView = new DataView(arrayBuffer);
@@ -7910,7 +7981,7 @@ class WorkerWebSocket {
       streamStats.noteBytes(arrayBuffer.byteLength);
       const dataTypeByte = dataView.getUint8(0);
       // When the socket's thread took the message, or failing that now.
-      const arrival = !streamStats.open ? NaN : event.at > 0 ? event.at : performance.timeOrigin + performance.now();
+      const arrival = !streamStats.open ? NaN : event.at! > 0 ? event.at! : performance.timeOrigin + performance.now();
 
       if (dataTypeByte === 0x03 || dataTypeByte === 0x04) {
         window.videoChunksReceived++;
@@ -7934,14 +8005,14 @@ class WorkerWebSocket {
         if ((isAudioPipelineActive || isSharedMode)) {
           if (audioDecoderWorker) {
             if (audioContext && audioContext.state !== 'running') {
-              audioContext.resume().catch((e: any): any => console.error("Error resuming audio context", e));
+              audioContext.resume().catch((e: unknown): void => console.error("Error resuming audio context", e));
             }
             const quiet = (new Uint8Array(arrayBuffer, 1, 1)[0] & AUDIO_QUIET) !== 0;
             if (quiet && arrayBuffer.byteLength <= 2) {
               audioDecoderWorker.postMessage({ type: 'quiet' });
               return;
             }
-            const opusFrames = extractOpusFrames(arrayBuffer).filter((opus: any): any => opus.byteLength);
+            const opusFrames = extractOpusFrames(arrayBuffer).filter((opus: ArrayBuffer): number => opus.byteLength);
             for (let i = 0; i < opusFrames.length; i++) {
               if (!isSharedMode && window.currentAudioBufferDuration >= AUDIO_RELAY_CEILING_MS) {
                 window.currentAudioDropped++;
@@ -7958,7 +8029,7 @@ class WorkerWebSocket {
             }
           } else {
             console.warn("AudioDecoderWorker not ready. Attempting to initialize audio pipeline.");
-            initializeAudio().then((): any => {
+            initializeAudio().then((): void => {
               if (audioDecoderWorker) {
                 const opusFrames = extractOpusFrames(arrayBuffer);
                 for (const opusDataArrayBuffer of opusFrames) {
@@ -8078,7 +8149,7 @@ class WorkerWebSocket {
             }
             // A reframed row is rebuilt on a key frame whose parameter sets changed too.
             const reframed = decoderInfo && decoderInfo.framed && isKeyFrame
-                && !sameBytes(avcDescription(new Uint8Array(h264Payload)), decoderInfo.description);
+                && !sameBytes(avcDescription(new Uint8Array(h264Payload)), decoderInfo.description!);
             if (!decoderInfo || decoderInfo.decoder.state === 'closed' || reframed ||
                 (decoderInfo.decoder.state === 'configured' && (decoderInfo.width !== stripeWidth || decoderInfo.height !== stripeHeight))) {
 
@@ -8088,7 +8159,7 @@ class WorkerWebSocket {
 
                 const newStripeDecoder = new VideoDecoder({
                     output: handleDecodedVncStripeFrame.bind(null, vncStripeYStart),
-                    error: (e: any): any => handleStripeDecodeError(e, vncStripeYStart)
+                    error: (e: DOMException): void => handleStripeDecodeError(e, vncStripeYStart)
                 });
                 if (vncStripeYStart === 0) pageGate.configured();
                 if (pagePace.cap !== null && !decodeInWorker && decoderInfo
@@ -8122,21 +8193,21 @@ class WorkerWebSocket {
 
                 if (!firstConfigAskedAt) firstConfigAskedAt = performance.now();
                 supportedDecoderConfig(decoderConfig)
-                    .then((config: any): any => {
+                    .then((config: VideoDecoderConfig | null): void | Promise<never> => {
                         if (config) {
                             return newStripeDecoder.configure(config);
                         } else {
                             // The catch below closes the decoder while the map entry still points at it.
                             answerRefusedCodec(dynamicCodec, wireCodecName(video_frame_type_byte));
-                            const refusal: any = new Error(`config not supported: ${dynamicCodec}`);
+                            const refusal: Error & { quiet?: boolean } = new Error(`config not supported: ${dynamicCodec}`);
                             refusal.quiet = true;
                             return Promise.reject(refusal);
                         }
                     })
-                    .then((): any => {
+                    .then((): void => {
                         processPendingChunksForStripe(vncStripeYStart);
                     })
-                    .catch((e: any): any => {
+                    .catch((e: Error & { quiet?: boolean }): void => {
                         if (!e.quiet) console.error(`Error configuring VNC stripe decoder Y=${vncStripeYStart}:`, e);
                         if (vncStripeDecoders[vncStripeYStart] && vncStripeDecoders[vncStripeYStart].decoder === newStripeDecoder) {
                             try { if (newStripeDecoder.state !== 'closed') newStripeDecoder.close(); } catch (_) {}
@@ -8179,10 +8250,10 @@ class WorkerWebSocket {
                     }
                     try {
                         decoderInfo.decoder.decode(chunk);
-                    } catch (e: any) {
-                        initiateFallback(e, `stripe_decode_Y=${vncStripeYStart}`);
+                    } catch (e) {
+                        initiateFallback(e as Error, `stripe_decode_Y=${vncStripeYStart}`);
                     }
-                } else if (decoderInfo.decoder.state === "unconfigured" || decoderInfo.decoder.state === "configuring") {
+                } else if (decoderInfo.decoder.state === "unconfigured" || (decoderInfo.decoder.state as string) === "configuring") {
                     // A mismatched geometry is a straggler from the previous encoder
                     // mode; queued, it would fail later and trip the fallback reload.
                     if (decoderInfo.width && (decoderInfo.width !== stripeWidth || decoderInfo.height !== stripeHeight)) {
@@ -8229,7 +8300,7 @@ class WorkerWebSocket {
         console.error(`Received KILL message from server: ${reason}`);
         stopReconnecting();
         if (websocket) {
-            websocket.onclose = (): any => {};
+            websocket.onclose = (): void => {};
             websocket.close();
         }
         if (statusDisplayElement) {
@@ -8272,7 +8343,7 @@ class WorkerWebSocket {
                 manual_width = 1280; manual_height = 720;
             }
             applyManualCanvasStyle(manual_width, manual_height, true);
-            window.addEventListener('resize', (): any => {
+            window.addEventListener('resize', (): void => {
                 if (isSharedMode && manual_width && manual_height && manual_width > 0 && manual_height > 0) {
                     applyManualCanvasStyle(manual_width, manual_height, true);
                 }
@@ -8285,7 +8356,7 @@ class WorkerWebSocket {
 
                 if (websocket && websocket.readyState === WebSocket.OPEN) {
                      websocket.send('STOP_VIDEO');
-                     setTimeout((): any => {
+                     setTimeout((): void => {
                         if (websocket && websocket.readyState === WebSocket.OPEN) {
                             if (document.hidden) {
                                 // Hidden on connect: stays paused until the next tab-show.
@@ -8388,7 +8459,7 @@ class WorkerWebSocket {
             // would pin a scarce hardware decode session.
         }
 
-        initializeAudio().then((kept: any): any => {
+        initializeAudio().then((kept: true | undefined): void => {
           if (!kept) initializeDecoderAudio();
         });
 
@@ -8414,7 +8485,7 @@ class WorkerWebSocket {
             armSharedStallWatchdog();
             if (websocket && websocket.readyState === WebSocket.OPEN) {
                  websocket.send('STOP_VIDEO');
-                 setTimeout((): any => {
+                 setTimeout((): void => {
                     if (websocket && websocket.readyState === WebSocket.OPEN) {
                         if (document.hidden) {
                             // Hidden on connect: stays paused until the next tab-show.
@@ -8445,7 +8516,7 @@ class WorkerWebSocket {
         streamStats.subscribe();
         if (firstFrameRecoveryTimer !== null) clearInterval(firstFrameRecoveryTimer);
         let firstFrameNudges = 0;
-        firstFrameRecoveryTimer = setInterval((): any => {
+        firstFrameRecoveryTimer = setInterval((): void => {
           if (streamStarted || !isVideoPipelineActive || codecRefusalUnanswerable || !websocket || websocket.readyState !== WebSocket.OPEN || firstFrameNudges >= 5) {
             clearInterval(firstFrameRecoveryTimer);
             firstFrameRecoveryTimer = null;
@@ -8482,7 +8553,7 @@ class WorkerWebSocket {
                       statusDisplayElement.classList.remove('hidden');
                   }
                   if (websocket) {
-                      websocket.onclose = (): any => {};
+                      websocket.onclose = (): void => {};
                       websocket.close();
                   }
                   stopReconnecting();
@@ -8683,9 +8754,9 @@ class WorkerWebSocket {
                  if (sharedClientState === 'ready' && dimensionsChanged) {
                    console.log(`Shared mode: Clearing decoders and canvas for new resolution.`);
                    clearAllVncStripeDecoders();
-                   if (canvasContext && canvas.width > 0 && canvas.height > 0) {
+                   if (canvasContext && canvas!.width > 0 && canvas!.height > 0) {
                      canvasContext.setTransform(1, 0, 0, 1, 0, 0);
-                     canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+                     canvasContext.clearRect(0, 0, canvas!.width, canvas!.height);
                    }
                  }
                } else {
@@ -8710,7 +8781,7 @@ class WorkerWebSocket {
                  if (requested) {
                    // This page's own request, which the buffer has not caught up with.
                    window.streamResolutionDiverged = false;
-                   resetCanvasStyle(lastRequestedStreamRes[2], lastRequestedStreamRes[3]);
+                   resetCanvasStyle(lastRequestedStreamRes![2], lastRequestedStreamRes![3]);
                  } else {
                    console.log(`Server realized stream resolution ${appliedWidth}x${appliedHeight} (canvas buffer ${canvas.width}x${canvas.height}); reconciling.`);
                    // CSS times the density no longer equals server pixels: input routes through the canvas box.
@@ -8870,7 +8941,7 @@ class WorkerWebSocket {
             audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
             if (websocket && websocket.setAudioActive) websocket.setAudioActive(false);
             audioDecoderWorker.postMessage({ type: 'close' });
-            setTimeout((): any => {
+            setTimeout((): void => {
               if (audioDecoderWorker) {
                 audioDecoderWorker.terminate();
                 audioDecoderWorker = null;
@@ -8918,13 +8989,13 @@ class WorkerWebSocket {
   };
 
   /** Inflates 0x05 frames and routes everything through `__rawWsMessage` in order (see `__wsCtrlChain`). */
-  const onSocketMessage = (event: any): any => {
+  const onSocketMessage = (event: SocketMessage): void => {
     const d = event.data;
     if (d instanceof ArrayBuffer) {
       if (d.byteLength >= 1 && new Uint8Array(d, 0, 1)[0] === 0x05) {
         __wsGzPending++;
         const gz = d.slice(1);
-        __wsCtrlChain = __wsCtrlChain.then(async (): Promise<any> => {
+        __wsCtrlChain = __wsCtrlChain.then(async (): Promise<void> => {
           try { __rawWsMessage({ data: await __inflateGz(gz) }); }
           catch (e) { console.error('[websockets] gzip control inflate failed:', e); }
           finally { __wsGzPending--; }
@@ -8939,13 +9010,13 @@ class WorkerWebSocket {
       return;
     }
     if (__wsGzPending > 0) {
-      __wsCtrlChain = __wsCtrlChain.then((): any => __rawWsMessage({ data: d }));
+      __wsCtrlChain = __wsCtrlChain.then((): void => __rawWsMessage({ data: d }));
     } else {
       __rawWsMessage({ data: d });
     }
   };
 
-  const onSocketError = (event: any): any => {
+  const onSocketError = (event: object): void => {
     console.error('[websockets] Error:', event);
     status = 'error';
     loadingText = 'WebSocket connection error.';
@@ -8976,7 +9047,7 @@ class WorkerWebSocket {
    * A drop with no close frame (1006: an ingress retiring its connections,
    * the network) of a socket that had held reopens at once.
    */
-  const onSocketClose = (event: any): any => {
+  const onSocketClose = (event: SocketClose): void => {
     console.log('[websockets] Connection closed', event);
     pageVisibilityWanted = false;
     streamStats.disconnected();
@@ -9033,7 +9104,7 @@ class WorkerWebSocket {
     isAudioPipelineActive = false;
     isMicrophoneActive = false;
     // What a drop that does not come back soon gives up.
-    const teardown = (): any => {
+    const teardown = (): void => {
       releaseWakeLock();
       if (audioDecoderWorker) {
         audioDecoderWorker.postMessage({
@@ -9051,7 +9122,7 @@ class WorkerWebSocket {
       // The gap is the sender's silence, not a late delivery to deepen the jitter target for.
       if (audioWorkletProcessorPort) audioWorkletProcessorPort.postMessage({ quiet: true });
       if (reconnectNoticeTimer === null) {
-        reconnectNoticeTimer = setTimeout((): any => {
+        reconnectNoticeTimer = setTimeout((): void => {
           reconnectNoticeTimer = null;
           if (streamStarted) return;
           endReconnectInPlace();
@@ -9095,15 +9166,15 @@ class WorkerWebSocket {
    * Binds the handlers above to the socket `openSessionSocket` made.
    * @returns
    */
-  const bindSessionSocket = (): any => {
-    gzipTextSends(websocket);
-    websocket.onopen = onSocketOpen;
-    websocket.onmessage = onSocketMessage;
-    websocket.onerror = onSocketError;
-    websocket.onclose = onSocketClose;
+  const bindSessionSocket = (): void => {
+    gzipTextSends(websocket!);
+    websocket!.onopen = onSocketOpen;
+    websocket!.onmessage = onSocketMessage;
+    websocket!.onerror = onSocketError;
+    websocket!.onclose = onSocketClose;
   };
   bindSessionSocket();
-  reopenSessionSocket = (): any => {
+  reopenSessionSocket = (): void => {
     openSessionSocket();
     bindSessionSocket();
   };
@@ -9137,7 +9208,7 @@ function scheduleReconnect(immediate: boolean = false): void {
     reopenInPlace(true);
     return;
   }
-  const timer = setTimeout(async (): Promise<any> => {
+  const timer = setTimeout(async (): Promise<void> => {
     if (window.__selkiesModeSwitching) { reconnectTimer = null; return; }
     // The same path derivation as the data socket, so the probe hits its route.
     const probeURL = new URL(window.location.href);
@@ -9165,15 +9236,15 @@ function scheduleReconnect(immediate: boolean = false): void {
 function reopenInPlace(unasked: boolean = false): void {
   if (!unasked) reconnectUnopened++;
   console.log(`[websockets] Reconnecting in place (attempt ${reconnectAttempts}).`);
-  reopenSessionSocket();
+  reopenSessionSocket!();
   // A path that swallows the handshake holds the socket connecting for minutes.
   const sock = websocket;
-  setTimeout((): any => {
-    if (websocket === sock && sock.readyState === WebSocket.CONNECTING) sock.close();
+  setTimeout((): void => {
+    if (websocket === sock && sock!.readyState === WebSocket.CONNECTING) sock!.close();
   }, RECONNECT_OPEN_MS);
 }
 
-window.addEventListener('online', (): any => {
+window.addEventListener('online', (): void => {
   if (reconnectTimer === null) return;
   stopReconnecting();
   reconnectAttempts = 0;
@@ -9237,7 +9308,7 @@ if (document.readyState === 'loading') {
  * Closes every queued JPEG stripe image and resets the frame-boundary blit
  * latch, which stale would blit the previous mode's back-buffer once.
  */
-function cleanupJpegStripeQueue(): any {
+function cleanupJpegStripeQueue(): void {
   let closedCount = 0;
   while (jpegStripeRenderQueue.length > 0) {
     const segment = jpegStripeRenderQueue.shift();
@@ -9914,7 +9985,7 @@ const micEncodeWorkerCode = `
  * has no audio session.
  * @param type 'playback' or 'play-and-record'.
  */
-function setAudioSessionType(type: string): any {
+function setAudioSessionType(type: string): void {
   try {
     if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type;
   } catch (e) { /* the engine refused the type */ }
@@ -9929,7 +10000,7 @@ function setAudioSessionType(type: string): any {
  * @param [askedByServer] The session asked rather than the user, so a refusal
  *   latches instead of raising a dialog.
  */
-async function startMicrophoneCapture(askedByServer: boolean = false): Promise<any> {
+async function startMicrophoneCapture(askedByServer: boolean = false): Promise<void> {
   if (isSharedMode) {
     console.log("Shared mode: Microphone capture blocked.");
     isMicrophoneActive = false;
@@ -9966,7 +10037,7 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<a
       micPending = null;
     }
     if (pending.withdrawn) {
-      stream.getTracks().forEach((track: any): any => track.stop());
+      stream.getTracks().forEach((track: MediaStreamTrack): void => track.stop());
       setAudioSessionType('playback');
       return;
     }
@@ -9982,11 +10053,11 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<a
     });
     try {
       micSourceNode = micAudioContext.createMediaStreamSource(micStream);
-    } catch (e: any) {
+    } catch (e) {
       // An engine that cannot resample a stream into a context of another
       // rate (Firefox before 148) refuses it at 24 kHz; at its default rate the
       // context runs at the stream's, and the capture worklet resamples.
-      if (e.name !== 'NotSupportedError') throw e;
+      if ((e as Error).name !== 'NotSupportedError') throw e;
       await micAudioContext.close();
       micAudioContext = new AudioContext();
       micSourceNode = micAudioContext.createMediaStreamSource(micStream);
@@ -9999,7 +10070,7 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<a
     const micEncodeWorkerURL = URL.createObjectURL(new Blob([micEncodeWorkerCode], { type: 'application/javascript' }));
     micEncodeWorker = new Worker(micEncodeWorkerURL);
     URL.revokeObjectURL(micEncodeWorkerURL);
-    micEncodeWorker.onmessage = (event: any): any => {
+    micEncodeWorker.onmessage = (event: MessageEvent): void => {
       const m = event.data;
       if (m.type === 'chunk') {
         if (!(websocket && websocket.readyState === WebSocket.OPEN && isMicrophoneActive)) return;
@@ -10010,7 +10081,7 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<a
         console.error("Mic AudioEncoder error:", m.message);
       }
     };
-    micEncodeWorker.onerror = (e: any): any => console.error("Mic encode worker error:", e && e.message);
+    micEncodeWorker.onerror = (e: ErrorEvent): void => console.error("Mic encode worker error:", e && e.message);
     micEncodeWorker.postMessage({ type: 'init', opusUrl: opusWasmUrl() });
     if (websocket && websocket.connectSend) {
       // Capture worklet -> encode worker -> socket worker, no page hop: a
@@ -10022,20 +10093,20 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<a
       micEncodeWorker.postMessage({ type: 'wirePort', port: wireLine.port1 }, [wireLine.port1]);
       websocket.connectSend(wireLine.port2);
     }
-    micWorkletNode.port.onmessage = (event: any): any => {
+    micWorkletNode.port.onmessage = (event: MessageEvent): void => {
       const pcm16Buffer = event.data;
       if (!(micEncodeWorker && isMicrophoneActive)) return;
       if (!pcm16Buffer || !(pcm16Buffer instanceof ArrayBuffer) || pcm16Buffer.byteLength === 0) return;
       try { micEncodeWorker.postMessage({ type: 'pcm', buffer: pcm16Buffer }, [pcm16Buffer]); }
       catch (e) { console.error("Mic PCM forward error:", e); }
     };
-    micWorkletNode.port.onmessageerror = (event: any): any => console.error("Error from mic worklet:", event);
+    micWorkletNode.port.onmessageerror = (event: MessageEvent): void => console.error("Error from mic worklet:", event);
     micSourceNode.connect(micWorkletNode);
     isMicrophoneActive = true;
     postSidebarButtonUpdate();
-  } catch (error: any) {
+  } catch (error) {
     console.error('Failed to start microphone capture:', error);
-    if (!askedByServer && !pending.withdrawn) alert(`Microphone error: ${error.name} - ${error.message}`);
+    if (!askedByServer && !pending.withdrawn) alert(`Microphone error: ${(error as Error).name} - ${(error as Error).message}`);
     else if (isCaptureRefusal(error)) micDemandRefused = true;
     stopMicrophoneCapture();
     // A refused request leaves the stop above nothing to release.
@@ -10048,7 +10119,7 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<a
  * context; a start still waiting on its permission prompt is withdrawn, so the
  * stream it gets is released at once.
  */
-function stopMicrophoneCapture(): any {
+function stopMicrophoneCapture(): void {
   if (micPending) micPending.withdrawn = true;
   if (!isMicrophoneActive && !micStream && !micAudioContext) {
     if (isMicrophoneActive) {
@@ -10058,7 +10129,7 @@ function stopMicrophoneCapture(): any {
     return;
   }
   if (micStream) {
-    micStream.getTracks().forEach((track: any): any => track.stop());
+    micStream.getTracks().forEach((track: MediaStreamTrack): void => track.stop());
     micStream = null;
   }
   if (micWorkletNode) {
@@ -10082,7 +10153,7 @@ function stopMicrophoneCapture(): any {
   }
   if (micAudioContext) {
     if (micAudioContext.state !== 'closed') {
-      micAudioContext.close().catch((e: any): any => console.error('Error closing mic AudioContext:', e)).finally((): any => micAudioContext = null);
+      micAudioContext.close().catch((e: unknown): void => console.error('Error closing mic AudioContext:', e)).finally((): null => micAudioContext = null);
     } else {
       micAudioContext = null;
     }
@@ -10123,13 +10194,13 @@ let webcamLastFrameBytes = 0;
  * @param [askedByServer] The session asked rather than the user, so a refusal
  *   latches instead of raising a dialog.
  */
-function startWebcamCapture(askedByServer: boolean = false): any {
+function startWebcamCapture(askedByServer: boolean = false): void {
   if (isSharedMode || webcamCapture) {
     return;
   }
   webcamCapture = new WebcamCapture({
     encoderPreference: webcamEncoderPreference,
-    sendFrame: (codec: any, keyframe: any, payload: any, rotation: any, flip: any): any => {
+    sendFrame: (codec: number, keyframe: boolean, payload: Uint8Array<ArrayBufferLike>, rotation: number | undefined, flip: boolean | undefined): void => {
       if (!(websocket && websocket.readyState === WebSocket.OPEN && isWebcamActive)) {
         return;
       }
@@ -10146,14 +10217,14 @@ function startWebcamCapture(askedByServer: boolean = false): any {
         console.error("Error sending webcam frame:", e);
       }
     },
-    canSend: (): any => !websocket
+    canSend: (): boolean => !websocket
       || websocket.bufferedAmount <= Math.max(
-        webcamCapture.bitrate / 8 * WEBCAM_QUEUE_MS / 1000, webcamLastFrameBytes),
-    onStateChange: (active: any): any => {
+        webcamCapture!.bitrate / 8 * WEBCAM_QUEUE_MS / 1000, webcamLastFrameBytes),
+    onStateChange: (active: boolean): void => {
       isWebcamActive = active;
       postSidebarButtonUpdate();
     },
-    onError: (error: any): any => {
+    onError: (error: Error): void => {
       console.error('Webcam capture error:', error);
       if (!askedByServer) alert(`Webcam error: ${error.name || 'Error'} - ${error.message || error}`);
       else if (isCaptureRefusal(error)) webcamDemandRefused = true;
@@ -10163,18 +10234,18 @@ function startWebcamCapture(askedByServer: boolean = false): any {
   if (websocket && websocket.connectWebcam) {
     // Encoded frames go encode worker -> socket worker directly; the socket
     // worker frames them and answers dropped-send gaps with a keyframe ask.
-    webcamCapture.setWireProvider((): any => {
+    webcamCapture.setWireProvider((): MessagePort | null => {
       if (!websocket || !websocket.connectWebcam) return null;
       const line = new MessageChannel();
       websocket.connectWebcam(line.port2);
       return line.port1;
     });
   }
-  webcamCapture.start(preferredWebcamDeviceId);
+  webcamCapture.start(preferredWebcamDeviceId!);
 }
 
 /** Stops the webcam uplink. */
-function stopWebcamCapture(): any {
+function stopWebcamCapture(): void {
   if (webcamCapture) {
     webcamCapture.stop();
     webcamCapture = null;
@@ -10186,7 +10257,7 @@ function stopWebcamCapture(): any {
 }
 
 /** Tears everything down on unload: timers, capture, socket, audio, decoders, and buffers, then resets the UI state. */
-function cleanup(): any {
+function cleanup(): void {
   if (metricsIntervalId) {
     clearInterval(metricsIntervalId);
     metricsIntervalId = null;
@@ -10214,7 +10285,7 @@ function cleanup(): any {
     videoDivertOn = false;
   }
   if (audioContext) {
-    if (audioContext.state !== 'closed') audioContext.close().catch((e: any): any => console.error('Cleanup error:', e));
+    if (audioContext.state !== 'closed') audioContext.close().catch((e: unknown): void => console.error('Cleanup error:', e));
     audioContext = null;
     releaseOutputRoute();
     audioWorkletNode = null;
@@ -10257,7 +10328,7 @@ function cleanup(): any {
  * mode, clearing the canvas for the modes that repaint it whole.
  * @param [reason] Logged.
  */
-function performServerInitiatedVideoReset(reason: string = "unknown"): any {
+function performServerInitiatedVideoReset(reason: string = "unknown"): void {
   console.log(`Performing server-initiated video reset. Reason: ${reason}. Current lastReceivedVideoFrameId before reset: ${lastReceivedVideoFrameId}`);
 
   lastReceivedVideoFrameId = -1;
@@ -10292,7 +10363,7 @@ function performServerInitiatedVideoReset(reason: string = "unknown"): any {
 }
 
 /** Tells the server the decoder let frame `id` go, so the encoder predicts past it (`LOST_FRAME`). */
-function sendLostFrame(id: any): any {
+function sendLostFrame(id: number): void {
     if (websocket && websocket.readyState === WebSocket.OPEN) {
         websocket.send(`LOST_FRAME ${id}`);
         requests.lost++;
@@ -10306,7 +10377,7 @@ let lastKeyframeRequestTime = 0;
  * infinite, so this is the only recovery path and shared viewers request
  * too; debounced here, harder for shared viewers, and rate-limited server-side.
  */
-function requestKeyframe(): any {
+function requestKeyframe(): void {
     // A stream this browser cannot decode, whose encoder it cannot change, is not helped by one.
     if (codecRefusalUnanswerable) return;
     const now = performance.now();
@@ -10325,7 +10396,7 @@ function requestKeyframe(): any {
  * the paths that own them, and a worker decoder disqualified by the same
  * broken path gets its turn back.
  */
-function restartDecodersForAcceleration(): any {
+function restartDecodersForAcceleration(): void {
     workerDecoderCodec = null; workerDecoderW = 0; workerDecoderH = 0;
     workerKeyframeCodec = null;
     workerDecodeFailed = false;
@@ -10351,7 +10422,7 @@ function restartDecodersForAcceleration(): any {
  * @param error
  * @param context Which decoder failed.
  */
-function initiateFallback(error: Error | DOMException, context: string): any {
+function initiateFallback(error: Error | DOMException, context: string): void {
     if (error.name === 'QuotaExceededError' || (error.message && error.message.includes('reclaimed'))) {
         console.warn(`[initiateFallback] Ignoring soft error (Context: ${context}): Codec reclaimed by browser. Waiting for tab focus to re-initialize.`);
         return;
@@ -10437,7 +10508,7 @@ function initiateFallback(error: Error | DOMException, context: string): any {
             statusDisplayElement.classList.remove('hidden');
         }
     }
-    setTimeout((): any => {
+    setTimeout((): void => {
         window.location.reload();
     }, 3000);
 }
@@ -10471,7 +10542,7 @@ function runPreflightChecks(): boolean {
 }
 
 /** Pins the jpeg encoder, the fallback ladder's last rung. */
-function pinJpegEncoder(): any {
+function pinJpegEncoder(): void {
     currentEncoderMode = 'jpeg';
     storeFallbackEncoder('jpeg', 'no WebCodecs VideoDecoder');
 }

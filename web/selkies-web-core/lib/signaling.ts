@@ -161,11 +161,11 @@ export class WebRTCSignaling {
     peer_type = "client";
 
     /** `'viewer'` or `'controller'`. */
-    client_type: string;
+    client_type: string | null;
 
     server_peer_id: string | null = null;
 
-    client_slot: number;
+    client_slot: number | null;
 
     client_strict_viewer: boolean;
 
@@ -191,7 +191,7 @@ export class WebRTCSignaling {
      * @param display_position Where a secondary display sits relative
      *     to the primary in the extended desktop, `'right'` by default.
      */
-    constructor(server: URL, client_type: string, client_slot: number, client_strict_viewer: boolean, client_token: string | undefined, display_id: string, display_position: string) {
+    constructor(server: URL, client_type: string | null, client_slot: number | null, client_strict_viewer: boolean, client_token: string | undefined, display_id: string, display_position: string) {
         this._server = server;
         this.client_type = client_type;
         this.client_slot = client_slot;

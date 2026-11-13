@@ -142,6 +142,14 @@ export interface ServerSettingEntry {
   value: unknown;
   locked?: boolean;
   overridden?: boolean;
+  /** The values an enumerated setting takes. */
+  allowed?: string[];
+  /** The lowest value a ranged setting takes. */
+  min?: number;
+  /** The highest value a ranged setting takes. */
+  max?: number;
+  /** The value a ranged setting starts from. */
+  default?: unknown;
 }
 
 /** Input to `resolveConditionalSetting`. */

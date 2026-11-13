@@ -15,11 +15,7 @@
  * @module
  */
 
-/** The server's overridable `ui_title` setting entry. */
-interface TitleSetting {
-  value: unknown;
-  overridden: boolean;
-}
+import type { ServerSettingEntry } from './conditional-settings.ts';
 
 let operatorTitle = '';
 
@@ -43,7 +39,7 @@ export function titleFromManifest(): void {
  * Names the tab after `ui_title` when the operator set it.
  * @param settings The server's settings payload.
  */
-export function titleFromSettings(settings: Record<string, TitleSetting>): void {
+export function titleFromSettings(settings: Record<string, ServerSettingEntry>): void {
   const title = settings.ui_title;
   if (!title || !title.overridden || !title.value) return;
   operatorTitle = String(title.value);

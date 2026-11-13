@@ -57,6 +57,8 @@ export interface StreamInfo {
   codec: string;
   fullcolor: boolean;
   bit_depth?: number;
+  /** Whether the stream is encoded full range. */
+  full_range?: boolean;
   striped: boolean;
   gpu: string;
   driver: string;

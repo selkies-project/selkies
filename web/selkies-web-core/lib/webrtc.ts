@@ -142,7 +142,7 @@ export type DataChannelMessage =
 	| { type: 'cc_rate'; data?: { kbps: number } | null };
 
 /** A codec report, which the DOM typings leave out. */
-interface CodecStats extends RTCStats {
+export interface CodecStats extends RTCStats {
 	mimeType: string;
 	sdpFmtpLine?: string;
 }
@@ -156,7 +156,7 @@ interface DataChannelStats extends RTCStats {
 }
 
 /** A candidate report, which the DOM typings leave out. */
-interface CandidateStats extends RTCStats {
+export interface CandidateStats extends RTCStats {
 	candidateType: string;
 	protocol?: string;
 	relayProtocol?: string;
