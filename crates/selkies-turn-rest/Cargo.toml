@@ -1,0 +1,29 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "selkies-turn-rest"
+description = "The TURN REST credential service of the turn-rest image: time-limited HMAC-SHA1 TURN credentials minted from a shared secret."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The crates the server serves HTTP and signs with, at its versions.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
+base64 = "0.23"
+libc = "0.2"
+percent-encoding = "2"
+serde_json = "1"
+socket2 = "0.6"
+
+[dev-dependencies]
+# The server's TURN REST client, held against the service it queries.
+selkies-rtc = { path = "../selkies-rtc" }
+tokio = { version = "1", features = ["macros"] }
+tower = { version = "0.5", features = ["util"] }

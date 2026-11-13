@@ -5,7 +5,8 @@ stack, `crates/pixelflux` its screen-capture and video-encode library, `crates/p
 encode library, `crates/selkies-wm` the window manager the server runs under `--wm` (the window policy of
 pixelflux's compositor on Wayland, an x11rb manager on X11), `crates/selkies-draw` the one rasterizer the window
 manager's frames and menus and the desktop shell draw with, and `crates/selkies-desktop` that shell, its own
-binary the server starts under `--desktop`. The server links both native libraries directly as Rust crates,
+binary the server starts under `--desktop`; `crates/selkies-turn-rest` is the TURN REST credential service the
+`turn-rest` image runs, a binary of its own that shares none of the server's code. The server links both native libraries directly as Rust crates,
 without Python. Their optional PyO3 features are only for standalone wheels. The web client is under `web/`: `selkies-web-core` (the streaming
 core), `selkies-dashboard` (the dashboard built on it), and `universal-touch-gamepad`; `addons/` holds what
 runs beside Selkies rather than in it: the interposers, `fake-udev`, the images, and the integrations.

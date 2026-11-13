@@ -3767,6 +3767,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "selkies-turn-rest"
+version = "0.0.0"
+dependencies = [
+ "aws-lc-rs",
+ "axum",
+ "base64 0.23.1",
+ "libc",
+ "percent-encoding",
+ "selkies-rtc",
+ "serde_json",
+ "socket2",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "selkies-wm"
 version = "0.0.0"
 dependencies = [

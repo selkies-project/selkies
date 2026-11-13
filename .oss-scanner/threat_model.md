@@ -134,6 +134,13 @@
   `SELKIES_DESKTOP_<KEY>` environment over both; the `terminals`, `run_command`, and `settings` keys only leave
   entries out of its menus and its launcher, which the session user can still get around by running a program
   any other way, so an image that must keep a user from a terminal removes the binaries' permissions as well.
+- In scope but lower, as well: the TURN REST credential service (`crates/selkies-turn-rest`, the `turn-rest`
+  image), a process and a listener of its own (port 8008) that no desktop runs. Its one route answers any peer
+  that reaches it with a time-limited TURN credential, or, with `TURN_API_KEY` set, only a request carrying that
+  key (compared in constant time). It holds the TURN server's shared secret, which no response carries; a request
+  chooses only the user name, the transport, and the TLS flag of the credential, never the relay or the lifetime,
+  and its body is read up to 1 MiB. Without a key it mints for whoever reaches it, by design: such a deployment
+  keeps it on a private network or behind a proxy.
 - Out of scope: `website/`, `docs/`, `infra/`, and the prebuilt third-party wheels and patches in `addons/base`.
 
 ## How to exercise it

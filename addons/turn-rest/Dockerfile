@@ -2,16 +2,34 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-FROM python:3-alpine
+# The TURN REST credential service (crates/selkies-turn-rest), built from the
+# repository root: docker build -f addons/turn-rest/Dockerfile .
+FROM rust:1-alpine AS build
 
-ARG PIP_BREAK_SYSTEM_PACKAGES="1"
-RUN pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall flask gunicorn
+# AWS-LC, the service's HMAC, is compiled from the source its crate vendors.
+# apk has no retry option of its own, so the one package fetch this image makes
+# is bounded-retried in the shell rather than left to fail the build outright.
+RUN i=1; until apk add --no-cache build-base cmake; do \
+        [ "$i" -ge 5 ] && exit 1; \
+        i=$((i+1)); sleep 5; \
+    done
 
-COPY app.py gunicorn.conf.py /etc
+WORKDIR /build
 
-WORKDIR /etc
+# The workspace's manifest and lockfile and every member they name; only the
+# service and the crates it depends on are compiled.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release --locked -p selkies-turn-rest
 
-# Gunicorn environment variables, number of workers
+FROM alpine:3
+
+COPY --from=build /build/target/release/selkies-turn-rest /usr/local/bin/selkies-turn-rest
+
+# The published port is the container's boundary, so the service listens on
+# every interface of both families; a kernel without IPv6 serves IPv4 alone.
+ENV TURN_REST_ADDR="0.0.0.0,::"
+# Number of worker threads
 ENV WEB_CONCURRENCY="3"
 # Replace environment with customized TURN server
 ENV TURN_SHARED_SECRET="openrelayprojectsecret"
@@ -28,6 +46,4 @@ EXPOSE 8008
 # from the image; the service reads only its environment and binds above 1024.
 USER 65534:65534
 
-# The listen address comes from gunicorn.conf.py. No control socket: it would
-# live under the home of a user that has none, and nothing here drives it.
-CMD ["sh", "-c", "python -m gunicorn --worker-class=gthread --workers=1 --threads=${WEB_CONCURRENCY:-3} --no-control-socket app:app"]
+CMD ["selkies-turn-rest"]

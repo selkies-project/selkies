@@ -1,4 +1,5 @@
-# Both Dockerfiles build from the repository root, so keep the context small.
+# The wheel's, the base image's, and the TURN REST image's Dockerfiles build
+# from the repository root, so keep the context small.
 # npm dependencies and every generated bundle are rebuilt inside the image.
 .git
 **/.git

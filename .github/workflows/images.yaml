@@ -294,11 +294,14 @@ jobs:
         id: build
         uses: ./.github/actions/build-push
         with:
-          context: addons/${{ matrix.addon }}
+          # The TURN REST service is a crate of the workspace, so its image
+          # builds from the repository root
+          context: ${{ matrix.addon == 'turn-rest' && '.' || format('addons/{0}', matrix.addon) }}
+          file: addons/${{ matrix.addon }}/Dockerfile
           platforms: ${{ matrix.arch.platform }}
           outputs: type=image,"name=${{ env.REGISTRY_NAMESPACE }}/${{ matrix.addon }}",push-by-digest=true,name-canonical=true,push=true
-          # Small enough to build whole every time, so a pip or base-image
-          # update upstream is never answered from a cached layer
+          # Small enough to build whole every time, so a package or
+          # base-image update upstream is never answered from a cached layer
           no-cache: "true"
           cache-scope: ${{ matrix.addon }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}

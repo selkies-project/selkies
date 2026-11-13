@@ -15,6 +15,7 @@ members = [
     "crates/selkies-draw",
     "crates/selkies-desktop",
     "crates/pelorus",
+    "crates/selkies-turn-rest",
 ]
 default-members = ["crates/selkies", "crates/selkies-rtc", "crates/selkies-desktop"]
 exclude = [
