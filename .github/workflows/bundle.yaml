@@ -1,0 +1,126 @@
+name: Bundle
+# The Selkies bundle, selkies-<version>-<arch>-linux-<gnu|musl>.tar.gz: one
+# directory tree carrying the server, the desktop shell, the X servers,
+# PulseAudio, dbus-daemon, CUPS, and the interposers, built once for each C
+# library and architecture (infra/bundle/build.sh) and the build every other
+# channel repackages. glibc's is built in manylinux_2_28, whose glibc 2.28 is
+# its floor, musl's in musllinux_1_2. Each is checked on a bare host of its C
+# library, where nothing of what it carries is installed: the session it
+# starts has to come up and answer.
+# Called by build-wheel.yaml, which repackages the bundles as wheels and leaves
+# them in the run for packages.yaml; can also be run standalone.
+on:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: Version string stamped into the bundles
+        type: string
+        default: 0.0.0.dev0
+  workflow_call:
+    inputs:
+      package_version:
+        description: Version string stamped into the bundles
+        type: string
+        default: 0.0.0.dev0
+permissions:
+  contents: read
+env:
+  NODE_VERSION: "26"
+jobs:
+  web:
+    name: Web client for the bundles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            web/selkies-web-core/package-lock.json
+            web/selkies-dashboard/package-lock.json
+      - name: Build the web client bundle
+        env:
+          # For the controller database's lookups (gendb.ts)
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/ci/build-web.sh
+          tar -C dist -cf selkies-web-client.tar web
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundle-web-client
+          path: selkies-web-client.tar
+          if-no-files-found: error
+          retention-days: 1
+  bundle:
+    name: Bundle (${{ matrix.libc.name }}, ${{ matrix.arch.name }})
+    needs: web
+    runs-on: ${{ matrix.arch.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - name: x86_64
+            runner: ubuntu-latest
+          - name: aarch64
+            runner: ubuntu-26.04-arm
+        libc:
+          - name: glibc
+            host: debian:stable-slim
+            setup: apt-get update -qq > /dev/null && apt-get install -y -qq curl procps > /dev/null
+          - name: musl
+            host: alpine:3.22
+            setup: apk add --no-cache -q bash curl procps
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: false
+          remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
+          remove_packages_one_command: true
+          remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
+      - name: Download the web client
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle-web-client
+      - name: Unpack the web client into dist/web
+        run: mkdir -p dist && tar -C dist -xf selkies-web-client.tar && rm selkies-web-client.tar
+      - name: Build the bundle
+        env:
+          SELKIES_VERSION: ${{ inputs.package_version }}
+        run: ./infra/bundle/build.sh out "${{ matrix.libc.name }}"
+      - name: Start a session from the bundle on a bare host
+        # Nothing the bundle carries is installed on the host: the session's
+        # buses, sound server, and X server are the bundle's, and its server has
+        # to answer
+        run: |
+          scripts/ci/retry.sh 5 60 docker pull "${{ matrix.libc.host }}"
+          mkdir -p unpacked && tar -C unpacked -xzf out/selkies-*.tar.gz
+          docker run --rm -v "${GITHUB_WORKSPACE}/unpacked:/opt:ro" "${{ matrix.libc.host }}" sh -c '
+            ${{ matrix.libc.setup }}
+            adduser -D u 2> /dev/null || useradd -m u
+            mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+            selkies="$(echo /opt/selkies-*/bin/selkies)"
+            "${selkies}" --version
+            su u -c "XDG_RUNTIME_DIR=/tmp ${selkies} session --runtime-dir /tmp/xdg --session \"sleep 600\" -- --port=8080 --enable-basic-auth=false > /tmp/log 2>&1 &"
+            for _ in $(seq 1 60); do
+              curl -fs http://127.0.0.1:8080/api/health > /dev/null && break
+              sleep 1
+            done
+            cat /tmp/log
+            curl -fs http://127.0.0.1:8080/api/health'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundle-${{ matrix.libc.name }}-${{ matrix.arch.name }}
+          path: out/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14

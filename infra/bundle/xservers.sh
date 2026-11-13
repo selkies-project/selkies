@@ -15,7 +15,14 @@
 # and linked in, the only shared libraries they need are glibc's, and libgbm,
 # which only the host can supply, is reached through a loader that opens it at
 # run time and leaves the server in software where the host has none
-# (gbm-loader.c). They find their xkb data and xkbcomp relative to their own
+# (gbm-loader.c). Their GL goes through libepoxy, which opens libEGL.so.1 at
+# run time: on glibc that is the bundle's libglvnd, which their run path finds
+# in lib/selkies and which hands every call to the host's driver through the
+# vendor files the driver installs. glvnd is the one library they share with a
+# driver that is carried anyway, because its vendor interface is the one both
+# sides keep compatible, a host's own glvnd is not a given (a container runtime
+# injects a driver's vendor libraries alone), and the server's process takes
+# the same copy. musl's has none: Alpine's Mesa is its own libEGL. They find their xkb data and xkbcomp relative to their own
 # directory (patches/*-relative-xkb.patch), their font path is the built-in
 # fonts, and their compiled keymaps go to the runtime directory, so the tree
 # runs wherever it is unpacked.
@@ -75,14 +82,17 @@ mesonbuild() {
     ninja -C "${dir}/build" install > /dev/null
 }
 
+if ldd --version 2>&1 | grep -qi musl; then LIBC=musl; else LIBC=gnu; fi
+
 # The servers as an earlier run built them, where nothing they are built from
 # has changed since
 KEY="$(cat "$0" "${REPO}"/infra/bundle/*-loader.c "${REPO}"/infra/bundle/patches/*.patch \
     "${REPO}"/addons/base/patches/xvfb-*.patch | sha256sum | cut -c1-16)"
 BUILT="${BUILD}/built-${KEY}"
 if [ -d "${BUILT}" ]; then
-    mkdir -p "${TREE}/libexec/selkies" "${TREE}/share/selkies"
+    mkdir -p "${TREE}/libexec/selkies" "${TREE}/share/selkies" "${TREE}/lib/selkies"
     cp -a "${BUILT}/libexec/selkies/." "${TREE}/libexec/selkies/"
+    cp -a "${BUILT}/lib/selkies/." "${TREE}/lib/selkies/"
     rm -rf "${TREE}/share/selkies/xkb"
     cp -a "${BUILT}/share/selkies/xkb" "${TREE}/share/selkies/xkb"
     exit 0
@@ -176,7 +186,7 @@ fi
 # The libgbm loader, found by pkg-config in place of the host's libgbm
 cc -O2 -fPIC -c "${REPO}/infra/bundle/gbm-loader.c" -o "${BUILD}/gbm-loader.o"
 ar rcs "${DEPS}/lib/libgbm.a" "${BUILD}/gbm-loader.o"
-gbm_version="$(pkg-config --modversion --with-path=/usr/lib64/pkgconfig gbm 2> /dev/null || echo 23.1.4)"
+gbm_version="$(PKG_CONFIG_PATH='' pkg-config --modversion gbm 2> /dev/null || echo 23.1.4)"
 cat > "${DEPS}/lib/pkgconfig/gbm.pc" <<EOF
 prefix=${DEPS}
 libdir=\${prefix}/lib
@@ -208,6 +218,24 @@ Libs.private: -ldl -lpthread
 Cflags: -I\${includedir}
 EOF
 
+# libglvnd's EGL and GL front ends, reading the vendor files the host's drivers
+# install under /etc and /usr/share, each finding the others beside it
+mkdir -p "${TREE}/lib/selkies"
+if [ "${LIBC}" = gnu ]; then
+    d="$(fetch https://gitlab.freedesktop.org/glvnd/libglvnd/-/archive/v1.7.0/libglvnd-v1.7.0.tar.gz \
+        2b6e15b06aafb4c0b6e2348124808cbd9b291c647299eaaba2e3202f51ff2f3d)"
+    meson setup "${d}/build" "${d}" --prefix=/usr --sysconfdir=/etc --libdir=lib \
+        --buildtype=release --wrap-mode=nodownload -Dx11=disabled -Dglx=disabled -Dheaders=false
+    DESTDIR="${BUILD}/glvnd" ninja -C "${d}/build" install > /dev/null
+    for lib in libEGL.so.1 libGLdispatch.so.0 libGLESv2.so.2 libGLESv1_CM.so.1 libOpenGL.so.0; do
+        cp -L "${BUILD}/glvnd/usr/lib/${lib}" "${TREE}/lib/selkies/${lib}"
+        patchelf --set-rpath "\$ORIGIN" "${TREE}/lib/selkies/${lib}"
+    done
+fi
+
+# The servers' libEGL.so.1 beside the rest of the bundle's libraries
+RUNPATH_FLAGS="-Wl,--enable-new-dtags -Wl,-rpath,\$ORIGIN/../../lib/selkies"
+
 # Paths the servers resolve against their own directory, libexec/selkies
 XKB_ARGS="-Dxkb_dir=../../share/selkies/xkb -Dxkb_bin_dir=. -Dxkb_output_dir=/var/lib/xkb \
     -Ddefault_font_path=built-ins -Dsha1=libnettle -Dxdmcp=false -Dxdm-auth-1=false \
@@ -217,8 +245,8 @@ d="$(fetch https://xorg.freedesktop.org/archive/individual/xserver/xwayland-24.1
     7311b4bcda22cfc19cb99680eb1c35cfc1ea885981310639f0429fe2948c122e)"
 patch -d "${d}" -p1 < "${REPO}/infra/bundle/patches/xwayland-relative-xkb.patch"
 # shellcheck disable=SC2086  # XKB_ARGS is a list of options
-meson setup "${d}/build" "${d}" --buildtype=release -Dprefer_static=true --wrap-mode=nodownload \
-    ${XKB_ARGS} -Dxvfb=false -Dglamor=true -Ddri3=true -Dglx=true -Dxwayland_ei=false \
+LDFLAGS="${RUNPATH_FLAGS}" meson setup "${d}/build" "${d}" --buildtype=release -Dprefer_static=true \
+    --wrap-mode=nodownload ${XKB_ARGS} -Dxvfb=false -Dglamor=true -Ddri3=true -Dglx=true -Dxwayland_ei=false \
     -Dlibdecor=false -Dsecure-rpc=false -Dsystemd_notify=false -Ddocs-pdf=false -Dxcsecurity=true
 ninja -C "${d}/build" hw/xwayland/Xwayland
 install -Dm755 "${d}/build/hw/xwayland/Xwayland" "${TREE}/libexec/selkies/Xwayland"
@@ -230,8 +258,8 @@ for p in "${REPO}"/addons/base/patches/xvfb-*.patch "${REPO}"/infra/bundle/patch
     patch -d "${d}" -p1 < "${p}"
 done
 # shellcheck disable=SC2086  # XKB_ARGS is a list of options
-meson setup "${d}/build" "${d}" --buildtype=release -Dprefer_static=true --wrap-mode=nodownload \
-    ${XKB_ARGS} -Dxvfb=true -Dglamor=true -Dgbm=true -Ddri3=true -Dglx=true -Dxcsecurity=true \
+LDFLAGS="${RUNPATH_FLAGS}" meson setup "${d}/build" "${d}" --buildtype=release -Dprefer_static=true \
+    --wrap-mode=nodownload ${XKB_ARGS} -Dxvfb=true -Dglamor=true -Dgbm=true -Ddri3=true -Dglx=true -Dxcsecurity=true \
     -Dxorg=false -Dxnest=false -Dxephyr=false -Dxwin=false -Dxquartz=false -Dxfbdev=false \
     -Dudev=false -Dudev_kms=false -Dsystemd_logind=false -Dseatd_libseat=false -Dpciaccess=false \
     -Dtests=false
@@ -262,12 +290,18 @@ test -f "${TREE}/share/selkies/xkb/rules/evdev"
 # the server's process, or a library a bare host lacks
 for bin in Xvfb Xwayland xkbcomp; do
     other="$(readelf -d "${TREE}/libexec/selkies/${bin}" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' \
-        | grep -vxE 'lib(c|m|dl|pthread|rt)\.so\.[0-9]+|ld-linux[-a-z0-9_]*\.so\.[0-9]+' || true)"
+        | grep -vxE 'lib(c|m|dl|pthread|rt)\.so\.[0-9]+|ld-linux[-a-z0-9_]*\.so\.[0-9]+|(ld|libc)\.musl-[a-z0-9_]+\.so\.1' || true)"
     [ -z "${other}" ] || { echo "${bin} links ${other}" >&2; exit 1; }
+done
+for bin in Xvfb Xwayland; do
+    readelf -d "${TREE}/libexec/selkies/${bin}" | grep -F 'RUNPATH' | grep -qF "\$ORIGIN/../../lib/selkies"
 done
 
 rm -rf "${BUILD}"/built-*
-mkdir -p "${BUILT}/libexec/selkies" "${BUILT}/share/selkies"
+mkdir -p "${BUILT}/libexec/selkies" "${BUILT}/share/selkies" "${BUILT}/lib/selkies"
+for lib in libEGL.so.1 libGLdispatch.so.0 libGLESv2.so.2 libGLESv1_CM.so.1 libOpenGL.so.0; do
+    [ ! -f "${TREE}/lib/selkies/${lib}" ] || cp -a "${TREE}/lib/selkies/${lib}" "${BUILT}/lib/selkies/"
+done
 for bin in Xvfb Xwayland xkbcomp; do
     cp -a "${TREE}/libexec/selkies/${bin}" "${BUILT}/libexec/selkies/"
 done

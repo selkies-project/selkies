@@ -3,9 +3,9 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Assemble the Selkies bundle, selkies-<version>-linux-<arch>.tar.gz: one
-# directory tree that runs a whole session on a host providing glibc, the
-# kernel, and, for the GPU, its driver, unpacked anywhere
+# Assemble the Selkies bundle, selkies-<version>-<arch>-linux-<gnu|musl>.tar.gz:
+# one directory tree that runs a whole session on a host providing its C
+# library, the kernel, and, for the GPU, its driver, unpacked anywhere
 # (crates/selkies/src/commands/bundle.rs reads it):
 #
 #   bin/selkies, bin/selkies-desktop
@@ -13,17 +13,19 @@
 #                     cups/, the print queue's scheduler (cups.sh)
 #   lib/selkies/      the libraries those link that are not glibc's or the GPU
 #                     driver's, pulse/modules/, and preload/, the interposers
-#   share/selkies/    the xkb data, the buses' configuration, and the logo
+#   share/selkies/    the xkb data, the buses' configuration, the logo, and fonts/,
+#                     the shell's UI face
 #
 # Every program finds its libraries through a run path relative to itself
 # ($ORIGIN), a RUNPATH rather than an RPATH, so it binds that program's own
 # lookups alone and never the libraries a host's GPU driver loads into the same
 # process. What only the host can supply stays the host's: glibc, libstdc++ and
-# libgcc_s, and the graphics stack (libgbm is reached through gbm-loader.c, the
+# libgcc_s, which every glibc distribution installs (musl's are carried, since
+# Alpine installs neither), and the graphics stack (libgbm is reached through gbm-loader.c, the
 # rest is loaded at run time). The X servers carry nothing of their own at all.
 #
-# Runs inside the manylinux_2_28 image (infra/bundle/build.sh), whose glibc is
-# the bundle's floor. PulseAudio and dbus-daemon are the image's distribution's
+# Runs inside the manylinux_2_28 or musllinux_1_2 image (infra/bundle/build.sh),
+# whose C library is the bundle's floor. PulseAudio and dbus-daemon are the image's distribution's
 # builds with their libraries alongside; the server, the shell, and the
 # interposers are built from this tree, the codecs from SELKIES_CODECS where
 # set (scripts/ci/build-codecs.sh), else built here.
@@ -36,7 +38,8 @@ BUILD="${SELKIES_BUILD_DIR:-/build}"
 export SELKIES_BUILD_DIR="${BUILD}"
 ARCH="$(uname -m)"
 VERSION="${SELKIES_VERSION:-0.0.0}"
-NAME="selkies-${VERSION}-linux-${ARCH}"
+if ldd --version 2>&1 | grep -qi musl; then LIBC=musl; else LIBC=gnu; fi
+NAME="selkies-${VERSION}-${ARCH}-linux-${LIBC}"
 TREE="${BUILD}/bundle/${NAME}"
 rm -rf "${BUILD}/bundle"
 mkdir -p "${TREE}/bin" "${TREE}/libexec/selkies" "${TREE}/lib/selkies/pulse/modules" \
@@ -66,7 +69,7 @@ cp "${BUILD}/xservers/deps/lib/libgbm.a" "${BUILD}/xservers/deps/lib/libpixman-1
 export LIBRARY_PATH="${STATIC}:${LIBRARY_PATH}"
 # The build image's own link names would be found first on the search path the
 # crates' build scripts add; this image is thrown away with them
-rm -f /usr/lib64/libgbm.so /usr/lib64/libpixman-1.so
+rm -f /usr/lib64/libgbm.so /usr/lib64/libpixman-1.so /usr/lib/libgbm.so /usr/lib/libpixman-1.so
 # The server's libraries beside it, as a RUNPATH binding its own lookups alone
 export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-C link-arg=-Wl,--enable-new-dtags -C link-arg=-Wl,-rpath,\$ORIGIN/../lib/selkies"
 "${REPO}/infra/packaging/server.sh" "${BUILD}/server-root"
@@ -82,7 +85,7 @@ install -Dm755 "${BUILD}/target/${PROFILE}/selkies-desktop" "${TREE}/bin/selkies
 # PulseAudio with the modules Selkies loads, and the distribution's dbus-daemon
 # with its configuration
 install -m755 /usr/bin/pulseaudio /usr/bin/dbus-daemon "${TREE}/libexec/selkies/"
-modules="$(dirname "$(find /usr/lib64 -name module-null-sink.so | head -n 1)")"
+modules="$(dirname "$(find /usr/lib64 /usr/lib -name module-null-sink.so 2> /dev/null | head -n 1)")"
 for module in module-native-protocol-unix module-always-sink module-null-sink module-virtual-source; do
     install -m755 "${modules}/${module}.so" "${TREE}/lib/selkies/pulse/modules/"
 done
@@ -90,6 +93,27 @@ done
 # where the image installs none of its own
 install -m644 "${REPO}/docs/assets/logo/selkies.svg" "${TREE}/share/selkies/icon.svg"
 install -m644 "${REPO}/docs/assets/logo/mark-512x512.png" "${TREE}/share/selkies/icon.png"
+# The face the shell and the window manager draw their text in, Inter (SIL Open
+# Font License), which the drawing library adds to the host's fonts: a host can
+# have none at all
+CACHE="${SELKIES_SOURCE_CACHE:-${BUILD}/sources}"
+mkdir -p "${CACHE}" "${TREE}/share/selkies/fonts"
+if [ ! -f "${CACHE}/Inter-4.1.zip" ]; then
+    curl -fsSL --retry 5 --connect-timeout 30 -o "${CACHE}/Inter-4.1.zip.part" \
+        https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
+    mv "${CACHE}/Inter-4.1.zip.part" "${CACHE}/Inter-4.1.zip"
+fi
+echo "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e  ${CACHE}/Inter-4.1.zip" \
+    | sha256sum -c -
+python3 - "${CACHE}/Inter-4.1.zip" "${TREE}/share/selkies/fonts" <<'PY'
+import sys, zipfile
+names = {"extras/ttf/Inter-Regular.ttf": "Inter-Regular.ttf",
+         "extras/ttf/Inter-Bold.ttf": "Inter-Bold.ttf", "LICENSE.txt": "Inter-LICENSE.txt"}
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    for member, name in names.items():
+        with open(f"{sys.argv[2]}/{name}", "wb") as out:
+            out.write(archive.read(member))
+PY
 cp /usr/share/dbus-1/session.conf "${TREE}/share/selkies/dbus-1/"
 # The session's system bus: the distribution's configuration names the account
 # the daemon drops to, which the daemon looks up even when it never drops, and
@@ -141,9 +165,12 @@ if echo 'int main(void){return 0;}' | gcc -m32 -x c - -o /dev/null 2> /dev/null;
     build_interposers _32 -m32
 fi
 
-# The libraries every program and module links, but for glibc's, libstdc++ and
-# libgcc_s, and the graphics stack, each copied once under its soname
-HOST_LIBS='^(ld-linux.*|linux-vdso|lib(c|m|dl|pthread|rt|resolv|util|mvec|anl|nsl|crypt|BrokenLocale|gcc_s|stdc\+\+)|lib(GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]_CM|GLESv2|gbm|drm|vulkan|va|va-drm|va-x11|va-wayland|cuda|nvidia-.*))\.so'
+# The libraries every program and module links, but for the C library's, glibc's
+# C++ runtime, and the graphics stack, each copied once under its soname.
+# libcrypt is carried: distributions moved it to a compat package with soname 2.
+CXX_RUNTIME='|gcc_s|stdc\+\+'
+[ "${LIBC}" = gnu ] || CXX_RUNTIME=''
+HOST_LIBS="^(ld-linux.*|ld-musl.*|libc\\.musl.*|linux-vdso|lib(c|m|dl|pthread|rt|resolv|util|mvec|anl|nsl|BrokenLocale${CXX_RUNTIME})|lib(GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]_CM|GLESv2|gbm|drm|vulkan|va|va-drm|va-x11|va-wayland|cuda|nvidia-.*))\\.so"
 LIBDIR="${TREE}/lib/selkies"
 queue="$(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}/pulse/modules" -type f \
     -exec sh -c 'head -c4 "$1" | grep -q ELF' _ {} \; -print)"
@@ -171,26 +198,29 @@ done
 # GPU driver
 for elf in "${LIBDIR}"/*.so*; do
     if [ -n "$(patchelf --print-rpath "${elf}")" ]; then
-        patchelf --set-rpath '$ORIGIN' "${elf}"
+        patchelf --set-rpath "\$ORIGIN" "${elf}"
     fi
 done
 for elf in "${LIBDIR}"/pulse/modules/*.so; do
     if [ -n "$(patchelf --print-rpath "${elf}")" ]; then
-        patchelf --set-rpath '$ORIGIN:$ORIGIN/../..' "${elf}"
+        patchelf --set-rpath "\$ORIGIN:\$ORIGIN/../.." "${elf}"
     fi
 done
 for elf in "${TREE}"/libexec/selkies/pulseaudio "${TREE}"/libexec/selkies/dbus-daemon; do
-    patchelf --force-rpath --set-rpath '$ORIGIN/../../lib/selkies' "${elf}"
+    patchelf --force-rpath --set-rpath "\$ORIGIN/../../lib/selkies" "${elf}"
 done
-patchelf --print-rpath "${TREE}/bin/selkies" | grep -qxF '$ORIGIN/../lib/selkies'
+patchelf --force-rpath --set-rpath "\$ORIGIN/../../../../lib/selkies" \
+    "${TREE}/libexec/selkies/cups/sbin/cupsd"
+patchelf --force-rpath --set-rpath "\$ORIGIN/../../../../../../lib/selkies" \
+    "${TREE}/libexec/selkies/cups/lib/cups/daemon/cups-exec"
+patchelf --print-rpath "${TREE}/bin/selkies" | grep -qxF "\$ORIGIN/../lib/selkies"
 
 # Every program resolves every library it links from the tree or from what the
 # host is expected to have
-for elf in $(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}" -type f -name '*' ! -path '*/preload/*' \
-    -exec sh -c 'head -c4 "$1" | grep -q ELF' _ {} \; -print); do
-    missing="$(ldd "${elf}" 2>&1 | grep 'not found' || true)"
-    [ -z "${missing}" ] || { echo "${elf}: ${missing}" >&2; exit 1; }
-done
+missing="$(find "${TREE}/bin" "${TREE}/libexec" "${LIBDIR}" -type f ! -path '*/preload/*' \
+    -exec sh -c 'head -c4 "$1" | grep -q ELF || exit 0
+        ldd "$1" 2>&1 | grep "not found" | sed "s|^|$1: |"' _ {} \;)"
+[ -z "${missing}" ] || { echo "${missing}" >&2; exit 1; }
 "${TREE}/bin/selkies" --version
 readelf -d "${TREE}/bin/selkies" | grep -E 'NEEDED|RUNPATH'
 

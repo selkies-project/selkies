@@ -6,7 +6,7 @@
 # with what infra/bundle/deps.sh installs, kept as a layer so a rebuild of the
 # bundle compiles only the tree. Built by infra/bundle/build.sh from the
 # scripts copied here; it changes only when one of them does.
-ARG MANYLINUX=quay.io/pypa/manylinux_2_28_x86_64
+ARG MANYLINUX="quay.io/pypa/manylinux_2_28_x86_64"
 FROM ${MANYLINUX}
 COPY infra/packaging/portable-deps.sh /deps/infra/packaging/portable-deps.sh
 COPY crates/pcmflux/scripts/build-libpulse.sh /deps/crates/pcmflux/scripts/build-libpulse.sh
