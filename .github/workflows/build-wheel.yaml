@@ -63,7 +63,8 @@ jobs:
           for bundle in bundles/selkies-*-linux-*.tar.gz; do
             python3 infra/wheel/build.py "${bundle}" wheelhouse
           done
-          test "$(ls wheelhouse/*.whl | wc -l)" -eq 4
+          set -- wheelhouse/*.whl
+          test "$#" -eq 4
           # The checkout is this job's own, so it is stamped in place
           sh infra/packaging/stamp-version.sh . "${SELKIES_VERSION}"
           sed -i "s|^version =.*|version = \"${SELKIES_VERSION}\"|" pyproject.toml
