@@ -1821,12 +1821,15 @@ impl AppState {
         found.map(|(target, origin)| target.under_point(origin, p))
     }
 
-    /// The topmost X11 popup menu that is open, with where it lies.
+    /// The topmost X11 popup menu that is open, with where it lies. A menu Xwayland has not yet
+    /// given its surface is not one: the pointer would take it as its focus with no enter sent,
+    /// and Xwayland drops every motion after that until the focus changes again.
     fn x11_menu_open(&self) -> Option<(FocusTarget, Point<f64, Logical>)> {
         use smithay::xwayland::xwm::WmWindowType;
         let menu = self.space.elements().rev().find(|window| {
             window.x11_surface().is_some_and(|surface| {
                 surface.is_override_redirect()
+                    && surface.wl_surface().is_some()
                     && matches!(
                         surface.window_type(),
                         Some(
@@ -1837,7 +1840,7 @@ impl AppState {
                     )
             })
         })?;
-        let loc = self.space.element_location(menu)?;
+        let loc = self.space.element_location(menu)? - menu.geometry().loc;
         Some((FocusTarget::Window(menu.clone()), loc.to_f64()))
     }
 
