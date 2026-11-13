@@ -4,12 +4,12 @@
   License, v. 2.0. If a copy of the MPL was not distributed with this
   file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-  The window manager's right-click menu on the desktop, installed as
-  /etc/xdg/openbox/menu.xml, the file Openbox would read, and read on both
-  backends; a user's ~/.config/openbox/menu.xml replaces it. It offers the
-  desktop's own commands, which the window manager leaves out while the
-  application runs alone, every installed application by category, and the
-  open windows. The selkies-applications menu
+  The window manager's built-in right-click menu on the desktop, compiled into
+  it and used where no menu.xml is found along its configuration directories;
+  an image's /etc/xdg/openbox/menu.xml or a user's ~/.config/openbox/menu.xml
+  replaces it. It offers the desktop's own commands, which the window manager
+  leaves out while the application runs alone, every installed application by
+  category, and the open windows. The selkies-applications menu
   is the window manager's own, filled from the installed desktop entries with
   their icons, and an item written without an icon gets the one of the
   application it starts. There is no Exit: the window manager is the server's,

@@ -3,16 +3,15 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Install the native package in /out and prove what it lays down works with
-# nothing but the package's own declared dependencies.
+# Install the native package in /out and prove the bundle it lays down runs a
+# session with nothing but what the package itself declares.
 #
-# The build container carries a whole toolchain, so a runtime library the
-# package forgot to declare is satisfied there and missing on a user's machine.
-# This runs in a pristine image of the same distribution instead, and checks
-# what a bare `--help` does not: that every library the server and the
-# interposers link resolves, that the libraries pixelflux and pcmflux open by name
-# at runtime (no ELF dependency names them) are present, and that the server
-# serves the web client compiled into it.
+# This runs in a pristine image of a distribution the package targets, where
+# nothing the bundle carries is installed: every program and library under
+# /opt/selkies has to resolve what it links, the interposers have to be where
+# `/usr/$LIB` finds them, and `selkies session`, run as an ordinary user, has to
+# bring up its own buses, sound server, and X server and serve the web client
+# the server embeds.
 #
 # $INSTALL is the distribution's install command for /out/*, from the packages
 # workflow matrix.
@@ -22,20 +21,15 @@ set -eu
 sh -c "${INSTALL}" > /dev/null
 
 selkies --version
-selkies --help > /dev/null
-echo "selkies --version and --help run"
-
 selkies --version | grep -F "web client: embedded (" || {
     echo "::error::the server embeds no web client"
     exit 1
 }
 
-interposers="$(find /usr/lib /usr/lib64 -name 'selkies_*_interposer.so' 2>/dev/null || true)"
-[ -n "${interposers}" ] || {
-    echo "::error::the package installed no interposers"
-    exit 1
-}
-missing="$(for f in /usr/bin/selkies ${interposers}; do
+# The programs, each with the closure its run path finds: a library the bundle
+# carries resolves its own dependencies through the program that loads it
+missing="$(find /opt/selkies/bin /opt/selkies/libexec -type f | while read -r f; do
+    head -c4 "${f}" | grep -q ELF || continue
     ldd "${f}" 2>/dev/null | grep 'not found' | sed "s|^|${f}: |"
 done | sort -u)"
 if [ -n "${missing}" ]; then
@@ -43,27 +37,16 @@ if [ -n "${missing}" ]; then
     echo "${missing}"
     exit 1
 fi
-echo "the server and the interposers resolve every library they link"
+echo "every program the bundle carries resolves what it links"
 
-# Opened by name at runtime: pixelflux reaches for the Wayland server library,
-# VA-API, and the GPU stack, so no ELF dependency names them and only a
-# declared package dependency puts them on the system.
-NEEDED="libwayland-server.so.0 libEGL.so.1 libgbm.so.1 libpulse.so.0 libva.so.2 libva-drm.so.2 libdrm.so.2 libxkbcommon.so.0 libpixman-1.so.0"
-absent=""
-for name in ${NEEDED}; do
-    found=""
-    for dir in /lib /lib64 /usr/lib /usr/lib64 /usr/lib/*-linux-gnu /lib/*-linux-gnu; do
-        [ -e "${dir}/${name}" ] && found=1 && break
-    done
-    [ -n "${found}" ] || absent="${absent} ${name}"
-done
-if [ -n "${absent}" ]; then
-    echo "::error::runtime-loaded libraries the package does not pull in:${absent}"
+interposer="$(find /usr/lib /usr/lib64 -maxdepth 2 -name selkies_input_interposer.so 2>/dev/null | head -n 1)"
+[ -n "${interposer}" ] && [ -f "${interposer}" ] || {
+    echo "::error::the package linked no interposer under the loader's library directory"
     exit 1
-fi
-echo "every runtime-loaded library is present"
+}
+echo "the interposer preloads from ${interposer}"
 
-# One GET of $2 from the server below with Accept-Encoding $3, printing the
+# One GET of $2 from the session below with Accept-Encoding $3, printing the
 # response's head where $1 is "head" and its body where it is "body": through
 # curl, else BusyBox wget, else bash's /dev/tcp, whichever the pristine image
 # carries.
@@ -88,47 +71,46 @@ get() {
             cat <&3' "${PORT}" "$2" "$3" | if [ "$1" = head ]; then sed '/^\r*$/q'; else sed '1,/^\r*$/d'; fi
     fi
 }
-# The server on the Wayland backend, which needs no X server, in a runtime
-# directory of its own and without a login, which it otherwise refuses to start
-# without a password for: its entry page, and a content-hashed script the page
-# loads sent gzip-encoded with its entity tag to a client that takes gzip
-RUNTIME="$(mktemp -d)"
-chmod 700 "${RUNTIME}"
-env XDG_RUNTIME_DIR="${RUNTIME}" SELKIES_WAYLAND=true SELKIES_PORT="${PORT}" \
-    selkies --enable-basic-auth=false > "${RUNTIME}/selkies.log" 2>&1 &
-server="$!"
+
+# A session as an ordinary user, without a login, which the server otherwise
+# refuses to start without a password for: its entry page, and a
+# content-hashed script the page loads sent gzip-encoded with its entity tag to
+# a client that takes gzip
+useradd -m selkies-check 2> /dev/null || adduser -D selkies-check
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+LOG=/tmp/selkies-session.log
+su selkies-check -c "exec selkies session --runtime-dir /tmp/selkies-check --session 'sleep 600' \
+    -- --port=${PORT} --enable-basic-auth=false" > "${LOG}" 2>&1 &
+session="$!"
 i=0
 until get body / identity 2> /dev/null | grep -q "selkies-core.js"; do
     i=$((i + 1))
-    if [ "${i}" -ge 60 ] || ! kill -0 "${server}" 2> /dev/null; then
-        echo "::error::the server never served its entry page; its log:"
-        tail -n 20 "${RUNTIME}/selkies.log"
-        kill "${server}" 2> /dev/null || true
+    if [ "${i}" -ge 60 ] || ! kill -0 "${session}" 2> /dev/null; then
+        echo "::error::the session never served its entry page; its log:"
+        tail -n 30 "${LOG}"
         exit 1
     fi
     sleep 1
 done
 asset="$(get body / identity | grep -o 'assets/[^"]*\.js' | head -n 1)"
 head="$(get head "/${asset}" gzip | tr -d '\r')"
-kill "${server}" 2> /dev/null || true
-wait "${server}" 2> /dev/null || true
+# Each process's program as it was started: cmdline, since a container's root
+# cannot read the executable link of another account's process
+running="$(for proc in /proc/[0-9]*; do
+    tr '\0' '\n' < "${proc}/cmdline" 2> /dev/null | head -n 1 || true
+done)"
+for program in Xvfb dbus-daemon pulseaudio; do
+    printf '%s\n' "${running}" | grep -qx "/opt/selkies/libexec/selkies/${program}" || {
+        echo "::error::the session runs no bundled ${program}; its log:"
+        tail -n 30 "${LOG}"
+        exit 1
+    }
+done
+kill "${session}" 2> /dev/null || true
 if [ -z "${asset}" ] || ! printf '%s\n' "${head}" | grep -qi '^ *content-encoding: *gzip$' \
         || ! printf '%s\n' "${head}" | grep -qi '^ *etag: *"'; then
     echo "::error::the server did not send its client's ${asset:-scripts} gzip-encoded with a tag:"
     printf '%s\n' "${head}"
     exit 1
 fi
-echo "the server serves its entry page and ${asset}, gzip-encoded, from the client it embeds"
-
-# Arch installs the CUPS scheduler readable by root alone; the package's pacman
-# hook opens it on the cups install, which is what lets the print queue run a
-# copy of it as the session user.
-if command -v pacman > /dev/null; then
-    pacman -S --noconfirm --needed cups > /dev/null
-    mode="$(stat -c %a /usr/bin/cupsd)"
-    [ "${mode}" = "755" ] || {
-        echo "::error::the pacman hook left /usr/bin/cupsd at mode ${mode}"
-        exit 1
-    }
-    echo "the pacman hook opened the CUPS scheduler"
-fi
+echo "the session runs the bundle's X server, buses, and sound server and serves ${asset}, gzip-encoded"

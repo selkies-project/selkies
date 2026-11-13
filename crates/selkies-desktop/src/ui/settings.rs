@@ -2524,7 +2524,7 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                 Action::Set(vec![(image_key, path.to_string()), (mode_key, mode.to_string())])
             };
             let mut cards = Vec::new();
-            let logo = Path::new(config::LOGO_PATH);
+            let logo = config::logo_path();
             if logo.is_file() {
                 cards.push(WallpaperChoice {
                     name: tr("Application icon").to_string(),
@@ -2533,8 +2533,8 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                         dark: None,
                         author: None,
                     },
-                    action: choose(config::LOGO_PATH, "center"),
-                    active: shown.as_deref() == Some(crate::wallpapers::real_path(logo).as_path()),
+                    action: choose(&logo.to_string_lossy(), "center"),
+                    active: shown.as_deref() == Some(crate::wallpapers::real_path(&logo).as_path()),
                 });
             }
             for entry in &d.settings.wallpapers {

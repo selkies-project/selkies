@@ -1250,6 +1250,10 @@ pub struct Menu {
     pub items: Vec<MenuItem>,
 }
 
+/// The menu used where no menu file is found: the desktop's own commands, the installed
+/// applications, and the open windows, so an image ships no menu of its own to have one.
+const DEFAULT_MENU: &str = include_str!("menu.xml");
+
 /// Every menu the files define, by id. The ones the window manager fills itself are resolved
 /// by the engine whatever a file says of them: `client-menu`, `client-list-combined-menu`, and
 /// `selkies-applications`, the installed applications by category with their icons, which the
@@ -1261,14 +1265,19 @@ pub struct Menus {
 }
 
 impl Menus {
-    /// The menus of every file the configuration names, found along its search directories.
+    /// The menus of every file the configuration names, found along its search directories, or
+    /// the built-in menu ([`DEFAULT_MENU`]) where none of them is found.
     pub fn load(config: &Config) -> Menus {
         let mut menus = Menus::default();
+        let mut found = false;
         for file in &config.menu_files {
             let Some(path) = find_file(&config.search_dirs, file) else {
-                log::warn!(target: "wm", "menu file {file} not found");
+                if file != "menu.xml" {
+                    log::warn!(target: "wm", "menu file {file} not found");
+                }
                 continue;
             };
+            found = true;
             match std::fs::read_to_string(&path) {
                 Ok(text) => match menus.apply(&text) {
                     Ok(()) => menus.sources.push(path),
@@ -1276,6 +1285,9 @@ impl Menus {
                 },
                 Err(e) => log::warn!(target: "wm", "{}: not read: {e}", path.display()),
             }
+        }
+        if !found && let Err(e) = menus.apply(DEFAULT_MENU) {
+            log::error!(target: "wm", "the built-in menu is not read: {e}");
         }
         menus
     }
@@ -1724,6 +1736,29 @@ mod tests {
 
     /// The image's menu defines its menus, a pipe menu by its command, and the pipe menu's
     /// output parses into entries.
+    #[test]
+    fn a_session_with_no_menu_file_gets_the_built_in_menu() {
+        let config = Config {
+            search_dirs: Vec::new(),
+            ..Config::default()
+        };
+        let menus = Menus::load(&config);
+        assert!(menus.sources.is_empty(), "no file was read");
+        let root = &menus.menus["root-menu"];
+        assert!(
+            root.items
+                .iter()
+                .any(|i| matches!(i, MenuItem::Submenu { id, .. } if id == "selkies-applications")),
+            "the installed applications"
+        );
+        assert!(
+            root.items
+                .iter()
+                .any(|i| matches!(i, MenuItem::Item { label, .. } if label == "Change Wallpaper")),
+            "the desktop's own commands"
+        );
+    }
+
     #[test]
     fn the_images_menu_and_a_pipe_menu_parse() {
         let mut menus = Menus::default();

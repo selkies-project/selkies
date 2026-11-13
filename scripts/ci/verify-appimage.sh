@@ -3,186 +3,107 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Prove the AppImage in $1 works somewhere other than where it was built.
+# Prove the AppImage runs from an extracted copy on a host that has none of
+# what it carries: run as root on a pristine image at the bundle's glibc floor,
+# with curl the one tool it needs.
 #
-# The build's own `--help` smoke test runs inside the AppDir at the path the
-# conda prefix was installed to, where a path the build left inside resolves
-# anyway. What ships mounts at a path chosen at run time, and every absolute
-# path the build left inside is wrong there: the interpreter a script names,
-# and the module directory and startup script the bundled sound server has
-# compiled in. This runs from an extracted copy instead, which is also how a
-# user reaches the payload by hand.
-#
-# Every path checked has to be inside that copy rather than merely resolve,
-# because the build path is still there on the machine that built the AppImage.
+# What AppRun starts by itself is checked first: on the Wayland backend it
+# starts no X server, only the bundle's PulseAudio, and the server's compositor
+# comes up and serves the web client it embeds. Then `session`, run as an
+# ordinary user, brings up the bundle's own X server, buses, and sound server.
+# Where /dev/fuse is present the read-only mount a user's own run takes is
+# exercised too.
 #
 # Usage: verify-appimage.sh <appimage>
-
 set -eu
 
 IMAGE="$(readlink -f "${1:?usage: verify-appimage.sh <appimage>}")"
 WORK="$(mktemp -d)"
-# A removal racing the sound server's own teardown is not what this reports on
+chmod 755 "${WORK}"
 trap 'rm -rf "${WORK}" 2>/dev/null || true' EXIT
 cd "${WORK}"
 "${IMAGE}" --appimage-extract > /dev/null
 APP="${WORK}/squashfs-root"
-PREFIX="${APP}/usr/conda"
+chmod -R a+rX "${APP}"
 
-"${APP}/AppRun" --help > /dev/null
-echo "AppRun runs from an extracted copy"
-"${APP}/AppRun" session --help > /dev/null
-"${APP}/usr/libexec/selkies-session/pulseaudio" --version > /dev/null
-echo "AppRun runs the session launcher, and its sound server wrapper finds the daemon"
+"${APP}/AppRun" --version | grep -F "web client: embedded ("
+echo "AppRun runs the server from an extracted copy, with its web client"
 
-# Through usr/bin too, the symlink farm linuxdeploy is given rather than the
-# executables themselves
-"${APP}/usr/bin/selkies" --help > /dev/null
-"${PREFIX}/bin/selkies" --version
-echo "the server runs, by either name"
+missing="$(find "${APP}/bin" "${APP}/libexec" -type f | while read -r f; do
+    head -c4 "${f}" | grep -q ELF || continue
+    ldd "${f}" 2>/dev/null | grep 'not found' | sed "s|^|${f#"${APP}"/}: |"
+done | sort -u)"
+if [ -n "${missing}" ]; then
+    echo "::error::programs with unresolved dependencies:"
+    echo "${missing}"
+    exit 1
+fi
+echo "every program the AppImage carries resolves what it links"
 
-# Not only the ones this project calls: a launcher left naming the build path
-# is the whole class of defect, and a script nobody here runs is a user's first
-# command as easily as any other. An interpreter under this copy passes, and so
-# does one of the system's, which the shell prologue and the scripts conda
-# ships for other languages name; anything else is a prefix that existed only
-# on the machine that built the AppImage, and would resolve there.
-outside="$(for path in "${PREFIX}"/bin/* "${PREFIX}"/condabin/*; do
-    [ -f "${path}" ] || continue
-    [ "$(head -c 2 "${path}" 2>/dev/null)" = '#!' ] || continue
-    named="$(head -2 "${path}" | sed -n \
-        -e 's|^#!\(/[^ ]*\).*|\1|p' \
-        -e "s|^'''exec' \"\{0,1\}\(/[^\" ]*\).*|\1|p")"
-    for interp in ${named}; do
-        case "${interp}" in
-            "${APP}"/*|/bin/*|/usr/bin/*|/usr/local/bin/*) ;;
-            *) echo "${path##*/}: ${interp}" ;;
-        esac
+PORT=18080
+# The entry page's first content-hashed script, then its head fetched taking gzip
+serves_client() {
+    asset=""
+    i=0
+    while [ -z "${asset}" ] && [ "${i}" -lt "$1" ]; do
+        asset="$(curl -fsS "http://127.0.0.1:${PORT}/" 2>/dev/null | grep -o 'assets/[^"]*\.js' | head -n 1 || true)"
+        [ -n "${asset}" ] || sleep 1
+        i=$((i + 1))
     done
-done)"
-if [ -n "${outside}" ]; then
-    echo "::error::entry points naming an interpreter from neither this copy nor the system:"
-    echo "${outside}"
-    exit 1
-fi
-echo "every entry point names an interpreter inside this copy"
-# Nothing at run time reads a package cache, and building the interposers
-# leaves one in the prefix
-if [ -e "${PREFIX}/pkgs" ]; then
-    echo "::error::the prefix carries a conda package cache of $(du -sh "${PREFIX}/pkgs" | cut -f1)"
-    exit 1
-fi
-echo "the prefix carries no conda package cache"
+    [ -n "${asset}" ] || return 1
+    curl -fsS -D - -o /dev/null -H "Accept-Encoding: gzip" "http://127.0.0.1:${PORT}/${asset}" \
+        | tr -d '\r' | grep -qi '^content-encoding: gzip$'
+}
 
-"${PREFIX}/bin/selkies" --version | grep -F "web client: embedded ("
-echo "the server carries its web client"
-if find "${APP}" -name 'python*' -type f | grep -q .; then
-    echo "::error::the AppImage carries a Python interpreter:"
-    find "${APP}" -name 'python*' -type f
-    exit 1
-fi
-echo "the AppImage carries no Python interpreter"
-# pixelflux's VA-API session opens libva by name, and the bundled one is first
-test -e "${PREFIX}/lib/libva.so.2"
-echo "the AppImage carries libva"
-
-# The sound server AppRun starts, started by AppRun: a daemon that finds no
-# module directory exits with "startup without any loaded modules", taking
-# audio out of the AppImage while everything else still streams. The Wayland
-# backend is selected so no X server is started, and its compositor is checked
-# too, and so is the web client the server serves from memory. Its own runtime
-# directory, never a live session's, and no login, which the server otherwise
-# refuses to start without a password for.
+# AppRun alone: the bundle's PulseAudio where none listens, and the server
 RUNTIME="${WORK}/runtime"
 mkdir -p "${RUNTIME}"
 chmod 700 "${RUNTIME}"
-# AppRun names this log, so an earlier run's copy would answer for this one
-PULSE_LOG="/tmp/pulseaudio_selkies.log"
-rm -f "${PULSE_LOG}"
-PORT=18080
-env XDG_RUNTIME_DIR="${RUNTIME}" PULSE_SERVER="unix:${RUNTIME}/pulse/native" \
-    PULSE_RUNTIME_PATH="${RUNTIME}/pulse" SELKIES_WAYLAND="true" SELKIES_PORT="${PORT}" \
+env XDG_RUNTIME_DIR="${RUNTIME}" SELKIES_WAYLAND=true SELKIES_PORT="${PORT}" \
     setsid "${APP}/AppRun" --enable-basic-auth=false > "${WORK}/apprun.log" 2>&1 &
-session="$!"
-sinks=""
-i=0
-while [ "${i}" -lt 40 ]; do
-    sinks="$(env XDG_RUNTIME_DIR="${RUNTIME}" PULSE_SERVER="unix:${RUNTIME}/pulse/native" \
-        "${PREFIX}/bin/pactl" list short sinks 2>/dev/null || true)"
-    [ -n "${sinks}" ] && break
-    i=$((i + 1))
-    sleep 1
-done
-# The compositor names its socket once up, or says its startup window passed
-i=0
-while ! grep -q "Wayland compositor socket" "${WORK}/apprun.log" && [ "${i}" -lt 30 ]; do
-    i=$((i + 1))
-    sleep 1
-done
-# The entry page, and a content-hashed script it loads, gzip-encoded with its
-# entity tag for a client that takes gzip; both hosts this runs on carry curl
-asset=""
-i=0
-while [ -z "${asset}" ] && [ "${i}" -lt 30 ]; do
-    asset="$(curl -fsS "http://127.0.0.1:${PORT}/" 2>/dev/null | grep -o 'assets/[^"]*\.js' | head -n 1 || true)"
-    [ -n "${asset}" ] || sleep 1
-    i=$((i + 1))
-done
-served=""
-if [ -n "${asset}" ]; then
-    served="$(curl -fsS -D - -o /dev/null -H "Accept-Encoding: gzip" "http://127.0.0.1:${PORT}/${asset}" | tr -d '\r')"
+apprun="$!"
+if ! serves_client 60; then
+    echo "::error::the server AppRun starts never served its web client; its log:"
+    tail -n 20 "${WORK}/apprun.log"
+    exit 1
 fi
-kill -- "-${session}" 2>/dev/null || kill "${session}" 2>/dev/null || true
-wait "${session}" 2>/dev/null || true
-# The daemon outlives what AppRun exec'd and unlinks its socket on the way out
-i=0
-while [ -S "${RUNTIME}/pulse/native" ] && [ "${i}" -lt 10 ]; do
-    i=$((i + 1))
-    sleep 1
-done
-if [ -z "${sinks}" ]; then
+if [ ! -S "${RUNTIME}/pulse/native" ]; then
     echo "::error::the sound server AppRun starts never came up; its log:"
-    tail -n 20 "${PULSE_LOG}" 2>/dev/null || true
+    tail -n 20 "${RUNTIME}/pulseaudio_selkies.log" 2>/dev/null || true
     exit 1
 fi
-# Where it loaded them from, and not only that it loaded some: the directory it
-# has compiled in is the build path, which resolves on the build machine
-modules="$(sed -n 's|.*Using modules directory \(.*\)\.$|\1|p' "${PULSE_LOG}" | tail -1)"
-case "${modules}" in
-    "${APP}"/*) ;;
-    *)
-        echo "::error::AppRun's sound server took its modules from ${modules:-nowhere it named}"
-        exit 1
-        ;;
-esac
-echo "AppRun's sound server comes up with a sink, on this copy's modules"
-# The system bus it asks RTKit for real-time scheduling on, which the bundled
-# libdbus also has at the build path; a runner without a bus logs the one it tried
-bus="$(sed -n 's|.*Failed to connect to system bus: .*socket \(/[^:]*\):.*|\1|p' "${PULSE_LOG}" | tail -1)"
-case "${bus}" in
-    ""|/var/run/dbus/system_bus_socket) ;;
-    *)
-        echo "::error::AppRun's sound server looked for the system bus at ${bus}"
-        exit 1
-        ;;
-esac
-echo "AppRun's sound server looks for the system bus at the well-known address"
-# Its keyboard needs the keymaps AppRun points the bundled libxkbcommon at,
-# whose own default is the build path
-if ! grep -q "Wayland compositor socket: " "${WORK}/apprun.log"; then
-    echo "::error::the Wayland compositor AppRun starts never came up; its log:"
+grep -q "Wayland compositor socket: " "${WORK}/apprun.log" || {
+    echo "::error::the Wayland compositor never came up; its log:"
     tail -n 20 "${WORK}/apprun.log"
     exit 1
-fi
-echo "AppRun's Wayland compositor comes up"
-if ! printf '%s\n' "${served}" | grep -qi '^content-encoding: gzip$' \
-        || ! printf '%s\n' "${served}" | grep -qi '^etag: "'; then
-    echo "::error::the server did not serve its entry page and ${asset:-a script it loads} gzip-encoded:"
-    printf '%s\n' "${served}"
-    tail -n 20 "${WORK}/apprun.log"
+}
+kill -- "-${apprun}" 2>/dev/null || kill "${apprun}" 2>/dev/null || true
+wait "${apprun}" 2>/dev/null || true
+echo "AppRun starts the bundle's sound server, and the server's compositor serves its web client gzip-encoded"
+
+# A session as an ordinary user
+useradd -m selkies-check 2> /dev/null || adduser -D selkies-check
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+su selkies-check -c "exec setsid '${APP}/AppRun' session --runtime-dir /tmp/selkies-check \
+    --session 'sleep 600' -- --port=${PORT} --enable-basic-auth=false" > "${WORK}/session.log" 2>&1 &
+session="$!"
+if ! serves_client 60; then
+    echo "::error::the session never served its web client; its log:"
+    tail -n 30 "${WORK}/session.log"
     exit 1
 fi
-echo "the server serves its entry page and ${asset}, gzip-encoded, from the client it embeds"
+running="$(for proc in /proc/[0-9]*; do
+    tr '\0' '\n' < "${proc}/cmdline" 2> /dev/null | head -n 1 || true
+done)"
+for program in Xvfb dbus-daemon pulseaudio; do
+    printf '%s\n' "${running}" | grep -qx "${APP}/libexec/selkies/${program}" || {
+        echo "::error::the session runs no bundled ${program}; its log:"
+        tail -n 30 "${WORK}/session.log"
+        exit 1
+    }
+done
+kill -- "-${session}" 2>/dev/null || kill "${session}" 2>/dev/null || true
+echo "AppRun session runs the bundle's X server, buses, and sound server"
 
 # The mount a user's own run takes: the runtime mounts the image read-only and
 # only extracts itself where FUSE is missing, so the checks above never see it.
@@ -205,10 +126,9 @@ if [ -e /dev/fuse ]; then
     fi
     "${point}/AppRun" --help > /dev/null
     "${point}/AppRun" session --help > /dev/null
-    "${point}/usr/conda/bin/selkies" --help > /dev/null
     kill "${mounted}" 2>/dev/null || true
     wait "${mounted}" 2>/dev/null || true
-    echo "AppRun and the entry points run from the read-only mount too"
+    echo "AppRun runs from the read-only mount too"
 else
     echo "note: no /dev/fuse here, so the read-only mount was not exercised"
 fi

@@ -157,9 +157,9 @@ def main() -> int:
     check("the desktop image checks its downloads with it",
           desktop.count("fetch-verified key ") == 2 and "fetch-verified release linuxserver/proot-apps" in desktop
           and "dl.google.com/linux/direct" not in desktop, "addons/desktop/Dockerfile")
-    appimage = open(os.path.join(REPO, "scripts", "ci", "appimage.sh"), encoding="utf-8").read()
-    check("the AppImage build fetches linuxdeploy with it",
-          "addons/base/fetch-verified release linuxdeploy/linuxdeploy" in appimage, "scripts/ci/appimage.sh")
+    appimage = open(os.path.join(REPO, "infra", "appimage", "build.sh"), encoding="utf-8").read()
+    check("the AppImage build fetches its runtime with it",
+          'addons/base/fetch-verified" release AppImage/type2-runtime' in appimage, "infra/appimage/build.sh")
 
     print(f"[fetch-verified] {passed}/{passed + failed} passed", flush=True)
     return 1 if failed else 0

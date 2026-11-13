@@ -1,5 +1,13 @@
 name: Build wheel
-
+# The release media of every target: the web client once, then one call of
+# bundle.yaml for each C library and architecture (glibc and musl, x86_64 and
+# aarch64), each building its bundle and repackaging it as the wheel of its
+# platform, manylinux_2_28 or musllinux_1_2, and, where `packages` is set, as
+# its native packages and AppImage, so each target's media follow its own
+# bundle. Nothing past the bundles is compiled. The wheels are collected with
+# the sdist, written for an index that wants one (a build from it carries the
+# server alone), as the one artifact callers name; the bundles, packages, and
+# AppImages stay in the run under their own names.
 on:
   workflow_dispatch:
     inputs:
@@ -7,6 +15,10 @@ on:
         description: Version written into the wheel metadata
         type: string
         default: 0.0.0.dev0
+      packages:
+        description: Also build the native packages and the AppImages
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       artifact_name:
@@ -17,6 +29,10 @@ on:
         description: Version written into the wheel metadata
         type: string
         default: 0.0.0.dev0
+      packages:
+        description: Also build the native packages and the AppImages
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,44 +41,14 @@ env:
   NODE_VERSION: "26"
 
 jobs:
-  wheel:
-    name: Build wheel (${{ matrix.target.platform }}_${{ matrix.target.arch }}, with bundled web client)
-    # One wheel per platform pixelflux and pcmflux publish theirs for, each built
-    # in the image theirs are built in (infra/wheel/build.sh), on a native runner
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - arch: x86_64
-            runner: ubuntu-latest
-            platform: manylinux2014
-            # The sdist is the same file from any job, so one writes it
-            sdist: "1"
-          - arch: aarch64
-            runner: ubuntu-26.04-arm
-            platform: manylinux_2_28
-          - arch: x86_64
-            runner: ubuntu-latest
-            platform: musllinux_1_2
-          - arch: aarch64
-            runner: ubuntu-26.04-arm
-            platform: musllinux_1_2
-    runs-on: ${{ matrix.target.runner }}
+  web:
+    name: Web client
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Free disk space
-        # The tool cache is kept: setup-node resolves from it
-        uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
         with:
-          remove_android: true
-          remove_dotnet: true
-          remove_haskell: true
-          remove_tool_cache: false
-          remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
-          remove_packages_one_command: true
-          remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -73,39 +59,94 @@ jobs:
         env:
           # For the controller database's lookups (gendb.ts)
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/ci/build-web.sh
-      - name: Build the wheel
-        env:
-          SELKIES_VERSION: ${{ inputs.package_version }}
-          SELKIES_SDIST: ${{ matrix.target.sdist }}
-          IMAGE: quay.io/pypa/${{ matrix.target.platform }}_${{ matrix.target.arch }}
         run: |
-          mkdir -p wheelhouse
-          # The registry answers 5xx for minutes at a time, so the image is pulled with retries
-          scripts/ci/retry.sh 5 60 docker pull "${IMAGE}"
-          docker run --rm -v "${PWD}:/repo:ro" -v "${PWD}/wheelhouse:/out" \
-            -e SELKIES_VERSION -e SELKIES_SDIST "${IMAGE}" sh /repo/infra/wheel/build.sh /out
-          ls -la wheelhouse/
+          ./scripts/ci/build-web.sh
+          tar -C dist -cf selkies-web-client.tar web
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ inputs.artifact_name || 'selkies-wheel' }}-${{ matrix.target.platform }}_${{ matrix.target.arch }}
-          path: wheelhouse/*
-          # Already-compressed payloads: the artifact is a zip either way, and
-          # re-deflating them spends CPU for a size that does not move.
-          compression-level: 0
+          name: bundle-web-client
+          path: selkies-web-client.tar
           if-no-files-found: error
           retention-days: 1
 
-  # Every platform's wheel, and the sdist, as the one artifact callers name
-  merge:
-    name: Collect the wheels
-    needs: wheel
+  glibc-x86_64:
+    name: glibc x86_64
+    needs: web
+    uses: ./.github/workflows/bundle.yaml
+    with:
+      libc: glibc
+      arch: x86_64
+      package_version: ${{ inputs.package_version }}
+      packages: ${{ inputs.packages }}
+
+  glibc-aarch64:
+    name: glibc aarch64
+    needs: web
+    uses: ./.github/workflows/bundle.yaml
+    with:
+      libc: glibc
+      arch: aarch64
+      package_version: ${{ inputs.package_version }}
+      packages: ${{ inputs.packages }}
+
+  musl-x86_64:
+    name: musl x86_64
+    needs: web
+    uses: ./.github/workflows/bundle.yaml
+    with:
+      libc: musl
+      arch: x86_64
+      package_version: ${{ inputs.package_version }}
+      packages: ${{ inputs.packages }}
+
+  musl-aarch64:
+    name: musl aarch64
+    needs: web
+    uses: ./.github/workflows/bundle.yaml
+    with:
+      libc: musl
+      arch: aarch64
+      package_version: ${{ inputs.package_version }}
+      packages: ${{ inputs.packages }}
+
+  wheel:
+    name: Collect the wheels and write the sdist
+    needs: [glibc-x86_64, glibc-aarch64, musl-x86_64, musl-aarch64]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/upload-artifact/merge@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the wheels
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: selkies-wheel-*-*
+          path: wheelhouse
+          merge-multiple: true
+      - name: Download the web client
+        # The sdist carries it, for a build from source to embed
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle-web-client
+      - name: Write the sdist
+        env:
+          SELKIES_VERSION: ${{ inputs.package_version }}
+        run: |
+          set -e
+          set -- wheelhouse/*.whl
+          test "$#" -eq 4
+          mkdir -p dist
+          tar -C dist -xf selkies-web-client.tar && rm selkies-web-client.tar
+          # The checkout is this job's own, so it is stamped in place
+          sh infra/packaging/stamp-version.sh . "${SELKIES_VERSION}"
+          sed -i "s|^version =.*|version = \"${SELKIES_VERSION}\"|" pyproject.toml
+          python3 -m pip install --quiet "maturin>=1.9,<2"
+          maturin sdist --out wheelhouse
+          ls -la wheelhouse/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact_name || 'selkies-wheel' }}
-          pattern: ${{ inputs.artifact_name || 'selkies-wheel' }}-*
+          path: wheelhouse/*
           compression-level: 0
+          if-no-files-found: error
           retention-days: 14
-          delete-merged: true

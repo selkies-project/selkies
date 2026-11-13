@@ -734,6 +734,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         client_excluded: false,
     },
     SettingDef {
+        name: "ui_icon",
+        kind: Kind::Str,
+        default: "",
+        help: "Absolute path to an image served as the dashboard's icon, favicon, and installed-app icon in place of Selkies' own.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
+    },
+    SettingDef {
         name: "ui_show_logo",
         kind: Kind::Bool,
         default: "True",
@@ -1306,6 +1320,20 @@ pub static DEFINITIONS: &[SettingDef] = &[
         default_value: None,
         sensitive: true,
         client_excluded: false,
+    },
+    SettingDef {
+        name: "basic_auth_password_file",
+        kind: Kind::Str,
+        default: "",
+        help: "File holding the basic-authentication password, read once at startup with its trailing newline dropped, so the password is in neither the environment nor the command line (a container secret, a systemd credential, a file of the user's own mode 0600). A password given directly through --basic-auth-password or its variables takes precedence; a file that cannot be read leaves the password unset, so the server will not start with basic authentication enabled.",
+        env_vars: &[],
+        allowed: &[],
+        value_range: None,
+        min: None,
+        max: None,
+        default_value: None,
+        sensitive: false,
+        client_excluded: true,
     },
     SettingDef {
         name: "basic_auth_viewonly_password",
@@ -2857,6 +2885,10 @@ impl Settings {
         self.str_value("ui_title")
     }
 
+    pub fn ui_icon(&self) -> &str {
+        self.str_value("ui_icon")
+    }
+
     pub fn ui_show_logo(&self) -> BoolSetting {
         self.bool_setting("ui_show_logo")
     }
@@ -3019,6 +3051,10 @@ impl Settings {
 
     pub fn basic_auth_password(&self) -> &str {
         self.str_value("basic_auth_password")
+    }
+
+    pub fn basic_auth_password_file(&self) -> &str {
+        self.str_value("basic_auth_password_file")
     }
 
     pub fn basic_auth_viewonly_password(&self) -> &str {

@@ -15,8 +15,11 @@
 //! [`install_tool`] at startup, so a build that lacks one says so rather than guessing.
 //! `selkies --help` lists the commands after the server's options ([`help_epilog`]).
 
+pub mod bundle;
 pub mod session;
+pub mod session_gpu;
 pub mod sessions;
+pub mod standalone;
 
 use std::collections::HashMap;
 use std::sync::Mutex;

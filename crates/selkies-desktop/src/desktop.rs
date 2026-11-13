@@ -642,7 +642,7 @@ impl Desktop {
         }
         let apps = load_apps(&config);
         seed_favorites(&mut config, &apps);
-        let logo = crate::render::load_raster(std::path::Path::new(crate::config::LOGO_PATH), 0);
+        let logo = crate::render::load_raster(&crate::config::logo_path(), 0);
         let mut desktop = Desktop {
             config,
             fonts,
@@ -1035,11 +1035,11 @@ impl Desktop {
     /// * `size` - Logical pixel size.
     pub fn start_icon(&mut self, size: i32) -> Option<Arc<Pixmap>> {
         let px = (size * self.panel.scale.max(1)) as u32;
-        let source = self.config.start_icon.clone().or_else(|| {
-            std::path::Path::new(crate::config::LOGO_SVG_PATH)
-                .is_file()
-                .then(|| crate::config::LOGO_SVG_PATH.to_string())
-        });
+        let source = self
+            .config
+            .start_icon
+            .clone()
+            .or_else(|| crate::config::logo_svg_path().map(|path| path.to_string_lossy().into_owned()));
         let svg = source.as_deref().is_some_and(|name| {
             self.icons
                 .locate(name, px)

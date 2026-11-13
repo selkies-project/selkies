@@ -142,6 +142,13 @@ pub struct Text {
     pub px: f32,
 }
 
+/// The fonts the release bundle carries, `share/selkies/fonts`, where the running executable
+/// belongs to one.
+fn bundle_fonts() -> Option<std::path::PathBuf> {
+    let dir = crate::dirs::bundle_share()?.join("selkies/fonts");
+    dir.is_dir().then_some(dir)
+}
+
 /// The font system shared by every canvas, with caches for shaped lines and
 /// rasterized glyphs.
 pub struct Fonts {
@@ -158,9 +165,15 @@ impl Default for Fonts {
 }
 
 impl Fonts {
-    /// Loads the system fonts and picks the UI family.
+    /// Loads the system fonts and the release bundle's, and picks the UI family.
+    ///
+    /// The bundle carries its UI face ([`bundle_fonts`]) because a host can have no fonts at
+    /// all, where shaping would find no face to fall back on.
     pub fn new() -> Fonts {
         let mut system = FontSystem::new();
+        if let Some(dir) = bundle_fonts() {
+            system.db_mut().load_fonts_dir(dir);
+        }
         let installed: Vec<String> = system
             .db()
             .faces()
@@ -976,6 +989,9 @@ fn svg_fonts() -> &'static std::sync::Arc<resvg::usvg::fontdb::Database> {
     FONTS.get_or_init(|| {
         let mut db = resvg::usvg::fontdb::Database::new();
         db.load_system_fonts();
+        if let Some(dir) = bundle_fonts() {
+            db.load_fonts_dir(dir);
+        }
         std::sync::Arc::new(db)
     })
 }

@@ -1,8 +1,11 @@
 //! The applications' theme, derived from the desktop's interface colors so GTK, Qt, Chromium,
 //! and Electron windows take its light or dark scheme and its accent. The scheme is dark when the
 //! popup color is, and it picks the half of the installed GTK theme pair that matches (Breeze-Dark
-//! or Breeze, else GTK's built-in Adwaita-dark or Adwaita), the matching icon theme, and the
-//! cursor theme where those are installed. What each toolkit reads:
+//! or Breeze), else GTK's built-in Adwaita in either scheme, the matching icon theme, and the
+//! cursor theme where those are installed. GTK 3 builds in Adwaita alone, its dark variant chosen
+//! by `gtk-application-prefer-dark-theme`; a theme named Adwaita-dark exists only where a package
+//! installs one, and a name GTK cannot load leaves it on the light Adwaita, so the built-in pair is
+//! one name and the preference. What each toolkit reads:
 //!
 //! * GTK 3 and plain GTK 4 read `settings.ini` under `~/.config/gtk-3.0` and `~/.config/gtk-4.0`
 //!   for the theme, icon and cursor names and the dark preference; only those keys of its
@@ -21,9 +24,9 @@
 //!   it still win over it.
 //! * Qt follows GTK through its gtk3 platform theme (`QT_QPA_PLATFORMTHEME`, set by the image):
 //!   Qt 6 takes its palette and dark scheme from the GTK theme, Qt 5 its dialogs and fonts.
-//! * Chromium and Electron take `prefers-color-scheme` from the desktop portal where one answers
-//!   and otherwise from the GTK theme they load, which is why the dark scheme is a named dark
-//!   theme rather than the preference alone.
+//! * Chromium and Electron take `prefers-color-scheme` at launch from the GTK theme they load,
+//!   its dark preference included, and later changes from GSettings, which is why the theme named
+//!   has to be one every GTK can load: one a proot application's root lacks starts it light.
 //! * libadwaita, Qt 6, Chromium, and Electron read the Settings portal's
 //!   `org.freedesktop.appearance` scheme and accent first, which [`super::portal`] serves from the
 //!   same [`Decision`] where no portal of the image's own holds the name.
@@ -137,34 +140,34 @@ fn installed(roots: &[PathBuf], name: &str, part: &str) -> bool {
 }
 
 /// Decides the scheme, the theme names, and the accent for the desktop's colors and icon theme.
-/// Adwaita needs no directory since GTK carries it built in; the other names are taken only where
-/// installed, so a session never names a theme it cannot load.
+/// Adwaita needs no directory since GTK carries it built in, its dark variant taken from the dark
+/// preference; the other names are taken only where installed, so a session never names a theme
+/// it cannot load.
 ///
 /// # Arguments
 /// * `theme` - The desktop's four colors.
 /// * `icon_theme` - The icon theme the desktop's settings name, or `None` to detect one.
 pub fn decide(theme: Theme, icon_theme: Option<&str>) -> Decision {
+    decide_in(theme, icon_theme, &theme_roots(), &icon_roots())
+}
+
+/// [`decide`] over the directories themes (`themes`) and icon themes (`icons`) are found in.
+fn decide_in(theme: Theme, icon_theme: Option<&str>, themes: &[PathBuf], icons: &[PathBuf]) -> Decision {
     let dark = luminance(theme.popup) < 0.5;
-    let themes = theme_roots();
-    let icons = icon_roots();
-    let (breeze, adwaita) = if dark {
-        ("Breeze-Dark", "Adwaita-dark")
-    } else {
-        ("Breeze", "Adwaita")
-    };
-    let gtk_theme = if installed(&themes, breeze, "gtk-3.0") {
+    let breeze = if dark { "Breeze-Dark" } else { "Breeze" };
+    let gtk_theme = if installed(themes, breeze, "gtk-3.0") {
         breeze
     } else {
-        adwaita
+        "Adwaita"
     };
     let icon_theme = icon_theme.map(str::to_string).or_else(|| {
         [dark.then_some("breeze-dark"), Some("breeze")]
             .into_iter()
             .flatten()
-            .find(|name| installed(&icons, name, "index.theme"))
+            .find(|name| installed(icons, name, "index.theme"))
             .map(str::to_string)
     });
-    let cursor_theme = installed(&icons, "breeze_cursors", "cursors").then(|| "breeze_cursors".to_string());
+    let cursor_theme = installed(icons, "breeze_cursors", "cursors").then(|| "breeze_cursors".to_string());
     Decision {
         dark,
         gtk_theme: gtk_theme.to_string(),
@@ -591,6 +594,33 @@ mod tests {
             .tempdir()
             .unwrap()
             .keep()
+    }
+
+    #[test]
+    fn a_dark_scheme_without_a_dark_theme_installed_is_adwaita_with_the_dark_preference() {
+        let dark = Theme {
+            popup: Color::from_rgba8(30, 30, 30, 255),
+            ..Theme::default()
+        };
+        let none = decide_in(dark, None, &[], &[]);
+        assert!(none.dark);
+        assert_eq!(none.gtk_theme, "Adwaita", "the one name every GTK loads");
+        assert!(
+            none.settings_ini()
+                .contains(&("gtk-application-prefer-dark-theme", "1".to_string())),
+            "the dark variant comes from the preference"
+        );
+        let root = scratch("decide-themes");
+        std::fs::create_dir_all(root.join("Breeze-Dark/gtk-3.0")).unwrap();
+        assert_eq!(
+            decide_in(dark, None, std::slice::from_ref(&root), &[]).gtk_theme,
+            "Breeze-Dark"
+        );
+        let light = Theme {
+            popup: Color::from_rgba8(240, 240, 240, 255),
+            ..Theme::default()
+        };
+        assert_eq!(decide_in(light, None, &[root], &[]).gtk_theme, "Adwaita");
     }
 
     #[test]

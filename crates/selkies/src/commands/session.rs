@@ -6,20 +6,31 @@
 
 //! A desktop session and Selkies streaming it, from one command.
 //!
-//! For platforms that start one process behind a port or a Unix socket: Jupyter's server
-//! proxy, an Open OnDemand job, a Coder workspace. It starts what the host lacks, a sound
-//! server unless one answers and an Xvfb on the X11 backend, its screen started at the images'
-//! size inside a framebuffer resizes can grow it to, then the desktop and Selkies with every
-//! argument it was given. The backend is Selkies' own `SELKIES_WAYLAND` or `--wayland`, read
-//! by Selkies' parser ([`selkies_settings`]). The desktop is found as a display manager finds
-//! one ([`super::sessions`]); nothing is assumed of the host's Xvfb or compositor beyond what
-//! every release of them offers.
+//! For whatever starts one process behind a port or a Unix socket: a container's init,
+//! Jupyter's server proxy, an Open OnDemand job, a Coder workspace, a user on a desktop of
+//! their own. The session is isolated by default: it shares the home directory with the host
+//! and nothing else, starting its own session and system buses ([`Session::buses`]), its own
+//! sound server ([`Session::sound`]), and its own display, in a runtime directory of its own
+//! or the one `--runtime-dir` names, so the host's buses, sound server, and login session
+//! never reach it ([`HOST_SERVICE_VARS`]). `--host` ([`Options::host`]) shares the host's
+//! runtime directory, buses, and sound server instead, Selkies still being the display.
+//!
+//! In order: the buses, the sound server, the GPU the session's processes get
+//! ([`super::session_gpu`]), which may move a Wayland session whose compositor cannot reach the
+//! GPU to X11, an Xvfb on the X11 backend, its screen started at the images' size inside a
+//! framebuffer resizes can grow it to, then the desktop and Selkies with every argument it was
+//! given. The backend is Selkies' own `SELKIES_WAYLAND` or `--wayland`, read by Selkies' parser
+//! ([`selkies_settings`]). The desktop is found as a display manager finds one
+//! ([`super::sessions`]), started on the session's bus, and started again when it exits
+//! ([`DesktopRestarts`]); nothing is assumed of the host's Xvfb or compositor beyond what every
+//! release of them offers.
 //!
 //! The children share a process group the launcher is not in, so stopping ends every process
 //! they started while a signal meant for the launcher's caller, Ctrl-C in a terminal or a
 //! scheduler's for the job, still reaches the launcher and stops them in order. What they
 //! orphan, a desktop's agents and every application a menu double-forks, the launcher adopts
-//! ([`adopt_orphans`]), collects once it exits, and ends with the session.
+//! ([`adopt_orphans`]), collects once it exits, and ends with the session, as it does whatever
+//! carries the session's identifier ([`SESSION_ID_VAR`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -40,6 +51,8 @@ use rand::Rng;
 use regex::Regex;
 use serde_json::{Value as Json, json};
 
+use super::bundle::{self, Bundle};
+use super::session_gpu;
 use super::sessions::{Desktops, Entry, which};
 use crate::settings::Settings;
 
@@ -61,15 +74,29 @@ pub const XVFB_ARGS: &[&str] = &[
 pub const START_SIZE: (u32, u32) = (1920, 1080);
 /// Where every X server puts its socket; a host's boot creates it.
 pub const X11_SOCKET_DIR: &str = "/tmp/.X11-unix";
-/// What a host session leaves in the environment that must not reach this one.
-pub const HOST_SESSION_VARS: &[&str] = &[
-    "DISPLAY",
-    "WAYLAND_DISPLAY",
-    "XAUTHORITY",
+/// The host's displays, which no session reaches: Selkies is the session's display in either
+/// mode.
+pub const HOST_DISPLAY_VARS: &[&str] = &["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"];
+/// What names the host's buses, sound server, and login session, which an isolated session
+/// starts its own of and a host session ([`Options::host`]) shares.
+pub const HOST_SERVICE_VARS: &[&str] = &[
     "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS",
     "PIPEWIRE_RUNTIME_DIR",
+    "PIPEWIRE_REMOTE",
     "PULSE_RUNTIME_PATH",
+    "PULSE_SERVER",
+    "PULSE_COOKIE",
+    "SESSION_MANAGER",
+    "XDG_SESSION_ID",
+    "XDG_SESSION_CLASS",
+    "XDG_SESSION_TYPE",
+    "XDG_SEAT",
+    "XDG_VTNR",
 ];
+/// The variable every process of a session carries, its value the session's own, so what
+/// left the session's process groups is still found and stopped with it ([`Session::stragglers`]).
+pub const SESSION_ID_VAR: &str = "SELKIES_SESSION_ID";
 
 /// A process environment.
 pub type Env = BTreeMap<String, String>;
@@ -164,6 +191,43 @@ pub const APPLICATION_PRELOADS: [&str; 3] = [
     "SELKIES_WEBCAM_INTERPOSER",
 ];
 
+/// Whether `dir` may be emptied and made 0700 as a session's runtime directory.
+///
+/// `--runtime-dir` names a directory the session clears of an earlier session's sockets and
+/// locks, so a mistyped path must not reach that: the filesystem root and any directory that is
+/// `home` or holds it are refused. Both are compared resolved, so a link or a `..` does not slip
+/// past, and a directory that does not exist yet is judged by the nearest ancestor that does.
+///
+/// # Errors
+/// `dir` is one of those, as an [`io::ErrorKind::InvalidInput`] naming it.
+fn clearable_runtime_dir(dir: &Path, home: Option<&Path>) -> io::Result<()> {
+    let dir = std::path::absolute(dir)?;
+    let existing = dir
+        .ancestors()
+        .find(|a| a.exists())
+        .unwrap_or(Path::new("/"));
+    let rest = dir.strip_prefix(existing).unwrap_or(Path::new(""));
+    let resolved = existing.canonicalize()?.join(rest);
+    let refuse = |why: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to clear {} as a runtime directory: {why}",
+                resolved.display()
+            ),
+        ))
+    };
+    if resolved.parent().is_none() {
+        return refuse("it is the filesystem root");
+    }
+    if let Some(home) = home.and_then(|h| h.canonicalize().ok())
+        && home.starts_with(&resolved)
+    {
+        return refuse("it holds the home directory");
+    }
+    Ok(())
+}
+
 /// The `LD_PRELOAD` the session's applications start with: the libraries
 /// [`APPLICATION_PRELOADS`] name ahead of the environment's own `LD_PRELOAD`, each once.
 ///
@@ -239,27 +303,70 @@ pub fn run_resize(argv: &[String], env: &Env) -> Option<String> {
     Some(out)
 }
 
-/// The processes of one session, in a runtime directory of its own.
+/// Whose runtime directory a session runs in, which decides what stopping it removes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeDir {
+    /// Made for the session and removed with it.
+    Temporary,
+    /// Named by `--runtime-dir`: emptied when the session starts, so a container's shells find
+    /// the session's sockets at a path they know, and kept when it stops.
+    Fixed,
+    /// The host's own, shared under `--host` and left as it was.
+    Host,
+}
+
+/// The processes of one session, in a runtime directory of its own unless it shares the
+/// host's.
 pub struct Session {
     pub runtime_dir: PathBuf,
+    /// What stopping the session does with [`Session::runtime_dir`].
+    pub runtime_kind: RuntimeDir,
     pub env: Env,
+    /// Whether the session shares the host's buses and sound server rather than starting its
+    /// own ([`Options::host`]).
+    pub host: bool,
     children: Vec<Child>,
     groups: BTreeSet<i32>,
     /// Index into `children` of the Selkies server, once started.
     selkies: Option<usize>,
+    /// Index into `children` of the desktop, while it runs.
+    desktop: Option<usize>,
+    /// The Wayland sockets the runtime directory held before Selkies started.
+    sockets_before: BTreeSet<String>,
+    /// The X display the launcher's environment named, which an X server takes where free.
+    requested_display: Option<String>,
+    /// The release bundle the executable runs from, whose programs the session takes first.
+    bundle: Option<Bundle>,
 }
 
 impl Session {
-    /// A session with a fresh runtime directory under the environment's, where that exists
-    /// and is writable, else the system's temporary directory.
-    pub fn new() -> io::Result<Session> {
+    /// The session `options` ask for, from the launcher's own environment: isolated in a
+    /// runtime directory of its own by default, the one `--runtime-dir` names, or the host's
+    /// under `--host`.
+    pub fn new(options: &Options) -> io::Result<Session> {
+        let env: Env = std::env::vars().collect();
         let base = std::env::var("XDG_RUNTIME_DIR").ok().map(PathBuf::from);
-        Self::new_in(base.as_deref(), std::env::vars().collect())
+        if options.host {
+            let dir = base.filter(|b| b.is_dir()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "--host shares the host's XDG_RUNTIME_DIR, which is not set or not a directory",
+                )
+            })?;
+            return Ok(Self::on_host(&dir, env));
+        }
+        match &options.runtime_dir {
+            Some(dir) => Self::in_dir(dir, env),
+            None => Self::new_in(base.as_deref(), env),
+        }
     }
 
-    /// A session whose runtime directory is made under `base`, with `env` as the launcher's
-    /// environment.
-    pub fn new_in(base: Option<&Path>, mut env: Env) -> io::Result<Session> {
+    /// An isolated session whose runtime directory is made under `base`, where that exists and
+    /// is writable, else the system's temporary directory, with `env` as the launcher's
+    /// environment. The directory is its owner's alone from the moment it exists, whatever the
+    /// umask, as the runtime directory specification asks: the buses and the sound server listen
+    /// in it.
+    pub fn new_in(base: Option<&Path>, env: Env) -> io::Result<Session> {
         let usable = base.filter(|b| {
             b.is_dir()
                 && tempfile::Builder::new()
@@ -267,29 +374,92 @@ impl Session {
                     .tempfile_in(b)
                     .is_ok()
         });
+        use std::os::unix::fs::PermissionsExt;
+        let mut builder = tempfile::Builder::new();
+        builder
+            .prefix("selkies-session-")
+            .permissions(fs::Permissions::from_mode(0o700));
         let runtime_dir = match usable {
-            Some(base) => tempfile::Builder::new()
-                .prefix("selkies-session-")
-                .tempdir_in(base),
-            None => tempfile::Builder::new()
-                .prefix("selkies-session-")
-                .tempdir(),
+            Some(base) => builder.tempdir_in(base),
+            None => builder.tempdir(),
         }?
         .keep();
-        for var in HOST_SESSION_VARS {
+        Ok(Self::build(runtime_dir, RuntimeDir::Temporary, env, false))
+    }
+
+    /// An isolated session in `dir`, made with the mode the runtime directory specification
+    /// asks for and emptied of what an earlier session left, whose sockets and locks would
+    /// otherwise look taken.
+    ///
+    /// # Errors
+    /// `dir` cannot be made or read, or it is one [`clearable_runtime_dir`] refuses to empty.
+    pub fn in_dir(dir: &Path, env: Env) -> io::Result<Session> {
+        use std::os::unix::fs::PermissionsExt;
+        let home = env.get("HOME").map(PathBuf::from);
+        clearable_runtime_dir(dir, home.as_deref())?;
+        fs::create_dir_all(dir)?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        for entry in fs::read_dir(dir)?.flatten() {
+            let path = entry.path();
+            let removed = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            if let Err(err) = removed {
+                log(&format!("cannot clear {} ({err})", path.display()));
+            }
+        }
+        Ok(Self::build(
+            dir.to_path_buf(),
+            RuntimeDir::Fixed,
+            env,
+            false,
+        ))
+    }
+
+    /// A session sharing the host's runtime directory `dir`, buses, and sound server.
+    pub fn on_host(dir: &Path, env: Env) -> Session {
+        Self::build(dir.to_path_buf(), RuntimeDir::Host, env, true)
+    }
+
+    /// The session in `runtime_dir` with `env` cleared of what it does not share with the host,
+    /// and marked with an identifier of its own.
+    fn build(runtime_dir: PathBuf, runtime_kind: RuntimeDir, mut env: Env, host: bool) -> Session {
+        let requested_display = env.get("DISPLAY").cloned();
+        for var in HOST_DISPLAY_VARS {
             env.remove(*var);
+        }
+        if !host {
+            for var in HOST_SERVICE_VARS {
+                env.remove(*var);
+            }
         }
         env.insert(
             "XDG_RUNTIME_DIR".to_string(),
             runtime_dir.to_string_lossy().into_owned(),
         );
-        Ok(Session {
+        let mut id = [0u8; 8];
+        rand::rng().fill_bytes(&mut id);
+        let id: String = id.iter().map(|b| format!("{b:02x}")).collect();
+        env.insert(SESSION_ID_VAR.to_string(), id);
+        let bundle = Bundle::locate();
+        if let Some(bundle) = &bundle {
+            bundle.session_env(&mut env, bundle::host_xkb());
+        }
+        Session {
             runtime_dir,
+            runtime_kind,
             env,
+            host,
             children: Vec::new(),
             groups: BTreeSet::new(),
             selkies: None,
-        })
+            desktop: None,
+            sockets_before: BTreeSet::new(),
+            requested_display,
+            bundle,
+        }
     }
 
     /// Start `argv` in the session's process group, founding it with the first child; the
@@ -330,10 +500,84 @@ impl Session {
         Ok(self.children.len() - 1)
     }
 
-    /// A sound server Selkies can capture: the one the environment names or runs, else the
-    /// first of PipeWire and PulseAudio that comes up here. A named socket that nothing
-    /// serves, as an image's own init would, is passed over.
-    pub fn sound(&mut self) -> bool {
+    /// The program `name` the session runs: the bundle's where it carries one, else the host's
+    /// by name.
+    fn program(&self, name: &str) -> String {
+        self.bundle
+            .as_ref()
+            .and_then(|b| b.program(name))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// The session's buses, which an isolated session starts for itself: one session bus that
+    /// Selkies, its window manager, and the desktop all join, at `$XDG_RUNTIME_DIR/bus`, where
+    /// libdbus, GDBus, and sd-bus look when no address is named, so a shell a container opens
+    /// in the same runtime directory finds it as well; and a system bus of its own at
+    /// `dbus-system-bus`, so what asks for the system bus is answered rather than refused or
+    /// handed the host's. A host session keeps the host's, and a bus that does not come up is
+    /// left out, the session then running as it would on a host that has none.
+    pub fn buses(&mut self) {
+        if self.host {
+            return;
+        }
+        let daemon = self.program("dbus-daemon");
+        if which(&daemon).is_none() {
+            log("no dbus-daemon; the session runs without buses");
+            return;
+        }
+        let bundled = self
+            .bundle
+            .clone()
+            .filter(|b| b.program("dbus-daemon").is_some());
+        let session = self.runtime_dir.join("bus");
+        let system = self.runtime_dir.join("dbus-system-bus");
+        for (kind, socket, var) in [
+            ("--session", session, "DBUS_SESSION_BUS_ADDRESS"),
+            ("--system", system, "DBUS_SYSTEM_BUS_ADDRESS"),
+        ] {
+            let address = format!("unix:path={}", socket.display());
+            // The bundled daemon's compiled-in configuration is the build machine's.
+            let config = match &bundled {
+                Some(b) => format!("--config-file={}", b.dbus_config(&kind[2..]).display()),
+                None => kind.to_string(),
+            };
+            let argv: Vec<String> = [
+                daemon.as_str(),
+                &config,
+                "--nofork",
+                "--nopidfile",
+                "--nosyslog",
+            ]
+            .iter()
+            .map(|a| a.to_string())
+            .chain([format!("--address={address}")])
+            .collect();
+            let index = match self.spawn(&argv, None, None) {
+                Ok(index) => index,
+                Err(err) => {
+                    log(&format!("the {} bus did not start: {err}", &kind[2..]));
+                    continue;
+                }
+            };
+            let child = &mut self.children[index];
+            match wait_for(|| answers(&socket), 10, "dbus-daemon", Some(child)) {
+                Ok(()) => {
+                    log(&format!("the session's {} bus at {address}", &kind[2..]));
+                    self.env.insert(var.to_string(), address);
+                }
+                Err(err) => {
+                    log(&format!("the {} bus did not come up: {err}", &kind[2..]));
+                    let _ = child.kill();
+                }
+            }
+        }
+    }
+
+    /// The host's sound server, for a session that shares it: the one the environment names,
+    /// else the one serving the host's runtime directory. A named socket that nothing serves,
+    /// as an image's own init would leave, is passed over.
+    fn host_sound(&mut self) -> bool {
         let named = self.env.get("PULSE_SERVER").cloned().unwrap_or_default();
         let socket_path = named
             .strip_prefix("unix:")
@@ -343,22 +587,41 @@ impl Session {
         if !named.is_empty() && (socket_path.is_empty() || answers(Path::new(&socket_path))) {
             return true;
         }
-        let running = std::env::var("PULSE_RUNTIME_PATH")
-            .ok()
+        let running = self
+            .env
+            .get("PULSE_RUNTIME_PATH")
             .filter(|p| !p.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                Path::new(
-                    &std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/nonexistent".into()),
-                )
-                .join("pulse")
-            });
+            .unwrap_or_else(|| self.runtime_dir.join("pulse"));
         let native = running.join("native");
         if answers(&native) {
             self.env.insert(
                 "PULSE_SERVER".to_string(),
                 format!("unix:{}", native.display()),
             );
+            log(&format!("the host's sound server at {}", native.display()));
+            return true;
+        }
+        false
+    }
+
+    /// A sound server Selkies can capture. An isolated session starts its own, the first of
+    /// PipeWire and PulseAudio that comes up in its runtime directory, and never takes the
+    /// host's: the desktop's applications would play through the host's speakers and the
+    /// stream would carry the host's own audio. A host session ([`Options::host`]) takes the
+    /// host's where one answers and starts one only where none does.
+    ///
+    /// PulseAudio starts without its default script (`-n`): that script loads the host's
+    /// hardware, its idle suspension, and the user's own `default.pa` from the shared home,
+    /// none of which a captured session wants, so the server loads its socket and a placeholder
+    /// sink alone (`module-always-sink`), which an application that opens audio before any
+    /// client streams plays into until Selkies' audio control plane makes the sinks and the
+    /// microphone source it streams, when the server moves those streams onto them. The
+    /// socket admits whoever reaches it, since it sits in the session's private runtime
+    /// directory, which is the access control, rather than asking for the cookie a fresh home
+    /// has none of.
+    pub fn sound(&mut self) -> bool {
+        if self.host && self.host_sound() {
             return true;
         }
         let own = self.runtime_dir.join("pulse/native");
@@ -373,11 +636,32 @@ impl Session {
                 vec!["pipewire-pulse".into()],
             ]);
         }
-        candidates.push(vec![vec![
-            "pulseaudio".into(),
-            "--daemonize=no".into(),
-            "--exit-idle-time=-1".into(),
-        ]]);
+        let mut pulseaudio = vec![self.program("pulseaudio")];
+        if let Some(bundle) = self
+            .bundle
+            .as_ref()
+            .filter(|b| b.program("pulseaudio").is_some())
+        {
+            pulseaudio.push(format!(
+                "--dl-search-path={}",
+                bundle.pulse_modules().display()
+            ));
+        }
+        candidates.push(vec![
+            [
+                pulseaudio,
+                vec![
+                    "--daemonize=no".into(),
+                    "--exit-idle-time=-1".into(),
+                    "--use-pid-file=no".into(),
+                    "-n".into(),
+                    "--load=module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0"
+                        .into(),
+                    "--load=module-always-sink".into(),
+                ],
+            ]
+            .concat(),
+        ]);
         for servers in candidates {
             if !servers.iter().all(|argv| which(&argv[0]).is_some()) {
                 continue;
@@ -409,35 +693,89 @@ impl Session {
                 "PULSE_SERVER".to_string(),
                 format!("unix:{}", own.display()),
             );
-            log(&format!("{} serves the session's audio", servers[0][0]));
+            let server = Path::new(&servers[0][0])
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            log(&format!("{server} serves the session's audio"));
             return true;
         }
         log("no sound server came up; the session has no audio");
         false
     }
 
-    /// An Xvfb on the first free display that admits this session's cookie alone, rendering
-    /// on the GPU through glamor where the server offers it.
+    /// Settle the session's GPU ([`super::session_gpu`]): the driver's loader files, the probe
+    /// run in the session's environment as `exe gpu-probe`, and the policy applied to that
+    /// environment. Returns the plan, whose backend may differ from the `wayland` asked for.
+    pub fn gpu(&mut self, exe: &str, wayland: bool) -> session_gpu::Plan {
+        let files = session_gpu::driver_files(&self.runtime_dir, |k| self.env.get(k).cloned());
+        for (var, value) in &files {
+            log(&format!(
+                "GPU: {var}={value}, for the driver's libraries the system has no loader file for"
+            ));
+        }
+        self.env.extend(files);
+        let mut probe_env = self.env.clone();
+        if let Some(bundle) = &self.bundle {
+            // The probe's throwaway X server is the session's.
+            let path = probe_env.get("PATH").cloned().unwrap_or_default();
+            probe_env.insert(
+                "PATH".to_string(),
+                format!("{}:{path}", bundle.libexec().display()),
+            );
+        }
+        let probe = session_gpu::probe(exe, &probe_env, session_gpu::PROBE_TIMEOUT);
+        let plan = session_gpu::plan(
+            &probe,
+            wayland,
+            &first_render_node(),
+            Path::new("/dev/nvidiactl").exists(),
+            |k| self.env.get(k).cloned(),
+        );
+        for var in &plan.unset {
+            self.env.remove(var);
+        }
+        self.env
+            .extend(plan.set.iter().map(|(k, v)| (k.clone(), v.clone())));
+        for line in &plan.lines {
+            log(line);
+        }
+        plan
+    }
+
+    /// An Xvfb that admits this session's cookie alone, on the display number the launcher's
+    /// environment named where that is free (a container's shells expect the one its image
+    /// sets) and else the first free one, rendering on the GPU through glamor where the server
+    /// offers it.
     ///
     /// A server whose GLX cannot load (a vendor's GL stack beside a stock Xvfb) is started
     /// again without it, so the desktop comes up and only GL applications on X11 go without.
-    pub fn x11(&mut self, render_dri: &str) -> Result<(), String> {
-        if which("Xvfb").is_none() {
+    ///
+    /// The server drops the session's Zink selection, which would have its GLX module bring a
+    /// Vulkan driver up that it never renders through and that on some Mesa versions never
+    /// returns. A server without a render node keeps its GLX probing on Mesa's EGL and loads no
+    /// external EGL platform: a vendor's GBM has nothing to offer it, and NVIDIA's takes the
+    /// server down where the container has no DRM device at all.
+    pub fn x11(&mut self, render_node: &str) -> Result<(), String> {
+        let xvfb = self.program("Xvfb");
+        if which(&xvfb).is_none() {
             return Err(
                 "the X11 backend needs Xvfb; install it, or set SELKIES_WAYLAND=true".into(),
             );
         }
+        x11_socket_dir(Path::new(X11_SOCKET_DIR));
+        let requested = self
+            .requested_display
+            .as_deref()
+            .and_then(display_number)
+            .filter(|n| display_free(*n, Path::new("/tmp"), Path::new(X11_SOCKET_DIR)));
         let auth = self.runtime_dir.join("Xauthority");
         let mut cookie = [0u8; 16];
         rand::rng().fill_bytes(&mut cookie);
         fs::write(&auth, xauth_wildcard_entry(&cookie))
             .map_err(|e| format!("cannot write {}: {e}", auth.display()))?;
-        let node = if render_dri.is_empty() {
-            first_render_node()
-        } else {
-            render_dri.to_string()
-        };
-        let usage = Command::new("Xvfb")
+        let node = render_node.to_string();
+        let usage = Command::new(&xvfb)
             .arg("-help")
             .output()
             .map(|o| {
@@ -455,19 +793,43 @@ impl Session {
         attempts.push(glx);
         attempts.push(vec!["-extension".to_string(), "GLX".to_string()]);
         let auth_text = auth.to_string_lossy().into_owned();
+        let mut server_env = self.env.clone();
+        for var in [
+            "GALLIUM_DRIVER",
+            "MESA_LOADER_DRIVER_OVERRIDE",
+            "LIBGL_KOPPER_DRI2",
+        ] {
+            server_env.remove(var);
+        }
         for extra in attempts {
             let (read, write) = pipe()?;
-            let mut argv = vec![
-                "Xvfb".to_string(),
+            let mut argv = vec![xvfb.clone()];
+            if let Some(number) = requested {
+                argv.push(format!(":{number}"));
+            }
+            argv.extend([
                 "-displayfd".to_string(),
                 std::os::fd::AsRawFd::as_raw_fd(&write).to_string(),
                 "-auth".to_string(),
                 auth_text.clone(),
-            ];
+            ]);
             argv.extend(XVFB_ARGS.iter().map(|a| a.to_string()));
             argv.extend(extra.iter().cloned());
+            let mut env = server_env.clone();
+            if !extra.iter().any(|a| a == "-glamor") {
+                if Path::new(MESA_EGL_VENDOR).is_file() {
+                    env.insert(
+                        "__EGL_VENDOR_LIBRARY_FILENAMES".to_string(),
+                        MESA_EGL_VENDOR.to_string(),
+                    );
+                }
+                env.insert(
+                    "__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES".to_string(),
+                    String::new(),
+                );
+            }
             let index = self
-                .spawn(&argv, None, Some(&write))
+                .spawn(&argv, Some(&env), Some(&write))
                 .map_err(|e| format!("Xvfb did not start: {e}"))?;
             drop(write);
             let number = read_line_within(read, Duration::from_secs(30));
@@ -522,23 +884,28 @@ impl Session {
         line
     }
 
-    /// The socket of Selkies' compositor, the first in the runtime directory.
+    /// The Wayland sockets in the runtime directory now, which a host's shares with its own
+    /// compositor.
+    fn wayland_sockets(dir: &Path) -> BTreeSet<String> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return BTreeSet::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.starts_with("wayland-") && !n.ends_with(".lock"))
+            .collect()
+    }
+
+    /// The socket of Selkies' compositor: the first in the runtime directory that was not
+    /// there before Selkies started, so a host's own compositor is never taken for it.
     fn capture_socket(&mut self) -> Result<String, String> {
         let dir = self.runtime_dir.clone();
+        let before = self.sockets_before.clone();
         let found = move || -> String {
-            let Ok(entries) = fs::read_dir(&dir) else {
-                return String::new();
-            };
-            let mut names: Vec<String> = entries
-                .flatten()
-                .filter_map(|e| e.file_name().to_str().map(str::to_string))
-                .collect();
-            names.sort();
-            names
+            Self::wayland_sockets(&dir)
                 .into_iter()
-                .find(|n| {
-                    n.starts_with("wayland-") && !n.ends_with(".lock") && answers(&dir.join(n))
-                })
+                .find(|n| !before.contains(n) && answers(&dir.join(n)))
                 .unwrap_or_default()
         };
         let selkies = self.selkies.map(|i| &mut self.children[i]);
@@ -576,7 +943,10 @@ impl Session {
             env.insert("LD_PRELOAD".to_string(), preload);
         }
         let exec = entry.get("Exec").cloned().unwrap_or_default();
-        let mut argv: Vec<String> = if which("dbus-run-session").is_some() {
+        let has_bus = env
+            .get("DBUS_SESSION_BUS_ADDRESS")
+            .is_some_and(|a| !a.is_empty());
+        let mut argv: Vec<String> = if !has_bus && which("dbus-run-session").is_some() {
             vec!["dbus-run-session".to_string(), "--".to_string()]
         } else {
             Vec::new()
@@ -594,8 +964,10 @@ impl Session {
             .or_else(|| env.get("DISPLAY"))
             .cloned()
             .unwrap_or_default();
-        self.spawn(&argv, Some(&env), None)
+        let index = self
+            .spawn(&argv, Some(&env), None)
             .map_err(|e| format!("the desktop did not start: {e}"))?;
+        self.desktop = Some(index);
         log(&format!(
             "desktop {} on {shown}",
             if sid.is_empty() { exec.as_str() } else { sid }
@@ -603,10 +975,21 @@ impl Session {
         Ok(())
     }
 
+    /// Whether the desktop has exited, and with what status (`None` while it runs or where
+    /// none was started).
+    fn desktop_exited(&mut self) -> Option<i32> {
+        self.desktop
+            .and_then(|index| exited(&mut self.children[index]))
+    }
+
     /// Start Selkies itself with `command`; the result is its exit status once it ends.
     fn start_selkies(&mut self, command: &[String]) -> Result<(), String> {
+        self.sockets_before = Self::wayland_sockets(&self.runtime_dir);
         let preload = std::env::var("SELKIES_PRELOAD").unwrap_or_default();
-        let env = for_selkies(&self.env, &preload);
+        let mut env = for_selkies(&self.env, &preload);
+        if let Some(bundle) = &self.bundle {
+            bundle.selkies_env(&mut env);
+        }
         let index = self
             .spawn(command, Some(&env), None)
             .map_err(|e| format!("selkies did not start: {e}"))?;
@@ -622,11 +1005,19 @@ impl Session {
         }
     }
 
-    /// The processes outside the session's process groups: those carrying its runtime
-    /// directory, and the orphans the launcher adopted, since an agent that makes itself
-    /// undumpable (ssh-agent) hides its environment.
+    /// The processes outside the session's process groups: those carrying its identifier
+    /// ([`SESSION_ID_VAR`]), and the orphans the launcher adopted, since an agent that makes
+    /// itself undumpable (ssh-agent) hides its environment. The identifier rather than the
+    /// runtime directory, which a host session shares with every process of the host's own.
     pub fn stragglers(&self) -> Vec<i32> {
-        let marker = format!("XDG_RUNTIME_DIR={}", self.runtime_dir.display()).into_bytes();
+        let marker = format!(
+            "{SESSION_ID_VAR}={}",
+            self.env
+                .get(SESSION_ID_VAR)
+                .map(String::as_str)
+                .unwrap_or("")
+        )
+        .into_bytes();
         let launcher = std::process::id().to_string();
         let ours: BTreeSet<u32> = self.children.iter().map(Child::id).collect();
         let mut found = Vec::new();
@@ -703,7 +1094,7 @@ impl Session {
     }
 
     /// Selkies first, so its capture closes before its display, then the session's process
-    /// groups and whatever left them, and the runtime directory.
+    /// groups and whatever left them, and a runtime directory made for the session.
     pub fn stop(&mut self) {
         if let Some(index) = self.selkies {
             let child = &mut self.children[index];
@@ -730,7 +1121,9 @@ impl Session {
             let _ = child.wait();
         }
         self.reap();
-        let _ = fs::remove_dir_all(&self.runtime_dir);
+        if self.runtime_kind == RuntimeDir::Temporary {
+            let _ = fs::remove_dir_all(&self.runtime_dir);
+        }
     }
 }
 
@@ -749,6 +1142,49 @@ fn first_render_node() -> String {
         .first()
         .map(|n| format!("/dev/dri/{n}"))
         .unwrap_or_default()
+}
+
+/// glvnd's file for Mesa's EGL, which a software X server's GLX probing is kept on.
+const MESA_EGL_VENDOR: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+
+/// The number of an X display name such as `:1` or `:1.0`, for a local display only.
+pub fn display_number(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(':')?;
+    rest.split('.').next()?.parse().ok()
+}
+
+/// Whether X display `number` is free here, its lock under `tmp` and socket under `sockets`
+/// cleared where a server that died left them: a server that died leaves both, and its
+/// replacement would then start against a number that still looks taken.
+pub fn display_free(number: u32, tmp: &Path, sockets: &Path) -> bool {
+    let lock = tmp.join(format!(".X{number}-lock"));
+    let socket = sockets.join(format!("X{number}"));
+    if let Ok(text) = fs::read_to_string(&lock) {
+        let alive = text
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|pid| *pid > 0)
+            .is_some_and(|pid| {
+                matches!(
+                    kill(Pid::from_raw(pid), None),
+                    Ok(()) | Err(nix::errno::Errno::EPERM)
+                )
+            });
+        if alive {
+            return false;
+        }
+        if fs::remove_file(&lock).is_err() {
+            return false;
+        }
+    }
+    if socket.exists() {
+        if answers(&socket) {
+            return false;
+        }
+        let _ = fs::remove_file(&socket);
+    }
+    true
 }
 
 /// A pipe whose write end a child may inherit (no close-on-exec).
@@ -820,9 +1256,54 @@ fn install_stop_handlers() {
 pub struct Options {
     /// A session by file, desktop, or program name, else a command to run.
     pub session: Option<String>,
+    /// The session the Wayland backend runs in place of [`Options::session`]
+    /// (`--wayland-session`), for a deployment with one desktop script per backend: the backend
+    /// is settled only once the GPU is known, which may move a Wayland session to X11.
+    pub wayland_session: Option<String>,
     /// End the session when the parent exits, for a parent that owns it and may die without
     /// stopping it: the Jupyter server proxy's entry.
     pub follow: bool,
+    /// Share the host's runtime directory, buses, and sound server, and start the host's
+    /// desktop on Selkies' display, rather than run isolated with its own (`--host`).
+    pub host: bool,
+    /// The runtime directory an isolated session runs in, rather than one made for it
+    /// (`--runtime-dir`): a container names the one its shells are given.
+    pub runtime_dir: Option<PathBuf>,
+}
+
+/// When an exited desktop is started again: at once after a run that lasted, as a supervisor
+/// restarts a session its user logged out of, and after a growing wait after one that exited
+/// right after starting, until [`DesktopRestarts::QUICK_LIMIT`] such exits in a row show it
+/// cannot start at all.
+#[derive(Debug)]
+pub struct DesktopRestarts {
+    started: Instant,
+    quick: u32,
+}
+
+impl DesktopRestarts {
+    /// A run shorter than this counts as exiting right after starting.
+    pub const QUICK: Duration = Duration::from_secs(10);
+    /// How many quick exits in a row end the restarts.
+    pub const QUICK_LIMIT: u32 = 5;
+
+    /// The restarts of a desktop first started at `started`.
+    pub fn new(started: Instant) -> Self {
+        Self { started, quick: 0 }
+    }
+
+    /// The wait before the next start of a desktop that exited at `now`, or `None` once it is
+    /// not to be started again.
+    pub fn after_exit(&mut self, now: Instant) -> Option<Duration> {
+        let quick = now.saturating_duration_since(self.started) < Self::QUICK;
+        self.quick = if quick { self.quick + 1 } else { 0 };
+        if self.quick >= Self::QUICK_LIMIT {
+            return None;
+        }
+        let wait = Duration::from_secs(u64::from(self.quick));
+        self.started = now + wait;
+        Some(wait)
+    }
 }
 
 /// What `selkies session`'s arguments ask for.
@@ -842,13 +1323,19 @@ pub enum Parsed {
 /// The usage text, as `--help` prints it.
 pub fn usage(prog: &str) -> String {
     format!(
-        "usage: {prog} [-h] [--session SESSION] [--follow] ...\n\n\
+        "usage: {prog} [-h] [--session SESSION] [--wayland-session SESSION] [--follow] [--host]\n\
+         \x20      [--runtime-dir DIR] ...\n\n\
          Start a desktop session and Selkies streaming it; every other argument goes to selkies.\n\n\
          options:\n\
          \x20 -h, --help         show this help message and exit\n\
          \x20 --session SESSION  a session by file, desktop, or program name (plasma, KDE, xfce, startlxqt), else a command\n\
          \x20                    to run; unset, the desktop XDG_CURRENT_DESKTOP names, else the host's default desktop\n\
+         \x20 --wayland-session SESSION\n\
+         \x20                    the session the Wayland backend runs instead of --session's\n\
          \x20 --follow           end the session when the parent exits, as the Jupyter server proxy's entry asks\n\
+         \x20 --host             share the host's runtime directory, buses, and sound server instead of starting the\n\
+         \x20                    session's own\n\
+         \x20 --runtime-dir DIR  run the isolated session in DIR, emptied at start, instead of a directory made for it\n\
          \x20 --jupyter-config   print the Jupyter server configuration that offers this desktop and exit\n"
     )
 }
@@ -884,12 +1371,45 @@ pub fn parse(argv: &[String]) -> Parsed {
             }
         } else if let Some(value) = arg.strip_prefix("--session=") {
             options.session = Some(value.to_string());
+        } else if arg == "--wayland-session" {
+            match argv.get(i).filter(|v| !v.starts_with('-')) {
+                Some(value) => {
+                    options.wayland_session = Some(value.clone());
+                    i += 1;
+                }
+                None => {
+                    return Parsed::Error(
+                        "argument --wayland-session: expected one argument".into(),
+                    );
+                }
+            }
+        } else if let Some(value) = arg.strip_prefix("--wayland-session=") {
+            options.wayland_session = Some(value.to_string());
+        } else if arg == "--host" {
+            options.host = true;
+        } else if arg == "--runtime-dir" {
+            match argv.get(i).filter(|v| !v.starts_with('-')) {
+                Some(value) => {
+                    options.runtime_dir = Some(PathBuf::from(value));
+                    i += 1;
+                }
+                None => {
+                    return Parsed::Error("argument --runtime-dir: expected one argument".into());
+                }
+            }
+        } else if let Some(value) = arg.strip_prefix("--runtime-dir=") {
+            options.runtime_dir = Some(PathBuf::from(value));
         } else {
             rest.push(arg.clone());
         }
     }
     if rest.first().is_some_and(|a| a == "--") {
         rest.remove(0);
+    }
+    if options.host && options.runtime_dir.is_some() {
+        return Parsed::Error(
+            "argument --runtime-dir: not allowed with --host, which shares the host's".into(),
+        );
     }
     Parsed::Run(options, rest)
 }
@@ -927,7 +1447,7 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
     }
     adopt_orphans();
     install_stop_handlers();
-    let mut session = match Session::new() {
+    let mut session = match Session::new(&options) {
         Ok(session) => session,
         Err(err) => {
             log(&format!("cannot make a runtime directory: {err}"));
@@ -939,20 +1459,38 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
         let exe = std::env::current_exe()
             .map(|p| p.to_string_lossy().into_owned())
             .map_err(|e| format!("cannot find the selkies executable: {e}"))?;
-        let mut command = vec![exe];
+        let mut command = vec![exe.clone()];
+        session.buses();
         if !session.sound() {
             command.push("--audio-enabled=false".to_string());
         }
         command.extend(selkies_args.iter().cloned());
+        let gpu = session.gpu(&exe, wayland);
+        let wayland = gpu.wayland;
+        if !wayland && settings.wayland().on {
+            command.push("--wayland=false".to_string());
+        }
         if !wayland {
-            session.x11(settings.render_dri())?;
+            session.x11(&gpu.x_render_node)?;
             session.size_screen(&settings, run_resize);
         }
-        let (sid, entry) = Desktops::from_env().pick(options.session.as_deref(), wayland)?;
+        let wanted = match (wayland, &options.wayland_session) {
+            (true, Some(session)) => Some(session.as_str()),
+            _ => options.session.as_deref(),
+        };
+        // The server's own shell is the desktop, so no installed session is picked for it
+        let shell_only = wanted.is_none() && settings.desktop().on;
+        let (sid, entry) = if shell_only {
+            (String::new(), Entry::new())
+        } else {
+            Desktops::from_env().pick(wanted, wayland)?
+        };
         if wayland {
             session.start_selkies(&command)?;
         }
-        if entry.is_empty() {
+        if shell_only {
+            log("the desktop is the selkies-desktop shell the server starts");
+        } else if entry.is_empty() {
             log(&format!(
                 "no {} session is installed; the display stays empty",
                 if wayland { "Wayland" } else { "X11" }
@@ -963,6 +1501,7 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
         if !wayland {
             session.start_selkies(&command)?;
         }
+        let mut restarts = DesktopRestarts::new(Instant::now());
         loop {
             if STOPPING.load(Ordering::SeqCst) != 0 {
                 *status = 0;
@@ -971,6 +1510,23 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
             if let Some(code) = session.selkies_exited() {
                 *status = code;
                 return Ok(());
+            }
+            if let Some(code) = session.desktop_exited() {
+                session.desktop = None;
+                match restarts.after_exit(Instant::now()) {
+                    Some(wait) => {
+                        log(&format!(
+                            "the desktop exited with status {code}; starting it again"
+                        ));
+                        std::thread::sleep(wait);
+                        session.desktop(&sid, &entry, wayland)?;
+                    }
+                    None => log(&format!(
+                        "the desktop exited with status {code} right after starting {} times; \
+                         it is not started again",
+                        DesktopRestarts::QUICK_LIMIT
+                    )),
+                }
             }
             session.reap();
             std::thread::sleep(Duration::from_millis(500));
@@ -1076,7 +1632,7 @@ mod tests {
         ]));
         let options = Options {
             session: Some("xfce".into()),
-            follow: false,
+            ..Options::default()
         };
         assert_eq!(
             parsed,
@@ -1098,10 +1654,55 @@ mod tests {
             Parsed::Run(
                 Options {
                     session: Some("KDE".into()),
-                    follow: true
+                    follow: true,
+                    ..Options::default()
                 },
                 Vec::new()
             )
+        );
+        assert_eq!(
+            parse(&argv(&["--runtime-dir", "/config/.XDG", "--port=1"])),
+            Parsed::Run(
+                Options {
+                    runtime_dir: Some(PathBuf::from("/config/.XDG")),
+                    ..Options::default()
+                },
+                argv(&["--port=1"])
+            ),
+            "--runtime-dir names the isolated session's directory"
+        );
+        assert_eq!(
+            parse(&argv(&[
+                "--session",
+                "bash /defaults/startwm.sh",
+                "--wayland-session=bash /defaults/startwm_wayland.sh"
+            ])),
+            Parsed::Run(
+                Options {
+                    session: Some("bash /defaults/startwm.sh".into()),
+                    wayland_session: Some("bash /defaults/startwm_wayland.sh".into()),
+                    ..Options::default()
+                },
+                Vec::new()
+            ),
+            "a session for each backend"
+        );
+        assert_eq!(
+            parse(&argv(&["--host"])),
+            Parsed::Run(
+                Options {
+                    host: true,
+                    ..Options::default()
+                },
+                Vec::new()
+            )
+        );
+        assert!(
+            matches!(
+                parse(&argv(&["--host", "--runtime-dir=/x"])),
+                Parsed::Error(_)
+            ),
+            "a host session shares the host's runtime directory"
         );
         assert_eq!(parse(&argv(&["--port=1", "--help"])), Parsed::Help);
         assert_eq!(parse(&argv(&["--jupyter-config"])), Parsed::JupyterConfig);
@@ -1173,13 +1774,8 @@ mod tests {
     #[test]
     fn the_screen_starts_at_the_images_size() {
         let env = Env::from([("DISPLAY".to_string(), ":7".to_string())]);
-        let session = Session {
-            runtime_dir: PathBuf::new(),
-            env,
-            children: Vec::new(),
-            groups: BTreeSet::new(),
-            selkies: None,
-        };
+        let mut session = Session::build(PathBuf::new(), RuntimeDir::Fixed, Env::new(), false);
+        session.env.extend(env);
         let calls = std::cell::RefCell::new(Vec::new());
         let answer = |out: &'static str| {
             |argv: &[String], env: &Env| {
@@ -1302,6 +1898,192 @@ mod tests {
             "a usable runtime directory holds the session's"
         );
         fs::remove_dir_all(&session.runtime_dir).unwrap();
+    }
+
+    #[test]
+    fn a_runtime_directory_that_is_the_root_or_holds_the_home_is_never_cleared() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("home/user");
+        fs::create_dir_all(home.join("documents")).unwrap();
+        fs::write(home.join("documents/keep"), "mine").unwrap();
+        for dir in [
+            Path::new("/").to_path_buf(),
+            home.clone(),
+            base.path().join("home"),
+            home.join("documents/.."),
+        ] {
+            let refused = Session::in_dir(
+                &dir,
+                Env::from([("HOME".to_string(), home.to_string_lossy().into_owned())]),
+            );
+            assert!(refused.is_err(), "{} is refused", dir.display());
+        }
+        assert!(
+            home.join("documents/keep").is_file(),
+            "the home is untouched"
+        );
+        let runtime = home.join(".runtime");
+        Session::in_dir(
+            &runtime,
+            Env::from([("HOME".to_string(), home.to_string_lossy().into_owned())]),
+        )
+        .unwrap();
+        assert!(
+            runtime.is_dir(),
+            "a directory inside the home is the session's to clear"
+        );
+    }
+
+    #[test]
+    fn a_temporary_runtime_directory_is_its_owners_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let session = Session::new_in(Some(base.path()), Env::new()).unwrap();
+        let mode = fs::metadata(&session.runtime_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn an_isolated_session_keeps_none_of_the_hosts_services_and_a_host_session_keeps_them() {
+        let host_env = Env::from([
+            ("DISPLAY".to_string(), ":0".to_string()),
+            ("WAYLAND_DISPLAY".to_string(), "wayland-0".to_string()),
+            (
+                "DBUS_SESSION_BUS_ADDRESS".to_string(),
+                "unix:path=/run/user/1000/bus".to_string(),
+            ),
+            (
+                "PULSE_SERVER".to_string(),
+                "unix:/run/user/1000/pulse/native".to_string(),
+            ),
+            ("XDG_SESSION_ID".to_string(), "3".to_string()),
+            ("HOME".to_string(), "/home/user".to_string()),
+        ]);
+        let isolated = Session::new_in(None, host_env.clone()).unwrap();
+        for var in HOST_DISPLAY_VARS.iter().chain(HOST_SERVICE_VARS) {
+            assert!(
+                !isolated.env.contains_key(*var),
+                "an isolated session starts its own of what {var} names"
+            );
+        }
+        assert_eq!(isolated.env["HOME"], "/home/user", "the home is shared");
+        assert!(!isolated.host);
+        let dir = tempfile::Builder::new()
+            .prefix("selkies-host-runtime-")
+            .tempdir()
+            .unwrap();
+        let shared = Session::on_host(dir.path(), host_env);
+        assert_eq!(
+            shared.env["DBUS_SESSION_BUS_ADDRESS"],
+            "unix:path=/run/user/1000/bus"
+        );
+        assert_eq!(
+            shared.env["PULSE_SERVER"],
+            "unix:/run/user/1000/pulse/native"
+        );
+        assert!(
+            !shared.env.contains_key("DISPLAY") && !shared.env.contains_key("WAYLAND_DISPLAY"),
+            "Selkies is the display in either mode"
+        );
+        assert_eq!(shared.runtime_kind, RuntimeDir::Host);
+        assert_ne!(
+            isolated.env[SESSION_ID_VAR], shared.env[SESSION_ID_VAR],
+            "each session is marked with an identifier of its own"
+        );
+        fs::remove_dir_all(&isolated.runtime_dir).unwrap();
+    }
+
+    #[test]
+    fn a_display_number_is_taken_when_free_and_a_dead_servers_leftovers_are_cleared() {
+        assert_eq!(display_number(":1"), Some(1));
+        assert_eq!(display_number(":12.0"), Some(12));
+        assert_eq!(
+            display_number("host:1"),
+            None,
+            "a remote display is not ours"
+        );
+        let tmp = tempfile::Builder::new()
+            .prefix("selkies-display-")
+            .tempdir()
+            .unwrap();
+        let sockets = tmp.path().join(".X11-unix");
+        fs::create_dir_all(&sockets).unwrap();
+        assert!(display_free(1, tmp.path(), &sockets), "nothing holds :1");
+        fs::write(
+            tmp.path().join(".X1-lock"),
+            format!("{:>10}\n", std::process::id()),
+        )
+        .unwrap();
+        assert!(
+            !display_free(1, tmp.path(), &sockets),
+            "a live server's lock holds its number"
+        );
+        fs::write(tmp.path().join(".X2-lock"), format!("{:>10}\n", i32::MAX)).unwrap();
+        fs::write(sockets.join("X2"), "").unwrap();
+        assert!(
+            display_free(2, tmp.path(), &sockets),
+            "a dead server's lock does not"
+        );
+        assert!(
+            !tmp.path().join(".X2-lock").exists() && !sockets.join("X2").exists(),
+            "and what it left is cleared"
+        );
+    }
+
+    #[test]
+    fn a_named_runtime_directory_is_emptied_made_private_and_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::Builder::new()
+            .prefix("selkies-fixed-runtime-")
+            .tempdir()
+            .unwrap();
+        let dir = base.path().join("XDG");
+        fs::create_dir_all(dir.join("pulse")).unwrap();
+        fs::write(dir.join("wayland-1.lock"), "").unwrap();
+        let session = Session::in_dir(&dir, Env::new()).unwrap();
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            0,
+            "what an earlier session left is gone"
+        );
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(session.env["XDG_RUNTIME_DIR"], dir.to_string_lossy());
+        assert_eq!(
+            session.runtime_kind,
+            RuntimeDir::Fixed,
+            "the named directory outlives the session"
+        );
+    }
+
+    #[test]
+    fn a_desktop_that_keeps_exiting_right_after_starting_is_given_up_and_a_lasting_one_is_not() {
+        let start = Instant::now();
+        let mut restarts = DesktopRestarts::new(start);
+        let lasted = start + Duration::from_secs(3600);
+        assert_eq!(
+            restarts.after_exit(lasted),
+            Some(Duration::ZERO),
+            "a desktop its user logged out of starts again at once"
+        );
+        let mut now = lasted;
+        let mut waits = Vec::new();
+        while let Some(wait) = restarts.after_exit(now) {
+            waits.push(wait);
+            now += wait + Duration::from_secs(1);
+        }
+        assert_eq!(
+            waits,
+            [1, 2, 3, 4].map(Duration::from_secs),
+            "quick exits wait longer each time"
+        );
+        assert_eq!(restarts.quick, DesktopRestarts::QUICK_LIMIT);
     }
 
     #[test]

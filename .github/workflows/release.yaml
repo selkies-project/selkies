@@ -160,6 +160,7 @@ jobs:
     uses: ./.github/workflows/build-wheel.yaml
     with:
       package_version: ${{ needs.check.outputs.version }}
+      packages: true
 
   pixelflux-pcmflux-wheels:
     name: Build pixelflux and pcmflux wheels
@@ -191,15 +192,6 @@ jobs:
       tag_prefix: ${{ needs.check.outputs.version }}
       floating_tags: ${{ needs.check.outputs.latest == 'true' }}
 
-  packages:
-    name: Build native packages
-    needs: [check]
-    permissions:
-      contents: read
-    uses: ./.github/workflows/packages.yaml
-    with:
-      package_version: ${{ needs.check.outputs.version }}
-
   reference:
     name: Build the Developer Reference
     needs: [check]
@@ -211,7 +203,7 @@ jobs:
 
   draft-release:
     name: Assemble draft release
-    needs: [check, wheel, wheel-smoke, pixelflux-pcmflux-wheels, images, packages, reference]
+    needs: [check, wheel, wheel-smoke, pixelflux-pcmflux-wheels, images, reference]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -235,10 +227,11 @@ jobs:
           find release-artifacts -type f -regextype posix-extended -regex '.*/[0-9a-f]{64}' -delete
           # Artifacts of the run rather than of the release: the build record
           # docker/build-push-action uploads per image, the record of what
-          # each image was built from, the web client the packages embed, and
-          # the conda package the AppImage is assembled from
+          # each image was built from, and the web client the bundles embed;
+          # the bundles themselves are release files, the payload every other
+          # channel repackages
           find release-artifacts -type f \( -name '*.dockerbuild' -o -name 'selkies-*-images-*.txt' \
-            -o -name 'selkies-web-client.tar' -o -name '*.conda' \) -delete
+            -o -name 'selkies-web-client.tar' \) -delete
           find release-artifacts -type f -exec mv {} release/ \;
           (cd release && sha256sum -- * > SHA256SUMS)
           ls -la release/

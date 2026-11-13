@@ -9329,6 +9329,10 @@ pub fn window_request(id: wm::WindowId, request: wm::Request) -> bool {
     running_compositor().is_some_and(|be| be.window_request(id, request).unwrap_or(false))
 }
 
+/// The variable naming the Xwayland a caller ships, found ahead of the host's
+/// ([`wayland::xwm::XWAYLAND_VAR`]).
+pub const XWAYLAND_VAR: &str = wayland::xwm::XWAYLAND_VAR;
+
 /// Start Xwayland on the running compositor; `notify` is told the display number.
 pub fn start_xwayland(notify: Option<std::sync::mpsc::Sender<u32>>) -> Result<(), Error> {
     running_compositor()

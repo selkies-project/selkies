@@ -2415,6 +2415,61 @@ async fn ipv6_loopback_redirect_on_the_listener() {
     app.stop().await;
 }
 
+/// Behind a login, a browser on the IPv6 loopback is moved before it is asked to sign in, so
+/// it signs in once, at the origin it stays on.
+#[tokio::test]
+async fn ipv6_loopback_redirect_precedes_the_login() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        eprintln!("SKIP the IPv6 loopback redirect: this host has no ::1");
+        return;
+    }
+    let config = HttpConfig {
+        enable_basic_auth: true,
+        basic_auth_password: "secret".into(),
+        ..HttpConfig::default()
+    };
+    let state =
+        AppState::new(config, FixedSupervisor::new(None, &[])).with_web_client(embedded_client());
+    let cfg = ListenConfig {
+        addr: "127.0.0.1,::1".into(),
+        port: 0,
+        ..ListenConfig::default()
+    };
+    let app = TestServer::start_with(build(state, Vec::new()), cfg).await;
+    let port = app.port;
+    let ask = |addr: &'static str, path: &'static str| async move {
+        let mut stream = tokio::net::TcpStream::connect((addr, port)).await.unwrap();
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        stream.read_to_end(&mut out).await.unwrap();
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let moved = ask("::1", "/").await;
+    assert!(moved.starts_with("HTTP/1.1 302"), "{moved}");
+    assert!(
+        moved
+            .to_ascii_lowercase()
+            .contains(&format!("location: http://127.0.0.1:{port}/\r\n")),
+        "{moved}"
+    );
+    assert!(
+        ask("127.0.0.1", "/").await.starts_with("HTTP/1.1 401"),
+        "the page it is moved to asks for the login"
+    );
+    assert!(
+        !ask("::1", "/api/health").await.starts_with("HTTP/1.1 302"),
+        "nothing but the entry page is moved"
+    );
+    app.stop().await;
+}
+
 /// The access line of a real request carries neither query.
 #[tokio::test]
 async fn access_log_has_no_query() {
@@ -3272,5 +3327,55 @@ async fn computer_use_handlers_refuse_a_request_nothing_granted() {
             .await;
         assert_eq!((r.status, r.body.as_str()), (401, CU_REFUSAL), "{route}");
     }
+    app.stop().await;
+}
+
+/// A deployment's title names the installed app and its `ui_icon` stands in for every icon
+/// the client links, the manifest's sized as the file is; without one the client's own icons
+/// are served.
+#[tokio::test]
+async fn the_deployment_names_and_icons_the_installed_app() {
+    let dir = crate::http::testing::tempfile_dir("selkies-ui-icon-");
+    let icon = dir.join("app.png");
+    image::RgbaImage::new(3, 2).save(&icon).unwrap();
+    let config = HttpConfig {
+        ui_title: "Firefox".into(),
+        ui_icon: icon.to_string_lossy().into_owned(),
+        ..HttpConfig::default()
+    };
+    let state =
+        AppState::new(config, FixedSupervisor::new(None, &[])).with_web_client(embedded_client());
+    let app = TestServer::start(build(state, Vec::new())).await;
+    let r = app.call("GET", "/manifest.json", &[]).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("content-type"), Some("application/manifest+json"));
+    let manifest: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+    assert_eq!(manifest["name"], "Firefox");
+    assert_eq!(manifest["short_name"], "Firefox");
+    assert_eq!(
+        manifest["icons"],
+        json!([{"src": "icon.png", "type": "image/png", "sizes": "3x2"}])
+    );
+    let png = std::fs::read(&icon).unwrap();
+    for path in ["/icon.png", "/favicon.ico", "/icon-512.png"] {
+        let r = app.call("GET", path, &[]).await;
+        assert_eq!(r.status, 200, "{path}");
+        assert_eq!(r.header("content-type"), Some("image/png"), "{path}");
+        assert_eq!(
+            r.body,
+            String::from_utf8_lossy(&png),
+            "{path} is the deployment's icon"
+        );
+    }
+    app.stop().await;
+
+    let state = AppState::new(HttpConfig::default(), FixedSupervisor::new(None, &[]))
+        .with_web_client(embedded_client());
+    let app = TestServer::start(build(state, Vec::new())).await;
+    let r = app.call("GET", "/favicon.ico", &[]).await;
+    assert_eq!(r.body, "\0\0\u{1}\0", "the client's own icon");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&app.call("GET", "/manifest.json", &[]).await.body).unwrap();
+    assert_eq!(manifest["name"], "Selkies");
     app.stop().await;
 }

@@ -97,38 +97,6 @@ and `tools/mutter_portal.py` is the RemoteDesktop and ScreenCast portal backend
 the host-portal suite's GNOME blocks hand to Mutter's own API in place of
 GNOME's, whose dialog nothing answers headless.
 
-## Packaging
-
-`tests/packaging/simulate.sh` runs `infra/packaging/*.sh` against a genuinely
-read-only `/repo` with the root-only tools stubbed, on any host, with no
-container runtime. The server's build is stubbed too (a `cargo` that leaves a
-stand-in binary reporting the version its manifest was stamped with, and the
-codec and dependency resolution, which read the distribution), so it catches
-the staging, read-only-mount, package-version, and dependency-declaration
-mistakes that otherwise only surface in the release job:
-
-```bash
-tests/packaging/simulate.sh
-```
-
-Those scripts also compile the Input Interposer into each package, including
-a 32-bit variant wherever the compiler can produce one. A host without a
-multilib toolchain can unpack one and point `MULTILIB_SYSROOT` at it, and the
-simulation covers that branch instead of skipping it:
-
-```bash
-mkdir -p /tmp/multilib && cd /tmp/multilib
-# The gcc runtime package is named for the distribution's compiler generation,
-# so it is resolved rather than spelled out.
-apt-get download libc6-dev-i386 libc6-i386 lib32gcc-s1 \
-  "$(apt-cache search --names-only '^lib32gcc-[0-9]+-dev$' | sort -V | tail -1 | cut -d' ' -f1)"
-for d in *.deb; do dpkg-deb -x "$d" root/; done
-mkdir -p root/lib32 root/lib
-ln -sf ../usr/lib32/libc.so.6 root/lib32/libc.so.6
-ln -sf ../usr/lib32/ld-linux.so.2 root/lib/ld-linux.so.2
-MULTILIB_SYSROOT=/tmp/multilib/root tests/packaging/simulate.sh
-```
-
 ## BrowserStack
 
 `tests/browserstack/smoke.ts` runs the web client on real browsers through

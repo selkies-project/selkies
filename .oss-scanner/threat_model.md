@@ -29,7 +29,9 @@
   refuse everything.
 - Entry points, under `crates/selkies/src` unless named otherwise: `http` (the auth gate in `auth.rs`, the token
   endpoint and table in `tokens.rs`, the operator routes in `routes.rs`, the web client in `static_files.rs`: a
-  `web_root` directory no path or link leaves, or the table `embedded.rs` serves, which a request names by key),
+  `web_root` directory no path or link leaves, or the table `embedded.rs` serves, which a request names by key,
+  with the manifest built from the settings and the one file `ui_icon` names served under the client's three fixed
+  icon names alone),
   `files` (upload, download, recording, screenshot, print, apps routes), `ws` (data plane, binary opcodes in
   `protocol.rs`), WebRTC signaling (`crates/selkies-rtc/src/signaling`, mounted by `webrtc/routes.rs`), the WebRTC
   stack (`crates/selkies-rtc`: `ice`, `dtls`, `srtp`, `rtp`, `sctp`, `sdp`, and the vendored `rtc-dtls`, `rtc-sctp`, and `rtc-srtp` under `vendor/`, edited in tree and in scope),
@@ -109,8 +111,16 @@
   reader of the file and its copies; it is no defense against whoever controls the server, which receives every key
   a run is sent and serves the page that opens them.
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
-  `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
-  write (planted names, FIFOs, set-ID files). The screen is no account's to map: Xvfb starts without `-shmem`, whose
+  `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio, D-Bus), and through a file-manager directory they
+  can write (planted names, FIFOs, set-ID files). `selkies session` keeps the session bus and the system bus it
+  starts, and its PulseAudio socket, which asks for no cookie, in a runtime directory of mode 0700 from the moment it
+  exists, whatever the umask (`--runtime-dir` makes the one it names so), so that directory's mode is their access
+  control; under `--host` the session joins the host's buses and sound server instead and starts none of these.
+  `selkies` run with no arguments serves the user's own desktop and home on `localhost:8080`, as that user
+  (`commands/standalone.rs`), behind the placeholder login below unless the environment sets one; every local
+  account reaches the loopback addresses, and choosing a password is the user's, as it is a container operator's.
+  `--basic-auth-password-file` reads the password from a file at startup, so it is in neither the environment nor
+  the command line another local account can read; the file's own mode is its access control. The screen is no account's to map: Xvfb starts without `-shmem`, whose
   segment any local account could read and write, and shares its framebuffer (`SELKIES-FRAMEBUFFER`) only with a
   local X client that may read the root, read-only.
 
@@ -188,6 +198,6 @@
   job, so no app name reaches a shell; every page of the session is told each job's output.
 - With authentication turned off (no password, no tokens), any connector controls the desktop by design; operators
   front such deployments with their own proxy.
-- The documented placeholder container password (`mypasswd`) and the turn-rest addon's public openrelay secret are
-  intentional.
+- The documented placeholder container password (`mypasswd`), which a bare `selkies` signs in with too, and the
+  turn-rest addon's public openrelay secret are intentional.
 - Reports should name the file and line, give a reproducer runnable against the source tree, and propose a patch.

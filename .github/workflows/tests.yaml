@@ -155,8 +155,6 @@ jobs:
           path: dist/
       - name: Install the selkies server under test
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libgbm1 libpixman-1-0
           python -m pip install --no-index --find-links "$PWD/dist" --only-binary=:all: selkies
           server="$(python -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/selkies"
           "${server}" --version

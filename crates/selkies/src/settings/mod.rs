@@ -812,7 +812,36 @@ impl Settings {
     /// and thread defaults, microphone requiring audio, the clipboard and start policies
     /// normalized, the TURN username defaulted, and a public listener as the both-family
     /// wildcard address.
+    /// Take the basic-authentication password from `basic_auth_password_file` where no password
+    /// was given directly, marking it given so the credential check passes. The file's trailing
+    /// newline is dropped, as an editor or `echo` leaves one; an unreadable or empty file leaves
+    /// the password unset and says why, naming the file and never its content.
+    fn read_password_file(&mut self) {
+        let path = self
+            .str_value("basic_auth_password_file")
+            .trim()
+            .to_string();
+        if path.is_empty() || self.overridden.contains("basic_auth_password") {
+            return;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let password = text.trim_end_matches(['\n', '\r']).to_string();
+                if password.is_empty() {
+                    error!(target: "settings", "The basic-auth password file {path} is empty.");
+                    return;
+                }
+                self.set_str("basic_auth_password", password);
+                self.overridden.insert("basic_auth_password");
+            }
+            Err(e) => {
+                error!(target: "settings", "Could not read the basic-auth password file {path}: {e}.");
+            }
+        }
+    }
+
     fn post_process(&mut self) {
+        self.read_password_file();
         let subfolder = self
             .str_value("subfolder")
             .trim()
@@ -1792,6 +1821,28 @@ mod tests {
             }
         );
         assert_eq!(s.manual_height(), 768);
+    }
+
+    #[test]
+    fn a_password_file_supplies_the_password_a_direct_one_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("password");
+        std::fs::write(&file, "from-file\n").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let read = parse(&["--basic-auth-password-file", &path], &[]);
+        assert_eq!(read.basic_auth_password(), "from-file");
+        assert!(read.was_provided("basic_auth_password"));
+        let direct = parse(
+            &["--basic-auth-password-file", &path],
+            &[("SELKIES_BASIC_AUTH_PASSWORD", "direct")],
+        );
+        assert_eq!(direct.basic_auth_password(), "direct");
+        let missing = parse(
+            &["--basic-auth-password-file", "/nonexistent/password"],
+            &[],
+        );
+        assert!(!missing.was_provided("basic_auth_password"));
+        assert_eq!(missing.basic_auth_password(), "");
     }
 
     #[test]

@@ -19,7 +19,13 @@
 //! it apart from a file still being written. [`PrintQueue`] runs a copy of the installed
 //! `cupsd` under the runtime directory with its whole state there, so nothing under `/etc/cups`
 //! is touched and no privilege is needed; applications reach it with `CUPS_SERVER` set to its
-//! socket. The scheduler is asked to die with this process (`PR_SET_PDEATHSIG`): one killed
+//! socket. The scheduler is the release bundle's where Selkies runs from one
+//! ([`crate::commands::bundle`]), else the host's. The queue takes PDF, which a document has
+//! become by the time it reaches the backend: where the scheduler's tree has `pdftopdf`, from
+//! cups-filters, every format it converts arrives through it as the host's CUPS would print
+//! it, and where it has none, as in the bundle, a PDF goes to the backend as it was printed
+//! ([`pdf_passthrough`]) and any other format is refused. The scheduler is asked to die with
+//! this process (`PR_SET_PDEATHSIG`): one killed
 //! outright would otherwise leave the scheduler holding the socket and the program for the
 //! next start to trip over.
 
@@ -106,6 +112,32 @@ pub fn pending(spool: &Path) -> Vec<(String, u64)> {
         .into_iter()
         .map(|(_, name, size)| (name, size))
         .collect()
+}
+
+/// `ppd` taking a PDF as it was printed, for a scheduler with no `pdftopdf` to turn one into the
+/// `application/vnd.cups-pdf` the queue otherwise takes: the line goes beside the queue's own
+/// filter line, which CUPS reads as two inputs the printer accepts.
+pub fn pdf_passthrough(ppd: &str) -> String {
+    const LINE: &str = "*cupsFilter: \"application/pdf 0 -\"";
+    if ppd.contains(LINE) {
+        return ppd.to_string();
+    }
+    let mut out = String::with_capacity(ppd.len() + LINE.len() + 1);
+    let mut added = false;
+    for line in ppd.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if !added && line.starts_with("*cupsFilter:") {
+            out.push_str(LINE);
+            out.push('\n');
+            added = true;
+        }
+    }
+    if !added {
+        out.push_str(LINE);
+        out.push('\n');
+    }
+    out
 }
 
 /// `ppd` with its default paper set to `requested`, and the size it now defaults to, or
@@ -389,10 +421,14 @@ impl PrintQueue {
         }
     }
 
-    /// `(cupsd, server bin, data dir)` of the installed CUPS, or `None`.
+    /// `(cupsd, server bin, data dir)` of the release bundle's CUPS, else of the installed
+    /// one, or `None`.
     pub fn programs() -> Option<(PathBuf, PathBuf, PathBuf)> {
+        let bundled = crate::commands::bundle::Bundle::locate()
+            .map(|b| format!("{}:", b.libexec().join("cups/sbin").display()))
+            .unwrap_or_default();
         Self::programs_on(&format!(
-            "{}{}",
+            "{bundled}{}{}",
             std::env::var("PATH").unwrap_or_default(),
             Self::SEARCH_PATH
         ))
@@ -483,6 +519,11 @@ impl PrintQueue {
         std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755))?;
         let requested = std::env::var("PAPERSIZE").unwrap_or_default();
         let (ppd, size) = default_paper(PPD, &requested);
+        let ppd = if server_bin.join("filter/pdftopdf").exists() {
+            ppd
+        } else {
+            pdf_passthrough(&ppd)
+        };
         if !requested.is_empty() && size.is_none() {
             log::warn!(target: "printing", "PAPERSIZE={requested} names no size the Selkies queue offers; it stays on A4");
         }
@@ -633,6 +674,23 @@ mod tests {
 
     use super::*;
     use parking_lot::Mutex;
+
+    #[test]
+    fn a_scheduler_without_pdftopdf_takes_pdf_as_it_was_printed() {
+        let ppd = pdf_passthrough(PPD);
+        let filters: Vec<&str> = ppd
+            .lines()
+            .filter(|l| l.starts_with("*cupsFilter"))
+            .collect();
+        assert_eq!(
+            filters,
+            [
+                "*cupsFilter: \"application/vnd.cups-pdf 0 -\"",
+                "*cupsFilter: \"application/pdf 0 -\""
+            ]
+        );
+        assert_eq!(pdf_passthrough(&ppd), ppd, "the line is added once");
+    }
 
     fn scratch() -> PathBuf {
         super::super::testing::scratch("selkies-printing")

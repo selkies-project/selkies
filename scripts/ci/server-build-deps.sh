@@ -9,7 +9,7 @@
 # of every library it links, the list the base image's `server` stage installs.
 #
 # The toolchain is read from addons/base/Dockerfile's RUST_TOOLCHAIN, so this
-# cannot drift from the images and packages (tests/unit/test_package_deps.py
+# cannot drift from the images and the bundle (tests/unit/test_toolchain.py
 # holds those two together). A host with rustup (a GitHub runner) installs it
 # there; any other gets rustup-init, checked against the hash rustup publishes
 # beside it, which puts cargo in ${CARGO_HOME:-~/.cargo}/bin. The codec

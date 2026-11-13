@@ -17,12 +17,37 @@ host where nothing can be installed ([Native Install](native.md)). It brings up
 what the host lacks and then Selkies, passing it every argument it does not take
 itself, so the port, the socket, the login, and every other
 [setting](settings.md) are Selkies' own, from the command line or `SELKIES_*`
-variables alike:
+variables alike. `selkies` run with no arguments at all is this command on
+Selkies' own desktop shell, over HTTPS behind the placeholder login
+([Native Install](native.md#your-own-desktop-in-a-browser)):
 
-- **Audio**: the sound server the environment names or runs, else PipeWire, else
-  PulseAudio, of the session's own.
-- **Display**: on the X11 backend, an Xvfb on a free display that admits only the
-  session's own cookie, whatever version the host ships; it renders on the GPU
+- **Isolation**: the session is its own, sharing only the home directory with the
+  host: its runtime directory, its buses, its sound server, and its display, so a
+  desktop started on a machine that already has one neither plays through the
+  host's speakers nor streams its audio, and the host's processes are never taken
+  for the session's. `--host` instead shares the host's runtime directory, session
+  and system buses, and sound server, for a desktop that is to run off the host's
+  own services. `--runtime-dir DIR` runs the isolated session in `DIR` rather
+  than a directory made for it and removed with it: a container names the one its
+  shells are given, and the session empties it when it starts.
+- **Buses**: a session bus at `$XDG_RUNTIME_DIR/bus`, where D-Bus clients look
+  when no address is named, that Selkies, its window manager, and the desktop all
+  join, and a system bus of the session's own (`DBUS_SYSTEM_BUS_ADDRESS`).
+- **Audio**: PipeWire, else PulseAudio, of the session's own; PulseAudio loads
+  only its socket, not the host's or the user's `default.pa`. Under `--host`, the
+  sound server the environment names or runs comes first.
+- **GPU**: what `selkies gpu-probe` finds decides the session's GL: GLX goes to
+  the vendor library that renders on the X server's render node, Mesa reaches a
+  GPU it has no driver for through Zink where the Vulkan driver can present
+  (`SELKIES_DISABLE_ZINK=true` keeps it out), and a Wayland session whose compositor
+  cannot reach a GPU that is here runs on X11 instead
+  (`SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland in software). Where a
+  container runtime passes in the NVIDIA driver's libraries without the files that
+  point EGL, Vulkan, OpenCL, and GBM at them, the session writes those into its
+  runtime directory and points the loaders there, with no root.
+- **Display**: on the X11 backend, an Xvfb that admits only the session's own
+  cookie, whatever version the host ships, on the display `DISPLAY` names where
+  that one is free and else on the first free one; it renders on the GPU
   where the server offers glamor, and comes up without GLX where its GLX cannot
   load. On the Wayland backend (`SELKIES_WAYLAND=true` or `--wayland`), Selkies'
   own compositor, and the `/tmp/.X11-unix` directory a host's boot would make,
@@ -31,7 +56,9 @@ variables alike:
   finds one in the `xsessions` or `wayland-sessions` directories of the XDG data
   directories (`~/.local/share` first, so a user adds one without root).
   `--session` names it by file, desktop, or program name (`xfce`, `kde`, `lxqt`,
-  `gnome`, `plasma`, `startxfce4`) or gives a command to run instead. Unset, the
+  `gnome`, `plasma`, `startxfce4`) or gives a command to run instead, and
+  `--wayland-session` names the one the Wayland backend runs in its place, for a
+  deployment with a desktop script per backend. Unset, the
   desktop `XDG_CURRENT_DESKTOP` names comes first, then the host's default: the
   user's last choice in `~/.dmrc`, LightDM's `user-session`, GDM's
   `FallbackSession`, the `x-session-manager` alternative, or
@@ -43,14 +70,17 @@ variables alike:
   for X11), `selkies session` says which backend has it. On the Wayland backend
   the session is a compositor or a desktop that starts one, nested in Selkies'
   own; KDE Plasma 6.8 and later nest only on the compositor's GPU renderer,
-  since KWin's Wayland backend composites with OpenGL alone.
+  since KWin's Wayland backend composites with OpenGL alone. A desktop that exits
+  is started again, at once after a run that lasted and after a growing wait after
+  one that exited right after starting, until five such exits in a row show it
+  cannot start.
 
 ```bash
 selkies session --session=xfce --enable-basic-auth=false            # http://localhost:8080
 SELKIES_WAYLAND=true selkies session --session=labwc --port=8081 --enable-basic-auth=false
 ```
 
-Everything runs in a runtime directory of the session's own. SIGTERM, SIGINT, or
+SIGTERM, SIGINT, or
 SIGHUP stops Selkies first and then everything the session started; started in
 the background by a script that exits, the session keeps running. To stream a
 display that already exists instead, run `selkies` itself.
