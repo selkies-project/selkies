@@ -191,6 +191,43 @@ pub const APPLICATION_PRELOADS: [&str; 3] = [
     "SELKIES_WEBCAM_INTERPOSER",
 ];
 
+/// Whether `dir` may be emptied and made 0700 as a session's runtime directory.
+///
+/// `--runtime-dir` names a directory the session clears of an earlier session's sockets and
+/// locks, so a mistyped path must not reach that: the filesystem root and any directory that is
+/// `home` or holds it are refused. Both are compared resolved, so a link or a `..` does not slip
+/// past, and a directory that does not exist yet is judged by the nearest ancestor that does.
+///
+/// # Errors
+/// `dir` is one of those, as an [`io::ErrorKind::InvalidInput`] naming it.
+fn clearable_runtime_dir(dir: &Path, home: Option<&Path>) -> io::Result<()> {
+    let dir = std::path::absolute(dir)?;
+    let existing = dir
+        .ancestors()
+        .find(|a| a.exists())
+        .unwrap_or(Path::new("/"));
+    let rest = dir.strip_prefix(existing).unwrap_or(Path::new(""));
+    let resolved = existing.canonicalize()?.join(rest);
+    let refuse = |why: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to clear {} as a runtime directory: {why}",
+                resolved.display()
+            ),
+        ))
+    };
+    if resolved.parent().is_none() {
+        return refuse("it is the filesystem root");
+    }
+    if let Some(home) = home.and_then(|h| h.canonicalize().ok())
+        && home.starts_with(&resolved)
+    {
+        return refuse("it holds the home directory");
+    }
+    Ok(())
+}
+
 /// The `LD_PRELOAD` the session's applications start with: the libraries
 /// [`APPLICATION_PRELOADS`] name ahead of the environment's own `LD_PRELOAD`, each once.
 ///
@@ -353,8 +390,13 @@ impl Session {
     /// An isolated session in `dir`, made with the mode the runtime directory specification
     /// asks for and emptied of what an earlier session left, whose sockets and locks would
     /// otherwise look taken.
+    ///
+    /// # Errors
+    /// `dir` cannot be made or read, or it is one [`clearable_runtime_dir`] refuses to empty.
     pub fn in_dir(dir: &Path, env: Env) -> io::Result<Session> {
         use std::os::unix::fs::PermissionsExt;
+        let home = env.get("HOME").map(PathBuf::from);
+        clearable_runtime_dir(dir, home.as_deref())?;
         fs::create_dir_all(dir)?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
         for entry in fs::read_dir(dir)?.flatten() {
@@ -1856,6 +1898,40 @@ mod tests {
             "a usable runtime directory holds the session's"
         );
         fs::remove_dir_all(&session.runtime_dir).unwrap();
+    }
+
+    #[test]
+    fn a_runtime_directory_that_is_the_root_or_holds_the_home_is_never_cleared() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("home/user");
+        fs::create_dir_all(home.join("documents")).unwrap();
+        fs::write(home.join("documents/keep"), "mine").unwrap();
+        for dir in [
+            Path::new("/").to_path_buf(),
+            home.clone(),
+            base.path().join("home"),
+            home.join("documents/.."),
+        ] {
+            let refused = Session::in_dir(
+                &dir,
+                Env::from([("HOME".to_string(), home.to_string_lossy().into_owned())]),
+            );
+            assert!(refused.is_err(), "{} is refused", dir.display());
+        }
+        assert!(
+            home.join("documents/keep").is_file(),
+            "the home is untouched"
+        );
+        let runtime = home.join(".runtime");
+        Session::in_dir(
+            &runtime,
+            Env::from([("HOME".to_string(), home.to_string_lossy().into_owned())]),
+        )
+        .unwrap();
+        assert!(
+            runtime.is_dir(),
+            "a directory inside the home is the session's to clear"
+        );
     }
 
     #[test]
