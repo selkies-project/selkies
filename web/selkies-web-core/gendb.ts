@@ -18,6 +18,9 @@ const DB_BRANCH = 'master';
 const DB_FILE = 'gamecontrollerdb.txt';
 const API = 'https://api.github.com';
 const OUTPUT_DIR = 'dist/jsdb';
+// A fetch that fails is tried again this many times in all, this far apart.
+const FETCH_ATTEMPTS = 3;
+const FETCH_RETRY_MS = 5000;
 
 const VALID_MAPPINGS = new Set([
   'a', 'b', 'x', 'y', 'back', 'guide', 'start', 'leftstick', 'rightstick',
@@ -142,15 +145,23 @@ async function main() {
   let commit: string | undefined;
   let body: Buffer;
   let blob: string | undefined;
-  try {
-    commit = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/commits/${DB_BRANCH}`, headers));
-    blob = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/contents/${DB_FILE}?ref=${commit}`, headers));
-    const url = `https://raw.githubusercontent.com/${DB_REPO}/${commit}/${DB_FILE}`;
-    console.log(`Fetching controller DB from ${url}...`);
-    body = Buffer.from(await (await fetchOk(url)).arrayBuffer());
-  } catch (error) {
-    console.error('Error fetching game controller DB:', error);
-    return;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      commit = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/commits/${DB_BRANCH}`, headers));
+      blob = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/contents/${DB_FILE}?ref=${commit}`, headers));
+      const url = `https://raw.githubusercontent.com/${DB_REPO}/${commit}/${DB_FILE}`;
+      console.log(`Fetching controller DB from ${url}...`);
+      body = Buffer.from(await (await fetchOk(url)).arrayBuffer());
+      break;
+    } catch (error) {
+      console.error(`Error fetching game controller DB (attempt ${attempt} of ${FETCH_ATTEMPTS}):`, error);
+      if (attempt === FETCH_ATTEMPTS) {
+        console.error('No controller DB: the client would map no gamepad, so the build fails.');
+        process.exitCode = 1;
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, FETCH_RETRY_MS));
+    }
   }
   const digest = gitBlobSha(body);
   if (!/^[0-9a-f]{40}$/.test(String(commit)) || digest !== blob) {
