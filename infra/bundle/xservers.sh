@@ -25,7 +25,10 @@
 # the same copy. musl's has none: Alpine's Mesa is its own libEGL. They find their xkb data and xkbcomp relative to their own
 # directory (patches/*-relative-xkb.patch), their font path is the built-in
 # fonts, and their compiled keymaps go to the runtime directory, so the tree
-# runs wherever it is unpacked.
+# runs wherever it is unpacked. Their GLX, where glamor does not provide it,
+# loads the host's Mesa software driver from the first of the distributions'
+# DRI directories (DRI_DIRS) that holds it, where the builder's dri.pc names
+# its own alone.
 #
 # Runs inside the manylinux_2_28 image infra/bundle/build.sh starts, whose glibc
 # is the bundle's floor. Each source is fetched once into SELKIES_SOURCE_CACHE
@@ -240,6 +243,13 @@ RUNPATH_FLAGS="-Wl,--enable-new-dtags -Wl,-rpath,\$ORIGIN/../../lib/selkies"
 XKB_ARGS="-Dxkb_dir=../../share/selkies/xkb -Dxkb_bin_dir=. -Dxkb_output_dir=/var/lib/xkb \
     -Ddefault_font_path=built-ins -Dsha1=libnettle -Dxdmcp=false -Dxdm-auth-1=false \
     -Dxselinux=false -Ddtrace=false -Dlibunwind=false -Ddocs=false -Ddevel-docs=false"
+
+DRI_DIRS="/usr/lib/$(uname -m)-linux-gnu/dri:/usr/lib64/dri:/usr/lib/dri"
+mkdir -p "${BUILD}/dri-pc"
+sed "s|^dridriverdir=.*|dridriverdir=${DRI_DIRS}|" "$(pkg-config --variable=pcfiledir dri)/dri.pc" \
+    > "${BUILD}/dri-pc/dri.pc"
+grep -qxF "dridriverdir=${DRI_DIRS}" "${BUILD}/dri-pc/dri.pc"
+export PKG_CONFIG_PATH="${BUILD}/dri-pc:${PKG_CONFIG_PATH}"
 
 d="$(fetch https://xorg.freedesktop.org/archive/individual/xserver/xwayland-24.1.15.tar.xz \
     7311b4bcda22cfc19cb99680eb1c35cfc1ea885981310639f0429fe2948c122e)"
