@@ -78,6 +78,174 @@
 import { GamepadManager } from './gamepad.ts';
 import { Queue, isMacDesktop } from './util.ts';
 
+/** One relative move sent past the last pointer echo: its sequence number and its deltas. */
+type EchoDelta = [seq: number, dx: number, dy: number];
+
+/** The mapping from the stream element's client box to its frame (`Input._windowMath`). */
+interface PointerMath {
+    /** Frame pixels per client pixel across. */
+    mouseMultiX: number;
+    /** Frame pixels per client pixel down. */
+    mouseMultiY: number;
+    /** Letterbox inset of the picture from the element's left edge. */
+    mouseOffsetX: number;
+    /** Letterbox inset of the picture from the element's top edge. */
+    mouseOffsetY: number;
+    /** The element's left edge in client coordinates. */
+    elementClientX: number;
+    /** The element's top edge in client coordinates. */
+    elementClientY: number;
+    /** The element's layout width. */
+    frameW: number;
+    /** The element's layout height. */
+    frameH: number;
+}
+
+/** One display of the extended desktop, as `Input.setDisplayLayouts` keeps it. */
+interface LayoutRect {
+    /** Left edge in remote pixels. */
+    x: number;
+    /** Top edge in remote pixels. */
+    y: number;
+    /** Width in remote pixels. */
+    w: number;
+    /** Height in remote pixels. */
+    h: number;
+    /** The owning page's CSS-to-remote scale, 0 where unknown. */
+    scale: number;
+    /** Left edge of the page's stream box on the desktop. */
+    originX: number;
+    /** Top edge of the page's stream box on the desktop. */
+    originY: number;
+    /** Remote pixels per desktop pixel across, 0 where the page published no box. */
+    scaleX: number;
+    /** Remote pixels per desktop pixel down, 0 where the page published no box. */
+    scaleY: number;
+    /** Whether a held drag may cross onto this display's stream box. */
+    crossable?: boolean;
+}
+
+/** The extended-desktop layout a held drag is mapped through. */
+interface DisplayLayout {
+    /** This page's display. */
+    own: LayoutRect;
+    /** Every display, this page's included. */
+    rects: LayoutRect[];
+    /** `own.x` as first published. */
+    ownX: number;
+    /** `own.y` as first published. */
+    ownY: number;
+    /** `own.w` as first published. */
+    ownW: number;
+    /** `own.h` as first published. */
+    ownH: number;
+}
+
+/** A shortcut chord that arrived mid-composition (`Input._pendingChord`). */
+interface PendingChord {
+    /** Base-level keysym of the chord key. */
+    keysym: number;
+    /** Whether Control was held. */
+    ctrl: boolean;
+    /** Whether Alt was held. */
+    alt: boolean;
+    /** Whether Meta was held. */
+    meta: boolean;
+    /** Whether Shift was held. */
+    shift: boolean;
+    /** When the chord arrived (`performance.now()`). */
+    at: number;
+}
+
+/** A finger on the screen in touch mode (`Input._activeTouches`). */
+interface ActiveTouch {
+    /** Client X where the finger landed. */
+    startX: number;
+    /** Client Y where the finger landed. */
+    startY: number;
+    /** Client X where the finger is. */
+    currentX: number;
+    /** Client Y where the finger is. */
+    currentY: number;
+    /** When the finger landed (`Date.now()`). */
+    startTime: number;
+    /** The touch's identifier. */
+    identifier: number;
+    /** Whether the finger's long press already fired. */
+    longPressCompleted: boolean;
+    /** Whether another finger was down while this one was. */
+    shared?: boolean;
+}
+
+/** A finger on the screen in trackpad mode (`Input._trackpadTouches`). */
+interface TrackpadTouch {
+    /** The touch's identifier. */
+    id: number;
+    /** Event time the finger landed. */
+    startT: number;
+    /** Client X where the finger landed. */
+    startX: number;
+    /** Client Y where the finger landed. */
+    startY: number;
+    /** Client X the finger last reported. */
+    lastX: number;
+    /** Client Y the finger last reported. */
+    lastY: number;
+    /** Event time of the last report. */
+    lastT: number;
+    /** Smoothed finger speed, null until two reports. */
+    speed: number | null;
+    /** Whether the finger traveled past the tap threshold. */
+    moved: boolean;
+}
+
+/** The two-finger gesture in progress (`Input._twoFingerStart`). */
+interface TwoFingerGesture {
+    /** Midpoint X of the fingers, in client coordinates. */
+    x: number;
+    /** Midpoint Y of the fingers. */
+    y: number;
+    /** Midpoint X where the gesture began. */
+    x0: number;
+    /** Midpoint Y where the gesture began. */
+    y0: number;
+    /** Distance between the fingers. */
+    span: number;
+    /** Distance between the fingers where the gesture began. */
+    span0: number;
+    /** What the gesture turned out to be, null until the fingers moved. */
+    kind: 'pinch' | 'scroll' | null;
+    /** The axis a scroll is held to, null until it is one. */
+    rail: 'x' | 'y' | 'xy' | null;
+    /** Horizontal scroll travel not yet sent as notches. */
+    accX: number;
+    /** Vertical scroll travel not yet sent as notches. */
+    accY: number;
+    /** Fraction of a zoom notch carried. */
+    zoom: number;
+}
+
+/** A key or pointer event read for the modifiers it reports held; a pointer event carries no key fields. */
+type ModifierEvent = KeyboardEvent | (MouseEvent & { isComposing?: undefined; keyCode?: undefined; key?: undefined });
+
+/** A mouse or pointer event as the button and motion handler reads it; a mouse event predicts nothing. */
+type ButtonMotionEvent = PointerEvent | (MouseEvent & { getPredictedEvents?: undefined });
+
+/** One listener `addListener` registered, as `removeListeners` takes it back. */
+type ListenerRecord = [target: EventTarget, name: string, listener: EventListener, options: AddEventListenerOptions];
+
+/** The position a pointer or a touch point reports. */
+interface PointerPosition {
+    /** X in client coordinates. */
+    clientX: number;
+    /** Y in client coordinates. */
+    clientY: number;
+    /** X on the screen, where the source reports one. */
+    screenX?: number;
+    /** Y on the screen, where the source reports one. */
+    screenY?: number;
+}
+
 /** CSS class on elements (and their descendants) whose input stays native. */
 const WHITELIST_CLASS = 'allow-native-input';
 
@@ -201,7 +369,7 @@ function trackpadGain(speed: number): number {
  */
 export function slotList(slot: number | number[] | null | undefined): number[] | null {
     const named = Array.isArray(slot) ? slot : (slot === null || slot === undefined ? [] : [slot]);
-    const slots = named.map(Number).filter((s: any): boolean => Number.isInteger(s) && s >= 1);
+    const slots = named.map(Number).filter((s: number): boolean => Number.isInteger(s) && s >= 1);
     return slots.length ? slots : null;
 }
 
@@ -257,7 +425,7 @@ const MODIFIER_STATE_BY_CODE: Record<string, string> = {
  * @param event
  * @returns
  */
-function _altPositionHeld(event: KeyboardEvent): boolean {
+function _altPositionHeld(event: KeyboardEvent | MouseEvent): boolean {
     return !!event.altKey || (typeof event.getModifierState === 'function' &&
                               event.getModifierState('AltGraph'));
 }
@@ -268,7 +436,7 @@ function _altPositionHeld(event: KeyboardEvent): boolean {
  * @param [state] A `getModifierState()` name; absent reports nothing.
  * @returns
  */
-function _modifierStateHeld(event: KeyboardEvent, state: string): boolean {
+function _modifierStateHeld(event: KeyboardEvent | MouseEvent, state: string): boolean {
     if (!state) return false;
     return state === 'Alt' ? _altPositionHeld(event) : event.getModifierState(state);
 }
@@ -294,7 +462,7 @@ function _isCharacterKey(key: string): boolean {
  * @returns
  */
 function _isPhysicalKey(event: KeyboardEvent): boolean {
-    return event.isTrusted !== false || (event as any).__selkiesClipReplay === true;
+    return event.isTrusted !== false || event.__selkiesClipReplay === true;
 }
 
 /** X11 keysym values by name. */
@@ -970,7 +1138,7 @@ const keysymsByCodepoint: Record<number, number> = {
 };
 /** Keysym for a codepoint: Latin-1 directly, the legacy table, else the Unicode keysym range. */
 const Keysyms = {
-    lookup: function(u: any): any {
+    lookup: function(u: number): number {
         if ((u >= 0x20) && (u <= 0xff)) { return u; }
         const keysym = keysymsByCodepoint[u];
         if (keysym !== undefined) { return keysym; }
@@ -981,18 +1149,18 @@ const Keysyms = {
 /** `event.key` name to keysyms indexed by DOM key location (standard, left, right, numpad). */
 const DOMKeyTable: Record<string, number[]> = {};
 (function(): void {
-    function addStandard(key: any, standard: any): void {
+    function addStandard(key: string, standard: number): void {
         if (standard === undefined) throw new Error("Undefined keysym for key \"" + key + "\"");
         if (key in DOMKeyTable) throw new Error("Duplicate entry for key \"" + key + "\"");
         DOMKeyTable[key] = [standard, standard, standard, standard];
     }
-    function addLeftRight(key: any, left: any, right: any): void {
+    function addLeftRight(key: string, left: number, right: number): void {
         if (left === undefined) throw new Error("Undefined keysym for key \"" + key + "\"");
         if (right === undefined) throw new Error("Undefined keysym for key \"" + key + "\"");
         if (key in DOMKeyTable) throw new Error("Duplicate entry for key \"" + key + "\"");
         DOMKeyTable[key] = [left, left, right, left];
     }
-    function addNumpad(key: any, standard: any, numpad: any): void {
+    function addNumpad(key: string, standard: number, numpad: number): void {
         if (standard === undefined) throw new Error("Undefined keysym for key \"" + key + "\"");
         if (numpad === undefined) throw new Error("Undefined keysym for key \"" + key + "\"");
         if (key in DOMKeyTable) throw new Error("Duplicate entry for key \"" + key + "\"");
@@ -1210,10 +1378,10 @@ const fixedkeys: Record<string, string> = {
 
 /** Platform and engine probes that select keyboard quirks. */
 const browser = {
-    isMac: function(): any { return /Mac|iPod|iPhone|iPad/.test(navigator.platform); },
-    isIOS: function(): any { return /iPod|iPhone|iPad/.test(navigator.platform); },
-    isWindows: function(): any { return /Win/.test(navigator.platform); },
-    isLinux: function(): any { return /Linux/.test(navigator.platform); },
+    isMac: function(): boolean { return /Mac|iPod|iPhone|iPad/.test(navigator.platform); },
+    isIOS: function(): boolean { return /iPod|iPhone|iPad/.test(navigator.platform); },
+    isWindows: function(): boolean { return /Win/.test(navigator.platform); },
+    isLinux: function(): boolean { return /Linux/.test(navigator.platform); },
     /** macOS proper, a narrower question than `isMac` (util.ts). */
     isMacDesktop,
     /**
@@ -1221,14 +1389,14 @@ const browser = {
      * it does not exist, compositionend is the only carrier of the committed
      * text.
      */
-    hasTextInput: function(): any { return typeof window.TextEvent === 'function'; },
-    isChrome: function(): any {
-        const brands = ((navigator as any).userAgentData && (navigator as any).userAgentData.brands) || [];
-        if (brands.some((b: any): boolean => /Chromium|Google Chrome/.test(b.brand))) return true;
-        return !!(window as any).chrome && (!!(window as any).chrome.webstore || !!(window as any).chrome.runtime);
+    hasTextInput: function(): boolean { return typeof window.TextEvent === 'function'; },
+    isChrome: function(): boolean {
+        const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+        if (brands.some((b: { brand: string; version: string; }): boolean => /Chromium|Google Chrome/.test(b.brand))) return true;
+        return !!window.chrome && (!!window.chrome.webstore || !!window.chrome.runtime);
     },
-    isSafari: function(): any { return /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent); },
-    isFirefox: function(): any { return /Firefox\//.test(navigator.userAgent); },
+    isSafari: function(): boolean { return /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent); },
+    isFirefox: function(): boolean { return /Firefox\//.test(navigator.userAgent); },
 };
 
 /** Codes of the modifiers no layout picks a character with, so a chord holding
@@ -1310,7 +1478,7 @@ const KeyboardUtil = {
      * @param evt
      * @returns A `KeyboardEvent.code` value, or `Unidentified`.
      */
-    getKeyCode: function(evt: any): any {
+    getKeyCode: function(evt: KeyboardEvent): string {
         if (evt.code) {
             switch (evt.code) {
                 case 'OSLeft': return 'MetaLeft';
@@ -1356,7 +1524,7 @@ const KeyboardUtil = {
      * @param evt
      * @returns A `KeyboardEvent.key` value, or `Unidentified`.
      */
-    getKey: function(evt: any): any {
+    getKey: function(evt: KeyboardEvent): string {
         if ((evt.key !== undefined) && (evt.key !== 'Unidentified')  && (evt.key !== 'Dead')) {
             switch (evt.key) {
                 case 'OS': return 'Meta';
@@ -1393,7 +1561,7 @@ const KeyboardUtil = {
      * @param evt
      * @returns
      */
-    getKeysym: function(evt: any): any {
+    getKeysym: function(evt: KeyboardEvent): number | null {
         const key = KeyboardUtil.getKey(evt);
         if (key === 'Unidentified') {
             return null;
@@ -1436,7 +1604,7 @@ const KeyboardUtil = {
         if (key.length !== 1) {
             return null;
         }
-        const codepoint = key.charCodeAt();
+        const codepoint = key.charCodeAt(0);
         if (codepoint) {
             return Keysyms.lookup(codepoint);
         }
@@ -1452,7 +1620,7 @@ const KeyboardUtil = {
      * @param code
      * @returns
      */
-    getKeysymFromCode: function(code: any): any {
+    getKeysymFromCode: function(code: string): number | null {
         if (!code) return null;
         if (/^Key[A-Z]$/.test(code)) {
             return Keysyms.lookup(code.charCodeAt(3) + 32);
@@ -1489,7 +1657,7 @@ const KeyboardUtil = {
 };
 
 /** Stops propagation and the default action of an event. */
-const _stopEvent = function (e: any): void {
+const _stopEvent = function (e: Event): void {
     e.stopPropagation();
     e.preventDefault();
 };
@@ -1511,74 +1679,74 @@ const _stopEvent = function (e: any): void {
 export class Input {
     /** The one attached input context; a second attach detaches the first. */
     static _attachedInstance: Input | null = null;
-    element!: any;
-    send!: any;
+    element!: HTMLElement;
+    send!: ((message: string) => void);
     sendMotion!: ((message: string) => void) | null;
     motionBacklog!: (() => number) | null;
     _pointerSeq!: number;
     _isSidebarOpen!: boolean;
-    isSharedMode!: any;
-    controllerSlots!: any;
-    playerIndex!: any;
-    cursorDiv!: any;
-    cursorImg!: any;
-    cursorHotspot!: Record<string, any>;
-    _cursorImageBitmap!: any;
+    isSharedMode!: boolean;
+    controllerSlots!: number[] | null;
+    playerIndex!: number;
+    cursorDiv!: HTMLCanvasElement;
+    cursorImg!: CanvasRenderingContext2D;
+    cursorHotspot!: { x: number; y: number; };
+    _cursorImageBitmap!: ImageBitmap | null;
     _rawHotspotX!: number;
     _rawHotspotY!: number;
     use_browser_cursors!: boolean;
     _latestMouseX!: number;
     _latestMouseY!: number;
     displayId!: string;
-    _echo!: any;
-    _echoDeltas!: any[];
+    _echo!: { display: string; x: number; y: number; scale: number; seq: number; maxX: number; maxY: number; } | null;
+    _echoDeltas!: EchoDelta[];
     _echoComposited!: boolean;
     fingerScroll!: boolean;
-    _fingerScrollTimer!: any;
-    _echoTimer!: any;
+    _fingerScrollTimer!: number | null;
+    _echoTimer!: number | null;
     _echoAsking!: boolean;
-    useCssScaling!: any;
-    _streamDensity!: any;
-    m!: any;
-    _layout!: any;
-    _anchorX!: any;
-    _anchorY!: any;
-    _chromeInsetX!: any;
-    _chromeInsetY!: any;
-    _sampleClientX!: any;
-    _sampleClientY!: any;
-    _sampleAnchorX!: any;
-    _sampleAnchorY!: any;
-    _geometryTimer!: any;
+    useCssScaling!: boolean;
+    _streamDensity!: number | null;
+    m!: PointerMath | null;
+    _layout!: DisplayLayout | null;
+    _anchorX!: number | null;
+    _anchorY!: number | null;
+    _chromeInsetX!: number | null;
+    _chromeInsetY!: number | null;
+    _sampleClientX!: number;
+    _sampleClientY!: number;
+    _sampleAnchorX!: number;
+    _sampleAnchorY!: number;
+    _geometryTimer!: number | null;
     buttonMask!: number;
-    gamepadManager!: any;
-    _gamepadAnnounced!: Record<string, any>;
+    gamepadManager!: GamepadManager | null;
+    _gamepadAnnounced!: Record<number, number>;
     gamepadRumble!: boolean;
     x!: number;
     y!: number;
     _relCarryX!: number;
     _relCarryY!: number;
-    _pointerScaleFrame!: any;
-    _pendingMove!: any;
+    _pointerScaleFrame!: { x: number; y: number; } | null;
+    _pendingMove!: { mtype: string; x: number; y: number; buttonMask: number; } | null;
     _moveFlushScheduled!: boolean;
-    _lastMotionSend!: any;
+    _lastMotionSend!: number;
     _rawMotionSeen!: boolean;
-    onmenuhotkey!: any;
+    onmenuhotkey!: (() => void) | null;
     gamingMode!: boolean;
     _fullscreenKeyboardLock!: boolean;
     shortcutsEnabled!: boolean;
     _escapePresses!: number;
     _lastEscapeAt!: number;
-    ongamingmode!: any;
-    onnotice!: any;
-    onfullscreenhotkey!: any;
-    ongaminghotkey!: any;
-    ongamepadhotkey!: any;
-    ongamepadconnected!: any;
-    ongamepaddisconnected!: any;
-    listeners!: any[];
-    listeners_context!: any[];
-    _queue!: any;
+    ongamingmode!: ((active: boolean) => void) | null;
+    onnotice!: ((code: string, text: string) => void) | null;
+    onfullscreenhotkey!: (() => void);
+    ongaminghotkey!: (() => void);
+    ongamepadhotkey!: (() => void) | null;
+    ongamepadconnected!: ((gamepadId: string) => void) | null;
+    ongamepaddisconnected!: (() => void) | null;
+    listeners!: (ListenerRecord | null)[];
+    listeners_context!: (ListenerRecord | null)[];
+    _queue!: Queue<number>;
     _primaryAsSecondary!: boolean;
     _allowThreshold!: boolean;
     _wheelClassified!: boolean;
@@ -1586,53 +1754,53 @@ export class Input {
     _smallestLineDeltaY!: number;
     _scrollMagnitude!: number;
     _wheelAccumY!: number;
-    _wheelDirY!: any;
+    _wheelDirY!: 'up' | 'down' | null;
     _wheelAccumX!: number;
-    _wheelDirX!: any;
+    _wheelDirX!: 'left' | 'right' | null;
     _pinchCarry!: number;
     _lastWheelEventTs!: number;
-    cursorScaleFactor!: any;
-    _cursorBase64Data!: any;
-    _guacKeyboardID!: any;
-    _EVENT_MARKER!: any;
-    _keyDownList!: Record<string, any>;
-    _keyHeartbeatTimer!: any;
+    cursorScaleFactor!: number | null;
+    _cursorBase64Data!: string | null;
+    _guacKeyboardID!: number;
+    _EVENT_MARKER!: `_GUAC_KEYBOARD_HANDLED_BY_${number}`;
+    _keyDownList!: Record<string, number>;
+    _keyHeartbeatTimer!: number | null;
     _KEY_HEARTBEAT_INTERVAL!: number;
     _altGrArmed!: boolean;
-    _altGrTimeout!: any;
+    _altGrTimeout!: number | null;
     _altGrCtrlTime!: number;
     _isSynth!: boolean;
-    _altKeysymByCode!: Map<any, any>;
+    _altKeysymByCode!: Map<string, number | null>;
     isComposing!: boolean;
     compositionString!: string;
-    _pendingChord!: any;
-    _momentaryChordMods!: Set<any>;
-    _momentaryChordModsTimer!: any;
+    _pendingChord!: PendingChord | null;
+    _momentaryChordMods!: Set<number>;
+    _momentaryChordModsTimer!: number | null;
     _chordKeySent!: boolean;
-    _lastTextInputCommit!: any;
-    keyboardInputAssist!: any;
+    _lastTextInputCommit!: { data: string; at: number } | null;
+    keyboardInputAssist!: HTMLInputElement | null;
     _assistTyped!: string;
     _assistComposing!: boolean;
-    _activeTouches!: Map<any, any>;
-    _activeTouchIdentifier!: any;
+    _activeTouches!: Map<number, ActiveTouch>;
+    _activeTouchIdentifier!: number | null;
     _isTwoFingerGesture!: boolean;
-    _twoFinger!: any;
-    _TAP_THRESHOLD_DISTANCE_SQ!: any;
+    _twoFinger!: TwoFingerGesture | null;
+    _TAP_THRESHOLD_DISTANCE_SQ!: number;
     _TAP_MAX_DURATION!: number;
     _trackpadMode!: boolean;
-    _trackpadTouches!: Map<any, any>;
-    _trackpadGestureMode!: any;
-    _trackpadReleaseTimer!: any;
-    _trackpadHandoffAt!: any;
+    _trackpadTouches!: Map<number, TrackpadTouch>;
+    _trackpadGestureMode!: string | null;
+    _trackpadReleaseTimer!: number | null;
+    _trackpadHandoffAt!: number;
     trackpadSpeed!: number;
     inputAttached!: boolean;
-    _longPressTimer!: any;
-    _longPressTouchIdentifier!: any;
-    _sinkMirrors!: Record<string, any>;
-    _lastSinkRect!: any;
-    _lastCursorDensity!: any;
-    _cursorResizeObserver!: any;
-    _cursorMutationObserver!: any;
+    _longPressTimer!: number | null;
+    _longPressTouchIdentifier!: number | null;
+    _sinkMirrors!: Record<string, HTMLElement | null>;
+    _lastSinkRect!: DOMRect;
+    _lastCursorDensity!: number | null;
+    _cursorResizeObserver!: ResizeObserver;
+    _cursorMutationObserver!: MutationObserver;
     /**
      * @param element Overlay element the stream input lands on; it also hosts IME composition.
      * @param send Sends one input protocol message to the server.
@@ -1664,7 +1832,7 @@ export class Input {
         this.cursorDiv.style.top = '0px';
         // Moved on every pointer move: a layer of its own repaints nothing under it.
         this.cursorDiv.style.willChange = 'transform';
-        this.cursorImg = this.cursorDiv.getContext('2d');
+        this.cursorImg = this.cursorDiv.getContext('2d')!;
         document.body.appendChild(this.cursorDiv);
         this.cursorHotspot = { x: 0, y: 0 };
         this._cursorImageBitmap = null;
@@ -1774,7 +1942,7 @@ export class Input {
         this._cursorBase64Data = null;
 
         this._guacKeyboardID = Input._nextGuacID++;
-        this._EVENT_MARKER = '_GUAC_KEYBOARD_HANDLED_BY_' + this._guacKeyboardID;
+        this._EVENT_MARKER = `_GUAC_KEYBOARD_HANDLED_BY_${this._guacKeyboardID}`;
 
         /** `event.code` to keysym for every key held server-side. */
         this._keyDownList = {};
@@ -1807,7 +1975,7 @@ export class Input {
         this._chordKeySent = false;
         /** Last textInput commit, so a compositionend carrying the same text right after stays clear-only (Blink chains both). */
         this._lastTextInputCommit = null;
-        this.keyboardInputAssist = document.getElementById('keyboard-input-assist');
+        this.keyboardInputAssist = document.getElementById('keyboard-input-assist') as HTMLInputElement | null;
         /** The assist field's value as last typed on the server. */
         this._assistTyped = "";
         /** Whether the composition in progress is in the assist field. */
@@ -1834,7 +2002,7 @@ export class Input {
     }
 
     /** Sets whether this is a viewer-only session. */
-    setSharedMode(enabled: any): void {
+    setSharedMode(enabled: boolean): void {
         this.isSharedMode = !!enabled;
     }
 
@@ -1856,7 +2024,7 @@ export class Input {
         }
     }
     /** Tracks the dashboard's `sidebarVisibilityChanged` message so gamepad state is only mirrored while it is open. */
-    _handleVisibilityMessage(event: any): void {
+    _handleVisibilityMessage(event: MessageEvent<{ type?: unknown; isOpen?: unknown } | null>): void {
         if (event.origin !== window.location.origin) return;
         const message = event.data;
         if (typeof message === "object" && message !== null && message.type === 'sidebarVisibilityChanged') {
@@ -1901,7 +2069,7 @@ export class Input {
     static _keyboardLockNoticed = false;
 
     /** Whether the next lock request asks for raw movement. */
-    static _asksRawMotion(): any {
+    static _asksRawMotion(): boolean {
         return Input.rawPointerMotion && !Input._rawMotionRefused;
     }
 
@@ -1917,7 +2085,7 @@ export class Input {
      * @returns
      */
     static _viewportSettled(): boolean {
-        const x = (window as any).mozInnerScreenX, y = (window as any).mozInnerScreenY;
+        const x = window.mozInnerScreenX, y = window.mozInnerScreenY;
         if (typeof x !== 'number' || typeof y !== 'number') return true;
         return Math.abs(x - window.screenX) < 1 && Math.abs(y - window.screenY) < 1;
     }
@@ -1945,13 +2113,13 @@ export class Input {
     }
 
     /** Hides the page-drawn cursor when a press lands outside the stream. */
-    _handleOutsideClick(event: any): void {
-        if (!this.use_browser_cursors && !this._trackpadMode && !this.element.contains(event.target)) {
+    _handleOutsideClick(event: MouseEvent | TouchEvent): void {
+        if (!this.use_browser_cursors && !this._trackpadMode && !this.element.contains(event.target as Node | null)) {
             this.cursorDiv.style.display = 'none';
         }
     }
     /** Moves the page-drawn cursor so its hotspot sits at a client position. */
-    _updateCursorPosition(clientX: any, clientY: any): void {
+    _updateCursorPosition(clientX: number, clientY: number): void {
         if (this.cursorDiv.style.display !== 'none') {
             const newX = clientX - this.cursorHotspot.x;
             const newY = clientY - this.cursorHotspot.y;
@@ -1963,7 +2131,7 @@ export class Input {
     static _cursorImageSetFn: string | null | undefined;
 
     /** Probes and caches which `image-set()` spelling the engine accepts in `cursor`. */
-    _cursorImageSetFunction(): any {
+    _cursorImageSetFunction(): string | null {
         if (Input._cursorImageSetFn === undefined) {
             Input._cursorImageSetFn = null;
             if (typeof CSS !== 'undefined' && CSS.supports) {
@@ -2059,13 +2227,13 @@ export class Input {
     }
 
     /** Marks input as synthetic (tests), which disables the keydown stuck-modifier heal. */
-    setSynth(isSynth: any): void {
+    setSynth(isSynth: boolean): void {
         console.log(`Input: Synthetic mode ${isSynth ? 'enabled' : 'disabled'}.`);
         this._isSynth = isSynth;
     }
 
     /** Switches CSS-pixel scaling and re-derives the window math and cursor. */
-    updateCssScaling(newUseCssScalingValue: any): void {
+    updateCssScaling(newUseCssScalingValue: boolean): void {
         if (this.useCssScaling !== newUseCssScalingValue) {
             console.log(`Input: Updating useCssScaling from ${this.useCssScaling} to ${newUseCssScalingValue}`);
             this.useCssScaling = newUseCssScalingValue;
@@ -2143,7 +2311,7 @@ export class Input {
     }
 
     /** Records that a non-modifier key went out under a held or momentary chord modifier, for `_chordEchoPending`. */
-    _noteChordKey(keysym: any): void {
+    _noteChordKey(keysym: number): void {
         if (!_isChordModifierKeysym(keysym) && this._chordModifierHeld()) this._chordKeySent = true;
     }
 
@@ -2156,7 +2324,7 @@ export class Input {
             (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as HTMLElement).isContentEditable)) {
             return;
         }
-        try { el.focus({ preventScroll: true }); } catch (e: any) { /* detached element */ }
+        try { el.focus({ preventScroll: true }); } catch (e) { /* detached element */ }
     }
 
     /**
@@ -2179,7 +2347,7 @@ export class Input {
      * ending. A macOS Command found up this way lost its keyup, which the keys
      * held under it follow (`_releaseLostKey`).
      */
-    _releaseDesyncedModifiers(event: any): void {
+    _releaseDesyncedModifiers(event: ModifierEvent): void {
         if (typeof event.getModifierState !== 'function' || this._isSynth) return;
         if (this.isComposing || event.isComposing || event.keyCode === 229 ||
             event.key === 'Process') return;
@@ -2281,7 +2449,7 @@ export class Input {
      * @param tracked The touches the handler tracks, by identifier.
      * @param event
      */
-    _forgetLiftedTouches(tracked: Map<number, any>, event: TouchEvent): void {
+    _forgetLiftedTouches(tracked: Map<number, unknown>, event: TouchEvent): void {
         if (!tracked || !event.touches) return;
         const down = new Set(Array.from(event.touches, (t: Touch): number => t.identifier));
         const changed = new Set(Array.from(event.changedTouches || [], (t: Touch): number => t.identifier));
@@ -2304,7 +2472,7 @@ export class Input {
      * Marks an event as handled by this instance.
      * @returns False when it already was.
      */
-    _guac_markEvent(e: any): boolean {
+    _guac_markEvent(e: Event): boolean {
         if (e[this._EVENT_MARKER]) {
             return false;
         }
@@ -2350,7 +2518,7 @@ export class Input {
      * sync rides the trusted `paste` event (lib/clipboard-sync.ts); the key
      * still streams to the remote desktop.
      */
-    _handleKeyDown(event: any): void {
+    _handleKeyDown(event: KeyboardEvent): void {
         if (this._escapeHatch(event)) {
             _stopEvent(event);
             return;
@@ -2501,7 +2669,7 @@ export class Input {
             keysym = this._keyDownList[code];
         }
 
-        const jpBadKeys = [
+        const jpBadKeys: (number | null)[] = [
             KeyTable.XK_Zenkaku_Hankaku, KeyTable.XK_Eisu_toggle,
             KeyTable.XK_Katakana, KeyTable.XK_Hiragana, KeyTable.XK_Romaji
         ];
@@ -2577,7 +2745,7 @@ export class Input {
         return true;
     }
 
-    _handleKeyUp(event: any): void {
+    _handleKeyUp(event: KeyboardEvent): void {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) {
             // Focus moved to a native control while the stream held the key.
             const code = KeyboardUtil.getKeyCode(event);
@@ -2655,7 +2823,7 @@ export class Input {
 
         const typed: [string, number][] = [];
         for (let i = diff_start; i < newChars.length; i++) {
-            const keysym = Keysyms.lookup(newChars[i].codePointAt(0));
+            const keysym = Keysyms.lookup(newChars[i].codePointAt(0)!);
             if (keysym) typed.push([newChars[i], keysym as number]);
         }
         if (!asCommit || !this._sendAsCommit(typed)) {
@@ -2684,7 +2852,7 @@ export class Input {
      * held from a composition that continued instead of committing, which the
      * IME consumed itself.
      */
-    _compositionStart(event: any): void {
+    _compositionStart(event: CompositionEvent): void {
         if (!this._guac_markEvent(event)) return;
         this.isComposing = true;
         this.compositionString = "";
@@ -2720,7 +2888,7 @@ export class Input {
     }
 
     /** Composition update: streams the preedit diff. */
-    _compositionUpdate(event: any): void {
+    _compositionUpdate(event: CompositionEvent): void {
         if (!this._guac_markEvent(event)) return;
         if (!this.isComposing) return;
         this._updateCompositionText(event.data);
@@ -2733,7 +2901,7 @@ export class Input {
      * methods deliver the syllable on the textInput after the end, so the end
      * is clear-only wherever the engine has that event.
      */
-    _compositionEnd(event: any): void {
+    _compositionEnd(event: CompositionEvent): void {
         if (!this._guac_markEvent(event)) return;
         if (!this.isComposing) return;
         if (this._pendingChord !== null) {
@@ -2765,8 +2933,8 @@ export class Input {
         setTimeout((): void => {
             if (this.isComposing) return;
             const el = this.element;
-            if (el && el.tagName === 'INPUT' && el.value) {
-                el.value = '';
+            if (el && el.tagName === 'INPUT' && (el as HTMLInputElement).value) {
+                (el as HTMLInputElement).value = '';
             }
             this._resetAssist();
         }, 0);
@@ -2780,7 +2948,7 @@ export class Input {
     }
 
     /** Composition start in the assist field: only the state is raised, since the field's input events carry the preedit. */
-    _assistCompositionStart(event: any): void {
+    _assistCompositionStart(event: CompositionEvent): void {
         if (!this._guac_markEvent(event)) return;
         this.isComposing = true;
         this._assistComposing = true;
@@ -2789,7 +2957,7 @@ export class Input {
     }
 
     /** Composition end in the assist field: the wire is brought level with the field (a cancel erases), then the field is emptied. */
-    _assistCompositionEnd(event: any): void {
+    _assistCompositionEnd(event: CompositionEvent): void {
         if (!this._guac_markEvent(event)) return;
         if (!this._assistComposing) return;
         if (this._pendingChord !== null) {
@@ -2797,7 +2965,7 @@ export class Input {
         }
         this.isComposing = false;
         this._assistComposing = false;
-        this._assistTyped = this._streamTextDiff(this._assistTyped, event.target.value || "");
+        this._assistTyped = this._streamTextDiff(this._assistTyped, (event.target as HTMLInputElement).value || "");
         this._clearCompositionHostSoon();
     }
 
@@ -2823,7 +2991,7 @@ export class Input {
     _typeText(text: string): void {
         const typed: [string, number][] = [];
         for (const char of text) {
-            const keysym = Keysyms.lookup(char.codePointAt(0));
+            const keysym = Keysyms.lookup(char.codePointAt(0)!);
             if (keysym) typed.push([char, keysym as number]);
         }
         if (this._sendAsCommit(typed)) return;
@@ -2845,7 +3013,7 @@ export class Input {
      * the accent. A commit the composition's last update already streamed is
      * the preedit as it stands, and is left there rather than typed twice.
      */
-    _handleTextInput(event: any): void {
+    _handleTextInput(event: InputEvent): void {
         if (!event.data) return;
         if (this._chordEchoPending()) return;
         if (this.isComposing && this.compositionString === event.data) {
@@ -2860,7 +3028,7 @@ export class Input {
     }
 
     /** True while a chord modifier is held server-side or momentarily pressed. */
-    _chordModifierHeld(): any {
+    _chordModifierHeld(): boolean {
         if (this._momentaryChordMods.size > 0) return true;
         for (const code in this._keyDownList) {
             if (_isChordModifierKeysym(this._keyDownList[code])) return true;
@@ -2896,7 +3064,7 @@ export class Input {
      * key or it lands as a bare keypress and types the letter.
      * @returns Keysyms to press, in order.
      */
-    _missingChordModifiers({ ctrl, alt, meta, shift }: { "ctrl": any; "alt": any; "meta": any; "shift": any }): number[] {
+    _missingChordModifiers({ ctrl, alt, meta, shift }: { ctrl: boolean; alt: boolean; meta: boolean; shift: boolean }): number[] {
         const missing = [];
         if (ctrl && !this._keysymHeld(KeyTable.XK_Control_L, KeyTable.XK_Control_R)) {
             missing.push(KeyTable.XK_Control_L);
@@ -2915,7 +3083,7 @@ export class Input {
     }
 
     /** Registers momentary chord modifiers for `_chordModifierHeld`, briefly. */
-    _noteMomentaryChordMods(keysyms: any): void {
+    _noteMomentaryChordMods(keysyms: number[]): void {
         for (const ks of keysyms) this._momentaryChordMods.add(ks);
         clearTimeout(this._momentaryChordModsTimer);
         this._momentaryChordModsTimer = setTimeout((): void => this._momentaryChordMods.clear(), 250);
@@ -2978,7 +3146,7 @@ export class Input {
     }
 
     /** True when any of the given keysyms is currently held server-side. */
-    _keysymHeld(...keysyms: any[]): any {
+    _keysymHeld(...keysyms: number[]): boolean {
         for (const code in this._keyDownList) {
             if (keysyms.includes(this._keyDownList[code])) return true;
         }
@@ -2986,7 +3154,7 @@ export class Input {
     }
 
     /** True while a macOS Command key holds the Control a chord made it stand for. */
-    _commandIsControl(): any {
+    _commandIsControl(): boolean {
         return this._keyDownList["MetaLeft"] === KeyTable.XK_Control_L ||
             this._keyDownList["MetaRight"] === KeyTable.XK_Control_L;
     }
@@ -3003,8 +3171,8 @@ export class Input {
      * empty field mid-composition waits for the next event: the refill is
      * then a no-op, and a composition end erases what a cancel left.
      */
-    _handleMobileInput(event: any): void {
-        const field = event.target;
+    _handleMobileInput(event: InputEvent): void {
+        const field = event.target as HTMLInputElement;
         if (this._chordEchoPending()) {
             this._resetAssist();
             return;
@@ -3052,7 +3220,7 @@ export class Input {
      * Ctrl+Shift+Click takes pointer lock, and in gaming mode a click re-arms
      * it after an Escape unlock while the click still goes to the server.
      */
-    _mouseButtonMovement(event: any): void {
+    _mouseButtonMovement(event: ButtonMotionEvent): void {
         const raw = event.type === 'pointerrawupdate';
         const sentRaw = !raw && this._rawMotionSeen &&
             (event.type === 'mousemove' || event.type === 'pointermove');
@@ -3094,8 +3262,8 @@ export class Input {
         var mtype: 'm' | 'm2' = "m";
         let relX = 0;
         let relY = 0;
-        let canvas = document.getElementById('videoCanvas');
-        let videoEle = document.getElementById("stream");
+        let canvas = document.getElementById('videoCanvas') as HTMLCanvasElement | null;
+        let videoEle = document.getElementById("stream") as HTMLVideoElement | null;
         if (event.type === 'mousedown' || event.type === 'mouseup' || event.type === 'pointerdown' || event.type === 'pointerup' || event.type === 'pointercancel') {
             if (event.button === 1) { 
                 event.preventDefault(); 
@@ -3107,10 +3275,10 @@ export class Input {
             }
         }
         if (down && event.button === 0 && event.ctrlKey && event.shiftKey && this.shortcutsEnabled) {
-            const targetElement = this._streamLockTargets().includes(event.target)
-                ? event.target : this.element;
+            const targetElement = this._streamLockTargets().includes(event.target as Element)
+                ? event.target as Element : this.element;
             const lock = (): void => this._requestPointerLock(targetElement, lock,
-                (err: any): void => console.error("Pointer lock failed:", err));
+                (err: Error): void => console.error("Pointer lock failed:", err));
             lock();
             event.preventDefault();
             return;
@@ -3309,9 +3477,9 @@ export class Input {
         ((motion && this.sendMotion) || this.send)(message);
         if (this._trackpadMode && !this._echoComposited && fields[0] === "m2" &&
             (fields[1] !== 0 || fields[2] !== 0)) {
-            this._echoDeltas.push([this._pointerSeq, fields[1], fields[2]]);
+            this._echoDeltas.push([this._pointerSeq, fields[1] as number, fields[2] as number]);
             if (this._echoDeltas.length > POINTER_ECHO_DELTAS_MAX) {
-                const [, dx, dy] = this._echoDeltas.shift();
+                const [, dx, dy] = this._echoDeltas.shift()!;
                 if (this._echo) [this._echo.x, this._echo.y] = this._echoStep(this._echo.x, this._echo.y, dx, dy);
             }
             this._placeEchoCursor();
@@ -3319,7 +3487,7 @@ export class Input {
     }
 
     /** Pen pointer events feed the mouse path; other pointer types arrive as mouse events. */
-    _handlePointerDown(event: any): void {
+    _handlePointerDown(event: PointerEvent): void {
         if (event.pointerType !== 'pen') {
             return;
         }
@@ -3333,7 +3501,7 @@ export class Input {
      * times as often as the frames this event is held for), the tip's
      * coalesced positions go out from here.
      */
-    _handlePointerMove(event: any): void {
+    _handlePointerMove(event: PointerEvent): void {
         if (event.pointerType !== 'pen') {
            return;
         }
@@ -3342,7 +3510,7 @@ export class Input {
     }
  
     /** Pen pointer release and cancel, see `_handlePointerDown`. */
-    _handlePointerUp(event: any): void {
+    _handlePointerUp(event: PointerEvent): void {
         if (event.pointerType !== 'pen') {
             return;
         }
@@ -3369,7 +3537,7 @@ export class Input {
      * fingers drops to one, that finger moves the pointer on from where it
      * then is, once `TRACKPAD_HANDOFF_MS` have passed, and never taps.
      */
-    _handleTrackpadEvent(event: any): void {
+    _handleTrackpadEvent(event: TouchEvent): void {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         event.preventDefault();
         event.stopPropagation();
@@ -3416,9 +3584,10 @@ export class Input {
         else if (type === 'touchmove') {
             for (const touch of this._trackpadTouches.values()) {
                 if (!touch.moved) {
-                    const currentTouch = Array.from(changedTouches).find((t: any): boolean => t.identifier === touch.id) || touch;
-                    const dx = currentTouch.clientX - touch.startX;
-                    const dy = currentTouch.clientY - touch.startY;
+                    // A finger that reported nothing carries no client position, so its travel is NaN and it stays unmoved.
+                    const currentTouch = (Array.from(changedTouches).find((t: Touch): boolean => t.identifier === touch.id) || touch) as { clientX?: number; clientY?: number };
+                    const dx = currentTouch.clientX! - touch.startX;
+                    const dy = currentTouch.clientY! - touch.startY;
                     if (dx * dx + dy * dy > this._TAP_THRESHOLD_DISTANCE_SQ) {
                         touch.moved = true;
                     }
@@ -3428,7 +3597,7 @@ export class Input {
             if (this._trackpadGestureMode === 'moving' || this._trackpadGestureMode === 'dragging') {
                 const touchData = this._trackpadTouches.values().next().value;
                 const changedTouch = touchData &&
-                    Array.from(changedTouches).find((t: any): boolean => t.identifier === touchData.id);
+                    Array.from(changedTouches).find((t: Touch): boolean => t.identifier === touchData.id);
                 if (changedTouch) {
                     this._trackpadMove(touchData, changedTouch.clientX, changedTouch.clientY,
                                        event.timeStamp);
@@ -3447,11 +3616,11 @@ export class Input {
         else if (type === 'touchend' || type === 'touchcancel') {
             const touchCountBeforeEnd = this._trackpadTouches.size;
             const wasTap = type === 'touchend' &&
-                !Array.from(this._trackpadTouches.values()).some((t: any): boolean => t.moved);
+                !Array.from(this._trackpadTouches.values()).some((t: TrackpadTouch): boolean => t.moved);
             const mode = this._trackpadGestureMode;
 
             const longPress = touchCountBeforeEnd === 1 && mode === 'moving' && wasTap &&
-                event.timeStamp - this._trackpadTouches.values().next().value.startT >= LONG_PRESS_MS;
+                event.timeStamp - this._trackpadTouches.values().next().value!.startT >= LONG_PRESS_MS;
             if (((touchCountBeforeEnd === 2 || touchCountBeforeEnd === 3) && wasTap && mode !== 'completed') ||
                 longPress) {
                 const bit = touchCountBeforeEnd === 3 ? (1 << 1) : (1 << 2);
@@ -3504,7 +3673,7 @@ export class Input {
         const mode = this._trackpadGestureMode;
         if (!this._trackpadMode || this._trackpadTouches.size !== 1 ||
             (mode !== 'moving' && mode !== 'dragging')) return;
-        this._trackpadMove(this._trackpadTouches.values().next().value, event.clientX, event.clientY,
+        this._trackpadMove(this._trackpadTouches.values().next().value!, event.clientX, event.clientY,
                            event.timeStamp);
     }
 
@@ -3597,9 +3766,9 @@ export class Input {
      * @returns
      */
     _sinkBox(canvas: HTMLCanvasElement | null, videoEle: HTMLVideoElement | null, measureCursor: boolean = false): { boxLeft: number; boxTop: number; boxW: number; boxH: number; sinkW: number; sinkH: number } | null {
-        const sink = ((measureCursor || (window as any).manual_resolution || this.isSharedMode || (window as any).streamResolutionDiverged) && canvas)
+        const sink = ((measureCursor || window.manual_resolution || this.isSharedMode || window.streamResolutionDiverged) && canvas)
             ? canvas
-            : ((measureCursor || (window as any).manualResolution || (window as any).streamResolutionDiverged) && videoEle) ? videoEle : null;
+            : ((measureCursor || window.manualResolution || window.streamResolutionDiverged) && videoEle) ? videoEle : null;
         if (!sink || (measureCursor && sink.tagName === 'VIDEO' &&
             !((sink as HTMLVideoElement).videoWidth > 0 && (sink as HTMLVideoElement).videoHeight > 0))) {
             return null;
@@ -3657,7 +3826,7 @@ export class Input {
      *
      * Runs per pointer event; allocation-free.
      */
-    _noteScreenAnchor(event: any): void {
+    _noteScreenAnchor(event: PointerPosition): void {
         const sx = event.screenX, sy = event.screenY;
         if (!Number.isFinite(sx) || !Number.isFinite(sy)) {
             return;
@@ -3666,7 +3835,7 @@ export class Input {
             Math.abs(event.clientY - this._sampleClientY) < 8) {
             return;
         }
-        const anchorX = sx - event.clientX, anchorY = sy - event.clientY;
+        const anchorX = sx! - event.clientX, anchorY = sy! - event.clientY;
         const agrees = anchorX === this._sampleAnchorX && anchorY === this._sampleAnchorY;
         this._sampleClientX = event.clientX;
         this._sampleClientY = event.clientY;
@@ -3723,7 +3892,7 @@ export class Input {
             return null;
         }
         return { originX: (window.screenX || 0) + this._chromeInsetX + box.left,
-                 originY: (window.screenY || 0) + this._chromeInsetY + box.top,
+                 originY: (window.screenY || 0) + this._chromeInsetY! + box.top,
                  scaleX: box.scaleX, scaleY: box.scaleY };
     }
 
@@ -3757,7 +3926,7 @@ export class Input {
      * user drags elsewhere fires nothing this page listens for, and the next
      * crossing would be placed against where the window used to be.
      */
-    _watchScreenGeometry(on: any): void {
+    _watchScreenGeometry(on: boolean): void {
         if (on && !this._geometryTimer) {
             this._geometryTimer = setInterval((): void => this._publishScreenGeometry(), 1000);
             this._publishScreenGeometry();
@@ -3776,7 +3945,7 @@ export class Input {
      * @param [screenY]
      * @returns False when no sink applies.
      */
-    _applySinkCoordinates(clientX: any, clientY: any, canvas: any, videoEle: any, screenX: number, screenY: number): boolean {
+    _applySinkCoordinates(clientX: number, clientY: number, canvas: HTMLCanvasElement | null, videoEle: HTMLVideoElement | null, screenX?: number, screenY?: number): boolean {
         const box = this._sinkBox(canvas, videoEle);
         if (!box) {
             return false;
@@ -3810,8 +3979,8 @@ export class Input {
             this._watchScreenGeometry(false);
             return;
         }
-        const rects: { x: number; y: number; w: number; h: number; scale: number | undefined; originX: number | undefined; originY: number | undefined; scaleX: number | undefined; scaleY: number | undefined; crossable?: boolean }[] = [];
-        let own = null;
+        const rects: LayoutRect[] = [];
+        let own: LayoutRect | null = null;
         for (const id in layouts) {
             const entry = layouts[id];
             if (!entry) continue;
@@ -3856,7 +4025,7 @@ export class Input {
      * more than a pixel: windows placed edge to edge meet on a fraction, since
      * a letterboxed box starts on one.
      */
-    _boxesOverlap(a: any, b: any): any {
+    _boxesOverlap(a: LayoutRect, b: LayoutRect): boolean {
         if (!(a.scaleX > 0) || !(a.scaleY > 0) || !(b.scaleX > 0) || !(b.scaleY > 0)) {
             return false;
         }
@@ -3867,13 +4036,13 @@ export class Input {
     }
 
     /** Whether a desktop position sits on the stream box `rect`'s page published. */
-    _overNeighbor(rect: any, screenX: any, screenY: any): any {
+    _overNeighbor(rect: LayoutRect, screenX?: number, screenY?: number): boolean {
         if (!rect.crossable || !(rect.scaleX > 0) || !(rect.scaleY > 0) ||
             !Number.isFinite(screenX) || !Number.isFinite(screenY)) {
             return false;
         }
-        return screenX >= rect.originX && screenX <= rect.originX + rect.w / rect.scaleX &&
-               screenY >= rect.originY && screenY <= rect.originY + rect.h / rect.scaleY;
+        return screenX! >= rect.originX && screenX! <= rect.originX + rect.w / rect.scaleX &&
+               screenY! >= rect.originY && screenY! <= rect.originY + rect.h / rect.scaleY;
     }
 
     /**
@@ -3906,7 +4075,7 @@ export class Input {
      * @returns False inside this display or with no multi-display
      *     layout, so the caller keeps its single-display behavior.
      */
-    _mapToLayout(rx: number, ry: number, sxOwn: number, syOwn: number, screenX: number, screenY: number): boolean {
+    _mapToLayout(rx: number, ry: number, sxOwn: number, syOwn: number, screenX?: number, screenY?: number): boolean {
         const L = this._layout;
         if (!L || (rx >= 0 && rx <= L.ownW && ry >= 0 && ry <= L.ownH)) {
             return false;
@@ -3924,8 +4093,8 @@ export class Input {
             if (d < bestD) { bestD = d; target = r; }
         }
         if (target && this._overNeighbor(target, screenX, screenY)) {
-            gx = target.x + (screenX - target.originX) * target.scaleX;
-            gy = target.y + (screenY - target.originY) * target.scaleY;
+            gx = target.x + (screenX! - target.originX) * target.scaleX;
+            gy = target.y + (screenY! - target.originY) * target.scaleY;
         } else if (target && target.scale > 0 && sxOwn > 0 && syOwn > 0) {
             const kx = target.scale / sxOwn;
             const ky = target.scale / syOwn;
@@ -3957,8 +4126,8 @@ export class Input {
      * Device pixel ratio to map client coordinates by, or 1 wherever the stream
      * is already realized in CSS pixels and the sink box carries the scale.
      */
-    _inputDpr(): any {
-        if ((window as any).manual_resolution || (window as any).manualResolution || this.isSharedMode) {
+    _inputDpr(): number {
+        if (window.manual_resolution || window.manualResolution || this.isSharedMode) {
             return 1;
         }
         return this._streamDensity || (this.useCssScaling ? 1 : (window.devicePixelRatio || 1));
@@ -4051,7 +4220,7 @@ export class Input {
      * frame: the trackpad path is not coalesced, and every touch event of a
      * drag would otherwise force its own reflow.
      */
-    _pointerScale(): any {
+    _pointerScale(): { x: number; y: number; } {
         if (this._pointerScaleFrame) {
             return this._pointerScaleFrame;
         }
@@ -4076,7 +4245,7 @@ export class Input {
      * motion that should cancel out. A carry that ever went non-finite would
      * stay that way and put `NaN` on the wire, so it restarts from zero.
      */
-    _quantizeRelative(x: any, y: any): any {
+    _quantizeRelative(x: number, y: number): number[] {
         this._relCarryX += x;
         this._relCarryY += y;
         if (!Number.isFinite(this._relCarryX) || !Number.isFinite(this._relCarryY)) {
@@ -4092,20 +4261,20 @@ export class Input {
     }
 
     /** Scale a CSS-pixel relative motion onto the wire's server pixels. */
-    _relativeToServer(cssX: any, cssY: any): any {
+    _relativeToServer(cssX: number, cssY: number): number[] {
         const scale = this._pointerScale();
         return this._quantizeRelative(cssX * scale.x, cssY * scale.y);
     }
 
     /** Maps a touch point into `this.x`/`this.y` and moves the page-drawn cursor to it. */
-    _calculateTouchCoordinates(touchPoint: any): void {
+    _calculateTouchCoordinates(touchPoint: PointerPosition): void {
         this._noteScreenAnchor(touchPoint);
         this._updateCursorPosition(touchPoint.clientX, touchPoint.clientY);
         this._latestMouseX = touchPoint.clientX;
         this._latestMouseY = touchPoint.clientY;
         const dpr_for_input_coords = this._inputDpr();
-        let canvas = document.getElementById('videoCanvas');
-        let videoEle = document.getElementById('stream');
+        let canvas = document.getElementById('videoCanvas') as HTMLCanvasElement | null;
+        let videoEle = document.getElementById('stream') as HTMLVideoElement | null;
 
         if (this._applySinkCoordinates(touchPoint.clientX, touchPoint.clientY, canvas, videoEle,
                                        touchPoint.screenX, touchPoint.screenY)) {
@@ -4140,7 +4309,7 @@ export class Input {
     }
 
     /** Switches trackpad emulation, clearing touch state and any held button. */
-    setTrackpadMode(enabled: any): void {
+    setTrackpadMode(enabled: boolean): void {
         const newMode = !!enabled;
         if (this._trackpadMode === newMode) {
             return;
@@ -4198,7 +4367,7 @@ export class Input {
                 if (this._trackpadMode && !this._echo) this._compositeCursor();
             }, POINTER_ECHO_WAIT_MS);
             if (!this._cursorImageBitmap && this._cursorBase64Data) {
-                this._cursorBitmapFromBase64(this._cursorBase64Data).then((bitmap: any): void => {
+                this._cursorBitmapFromBase64(this._cursorBase64Data).then((bitmap: ImageBitmap): void => {
                     if (!this._cursorImageBitmap && this._trackpadMode) {
                         this._cursorImageBitmap = bitmap;
                         this._drawAndScaleCursor();
@@ -4256,7 +4425,7 @@ export class Input {
         }
         this._echo = { display: fields[1], x, y, scale: scale > 0 ? scale : 1, seq,
                        maxX: Infinity, maxY: Infinity };
-        this._echoDeltas = this._echoDeltas.filter((delta: any): boolean => delta[0] > seq);
+        this._echoDeltas = this._echoDeltas.filter((delta: EchoDelta): boolean => delta[0] > seq);
         this._placeEchoCursor();
     }
 
@@ -4267,8 +4436,8 @@ export class Input {
      * echo would move the drawn cursor at all (`PointerEcho` in
      * `crates/selkies/src/input/pointer.rs`).
      */
-    _echoStep(x: any, y: any, dx: any, dy: any): any {
-        const echo = this._echo;
+    _echoStep(x: number, y: number, dx: number, dy: number): number[] {
+        const echo = this._echo!;
         return [Math.min(Math.max(x + dx * echo.scale, 0), echo.maxX),
                 Math.min(Math.max(y + dy * echo.scale, 0), echo.maxY)];
     }
@@ -4287,10 +4456,10 @@ export class Input {
             if (this.cursorDiv.style.display !== 'none') this.cursorDiv.style.display = 'none';
             return;
         }
-        echo.maxX = Math.max(0, box.width * box.scaleX - 1);
-        echo.maxY = Math.max(0, box.height * box.scaleY - 1);
-        let x = echo.x;
-        let y = echo.y;
+        echo!.maxX = Math.max(0, box.width * box.scaleX - 1);
+        echo!.maxY = Math.max(0, box.height * box.scaleY - 1);
+        let x = echo!.x;
+        let y = echo!.y;
         for (const [, dx, dy] of this._echoDeltas) [x, y] = this._echoStep(x, y, dx, dy);
         if (this.cursorDiv.style.display !== 'block') this.cursorDiv.style.display = 'block';
         this._updateCursorPosition(box.left + x / box.scaleX, box.top + y / box.scaleY);
@@ -4314,7 +4483,7 @@ export class Input {
         const again = (): void => {
             if (document.pointerLockElement === locked) this._requestPointerLock(locked!, (): void => {}, (): void => {});
         };
-        this._requestPointerLock(locked!, again, (err: any): void => {
+        this._requestPointerLock(locked!, again, (err: Error): void => {
             console.warn('Input: pointer lock did not take the raw motion change:', err);
         });
     }
@@ -4325,11 +4494,11 @@ export class Input {
      * @param enabled
      */
     /** Whether the client keeps its own chords rather than passing them on. */
-    setShortcutsEnabled(enabled: any): void {
+    setShortcutsEnabled(enabled: boolean): void {
         this.shortcutsEnabled = !!enabled;
     }
 
-    setMacCmdAsCtrl(enabled: any): void {
+    setMacCmdAsCtrl(enabled: boolean): void {
         const want = !!enabled;
         if (Input.macCmdAsCtrl === want) return;
         Input.macCmdAsCtrl = want;
@@ -4342,7 +4511,7 @@ export class Input {
     }
 
     /** Switches between the CSS cursor and the page-drawn cursor canvas. */
-    async setUseBrowserCursors(enabled: any): Promise<void> {
+    async setUseBrowserCursors(enabled: boolean): Promise<void> {
         const newMode = !!enabled;
         if (this.use_browser_cursors === newMode) {
             return;
@@ -4378,14 +4547,14 @@ export class Input {
      * and taking both would click twice. In trackpad mode the pen pointer
      * path sends nothing, so there the stylus is a finger on the trackpad.
      */
-    _handleTouchEvent(event: any): void {
+    _handleTouchEvent(event: TouchEvent): void {
         if (this._trackpadMode) {
             this._handleTrackpadEvent(event);
             return;
         }
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (_stylusTouches(event.changedTouches)) {
-            if (this.element.contains(event.target)) event.preventDefault();
+            if (this.element.contains(event.target as Node | null)) event.preventDefault();
             return;
         }
         if (!this._guac_markEvent(event)) return;
@@ -4424,7 +4593,7 @@ export class Input {
             if (touchCount === 1 && !this._isTwoFingerGesture) {
                 preventDefault = true;
                 const [singleTouchID] = this._activeTouches.keys();
-                const touchData = this._activeTouches.get(singleTouchID);
+                const touchData = this._activeTouches.get(singleTouchID)!;
                 const currentTouchPoint = { clientX: touchData.currentX, clientY: touchData.currentY };
                 this._calculateTouchCoordinates(currentTouchPoint);
                 const physicalXAtPressStart = this.x;
@@ -4433,7 +4602,7 @@ export class Input {
                     this._longPressTouchIdentifier = singleTouchID;
                     if (this._longPressTimer) clearTimeout(this._longPressTimer);
                     this._longPressTimer = setTimeout((): void => {
-                        const currentActiveTouchData = this._activeTouches.get(this._longPressTouchIdentifier);
+                        const currentActiveTouchData = this._activeTouches.get(this._longPressTouchIdentifier!);
                         if (currentActiveTouchData && this._activeTouches.size === 1 &&
                             this._longPressTouchIdentifier === currentActiveTouchData.identifier &&
                             !this._isTwoFingerGesture && this._activeTouchIdentifier === null &&
@@ -4500,7 +4669,7 @@ export class Input {
             this._twoFingerMove(a.currentX, a.currentY, b.currentX, b.currentY);
         } else if (this._activeTouches.size === 1) {
             const [singleTouchID] = this._activeTouches.keys();
-            const touchData = this._activeTouches.get(singleTouchID);
+            const touchData = this._activeTouches.get(singleTouchID)!;
             if (this._activeTouchIdentifier === singleTouchID) {
                 this._calculateTouchCoordinates({ clientX: touchData.currentX, clientY: touchData.currentY }); this._sendMouseState();
                 activeTouchMoved = true; preventDefault = true;
@@ -4589,7 +4758,7 @@ export class Input {
                             const physicalXAtPressStart = this.x; const physicalYAtPressStart = this.y;
                             this._longPressTouchIdentifier = newSingleTouchID;
                             this._longPressTimer = setTimeout((): void => {
-                                const currentActiveTouchData = this._activeTouches.get(this._longPressTouchIdentifier);
+                                const currentActiveTouchData = this._activeTouches.get(this._longPressTouchIdentifier!);
                                 if (currentActiveTouchData && this._activeTouches.size === 1 && this._longPressTouchIdentifier === currentActiveTouchData.identifier && !this._isTwoFingerGesture && this._activeTouchIdentifier === null && !currentActiveTouchData.longPressCompleted) {
                                     const dx = currentActiveTouchData.currentX - currentActiveTouchData.startX;
                                     const dy = currentActiveTouchData.currentY - currentActiveTouchData.startY;
@@ -4611,13 +4780,13 @@ export class Input {
                 }
             }
         }
-        if (preventDefault && this.element.contains(event.target)) {
+        if (preventDefault && this.element.contains(event.target as Node | null)) {
             event.preventDefault();
         }
     }
 
     /** Starts a two-finger gesture at two touch points, in client coordinates. */
-    _twoFingerStart(ax: any, ay: any, bx: any, by: any): void {
+    _twoFingerStart(ax: number, ay: number, bx: number, by: number): void {
         const x = (ax + bx) / 2;
         const y = (ay + by) / 2;
         const span = Math.hypot(ax - bx, ay - by);
@@ -4642,7 +4811,7 @@ export class Input {
      * A pinch is Ctrl+wheel (`_sendZoomNotches`), one notch per
      * `PINCH_NOTCH_RATIO` of change in the spacing, the fraction carried.
      */
-    _twoFingerMove(ax: any, ay: any, bx: any, by: any): void {
+    _twoFingerMove(ax: number, ay: number, bx: number, by: number): void {
         const g = this._twoFinger;
         if (!g) return;
         const x = (ax + bx) / 2;
@@ -4769,7 +4938,7 @@ export class Input {
     _isDiscreteWheel(): boolean {
         var vals = [];
         while (!this._queue.isEmpty()) {
-            var v = this._queue.dequeue();
+            var v = this._queue.dequeue()!;
             if (v > 0) { vals.push(v); }
         }
         if (vals.length < 2) { return true; }
@@ -4829,15 +4998,15 @@ export class Input {
     _webKitGtkWheelNotches(event: WheelEvent): { x: number; y: number } | null {
         if (event.deltaMode !== 0 || !browser.isSafari() || !browser.isLinux()) return null;
         const steps = [window.innerHeight, window.innerWidth].map((size: number): number => Math.floor(Math.pow(size, 2 / 3)));
-        const axis = (delta: any, wheelDelta: any): any => {
+        const axis = (delta: number, wheelDelta: number | undefined): number | null => {
             if (!delta && !wheelDelta) return 0;
             if (!delta || !wheelDelta || Math.sign(delta) === Math.sign(wheelDelta)) return null;
             const notches = Math.abs(wheelDelta) / LEGACY_WHEEL_DELTA_PER_NOTCH;
             const perNotch = Math.abs(delta) / notches;
             return steps.some((step: number): boolean => step > 0 && Math.abs(perNotch - step) <= 1) ? Math.sign(delta) * notches : null;
         };
-        const y = axis(event.deltaY, (event as any).wheelDeltaY);
-        const x = axis(event.deltaX, (event as any).wheelDeltaX);
+        const y = axis(event.deltaY, event.wheelDeltaY);
+        const x = axis(event.deltaX, event.wheelDeltaX);
         if (x === null || y === null || (!x && !y)) return null;
         return { x, y };
     }
@@ -4895,7 +5064,7 @@ export class Input {
      * too, as one notch (`_isDetentWheel`), and so do a WebKitGTK wheel's
      * notches, as many as it reports (`_webKitGtkWheelNotches`).
      */
-    _mouseWheelWrapper(event: any): void {
+    _mouseWheelWrapper(event: WheelEvent): void {
         // One idle second is longer than any intra-gesture gap (momentum
         // tails included) and far shorter than a trackpad-to-mouse hand-over.
         const nowTs = performance.now();
@@ -4984,7 +5153,7 @@ export class Input {
     }
 
     /** Adds one event's vertical delta to the fractional-notch carry; a direction change resets it so a remainder cannot swallow the first notch. */
-    _accumulateWheelY(event: any): void {
+    _accumulateWheelY(event: WheelEvent): void {
         if (event.deltaY === 0) { return; }
         const direction = (event.deltaY < 0) ? 'up' : 'down';
         if (direction !== this._wheelDirY) { this._wheelAccumY = 0; this._wheelDirY = direction; }
@@ -4992,7 +5161,7 @@ export class Input {
     }
 
     /** Horizontal counterpart of `_accumulateWheelY`. */
-    _accumulateWheelX(event: any): void {
+    _accumulateWheelX(event: WheelEvent): void {
         if (event.deltaX === 0) { return; }
         const direction = (event.deltaX < 0) ? 'left' : 'right';
         if (direction !== this._wheelDirX) { this._wheelAccumX = 0; this._wheelDirX = direction; }
@@ -5010,7 +5179,7 @@ export class Input {
         this._wheelAccumY -= pulses;
         while (pulses > 0) {
             const burst = Math.min(pulses, this._scrollMagnitude);
-            this._triggerMouseWheel(this._wheelDirY, burst);
+            this._triggerMouseWheel(this._wheelDirY!, burst);
             pulses -= burst;
         }
     }
@@ -5022,7 +5191,7 @@ export class Input {
         this._wheelAccumX -= pulses;
         while (pulses > 0) {
             const burst = Math.min(pulses, this._scrollMagnitude);
-            this._triggerHorizontalMouseWheel(this._wheelDirX, burst);
+            this._triggerHorizontalMouseWheel(this._wheelDirX!, burst);
             pulses -= burst;
         }
     }
@@ -5036,7 +5205,7 @@ export class Input {
      * @param event
      */
     _pinchWheel(event: WheelEvent): void {
-        let notches: any;
+        let notches: number;
         if (event.deltaMode === 0 && Math.abs(event.deltaY) < PINCH_STEP_MAX_PX) {
             this._pinchCarry += -event.deltaY / (100 * Math.log(PINCH_NOTCH_RATIO));
             notches = Math.trunc(this._pinchCarry);
@@ -5104,7 +5273,7 @@ export class Input {
     }
 
     /** Accumulates and emits both axes of one wheel event, or sends a touchpad's as a finger's. */
-    _mouseWheel(event: any): void {
+    _mouseWheel(event: WheelEvent): void {
         if (this._isFingerScroll(event)) {
             this._fingerScroll(event);
             return;
@@ -5116,8 +5285,8 @@ export class Input {
     }
 
     /** Suppresses the native context menu over the stream. */
-    _contextMenu(event: any): void {
-        if (this.element.contains(event.target)) {
+    _contextMenu(event: MouseEvent): void {
+        if (this.element.contains(event.target as Node | null)) {
             event.preventDefault();
         }
     }
@@ -5139,7 +5308,7 @@ export class Input {
      * Whether pointer lock is held on the stream. Answers the overlay and the
      * unlocked case without touching the DOM, since every mouse event asks.
      */
-    _isStreamLocked(): any {
+    _isStreamLocked(): boolean {
         const locked = document.pointerLockElement;
         if (locked == null) return false;
         if (locked === this.element) return true;
@@ -5187,7 +5356,7 @@ export class Input {
     }
 
     /** Frame-space X for a client X, unrounded so the device scale rounds once. */
-    _clientToServerX(clientX: any): any {
+    _clientToServerX(clientX: number): number {
         if (!this.m) return 0;
         const elementRelativeX = clientX - this.m.elementClientX;
         const viewportRelativeX = elementRelativeX - this.m.mouseOffsetX;
@@ -5195,7 +5364,7 @@ export class Input {
     }
 
     /** Frame-space Y for a client Y, unrounded so the device scale rounds once. */
-    _clientToServerY(clientY: any): any {
+    _clientToServerY(clientY: number): number {
         if (!this.m) return 0;
         const elementRelativeY = clientY - this.m.elementClientY;
         const viewportRelativeY = elementRelativeY - this.m.mouseOffsetY;
@@ -5214,7 +5383,7 @@ export class Input {
         const safeId = String(id || 'Gamepad').replace(/[\u0100-\uffff]/g, '?');
         try {
             return btoa(safeId);
-        } catch (e: any) {
+        } catch (e) {
             return btoa('Gamepad');
         }
     }
@@ -5230,7 +5399,7 @@ export class Input {
     _gamepadIndex(position: number = 0): number | null {
         const slots = this.controllerSlots;
         const index = slots ? slots[position] - 1 : (position === 0 ? this.playerIndex : null);
-        return (Number.isInteger(index) && index >= 0) ? index : null;
+        return (Number.isInteger(index) && index! >= 0) ? index : null;
     }
 
     /**
@@ -5244,7 +5413,7 @@ export class Input {
     }
 
     /** Creates the shared manager on the first pad; which pads drive the slots is its call (`_gamepadActive`). */
-    _gamepadConnected(event: any): void {
+    _gamepadConnected(event: { gamepad: Gamepad; }): void {
         if (this._gamepadIndex() === null) return;
         if (!this.gamepadManager) {
             this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this),
@@ -5278,13 +5447,13 @@ export class Input {
     }
 
     /** A pad gone: the slot is released only if that pad drove it. */
-    _gamepadDisconnect(event: any): void {
+    _gamepadDisconnect(event: GamepadEvent): void {
         if (this.ongamepaddisconnected !== null) { this.ongamepaddisconnected(); }
         if (this.gamepadManager && event && event.gamepad) this.gamepadManager.padGone(event.gamepad.index);
     }
 
     /** Sends a button change (`js,b`) and mirrors it to the dashboard while the sidebar is open. */
-    _gamepadButton(gp_num: any, btn_num: any, val: any): void {
+    _gamepadButton(gp_num: number, btn_num: number, val: number): void {
         const server_gp_index = this._gamepadIndexOf(gp_num);
         if (server_gp_index === null) return;
         this.send("js,b," + server_gp_index + "," + btn_num + "," + val);
@@ -5333,14 +5502,14 @@ export class Input {
     _gamepadHeartbeat(): void {
         const positions = this.gamepadManager ? this.gamepadManager.drivers.length : 1;
         for (let position = 0; position < positions; position++) {
-            if (position > 0 && this.gamepadManager.drivers[position] === null) continue;
+            if (position > 0 && this.gamepadManager!.drivers[position] === null) continue;
             const server_gp_index = this._gamepadIndex(position);
             if (server_gp_index !== null) this.send("js,h," + server_gp_index);
         }
     }
 
     /** Sends an axis change (`js,a`); Firefox's non-standard layout reports the triggers on axes 4 and 5, sent as buttons 6 and 7. */
-    _gamepadAxis(gp_num: any, axis_num: any, val: any): void {
+    _gamepadAxis(gp_num: number, axis_num: number, val: number): void {
         const server_gp_index = this._gamepadIndexOf(gp_num);
         if (server_gp_index === null) return;
         if (navigator.userAgent.toLowerCase().includes('firefox')) {
@@ -5366,7 +5535,7 @@ export class Input {
      * container, or the whole document through a dashboard's fullscreen
      * control); every such fullscreen must hold pointer lock.
      */
-    _isStreamFullscreen(): any {
+    _isStreamFullscreen(): boolean {
         const fsElement = document.fullscreenElement;
         return fsElement !== null && fsElement.contains(this.element);
     }
@@ -5398,7 +5567,7 @@ export class Input {
             ? element.requestPointerLock({ unadjustedMovement: true })
             : element.requestPointerLock();
         if (!lockPromise || typeof lockPromise.catch !== 'function') return;
-        lockPromise.catch((err: any): void => {
+        lockPromise.catch((err: DOMException): void => {
             if (err && err.name === 'NotSupportedError' && askRaw) {
                 Input._rawMotionRefused = true;
                 again();
@@ -5430,7 +5599,7 @@ export class Input {
             requestAnimationFrame((): void => this._armPointerLock(attempt, frames + 1));
             return;
         }
-        this._requestPointerLock(this.element, (): void => this._armPointerLock(attempt, frames), (err: any): void => {
+        this._requestPointerLock(this.element, (): void => this._armPointerLock(attempt, frames), (err: Error): void => {
             if (attempt < 5) {
                 setTimeout((): void => this._armPointerLock(attempt + 1, frames), 60);
             } else {
@@ -5464,8 +5633,8 @@ export class Input {
      * True when the target or one of its ancestors carries the class.
      * @returns
      */
-    _targetHasClass(target: any, className: any): boolean {
-        let element = target;
+    _targetHasClass(target: EventTarget | null, className: string): boolean {
+        let element = target as Element | null;
         while (element && element.classList) {
             if (element.classList.contains(className)) return true;
             element = element.parentElement;
@@ -5492,7 +5661,7 @@ export class Input {
     }
 
     /** True while the full input context is attached. */
-    isInputAttached(): any {
+    isInputAttached(): boolean {
         return this.inputAttached;
     }
 
@@ -5508,7 +5677,7 @@ export class Input {
      */
     attach(): void {
         if (Input._attachedInstance && Input._attachedInstance !== this) {
-            try { Input._attachedInstance.detach(); } catch (e: any) { /* already torn down */ }
+            try { Input._attachedInstance.detach(); } catch (e) { /* already torn down */ }
         }
         Input._attachedInstance = this;
         this._watchCursorScale();
@@ -5531,7 +5700,7 @@ export class Input {
         if (!this.isSharedMode) {
             this.attach_context();
         } else {
-            const preventDefaultHandler = (e: any): void => e.preventDefault();
+            const preventDefaultHandler = (e: Event): void => e.preventDefault();
             this.listeners.push(addListener(this.element, 'touchstart', preventDefaultHandler, this));
             this.listeners.push(addListener(this.element, 'touchend', preventDefaultHandler, this));
             this.listeners.push(addListener(this.element, 'touchmove', preventDefaultHandler, this));
@@ -5622,10 +5791,10 @@ export class Input {
             this.gamepadManager.reannounce();
             return;
         }
-        let pads: any;
+        let pads: (Gamepad | null)[];
         try {
             pads = navigator.getGamepads ? Array.from(navigator.getGamepads()) : [];
-        } catch (e: any) {
+        } catch (e) {
             return;
         }
         for (const pad of pads) {
@@ -5704,7 +5873,7 @@ export class Input {
     enterFullscreen(): void {
         if (document.fullscreenElement === null) {
             document.documentElement.requestFullscreen()
-                .catch((err: any): void => console.error("Fullscreen request failed:", err));
+                .catch((err: unknown): void => console.error("Fullscreen request failed:", err));
         }
     }
 
@@ -5720,7 +5889,7 @@ export class Input {
             return;
         }
         if (document.fullscreenElement !== null) {
-            document.exitFullscreen().catch((err: any): void => console.error("Fullscreen exit failed:", err));
+            document.exitFullscreen().catch((err: unknown): void => console.error("Fullscreen exit failed:", err));
         } else {
             this._setGamingMode(false);
         }
@@ -5758,7 +5927,7 @@ export class Input {
             const enter = (): void => {
                 if (!this.gamingMode || document.fullscreenElement !== null) return;
                 document.documentElement.requestFullscreen(this._gamingFullscreenOptions())
-                    .catch((err: any): void => {
+                    .catch((err: unknown): void => {
                         console.error("Fullscreen request failed:", err);
                         this._setGamingMode(false);
                     });
@@ -5768,7 +5937,7 @@ export class Input {
             return;
         }
         this._armPointerLock();
-        if (!((navigator as any).keyboard && 'lock' in (navigator as any).keyboard)) {
+        if (!(navigator.keyboard && 'lock' in navigator.keyboard)) {
             document.fullscreenElement.requestFullscreen(this._gamingFullscreenOptions())
                 .catch((): void => {
                     this._fullscreenKeyboardLock = false;
@@ -5801,11 +5970,11 @@ export class Input {
             go();
             return;
         }
-        const ask = (raw: any): void => {
-            let request: any;
+        const ask = (raw: boolean): void => {
+            let request: Promise<void>;
             try {
                 request = raw ? el.requestPointerLock({ unadjustedMovement: true }) : el.requestPointerLock();
-            } catch (e: any) {
+            } catch (e) {
                 go();
                 return;
             }
@@ -5817,7 +5986,7 @@ export class Input {
             request.then((): void => {
                 if (!this.gamingMode) this._exitPointerLock();
                 go();
-            }, (err: any): void => {
+            }, (err: DOMException | null): void => {
                 if (raw && err && err.name === 'NotSupportedError') {
                     Input._rawMotionRefused = true;
                     ask(false);
@@ -5843,7 +6012,7 @@ export class Input {
         if (active && active !== el && active !== document.body && typeof (active as HTMLElement).blur === 'function') {
             (active as HTMLElement).blur();
         }
-        try { el.focus({ preventScroll: true }); } catch (e: any) { /* detached element */ }
+        try { el.focus({ preventScroll: true }); } catch (e) { /* detached element */ }
     }
 
     /**
@@ -5854,11 +6023,11 @@ export class Input {
      * records whether this one did (`_fullscreenKeyboardLock`).
      * @returns Options for `requestFullscreen`.
      */
-    _gamingFullscreenOptions(): Record<string, any> {
+    _gamingFullscreenOptions(): FullscreenOptions {
         this._fullscreenKeyboardLock = false;
         const markRead = (): void => { this._fullscreenKeyboardLock = true; };
         return {
-            get keyboardLock(): any {
+            get keyboardLock(): string {
                 markRead();
                 return 'browser';
             },
@@ -5871,7 +6040,7 @@ export class Input {
      * fullscreen, so a mode left without a fullscreen to exit (a refused
      * request, or one the page never got) holds it too.
      */
-    _setGamingMode(active: any): void {
+    _setGamingMode(active: boolean): void {
         if (this.gamingMode === active) return;
         this.gamingMode = active;
         if (!active) {
@@ -5895,8 +6064,8 @@ export class Input {
      */
     requestKeyboardLock(): void {
         if (!this.gamingMode || !document.fullscreenElement) return;
-        if ((navigator as any).keyboard && 'lock' in (navigator as any).keyboard) {
-            (navigator as any).keyboard.lock().catch((err: any): void => {
+        if (navigator.keyboard && 'lock' in navigator.keyboard) {
+            navigator.keyboard.lock().catch((err: DOMException | null): void => {
                 // A later request superseding this one refuses nothing.
                 if (err && err.name === 'AbortError') return;
                 console.warn("Input: the keyboard lock was refused, so Alt+Tab and the browser's "
@@ -5920,7 +6089,7 @@ export class Input {
     _noticeKeyboardLockUnavailable(): void {
         if (Input._keyboardLockNoticed) return;
         Input._keyboardLockNoticed = true;
-        const brave = typeof navigator !== 'undefined' && !!(navigator as any).brave;
+        const brave = typeof navigator !== 'undefined' && !!navigator.brave;
         const code = brave ? 'keyboardLockBlockedByShields' : 'keyboardLockUnavailable';
         const text = brave
             ? "Brave's Shields block the keyboard lock, so a single Escape leaves gaming mode. "
@@ -5932,10 +6101,10 @@ export class Input {
 
     /** Hands the system keys back; a browser that never locked them ignores it. */
     releaseKeyboardLock(): void {
-        if ((navigator as any).keyboard && 'unlock' in (navigator as any).keyboard) {
+        if (navigator.keyboard && 'unlock' in navigator.keyboard) {
             try {
-                (navigator as any).keyboard.unlock();
-            } catch (e: any) {
+                navigator.keyboard.unlock();
+            } catch (e) {
                 /* nothing was locked */
             }
         }
@@ -5950,7 +6119,7 @@ export class Input {
 function _stylusTouches(touches: TouchList | (Touch)[]): boolean {
     if (!touches || touches.length === 0) return false;
     for (let i = 0; i < touches.length; i++) {
-        if ((touches[i] as any).touchType !== 'stylus') return false;
+        if (touches[i].touchType !== 'stylus') return false;
     }
     return true;
 }
@@ -5960,19 +6129,19 @@ function _stylusTouches(touches: TouchList | (Touch)[]): boolean {
  * `preventDefault()`.
  * @returns The tuple `removeListeners` takes, or null for an invalid target.
  */
-function addListener(obj: any, name: any, func: any, ctx: any, useCapture: any = false): Array<any> | null {
+function addListener<E>(obj: EventTarget | null, name: string, func: (this: Input, event: E) => void, ctx: Input, useCapture: boolean = false): ListenerRecord | null {
     if (!obj || typeof obj.addEventListener !== 'function') {
         console.error("addListener: Invalid target object", obj);
         return null;
     }
-    const newFunc = ctx ? func.bind(ctx) : func;
+    const newFunc = (ctx ? func.bind(ctx) : func) as EventListener;
     const options = { capture: useCapture, passive: false };
     obj.addEventListener(name, newFunc, options);
     return [obj, name, newFunc, options];
 }
 
 /** Removes listeners added by `addListener` and empties the list. */
-function removeListeners(listeners: any): void {
+function removeListeners(listeners: (ListenerRecord | null)[]): void {
     for (const listener of listeners) {
         if (listener && listener[0] && typeof listener[0].removeEventListener === 'function') {
             listener[0].removeEventListener(listener[1], listener[2], listener[3]);
