@@ -108,12 +108,19 @@ interface FileManagerProps {
   t?: (key: string, vars?: Record<string, unknown>) => string
 }
 
+/** A reply of the file manager's API: its verdict, and what the route answers with. */
+interface ApiReply {
+  status?: string
+  message?: string
+  entries?: FileManagerItem[]
+}
+
 /**
  * One call to the file manager's API with the session's credentials: a GET, or
  * a POST of `body` as JSON. Resolves to the reply, or throws its message when
  * the route refuses or fails.
  */
-async function request(url: string, body?: unknown): Promise<any> {
+async function request(url: string, body?: unknown): Promise<ApiReply> {
   const resp = await fetch(url, body === undefined
     ? { credentials: "same-origin", headers: sessionAuthHeaders() }
     : {
@@ -122,7 +129,7 @@ async function request(url: string, body?: unknown): Promise<any> {
         headers: sessionAuthHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(body),
       })
-  const data = await resp.json().catch(() => null)
+  const data = await (resp.json() as Promise<ApiReply | null>).catch(() => null)
   if (!resp.ok || !data || data.status !== "ok") {
     throw new Error((data && data.message) || `HTTP ${resp.status}`)
   }
@@ -173,7 +180,7 @@ export function FileManager({
       const url = new URL(`${apiBase}/browse`)
       if (dir) url.searchParams.set("path", dir)
       const data = await request(url.href)
-      return (data.entries || []) as FileManagerItem[]
+      return data.entries || []
     },
     [apiBase]
   )
@@ -194,7 +201,7 @@ export function FileManager({
         setListings((prev) => ({ ...prev, "": entries }))
         setLoading(false)
       },
-      (e: any) => {
+      (e: Error) => {
         if (!live) return
         setError(e?.message || String(e))
         setLoading(false)
@@ -209,7 +216,7 @@ export function FileManager({
   const ensureLoaded = React.useCallback(
     (dir: string) => {
       if (dir in listings) return
-      load(dir).catch((e: any) => setError(e?.message || String(e)))
+      load(dir).catch((e: Error) => setError(e?.message || String(e)))
     },
     [listings, load]
   )
@@ -222,8 +229,8 @@ export function FileManager({
 
   // An upload that ends shows in the listing without a manual refresh.
   React.useEffect(() => onCoreMessage((message) => {
-    if (message.type === "fileUpload" && message.payload?.status === "end") {
-      refresh().catch((e: any) => setError(e?.message || String(e)))
+    if (message.type === "fileUpload" && (message.payload as { status?: string } | undefined)?.status === "end") {
+      refresh().catch((e: Error) => setError(e?.message || String(e)))
     }
   }), [refresh])
 
@@ -293,8 +300,8 @@ export function FileManager({
       setNewFolderName("")
       await refresh()
       toast.success(t("files.folderCreated", { name }))
-    } catch (e: any) {
-      toast.error(t("files.folderCreateFailed", { error: e?.message || String(e) }))
+    } catch (e) {
+      toast.error(t("files.folderCreateFailed", { error: (e as Error)?.message || String(e) }))
     }
   }
 

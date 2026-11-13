@@ -8,7 +8,7 @@ import { useState, useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { ActionButton, SwitchRow, Clip } from "@/panels/controls";
-import { computeRenderableSettings, getLastClipboardContent, getLastServerSettings, getPrefixedKey, onCoreMessage } from "@/utils";
+import { computeRenderableSettings, getLastClipboardContent, getLastServerSettings, getPrefixedKey, onCoreMessage, type ServerSettings } from "@/utils";
 import { t } from "@/i18n";
 
 /**
@@ -82,7 +82,7 @@ export function Clipboard() {
 		() => getLastClipboardContent()?.secret ?? false);
 	const [clipboardImage, setClipboardImage] = useState<File | null>(() => lastPickedImage);
 	const previewRef = useRef<HTMLCanvasElement>(null);
-	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
+	const [renderableSettings, setRenderableSettings] = useState(() => computeRenderableSettings(getLastServerSettings()));
 	const storedBool = (key: string, fallback: boolean) => {
 		const saved = localStorage.getItem(getPrefixedKey(key));
 		return saved !== null ? saved === 'true' : fallback;
@@ -127,18 +127,18 @@ export function Clipboard() {
 		}
 
 		if (message.type === 'serverSettings') {
-			const payload = message.payload;
+			const payload = message.payload as ServerSettings | null;
 			setRenderableSettings(computeRenderableSettings(payload));
 			const s = payload?.enable_binary_clipboard;
 			if (s) {
 				const saved = localStorage.getItem(getPrefixedKey('enable_binary_clipboard'));
 				const final = s.locked ? s.value : (saved !== null ? saved === 'true' : s.value);
-				setEnableBinaryClipboard(final);
+				setEnableBinaryClipboard(final as boolean);
 			}
 			const seamless = payload?.clipboard_seamless;
 			if (seamless) {
-				setClipboardSeamless(seamless.locked ? seamless.value
-					: storedBool('clipboard_seamless', seamless.value));
+				setClipboardSeamless(seamless.locked ? seamless.value as boolean
+					: storedBool('clipboard_seamless', seamless.value as boolean));
 			}
 		}
 	}), []);

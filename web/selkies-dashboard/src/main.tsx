@@ -53,11 +53,11 @@ async function detectInitialMode(): Promise<void> {
   try {
     const resp = await fetch(`${getRoutePrefix()}/api/status`, { credentials: 'same-origin', signal: AbortSignal.timeout(2000) });
     if (!resp.ok) throw new Error(`Failed to fetch initial mode, status: ${resp.status}`);
-    const data = await resp.json();
+    const data = await resp.json() as { current_mode?: string; enable_dual_mode?: unknown; ui_layout?: unknown; ui_layout_allowed?: unknown; pelorus?: unknown } | null;
     if (data?.current_mode) window.__SELKIES_STREAMING_MODE__ = data.current_mode;
     if (data && typeof data.enable_dual_mode !== 'undefined') window.__SELKIES_DUAL_MODE__ = !!data.enable_dual_mode;
     if (typeof data?.ui_layout === 'string') window.__SELKIES_UI_LAYOUT__ = data.ui_layout;
-    if (Array.isArray(data?.ui_layout_allowed)) window.__SELKIES_UI_LAYOUT_ALLOWED__ = data.ui_layout_allowed;
+    if (Array.isArray(data?.ui_layout_allowed)) window.__SELKIES_UI_LAYOUT_ALLOWED__ = data.ui_layout_allowed as string[];
     window.__SELKIES_PELORUS__ = data?.pelorus === true;
   } catch (err) {
     console.warn(`Error detecting initial mode: ${err}`);

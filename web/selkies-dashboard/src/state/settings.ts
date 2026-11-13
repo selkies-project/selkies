@@ -44,9 +44,9 @@ import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
     tenBitStream, CPU_ENCODE_THREADING_SPEC, cpuEncodeThreadingApplies,
-    RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.ts";
+    RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC, type EncoderBackends, type SettingSpec } from "../../../selkies-web-core/lib/conditional-settings.ts";
 import { getPrefixedKey, computeRenderableSettings, getLastServerSettings,
-    getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay, onCoreMessage, type ServerSettings } from "@/utils";
+    getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay, onCoreMessage, type ServerSetting, type ServerSettings } from "@/utils";
 import { t } from "@/i18n";
 
 export { displayLabel, canPlayEncoder, framerateLabel };
@@ -106,8 +106,8 @@ const deriveDpi = (manual: { w: number; h: number }): number => {
 const manualResolution = (serverSettings: ServerSettings | null): { w: number; h: number } => {
     const forced = serverSettings?.manual_resolution?.value === true;
     const server = {
-        w: parseInt(serverSettings?.manual_width?.value, 10) || 0,
-        h: parseInt(serverSettings?.manual_height?.value, 10) || 0,
+        w: parseInt(serverSettings?.manual_width?.value as string, 10) || 0,
+        h: parseInt(serverSettings?.manual_height?.value as string, 10) || 0,
     };
     if (forced && server.w > 0 && server.h > 0) return server;
     return {
@@ -139,9 +139,9 @@ const readStored = (key: string) => localStorage.getItem(getPrefixedKey(key));
  * value key so it inherits the per-display suffix.
  */
 const EXPLICIT_CHOICE_SUFFIX = "_explicit_choice";
-const explicitChoiceKey = (spec: any) => `${getPrefixedKey(spec.storageKey)}${EXPLICIT_CHOICE_SUFFIX}`;
-const isExplicitChoice = (spec: any) => localStorage.getItem(explicitChoiceKey(spec)) === "true";
-const readExplicitStored = (spec: any) => (key: string) => (isExplicitChoice(spec) ? readStored(key) : null);
+const explicitChoiceKey = (spec: SettingSpec) => `${getPrefixedKey(spec.storageKey)}${EXPLICIT_CHOICE_SUFFIX}`;
+const isExplicitChoice = (spec: SettingSpec) => localStorage.getItem(explicitChoiceKey(spec)) === "true";
+const readExplicitStored = (spec: SettingSpec) => (key: string) => (isExplicitChoice(spec) ? readStored(key) : null);
 
 /**
  * Drives a conditional setting: lazy init, then a re-resolve whenever the
@@ -156,7 +156,7 @@ const readExplicitStored = (spec: any) => (key: string) => (isExplicitChoice(spe
  * @param read Storage reader; the explicit-choice reader for settings that are also derived.
  * @returns A `[value, setValue]` pair.
  */
-function useConditionalSetting<T = boolean>(spec: any, serverSettings: any, ctx: any, deps: any[], read: any = readStored) {
+function useConditionalSetting<T = boolean>(spec: SettingSpec, serverSettings: ServerSettings | null, ctx: Record<string, unknown>, deps: React.DependencyList, read: ((key: string) => string | null) = readStored) {
     const compute = () => resolveSpec(spec, serverSettings, ctx, read) as T;
     const [value, setValue] = useState<T>(compute);
     // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
@@ -220,7 +220,7 @@ export function useStreamSettings() {
     const [streamMode, setStreamMode] = useState(() => {
         const saved = localStorage.getItem(getPrefixedKey("stream_mode"));
         if (saved && STREAMING_MODES.includes(saved)) return saved;
-        const runtimeMode = (window as any).__SELKIES_STREAMING_MODE__;
+        const runtimeMode = window.__SELKIES_STREAMING_MODE__;
         if (runtimeMode && STREAMING_MODES.includes(runtimeMode)) return runtimeMode;
         return STREAM_MODE_WEBSOCKETS;
     });
@@ -265,7 +265,7 @@ export function useStreamSettings() {
     /** The stored frame-rate choice: a rate, `FRAMERATE_DISPLAY`, or null for none. */
     const [framerateChoice, setFramerateChoice] = useState<string | null>(() => readStored("framerate"));
     /** The display's refresh the core measured, null until it has. */
-    const [displayRate, setDisplayRate] = useState<number | null>(() => (window as any).displayRefreshRate ?? null);
+    const [displayRate, setDisplayRate] = useState<number | null>(() => window.displayRefreshRate ?? null);
     const [videoCRF, setVideoCRF] = useState(() => {
         const saved = readStored("video_crf");
         return saved !== null ? parseInt(saved, 10) : 25;
@@ -294,21 +294,21 @@ export function useStreamSettings() {
 
     /** The two push channels a spec's `propagate` may use. */
     const conditionalIo = {
-        postSetting: (obj: any) => debouncedPostSetting(obj),
-        postToCore: (obj: any) => window.postMessage(obj, window.location.origin),
+        postSetting: (obj: Record<string, unknown>) => debouncedPostSetting(obj),
+        postToCore: (obj: Record<string, unknown>) => window.postMessage(obj, window.location.origin),
     };
     /**
      * The one write path for conditional settings: optimistic setState,
      * persistence only for an explicit choice (which pins it; a derived value
      * keeps following), then propagation through the spec.
      */
-    const writeConditional = (spec: any, uiValue: any, setValue: any, opts: { persist?: boolean } = {}) => {
+    const writeConditional = <V>(spec: SettingSpec, uiValue: V, setValue: (value: V) => void, opts: { persist?: boolean } = {}) => {
         setValue(uiValue);
         if (opts.persist) {
             localStorage.setItem(getPrefixedKey(spec.storageKey), spec.serialize ? spec.serialize(uiValue) : String(uiValue));
             localStorage.setItem(explicitChoiceKey(spec), "true");
         }
-        spec.propagate(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
+        spec.propagate!(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
     };
 
     const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
@@ -347,7 +347,7 @@ export function useStreamSettings() {
         if (isSettingPinned(HIDPI_SPEC, serverSettings, readHidpiStored)) return;
         const serverValue = serverSettings[HIDPI_SPEC.serverKey]?.value;
         if (serverValue !== undefined && HIDPI_SPEC.toServer(resolved) !== serverValue) {
-            writeConditional(HIDPI_SPEC, resolved, setHidpiEnabled, { persist: false });
+            writeConditional(HIDPI_SPEC, resolved as boolean, setHidpiEnabled, { persist: false });
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serverSettings]);
@@ -380,7 +380,7 @@ export function useStreamSettings() {
         if (isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
         const serverValue = serverSettings.use_paint_over_quality?.value;
         if (resolved !== undefined && serverValue !== undefined && resolved !== serverValue) {
-            writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
+            writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved as boolean, setUsePaintOverQuality, { persist: false });
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serverSettings]);
@@ -389,7 +389,7 @@ export function useStreamSettings() {
         if (!serverSettings || isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
         const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
         if (resolved !== usePaintOverQuality) {
-            writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
+            writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved as boolean, setUsePaintOverQuality, { persist: false });
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [encoder, videoStreamingMode]);
@@ -400,7 +400,7 @@ export function useStreamSettings() {
     const [video10Bit, setVideo10Bit] = useConditionalSetting(VIDEO_10BIT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     /** 10-bit is offered only where this engine shows a 10-bit picture of the stream's format. */
     const [tenBitAnswer, setTenBitAnswer] = useState({ format: "", ok: false });
-    const tenBitOffered = tenBitStream(encoder, conditionalCtx.encoderBackends, useCpu, videoFullColor);
+    const tenBitOffered = tenBitStream(encoder, conditionalCtx.encoderBackends as EncoderBackends | null | undefined, useCpu, videoFullColor);
     const tenBitFullColor = !!tenBitOffered && tenBitOffered.fullcolor;
     const tenBitAsked = tenBitFormat(fullColorCodec, tenBitFullColor);
     useEffect(() => {
@@ -437,17 +437,17 @@ export function useStreamSettings() {
     const [isLoadingAudioDevices, setIsLoadingAudioDevices] = useState(false);
 
     useEffect(() => onCoreMessage((message) => {
-        if (message.type === "serverSettings") setServerSettings(message.payload);
+        if (message.type === "serverSettings") setServerSettings(message.payload as ServerSettings | null);
         if (message.type === "effectiveCursorState" && typeof message.value === "boolean") setEffectiveCursor(message.value);
-        if (message.type === "displayRefresh" && Number.isFinite(message.rate)) setDisplayRate(message.rate);
+        if (message.type === "displayRefresh" && Number.isFinite(message.rate)) setDisplayRate(message.rate as number | null);
         // The core's derived pick; a stored pick is the user's and stays.
         if (message.type === "scalingDpiFollowed" && typeof message.value === "number" && readStored("scaling_dpi") === null) {
             setSelectedDpi(message.value);
         }
         // Echo of this dashboard's own pick: the picker shows what the core was told.
         if (message.type === "audioDeviceSelected" && message.deviceId) {
-            if (message.context === "input") setSelectedInputDeviceId(message.deviceId);
-            else if (message.context === "output") setSelectedOutputDeviceId(message.deviceId);
+            if (message.context === "input") setSelectedInputDeviceId(message.deviceId as string);
+            else if (message.context === "output") setSelectedOutputDeviceId(message.deviceId as string);
         }
     }), []);
 
@@ -457,25 +457,25 @@ export function useStreamSettings() {
     useEffect(() => {
         if (!serverSettings) return;
         const getStoredInt = (key: string) => parseInt(readStored(key) ?? "", 10);
-        const clamped = (setting: any, key: string): number => {
+        const clamped = (setting: ServerSetting, key: string): number => {
             const stored = getStoredInt(key);
-            return !isNaN(stored) ? Math.max(setting.min, Math.min(setting.max, stored)) : setting.default;
+            return !isNaN(stored) ? Math.max(setting.min!, Math.min(setting.max!, stored)) : setting.default as number;
         };
 
         const s_encoder = serverSettings.encoder;
         if (s_encoder) {
-            const playable = s_encoder.allowed.filter((enc: string) => canPlayEncoder(enc, isWebrtc));
+            const playable = s_encoder.allowed!.filter((enc: string) => canPlayEncoder(enc, isWebrtc));
             const stored = readStored("encoder");
             const final = stored !== null && playable.includes(stored) ? stored
-                : (playable.includes(s_encoder.value) || playable.length === 0) ? s_encoder.value : playable[0];
-            setEncoder(final);
-            setEncoderOptionsShown(s_encoder.allowed);
+                : (playable.includes(s_encoder.value as string) || playable.length === 0) ? s_encoder.value : playable[0];
+            setEncoder(final as string);
+            setEncoderOptionsShown(s_encoder.allowed!);
         }
         if (serverSettings.framerate) {
             const stored = parseFloat(readStored("framerate") ?? "");
-            setFramerate(!isNaN(stored)
-                ? Math.max(serverSettings.framerate.min, Math.min(serverSettings.framerate.max, stored))
-                : serverSettings.framerate.default);
+            setFramerate((!isNaN(stored)
+                ? Math.max(serverSettings.framerate.min!, Math.min(serverSettings.framerate.max!, stored))
+                : serverSettings.framerate.default) as number);
         }
         if (serverSettings.video_bitrate) setVideoBitRate(clamped(serverSettings.video_bitrate, "video_bitrate"));
         const s_audio_bitrate = serverSettings.audio_bitrate;
@@ -484,9 +484,9 @@ export function useStreamSettings() {
             // `allowed` holds string bps ("128000"), `stored`/`value` are numbers.
             const final = !isNaN(stored)
                 ? (s_audio_bitrate.allowed
-                    ? (s_audio_bitrate.allowed.includes(String(stored)) ? stored : parseInt(s_audio_bitrate.value, 10))
+                    ? (s_audio_bitrate.allowed.includes(String(stored)) ? stored : parseInt(s_audio_bitrate.value as string, 10))
                     : Math.max(s_audio_bitrate.min ?? stored, Math.min(s_audio_bitrate.max ?? stored, stored)))
-                : parseInt(s_audio_bitrate.value, 10);
+                : parseInt(s_audio_bitrate.value as string, 10);
             setAudioBitRate(final);
         }
         if (serverSettings.video_crf) setVideoCRF(clamped(serverSettings.video_crf, "video_crf"));
@@ -498,8 +498,8 @@ export function useStreamSettings() {
         const s_scaling_dpi = serverSettings.scaling_dpi;
         if (s_scaling_dpi) {
             const stored = getStoredInt("scaling_dpi");
-            const storedAllowed = s_scaling_dpi.allowed.includes(String(stored));
-            const serverVal = parseInt(s_scaling_dpi.value, 10);
+            const storedAllowed = s_scaling_dpi.allowed!.includes(String(stored));
+            const serverVal = parseInt(s_scaling_dpi.value as string, 10);
             const derived = deriveDpi(manualResolution(serverSettings));
             const willPostDerived = !storedAllowed && !s_scaling_dpi.overridden && derived !== serverVal;
             setSelectedDpi(s_scaling_dpi.overridden ? serverVal : storedAllowed ? stored : derived);
@@ -591,7 +591,7 @@ export function useStreamSettings() {
     };
 
     /** Stores a plain setting and posts it to the server. */
-    const storeAndPost = (key: string, value: string | number, setValue: (v: any) => void) => {
+    const storeAndPost = <V extends string | number>(key: string, value: V, setValue: (v: V) => void) => {
         setValue(value);
         localStorage.setItem(getPrefixedKey(key), String(value));
         debouncedPostSetting({ [key]: value });
@@ -599,7 +599,7 @@ export function useStreamSettings() {
 
     // Derived, not synced: the server default stands in for a missing choice, locked overrides it.
     const wceServer = serverSettings?.webcam_encoder;
-    const wceServerValue = WEBCAM_ENCODER_OPTIONS.includes(wceServer?.value ?? "") ? wceServer.value : null;
+    const wceServerValue = WEBCAM_ENCODER_OPTIONS.includes((wceServer?.value ?? "") as string) ? wceServer!.value as string : null;
     const wceChoice = WEBCAM_ENCODER_OPTIONS.includes(webcamEncoderChoice ?? "") ? webcamEncoderChoice : null;
     const webcamEncoder: string = (wceServer?.locked && wceServerValue) || wceChoice || wceServerValue || "auto";
 
@@ -608,7 +608,7 @@ export function useStreamSettings() {
      * (a server default, a clamp) shows at the nearest one.
      */
     const videoBitrateChoices: number[] = stopsWithin(BITRATE_STOPS, serverSettings?.video_bitrate?.min ?? 100, serverSettings?.video_bitrate?.max ?? 1000000);
-    const framerateSpan = serverSettings?.framerate ? { min: serverSettings.framerate.min, max: serverSettings.framerate.max } : null;
+    const framerateSpan = serverSettings?.framerate ? { min: serverSettings.framerate.min!, max: serverSettings.framerate.max! } : null;
     const displayFramerate: number | null = displayRate ? matchDisplay(displayRate, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240) : null;
     const framerateOptions = withDisplayStop(stopsWithin(FRAMERATE_STOPS, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240), displayFramerate);
     const framerateFollows = followsDisplay(framerateChoice, framerateSpan) && displayFramerate !== null;
@@ -732,14 +732,14 @@ export function useStreamSettings() {
      * The mode the encoder is actually using, which the quality slider must
      * belong to: with rate control disabled that is the server's mode.
      */
-    const appliedRateControlMode: string = rateControlEnabled ? rateControlMode : (serverSettings?.rate_control_mode?.value ?? rateControlMode);
+    const appliedRateControlMode: string = rateControlEnabled ? rateControlMode : ((serverSettings?.rate_control_mode?.value ?? rateControlMode) as string);
     // Under CBR a video stream's still screen is cleaned up to the paint-over quality whatever the switch says.
     const cbrVideo = isVideoEncoder && appliedRateControlMode === 'cbr';
     const locked = (key: string) => !serverSettings || !!serverSettings[key]?.locked;
     const fixed = (key: string) => !serverSettings || serverSettings[key]?.min === serverSettings[key]?.max;
 
     const show = {
-        streamMode: renderable.enableDualMode || !!(window as any).__SELKIES_DUAL_MODE__,
+        streamMode: renderable.enableDualMode || !!window.__SELKIES_DUAL_MODE__,
         encoder: renderable.encoder,
         webcamEncoder: renderable.webcamEncoder && !isWebrtc,
         fullColor: isVideoEncoder && codecCarriesFullColor(codecOfEncoder(encoder)) && renderable.videoFullColor && fullColorDecodable,
@@ -754,8 +754,8 @@ export function useStreamSettings() {
         paintoverCrf: isVideoEncoder && (usePaintOverQuality || cbrVideo) && renderable.videoPaintoverCRF,
         paintoverBurst: isVideoEncoder && (usePaintOverQuality || cbrVideo) && renderable.videoPaintoverBurstFrames,
         paintOverJpeg: showJpegOptions && usePaintOverQuality && renderable.paintOverJpegQuality,
-        cpu: softwareChoiceAvailable(encoder, conditionalCtx.encoderBackends) && renderable.useCpu,
-        cpuThreading: cpuEncodeThreadingApplies(encoder, conditionalCtx.encoderBackends, useCpu, videoFullColor, video10Bit) && renderable.cpuEncodeThreading,
+        cpu: softwareChoiceAvailable(encoder, conditionalCtx.encoderBackends as EncoderBackends | undefined) && renderable.useCpu,
+        cpuThreading: cpuEncodeThreadingApplies(encoder, conditionalCtx.encoderBackends as EncoderBackends | undefined, useCpu, videoFullColor, video10Bit) && renderable.cpuEncodeThreading,
         audioBitrate: renderable.audioBitrate,
         hidpi: !isSecondaryDisplay && renderable.hidpi,
         forceAligned: !isSecondaryDisplay && renderable.forceAlignedResolution,
@@ -830,7 +830,7 @@ export function useStreamSettings() {
         forceAlignedResolution, toggleForceAligned: () => writeConditional(FORCE_ALIGNED_RESOLUTION_SPEC, !forceAlignedResolution, setForceAlignedResolution, { persist: true }),
         selectedDpi, dpiScalingChoices, setDpi,
         /** A single allowed stop, or an operator-set DPI, leaves nothing to change. */
-        dpiDisabled: !serverSettings || serverSettings.scaling_dpi?.allowed?.length <= 1 || serverSettings.scaling_dpi?.overridden === true,
+        dpiDisabled: !serverSettings || (serverSettings.scaling_dpi?.allowed?.length as number) <= 1 || serverSettings.scaling_dpi?.overridden === true,
         manualWidth, manualHeight, presetValue,
         setManualWidth: (value: string) => { setManualWidth(value); setPresetValue(""); },
         setManualHeight: (value: string) => { setManualHeight(value); setPresetValue(""); },

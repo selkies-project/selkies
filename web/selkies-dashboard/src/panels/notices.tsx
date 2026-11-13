@@ -32,6 +32,15 @@ import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.ts";
 import { STATS_EVENT } from "../../../selkies-web-core/lib/stream-stats.ts";
 import { t } from "@/i18n";
 
+/** The progress of one upload, as the core reports it. */
+interface FileUploadPayload {
+  status: string;
+  fileName: string;
+  progress: number;
+  message?: string;
+  code?: string;
+}
+
 const TRANSPORT_TOAST_ID = "transport-advice";
 
 /** The toaster, following the theme, with the kit's icons. */
@@ -70,7 +79,7 @@ export function Notices() {
           toast.dismiss(TRANSPORT_TOAST_ID);
           return;
         }
-        const dualMode = computeRenderableSettings(getLastServerSettings()).enableDualMode || !!(window as any).__SELKIES_DUAL_MODE__;
+        const dualMode = computeRenderableSettings(getLastServerSettings()).enableDualMode || !!window.__SELKIES_DUAL_MODE__;
         const canSwitch = dualMode && !viewer;
         toast.warning(t("notifications.webrtcFailedTitle"), {
           id: TRANSPORT_TOAST_ID,
@@ -89,7 +98,7 @@ export function Notices() {
             <Button variant="outline" size="sm" nativeButton={false} render={<a href={url} target="_blank" onClick={() => toast.dismiss(url)} />}>
               {t('sections.printing.openButton')}
             </Button>
-            <span className="min-w-0 flex-1 truncate" title={message.name}>{message.name}</span>
+            <span className="min-w-0 flex-1 truncate" title={message.name as string}>{message.name as string}</span>
             <Printer className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           </div>,
           { id: url, duration: Infinity, classNames: { content: 'min-w-0 flex-1', title: 'w-full' } },
@@ -97,7 +106,7 @@ export function Notices() {
         return;
       }
       if (message.type !== 'fileUpload') return;
-      const { status, fileName, progress, message: errMsg, code } = message.payload;
+      const { status, fileName, progress, message: errMsg, code } = message.payload as FileUploadPayload;
       if (status === 'start') {
         toast.loading(t('uploads.uploadingFile', { fileName }), { id: fileName });
       } else if (status === 'progress') {
@@ -118,7 +127,7 @@ export function Notices() {
   return null;
 }
 
-const isPoor = () => (window as any).stream_client?.connection === "poor";
+const isPoor = () => window.stream_client?.connection === "poor";
 
 /** The poor-connection mark; `ui_show_connection_indicator` hides it. */
 export function ConnectionIndicator() {

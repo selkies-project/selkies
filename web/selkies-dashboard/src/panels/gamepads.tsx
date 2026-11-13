@@ -84,12 +84,12 @@ function GamepadPreview() {
   const [pads, setPads] = React.useState<Record<string, PadState>>({});
   React.useEffect(() => onCoreMessage((message) => {
     if (message.type !== "gamepadButtonUpdate" && message.type !== "gamepadAxisUpdate") return;
-    const index = message.gamepadIndex;
+    const index = message.gamepadIndex as number | null | undefined;
     if (index === undefined || index === null) return;
     setPads((previous) => {
       const pad: PadState = { buttons: { ...(previous[index]?.buttons || {}) }, axes: { ...(previous[index]?.axes || {}) } };
-      if (message.type === "gamepadButtonUpdate") pad.buttons[message.buttonIndex] = message.value || 0;
-      else pad.axes[message.axisIndex] = Math.max(-1, Math.min(1, message.value || 0));
+      if (message.type === "gamepadButtonUpdate") pad.buttons[message.buttonIndex as number] = (message.value || 0) as number;
+      else pad.axes[message.axisIndex as number] = Math.max(-1, Math.min(1, (message.value || 0) as number));
       return { ...previous, [index]: pad };
     });
   }), []);

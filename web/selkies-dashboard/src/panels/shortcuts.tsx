@@ -37,7 +37,7 @@ export function CiteLink({ className }: { className?: string }) {
 
 /** Renders the switch and the shortcut list. */
 export function ShortcutsMenu() {
-	const renderableSettings: any = computeRenderableSettings(getLastServerSettings());
+	const renderableSettings = computeRenderableSettings(getLastServerSettings());
 	const [enabled, setEnabled] = useState(() => {
 		const server = getLastServerSettings()?.keyboard_shortcuts;
 		if (server?.locked) return !!server.value;

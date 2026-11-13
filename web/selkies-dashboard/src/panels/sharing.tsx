@@ -9,7 +9,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { Badge } from "@/components/ui/badge";
 import { Check, Copy, Info } from "lucide-react";
 import { toast } from "sonner";
-import { computeRenderableSettings, getLastServerSettings } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, type ServerSettings } from "@/utils";
 import { t } from "@/i18n";
 import { shareablePagePath, shareablePageURL } from "../../../selkies-web-core/lib/page-url.ts";
 
@@ -66,7 +66,7 @@ function breakable(url: string): ReactNode[] {
 
 export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 	const [copiedId, setCopiedId] = useState<string | null>(null);
-	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
+	const [renderableSettings, setRenderableSettings] = useState(() => computeRenderableSettings(getLastServerSettings()));
 
 	const baseUrl =
 		typeof window !== "undefined" ? shareablePageURL() : "";
@@ -74,7 +74,7 @@ export const Sharing = ({ show, showUrl = false }: SharingProps) => {
 		typeof window !== "undefined" ? shareablePagePath() : "";
 
 	useEffect(() => {
-		const handleMessage = (event: MessageEvent) => {
+		const handleMessage = (event: MessageEvent<{ type?: string; payload: ServerSettings | null } | null>) => {
 			if (
 				event.origin === window.location.origin &&
 				event.data?.type === "serverSettings"

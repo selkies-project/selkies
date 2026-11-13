@@ -18,7 +18,7 @@ import { t } from "@/i18n";
  * per-instance: two logos sharing one identifier would leave the second
  * unpainted as soon as the instance that owns the definition unmounts.
  */
-export const SelkiesLogo = ({ width = 30, height = 30, className = "", ...props }: { width?: number; height?: number; className?: string;[key: string]: any }) => {
+export const SelkiesLogo = ({ width = 30, height = 30, className = "", ...props }: { width?: number; height?: number; className?: string } & React.SVGProps<SVGSVGElement>) => {
   const id = useId();
   return (
     <svg

@@ -6,7 +6,7 @@
 
 import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { computeRenderableSettings, getLastServerSettings, isViewerUrlMode, onCoreMessage } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, isViewerUrlMode, onCoreMessage, type ServerSettings } from "@/utils";
 import { t } from "@/i18n";
 import { FileManager } from "@/panels/file-manager";
 
@@ -34,13 +34,13 @@ interface FilesDialogProps {
  * popup unmounts with it.
  */
 export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
-    const [renderableSettings, setRenderableSettings] = useState<any>(() => 
+    const [renderableSettings, setRenderableSettings] = useState(() => 
         computeRenderableSettings(getLastServerSettings())
     );
 
     useEffect(() => onCoreMessage((message) => {
         if (message.type === 'serverSettings') {
-            setRenderableSettings(computeRenderableSettings(message.payload));
+            setRenderableSettings(computeRenderableSettings(message.payload as ServerSettings | null));
         }
     }), []);
 

@@ -127,7 +127,7 @@ async function call<T>(base: string, path: string, method = "GET", body?: unknow
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const data = await response.json().catch(() => ({}));
+  const data = await (response.json() as Promise<{ message?: unknown }>).catch(() => ({} as { message?: unknown }));
   if (!response.ok) throw new Error(typeof data?.message === "string" ? data.message : `HTTP ${response.status}`);
   return data as T;
 }
@@ -176,7 +176,7 @@ export async function run(base: string, request: RunRequest, onEvent: (event: Ru
     signal,
   });
   if (!response.ok || !response.body) {
-    const data = await response.json().catch(() => ({}));
+    const data = await (response.json() as Promise<{ message?: unknown }>).catch(() => ({} as { message?: unknown }));
     throw new Error(typeof data?.message === "string" ? data.message : `HTTP ${response.status}`);
   }
   const reader = response.body.getReader();

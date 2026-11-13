@@ -29,10 +29,25 @@
 import * as React from "react";
 import { fragmentWithSessionToken } from "../../../selkies-web-core/lib/page-url.ts";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
-  formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.ts";
+  formatChord, parseChord, readUserChords, writeUserChords, type ChordEvent } from "../../../selkies-web-core/lib/touch-controls.ts";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard,
   isMobileClient, isSecondaryDisplay, isViewerUrlMode, onCoreMessage, type Renderable, type ServerSettings } from "@/utils";
 import { LAYOUTS, layoutById, resolveLayout, storeLayout, type LayoutSpec } from "@/layouts";
+
+declare global {
+  /** One screen of the Window Management API, with its place on the desktop. */
+  interface ScreenDetailed extends Screen {
+    left: number;
+    top: number;
+    availLeft: number;
+    availTop: number;
+  }
+
+  interface Window {
+    /** The Window Management API's screens, which Chromium grants on a permission. */
+    getScreenDetails(): Promise<{ currentScreen: ScreenDetailed; screens: ScreenDetailed[] }>;
+  }
+}
 
 export { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS };
 
@@ -53,7 +68,7 @@ export function useKeyboardAttached(): boolean {
 export interface HeldKeys { Control: boolean; Alt: boolean; Meta: boolean }
 
 /** A screen per side a second display can be placed on; `null` for a side with no screen measured. */
-export type Placements = Record<"up" | "down" | "left" | "right", unknown> | null;
+export type Placements = Partial<Record<"up" | "down" | "left" | "right", ScreenDetailed | null>> | null;
 
 /** What `useDashboard` hands every layout and panel. */
 export interface DashboardState {
@@ -119,7 +134,7 @@ export interface DashboardState {
   /** Adds a second display, placing it unasked where one adjacent screen is measured. */
   addScreen: () => Promise<void>;
   /** Opens the second display's window on `direction`, on `screen` when measured. */
-  launchWindow: (direction: string, screen?: unknown) => boolean;
+  launchWindow: (direction: string, screen?: ScreenDetailed | null) => boolean;
   dismissPlacements: () => void;
   /** Leaves fullscreen when in it, else asks the core for it. */
   toggleFullscreen: () => void;
@@ -155,7 +170,7 @@ function leaveOrRequest(request: "requestFullscreen" | "requestGamingMode"): voi
     post({ type: request });
     return;
   }
-  const doc = document as any;
+  const doc: Document & { mozCancelFullScreen?: () => Promise<void>; webkitExitFullscreen?: () => Promise<void>; msExitFullscreen?: () => Promise<void> } = document;
   const exit = doc.exitFullscreen || doc.mozCancelFullScreen || doc.webkitExitFullscreen || doc.msExitFullscreen;
   if (exit) Promise.resolve(exit.call(document)).catch((err: unknown) => console.error("Error exiting fullscreen:", err));
 }
@@ -211,7 +226,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   const layout = React.useMemo(() => {
     const serverValue = layoutSetting?.value ?? window.__SELKIES_UI_LAYOUT__ ?? null;
     if (layoutPick && layoutChoices.some((choice) => choice.id === layoutPick)) return layoutById(layoutPick);
-    return resolveLayout(serverValue, layoutAllowed);
+    return resolveLayout(serverValue as string, layoutAllowed);
   }, [layoutSetting, layoutPick, layoutChoices, layoutAllowed]);
   const setLayout = React.useCallback((id: string) => {
     storeLayout(id);
@@ -250,19 +265,19 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     const offMessages = onCoreMessage((message) => {
       switch (message.type) {
         case "serverSettings":
-          setServerSettings(message.payload);
+          setServerSettings(message.payload as ServerSettings | null);
           break;
         case "clientRoleUpdate":
           setIsViewer(message.role === "viewer");
           break;
         case "pipelineStatusUpdate":
         case "sidebarButtonStatusUpdate":
-          if (message.video !== undefined) setVideo(message.video);
-          if (message.audio !== undefined) setAudio(message.audio);
-          if (message.microphone !== undefined) setMicrophone(message.microphone);
-          if (message.webcam !== undefined) setWebcam(message.webcam);
+          if (message.video !== undefined) setVideo(message.video as boolean);
+          if (message.audio !== undefined) setAudio(message.audio as boolean);
+          if (message.microphone !== undefined) setMicrophone(message.microphone as boolean);
+          if (message.webcam !== undefined) setWebcam(message.webcam as boolean);
           if (message.gamepad !== undefined) {
-            setGamepad(message.gamepad);
+            setGamepad(message.gamepad as boolean);
             // Gamepad input off takes the touch overlay down with it: its presses would go nowhere.
             if (message.gamepad === false) hideTouchGamepad();
           }
@@ -377,10 +392,10 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     const holding = Object.values(heldKeys).some(Boolean);
     if (!holding) post({ type: "setSynth", value: true });
     const events = chordEvents(chord, heldKeys);
-    const firstUp = events.findIndex((e: any) => e.type === "keyup");
-    events.slice(0, firstUp).forEach((e: any) => sendKeyEvent(e.type, e.key, e.code, e.state));
+    const firstUp = events.findIndex((e: ChordEvent) => e.type === "keyup");
+    events.slice(0, firstUp).forEach((e: ChordEvent) => sendKeyEvent(e.type, e.key, e.code, e.state));
     setTimeout(() => {
-      events.slice(firstUp).forEach((e: any) => sendKeyEvent(e.type, e.key, e.code, e.state));
+      events.slice(firstUp).forEach((e: ChordEvent) => sendKeyEvent(e.type, e.key, e.code, e.state));
       if (!holding) post({ type: "setSynth", value: false });
     }, 50);
   }, [heldKeys]);
@@ -414,7 +429,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
    * A refusal from an async continuation, whose click activation is spent,
    * leaves the arrows up: an arrow click is a fresh one.
    */
-  const launchWindow = React.useCallback((direction: string, screen: any = null) => {
+  const launchWindow = React.useCallback((direction: string, screen: ScreenDetailed | null = null) => {
     const here = new URL(window.location.href);
     const url = `${here.pathname}${here.search}${fragmentWithSessionToken(`display2-${direction}`)}`;
     let features = "resizable=yes,scrollbars=yes";
@@ -444,14 +459,14 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     try {
-      const details = await (window as any).getScreenDetails();
+      const details = await window.getScreenDetails();
       const current = details.currentScreen;
-      const others = details.screens.filter((s: any) => s !== current);
+      const others = details.screens.filter((s: ScreenDetailed) => s !== current);
       if (others.length === 0) {
         setPlacements(ANY_SIDE);
         return;
       }
-      const found: Record<string, any> = {};
+      const found: Record<string, ScreenDetailed> = {};
       for (const s of others) {
         if (!found.right && s.left >= current.left + current.width) found.right = s;
         if (!found.left && s.left + s.width <= current.left) found.left = s;
@@ -464,9 +479,9 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
       } else {
         setPlacements(sides.length > 1 ? (found as Placements) : ANY_SIDE);
       }
-    } catch (err: any) {
+    } catch (err) {
       // A refused permission is an ordinary outcome: the arrows still ask.
-      if (!(err && err.name === "NotAllowedError")) console.error("Error with Window Management API:", err);
+      if (!(err && (err as Error).name === "NotAllowedError")) console.error("Error with Window Management API:", err);
       setPlacements(ANY_SIDE);
     }
   }, [launchWindow]);
@@ -474,7 +489,7 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   const state: DashboardState = {
     serverSettings,
     renderable,
-    uiTitle: serverSettings?.ui_title?.value ?? "Selkies",
+    uiTitle: (serverSettings?.ui_title?.value ?? "Selkies") as string,
     uiShowLogo: serverSettings?.ui_show_logo?.value !== false,
     isViewer,
     isSecondaryDisplay,

@@ -19,7 +19,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import * as yaml from "js-yaml";
 import { t } from "@/i18n";
-import { getLastServerSettings, onCoreMessage } from "@/utils";
+import { getLastServerSettings, onCoreMessage, type ServerSettings } from "@/utils";
 import { withSessionToken } from "../../../selkies-web-core/lib/session-token.ts";
 import {
     appsCatalog,
@@ -306,7 +306,7 @@ function JobConsole({ job }: { job: AppJob }) {
  * what is installed.
  */
 export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
-    const [serverSettings, setServerSettings] = useState<any>(() => getLastServerSettings());
+    const [serverSettings, setServerSettings] = useState(() => getLastServerSettings());
     const catalog = appsCatalog(serverSettings, withSessionToken);
     const [appData, setAppData] = useState<{ include: App[] } | null>(
         () => (cachedCatalogUrl === catalog.metadata ? cachedAppData : null));
@@ -340,7 +340,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     }, [selectedApp]);
 
     useEffect(() => onCoreMessage((message) => {
-        if (message.type === 'serverSettings') setServerSettings(message.payload);
+        if (message.type === 'serverSettings') setServerSettings(message.payload as ServerSettings | null);
     }), []);
     const commandsKnown = serverSettings != null;
     const commandsAvailable = serverSettings?.command_enabled?.value === true;

@@ -25,6 +25,7 @@
 import { getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../selkies-web-core/lib/util.ts";
 import { urlFragmentKeyword } from "../../selkies-web-core/lib/page-url.ts";
 import { hardwareKeyboard } from "../../selkies-web-core/lib/hardware-keyboard.ts";
+import type { ServerSettingEntry } from "../../selkies-web-core/lib/conditional-settings.ts";
 
 export { isMobileClient, hardwareKeyboard, getRoutePrefix, getStorageAppName };
 
@@ -76,18 +77,10 @@ export function storedBool(key: string, fallback: boolean): boolean {
 }
 
 /** The server's description of one setting in the `serverSettings` payload. */
-export interface ServerSetting {
-  value?: unknown;
-  locked?: boolean;
-  overridden?: boolean;
-  allowed?: string[];
-  min?: number;
-  max?: number;
-  default?: unknown;
-}
+export type ServerSetting = ServerSettingEntry;
 
-/** The `serverSettings` payload: untyped JSON keyed by setting name. */
-export type ServerSettings = Record<string, any>;
+/** The `serverSettings` payload: each setting's entry by name. */
+export type ServerSettings = Record<string, ServerSettingEntry>;
 
 /** A document printed in the session, as the core hands it over: a blob URL. */
 export interface PrintJob { name: string; url: string }
@@ -96,7 +89,7 @@ export interface PrintJob { name: string; url: string }
 export interface ClipboardPreview { text: string; truncated: boolean; secret: boolean }
 
 /** A message the core posts to the page's window (or the page to itself): an object with a `type`. */
-export type CoreMessage = Record<string, any>;
+export type CoreMessage = Record<string, unknown>;
 
 /**
  * Hands `handler` every message the core posts to this window: from this
@@ -104,7 +97,7 @@ export type CoreMessage = Record<string, any>;
  * @returns The unsubscribe, for an effect's cleanup.
  */
 export function onCoreMessage(handler: (message: CoreMessage) => void): () => void {
-  const listener = (event: MessageEvent) => {
+  const listener = (event: MessageEvent<CoreMessage | null>) => {
     if (event.origin !== window.location.origin) return;
     const message = event.data;
     if (typeof message === 'object' && message !== null) handler(message);
@@ -121,17 +114,17 @@ const lastAudioDevices: { input: string | null; output: string | null } = { inpu
 if (typeof window !== 'undefined') {
   onCoreMessage((message) => {
     if (message.type === 'serverSettings') {
-      lastServerSettings = message.payload;
+      lastServerSettings = message.payload as ServerSettings | null;
     } else if (message.type === 'clipboardContentUpdate' && typeof message.text === 'string') {
       lastClipboardContent = { text: message.text, truncated: message.truncated === true,
         secret: message.secret === true };
     } else if (message.type === 'effectiveCursorState' && typeof message.value === 'boolean') {
       lastEffectiveCursorState = message.value;
     } else if (message.type === 'audioDeviceSelected' && message.deviceId) {
-      if (message.context === 'input') lastAudioDevices.input = message.deviceId;
-      else if (message.context === 'output') lastAudioDevices.output = message.deviceId;
+      if (message.context === 'input') lastAudioDevices.input = message.deviceId as string;
+      else if (message.context === 'output') lastAudioDevices.output = message.deviceId as string;
     } else if (message.type === 'printDocument' && typeof message.url === 'string') {
-      printJobs = [...printJobs, { name: message.name, url: message.url }];
+      printJobs = [...printJobs, { name: message.name as string, url: message.url as string }];
       window.dispatchEvent(new Event('printJobsChanged'));
     }
   });
@@ -263,7 +256,7 @@ export function computeRenderableSettings(serverSettings: ServerSettings | null)
   r.gamepadToggle = isSettingRenderable(s.gamepad_enabled);
 
   r.enableRateControl = shown('enable_rate_control');
-  const transfers: string[] | undefined = s.file_transfers?.value;
+  const transfers = s.file_transfers?.value as string[] | undefined;
   r.fileUpload = transfers !== undefined ? transfers.includes('upload') : true;
   r.fileDownload = transfers !== undefined ? transfers.includes('download') : true;
   // second_screen is effective availability (admin flag and backend capacity).

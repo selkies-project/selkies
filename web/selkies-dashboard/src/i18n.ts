@@ -46,7 +46,7 @@ function lookup(table: Dictionary, key: string): string | undefined {
 /** Substitutes `{name}` placeholders from `vars`, leaving unknown ones intact. */
 function interpolate(text: string, vars?: Record<string, unknown>): string {
     if (!vars) return text;
-    return text.replace(/\{(\w+)\}/g, (match, name) => (vars[name] !== undefined ? String(vars[name]) : match));
+    return text.replace(/\{(\w+)\}/g, (match, name: string) => (vars[name] !== undefined ? String(vars[name]) : match));
 }
 
 /**
