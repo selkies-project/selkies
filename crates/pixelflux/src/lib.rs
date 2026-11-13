@@ -7591,6 +7591,15 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                         return;
                     }
 
+                    // A client reads a repeated position between a press and its release as a
+                    // drag, so under the policy, whose seat Xwayland meets directly, a motion
+                    // that moves nothing is dropped, as a nested wlroots session drops it.
+                    if wayland::wm::active(state)
+                        && pointer.current_location() == p
+                        && pointer.current_focus() == under.as_ref().map(|(t, _)| t.clone())
+                    {
+                        return;
+                    }
                     state.release_grab_across_screens(&pointer, &under, serial, time);
                     let entered = pointer.current_focus() != under.as_ref().map(|(t, _)| t.clone());
                     pointer.motion(
