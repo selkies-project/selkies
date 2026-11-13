@@ -4,7 +4,7 @@
 An office application copying formatted text offers a picture of the selection
 beside its markup, so a copy whose markup carries text is text, and a copied
 picture, whose markup is only an img tag, stays the picture. The rule is
-JavaScript, so the checks live in tests/tools/clipboard_local_read_audit.mjs.
+TypeScript, so the checks live in tests/tools/clipboard_local_read_audit.ts.
 """
 import os
 import shutil
@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "clipboard_local_read_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "clipboard_local_read_audit.ts")
 
 node = shutil.which("node")
 if not node:

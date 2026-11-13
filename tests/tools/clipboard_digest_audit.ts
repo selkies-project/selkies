@@ -4,44 +4,55 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The digest the clipboard worker takes while it codes a payload, which stands
-// in for the payload's bytes wherever a signature is taken. Change detection
-// rests on it matching what the page computes for the same bytes, over a
-// payload delivered whole, split at arbitrary boundaries, or sent as chunks.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * The digest the clipboard worker takes while it codes a payload, which stands
+ * in for the payload's bytes wherever a signature is taken. Change detection
+ * rests on it matching what the page computes for the same bytes, over a
+ * payload delivered whole, split at arbitrary boundaries, or sent as chunks.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
-const replies = [];
-globalThis.self = { postMessage: (msg) => replies.push(msg) };
-await import('../../web/selkies-web-core/clipboard-worker.ts');
-const worker = globalThis.self;
+import type { WorkerReply, WorkerRequest, WorkerScope } from './clipboard_worker.ts';
+
+const replies: WorkerReply[] = [];
+const worker: WorkerScope = { postMessage: (msg) => replies.push(msg) };
+Object.assign(globalThis, { self: worker });
+// A classic script with no exports, loaded for the handler it leaves on `self`.
+const WORKER: string = '../../web/selkies-web-core/clipboard-worker.ts';
+await import(WORKER);
 const { digestedPayload } = await import('../../web/selkies-web-core/lib/clipboard-sync.ts');
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-digest] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-digest] ${label}  ${String(detail)}`);
 }
 
-function send(data) {
-    worker.onmessage({ data });
+/** Posts one request to the worker. */
+function send(data: WorkerRequest): void {
+    worker.onmessage!({ data });
 }
 
-function base64(bytes) {
+/** `bytes` in base64. */
+function base64(bytes: Uint8Array): string {
     let s = '';
     for (const b of bytes) s += String.fromCharCode(b);
     return btoa(s);
 }
 
 /** The page's own digest, which the worker's has to reproduce exactly. */
-function pageHash(bytes) {
+function pageHash(bytes: Uint8Array): number {
     let h = 5381;
     for (let i = 0; i < bytes.length; i++) h = ((h << 5) + h + bytes[i]) | 0;
     return h;
 }
 
-function reply(id) {
+/** The worker's reply to request `id`. */
+function reply(id: number): WorkerReply | undefined {
     return replies.find((m) => m.id === id);
 }
 
@@ -52,7 +63,7 @@ const b64 = base64(payload);
 
 send({ id: 1, action: 'DECODE_FROM_B64', payload: b64, mimeType: 'image/png' });
 check('a single-message decode digests what the page would',
-      reply(1) && reply(1).hash === want, `${reply(1) && reply(1).hash} vs ${want}`);
+      reply(1)?.hash === want, `${reply(1)?.hash} vs ${want}`);
 
 // Chunk boundaries fall wherever the sender put them, including inside a
 // base64 quartet, so the digest cannot depend on where the payload was cut.
@@ -64,24 +75,24 @@ for (const size of [4, 999, 65536]) {
     }
     send({ id, action: 'DECODE_END' });
     check(`a multipart decode split at ${size} digests the same`,
-          reply(id) && reply(id).hash === want, `${reply(id) && reply(id).hash}`);
+          reply(id)?.hash === want, `${reply(id)?.hash}`);
 }
 
 // The send path encodes a payload one chunk at a time and threads the digest
 // through them, so it has to end where a single pass over the whole would.
-let h;
+let h: number | undefined;
 for (let at = 0; at < payload.length; at += 16383) {
     const id = 900 + at;
     const chunk = payload.slice(at, at + 16383);
     send({ id, action: 'ENCODE_BINARY_TO_B64', payload: chunk.buffer, hash: at === 0 ? 5381 : h });
-    h = reply(id).hash;
+    h = reply(id)!.hash;
 }
 check('a chunked encode digests the whole payload', h === want, `${h} vs ${want}`);
 
 send({ id: 2, action: 'HASH_BYTES', payload: payload.slice().buffer });
 check('a standalone digest matches the codec ones',
-      reply(2) && reply(2).hash === want && reply(2).byteLength === payload.length,
-      `${reply(2) && reply(2).hash}`);
+      reply(2)?.hash === want && reply(2)?.byteLength === payload.length,
+      `${reply(2)?.hash}`);
 
 // A signature built from the digest has to be the string the byte path builds,
 // or the two sides of the change-only gate never agree.
@@ -95,7 +106,7 @@ const other = new Uint8Array(payload);
 other[other.length - 1] ^= 0xff;
 send({ id: 3, action: 'HASH_BYTES', payload: other.buffer });
 check('a payload differing in one byte digests differently',
-      reply(3) && reply(3).hash !== want, `${reply(3) && reply(3).hash}`);
+      !!reply(3) && reply(3)?.hash !== want, `${reply(3)?.hash}`);
 
 console.log(`[clip-digest] ${failed ? `${failed} failed` : 'all passed'}`);
 process.exit(failed ? 1 : 0);

@@ -4,20 +4,28 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// A secret the session copied, on the page. Its preview reaches the dashboards
-// masked, never as its text; written locally, it is taken back 60 seconds
-// later, or as soon as the session's clipboard moves on, but only while the
-// local clipboard still holds it, and only where the engine lets a page check
-// that without a gesture or a prompt (Chromium, with clipboard-read granted
-// and the page focused). The engine is modeled by those rules; the long timer
-// is fired by hand, everything shorter runs on the real clock, and decoding
-// runs in the real worker.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * A secret the session copied, on the page. Its preview reaches the dashboards
+ * masked, never as its text; written locally, it is taken back 60 seconds
+ * later, or as soon as the session's clipboard moves on, but only while the
+ * local clipboard still holds it, and only where the engine lets a page check
+ * that without a gesture or a prompt (Chromium, with clipboard-read granted
+ * and the page focused). The engine is modeled by those rules; the long timer
+ * is fired by hand, everything shorter runs on the real clock, and decoding
+ * runs in the real worker.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
-const pending = new Map();
+import type { ClipboardWorkerBridge, DecodedClipboard } from '../../web/selkies-web-core/lib/clipboard-worker-bridge.ts';
+import type { ClipboardSync, IncomingClipboard } from '../../web/selkies-web-core/lib/clipboard-sync.ts';
+import type { Waiter, WorkerReply, WorkerRequest, WorkerScope } from './clipboard_worker.ts';
+import type { StandIn } from './stand_in.ts';
+
+const pending = new Map<number, Waiter>();
 let nextId = 0;
-globalThis.self = {
+const workerScope: WorkerScope = {
     postMessage: (msg) => {
         const waiter = pending.get(msg.id);
         if (!waiter) return;
@@ -26,81 +34,108 @@ globalThis.self = {
         else waiter.reject(new Error(msg.error));
     },
 };
-await import('../../web/selkies-web-core/clipboard-worker.ts');
-const workerScope = globalThis.self;
+Object.assign(globalThis, { self: workerScope });
+// A classic script with no exports, loaded for the handler it leaves on `self`.
+const WORKER: string = '../../web/selkies-web-core/clipboard-worker.ts';
+await import(WORKER);
 
-function ask(action, payload, extra = {}) {
+/** One request of the worker bridge, answered in-process by the real worker. */
+function ask(action: string, payload: WorkerRequest['payload'], extra: Partial<WorkerRequest> = {}): Promise<WorkerReply> {
     const id = ++nextId;
     return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject });
-        workerScope.onmessage({ data: { id, action, payload, ...extra } });
+        workerScope.onmessage!({ data: { id, action, payload, ...extra } });
     });
 }
-const worker = {
-    decode: (b64, mimeType) => ask('DECODE_FROM_B64', b64, { mimeType }),
-    hashBytes: (buf) => ask('HASH_BYTES', buf),
+const worker: Pick<ClipboardWorkerBridge, 'decode' | 'hashBytes' | 'decodeStream'> = {
+    decode: (b64, mimeType) => ask('DECODE_FROM_B64', b64, { mimeType }) as Promise<DecodedClipboard>,
+    hashBytes: (buf) => ask('HASH_BYTES', buf) as Promise<{ byteLength: number; hash: number }>,
     decodeStream() { throw new Error('no multipart here'); },
 };
 
+/** A deadline the module set, held here in place of a timer. */
+interface LongTimer {
+    fn: () => void;
+    ms: number;
+    fired: boolean;
+    cleared: boolean;
+}
+
 const realSetTimeout = globalThis.setTimeout;
-const longTimers = [];
-globalThis.setTimeout = (fn, ms, ...args) => {
-    if (ms >= 60000) {
-        const timer = { fn, ms, fired: false, cleared: false };
-        longTimers.push(timer);
-        return timer;
-    }
-    return realSetTimeout(fn, ms, ...args);
-};
+const longTimers: LongTimer[] = [];
 const realClearTimeout = globalThis.clearTimeout;
-globalThis.clearTimeout = (t) => {
-    if (t && typeof t === 'object' && 'cleared' in t) t.cleared = true;
-    else realClearTimeout(t);
-};
-function fireDeadlines() {
+Object.assign(globalThis, {
+    setTimeout: (fn: () => void, ms: number, ...args: []) => {
+        if (ms >= 60000) {
+            const timer = { fn, ms, fired: false, cleared: false };
+            longTimers.push(timer);
+            return timer;
+        }
+        return realSetTimeout(fn, ms, ...args);
+    },
+    clearTimeout: (t: LongTimer | ReturnType<typeof setTimeout> | undefined) => {
+        if (t && typeof t === 'object' && 'cleared' in t) t.cleared = true;
+        else realClearTimeout(t);
+    },
+});
+/** Runs every deadline not cleared since it was set. */
+function fireDeadlines(): void {
     for (const t of longTimers.splice(0)) if (!t.cleared) { t.fired = true; t.fn(); }
 }
 
-const listeners = {};
-globalThis.window = {
-    isSecureContext: true,
-    addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
-};
-const engine = { focused: true, permission: 'granted' };
-globalThis.document = { hidden: false, addEventListener: () => {}, hasFocus: () => engine.focused };
-function dispatch(type) {
+/** A listener as the stand-in window calls it. */
+type Listener = (event: StandIn<Event>) => void;
+
+/** A clipboard item as the module builds one: the data of each type, awaited when written. */
+class FakeClipboardItem {
+    items: Record<string, Blob | Promise<Blob>>;
+    types: string[];
+    constructor(items: Record<string, Blob | Promise<Blob>>) { this.items = items; this.types = Object.keys(items); }
+}
+
+const listeners: Record<string, Listener[]> = {};
+const engine: { focused: boolean; permission: PermissionState } = { focused: true, permission: 'granted' };
+Object.assign(globalThis, {
+    window: {
+        isSecureContext: true,
+        addEventListener: (type: string, fn: Listener) => { (listeners[type] ||= []).push(fn); },
+    } satisfies StandIn<Window>,
+    document: { hidden: false, addEventListener: () => {}, hasFocus: () => engine.focused } satisfies StandIn<Document>,
+    ClipboardItem: FakeClipboardItem,
+});
+/** An event of the page. */
+function dispatch(type: string): void {
     for (const fn of listeners[type] || []) fn({ type });
 }
 
 const local = { text: 'what the user had' };
-const calls = [];
-globalThis.ClipboardItem = class {
-    constructor(items) { this.items = items; this.types = Object.keys(items); }
-};
+const calls: string[] = [];
 Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: {
-        permissions: { query: async () => ({ state: engine.permission }) },
+        permissions: { query: () => Promise.resolve({ state: engine.permission }) },
         clipboard: {
             async write(items) {
                 calls.push('write');
                 if (!engine.focused) throw new DOMException('Document is not focused.', 'NotAllowedError');
-                const item = items[0];
+                // The module builds its items from the class installed above.
+                const item = items[0] as ClipboardItem & Pick<FakeClipboardItem, 'items'>;
                 const blob = await item.items['text/plain'];
                 local.text = await blob.text();
             },
-            async writeText(text) {
+            writeText(text) {
                 calls.push(`writeText:${text}`);
-                if (!engine.focused) throw new DOMException('Document is not focused.', 'NotAllowedError');
+                if (!engine.focused) return Promise.reject(new DOMException('Document is not focused.', 'NotAllowedError'));
                 local.text = text;
+                return Promise.resolve();
             },
-            async readText() {
+            readText() {
                 calls.push('readText');
-                if (!engine.focused) throw new DOMException('Document is not focused.', 'NotAllowedError');
-                return local.text;
+                if (!engine.focused) return Promise.reject(new DOMException('Document is not focused.', 'NotAllowedError'));
+                return Promise.resolve(local.text);
             },
         },
-    },
+    } satisfies StandIn<Navigator>,
 });
 
 const {
@@ -108,25 +143,29 @@ const {
 } = await import('../../web/selkies-web-core/lib/clipboard-sync.ts');
 
 let failed = 0;
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
     // A detail shows the page's state, which may hold the secret; the line never does.
     console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-secret-page] ${label}  ${String(detail).replaceAll(HIDDEN_TEXT, '<the secret>')}`);
 }
-const settle = () => new Promise((resolve) => realSetTimeout(resolve, 30));
-const b64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+const settle = (): Promise<void> => new Promise((resolve) => realSetTimeout(resolve, 30));
+const b64 = (text: string): string => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
 const HIDDEN_TEXT = 'correct horse battery staple';
 
 /** A page: the clipboard state, the writer, and the receive path of one core. */
-function page({ isChromium = true, writeLocal = true } = {}) {
-    const previews = [];
+function page({ isChromium = true, writeLocal = true } = {}): {
+    incoming: IncomingClipboard; clipboardSync: ClipboardSync; previews: Array<ReturnType<typeof clipboardPreviewMessage>>;
+    options: { writeLocal: boolean };
+} {
+    const previews: Array<ReturnType<typeof clipboardPreviewMessage>> = [];
     const clipboardSync = createClipboardSync({ sendRequest: () => {} });
     const options = { writeLocal };
     const incoming = createIncomingClipboard({
         worker,
         clipboardSync,
         writer: createDeferredClipboardWriter(),
-        toPng: async (blob) => blob,
+        toPng: (blob) => Promise.resolve(blob),
         canWriteLocal: () => options.writeLocal,
         binaryEnabled: () => true,
         onPreview: (text, secret) => previews.push(clipboardPreviewMessage(text, secret)),
@@ -137,12 +176,14 @@ function page({ isChromium = true, writeLocal = true } = {}) {
     return { incoming, clipboardSync, previews, options };
 }
 
-async function reset() {
+/** Puts the engine, the local clipboard and the deadlines back as a page starts with them. */
+function reset(): Promise<void> {
     calls.length = 0;
     longTimers.length = 0;
     engine.focused = true;
     engine.permission = 'granted';
     local.text = 'what the user had';
+    return Promise.resolve();
 }
 
 // The preview never carries the secret.

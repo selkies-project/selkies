@@ -5,7 +5,7 @@ Chromium reads the local clipboard when the window gains focus, but the
 clipboard also changes while the window keeps focus, and the chord would
 then paste what the last focus read sent. The chord's keydown therefore
 reads the clipboard itself and its V waits for that send. The rule is
-JavaScript, so the checks live in tests/tools/clipboard_paste_chord_audit.mjs.
+TypeScript, so the checks live in tests/tools/clipboard_paste_chord_audit.ts.
 """
 import os
 import shutil
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "clipboard_paste_chord_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "clipboard_paste_chord_audit.ts")
 
 node = shutil.which("node")
 if not node:

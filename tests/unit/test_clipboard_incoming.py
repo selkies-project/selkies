@@ -5,8 +5,8 @@ Engines decide whether a clipboard write may happen at the moment it is asked
 for, and a large image is still crossing the link by the time the user has left
 to paste it, so the write is asked for at the payload's first frame; a repeat or
 a superseded payload withdraws it, and a refused one waits for the next gesture
-only while nothing newer was asked for. The rules are JavaScript, so the checks
-live in tests/tools/clipboard_incoming_audit.mjs.
+only while nothing newer was asked for. The rules are TypeScript, so the checks
+live in tests/tools/clipboard_incoming_audit.ts.
 """
 import os
 import shutil
@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "clipboard_incoming_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "clipboard_incoming_audit.ts")
 
 node = shutil.which("node")
 if not node:

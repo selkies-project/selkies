@@ -4,45 +4,55 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The clipboard worker's multipart accumulation. A download reaches it one
-// message at a time so the page never holds the whole base64 payload, which
-// means the worker owns what used to be a join on the main thread: chunk
-// boundaries fall wherever the sender put them, and two transfers can be open
-// at once.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * The clipboard worker's multipart accumulation. A download reaches it one
+ * message at a time so the page never holds the whole base64 payload, which
+ * means the worker owns what used to be a join on the main thread: chunk
+ * boundaries fall wherever the sender put them, and two transfers can be open
+ * at once.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
-const replies = [];
-globalThis.self = { postMessage: (msg) => replies.push(msg) };
-await import('../../web/selkies-web-core/clipboard-worker.ts');
-const worker = globalThis.self;
+import type { WorkerReply, WorkerRequest, WorkerScope } from './clipboard_worker.ts';
+
+const replies: WorkerReply[] = [];
+const worker: WorkerScope = { postMessage: (msg) => replies.push(msg) };
+Object.assign(globalThis, { self: worker });
+// A classic script with no exports, loaded for the handler it leaves on `self`.
+const WORKER: string = '../../web/selkies-web-core/clipboard-worker.ts';
+await import(WORKER);
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-stream] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-stream] ${label}  ${String(detail)}`);
 }
 
-function send(data) {
-    worker.onmessage({ data });
+/** Posts one request to the worker. */
+function send(data: WorkerRequest): void {
+    worker.onmessage!({ data });
 }
 
-function base64(bytes) {
+/** `bytes` in base64. */
+function base64(bytes: Uint8Array): string {
     let s = '';
     for (const b of bytes) s += String.fromCharCode(b);
     return btoa(s);
 }
 
 /** Splits `text` into runs of the given lengths, the remainder last. */
-function split(text, size) {
-    const out = [];
+function split(text: string, size: number): string[] {
+    const out: string[] = [];
     for (let at = 0; at < text.length; at += size) out.push(text.slice(at, at + size));
     return out;
 }
 
 /** Runs one transfer and returns the worker's reply. */
-function transfer(id, mimeType, chunks) {
+function transfer(id: number, mimeType: string, chunks: string[]): WorkerReply {
     replies.length = 0;
     send({ id, action: 'DECODE_BEGIN', mimeType });
     for (const chunk of chunks) send({ id, action: 'DECODE_CHUNK', payload: chunk });
@@ -54,11 +64,13 @@ const payload = new Uint8Array(3000);
 for (let i = 0; i < payload.length; i++) payload[i] = (i * 31 + 7) & 0xff;
 const encoded = base64(payload);
 
-function bytesOf(reply) {
-    return new Uint8Array(reply.result);
+/** The bytes a reply carries. */
+function bytesOf(reply: WorkerReply): Uint8Array {
+    return new Uint8Array(reply.result as ArrayBuffer);
 }
 
-function same(a, b) {
+/** Whether two byte runs are equal. */
+function same(a: Uint8Array, b: Uint8Array): boolean {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
     return true;
@@ -99,8 +111,8 @@ for (const size of [1, 7, 401, 999]) {
     send({ id: 11, action: 'DECODE_CHUNK', payload: base64(other) });
     send({ id: 11, action: 'DECODE_END' });
     send({ id: 10, action: 'DECODE_END' });
-    const first = replies.find((r) => r.id === 11);
-    const second = replies.find((r) => r.id === 10);
+    const first = replies.find((r) => r.id === 11)!;
+    const second = replies.find((r) => r.id === 10)!;
     check('two open transfers keep their own bytes',
           same(bytesOf(first), other) && same(bytesOf(second), payload),
           `${first.byteLength} and ${second.byteLength} bytes`);

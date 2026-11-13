@@ -5,7 +5,7 @@ Its preview reaches the dashboards masked, never as its text; written locally,
 it is taken back 60 seconds later, or as soon as the session's clipboard moves
 on, but only while the local clipboard still holds it, and only where the
 engine lets a page check that without a gesture or a prompt. The rules are
-JavaScript, so the checks live in tests/tools/clipboard_secret_audit.mjs.
+TypeScript, so the checks live in tests/tools/clipboard_secret_audit.ts.
 """
 import os
 import shutil
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "clipboard_secret_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "clipboard_secret_audit.ts")
 
 node = shutil.which("node")
 if not node:

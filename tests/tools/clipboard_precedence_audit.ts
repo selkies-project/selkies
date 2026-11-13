@@ -4,24 +4,49 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// Which local-to-server clipboard send wins. Choosing a file for the image
-// upload blurs the page and refocuses it, and the focus read that refocus
-// fires reads the clipboard the user had before, so without precedence the
-// upload lands on the session clipboard and the old value lands on top of it.
-// A push the user asked for therefore outranks a read while it runs and
-// briefly after, and a clipboard the page has already seen is never sent
-// again over what the session took since: only a copy made later reaches the
-// session.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * Which local-to-server clipboard send wins. Choosing a file for the image
+ * upload blurs the page and refocuses it, and the focus read that refocus
+ * fires reads the clipboard the user had before, so without precedence the
+ * upload lands on the session clipboard and the old value lands on top of it.
+ * A push the user asked for therefore outranks a read while it runs and
+ * briefly after, and a clipboard the page has already seen is never sent
+ * again over what the session took since: only a copy made later reaches the
+ * session.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
 // Set before the module loads: it reads neither at import, but the sender
 // closes over them per call and a missing global would read as "no clipboard".
-globalThis.window = { isSecureContext: true };
+import type { ClipboardSync, LocalClipboardSender } from '../../web/selkies-web-core/lib/clipboard-sync.ts';
+import type { StandIn } from './stand_in.ts';
+
+/** A clipboard item: its types and the blob of each. */
+interface FakeItem {
+    types: string[];
+    getType: (type: string) => Promise<Blob>;
+}
+
+/** The navigator members the sender reads, which a check replaces. */
+interface FakeNavigator {
+    clipboard: { readText: () => Promise<string>; read?: () => Promise<FakeItem[]> };
+    permissions?: { query: () => Promise<{ state: PermissionState }> };
+}
+
+/** What a transport was asked to send. */
+interface Sent {
+    data?: string | ArrayBuffer;
+    mime?: string;
+}
+
+Object.assign(globalThis, { window: { isSecureContext: true } satisfies StandIn<Window> });
 const clipboard = { text: '', read: null };
+const browser: FakeNavigator = { clipboard: { readText: () => Promise.resolve(clipboard.text) } };
 Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
-    value: { clipboard: { readText: async () => clipboard.text } },
+    value: browser satisfies StandIn<Navigator>,
 });
 
 const { createClipboardSync, createLocalClipboardSender } = await import(
@@ -33,9 +58,10 @@ const EXPLICIT_PRECEDENCE_MS = 1000;
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-precedence] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-precedence] ${label}  ${String(detail)}`);
 }
 
 const realNow = Date.now;
@@ -43,8 +69,9 @@ let clock = 1_000_000;
 Date.now = () => clock;
 
 /** A sender whose transport records what it was asked to send. */
-function sender({ hold = null } = {}) {
-    const sent = [];
+function sender({ hold = null }: { hold?: ReturnType<typeof gate> | null } = {}):
+    { sender: LocalClipboardSender; sent: Sent[]; clipboardSync: ClipboardSync } {
+    const sent: Sent[] = [];
     const clipboardSync = createClipboardSync({ sendRequest: () => {} });
     const s = createLocalClipboardSender({
         isChromium: true,
@@ -62,9 +89,10 @@ function sender({ hold = null } = {}) {
     return { sender: s, sent, clipboardSync };
 }
 
-function gate() {
-    let release;
-    const promise = new Promise((r) => { release = r; });
+/** A promise and the call that settles it. */
+function gate(): { promise: Promise<void>; release: () => void } {
+    let release!: () => void;
+    const promise = new Promise<void>((r) => { release = r; });
     return { promise, release };
 }
 
@@ -116,8 +144,10 @@ clipboard.text = 'what the user copied before';
 {
     const held = gate();
     const { sender: s, sent } = sender();
-    const blob = { arrayBuffer: async () => { await held.promise; return 'image bytes'; } };
-    const push = s.sendExplicit(blob, 'image/png');
+    // Text stands for the bytes: the transport takes either, and the check's line prints it.
+    const bytes = 'image bytes' as string | ArrayBuffer as ArrayBuffer;
+    const blob = { arrayBuffer: async () => { await held.promise; return bytes; } };
+    const push = s.sendExplicit(blob as StandIn<Blob> as Blob, 'image/png');
     const read = s.readAndSend();
     held.release();
     await Promise.all([push, read]);
@@ -177,8 +207,8 @@ clipboard.text = 'what the user copied before';
 // the next read and read again once the next connection's settings arrive. A
 // push the server's policy declined is not chased.
 /** A sender whose transport declines with `codes`, one per call, then sends. */
-function declining(codes) {
-    const sent = [];
+function declining(codes: Array<string | undefined>): { sender: LocalClipboardSender; sent: Sent[] } {
+    const sent: Sent[] = [];
     const clipboardSync = createClipboardSync({ sendRequest: () => {} });
     const s = createLocalClipboardSender({
         isChromium: true,
@@ -187,18 +217,19 @@ function declining(codes) {
         canRead: () => true,
         binaryEnabled: () => false,
         clipboardSync,
-        sendClipboardData: async (data, mime, onSkip) => {
+        sendClipboardData: (data, mime, onSkip) => {
             const code = codes.shift();
-            if (code) { if (onSkip) onSkip('declined', code); return; }
+            if (code) { if (onSkip) onSkip('declined', code); return Promise.resolve(); }
             sent.push({ data, mime });
             clipboardSync.markSynced(data, mime);
+            return Promise.resolve();
         },
     });
     return { sender: s, sent };
 }
-globalThis.document = { hasFocus: () => true };
-navigator.permissions = { query: async () => ({ state: 'granted' }) };
-const settle = () => new Promise((r) => setTimeout(r, 0));
+Object.assign(globalThis, { document: { hasFocus: () => true } satisfies StandIn<Document> });
+browser.permissions = { query: () => Promise.resolve({ state: 'granted' }) };
+const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 {
     const { sender: s, sent } = declining(['clipboardSkipNotConnected']);
     await s.readAndSend();
@@ -255,28 +286,28 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
     clipboard.text = 'what the user copied before';
 }
 {
-    const sent = [];
+    const sent: Sent[] = [];
     const clipboardSync = createClipboardSync({ sendRequest: () => {} });
     const s = createLocalClipboardSender({
         isChromium: true, isSharedMode: () => false, canSync: () => true, canRead: () => true,
         binaryEnabled: () => true, clipboardSync,
-        sendClipboardData: async (data, mime) => { sent.push({ mime }); clipboardSync.markSynced(data, mime); },
+        sendClipboardData: (data, mime) => { sent.push({ mime }); clipboardSync.markSynced(data, mime); return Promise.resolve(); },
     });
-    const item = (html, text) => [{
+    const item = (html: string, text: string): FakeItem[] => [{
         types: ['text/html', 'text/plain'],
-        getType: async (t) => new Blob([t === 'text/html' ? html : text], { type: t }),
+        getType: (t) => Promise.resolve(new Blob([t === 'text/html' ? html : text], { type: t })),
     }];
-    const savedRead = navigator.clipboard.read;
-    navigator.clipboard.read = async () => item("<meta charset='utf-8'><p>from <b>the session</b></p>", 'from the session');
+    const savedRead = browser.clipboard.read;
+    browser.clipboard.read = () => Promise.resolve(item("<meta charset='utf-8'><p>from <b>the session</b></p>", 'from the session'));
     // As the landing of a formatted copy leaves it: the server's text synced, the local form unknown.
     clipboardSync.resolveServer('from the session', null, 'application/x-selkies-clipboard-flavours', { __clipDigest: true, byteLength: 40, hash: 7 });
     clipboardSync.noteLocal(null);
     await s.readAndSend();
     check("the session's formatted copy read back rewrapped is not sent", sent.length === 0, JSON.stringify(sent));
-    navigator.clipboard.read = async () => item('<p>copied in the browser</p>', 'copied in the browser');
+    browser.clipboard.read = () => Promise.resolve(item('<p>copied in the browser</p>', 'copied in the browser'));
     await s.readAndSend();
     check('a formatted copy made in the browser is', sent.length === 1, JSON.stringify(sent));
-    navigator.clipboard.read = savedRead;
+    browser.clipboard.read = savedRead;
 }
 {
     // The session sent A, this page then sent B: copying A again in the browser is a copy.

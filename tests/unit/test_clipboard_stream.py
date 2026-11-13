@@ -3,8 +3,8 @@
 
 A download reaches the worker one message at a time, so the page never holds
 the whole base64 payload — which puts the chunk-boundary handling and the
-per-transfer state in the worker. The rules are JavaScript, so the checks live
-in tests/tools/clipboard_stream_audit.mjs.
+per-transfer state in the worker. The rules are TypeScript, so the checks live
+in tests/tools/clipboard_stream_audit.ts.
 """
 import os
 import shutil
@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "clipboard_stream_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "clipboard_stream_audit.ts")
 
 node = shutil.which("node")
 if not node:

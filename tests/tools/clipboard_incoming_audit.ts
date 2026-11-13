@@ -4,25 +4,33 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// When a session copy is written to the local clipboard. Engines decide
-// whether a clipboard write may happen at the moment it is asked for --
-// Chromium wants the page focused, Firefox and WebKit a recent user
-// activation -- and a multi-megabyte image is still crossing the link by the
-// time the user has gone to paste it, so the write is asked for at the
-// payload's first frame with its data still to come. A payload that repeats
-// what the client holds, or that a newer one supersedes, withdraws its write
-// and leaves the local clipboard as it was, and a write the engine refused
-// waits for the next gesture only while nothing newer was asked for since.
-//
-// The engine is modeled by its rule alone: a write asked for while the page is
-// not allowed to is refused; one asked for while it is lands whenever its data
-// settle, allowed or not by then. Decoding and digests run in the real worker.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * When a session copy is written to the local clipboard. Engines decide
+ * whether a clipboard write may happen at the moment it is asked for --
+ * Chromium wants the page focused, Firefox and WebKit a recent user
+ * activation -- and a multi-megabyte image is still crossing the link by the
+ * time the user has gone to paste it, so the write is asked for at the
+ * payload's first frame with its data still to come. A payload that repeats
+ * what the client holds, or that a newer one supersedes, withdraws its write
+ * and leaves the local clipboard as it was, and a write the engine refused
+ * waits for the next gesture only while nothing newer was asked for since.
+ *
+ * The engine is modeled by its rule alone: a write asked for while the page is
+ * not allowed to is refused; one asked for while it is lands whenever its data
+ * settle, allowed or not by then. Decoding and digests run in the real worker.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
-const pending = new Map();
+import type { ClipboardWorkerBridge, DecodedClipboard } from '../../web/selkies-web-core/lib/clipboard-worker-bridge.ts';
+import type { ClipboardSync, IncomingClipboard } from '../../web/selkies-web-core/lib/clipboard-sync.ts';
+import type { Waiter, WorkerReply, WorkerRequest, WorkerScope } from './clipboard_worker.ts';
+import type { StandIn } from './stand_in.ts';
+
+const pending = new Map<number, Waiter>();
 let nextId = 0;
-globalThis.self = {
+const workerScope: WorkerScope = {
     postMessage: (msg) => {
         const waiter = pending.get(msg.id);
         if (!waiter) return;
@@ -31,50 +39,63 @@ globalThis.self = {
         else waiter.reject(new Error(msg.error));
     },
 };
-await import('../../web/selkies-web-core/clipboard-worker.ts');
-const workerScope = globalThis.self;
+Object.assign(globalThis, { self: workerScope });
+// A classic script with no exports, loaded for the handler it leaves on `self`.
+const WORKER: string = '../../web/selkies-web-core/clipboard-worker.ts';
+await import(WORKER);
 
 /** The worker bridge's surface, answered in-process by the real worker. */
-function ask(action, payload, extra = {}) {
+function ask(action: string, payload: WorkerRequest['payload'], extra: Partial<WorkerRequest> = {}): Promise<WorkerReply> {
     const id = ++nextId;
     return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject });
-        workerScope.onmessage({ data: { id, action, payload, ...extra } });
+        workerScope.onmessage!({ data: { id, action, payload, ...extra } });
     });
 }
-const worker = {
-    decode: (b64, mimeType) => ask('DECODE_FROM_B64', b64, { mimeType }),
-    hashBytes: (buf) => ask('HASH_BYTES', buf),
+const worker: Pick<ClipboardWorkerBridge, 'decode' | 'hashBytes' | 'decodeStream'> = {
+    decode: (b64, mimeType) => ask('DECODE_FROM_B64', b64, { mimeType }) as Promise<DecodedClipboard>,
+    hashBytes: (buf) => ask('HASH_BYTES', buf) as Promise<{ byteLength: number; hash: number }>,
     decodeStream(mimeType) {
         const id = ++nextId;
-        workerScope.onmessage({ data: { id, action: 'DECODE_BEGIN', mimeType } });
+        workerScope.onmessage!({ data: { id, action: 'DECODE_BEGIN', mimeType } });
         return {
-            push: (b64) => workerScope.onmessage({ data: { id, action: 'DECODE_CHUNK', payload: b64 } }),
-            finish: () => new Promise((resolve, reject) => {
+            push: (b64) => workerScope.onmessage!({ data: { id, action: 'DECODE_CHUNK', payload: b64 } }),
+            finish: () => new Promise<WorkerReply>((resolve, reject) => {
                 pending.set(id, { resolve, reject });
-                workerScope.onmessage({ data: { id, action: 'DECODE_END' } });
-            }),
-            abort: () => workerScope.onmessage({ data: { id, action: 'DECODE_ABORT' } }),
+                workerScope.onmessage!({ data: { id, action: 'DECODE_END' } });
+            }) as Promise<DecodedClipboard>,
+            abort: () => workerScope.onmessage!({ data: { id, action: 'DECODE_ABORT' } }),
         };
     },
 };
 
-const listeners = {};
-globalThis.window = {
-    isSecureContext: true,
-    addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
-};
-globalThis.document = { hidden: false, addEventListener: () => {} };
-function gesture(type = 'keydown') {
+/** A listener as the stand-in window calls it. */
+type Listener = (event: StandIn<Event>) => void;
+
+/** A clipboard item as the module builds one: the data of each type, awaited when written. */
+class FakeClipboardItem {
+    items: Record<string, Blob | Promise<Blob>>;
+    types: string[];
+    constructor(items: Record<string, Blob | Promise<Blob>>) { this.items = items; this.types = Object.keys(items); }
+}
+
+const listeners: Record<string, Listener[]> = {};
+Object.assign(globalThis, {
+    window: {
+        isSecureContext: true,
+        addEventListener: (type: string, fn: Listener) => { (listeners[type] ||= []).push(fn); },
+    } satisfies StandIn<Window>,
+    document: { hidden: false, addEventListener: () => {} } satisfies StandIn<Document>,
+    ClipboardItem: FakeClipboardItem,
+});
+/** A user gesture on the page. */
+function gesture(type = 'keydown'): void {
     for (const fn of listeners[type] || []) fn({ type });
 }
 
 const engine = { allowed: true };
-const local = { value: 'what the user had' };
-const writes = [];
-globalThis.ClipboardItem = class {
-    constructor(items) { this.items = items; this.types = Object.keys(items); }
-};
+const local: { value: string | Record<string, Blob> } = { value: 'what the user had' };
+const writes: Array<{ outcome: string }> = [];
 Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: {
@@ -86,8 +107,9 @@ Object.defineProperty(globalThis, 'navigator', {
                     entry.outcome = 'refused';
                     throw new DOMException('Document is not focused.', 'NotAllowedError');
                 }
-                const item = items[0];
-                const values = {};
+                // The module builds its items from the class installed above.
+                const item = items[0] as ClipboardItem & Pick<FakeClipboardItem, 'items'>;
+                const values: Record<string, Blob> = {};
                 try {
                     for (const type of item.types) values[type] = await item.items[type];
                 } catch (_) {
@@ -99,7 +121,7 @@ Object.defineProperty(globalThis, 'navigator', {
                 local.value = values;
             },
         },
-    },
+    } satisfies StandIn<Navigator>,
 });
 
 const {
@@ -108,36 +130,42 @@ const {
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-incoming] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-incoming] ${label}  ${String(detail)}`);
 }
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
+const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
 
-function base64(bytes) {
+/** `bytes` in base64. */
+function base64(bytes: Uint8Array): string {
     let s = '';
     for (const b of bytes) s += String.fromCharCode(b);
     return btoa(s);
 }
 
-function bytesOf(seed, length) {
+/** `length` bytes that differ by `seed`. */
+function bytesOf(seed: number, length: number): Uint8Array {
     const out = new Uint8Array(length);
     for (let i = 0; i < length; i++) out[i] = (seed * 31 + i * 7) & 0xff;
     return out;
 }
 
-async function localBytes() {
-    const blob = local.value && local.value['image/png'];
+/** The image on the local clipboard, or null where it holds none. */
+async function localBytes(): Promise<Uint8Array | null> {
+    const blob = local.value && (local.value as Record<string, Blob | undefined>)['image/png'];
     return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
 }
 
-function same(a, b) {
+/** Whether two byte runs are there and equal. */
+function same(a: Uint8Array | null, b: Uint8Array | null): boolean {
     return !!a && !!b && a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
 /** A client: the shared clipboard state, the writer, and the receive path. */
-function client({ toPng = async (blob) => blob } = {}) {
+function client({ toPng = (blob: Blob): Promise<Blob> => Promise.resolve(blob) } = {}):
+    { incoming: IncomingClipboard; clipboardSync: ClipboardSync; failures: Error[] } {
     const clipboardSync = createClipboardSync({
         sendRequest: () => {},
         digestBytes: async (buf) => {
@@ -145,7 +173,7 @@ function client({ toPng = async (blob) => blob } = {}) {
             return digestedPayload(byteLength, hash);
         },
     });
-    const failures = [];
+    const failures: Error[] = [];
     const incoming = createIncomingClipboard({
         worker,
         clipboardSync,
@@ -165,7 +193,8 @@ function client({ toPng = async (blob) => blob } = {}) {
  * Frames are separate messages, so what runs in the first frame's microtasks
  * has run before anything else can happen.
  */
-async function multipart(incoming, mime, bytes, { cacheOnly = false, between = null } = {}) {
+async function multipart(incoming: IncomingClipboard, mime: string, bytes: Uint8Array,
+    { cacheOnly = false, between = null }: { cacheOnly?: boolean; between?: (() => void) | null } = {}): Promise<void> {
     incoming.begin(mime, bytes.length, cacheOnly);
     await new Promise((resolve) => setTimeout(resolve, 0));
     const size = 3 * 1024;
@@ -246,13 +275,13 @@ async function multipart(incoming, mime, bytes, { cacheOnly = false, between = n
 // retry would land the older value over the newer one.
 {
     const writer = createDeferredClipboardWriter();
-    let refuse = null;
+    let refuse = null as ((reason: Error) => void) | null;
     // Refused the first time, slowly; written if it is ever tried again.
     const older = writer.write(() => (refuse === null
-        ? new Promise((_, reject) => { refuse = reject; })
+        ? new Promise<void>((_, reject) => { refuse = reject; })
         : Promise.resolve().then(() => { local.value = 'older'; })));
-    await writer.write(async () => { local.value = 'newer'; });
-    refuse(new DOMException('Document is not focused.', 'NotAllowedError'));
+    await writer.write(() => { local.value = 'newer'; return Promise.resolve(); });
+    refuse!(new DOMException('Document is not focused.', 'NotAllowedError'));
     await older;
     gesture('keydown');
     await tick();
@@ -277,7 +306,7 @@ async function multipart(incoming, mime, bytes, { cacheOnly = false, between = n
     writes.length = 0;
     incoming.single('text/plain', base64(new TextEncoder().encode('from the session')), false);
     await tick();
-    const blob = local.value && local.value['text/plain'];
+    const blob = local.value && (local.value as Record<string, Blob | undefined>)['text/plain'];
     const text = blob ? await blob.text() : null;
     check('session text lands, and a read of it afterwards is no local change',
           text === 'from the session'
@@ -286,7 +315,7 @@ async function multipart(incoming, mime, bytes, { cacheOnly = false, between = n
 
 // An image the browser cannot convert is reported, never retried as refused.
 {
-    const { incoming, failures } = client({ toPng: async () => { throw new Error('undecodable'); } });
+    const { incoming, failures } = client({ toPng: () => Promise.reject(new Error('undecodable')) });
     writes.length = 0;
     await multipart(incoming, 'image/bmp', bytesOf(7, 6000));
     await tick();

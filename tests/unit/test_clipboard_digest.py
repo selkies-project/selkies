@@ -4,8 +4,8 @@
 It stands in for the payload's bytes wherever a signature is taken, so the
 page never walks a clipboard of any size to decide whether it changed. That
 only holds while the worker's digest reproduces the page's exactly, over any
-chunking. The rules are JavaScript, so the checks live in
-tests/tools/clipboard_digest_audit.mjs.
+chunking. The rules are TypeScript, so the checks live in
+tests/tools/clipboard_digest_audit.ts.
 """
 import os
 import shutil
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "clipboard_digest_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "clipboard_digest_audit.ts")
 
 node = shutil.which("node")
 if not node:

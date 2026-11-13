@@ -5,8 +5,8 @@ The image upload and the focus-driven local sync both write the session
 clipboard, and choosing a file raises the very focus event that fires the
 second one -- so without precedence the upload lands and the client's own
 clipboard lands on top of it, which reads as the button doing nothing. The
-rule is JavaScript, so the checks live in
-tests/tools/clipboard_precedence_audit.mjs.
+rule is TypeScript, so the checks live in
+tests/tools/clipboard_precedence_audit.ts.
 """
 import os
 import shutil
@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "clipboard_precedence_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "clipboard_precedence_audit.ts")
 
 node = shutil.which("node")
 if not node:
