@@ -4,7 +4,7 @@ name: Smoke test the wheel
 # installed and proves they run: the executable answers with the web client
 # compiled into it, the Jupyter entry point reads the executable's
 # configuration, and a bare `selkies` serves its standalone desktop behind the
-# password it generates (scripts/ci/verify-standalone.py). Split from the build so a
+# placeholder login (scripts/ci/verify-standalone.py). Split from the build so a
 # caller can gate this alone on it.
 
 on:

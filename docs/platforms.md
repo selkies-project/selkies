@@ -18,7 +18,7 @@ what the host lacks and then Selkies, passing it every argument it does not take
 itself, so the port, the socket, the login, and every other
 [setting](settings.md) are Selkies' own, from the command line or `SELKIES_*`
 variables alike. `selkies` run with no arguments at all is this command on
-Selkies' own desktop shell, over HTTPS behind a generated password
+Selkies' own desktop shell, over HTTPS behind the placeholder login
 ([Native Install](native.md#your-own-desktop-in-a-browser)):
 
 - **Isolation**: the session is its own, sharing only the home directory with the

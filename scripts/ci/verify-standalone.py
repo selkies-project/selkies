@@ -4,16 +4,17 @@
 """Run a bare `selkies` the way a user does after `pip install selkies` and check it.
 
 The standalone desktop (crates/selkies/src/commands/standalone.rs) has to say
-where it is, serve HTTPS on localhost:8080 behind the password it generated,
-refuse a request without it, and keep its desktop shell running: on a host
-with nothing installed but the wheel, a shell that cannot find a font or a
-library exits and is restarted, which the log shows.
+where it is, serve HTTPS on localhost:8080 behind the placeholder login the
+containers document, refuse a request without it, and keep its desktop shell
+running: on a host with nothing installed but the wheel, a shell that cannot
+find a font or a library exits and is restarted, which the log shows. Where
+localhost resolves to ::1 the entry page is moved to 127.0.0.1 before the
+login, which urllib follows.
 
 Usage: verify-standalone.py <selkies-executable>
 """
 
 import base64
-import getpass
 import os
 import signal
 import ssl
@@ -26,13 +27,15 @@ import urllib.request
 from pathlib import Path
 
 URL = "https://localhost:8080/"
+USER = "ubuntu"
+PASSWORD = "mypasswd"
 
 
 def fetch(password: str = "") -> int:
     """The status of a GET of the entry page, with a login when `password` is given."""
     request = urllib.request.Request(URL)
     if password:
-        token = base64.b64encode(f"{getpass.getuser()}:{password}".encode()).decode()
+        token = base64.b64encode(f"{USER}:{password}".encode()).decode()
         request.add_header("Authorization", f"Basic {token}")
     context = ssl.create_default_context()
     context.check_hostname = False
@@ -58,13 +61,12 @@ def main() -> None:
     home = Path(tempfile.mkdtemp(prefix="selkies-standalone-"))
     log = home / "selkies.log"
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SELKIES_", "XDG_", "DISPLAY", "WAYLAND"))}
-    env.update(HOME=str(home), USER=getpass.getuser())
+    env["HOME"] = str(home)
     with open(log, "w") as out:
         session = subprocess.Popen(
             [sys.argv[1]], env=env, cwd=home, stdout=out, stderr=subprocess.STDOUT, start_new_session=True
         )
     try:
-        password_file = home / ".config/selkies/password"
         deadline = time.monotonic() + 90
         status = 0
         while time.monotonic() < deadline and session.poll() is None:
@@ -78,20 +80,17 @@ def main() -> None:
         if status != 401:
             fail(f"{URL} never asked for a login (last status {status})", log)
         text = log.read_text(errors="replace")
-        if f"your desktop is at {URL.rstrip('/')}" not in text or str(password_file) not in text:
-            fail("the log does not say where the desktop is and where its password is kept", log)
-        if password_file.stat().st_mode & 0o077:
-            fail(f"{password_file} is readable by others", log)
-        password = password_file.read_text().strip()
-        if fetch(password) != 200:
-            fail("the generated password does not sign in", log)
+        if f"your desktop is at {URL.rstrip('/')}, signing in as {USER} with the password {PASSWORD}" not in text:
+            fail("the log does not say where the desktop is and how to sign in", log)
+        if fetch(PASSWORD) != 200:
+            fail("the placeholder login does not sign in", log)
         time.sleep(10)
         text = log.read_text(errors="replace")
         if "selkies-desktop started" not in text:
             fail("the desktop shell never started", log)
         if "selkies-desktop exited" in text or "panicked" in text:
             fail("the desktop shell exited", log)
-        print(f"a bare selkies serves its desktop at {URL} behind the password in {password_file}")
+        print(f"a bare selkies serves its desktop at {URL} behind the placeholder login")
     finally:
         try:
             os.killpg(session.pid, signal.SIGTERM)
