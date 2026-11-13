@@ -12,7 +12,7 @@ resize measures that stream's ratio. With HiDPI off the desktop
 is left at 96 DPI and the UI-scaling pick divides the resolution asked for
 instead, the browser stretching the stream back by it, so the pick decides what
 a page requests as much as the display's own scaling does. The rules are
-JavaScript, so the checks live in tests/tools/stream_density_audit.mjs.
+TypeScript, so the checks live in tests/tools/stream_density_audit.ts.
 """
 import os
 import shutil
@@ -20,7 +20,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "stream_density_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "stream_density_audit.ts")
 
 node = shutil.which("node")
 if not node:

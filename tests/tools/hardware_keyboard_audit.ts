@@ -4,27 +4,35 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// When a tablet's attached keyboard hides the on-screen keyboard button. The
-// keys an on-screen keyboard lacks say a keyboard is attached; letters, which
-// an engine may report from an on-screen keyboard with a physical code, and
-// an on-screen keyboard's own keys (keyCode 229, no code) do not. A touch
-// after the idle period without such a key takes the verdict back, so a
-// keyboard detached mid-session leaves the button reachable again. On a touch
-// screen the primary pointer decides at once: fine with a convertible's
-// keyboard and touchpad attached, coarse once they are detached.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * When a tablet's attached keyboard hides the on-screen keyboard button. The
+ * keys an on-screen keyboard lacks say a keyboard is attached; letters, which
+ * an engine may report from an on-screen keyboard with a physical code, and
+ * an on-screen keyboard's own keys (keyCode 229, no code) do not. A touch
+ * after the idle period without such a key takes the verdict back, so a
+ * keyboard detached mid-session leaves the button reachable again. On a touch
+ * screen the primary pointer decides at once: fine with a convertible's
+ * keyboard and touchpad attached, coarse once they are detached.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
-const { createHardwareKeyboardWatch, isKeyboardOnlyKeystroke, HARDWARE_KEYBOARD_IDLE_MS } =
-    await import('../../web/selkies-web-core/lib/hardware-keyboard.ts');
+import {
+    createHardwareKeyboardWatch, isKeyboardOnlyKeystroke, HARDWARE_KEYBOARD_IDLE_MS,
+} from '../../web/selkies-web-core/lib/hardware-keyboard.ts';
+import type { HardwareKeyboardWatch } from '../../web/selkies-web-core/lib/hardware-keyboard.ts';
+import type { StandIn } from './stand_in.ts';
 
 let failed = 0;
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [hw-keyboard] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [hw-keyboard] ${label}  ${String(detail)}`);
 }
 
-const key = (code, extra = {}) => ({ type: 'keydown', code, key: code, keyCode: 65, isTrusted: true, ...extra });
+const key = (code: string, extra: StandIn<KeyboardEvent> = {}): KeyboardEvent =>
+    ({ type: 'keydown', code, key: code, keyCode: 65, isTrusted: true, ...extra }) as StandIn<KeyboardEvent> as KeyboardEvent;
 
 // An on-screen keyboard's keys, as Android's and iOS's report them.
 const onScreen = [
@@ -56,7 +64,7 @@ check('but not a key the page dispatched itself',
 {
     let t = 0;
     const watch = createHardwareKeyboardWatch({ now: () => t });
-    const seen = [];
+    const seen: boolean[] = [];
     watch.subscribe((v) => seen.push(v));
     for (const e of onScreen) watch.onKeyDown(e);
     check('typing on the on-screen keyboard leaves the button', watch.attached() === false && seen.length === 0);
@@ -81,7 +89,7 @@ check('but not a key the page dispatched itself',
 {
     let t = 0;
     const watch = createHardwareKeyboardWatch({ now: () => t });
-    const seen = [];
+    const seen: boolean[] = [];
     watch.subscribe((v) => seen.push(v));
     watch.onPointer(true);
     check('a primary pointer turning fine hides it at once, as a keyboard attached with its touchpad',
@@ -101,16 +109,25 @@ check('but not a key the page dispatched itself',
 }
 
 /** The page's watch, imported afresh on a window whose primary pointer starts `fine`. */
-async function pageWatchOn(fine, maxTouchPoints, tag) {
-    const listeners = new Set();
-    const pointer = { matches: fine, addEventListener: (type, fn) => type === 'change' && listeners.add(fn) };
-    globalThis.window = {
-        addEventListener() {},
-        matchMedia: (query) => (query === '(pointer: fine)' ? pointer : { matches: false, addEventListener() {} }),
-    };
-    Object.defineProperty(globalThis, 'navigator', { value: { maxTouchPoints }, configurable: true, writable: true });
-    const mod = await import(`../../web/selkies-web-core/lib/hardware-keyboard.ts?${tag}`);
-    const turn = (to) => {
+async function pageWatchOn(fine: boolean, maxTouchPoints: number, tag: string):
+    Promise<{ watch: HardwareKeyboardWatch; turn: (to: boolean) => void }> {
+    const listeners = new Set<(event: StandIn<MediaQueryListEvent>) => void>();
+    const pointer = {
+        matches: fine,
+        addEventListener: (type: string, fn: (event: StandIn<MediaQueryListEvent>) => void) => type === 'change' && listeners.add(fn),
+    } satisfies StandIn<MediaQueryList>;
+    Object.assign(globalThis, {
+        window: {
+            addEventListener() {},
+            matchMedia: (query: string) => (query === '(pointer: fine)' ? pointer : { matches: false, addEventListener() {} }),
+        } satisfies StandIn<Window>,
+    });
+    Object.defineProperty(globalThis, 'navigator', {
+        value: { maxTouchPoints } satisfies StandIn<Navigator>, configurable: true, writable: true,
+    });
+    const mod = await import(`../../web/selkies-web-core/lib/hardware-keyboard.ts?${tag}`) as
+        typeof import('../../web/selkies-web-core/lib/hardware-keyboard.ts');
+    const turn = (to: boolean): void => {
         pointer.matches = to;
         for (const fn of listeners) fn({ matches: to });
     };

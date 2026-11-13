@@ -4,9 +4,9 @@
 The page's collector asks the server for the moving figures only while a
 dashboard has its stats open, never for a viewer, and again on a fresh
 connection, and a status row warns where the session fell short of what it
-asked for and never for a choice. The rules are JavaScript, shared by both
+asked for and never for a choice. The rules are TypeScript, shared by both
 cores and the dashboard, so the checks live in
-tests/tools/stream_stats_audit.mjs.
+tests/tools/stream_stats_audit.ts.
 """
 import os
 import shutil
@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "stream_stats_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "stream_stats_audit.ts")
 
 node = shutil.which("node")
 if not node:

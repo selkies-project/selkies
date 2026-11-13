@@ -4,15 +4,21 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The density a display page streams at and the scale it publishes for its
-// neighbors. Both are pure functions of the page's own screen, its settings,
-// and the box it draws, so they are checked here rather than through two
-// browsers on two densities.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * The density a display page streams at and the scale it publishes for its
+ * neighbors. Both are pure functions of the page's own screen, its settings,
+ * and the box it draws, so they are checked here rather than through two
+ * browsers on two densities.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
+
+import type { StandIn } from './stand_in.ts';
 
 // streamDensity reads the display's own density off the window.
-globalThis.window = { devicePixelRatio: 2 };
+const page = { devicePixelRatio: 2 } satisfies StandIn<Window>;
+Object.assign(globalThis, { window: page });
 
 const { streamDensity, publishedScale, autoScalingDpi, resolutionScalingDpi,
         DPI_STOPS, capStreamSize, STREAM_SIDE_CAP } = await import(
@@ -20,9 +26,10 @@ const { streamDensity, publishedScale, autoScalingDpi, resolutionScalingDpi,
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [stream-density] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [stream-density] ${label}  ${String(detail)}`);
 }
 
 {
@@ -71,9 +78,9 @@ function check(label, ok, detail = '') {
 }
 
 {
-    window.devicePixelRatio = 1;
+    page.devicePixelRatio = 1;
     const low = streamDensity({ useCssScaling: false });
-    window.devicePixelRatio = 2;
+    page.devicePixelRatio = 2;
     check('a page on a plain screen streams at one pixel per CSS pixel', low === 1, low);
 }
 
@@ -100,9 +107,9 @@ function check(label, ok, detail = '') {
 {
     // A secondary less dense than the primary keeps its own: the primary's
     // density would ask for a buffer beyond its screen's pixels.
-    window.devicePixelRatio = 1;
+    page.devicePixelRatio = 1;
     const own = streamDensity({ useCssScaling: false, displayId: 'display2', layouts: { primary: { scale: 2 } } });
-    window.devicePixelRatio = 2;
+    page.devicePixelRatio = 2;
     check('an X11 secondary less dense than the primary keeps its own density', own === 1, own);
 }
 
@@ -148,14 +155,14 @@ function check(label, ok, detail = '') {
 {
     // The default pick is the display's own scaling as a desktop DPI, so both
     // cores derive it from the same place.
-    const at = (dpr) => { window.devicePixelRatio = dpr; return autoScalingDpi(); };
+    const at = (dpr: number): number => { page.devicePixelRatio = dpr; return autoScalingDpi(); };
     const derived = [1, 1.25, 1.5, 2].map(at);
     check('the default pick is the display scaling as a DPI',
         derived.join() === '96,120,144,192', derived.join());
     check('a density between the stops takes the nearest', at(1.75) === 168, at(1.75));
     check('and one past the last stop is clamped there',
         at(3.5) === DPI_STOPS[DPI_STOPS.length - 1], at(3.5));
-    window.devicePixelRatio = 2;
+    page.devicePixelRatio = 2;
 }
 
 {
@@ -163,8 +170,8 @@ function check(label, ok, detail = '') {
     // follows it rather than the screen showing it, off the shorter side, so
     // an ultrawide is not read as a dense screen and a turned one is the same
     // screen. The local density is left out of it entirely.
-    window.devicePixelRatio = 1;
-    const at = (w, h) => resolutionScalingDpi(w, h);
+    page.devicePixelRatio = 1;
+    const at = (w: number, h: number): number => resolutionScalingDpi(w, h);
     const standard = [[1920, 1080], [2560, 1440], [3840, 2160]].map(([w, h]) => at(w, h));
     check('a manual resolution picks the DPI its own size asks for',
         standard.join() === '96,120,192', standard.join());
@@ -175,7 +182,7 @@ function check(label, ok, detail = '') {
         at(1080, 1920) === 96, at(1080, 1920));
     check('past the last stop it is clamped there',
         at(7680, 4320) === DPI_STOPS[DPI_STOPS.length - 1], at(7680, 4320));
-    window.devicePixelRatio = 2;
+    page.devicePixelRatio = 2;
     check('a size not yet known falls back to the display scaling',
         at(0, 0) === autoScalingDpi(), at(0, 0));
     check('and a known one ignores it', at(1920, 1080) === 96, at(1920, 1080));
@@ -187,7 +194,7 @@ function check(label, ok, detail = '') {
     // sent mid-move still measure the old buffer. Reconciling on the settled buffer
     // republishes the true scale; without it the server keeps the stale 2.
     let reported = 0;
-    const needsRepublish = (measured) => reported > 0 && Math.abs(measured - reported) > 1e-6;
+    const needsRepublish = (measured: number): boolean => reported > 0 && Math.abs(measured - reported) > 1e-6;
     reported = publishedScale({ stream: [3024, 1612], css: [1512, 806], realized: [3024, 1612], density: 2 });
     check('a dense screen publishes scale 2', reported === 2, reported);
     const stale = publishedScale({ stream: [3024, 1612], css: [1512, 806], realized: [3024, 1612], density: 1 });

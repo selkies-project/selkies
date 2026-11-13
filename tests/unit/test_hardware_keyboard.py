@@ -4,7 +4,7 @@
 A tablet with a keyboard attached keeps the system's on-screen keyboard down,
 so the dashboards' button that pops it goes once a key only a keyboard has is
 pressed, and a touch after an idle spell brings it back. The rule is
-JavaScript, so the checks live in tests/tools/hardware_keyboard_audit.mjs.
+TypeScript, so the checks live in tests/tools/hardware_keyboard_audit.ts.
 """
 import os
 import shutil
@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "hardware_keyboard_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "hardware_keyboard_audit.ts")
 
 node = shutil.which("node")
 if not node:

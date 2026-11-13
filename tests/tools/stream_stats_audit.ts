@@ -4,39 +4,65 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What a dashboard is told of the session, and when. The collector asks the
-// server for the moving figures only while a dashboard has its stats open, never
-// for a viewer, and again on a fresh connection; the history it publishes starts
-// empty at each opening and grows a sample at a time, and every change is
-// announced once. A row warns where the session fell short of what it asked for,
-// never for a choice, for a server with no GPU, for a client with no hardware
-// decoder, or for the path the network gave it, and the decoder is called
-// software only on evidence, hardware where the engine has one and nothing said
-// software.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * What a dashboard is told of the session, and when. The collector asks the
+ * server for the moving figures only while a dashboard has its stats open, never
+ * for a viewer, and again on a fresh connection; the history it publishes starts
+ * empty at each opening and grows a sample at a time, and every change is
+ * announced once. A row warns where the session fell short of what it asked for,
+ * never for a choice, for a server with no GPU, for a client with no hardware
+ * decoder, or for the path the network gave it, and the decoder is called
+ * software only on evidence, hardware where the engine has one and nothing said
+ * software.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
+
+import type {
+  DecoderVerdict, StreamClient, StreamInfo, StreamSample, WebcodecsEvidence, WebrtcEvidence,
+} from '../../web/selkies-web-core/lib/stream-stats.ts';
+import type { StreamRow, StreamTile, StreamWords } from '../../web/selkies-web-core/lib/stream-stats-view.ts';
+import type { PresentMeter, VideoWatch } from '../../web/selkies-web-core/lib/present-meter.ts';
+import type { StandIn } from './stand_in.ts';
 
 let announced = 0;
-globalThis.window = { dispatchEvent: () => { announced++; } };
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+Object.assign(globalThis, { window: { dispatchEvent: () => { announced++; } } satisfies StandIn<Window> });
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
-const { StreamStats, HISTORY_MAX, FIRST_SAMPLE_MS, webcodecsDecoder, webrtcDecoder } =
-  await import('../../web/selkies-web-core/lib/stream-stats.ts');
-const { streamRows, streamTiles, streamStrip, streamMeters, streamReport, seriesOf, graphPath, GRAPH_POINTS, OVERSHOOT } =
-  await import('../../web/selkies-web-core/lib/stream-stats-view.ts');
-const { createPresentMeter, watchVideo, DELAY_SAMPLE_MS } = await import('../../web/selkies-web-core/lib/present-meter.ts');
+const statsModule = await import('../../web/selkies-web-core/lib/stream-stats.ts');
+const { StreamStats, HISTORY_MAX, FIRST_SAMPLE_MS } = statsModule;
+const viewModule = await import('../../web/selkies-web-core/lib/stream-stats-view.ts');
+const { streamTiles, streamStrip, streamMeters, seriesOf, graphPath, GRAPH_POINTS, OVERSHOOT } = viewModule;
+const presentModule = await import('../../web/selkies-web-core/lib/present-meter.ts');
+const { createPresentMeter, DELAY_SAMPLE_MS } = presentModule;
+
+// The checks name the evidence, the fields and the words each one is about and
+// leave the rest unset, as a page that has not learned them yet does.
+const webcodecsDecoder = statsModule.webcodecsDecoder as (evidence: Partial<WebcodecsEvidence>) => DecoderVerdict;
+const webrtcDecoder = statsModule.webrtcDecoder as (evidence: Partial<WebrtcEvidence>) => DecoderVerdict;
+const streamRows = viewModule.streamRows as (info: Partial<StreamInfo> | null, client: Partial<StreamClient> | null,
+  latest: StreamSample | null, words: Partial<StreamWords>) => StreamRow[];
+const streamReport = viewModule.streamReport as (info: Partial<StreamInfo> | null, client: Partial<StreamClient> | null,
+  latest: StreamSample | null) => string;
+
+/** A frame callback as the stand-in `<video>` keeps it. */
+type FrameCallback = (now: number, metadata: StandIn<VideoFrameCallbackMetadata>) => void;
+const watchVideo = presentModule.watchVideo as (video: StandIn<HTMLVideoElement>, meter: PresentMeter,
+  delayOf: (metadata: StandIn<VideoFrameCallbackMetadata>) => number) => VideoWatch;
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
   if (!ok) failed++;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  [stream-stats] ${label}  ${detail}`);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  [stream-stats] ${label}  ${String(detail)}`);
 }
 
-const sent = [];
+const sent: string[] = [];
 let viewer = false;
 let connected = true;
-const opened = [];
+const opened: boolean[] = [];
 const stats = new StreamStats({
   transport: 'websockets',
   send: (m) => { if (!connected) throw new Error('not connected'); sent.push(m); },
@@ -46,7 +72,7 @@ const stats = new StreamStats({
 
 check('nothing is asked of the server before a dashboard opens its stats', sent.length === 0);
 stats.clientSample({ fps: 60 });
-check('and nothing is sampled', window.stream_stats.history.length === 0);
+check('and nothing is sampled', window.stream_stats!.history.length === 0);
 
 stats.setOpen(true);
 check('opening asks the server for the figures', sent.join() === '_stats,1', sent.join());
@@ -57,17 +83,17 @@ check('opening twice asks once', sent.length === 1);
 stats.serverSample({ cpu_percent: 12, encoded_fps: 59, rtt_ms: 8 });
 stats.noteBytes(125000);
 stats.clientSample({ fps: 58 });
-const first = window.stream_stats.latest;
+const first = window.stream_stats!.latest!;
 check('a sample merges the server and the page', first.cpu_percent === 12 && first.fps === 58 && first.encoded_fps === 59,
   JSON.stringify(first));
-check('bandwidth is what arrived', first.mbps > 0, String(first.mbps));
+check('bandwidth is what arrived', (first.mbps as number) > 0, String(first.mbps));
 check('the round trip the latency graph plots comes straight from the server', first.rtt_ms === 8,
   String(first.rtt_ms));
 check('what arrived since the opening is counted as received', first.received_mb === 0.13, String(first.received_mb));
 stats.noteBytes(875000);
 stats.clientSample({ fps: 58 });
-check('and the received count keeps growing from the opening', window.stream_stats.latest.received_mb === 1,
-  String(window.stream_stats.latest.received_mb));
+check('and the received count keeps growing from the opening', window.stream_stats!.latest!.received_mb === 1,
+  String(window.stream_stats!.latest!.received_mb));
 await settle();
 announced = 0;
 stats.setClient({ codec: 'h264', resolution: '1920x1080' });
@@ -79,7 +105,7 @@ await settle();
 check('and a description that did not change is not announced', announced === 1, String(announced));
 check('the first sample follows the opening within a second', FIRST_SAMPLE_MS > 0 && FIRST_SAMPLE_MS < 1000);
 for (let i = 0; i < HISTORY_MAX + 5; i++) stats.clientSample({ fps: i });
-check('the history grows to its cap and no further', window.stream_stats.history.length === HISTORY_MAX);
+check('the history grows to its cap and no further', window.stream_stats!.history.length === HISTORY_MAX);
 
 stats.disconnected();
 stats.subscribe();
@@ -87,7 +113,7 @@ check('a fresh connection is asked again', sent.join() === '_stats,1,_stats,1', 
 
 stats.setOpen(false);
 check('shutting tells the server to stop', sent[sent.length - 1] === '_stats,0');
-check('and empties the history', window.stream_stats.history.length === 0 && window.stream_stats.latest === null);
+check('and empties the history', window.stream_stats!.history.length === 0 && window.stream_stats!.latest === null);
 
 viewer = true;
 const before = sent.length;
@@ -102,18 +128,18 @@ connected = true;
 stats.subscribe();
 check('a subscription that could not be sent goes out once connected', sent[sent.length - 1] === '_stats,1');
 
-const info = {
+const info: Partial<StreamInfo> = {
   backend: 'x11', capture: 'XShm', zero_copy: false, capture_reason: 'DRI3: no DRI3', encoder: 'x264',
   hardware: false, gpu_present: true, hardware_expected: true, encoder_reason: 'NVENC H264 did not open', codec: 'h264',
   fullcolor: false, striped: false, gpu: '', driver: '', encode_node: '',
 };
-stats.setInfo(info);
+stats.setInfo(info as StreamInfo);
 check('the description is published', window.stream_info === info);
 
 const words = { hardware: 'hardware', software: 'software', unknown: 'n/a', throttled: 'held back',
   hardware_available: 'engine has one', software_preferred: 'left after a failure' };
-const client = { transport: 'websockets', decoder: 'hardware', decoder_evidence: 'NV12 frames', codec: 'h264', resolution: '1920x1080', path: '' };
-const rowOf = (rows, key) => rows.find((row) => row.key === key);
+const client: Partial<StreamClient> = { transport: 'websockets', decoder: 'hardware', decoder_evidence: 'NV12 frames', codec: 'h264', resolution: '1920x1080', path: '' };
+const rowOf = (rows: StreamRow[], key: StreamRow['key']): StreamRow => rows.find((row) => row.key === key)!;
 
 let rows = streamRows(info, client, null, words);
 check('software on a session that asked for hardware warns with the reason',
@@ -207,7 +233,7 @@ rows = streamRows(null, { ...client, ...efficient }, null, words);
 check('WebSockets planar frames where the engine decodes the stream efficiently warn, with why, as WebRTC\'s do',
   efficient.decoder === 'software' && rowOf(rows, 'decoder').status === 'warn'
   && rowOf(rows, 'decoder').reason === 'engine has one');
-const same = [];
+const same: string[] = [];
 for (const format of ['I420', 'I444', 'NV12', null, undefined]) {
   for (const capable of [true, false, null]) {
     const ws = webcodecsDecoder({ forcedSoftware: false, hardwareSupported: null, format, capable });
@@ -262,8 +288,9 @@ const timed = streamTiles({ pipeline_ms: 1.9, pipeline_min_ms: 1.8, pipeline_max
 check('a host time carries its second\'s range where the server measured one, and none where it did not',
   timed[1].detail === '1.8\u20134.3' && timed[2].value === '2.1 ms' && timed[2].detail === '',
   JSON.stringify(timed.slice(1, 3)));
-const rate = (video, target) => streamTiles({ video_mbps: video, target_mbps: target, peak_mbps: 30 }, 'webrtc')
-  .find((tile) => tile.key === 'video_mbps');
+const rate = (video: number, target: number | undefined): StreamTile => streamTiles(
+  { video_mbps: video, target_mbps: target, peak_mbps: 30 } as StreamSample, 'webrtc')
+  .find((tile) => tile.key === 'video_mbps')!;
 check('the video rate reads against its CBR target, and a burst\'s peak beside it does not warn',
   rate(8.4, 8).value === '8.4 / 8 Mbps' && !rate(8.4, 8).warn && !rate(8.8, 8).warn, JSON.stringify(rate(8.4, 8)));
 check('past the policy\'s 10% it warns', OVERSHOOT === 1.1 && rate(8.9, 8).warn);
@@ -276,7 +303,7 @@ check('the strip over the stream carries the frame rate, the video rate against 
 check('with the round trip over WebSockets only, a WebRTC page measuring its own link',
   streamStrip(null, 'webrtc').map((f) => f.key).join() === 'fps,video_mbps,send_ms');
 check('both transports show how long a frame took to the screen and how many never got there',
-  ['websockets', 'webrtc'].every((transport) => ['present_ms', 'frames_not_shown']
+  (['websockets', 'webrtc'] as const).every((transport) => ['present_ms', 'frames_not_shown']
     .every((key) => streamTiles(null, transport).some((tile) => tile.key === key))));
 check('WebRTC adds what it measures of the link', streamTiles(null, 'webrtc').some((tile) => tile.key === 'packet_loss_percent'));
 check('a memory meter reads as its amounts and carries no bar, the share going to the hover',
@@ -297,10 +324,10 @@ check('a light load under ten percent shows its tenths, so it does not read as i
 check('and a heavier one rounds to the percent', streamMeters({ ...latest, cpu_percent: 12.6 })[0].text === '13%');
 
 // Times through a still spell: frames came and went, as on a desktop between movements.
-const second = (t, extra) => ({ t, server: true, encoded_fps: 0, fps: 0, ...extra });
+const second = (t: number, extra?: StreamSample): StreamSample => ({ t, server: true, encoded_fps: 0, fps: 0, ...extra });
 const moved = [second(1000, { encoded_fps: 60, fps: 60, encode_ms: 1.6, pipeline_ms: 1.8, pipeline_min_ms: 1.7,
   pipeline_max_ms: 2.4, decode_ms: 3.1 })];
-const tileOf = (tiles, key) => tiles.find((tile) => tile.key === key);
+const tileOf = (tiles: StreamTile[], key: string): StreamTile => tiles.find((tile) => tile.key === key)!;
 const held = streamTiles(second(4000), 'websockets', [...moved, second(4000)]);
 check('a time a second without frames did not measure reads the last one, within the hold',
   tileOf(held, 'encode_ms').value === '1.6 ms' && tileOf(held, 'pipeline_ms').detail === '1.7\u20132.4'
@@ -326,28 +353,28 @@ const opening = new StreamStats({ transport: 'webrtc', send: () => {}, isViewer:
 opening.setOpen(true);
 opening.clientSample({ fps: 30 });
 check('a sample taken before the server said anything carries none of its figures',
-  !window.stream_stats.latest.server && window.stream_stats.latest.cpu_percent === undefined);
+  !window.stream_stats!.latest!.server && window.stream_stats!.latest!.cpu_percent === undefined);
 opening.serverSample({ cpu_percent: 40, encoded_fps: 30 });
 check('the server\'s first figures after an opening reach the sample on screen at once',
-  window.stream_stats.latest.cpu_percent === 40 && window.stream_stats.history.length === 1);
+  window.stream_stats!.latest!.cpu_percent === 40 && window.stream_stats!.history.length === 1);
 opening.serverSample({ cpu_percent: 50 });
 check('and later ones wait for the next sample, which is the one read a dashboard pays for',
-  window.stream_stats.latest.cpu_percent === 40);
+  window.stream_stats!.latest!.cpu_percent === 40);
 opening.clientSample({ fps: 30 });
-check('which carries them', window.stream_stats.latest.cpu_percent === 50 && window.stream_stats.latest.server);
+check('which carries them', window.stream_stats!.latest!.cpu_percent === 50 && window.stream_stats!.latest!.server === true);
 
 // What reaches the screen: a canvas draw lands at its thread's next animation
 // frame, and every draw ahead of the last one before that frame was replaced
 // unseen; a <video> reports its own frames and drops.
-const frames = [];
+const frames: Array<() => void> = [];
 const meter = createPresentMeter((land) => frames.push(land));
-const epoch = () => performance.timeOrigin + performance.now();
+const epoch = (): number => performance.timeOrigin + performance.now();
 const arrived = epoch() - 5;
 meter.drawn(arrived - 10);
 meter.drawn(arrived);
 check('draws wait for the next animation frame, asked for once', frames.length === 1
   && meter.take().presented === 0, String(frames.length));
-frames.shift()();
+frames.shift()!();
 let figures = meter.take();
 check('which hands on the newest draw and counts the one before it as replaced', figures.presented === 1
   && figures.superseded === 1 && figures.delays === 1 && figures.delaySum >= 5 && figures.delaySum < 1000,
@@ -359,11 +386,11 @@ meter.land();
 figures = meter.take();
 check('a draw landed by its own frame counts at once, and one of unknown arrival carries no delay',
   figures.presented === 1 && figures.delays === 0, JSON.stringify(figures));
-frames.shift()();
+frames.shift()!();
 check('and the frame asked for before it then finds nothing to count', meter.take().presented === 0);
 meter.drawn(arrived);
 meter.reset();
-frames.shift()();
+frames.shift()!();
 check('a reset forgets draws still waiting for their frame', meter.take().presented === 0);
 const eager = createPresentMeter(null);
 eager.drawn(arrived);
@@ -373,18 +400,18 @@ figures = eager.take();
 check('a thread without animation frames counts each draw as it is made', figures.presented === 2
   && figures.superseded === 0 && figures.refused === 1, JSON.stringify(figures));
 
-const callbacks = [];
+const callbacks: FrameCallback[] = [];
 let cancelled = 0;
 let quality = { totalVideoFrames: 10, droppedVideoFrames: 3 };
 const video = {
-  requestVideoFrameCallback: (cb) => { callbacks.push(cb); return callbacks.length; },
+  requestVideoFrameCallback: (cb: FrameCallback) => { callbacks.push(cb); return callbacks.length; },
   cancelVideoFrameCallback: () => { cancelled++; },
   getVideoPlaybackQuality: () => quality,
 };
 const followed = createPresentMeter(null);
-const watch = watchVideo(video, followed, (frame) => frame.presentationTime - frame.receiveTime);
-callbacks.shift()(0, { presentedFrames: 10, presentationTime: 100, receiveTime: 90 });
-callbacks.shift()(0, { presentedFrames: 13, presentationTime: 150, receiveTime: 146 });
+const watch = watchVideo(video, followed, (frame) => frame.presentationTime! - frame.receiveTime!);
+callbacks.shift()!(0, { presentedFrames: 10, presentationTime: 100, receiveTime: 90 });
+callbacks.shift()!(0, { presentedFrames: 13, presentationTime: 150, receiveTime: 146 });
 figures = followed.take();
 check('a <video> reports each frame\'s delay as it hands it on', figures.delays === 2 && figures.delaySum === 14
   && figures.presented === 0, JSON.stringify(figures));
@@ -399,31 +426,31 @@ check('a new source restarting the counters is read as a restart', read.shown ==
 const liveOnly = { ...video, getVideoPlaybackQuality: () => ({ totalVideoFrames: 0, droppedVideoFrames: 0 }) };
 const firefoxWatch = watchVideo(liveOnly, followed, () => NaN);
 callbacks.shift();
-callbacks.shift()(0, { presentedFrames: 40, presentationTime: 0 });
-callbacks.shift()(0, { presentedFrames: 42, presentationTime: 0 });
+callbacks.shift()!(0, { presentedFrames: 40, presentationTime: 0 });
+callbacks.shift()!(0, { presentedFrames: 42, presentationTime: 0 });
 check('an engine that keeps no playback quality for a live stream counts the frames the callback reports',
   firefoxWatch.read().shown === 3);
 watch.stop();
 check('stopping cancels the callback it had asked for', cancelled === 1 && watch.reported());
 check('an engine without the callback never reports a frame',
   !watchVideo({}, followed, () => NaN).reported());
-const sampled = [];
+const sampled: FrameCallback[] = [];
 let counts = { totalVideoFrames: 100, droppedVideoFrames: 0 };
 const counting = {
-  requestVideoFrameCallback: (cb) => { sampled.push(cb); return sampled.length; },
+  requestVideoFrameCallback: (cb: FrameCallback) => { sampled.push(cb); return sampled.length; },
   cancelVideoFrameCallback: () => {},
   getVideoPlaybackQuality: () => counts,
 };
 const spaced = createPresentMeter(null);
-const countingWatch = watchVideo(counting, spaced, (frame) => frame.presentationTime - frame.receiveTime);
-const spacing = () => new Promise((resolve) => setTimeout(resolve, DELAY_SAMPLE_MS + 20));
+const countingWatch = watchVideo(counting, spaced, (frame) => frame.presentationTime! - frame.receiveTime!);
+const spacing = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, DELAY_SAMPLE_MS + 20));
 counts = { totalVideoFrames: 101, droppedVideoFrames: 0 };
-sampled.shift()(0, { presentedFrames: 101, presentationTime: 100, receiveTime: 95 });
+sampled.shift()!(0, { presentedFrames: 101, presentationTime: 100, receiveTime: 95 });
 check('once the playback quality counts the frames, the next callback waits out the sample spacing',
   sampled.length === 0, String(sampled.length));
 await spacing();
 check('and is asked for after it', sampled.length === 1, String(sampled.length));
-sampled.shift()(0, { presentedFrames: 107, presentationTime: 200, receiveTime: 193 });
+sampled.shift()!(0, { presentedFrames: 107, presentationTime: 200, receiveTime: 193 });
 figures = spaced.take();
 check('the sampled frames carry their delays', figures.delays === 2 && figures.delaySum === 12,
   JSON.stringify(figures));
@@ -438,17 +465,17 @@ check('stopping drops a sample still waiting out the spacing', sampled.length ==
 const verdicts = new StreamStats({ transport: 'websockets', send: () => {}, isViewer: () => false });
 await settle();
 announced = 0;
-check('a connection starts out good', window.stream_client.connection === 'ok', window.stream_client.connection);
+check('a connection starts out good', window.stream_client!.connection === 'ok', window.stream_client!.connection);
 verdicts.setConnection(true);
 await settle();
 check("the server's poor verdict is kept and announced with the stats shut",
-  window.stream_client.connection === 'poor' && announced === 1 && !window.stream_stats.open, String(announced));
+  window.stream_client!.connection === 'poor' && announced === 1 && !window.stream_stats!.open, String(announced));
 verdicts.setConnection(true);
 await settle();
 check('and a verdict that did not change is not announced again', announced === 1, String(announced));
 verdicts.disconnected();
 await settle();
-check('a lost connection takes its verdict with it', window.stream_client.connection === 'ok' && announced === 2,
-  `${window.stream_client.connection} ${announced}`);
+check('a lost connection takes its verdict with it', window.stream_client!.connection === 'ok' && announced === 2,
+  `${window.stream_client!.connection} ${announced}`);
 
 process.exit(failed ? 1 : 0);

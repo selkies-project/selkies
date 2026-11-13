@@ -4,8 +4,8 @@
 A stream matching its display's refresh gives every frame a refresh of its own,
 so the page measures the refresh from its animation frames and asks the server
 for that rate where the user chose it. The estimator, its snap to the whole and
-NTSC rates, and the rate asked for are JavaScript, so the checks run on
-synthetic animation frames in tests/tools/display_refresh_audit.mjs: timer
+NTSC rates, and the rate asked for are TypeScript, so the checks run on
+synthetic animation frames in tests/tools/display_refresh_audit.ts: timer
 resolutions from 20 us to 1 ms, a software vsync's jitter, frames a busy page
 missed, and a page hidden or throttled in the background.
 """
@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "display_refresh_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "display_refresh_audit.ts")
 
 node = shutil.which("node")
 if not node:

@@ -4,25 +4,34 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// Where the page URL's session token comes from and where it goes. A token in
-// the fragment reaches the server only as a header, a subprotocol, or the
-// cookie, never in a URL; a query token keeps its URL carriers. The fragment's
-// display or sharing keyword reads the same with or without a token beside it,
-// and a sharing link never carries the sharer's token.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * Where the page URL's session token comes from and where it goes. A token in
+ * the fragment reaches the server only as a header, a subprotocol, or the
+ * cookie, never in a URL; a query token keeps its URL carriers. The fragment's
+ * display or sharing keyword reads the same with or without a token beside it,
+ * and a sharing link never carries the sharer's token.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
+
+import type { StandIn } from './stand_in.ts';
 
 let failed = 0;
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [session-token] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [session-token] ${label}  ${String(detail)}`);
 }
 
-let cookies = [];
-function at(url) {
-    globalThis.window = { location: new URL(url) };
+let cookies: string[] = [];
+/** Puts the page at `url`, with no cookie written yet. */
+function at(url: string): void {
     cookies = [];
-    globalThis.document = { set cookie(value) { cookies.push(value); } };
+    Object.assign(globalThis, {
+        window: { location: new URL(url) } satisfies StandIn<Window>,
+        document: { set cookie(value: string) { cookies.push(value); } } satisfies StandIn<Document>,
+    });
 }
 at('http://host.test/app/');
 

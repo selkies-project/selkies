@@ -4,49 +4,81 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// How the client reads gamepads. The Gamepad API has no input event, so pads
-// are polled, and every millisecond between polls is latency every press pays:
-// the poller runs at the 4 ms Chromium samples pads at, and the on-screen
-// touch gamepad, which knows when it changes, is read the moment it says so. A
-// stick is one point, so its rest noise is cut by its distance from center:
-// cutting each axis on its own pins the minor axis of a push near a cardinal
-// direction to zero and then jumps it. Rumble the server relays plays on every
-// pad that has a motor to play it with, unless the user turned it off, and
-// stops when the manager goes. A client drives one server slot, so of several
-// local pads the one taken up drives it, and the others' resting or noisy
-// controls never reach it.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * How the client reads gamepads. The Gamepad API has no input event, so pads
+ * are polled, and every millisecond between polls is latency every press pays:
+ * the poller runs at the 4 ms Chromium samples pads at, and the on-screen
+ * touch gamepad, which knows when it changes, is read the moment it says so. A
+ * stick is one point, so its rest noise is cut by its distance from center:
+ * cutting each axis on its own pins the minor axis of a push near a cardinal
+ * direction to zero and then jumps it. Rumble the server relays plays on every
+ * pad that has a motor to play it with, unless the user turned it off, and
+ * stops when the manager goes. A client drives one server slot, so of several
+ * local pads the one taken up drives it, and the others' resting or noisy
+ * controls never reach it.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
+
+import type { RumbleActuator } from '../../web/selkies-web-core/lib/gamepad.ts';
+import type { StandIn } from './stand_in.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [gamepad-poll] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [gamepad-poll] ${label}  ${String(detail)}`);
 }
 
-const listeners = {};
-globalThis.window = {
-    addEventListener: (type, fn) => { (listeners[type] || (listeners[type] = [])).push(fn); },
-    removeEventListener: (type, fn) => {
-        listeners[type] = (listeners[type] || []).filter((f) => f !== fn);
-    },
-};
-const intervals = [];
-globalThis.setInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
-globalThis.clearInterval = () => {};
+/** A listener as the stand-in window calls it. */
+type Listener = (event: StandIn<Event>) => void;
 
-const pad = (mapping, axes, buttons = 17) => ({
+/** A local pad: the members of a `Gamepad` the manager reads, which a check sets. */
+interface FakePad {
+    index: number;
+    id: string;
+    mapping: GamepadMappingType;
+    connected: boolean;
+    axes: number[];
+    buttons: Array<{ pressed: boolean; touched: boolean; value: number }>;
+    /** Chromium's actuator. */
+    vibrationActuator?: Required<RumbleActuator>;
+    /** Gecko's actuators. */
+    hapticActuators?: Array<{ pulse: (value: number, ms: number) => Promise<boolean> }>;
+}
+
+/** What a manager reported, by kind: a button, an axis, or the pad that drives a slot. */
+type Report = Array<string | number | boolean | null>;
+
+const listeners: Record<string, Listener[]> = {};
+Object.assign(globalThis, {
+    window: {
+        addEventListener: (type: string, fn: Listener) => { (listeners[type] || (listeners[type] = [])).push(fn); },
+        removeEventListener: (type: string, fn: Listener) => {
+            listeners[type] = (listeners[type] || []).filter((f) => f !== fn);
+        },
+    } satisfies StandIn<Window>,
+});
+const intervals: Array<{ fn: () => void; ms: number }> = [];
+Object.assign(globalThis, {
+    setInterval: (fn: () => void, ms: number) => { intervals.push({ fn, ms }); return intervals.length; },
+    clearInterval: () => {},
+});
+
+const pad = (mapping: GamepadMappingType, axes: number[], buttons = 17): FakePad => ({
     index: 0, id: 'Audit Pad (STANDARD GAMEPAD Vendor: 045e Product: 028e)', mapping, connected: true,
     axes, buttons: Array.from({ length: buttons }, () => ({ pressed: false, touched: false, value: 0 })),
 });
-let pads = [null, null, null, null];
-navigator.getGamepads = () => pads;
+let pads: Array<FakePad | null> = [null, null, null, null];
+navigator.getGamepads = () => pads as Array<StandIn<Gamepad> | null> as Array<Gamepad | null>;
 
 const { GamepadManager } = await import('../../web/selkies-web-core/lib/gamepad.ts');
 
-function makeManager() {
-    const sent = [];
+/** A manager over the stand-in pads, with what it reports. */
+function makeManager(): { manager: InstanceType<typeof GamepadManager>; sent: Report[] } {
+    const sent: Report[] = [];
     const manager = new GamepadManager(null,
         (i, b, v) => sent.push(['b', b, v]),
         (i, a, v) => sent.push(['a', a, v]),
@@ -69,7 +101,7 @@ function makeManager() {
     const { manager, sent } = makeManager();
     manager._poll();
     sent.length = 0;
-    pads[0].buttons[0] = { pressed: true, touched: true, value: 1 };
+    pads[0]!.buttons[0] = { pressed: true, touched: true, value: 1 };
     for (const fn of listeners.touchgamepadinput || []) fn({ type: 'touchgamepadinput' });
     check('a touch gamepad change is sent as it is announced, before any tick',
           sent.some(([k, b, v]) => k === 'b' && b === 0 && v === 1), JSON.stringify(sent));
@@ -85,10 +117,10 @@ function makeManager() {
     const { manager, sent } = makeManager();
     manager._poll();
     const seq = [[0.04, 0.9], [0.049, 0.95], [0.06, 0.95]];
-    const xs = [];
+    const xs: Report = [];
     for (const [x, y] of seq) {
         sent.length = 0;
-        pads[0].axes = [x, y, 0, 0];
+        pads[0]!.axes = [x, y, 0, 0];
         manager._poll();
         const ax = sent.find(([k, a]) => k === 'a' && a === 0);
         xs.push(ax ? ax[2] : 'unchanged');
@@ -96,7 +128,7 @@ function makeManager() {
     check('a push near a cardinal direction keeps its minor axis', xs[0] === 0.04 && xs[1] === 0.049 && xs[2] === 0.06,
           JSON.stringify(xs));
     sent.length = 0;
-    pads[0].axes = [0.03, 0.03, 0, 0];
+    pads[0]!.axes = [0.03, 0.03, 0, 0];
     manager._poll();
     const rest = sent.filter(([k]) => k === 'a');
     check('a stick within the deadzone of center reads as centered',
@@ -109,7 +141,7 @@ function makeManager() {
     const { manager, sent } = makeManager();
     manager._poll();
     sent.length = 0;
-    pads[0].axes = [0.04, 0.9, 0, 0, 0, 0];
+    pads[0]!.axes = [0.04, 0.9, 0, 0, 0, 0];
     manager._poll();
     const ax = sent.find(([k, a]) => k === 'a' && a === 0);
     check('an unmapped pad keeps the per-axis cut', ax === undefined, JSON.stringify(sent));
@@ -117,15 +149,15 @@ function makeManager() {
 
 // --- rumble plays on every pad that can -------------------------------------
 {
-    const calls = [];
-    const actuator = (name) => ({
+    const calls: Report[] = [];
+    const actuator = (name: string): Required<RumbleActuator> => ({
         playEffect: (type, p) => { calls.push([name, 'play', type, p.strongMagnitude, p.weakMagnitude, p.duration]); return Promise.resolve('complete'); },
         reset: () => { calls.push([name, 'reset']); return Promise.resolve('complete'); },
     });
     const chromePad = pad('standard', [0, 0, 0, 0]);
     chromePad.vibrationActuator = actuator('chrome');
     const geckoPad = pad('standard', [0, 0, 0, 0]);
-    geckoPad.hapticActuators = [{ pulse: (v, ms) => { calls.push(['gecko', 'pulse', v, ms]); return Promise.resolve(true); } }];
+    geckoPad.hapticActuators = [{ pulse: (v: number, ms: number) => { calls.push(['gecko', 'pulse', v, ms]); return Promise.resolve(true); } }];
     const plainPad = pad('standard', [0, 0, 0, 0]);
     pads = [chromePad, geckoPad, plainPad, null];
     const { manager } = makeManager();
@@ -159,7 +191,7 @@ function makeManager() {
 
 // --- of several local pads, the one taken up drives the slot --------------
 {
-    const press = (p, b, v) => { p.buttons[b] = { pressed: v > 0, touched: v > 0, value: v }; };
+    const press = (p: FakePad, b: number, v: number): void => { p.buttons[b] = { pressed: v > 0, touched: v > 0, value: v }; };
     // A flight stick the browser cannot map: its pots jitter past the stick
     // deadzone, its throttle is parked at an end and its hat rests at 1.2857.
     const stick = pad('', [0.07, -0.06, 0, 0, 0, 0, -1, 0, 0, 1.2857], 12);
@@ -231,15 +263,15 @@ function makeManager() {
 
 // --- a token holding several slots drives one with each pad -------------------
 {
-    const press = (p, b, v) => { p.buttons[b] = { pressed: v > 0, touched: v > 0, value: v }; };
-    const named = (name, index) => {
+    const press = (p: FakePad, b: number, v: number): void => { p.buttons[b] = { pressed: v > 0, touched: v > 0, value: v }; };
+    const named = (name: string, index: number): FakePad => {
         const p = pad('standard', [0, 0, 0, 0]);
         p.id = `${name} (STANDARD GAMEPAD Vendor: 045e Product: 0b13)`;
         p.index = index;
         return p;
     };
     const [a, b, c] = [named('Pad A', 0), named('Pad B', 1), named('Pad C', 2)];
-    const sent = [];
+    const sent: Report[] = [];
     const manager = new GamepadManager(null,
         (i, btn, v) => sent.push(['b', i, btn, v]),
         (i, ax, v) => sent.push(['a', i, ax, v]),
@@ -282,8 +314,8 @@ function makeManager() {
           JSON.stringify(sent));
     manager.destroy();
 
-    const calls = [];
-    const shaker = (p, name) => {
+    const calls: Report[] = [];
+    const shaker = (p: FakePad, name: string): FakePad => {
         p.vibrationActuator = {
             playEffect: (type, e) => { calls.push([name, 'play', e.strongMagnitude]); return Promise.resolve('complete'); },
             reset: () => { calls.push([name, 'reset']); return Promise.resolve('complete'); },

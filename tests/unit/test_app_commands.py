@@ -5,7 +5,7 @@ Installs and removes are applied optimistically, so between the click and the
 server's answer the panel has to say the action is running, and the answer has
 to settle it either way: a clean exit clears the running state, a failure also
 rolls the optimistic update back. The checks live in
-tests/tools/app_commands_audit.mjs, because the path under test is JavaScript.
+tests/tools/app_commands_audit.ts, because the path under test is TypeScript.
 """
 import os
 import shutil
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "app_commands_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "app_commands_audit.ts")
 
 node = shutil.which("node")
 if not node:

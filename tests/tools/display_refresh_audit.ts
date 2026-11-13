@@ -4,28 +4,33 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// The display refresh a page measures from its animation frames, and the frame
-// rate it asks the server for from it. Animation frames are synthesized the
-// way engines hand them out: on a display's refreshes, stamped at a timer's
-// resolution (0.1 ms in Chromium, 20 us in Firefox, 1 ms where an engine
-// coarsens further), with a software vsync's jitter, frames a busy page
-// missed, and the pauses and 1 Hz throttling of a page in the background.
-//
-// Prints one PASS/FAIL line per check and exits non-zero if any failed.
+/**
+ * The display refresh a page measures from its animation frames, and the frame
+ * rate it asks the server for from it. Animation frames are synthesized the
+ * way engines hand them out: on a display's refreshes, stamped at a timer's
+ * resolution (0.1 ms in Chromium, 20 us in Firefox, 1 ms where an engine
+ * coarsens further), with a software vsync's jitter, frames a busy page
+ * missed, and the pauses and 1 Hz throttling of a page in the background.
+ *
+ * Prints one PASS/FAIL line per check and exits non-zero if any failed.
+ * @module
+ */
 
-const {
+import {
     FRAMERATE_DISPLAY, estimateRefresh, snapRefresh, matchDisplay, followsDisplay, requestedFramerate,
-} = await import('../../web/selkies-web-core/lib/display-refresh.ts');
+} from '../../web/selkies-web-core/lib/display-refresh.ts';
+import type { FramerateSpan } from '../../web/selkies-web-core/lib/display-refresh.ts';
 
 let failed = 0;
 
-function check(label, ok, detail = '') {
+/** Prints one check's line and counts a failure. */
+function check(label: string, ok: boolean, detail: unknown = ''): void {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [display-refresh] ${label}  ${detail}`);
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [display-refresh] ${label}  ${String(detail)}`);
 }
 
 /** A seeded generator, so a failure reproduces. */
-function lcg(seed) {
+function lcg(seed: number): () => number {
     let s = seed >>> 0;
     return () => {
         s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
@@ -33,22 +38,35 @@ function lcg(seed) {
     };
 }
 
+/** How an engine hands out the animation frames of a page. */
+interface FrameOptions {
+    /** The timer's resolution in ms. */
+    quantum?: number;
+    /** The vsync's standard deviation in ms. */
+    jitter?: number;
+    /** The share of refreshes the page was too busy for. */
+    missed?: number;
+    /** `[start, end]` seconds without frames. */
+    pauses?: number[][];
+    /** `[start, end]` seconds at one frame a second. */
+    throttled?: number[][];
+    /** The generator's seed. */
+    seed?: number;
+}
+
 /**
  * Animation-frame timestamps of `seconds` on a display at `hz`.
- * @param {number} hz
- * @param {number} seconds
- * @param {{quantum?: number, jitter?: number, missed?: number, pauses?: number[][], throttled?: number[][], seed?: number}} o
- *     `quantum` the timer's resolution in ms, `jitter` the vsync's standard
- *     deviation in ms, `missed` the share of refreshes the page was too busy
- *     for, `pauses` [start, end] seconds without frames, `throttled` [start,
- *     end] seconds at one frame a second.
+ * @param hz
+ * @param seconds
+ * @param o How the engine hands the frames out.
+ * @returns The timestamps, in ms.
  */
-function frames(hz, seconds, o = {}) {
+function frames(hz: number, seconds: number, o: FrameOptions = {}): number[] {
     const rand = lcg(o.seed ?? 7);
-    const gauss = () => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
+    const gauss = (): number => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
     const quantum = o.quantum ?? 0.1;
     const period = 1000 / hz;
-    const out = [];
+    const out: number[] = [];
     let lastThrottled = -Infinity;
     for (let n = 0; n * period < seconds * 1000; n++) {
         const at = 1234.5 + n * period + (o.jitter ? o.jitter * gauss() : 0);
@@ -65,8 +83,8 @@ function frames(hz, seconds, o = {}) {
     return out;
 }
 
-const NTSC = (n) => n * 1000 / 1001;
-const measured = (hz, o) => {
+const NTSC = (n: number): number => n * 1000 / 1001;
+const measured = (hz: number, o?: FrameOptions): number | null => {
     const e = estimateRefresh(frames(hz, 2, o));
     return e === null ? null : snapRefresh(e);
 };
@@ -81,17 +99,18 @@ const measured = (hz, o) => {
         check(`a ${n}000/1001 Hz display reads as that fraction`, got === NTSC(n), got);
     }
     const raw = estimateRefresh(frames(NTSC(60), 2));
-    check('the fit resolves the refresh past the timer resolution', Math.abs(raw - NTSC(60)) < 0.002, raw);
+    check('the fit resolves the refresh past the timer resolution', Math.abs(raw! - NTSC(60)) < 0.002, raw);
 }
 
 {
-    for (const [label, o] of [
+    const engines: Array<[label: string, o: FrameOptions]> = [
         ['a 1 ms timer', { quantum: 1 }],
         ['a 20 us timer and a 0.5 ms software vsync jitter', { quantum: 0.02, jitter: 0.5 }],
         ['a page too busy for a third of its frames', { missed: 1 / 3 }],
         ['a page too busy for three frames in four', { missed: 0.75 }],
         ['a 1 ms timer, jitter, and missed frames at once', { quantum: 1, jitter: 0.3, missed: 0.3, seed: 3 }],
-    ]) {
+    ];
+    for (const [label, o] of engines) {
         for (const hz of [60, NTSC(60), 144, NTSC(120)]) {
             const got = measured(hz, o);
             check(`${label}: ${hz.toFixed(3)} Hz`, got === hz, got);
@@ -103,14 +122,14 @@ const measured = (hz, o) => {
     const rough = frames(60, 6, { quantum: 0.02, jitter: 1.5 });
     check('a 1.5 ms jitter leaves two seconds short of the precision a rate stands at',
         estimateRefresh(rough.filter((t) => t - rough[0] < 2000)) === null);
-    check('and six seconds read a 60 Hz display as 60', snapRefresh(estimateRefresh(rough)) === 60,
+    check('and six seconds read a 60 Hz display as 60', snapRefresh(estimateRefresh(rough)!) === 60,
         estimateRefresh(rough));
     const hidden = frames(NTSC(60), 6, { pauses: [[1, 4]] });
     check('frames either side of a hidden stretch still measure',
-        snapRefresh(estimateRefresh(hidden)) === NTSC(60), estimateRefresh(hidden));
+        snapRefresh(estimateRefresh(hidden)!) === NTSC(60), estimateRefresh(hidden));
     const throttled = frames(144, 6, { throttled: [[0.8, 4.5]] });
     check('frames either side of a throttled stretch still measure',
-        snapRefresh(estimateRefresh(throttled)) === 144, estimateRefresh(throttled));
+        snapRefresh(estimateRefresh(throttled)!) === 144, estimateRefresh(throttled));
     check('a page throttled throughout measures nothing',
         estimateRefresh(frames(60, 30, { throttled: [[0, 30]] })) === null);
     check('too few frames measure nothing', estimateRefresh(frames(60, 0.3)) === null);
@@ -139,7 +158,14 @@ const measured = (hz, o) => {
 }
 
 {
-    const span = { min: 8, max: 240, default: 60, overridden: false };
+    /** The server's framerate setting as it arrives: the span, and what the module does not read. */
+    interface FramerateSetting extends FramerateSpan {
+        default: number;
+        overridden: boolean;
+    }
+    const span: FramerateSetting = { min: 8, max: 240, default: 60, overridden: false };
+    const operator: FramerateSetting = { ...span, overridden: true };
+    const locked: FramerateSetting = { min: 60, max: 60, default: 60, overridden: true };
     check('a stored rate is asked for', requestedFramerate('90', NTSC(60), span) === 90);
     check('a stored fraction is asked for as it is',
         requestedFramerate(String(NTSC(60)), 144, span) === NTSC(60));
@@ -152,14 +178,14 @@ const measured = (hz, o) => {
         requestedFramerate(FRAMERATE_DISPLAY, null, span) === null && requestedFramerate(null, null, span) === null);
     check('nothing is asked before the server says its span', requestedFramerate(null, 60, null) === null);
     check("an operator's rate stands where the user chose none",
-        requestedFramerate(null, NTSC(60), { ...span, overridden: true }) === null);
+        requestedFramerate(null, NTSC(60), operator) === null);
     check("the display, when chosen, overrides the operator's rate",
-        requestedFramerate(FRAMERATE_DISPLAY, 144, { ...span, overridden: true }) === 144);
-    check('a locked rate asks for nothing', requestedFramerate(FRAMERATE_DISPLAY, 144, { min: 60, max: 60, default: 60, overridden: true }) === null);
+        requestedFramerate(FRAMERATE_DISPLAY, 144, operator) === 144);
+    check('a locked rate asks for nothing', requestedFramerate(FRAMERATE_DISPLAY, 144, locked) === null);
     check('the page follows its display only where it is chosen and the server allows it',
         followsDisplay(FRAMERATE_DISPLAY, span) && followsDisplay(FRAMERATE_DISPLAY, null)
             && !followsDisplay(null, span) && !followsDisplay('60', span) && !followsDisplay(null, null)
-            && !followsDisplay(FRAMERATE_DISPLAY, { min: 60, max: 60, default: 60, overridden: true }));
+            && !followsDisplay(FRAMERATE_DISPLAY, locked));
 }
 
 console.log(`\n[display-refresh] ${failed ? 'FAILED' : 'OK'}`);

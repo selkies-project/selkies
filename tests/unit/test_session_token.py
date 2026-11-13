@@ -4,8 +4,8 @@
 A token in the fragment reaches the server only as a header, a subprotocol, or
 the cookie; a query token keeps its URL carriers; the display and sharing
 keyword reads the same beside either; a sharing link drops both. The checks live
-in tests/tools/session_token_audit.mjs, because the path under test is
-JavaScript.
+in tests/tools/session_token_audit.ts, because the path under test is
+TypeScript.
 """
 import os
 import shutil
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDIT = os.path.join(TESTS, "tools", "session_token_audit.mjs")
+AUDIT = os.path.join(TESTS, "tools", "session_token_audit.ts")
 
 node = shutil.which("node")
 if not node:

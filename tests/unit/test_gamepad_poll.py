@@ -7,8 +7,8 @@ knows when it changes, says so and is read at once. A stick's rest noise is cut
 by its distance from center, not axis by axis. A page holding several slots (a
 token's list) drives one with each pad. The checks drive the client's own
 poller over a stubbed `navigator.getGamepads`, in
-tests/tools/gamepad_poll_audit.mjs and gamepad_slots_audit.mjs, because the
-path under test is JavaScript.
+tests/tools/gamepad_poll_audit.ts and gamepad_slots_audit.ts, because the
+path under test is TypeScript.
 """
 import os
 import shutil
@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AUDITS = [os.path.join(TESTS, "tools", name) for name in ("gamepad_poll_audit.mjs", "gamepad_slots_audit.mjs")]
+AUDITS = [os.path.join(TESTS, "tools", name) for name in ("gamepad_poll_audit.ts", "gamepad_slots_audit.ts")]
 
 node = shutil.which("node")
 if not node:
