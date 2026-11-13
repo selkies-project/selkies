@@ -81,6 +81,9 @@ fn main() -> ExitCode {
         print!("{}", Settings::help_text(&selkies::commands::help_epilog()));
         return ExitCode::SUCCESS;
     }
+    if selkies::commands::standalone::wanted(&args, |name| std::env::var(name).ok()) {
+        return ExitCode::from(selkies::commands::standalone::main().clamp(0, 255) as u8);
+    }
     selkies::commands::install_tool("gpu-probe", gpu_probe_tool);
     selkies::commands::install_tool("resize", resize_tool);
     selkies::commands::install_tool("manual-size", manual_size_tool);

@@ -1436,11 +1436,19 @@ pub fn main(argv: &[String], prog: &str) -> i32 {
             (true, Some(session)) => Some(session.as_str()),
             _ => options.session.as_deref(),
         };
-        let (sid, entry) = Desktops::from_env().pick(wanted, wayland)?;
+        // The server's own shell is the desktop, so no installed session is picked for it
+        let shell_only = wanted.is_none() && settings.desktop().on;
+        let (sid, entry) = if shell_only {
+            (String::new(), Entry::new())
+        } else {
+            Desktops::from_env().pick(wanted, wayland)?
+        };
         if wayland {
             session.start_selkies(&command)?;
         }
-        if entry.is_empty() {
+        if shell_only {
+            log("the desktop is the selkies-desktop shell the server starts");
+        } else if entry.is_empty() {
             log(&format!(
                 "no {} session is installed; the display stays empty",
                 if wayland { "Wayland" } else { "X11" }

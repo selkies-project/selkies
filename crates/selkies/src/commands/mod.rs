@@ -19,6 +19,7 @@ pub mod bundle;
 pub mod session;
 pub mod session_gpu;
 pub mod sessions;
+pub mod standalone;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
