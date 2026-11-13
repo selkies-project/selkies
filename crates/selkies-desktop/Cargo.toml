@@ -13,6 +13,9 @@ repository.workspace = true
 keywords = ["wayland", "x11", "panel", "taskbar"]
 categories = ["gui"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "selkies-desktop"
 path = "src/main.rs"

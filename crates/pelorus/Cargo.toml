@@ -11,6 +11,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # The accessibility bus the toolkits answer on, over the D-Bus client the tree already carries.
 zbus = { version = "6", default-features = false, features = ["default-rt"] }

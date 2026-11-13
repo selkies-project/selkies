@@ -11,6 +11,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # The window policy interface the Wayland backend implements and the geometry types both
 # backends share.

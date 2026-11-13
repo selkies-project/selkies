@@ -11,6 +11,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # The crates the server serves HTTP and signs with, at its versions.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "multipart"] }

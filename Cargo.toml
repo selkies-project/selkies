@@ -40,6 +40,20 @@ repository = "https://github.com/selkies-project/selkies"
 pixelflux = { path = "crates/pixelflux", default-features = false, features = ["gpl"] }
 pcmflux = { path = "crates/pcmflux", default-features = false }
 
+# Needless clones and collects, buffers behind two pointers, calling conventions that copy, and
+# widening `as` casts, refused in every crate of the workspace (`[lints] workspace = true`). pixelflux,
+# pcmflux and the fuzz crates build outside the workspace and repeat the table.
+[workspace.lints.clippy]
+assigning_clones = "deny"
+cast_lossless = "deny"
+cloned_instead_of_copied = "deny"
+implicit_clone = "deny"
+large_types_passed_by_value = "deny"
+needless_collect = "deny"
+rc_buffer = "deny"
+redundant_clone = "deny"
+trivially_copy_pass_by_ref = "deny"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

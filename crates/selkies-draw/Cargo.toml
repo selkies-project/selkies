@@ -11,6 +11,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # tiny-skia rasterizes, cosmic-text shapes and renders text from the system
 # fonts, resvg renders SVG icons, image decodes PNG and JPEG.

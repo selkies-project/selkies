@@ -36,3 +36,15 @@ members = ["."]
 # use for; the cfg is declared so the check knows the name.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("gpl"))'] }
+
+# The workspace's lint table, which a crate outside the workspace does not inherit.
+[lints.clippy]
+assigning_clones = "deny"
+cast_lossless = "deny"
+cloned_instead_of_copied = "deny"
+implicit_clone = "deny"
+large_types_passed_by_value = "deny"
+needless_collect = "deny"
+rc_buffer = "deny"
+redundant_clone = "deny"
+trivially_copy_pass_by_ref = "deny"

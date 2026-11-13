@@ -12,6 +12,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 # No crate of the workspace and nothing native, so the tool builds where the server does not.
 # The PNG decoder the server's image handling already brings in.
