@@ -1270,6 +1270,27 @@ async fn start_rate_seeds_the_only_controller() {
     );
 }
 
+/// A display's capture leaves the cursor to the page, which draws it from the cursor updates,
+/// until a page asks for it composited; a display started while one does composites it as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capture_composites_the_cursor_only_while_a_page_asks_for_it() {
+    let rig = Rig::new((1920, 1080), quick());
+    rig.service.begin().await.unwrap();
+    let composited = |display: &str| {
+        let st = rig.service.st.lock();
+        WebRtcService::pipeline_config(&st, display, 1280, 720, None).capture_cursor
+    };
+    assert!(!composited("primary"), "the page draws the cursor");
+    rig.service.handle_pointer_visible(true).await;
+    assert!(
+        composited("display2"),
+        "a pointer lock covers a display started under it"
+    );
+    rig.service.handle_pointer_visible(false).await;
+    assert!(!composited("display2"));
+    rig.service.shutdown().await;
+}
+
 /// A CRF pipeline under congestion control opens capped at the steer's start, never at the range's
 /// high end; a CBR one at the bitrate its client chose.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -167,6 +167,9 @@ pub(crate) struct State {
     pub invalidation_log: HashMap<(String, bool), (f64, u32)>,
     pub stop_grace: Option<JoinHandle<()>>,
     pub peer_events: HashMap<String, mpsc::UnboundedSender<ClientEvent>>,
+    /// Whether a page has the cursor composited into the video (`handle_pointer_visible`); a
+    /// display's capture starts as this stands.
+    pub pointer_visible: bool,
     pub shutdown: bool,
 }
 
@@ -260,6 +263,7 @@ impl WebRtcService {
                 invalidation_log: HashMap::new(),
                 stop_grace: None,
                 peer_events: HashMap::new(),
+                pointer_visible: false,
                 shutdown: false,
             }),
             display_lock: tokio::sync::Mutex::new(()),
@@ -340,7 +344,7 @@ impl WebRtcService {
                 d.video_paintover_burst_frames
             }),
             scale: d.map_or(1.0, |d| d.scale),
-            capture_cursor: true,
+            capture_cursor: st.pointer_visible,
         }
     }
 
@@ -1404,10 +1408,17 @@ impl WebRtcService {
         }
     }
 
-    /// Compose the cursor into the captured video, on every display's capture.
+    /// Compose the cursor into the captured video, on every display's capture and on those
+    /// started later. A page asks for it while it holds a pointer lock or its trackpad mode gets
+    /// no pointer echo; otherwise the page draws the cursor from the cursor updates, so a capture
+    /// that composited it as well would show two, and a host compositor asked to paint its cursor
+    /// sends no cursor metadata for the echo.
     pub async fn handle_pointer_visible(&self, visible: bool) {
-        let pipelines: Vec<Arc<dyn MediaPipeline>> =
-            self.st.lock().pipelines.values().cloned().collect();
+        let pipelines: Vec<Arc<dyn MediaPipeline>> = {
+            let mut st = self.st.lock();
+            st.pointer_visible = visible;
+            st.pipelines.values().cloned().collect()
+        };
         for pipeline in pipelines {
             pipeline.set_pointer_visible(visible).await;
         }
