@@ -30,10 +30,18 @@ impl Checks {
         }
     }
 
-    /// Record the check `name`, which holds when `ok`; `detail` is what was observed.
+    /// Record the check `name`, which holds when `ok`; `detail` is what was observed, kept to one
+    /// line.
     pub fn check(&mut self, name: &str, ok: bool, detail: impl Display) {
         self.made += 1;
-        let detail: String = detail.to_string().chars().take(300).collect();
+        let detail: String = detail
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(300)
+            .collect();
         let verdict = if ok { "PASS" } else { "FAIL" };
         println!("{verdict}  [{}] {name}  {detail}", self.block);
         if !ok {

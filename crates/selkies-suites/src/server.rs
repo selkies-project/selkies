@@ -161,6 +161,7 @@ impl Launch {
             port,
             log,
             last_page: std::sync::Mutex::new(None),
+            pages: std::sync::Mutex::new(Vec::new()),
             _turn: turn,
         };
         server.await_status().await;
@@ -168,13 +169,19 @@ impl Launch {
     }
 }
 
-/// A running server. Dropping it ends the server's process group.
+/// What a page's socket task sends next; `None` closes the socket.
+pub(crate) type PageSender = tokio::sync::mpsc::UnboundedSender<Option<tokio_websockets::Message>>;
+
+/// A running server. Dropping it ends the server's process group; [`Server::stop`] is the orderly
+/// end, and the drop what a panic leaves.
 pub struct Server {
     child: Child,
     port: u16,
     log: PathBuf,
     /// When the last page set out to connect.
     last_page: std::sync::Mutex<Option<Instant>>,
+    /// The pages that connected, for [`Server::stop`] to close.
+    pages: std::sync::Mutex<Vec<PageSender>>,
     _turn: MutexGuard<'static, ()>,
 }
 
@@ -288,16 +295,34 @@ impl Server {
         self.saw(mark, needle, at_most).await;
     }
 
-    /// Stop the server and give the turn to the next one.
-    pub async fn stop(mut self) {
+    /// Close the pages still connected, stop the server, and give the turn to the next one; the
+    /// end of its log, for the failure message of the checks made on it.
+    ///
+    /// The server is asked to exit, as an operator stops it, and killed only when it does not
+    /// within [`SHUTDOWN`].
+    pub async fn stop(mut self) -> String {
+        for page in self
+            .pages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+        {
+            let _ = page.send(None);
+        }
         self.signal(libc::SIGTERM);
         let deadline = Instant::now() + SHUTDOWN;
-        while Instant::now() < deadline {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
+        while Instant::now() < deadline && matches!(self.child.try_wait(), Ok(None)) {
             tokio::time::sleep(POLL).await;
         }
+        self.log_tail()
+    }
+
+    /// Count `page` among the pages [`Server::stop`] closes.
+    pub(crate) fn attach(&self, page: PageSender) {
+        self.pages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(page);
     }
 
     /// Send `signal` to the server's process group, which it leads.
@@ -314,8 +339,10 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
+            // A test that panicked still holds its pages' sockets on this thread, and a server
+            // waits for those: it is given a moment, not the whole of SHUTDOWN.
             self.signal(libc::SIGTERM);
-            let deadline = Instant::now() + SHUTDOWN;
+            let deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline && matches!(self.child.try_wait(), Ok(None)) {
                 std::thread::sleep(POLL);
             }

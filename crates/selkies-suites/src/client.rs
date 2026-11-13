@@ -21,6 +21,7 @@ use tokio::task::JoinHandle;
 use tokio_websockets::{ClientBuilder, Limits, Message};
 
 use crate::Server;
+use crate::server::PageSender;
 
 /// How long the server is given to accept the socket and send its first message.
 const HELLO: Duration = Duration::from_secs(10);
@@ -51,8 +52,7 @@ struct Inbox {
 
 /// A connected page.
 pub struct Client {
-    /// What the pump sends next; `None` closes the socket.
-    outgoing: mpsc::UnboundedSender<Option<Message>>,
+    outgoing: PageSender,
     inbox: Arc<Mutex<Inbox>>,
     arrived: Arc<Notify>,
     pump: JoinHandle<()>,
@@ -138,6 +138,7 @@ impl Client {
                 }
             }
         });
+        server.attach(outgoing.clone());
         let client = Client {
             outgoing,
             inbox,
