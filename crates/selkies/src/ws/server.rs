@@ -8,12 +8,13 @@
 //! model, the settings a page applies, the per-display captures with their relays and
 //! backpressure, the layout pass, and the broadcasts that tell the pages about all of it.
 //!
-//! `reconfigure_lock` serializes the layout passes and the refresh a frame-rate change sets
-//! between them (a pass requested during a pass coalesces into one follow-up);
-//! `video_capture_lock` serializes per-display capture start and stop underneath it. One
-//! capture per display persists for the server's lifetime so a restart keeps the encoder backend
-//! warm. A display whose page dropped keeps its entry and its running capture for the reconnect
-//! grace, so a reloading page resumes on it instead of paying a pipeline rebuild.
+//! `reconfigure_lock` serializes the layout passes and what sets the display's modes between
+//! them, the refresh a frame-rate change sets and a lone Wayland display's resize in place (a
+//! pass requested during a pass coalesces into one follow-up); `video_capture_lock` serializes
+//! per-display capture start and stop underneath it. One capture per display persists for the
+//! server's lifetime so a restart keeps the encoder backend warm. A display whose page dropped
+//! keeps its entry and its running capture for the reconnect grace, so a reloading page resumes
+//! on it instead of paying a pipeline rebuild.
 //!
 //! A display has one owner, whose size and encoding it streams with. With sharing on, a
 //! controller of another tab joins beside the owner: it is streamed as a viewer is (its relay
@@ -1448,11 +1449,14 @@ impl WsService {
             }
             Self::is_wayland() && display_id == PRIMARY_DISPLAY && lone
         };
-        if !lone_wayland {
-            self.reconfigure_displays().await;
-            return;
+        if lone_wayland && let Some(guard) = self.layout_turn() {
+            self.resize_lone_wayland(display_id, w, h).await;
+            drop(guard);
+            if !self.reconfigure_pending.load(Ordering::Relaxed) {
+                return;
+            }
         }
-        self.resize_lone_wayland(display_id, w, h).await;
+        self.reconfigure_displays().await;
     }
 
     /// A lone Wayland display resizes its live capture in place, bracketed by the screen sizing
@@ -1460,7 +1464,9 @@ impl WsService {
     /// view, so the screen is grown first, the geometry read back, and the screen fitted to it.
     /// A nested session's screen is its own compositor's, not the capture's: sizing only the
     /// capture leaves its applications laid out for the size the last DPI change realized, so it
-    /// takes what was realized too, at the DPI the display holds.
+    /// takes what was realized too, at the DPI the display holds. It runs in the layout's turn
+    /// (`layout_turn`): a pass in flight laid the display out at the size it read when it
+    /// began, so the resize is left to the pass that follows it.
     pub(crate) async fn resize_lone_wayland(&self, display_id: &str, w: i32, h: i32) {
         let scale = {
             let mut st = self.st.lock();

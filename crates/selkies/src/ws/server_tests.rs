@@ -2261,6 +2261,58 @@ async fn a_lone_wayland_resize_in_its_process() {
     );
 }
 
+/// A pass that laid the display out at its old size is in flight when the resize arrives.
+#[tokio::test]
+#[ignore = "run by a_lone_wayland_resize_during_a_pass_is_the_size_kept, in a process of its own"]
+async fn a_lone_wayland_resize_during_a_pass_in_its_process() {
+    if !crate::session_screens::testing::isolated() {
+        return;
+    }
+    crate::settings::install(crate::settings::Settings::parse(
+        &["--wayland=true".to_string()],
+        &|_| None,
+    ));
+    let rig = Rig::new();
+    let mut page = rig.controller().await;
+    page.say(r#"SETTINGS,{"initialClientWidth":1280,"initialClientHeight":720,"tabId":"a"}"#)
+        .await;
+    let hold = Arc::new(tokio::sync::Notify::new());
+    *rig.display.hold_layout.lock() = Some(hold.clone());
+    let service = rig.service.clone();
+    let pass = tokio::spawn(async move { service.reconfigure_displays().await });
+    while rig.display.hold_layout.lock().is_some() {
+        settle().await;
+    }
+    sized(&rig);
+    rig.service
+        .handle_resize("1920x1080", PRIMARY_DISPLAY)
+        .await;
+    hold.notify_one();
+    pass.await.unwrap();
+    assert_eq!(
+        rig.layout(PRIMARY_DISPLAY).map(|l| (l.w, l.h)),
+        Some((1920, 1080)),
+        "the pass cannot lay the display out at the size it read before the resize"
+    );
+    let screens: Vec<String> = sized(&rig)
+        .into_iter()
+        .filter(|c| c.starts_with("screen"))
+        .collect();
+    assert_eq!(
+        screens.last().map(String::as_str),
+        Some("screen 1920x1080 grow_only=false"),
+        "and the screen ends at the resize: {screens:?}"
+    );
+}
+
+#[test]
+fn a_lone_wayland_resize_during_a_pass_is_the_size_kept() {
+    crate::session_screens::testing::run_isolated(
+        "ws::server_tests::a_lone_wayland_resize_during_a_pass_in_its_process",
+        &[],
+    );
+}
+
 #[test]
 fn a_lone_wayland_resize_carries_the_session_screen() {
     crate::session_screens::testing::run_isolated(

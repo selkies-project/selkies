@@ -271,7 +271,7 @@ pub struct FakeDisplay {
     pub refresh: Mutex<Option<f64>>,
     /// The size the last mode-set gave the outputs.
     pub shown: Mutex<Option<(i32, i32)>>,
-    /// Holds the next layout request, once it is recorded, until notified: a mode-set in flight.
+    /// Holds the next layout request, once it is taken, until notified: a pass in flight.
     pub hold_layout: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
@@ -336,6 +336,10 @@ impl Display for FakeDisplay {
         _k: &HashSet<String>,
         _s: f64,
     ) -> LayoutOutcome {
+        let hold = self.hold_layout.lock().take();
+        if let Some(hold) = hold {
+            hold.notified().await;
+        }
         LayoutOutcome::default()
     }
 
