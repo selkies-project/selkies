@@ -1080,7 +1080,9 @@ pub struct AppState {
 /// Pointer-constraints protocol. A lock is activated for the surface the pointer already holds,
 /// and `activate_constraint_under` picks up one asked for ahead of the pointer when the motion
 /// that enters it arrives: SDL asks as relative mode goes on, which is before it has the pointer.
-/// Confinement regions and cursor-position hints are still accepted as no-ops.
+/// Under the window policy a confinement holds the pointer in its region (`confined`), the way
+/// Xwayland asks for an X11 grab confined to a window; cursor-position hints are still accepted
+/// as no-ops, since the client's pointer is absolute and sets the position on its next move.
 impl PointerConstraintsHandler for AppState {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
         let Some(focus) = pointer.current_focus() else {
@@ -1751,6 +1753,64 @@ impl AppState {
             }
             _ => false,
         })
+    }
+
+    /// `p` held inside the region an active confinement of the pointer's focus names, or the
+    /// whole surface where it names none; `p` itself where no confinement holds the pointer. The
+    /// region is taken as its bounding box of added rectangles, which is every region Xwayland
+    /// asks for.
+    pub(crate) fn confined(
+        &self,
+        pointer: &PointerHandle<Self>,
+        p: Point<f64, Logical>,
+    ) -> Point<f64, Logical> {
+        let Some(focus) = pointer.current_focus() else {
+            return p;
+        };
+        let Some((target, origin)) = self
+            .pointer_target_under(pointer.current_location())
+            .filter(|(target, _)| *target == focus)
+        else {
+            return p;
+        };
+        let Some(surface) = target.wl_surface() else {
+            return p;
+        };
+        // The surface is measured once the constraint's lock is released: its state sits
+        // behind that same lock.
+        let region = with_pointer_constraint(&surface, pointer, |constraint| match constraint {
+            Some(constraint)
+                if constraint.is_active()
+                    && matches!(&*constraint, PointerConstraint::Confined(_)) =>
+            {
+                Some(constraint.region().map(|region| {
+                    region
+                        .rects
+                        .iter()
+                        .filter(|(kind, _)| {
+                            matches!(kind, smithay::wayland::compositor::RectangleKind::Add)
+                        })
+                        .map(|(_, rect)| *rect)
+                        .reduce(|a, b| a.merge(b))
+                        .unwrap_or_default()
+                }))
+            }
+            _ => None,
+        });
+        let bounds = region.map(|region| {
+            region.unwrap_or_else(|| {
+                smithay::desktop::utils::bbox_from_surface_tree(&surface, (0, 0))
+            })
+        });
+        let Some(bounds) = bounds.filter(|b| b.size.w > 0 && b.size.h > 0) else {
+            return p;
+        };
+        let left = origin.x + f64::from(bounds.loc.x);
+        let top = origin.y + f64::from(bounds.loc.y);
+        Point::from((
+            p.x.clamp(left, left + f64::from(bounds.size.w - 1)),
+            p.y.clamp(top, top + f64::from(bounds.size.h - 1)),
+        ))
     }
 
     /// What the pointer targets at a logical layout point: an overlay layer surface, an X11

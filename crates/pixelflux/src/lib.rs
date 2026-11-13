@@ -7580,6 +7580,11 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                 let p = state.layout_physical_to_logical(x, y);
 
                 if let Some(pointer) = state.seat.get_pointer() {
+                    let p = if wayland::wm::active(state) {
+                        state.confined(&pointer, p)
+                    } else {
+                        p
+                    };
                     let under = state.pointer_target_under(p);
                     if wayland::wm::pointer(
                         state,
