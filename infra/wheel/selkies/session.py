@@ -9,6 +9,13 @@ proxies. The configuration is the server's own: `selkies session
 which it writes out of the executable into the user's data directory, so this
 only runs the executable this wheel installed and returns its entry, and the
 two never describe different launchers.
+
+The group is the one registration a `pip install` can make, which is why this
+module, its package, and the entry point in `pyproject.toml` are Python:
+jupyter-server-proxy loads each entry as a Python callable, Jupyter Server
+takes only `ServerApp.jpserver_extensions` from the `jupyter_server_config.d`
+drop-in directories, and `jupyter_server_config.json`, which would carry
+`ServerProxy.servers`, is the user's own file.
 """
 import json
 import shutil
