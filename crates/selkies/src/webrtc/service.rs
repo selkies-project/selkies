@@ -19,7 +19,9 @@
 //! and a peer's tracks are started, paused, and repaired differently.
 //!
 //! Threading: every peer runs on tasks of its own (`peer`), and nothing here holds `st` across an
-//! await; `display_lock` sequences the layout passes, each of which awaits the display server.
+//! await; `display_lock` sequences the layout passes, each of which awaits the display server, and
+//! the lone primary's resize and refresh change with them, since a pass sets the size and rate it
+//! read when it began.
 //!
 //! A first capture of the primary waits for its controller's page to send its size, or its settings,
 //! which a page that keeps the server's size sends instead, for `PRIMARY_SIZE_WAIT_S` at most: a

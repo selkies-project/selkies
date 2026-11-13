@@ -25,7 +25,7 @@ use tokio::sync::broadcast;
 use crate::audio::AudioPacket;
 use crate::clipboard::outbound::ClipboardHost;
 use crate::clipboard::{Clipboard, Payload, Policy as ClipboardPolicy, Session};
-use crate::display::Layouts;
+use crate::display::{Layout, Layouts};
 use crate::stats::StreamWatch;
 use crate::webrtc::channel::{ChannelOut, ChannelTx};
 use crate::webrtc::engine::{EngineHost, PeerRequest, RtcEngine};
@@ -64,6 +64,7 @@ struct FakePipeline {
     rc_mode: Mutex<String>,
     watch: Mutex<Option<Arc<StreamWatch>>>,
     fail_start: AtomicBool,
+    fps: Mutex<f64>,
 }
 
 impl FakePipeline {
@@ -87,6 +88,7 @@ impl FakePipeline {
             rc_mode: Mutex::new("cbr".into()),
             watch: Mutex::new(None),
             fail_start: AtomicBool::new(false),
+            fps: Mutex::new(60.0),
         })
     }
 
@@ -194,7 +196,7 @@ impl MediaPipeline for FakePipeline {
     }
 
     fn framerate(&self) -> f64 {
-        60.0
+        *self.fps.lock()
     }
 
     fn video_bitrate(&self) -> f64 {
@@ -207,6 +209,9 @@ impl MediaPipeline for FakePipeline {
 
     async fn apply_setting(&self, key: &str, value: &Json) {
         self.note(format!("set {key} {value}"));
+        if let ("framerate", Some(fps)) = (key, value.as_f64()) {
+            *self.fps.lock() = fps;
+        }
     }
 
     async fn set_video_bitrate(&self, kbps: f64) {
@@ -266,6 +271,11 @@ struct FakePlane {
     rounding: i32,
     refuse_grow: AtomicBool,
     capability: Mutex<(bool, String)>,
+    /// The refresh the outputs run at: what the last resize or refresh request carried.
+    refresh: Mutex<Option<f64>>,
+    /// Holds the next resize, once it is logged as `resizing`, until notified: a mode-set in
+    /// flight.
+    hold_resize: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 impl FakePlane {
@@ -276,6 +286,8 @@ impl FakePlane {
             rounding: 8,
             refuse_grow: AtomicBool::new(false),
             capability: Mutex::new((true, String::new())),
+            refresh: Mutex::new(None),
+            hold_resize: Mutex::new(None),
         })
     }
 }
@@ -300,9 +312,15 @@ impl DisplayPlane for FakePlane {
         true
     }
 
-    async fn resize_display(&self, res: &str, _fps: f64) -> Option<(i32, i32)> {
+    async fn resize_display(&self, res: &str, fps: f64) -> Option<(i32, i32)> {
         let (w, h) = crate::display::geometry::parse_resize_dims(res)?;
         let w = (w + self.rounding - 1) / self.rounding * self.rounding;
+        let hold = self.hold_resize.lock().take();
+        if let Some(hold) = hold {
+            self.log.lock().push("resizing".into());
+            hold.notified().await;
+        }
+        *self.refresh.lock() = Some(fps);
         self.log.lock().push(format!("root {w} {h}"));
         *self.root.lock() = (w, h);
         Some((w, h))
@@ -320,7 +338,9 @@ impl DisplayPlane for FakePlane {
         true
     }
 
-    async fn refresh_output_mode(&self, _fps: f64) {}
+    async fn refresh_output_mode(&self, fps: f64) {
+        *self.refresh.lock() = Some(fps);
+    }
 
     async fn set_dpi(&self, dpi: i32) -> bool {
         self.log.lock().push(format!("dpi {dpi}"));
@@ -592,6 +612,67 @@ async fn capture_region_grow_moves_after_the_root() {
     assert!(steps[0].starts_with("root "), "{steps:?}");
     assert!(steps[1].starts_with("region "), "{steps:?}");
     assert!(region_past_root(&steps, (1920, 1000), &[("primary", (0, 0, 1918, 1000))]).is_empty());
+}
+
+// A change beside a layout pass.
+
+/// A lone primary whose secondary just left, its layout still standing: the pass that retires
+/// it, held inside its resize.
+async fn retiring_pass(rig: &Rig) -> (Arc<tokio::sync::Notify>, tokio::task::JoinHandle<()>) {
+    rig.set_primary(FakePipeline::new(&rig.log, "primary", 1920, 1080, None).capturing());
+    rig.service
+        .st
+        .lock()
+        .layouts
+        .insert("primary".into(), Layout::new(0, 0, 1920, 1080));
+    let hold = Arc::new(tokio::sync::Notify::new());
+    *rig.plane.hold_resize.lock() = Some(hold.clone());
+    let service = rig.service.clone();
+    let pass = tokio::spawn(async move { service.reconfigure_displays().await });
+    while !rig.steps().iter().any(|s| s == "resizing") {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    (hold, pass)
+}
+
+#[tokio::test]
+async fn a_rate_change_during_a_layout_pass_is_the_refresh_the_display_keeps() {
+    let rig = Rig::new((1920, 1080), quick());
+    let (hold, pass) = retiring_pass(&rig).await;
+    let service = rig.service.clone();
+    let verb = tokio::spawn(async move { service.handle_fps_change(90.0, "primary").await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        rig.primary().framerate(),
+        90.0,
+        "the capture takes the rate without waiting for the pass"
+    );
+    hold.notify_one();
+    pass.await.unwrap();
+    verb.await.unwrap();
+    assert_eq!(
+        *rig.plane.refresh.lock(),
+        Some(90.0),
+        "the pass's mode-set cannot leave the display at the rate it read before the change"
+    );
+}
+
+#[tokio::test]
+async fn a_resize_during_a_layout_pass_is_the_size_the_display_keeps() {
+    let rig = Rig::new((1920, 1080), quick());
+    let (hold, pass) = retiring_pass(&rig).await;
+    let service = rig.service.clone();
+    let verb = tokio::spawn(async move { service.on_resize_handler("1600x900", "primary").await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    hold.notify_one();
+    pass.await.unwrap();
+    verb.await.unwrap();
+    assert_eq!(
+        *rig.plane.root.lock(),
+        (1600, 900),
+        "the pass's mode-set cannot leave the display at the size it read before the resize"
+    );
+    assert_eq!(rig.primary().geometry(), (1600, 900, None));
 }
 
 #[tokio::test]

@@ -84,8 +84,13 @@ impl WebRtcService {
             }
             return;
         }
-        self.st.lock().primary_dims = None;
-        self.resize_primary_display(res).await;
+        {
+            // In the layout's turn: the pass a leaving secondary runs sizes the display to what
+            // it read when it began.
+            let _guard = self.display_lock.lock().await;
+            self.st.lock().primary_dims = None;
+            self.resize_primary_display(res).await;
+        }
         self.primary_sized.send_replace(true);
     }
 

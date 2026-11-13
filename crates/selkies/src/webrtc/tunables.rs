@@ -319,6 +319,8 @@ impl WebRtcService {
             && !self.wayland()
             && let Some(pipeline) = &pipeline
         {
+            // In the layout's turn: a pass sets its modes at the rate it read when it began.
+            let _guard = self.display_lock.lock().await;
             self.deps
                 .display
                 .refresh_output_mode(pipeline.framerate())
