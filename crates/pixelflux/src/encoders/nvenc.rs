@@ -7349,6 +7349,10 @@ pub(crate) mod gpu_tests {
                     "pool {pool}, frame {i}: {psnr:.1} dB against the picture just painted"
                 );
             }
+            assert!(
+                enc.pin_uploads,
+                "the client path restores the production default"
+            );
             // SAFETY: the mapping made above, which no slice outlives.
             unsafe { libc::munmap(at, len) };
         }
