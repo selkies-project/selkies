@@ -1,0 +1,30 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "selkies-suites"
+description = "The integration suites that drive a built selkies server as a black box, and the harness they share."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# No crate of the workspace and nothing native beyond the server's own TLS provider, so the suites
+# build where the server does not: beside a server a wheel installed. The crates are the ones the
+# server speaks WebSockets and HTTP with, at its versions.
+tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync", "io-util"] }
+tokio-websockets = { version = "0.13", default-features = false, features = ["client", "aws_lc_rs", "fastrand"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+serde_json = "1"
+libc = "0.2"

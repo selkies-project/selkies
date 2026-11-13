@@ -3622,6 +3622,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "selkies-suites"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "serde_json",
+ "tokio",
+ "tokio-websockets",
+]
+
+[[package]]
 name = "selkies-turn-rest"
 version = "0.0.0"
 dependencies = [
@@ -4251,6 +4266,7 @@ dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
  "bytes",
+ "fastrand",
  "futures-core",
  "futures-sink",
  "http",

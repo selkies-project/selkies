@@ -444,6 +444,18 @@ jobs:
         run: ./scripts/ci/build-web.sh
       - name: Build the test tools
         run: make -C tests/tools
+      # The Rust suites (crates/selkies-suites) depend on no crate of the
+      # workspace, so they build here without the server's libraries, on the
+      # toolchain the images build the server with (scripts/ci/server-build-deps.sh
+      # reads the same pin). Built ahead of the run, so no suite's budget pays
+      # for the compile.
+      - name: Build the Rust suites
+        if: contains(inputs.tiers || 'integration or e2e', 'integration')
+        run: |
+          toolchain="$(sed -n 's/^ARG RUST_TOOLCHAIN="\(.*\)"$/\1/p' addons/base/Dockerfile)"
+          scripts/ci/retry.sh 5 60 rustup toolchain install "${toolchain}" --profile minimal
+          rustup default "${toolchain}"
+          scripts/ci/retry.sh 5 60 cargo test --locked --package selkies-suites --no-run
       # The same stack a development sandbox starts, on the display the
       # workflow names. VirtualCamera publishes a PipeWire node as well as
       # listening on its socket, so the webcam suite needs a reachable daemon.

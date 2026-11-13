@@ -6,9 +6,10 @@ encode library, `crates/selkies-wm` the window manager the server runs under `--
 pixelflux's compositor on Wayland, an x11rb manager on X11), `crates/selkies-draw` the one rasterizer the window
 manager's frames and menus and the desktop shell draw with, and `crates/selkies-desktop` that shell, its own
 binary the server starts under `--desktop`; `crates/selkies-turn-rest` is the TURN REST credential service the
-`turn-rest` image runs, a binary of its own that shares none of the server's code, and `crates/xtask` the
-repository's own tooling (`cargo xtask`: the generated pages, fragments, and images, and the license gate), which depends
-on no crate of the workspace. The server links both native libraries directly as Rust crates,
+`turn-rest` image runs, a binary of its own that shares none of the server's code, `crates/selkies-suites` the
+integration suites that drive a built server as a black box and the harness they share, and `crates/xtask` the
+repository's own tooling (`cargo xtask`: the generated pages, fragments, and images, and the license gate); neither of
+the last two depends on a crate of the workspace. The server links both native libraries directly as Rust crates,
 without Python. Their optional PyO3 features are only for standalone wheels. The web client is under `web/`: `selkies-web-core` (the streaming
 core), `selkies-dashboard` (the dashboard built on it), and `universal-touch-gamepad`; `addons/` holds what
 runs beside Selkies rather than in it: the interposers, `fake-udev`, the images, and the integrations.
@@ -120,9 +121,12 @@ audio the suites stream from on `E2E_DISPLAY`, apart from any desktop's `DISPLAY
 apart from any desktop's, since their servers write every density they apply into its resource files. Run the cheapest
 tier that covers a change on every change (`pre-commit run --all-files`, `cargo test --workspace`,
 `pytest tests -m unit`), the `integration` tier and the `e2e` blocks the change touches before reporting it, and a
-measurement for every claim that is a number. The suites in `tests/` drive the server as a black box over its
-public interfaces; a part of the server is tested in process by its own `cargo test`, never by a suite reaching
-into it. End-to-end testing is possible with the installed Firefox and Chrome, and Playwright/Selenium/Puppeteer/
+measurement for every claim that is a number. The suites in `tests/` and `crates/selkies-suites` drive the server
+as a black box over its public interfaces; a part of the server is tested in process by its own `cargo test`, never
+by a suite reaching into it. A suite that needs only the server, a socket, and the display is written in Rust on
+the harness of `crates/selkies-suites` (its module docblock), every test `#[ignore]`d with what it needs so that
+`cargo test --workspace` runs none, a wait a condition with a bound rather than a sleep, and a check that
+something did not happen a watch over a stated window. End-to-end testing is possible with the installed Firefox and Chrome, and Playwright/Selenium/Puppeteer/
 Cypress WebKit in place of Safari. Ask before building an environment on a machine that was not set up for one
 (keep the system `libgbm.so` for GBM on NVIDIA and other GPUs) and take the operator's directives on how it is
 constructed and constrained. A suite that skips is a failure in CI; say which checks could not run where the

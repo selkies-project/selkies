@@ -21,6 +21,22 @@ pytest tests -k gamepad -v
 its tier, its selectors, and its timeout. Add a suite there and it appears in
 both.
 
+The suites that need only the server, a socket, and the display are Rust test
+targets of `crates/selkies-suites`, on the harness that crate's library is. The
+registry lists them by their source file and `pytest` runs them with the rest
+of their tier; one runs on its own as:
+
+```bash
+cargo test -p selkies-suites --test protocol -- --include-ignored
+```
+
+Every test there is `#[ignore]`d with what it needs, so `cargo test --workspace`
+builds them and runs none, and a run that names a target fails, never skips,
+where the server or the display is missing. They take `SELKIES_TEST_SERVER`,
+`E2E_DISPLAY`, and `E2E_WORKDIR` as the Python suites do, start each server on
+a free port under a `HOME` and an `XDG_RUNTIME_DIR` inside `E2E_WORKDIR`, and
+leave each server's log there as `<suite>-<label>.log`.
+
 The server under test is the `selkies` binary: `SELKIES_TEST_SERVER`, else
 `target/release/selkies` in the tree (`cargo build --release -p selkies`), else
 `selkies` on `PATH`. The suites' own dependencies are `tests/requirements.txt`

@@ -23,12 +23,11 @@ import helpers
 import suites
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
-PYTHON = sys.executable
 
 CASES: list = [
-    pytest.param(path, selector, timeout,
+    pytest.param(path, selector, timeout, suites.name(path, tier),
                  marks=getattr(pytest.mark, tier),
-                 id=path[:-3].replace("/", ":") + (f"-{selector}" if selector else ""))
+                 id=suites.name(path, tier).replace("/", ":") + (f"-{selector}" if selector else ""))
     for path, selector, tier, timeout in suites.cases()
 ]
 
@@ -69,13 +68,13 @@ def stalled(text: str) -> bool:
     return any(mark in text for mark in STALLED)
 
 
-@pytest.mark.parametrize("path,selector,timeout", CASES)
-def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
+@pytest.mark.parametrize("path,selector,timeout,name", CASES)
+def test_suite(path: str, selector: Optional[str], timeout: int, name: str) -> None:
     """Run one suite as a subprocess and map its exit protocol onto pytest."""
-    cmd = [PYTHON, os.path.join(TESTS, path)] + ([selector] if selector else [])
+    cmd = suites.command(path, selector)
     # A minute short of the kill, so the dump lands in the output that is kept.
     env = dict(os.environ, SELKIES_SUITE_DEADLINE=str(max(30, timeout - 60)))
-    case = path[:-3].replace("/", "-") + (f"-{selector}" if selector else "")
+    case = name.replace("/", "-") + (f"-{selector}" if selector else "")
     started = time.time()
     try:
         proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
@@ -108,7 +107,9 @@ def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
         pytest.skip(f"{path}: {reason}")
     failed = [line for line in proc.stdout.splitlines() if line.startswith("FAIL")]
     # A suite that died rather than failing checks reports through stderr, so
-    # the traceback is what the message has to carry
-    detail = "\n".join(failed[:20]) or proc.stderr[-2000:] or proc.stdout[-2000:]
+    # the traceback is what the message has to carry; a Rust one's panic is in
+    # the test's own output, and stderr holds cargo's.
+    died = (proc.stdout[-4000:] if path.endswith(".rs") else "") or proc.stderr[-2000:] or proc.stdout[-2000:]
+    detail = "\n".join(failed[:20]) or died
     assert proc.returncode == 0, (
         f"{path} {selector or ''} exited {proc.returncode}\n{detail}")

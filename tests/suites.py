@@ -6,6 +6,12 @@ exits non-zero if any of them failed, so it can be run directly:
 
     python3 tests/e2e/test_matrix.py ws-x11
 
+A suite whose path ends in `.rs` is a test target of `crates/selkies-suites`,
+which drives the server from Rust; it runs as `command()` gives it, a selector
+naming the tests of the target to run:
+
+    cargo test -p selkies-suites --test protocol -- --include-ignored
+
 test_suites.py turns this table into pytest cases, one per selector, and CI
 selects tiers from it. Tiers describe what a suite needs:
 
@@ -17,7 +23,13 @@ selects tiers from it. Tiers describe what a suite needs:
     soak         the full pixelflux/pcmflux API surface, run on request
     image        a published desktop image through the release checklist, run on request
 """
+import os
+import sys
 from typing import Iterator, Optional, Sequence
+
+TESTS: str = os.path.dirname(os.path.abspath(__file__))
+#: Where the Rust suites live, relative to this directory as every suite's path is.
+RUST: str = "../crates/selkies-suites/tests/"
 
 SUITES: list = [
     # unit
@@ -311,3 +323,25 @@ def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
             continue
         for selector in suite.get("selectors", [None]):
             yield suite["path"], selector, suite["tier"], suite["timeout"]
+
+
+def name(path: str, tier: str) -> str:
+    """The name a suite is selected and its logs are kept under, without its
+    selector: `integration/test_protocol` for `integration/test_protocol.py`,
+    and for the Rust target `protocol.rs` of that tier as well, so a suite
+    keeps its name in whichever language it is written."""
+    stem = os.path.splitext(path)[0]
+    if path.endswith(".rs"):
+        return f"{tier}/test_{os.path.basename(stem)}"
+    return stem
+
+
+def command(path: str, selector: Optional[str]) -> list:
+    """The program that runs one case."""
+    if path.endswith(".rs"):
+        target = os.path.splitext(os.path.basename(path))[0]
+        # Every test of a suite is ignored until a run names its target, as
+        # here: `cargo test --workspace` runs on hosts with no display.
+        return ["cargo", "test", "--locked", "--package", "selkies-suites", "--test", target,
+                "--", "--include-ignored"] + ([selector] if selector else [])
+    return [sys.executable, os.path.join(TESTS, path)] + ([selector] if selector else [])
