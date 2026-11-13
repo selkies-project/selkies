@@ -9,7 +9,7 @@
 //! from the mount, forces file links to save, carries a `?token=` onto every link, and removes
 //! the parent row at the root. The body of that function is byte-identical to the nginx
 //! fancyindex footer (`web/selkies-web-core/nginx/footer.html`), which
-//! `tests/tools/file_index_footer_audit.mjs` runs over both copies.
+//! `tests/tools/file_index_footer_audit.ts` runs over both copies.
 
 /// Everything before the current path: `<!DOCTYPE html>` through the open `<h1>`.
 pub const FILE_INDEX_HEADER: &str = r#"<!DOCTYPE html>
