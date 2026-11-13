@@ -155,6 +155,7 @@ export class WebRTCClient {
     clipboardcontent!: any[];
     onserversettings!: ((...args: [Record<string, any>]) => void) | null;
     ondisplaysettings!: ((...args: [Record<string, any>]) => void) | null;
+    ondisplayowner!: (() => void) | null;
     onpagevisibility!: (() => void) | null;
     ondisplayconfig!: ((...args: [Record<string, any>]) => void) | null;
     onprintdocument!: ((...args: [Record<string, any>]) => void) | null;
@@ -279,6 +280,9 @@ export class WebRTCClient {
 
 		
 		this.ondisplaysettings = null;
+
+		/** The server made this page its display's owner and holds no size from it. */
+		this.ondisplayowner = null;
 
 		
 		this.onpagevisibility = null;
@@ -846,6 +850,10 @@ export class WebRTCClient {
 		} else if (msg.type === 'display_settings') {
 			if (this.ondisplaysettings !== null) {
 				this.ondisplaysettings(msg.data);
+			}
+		} else if (msg.type === 'display_owner') {
+			if (this.ondisplayowner !== null) {
+				this.ondisplayowner();
 			}
 		} else if (msg.type === 'page_visibility') {
 			if (this.onpagevisibility !== null) {

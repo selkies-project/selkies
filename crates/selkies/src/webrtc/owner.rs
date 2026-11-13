@@ -328,19 +328,28 @@ impl WebRtcService {
     }
 
     /// Apply what a controller that owns its display now held back: its settings, density, and
-    /// size, the latest of each, which it keeps for the next time it owns the display.
+    /// size, the latest of each, which it keeps for the next time it owns the display. One that
+    /// held no size is told it owns the display (`display_owner`), and its page sends the size.
     async fn replay_held(&self, peer: &str, display: &str) {
-        let held = self
-            .engine
-            .peers
-            .lock()
-            .get(peer)
-            .map(|p| p.held_owner_messages.clone())
-            .unwrap_or_default();
+        let (held, channel) = {
+            let peers = self.engine.peers.lock();
+            let entry = peers.get(peer);
+            (
+                entry
+                    .map(|p| p.held_owner_messages.clone())
+                    .unwrap_or_default(),
+                entry.and_then(|p| p.channel.clone()),
+            )
+        };
         for kind in ["SETTINGS", "s", "r"] {
             if let Some(msg) = held.get(kind) {
                 self.input_message(msg, display, peer).await;
             }
+        }
+        if !held.contains_key("r")
+            && let Some(channel) = channel
+        {
+            channel.send_typed("display_owner", &json!({"displayId": display}));
         }
     }
 

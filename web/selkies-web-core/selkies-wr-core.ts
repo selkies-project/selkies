@@ -3733,6 +3733,8 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			 * defaults would move the stream off both.
 			 */
 			webrtc.ondisplaysettings = (obj: any): any => followDisplaySettings((obj && obj.settings) || {});
+			// The display passed to this page and the server holds no size of its window
+			webrtc.ondisplayowner = (): any => handleResizeUI();
 			webrtc.onpagevisibility = (): any => {
 				pageVisibilityWanted = true;
 				reportPageVisibility();

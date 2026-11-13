@@ -2321,6 +2321,58 @@ async fn owner_a_page_beside_it_is_held_back_until_it_owns_the_display() {
     rig.service.shutdown().await;
 }
 
+/// A page that takes the display with no size held is told it owns it, so its page sends one;
+/// one whose size was held and replayed is not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_an_heir_that_held_no_size_is_told_it_owns_the_display() {
+    for held_size in [false, true] {
+        let rig = Rig::new(
+            (1920, 1080),
+            Timings {
+                hidden_owner_handoff_s: 0.05,
+                ..quick()
+            },
+        );
+        rig.service.begin().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        rig.peer("a", ClientType::Controller, "primary").await;
+        rig.peer("b", ClientType::Controller, "primary").await;
+        {
+            let mut st = rig.service.st.lock();
+            st.peer_tabs.insert("a".into(), Some("tab-a".into()));
+            st.peer_tabs.insert("b".into(), Some("tab-b".into()));
+            st.owner_tabs.insert("primary".into(), "tab-a".into());
+        }
+        let (channel, mut rx) = ChannelTx::recording();
+        rig.service
+            .engine
+            .peers
+            .lock()
+            .get_mut("b")
+            .unwrap()
+            .channel = Some(channel);
+        if held_size {
+            rig.service
+                .on_peer_data_message("r,1280x720".into(), "primary", "b")
+                .await;
+        }
+        rig.service
+            .on_peer_data_message("PAGE_SHOWN".into(), "primary", "b")
+            .await;
+        rig.service
+            .on_peer_data_message("PAGE_HIDDEN".into(), "primary", "a")
+            .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            rig.service.st.lock().owner_tabs.get("primary").unwrap(),
+            "tab-b"
+        );
+        let told = types(&typed(&mut rx)).iter().any(|t| t == "display_owner");
+        assert_eq!(told, !held_size, "held a size: {held_size}");
+        rig.service.shutdown().await;
+    }
+}
+
 /// A STUN server that never answers, for the peers the engine starts from here on: their
 /// server-reflexive gathering waits out its bound, holding their start. It answers nothing once
 /// dropped either.
