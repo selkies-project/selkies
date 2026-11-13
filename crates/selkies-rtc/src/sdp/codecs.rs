@@ -382,7 +382,7 @@ pub fn find_common_codecs(local: &[Codec], remote: &[Codec]) -> Vec<Codec> {
                 taken.payload_type = c.payload_type;
             }
             if taken.is_red() {
-                taken.parameters = c.parameters.clone();
+                taken.parameters.clone_from(&c.parameters);
             }
             taken
                 .rtcp_feedback

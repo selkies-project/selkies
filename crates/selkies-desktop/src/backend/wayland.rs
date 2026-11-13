@@ -428,7 +428,7 @@ impl State {
         }
         buffer.busy.store(true, Ordering::Release);
 
-        surface.input = frame.input.clone();
+        surface.input.clone_from(&frame.input);
         let buffer = &surface.buffers[index];
         if !(dragging && matches!(target, Target::Launchers(_))) {
             let region = compositor.create_region(qh, ());

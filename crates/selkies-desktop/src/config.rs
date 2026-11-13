@@ -532,7 +532,7 @@ impl Config {
                 wallpaper.color_set = true;
             }
             if let Some(image) = &over.image {
-                wallpaper.image = image.clone();
+                wallpaper.image.clone_from(image);
             }
             if let Some(mode) = over.mode {
                 wallpaper.mode = mode;

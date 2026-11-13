@@ -231,7 +231,7 @@ pub fn parse_hello(text: &str) -> Result<Hello, Refusal> {
     if let Some(json) = json {
         let meta: HelloMetadata =
             serde_json::from_str(json).map_err(|_| Refusal::protocol("Invalid JSON metadata"))?;
-        client_type = meta.client_type.clone();
+        client_type.clone_from(&meta.client_type);
         hello.client_strict_viewer = truthy(meta.client_strict_viewer.as_ref());
         hello.client_token = meta
             .client_token
@@ -245,14 +245,14 @@ pub fn parse_hello(text: &str) -> Result<Hello, Refusal> {
             .map(str::to_owned);
         if truthy(meta.display_id.as_ref()) {
             match meta.display_id.as_ref().and_then(Value::as_str) {
-                Some(id) if valid_display_id(id) => hello.display_id = id.to_owned(),
+                Some(id) if valid_display_id(id) => id.clone_into(&mut hello.display_id),
                 _ => return Err(Refusal::protocol("Invalid display_id")),
             }
         }
         if let Some(position) = meta.display_position.as_ref().and_then(Value::as_str)
             && ["right", "left", "up", "down"].contains(&position)
         {
-            hello.display_position = position.to_owned();
+            position.clone_into(&mut hello.display_position);
         }
         hello.client_tab_id = meta
             .client_tab_id
@@ -260,7 +260,7 @@ pub fn parse_hello(text: &str) -> Result<Hello, Refusal> {
             .and_then(Value::as_str)
             .filter(|tab| !tab.is_empty())
             .map(|tab| tab.chars().take(64).collect());
-        hello.cc_start_kbps = meta.cc_start_kbps.clone();
+        hello.cc_start_kbps.clone_from(&meta.cc_start_kbps);
         hello.fullcolor_codecs = codec_names(meta.fullcolor_codecs.as_ref());
         hello.tenbit_codecs = codec_names(meta.tenbit_codecs.as_ref());
         hello.page_size = hello_page_size(meta.page_size.as_ref());

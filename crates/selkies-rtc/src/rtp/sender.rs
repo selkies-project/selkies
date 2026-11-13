@@ -808,8 +808,8 @@ impl RtpSender {
         if self.started {
             return Ok(());
         }
-        self.cname = parameters.cname.clone();
-        self.mid = parameters.mux_id.clone();
+        self.cname.clone_from(&parameters.cname);
+        self.mid.clone_from(&parameters.mux_id);
         self.map.configure(&parameters.header_extensions);
         let mut send_codec = parameters
             .codecs
@@ -817,7 +817,7 @@ impl RtpSender {
             .find(|c| !c.is_rtx() && !c.is_flexfec())
             .cloned()
             .ok_or(NoCodec)?;
-        self.codecs = parameters.codecs.clone();
+        self.codecs.clone_from(&parameters.codecs);
         if let Some(pending) = self.pending_codec.take()
             && let Some(codec) = self.negotiated_codec(&pending)
         {
@@ -1789,7 +1789,7 @@ impl RtpSender {
             packet.marker = last;
             let extensions = &mut packet.extensions;
             extensions.abs_send_time = Some(abs_send_time);
-            extensions.mid = self.mid.clone();
+            extensions.mid.clone_from(&self.mid);
             let twcc_seq = transport.twcc().next(size, now);
             extensions.transport_sequence_number = Some(twcc_seq);
             // Min and max 0 hint the receiver to render frames as soon as possible.

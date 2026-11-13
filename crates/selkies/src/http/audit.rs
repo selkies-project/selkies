@@ -286,7 +286,7 @@ static CURRENT: RwLock<Option<Arc<Audit>>> = RwLock::new(None);
 /// when a URL is set.
 pub fn install(cfg: AuditConfig) -> Option<Arc<Audit>> {
     let sink = (!cfg.url.is_empty()).then(|| Audit::start(cfg));
-    *CURRENT.write() = sink.clone();
+    (*CURRENT.write()).clone_from(&sink);
     sink
 }
 

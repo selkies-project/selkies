@@ -306,7 +306,7 @@ impl Dtls {
         if remote.fingerprints.is_empty() {
             return Err(DtlsError::Handshake("no remote fingerprint".into()));
         }
-        self.expected = remote.fingerprints.clone();
+        self.expected.clone_from(&remote.fingerprints);
         self.is_client = is_client;
         let config = self.build_config(is_client)?;
         let mut endpoint = Endpoint::new(

@@ -892,7 +892,7 @@ impl SessionDescription {
                 password: ice_password.clone(),
                 ice_lite,
             };
-            media.ice_options = ice_options.clone();
+            media.ice_options.clone_from(&ice_options);
             media.host = rtc_media
                 .connection_information
                 .as_ref()

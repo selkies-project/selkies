@@ -1075,11 +1075,11 @@ impl WsService {
             if d.rate_control_mode == sanitized {
                 return;
             }
-            d.rate_control_mode = sanitized.clone();
+            d.rate_control_mode.clone_from(&sanitized);
             let active = d.video_active;
             let seed = Self::capped_seed(d);
             if display_id == PRIMARY_DISPLAY {
-                st.seeds.rc_mode = sanitized.clone();
+                st.seeds.rc_mode.clone_from(&sanitized);
             }
             let layout = st.layouts.get(display_id).copied();
             drop(st);
@@ -2207,7 +2207,7 @@ impl WsService {
                 d.width = w;
                 d.height = h;
                 if let Some(p) = &s.display_position {
-                    d.position = p.clone();
+                    d.position.clone_from(p);
                 }
             }
             let mut scale_changed = false;
@@ -2835,7 +2835,7 @@ impl WsService {
                 .unwrap_or(active.as_str());
             warn!(target: "ws", "Display '{display_id}' streams {label} as '{demoted}': no encoder served '{encoder}'.");
             if let Some(d) = st.displays.get_mut(display_id) {
-                d.encoder = demoted.clone();
+                d.encoder.clone_from(&demoted);
             }
             if display_id == PRIMARY_DISPLAY {
                 st.seeds.encoder = demoted;
@@ -4565,7 +4565,7 @@ fn seed_session(
     fallback_reset: bool,
 ) {
     if s.encoder.is_some() && !fallback_reset && !d.encoder_fallback {
-        seeds.encoder = d.encoder.clone();
+        seeds.encoder.clone_from(&d.encoder);
         settings_mut().set_str("encoder", d.encoder.clone());
         settings_mut().encoder_client_set = true;
     }
@@ -4613,7 +4613,7 @@ fn seed_session(
         seeds.video_paintover_burst_frames = d.video_paintover_burst_frames;
     }
     if s.rate_control_mode.is_some() && settings().enable_rate_control().on {
-        seeds.rc_mode = d.rate_control_mode.clone();
+        seeds.rc_mode.clone_from(&d.rate_control_mode);
     }
 }
 

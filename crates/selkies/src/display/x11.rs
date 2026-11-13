@@ -632,7 +632,7 @@ impl X11 {
             } else {
                 ""
             };
-            state.pool.on_output = oi.modes.clone();
+            state.pool.on_output.clone_from(&oi.modes);
             let (mode_id, rate) = mode_at(
                 self,
                 &mut state.pool,

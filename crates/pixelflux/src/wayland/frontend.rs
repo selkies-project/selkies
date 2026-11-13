@@ -2595,7 +2595,7 @@ impl SelectionHandler for AppState {
         let chosen = source.map_or_else(Vec::new, |source| clipboard_flavors(&source.mime_types()));
         // Recorded even with no callback armed, so SetClipboardCallback can re-stage a
         // read of a copy made while nobody was listening.
-        self.current_selection_mimes = chosen.clone();
+        self.current_selection_mimes.clone_from(&chosen);
         if crate::SHUTDOWN.load(Ordering::Relaxed) {
             return;
         }

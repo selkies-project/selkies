@@ -602,7 +602,7 @@ impl SessionScreens {
             .into_iter()
             .collect();
         wanted.sort_by_key(|d| (wayland_output_id(Some(d)), d.clone()));
-        *self.display_order.lock() = wanted.clone();
+        (*self.display_order.lock()).clone_from(&wanted);
         if self.backend.is_none() || !self.control_available() || Self::host_capture() {
             return;
         }

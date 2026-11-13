@@ -1041,7 +1041,7 @@ impl Manager {
         if outputs == self.outputs {
             return;
         }
-        self.outputs = outputs.clone();
+        self.outputs.clone_from(&outputs);
         let primary = outputs.iter().find(|o| o.primary).or(outputs.first()).copied();
         let props = self.props();
         if let Some(p) = primary {

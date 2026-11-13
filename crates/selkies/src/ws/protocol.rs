@@ -355,7 +355,7 @@ impl ClientSettings {
         };
         for key in keys {
             match *key {
-                "encoder" => out.encoder = self.encoder.clone(),
+                "encoder" => out.encoder.clone_from(&self.encoder),
                 "framerate" => out.framerate = self.framerate,
                 "video_crf" => out.video_crf = self.video_crf,
                 "video_fullcolor" => out.video_fullcolor = self.video_fullcolor,
@@ -373,7 +373,7 @@ impl ClientSettings {
                     out.video_paintover_burst_frames = self.video_paintover_burst_frames
                 }
                 "video_bitrate" => out.video_bitrate = self.video_bitrate,
-                "rate_control_mode" => out.rate_control_mode = self.rate_control_mode.clone(),
+                "rate_control_mode" => out.rate_control_mode.clone_from(&self.rate_control_mode),
                 "use_cpu" => out.use_cpu = self.use_cpu,
                 "cpu_encode_threading" => out.cpu_encode_threading = self.cpu_encode_threading,
                 "audio_bitrate" => out.audio_bitrate = self.audio_bitrate,

@@ -2391,7 +2391,7 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
             Ok((session, core)) => {
                 inner.epoch += 1;
                 if session.restore_token.is_some() {
-                    inner.restore_token = session.restore_token.clone();
+                    inner.restore_token.clone_from(&session.restore_token);
                 }
                 // Prefer libei where the backend offers it: the injector is kept only once its
                 // handshake binds a device, and a successful ConnectToEIS makes the session

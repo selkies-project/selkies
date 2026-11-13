@@ -3267,7 +3267,7 @@ impl Desktop {
             .filter_map(|(index, rect)| self.toplevels.get(*index).map(|t| (t.id, *rect)))
             .collect();
         if rects != self.published_tasks {
-            self.published_tasks = rects.clone();
+            self.published_tasks.clone_from(&rects);
             self.requests.push(Request::TaskbarRects {
                 surface: self.current_bar_surface(),
                 rects,
@@ -3346,7 +3346,7 @@ impl Desktop {
         } else {
             visible.clone()
         };
-        self.panel_visible = visible.clone();
+        self.panel_visible.clone_from(&visible);
         self.panel_pix = Some(pix);
         self.publish_task_rects();
         Some(BarFrame {
@@ -3581,7 +3581,7 @@ impl Desktop {
         }
         let title = self.files.windows[index].title();
         if self.files.windows[index].shown_title != title {
-            self.files.windows[index].shown_title = title.clone();
+            self.files.windows[index].shown_title.clone_from(&title);
             self.requests.push(Request::SetTitle { id, title });
         }
         let whole = Rect::new(0, 0, geometry.width, geometry.height);

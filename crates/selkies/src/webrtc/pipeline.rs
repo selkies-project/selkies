@@ -783,7 +783,7 @@ impl MediaPipeline for Handle {
         let restart = match key {
             "rate_control_mode" => p.store(|c| {
                 let changed = c.rc_mode != as_str;
-                c.rc_mode = as_str.clone();
+                c.rc_mode.clone_from(&as_str);
                 changed
             }),
             "use_cpu" => p.store(|c| {
@@ -808,7 +808,7 @@ impl MediaPipeline for Handle {
             }),
             "encoder" => p.store(|c| {
                 let changed = c.encoder != as_str;
-                c.encoder = as_str.clone();
+                c.encoder.clone_from(&as_str);
                 changed
             }),
             "video_crf" => {

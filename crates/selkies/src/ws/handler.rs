@@ -777,7 +777,7 @@ impl Connection {
             }
         }
         self.display_id = Some(display_id.clone());
-        self.tab_id = parsed.tab_id.clone();
+        self.tab_id.clone_from(&parsed.tab_id);
         if display_id == PRIMARY_DISPLAY && !self.visibility_asked {
             // Its tab hidden may hand the display to a page beside it; an older page ignores it.
             self.visibility_asked = true;

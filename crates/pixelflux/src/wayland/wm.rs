@@ -723,7 +723,7 @@ pub fn outputs_changed(state: &mut AppState) {
         return;
     }
     if let Some(wm) = state.wm.as_mut() {
-        wm.outputs = outputs.clone();
+        wm.outputs.clone_from(&outputs);
     }
     dispatch(state, Event::Outputs(outputs));
     mark_dirty(state);

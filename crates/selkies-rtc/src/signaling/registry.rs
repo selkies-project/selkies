@@ -637,7 +637,7 @@ impl PeerRegistry {
             peer.socket.close(1000, "Resumed on a new connection.");
         }
         peer.socket = Arc::clone(socket);
-        peer.raddr = raddr.to_owned();
+        raddr.clone_into(&mut peer.raddr);
         peer.host = host.map(str::to_owned);
         let held = std::mem::take(&mut peer.held);
         Some((peer_id, partner, held))

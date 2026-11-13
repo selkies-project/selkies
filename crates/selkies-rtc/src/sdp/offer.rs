@@ -348,8 +348,10 @@ impl Session {
         );
         media.direction = Some(direction);
         media.msid = Some(format!("{} {}", self.stream_id, transceiver.track_id));
-        media.codecs = transceiver.codecs.clone();
-        media.header_extensions = transceiver.header_extensions.clone();
+        media.codecs.clone_from(&transceiver.codecs);
+        media
+            .header_extensions
+            .clone_from(&transceiver.header_extensions);
         media.mid = Some(mid.to_owned());
         media.rtcp_host = Some("0.0.0.0".to_owned());
         media.rtcp_port = Some(9);
@@ -415,7 +417,7 @@ impl Session {
     }
 
     fn add_transport(&self, media: &mut MediaDescription, transport: &LocalTransport) {
-        media.ice_candidates = transport.candidates.clone();
+        media.ice_candidates.clone_from(&transport.candidates);
         media.ice_candidates_complete = transport.candidates_complete;
         media.ice = IceParameters {
             ice_lite: self.ice_lite,
@@ -818,7 +820,7 @@ impl Session {
                 {
                     let transceiver = &mut self.transceivers[index];
                     if transceiver.mid.is_none() {
-                        transceiver.mid = media.mid.clone();
+                        transceiver.mid.clone_from(&media.mid);
                         transceiver.mline_index = Some(i);
                     }
                     if matches!(kind, SdpType::Answer | SdpType::Pranswer) {
@@ -843,7 +845,7 @@ impl Session {
                 let table = self.table(media_kind);
                 let transceiver = &mut self.transceivers[index];
                 if transceiver.mid.is_none() {
-                    transceiver.mid = media.mid.clone();
+                    transceiver.mid.clone_from(&media.mid);
                     transceiver.mline_index = Some(i);
                 }
                 let common = filter_preferred_codecs(
@@ -867,7 +869,7 @@ impl Session {
                 } else {
                     transceiver.offer_direction = Some(direction);
                 }
-                transceiver.remote_mid = media.mid.clone();
+                transceiver.remote_mid.clone_from(&media.mid);
                 transceiver.remote_encodings = remote_encodings(media, &transceiver.codecs);
                 negotiated.transceivers.push(index);
                 negotiated_section = true;
@@ -875,7 +877,7 @@ impl Session {
                 self.add_data_section();
                 if let Some(sctp) = self.sctp.as_mut() {
                     if sctp.mid.is_none() {
-                        sctp.mid = media.mid.clone();
+                        sctp.mid.clone_from(&media.mid);
                         sctp.mline_index = Some(i);
                     }
                     if media.profile == "DTLS/SCTP" {

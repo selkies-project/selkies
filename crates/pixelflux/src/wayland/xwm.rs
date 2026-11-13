@@ -1016,7 +1016,7 @@ impl XwmHandler for AppState {
             SelectionTarget::Clipboard => {
                 let flavors = crate::wayland::frontend::clipboard_flavors(&mime_types);
                 set_data_device_selection(&dh, &self.seat, mime_types, Arc::new(Vec::new()));
-                self.current_selection_mimes = flavors.clone();
+                self.current_selection_mimes.clone_from(&flavors);
                 if self.clipboard_callback.is_some() {
                     self.pending_clipboard_read = Some(flavors);
                 }
