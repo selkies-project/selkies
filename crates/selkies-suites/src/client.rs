@@ -257,6 +257,31 @@ impl Client {
             .collect()
     }
 
+    /// The last text message that `wanted` accepts.
+    pub fn last_text(&self, wanted: impl Fn(&str) -> bool) -> Option<String> {
+        let inbox = self.inbox.lock().unwrap_or_else(PoisonError::into_inner);
+        inbox.texts.iter().rfind(|text| wanted(text)).cloned()
+    }
+
+    /// The newest video frame to arrive: its id and when it came.
+    pub fn newest_frame(&self) -> Option<(u16, Instant)> {
+        let inbox = self.inbox.lock().unwrap_or_else(PoisonError::into_inner);
+        inbox
+            .binaries
+            .iter()
+            .rev()
+            .find_map(|binary| Some((binary.video_frame_id()?, binary.at)))
+    }
+
+    /// How many binary messages have arrived: a mark for [`Client::binaries`].
+    pub fn binary_count(&self) -> usize {
+        self.inbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .binaries
+            .len()
+    }
+
     /// The binary messages that have arrived from index `mark` on.
     pub fn binaries(&self, mark: usize) -> Vec<Binary> {
         let inbox = self.inbox.lock().unwrap_or_else(PoisonError::into_inner);

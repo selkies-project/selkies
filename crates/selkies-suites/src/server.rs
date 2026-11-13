@@ -261,6 +261,14 @@ impl Server {
     ///
     /// When the server exits or stays silent through its startup; the message carries its log.
     pub async fn ready(&self) {
+        if let Err(why) = self.came_up().await {
+            panic!("{why}:\n{}", self.log_tail());
+        }
+    }
+
+    /// Wait for `/api/status`; the error says how the server failed to come up, for a suite
+    /// whose finding that is.
+    pub async fn came_up(&self) -> Result<(), String> {
         let deadline = Instant::now() + STARTUP;
         loop {
             let answer = http::request(
@@ -273,19 +281,16 @@ impl Server {
             )
             .await;
             if matches!(answer, Ok(ref response) if response.status == 200) {
-                return;
+                return Ok(());
             }
             if let Some(status) = self.exited() {
-                panic!(
-                    "selkies exited during startup ({status}):\n{}",
-                    self.log_tail()
-                );
+                return Err(format!("selkies exited during startup ({status})"));
             }
-            assert!(
-                Instant::now() < deadline,
-                "selkies did not answer /api/status within {STARTUP:?}:\n{}",
-                self.log_tail()
-            );
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "selkies did not answer /api/status within {STARTUP:?}"
+                ));
+            }
             tokio::time::sleep(POLL).await;
         }
     }
@@ -514,6 +519,53 @@ pub fn output_within(command: &mut Command, limit: Duration) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// What a command run to its end left: its exit status and both streams.
+pub struct Ran {
+    pub status: std::process::ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run `command` to its end within `limit`, its streams kept in the work directory so no pipe
+/// can fill; the error is that it could not start or was still running at the limit (it is
+/// killed then).
+pub fn run_within(command: &mut Command, limit: Duration) -> Result<Ran, String> {
+    static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let kept = |stream: &str| workdir().join(format!("{}-run{run}.{stream}", suite()));
+    let (out, err) = (kept("stdout"), kept("stderr"));
+    let sink = |path: &Path| File::create(path).map_err(|e| format!("{}: {e}", path.display()));
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(sink(&out)?)
+        .stderr(sink(&err)?)
+        .spawn()
+        .map_err(|e| format!("did not start: {e}"))?;
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("still running after {limit:?}"));
+            }
+        }
+    };
+    let read = |path: &Path| {
+        String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned()
+    };
+    let ran = Ran {
+        status,
+        stdout: read(&out),
+        stderr: read(&err),
+    };
+    let _ = std::fs::remove_file(out);
+    let _ = std::fs::remove_file(err);
+    Ok(ran)
 }
 
 /// `pactl` with `args`, bounded.
