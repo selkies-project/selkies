@@ -70,14 +70,25 @@ class CutRelay:
         self.refuse_until = 0.0
         self.hold_video_until = 0.0
         self.ready = threading.Event()
-        threading.Thread(target=self._run, daemon=True).start()
-        self.ready.wait(10)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        if not self.ready.wait(10):
+            raise RuntimeError(f"the relay could not listen on port {listen}")
 
     def _run(self) -> None:
         asyncio.set_event_loop(self.loop)
-        self.loop.run_until_complete(asyncio.start_server(self._handle, "127.0.0.1", self.listen))
+        self.server = self.loop.run_until_complete(
+            asyncio.start_server(self._handle, "127.0.0.1", self.listen))
         self.ready.set()
         self.loop.run_forever()
+        self.server.close()
+        self.loop.run_until_complete(self.server.wait_closed())
+
+    def stop(self) -> None:
+        """Stop listening, so a later relay can take the port."""
+        self.cut()
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(10)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         if time.monotonic() < self.refuse_until:
@@ -557,6 +568,7 @@ def session(engine: str) -> "H.Results":
             painter.kill()
         H.pulse_unload(tone)
         H.server_stop()
+        relay.stop()
     res.summary()
     return res
 

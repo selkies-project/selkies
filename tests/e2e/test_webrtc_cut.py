@@ -190,6 +190,7 @@ def session(engine: str) -> "H.Results":
             painter.kill()
         H.pulse_unload(tone)
         H.server_stop()
+        relay.stop()
     res.summary()
     return res
 
