@@ -1174,6 +1174,8 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
     let lastSyncedSig: any = null;
     let lastReencodeSig: any = null;
     let lastLocalSig: any = null;
+    /** What the local clipboard was last seen to hold before a push the user asked for. */
+    let seenBeforeExplicit: any = null;
     // The text of the value last synced, either way, when it is known: a local read whose text is that is
     // the same value come back in the engine's own form (its markup rewrapped, an image beside it), no copy.
     let lastSyncedText: any = null;
@@ -1268,12 +1270,15 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
     /**
      * Records what the local clipboard holds now, from a read or from a write
      * made here (`null` when its form there is unknown).
-     * @returns Whether that differs from what it held last time; the
-     *     first look after a push the user asked for finds what the clipboard
-     *     held before it, which is no change.
+     * @returns Whether that differs from what it held last time. The
+     *     first look after a push the user asked for is a change only where
+     *     it differs from what the clipboard was last seen to hold before
+     *     the push: unseen until then, it is taken to predate the push.
      */
     function noteLocal(s: any): boolean {
-        const changed = lastLocalSig !== PREDATES_EXPLICIT && (s === null || s !== lastLocalSig);
+        const changed = lastLocalSig === PREDATES_EXPLICIT
+            ? seenBeforeExplicit !== null && s !== null && s !== seenBeforeExplicit
+            : s === null || s !== lastLocalSig;
         lastLocalSig = s;
         return changed;
     }
@@ -1285,6 +1290,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * delivers it has never seen it.
      */
     function noteExplicit(): void {
+        if (lastLocalSig !== PREDATES_EXPLICIT) seenBeforeExplicit = lastLocalSig;
         lastLocalSig = PREDATES_EXPLICIT;
     }
 

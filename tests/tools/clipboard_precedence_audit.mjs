@@ -142,6 +142,25 @@ clipboard.text = 'what the user copied before';
     clipboard.text = 'what the user copied before';
 }
 
+// The clipboard was seen before the push (a paste sent it), and the user
+// copies something else after it: the first read after the push is that copy.
+{
+    const { sender: s, sent } = sender();
+    await s.readAndSend();
+    await s.sendExplicit('typed into the clipboard box', 'text/plain');
+    clock += EXPLICIT_PRECEDENCE_MS + 1;
+    await s.readAndSend();
+    check('the clipboard seen before a push is not sent over it',
+          sent.length === 2 && sent[1].data === 'typed into the clipboard box', JSON.stringify(sent));
+    await s.sendExplicit('typed into the clipboard box again', 'text/plain');
+    clipboard.text = 'copied after the box';
+    clock += EXPLICIT_PRECEDENCE_MS + 1;
+    await s.readAndSend();
+    check('the first copy made after a push reaches the session',
+          sent.length === 4 && sent[3].data === 'copied after the box', JSON.stringify(sent));
+    clipboard.text = 'what the user copied before';
+}
+
 // The session took a newer value whose local write never landed (refused,
 // withdrawn): the local clipboard is unchanged and must not go back over it.
 {
