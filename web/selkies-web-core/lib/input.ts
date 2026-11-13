@@ -298,6 +298,16 @@ const TRACKPAD_HANDOFF_MS = 200;
  */
 const LONG_PRESS_MS = 750;
 
+/** How far a long press may drift and still right-click, squared, in CSS pixels. */
+const LONG_PRESS_MAX_MOVEMENT_SQ = 15 * 15;
+
+/**
+ * How late a long press's timer may run and still right-click, in milliseconds,
+ * and how long one that ran later waits for a lift still on its way
+ * (`Input._armLongPress`).
+ */
+const LONG_PRESS_SETTLE_MS = 50;
+
 /**
  * Trackpad pointer acceleration, on the finger's speed in CSS pixels per
  * millisecond, which does not depend on how often the digitizer reports:
@@ -1816,6 +1826,7 @@ export class Input {
     inputAttached!: boolean;
     _longPressTimer!: number | null;
     _longPressTouchIdentifier!: number | null;
+    _longPressSince!: number;
     _sinkMirrors!: Record<string, HTMLElement | null>;
     _lastSinkRect!: DOMRect;
     _lastCursorDensity!: number | null;
@@ -4584,7 +4595,6 @@ export class Input {
         const now = event.timeStamp;
         let preventDefault = false;
         let activeTouchMoved = false;
-        const LONG_PRESS_MAX_MOVEMENT_SQ = 15 * 15;
         const TAP_THRESHOLD_DISTANCE_SQ_LOGICAL = this._TAP_THRESHOLD_DISTANCE_SQ;
 
         if (type === 'touchstart') {
@@ -4616,36 +4626,8 @@ export class Input {
                 const touchData = this._activeTouches.get(singleTouchID)!;
                 const currentTouchPoint = { clientX: touchData.currentX, clientY: touchData.currentY };
                 this._calculateTouchCoordinates(currentTouchPoint);
-                const physicalXAtPressStart = this.x;
-                const physicalYAtPressStart = this.y;
                 if (touchData && !touchData.longPressCompleted) {
-                    this._longPressTouchIdentifier = singleTouchID;
-                    if (this._longPressTimer) clearTimeout(this._longPressTimer);
-                    this._longPressTimer = setTimeout((): void => {
-                        const currentActiveTouchData = this._activeTouches.get(this._longPressTouchIdentifier!);
-                        if (currentActiveTouchData && this._activeTouches.size === 1 &&
-                            this._longPressTouchIdentifier === currentActiveTouchData.identifier &&
-                            !this._isTwoFingerGesture && this._activeTouchIdentifier === null &&
-                            !currentActiveTouchData.longPressCompleted) {
-                            const dx = currentActiveTouchData.currentX - currentActiveTouchData.startX;
-                            const dy = currentActiveTouchData.currentY - currentActiveTouchData.startY;
-                            const distSq = dx * dx + dy * dy;
-                            if (distSq < LONG_PRESS_MAX_MOVEMENT_SQ) {
-                                currentActiveTouchData.longPressCompleted = true;
-                                this.x = physicalXAtPressStart;
-                                this.y = physicalYAtPressStart;
-                                this.buttonMask |= (1 << 2);
-                                this._sendMouseState();
-                                setTimeout((): void => {
-                                    if ((this.buttonMask & (1 << 2)) !== 0) {
-                                        this.buttonMask &= ~(1 << 2);
-                                        this._sendMouseState();
-                                    }
-                                }, 50);
-                            }
-                        }
-                        this._longPressTimer = null;
-                    }, LONG_PRESS_MS);
+                    this._armLongPress(singleTouchID, now);
                 }
             } else {
                 if (this._longPressTimer) { clearTimeout(this._longPressTimer); this._longPressTimer = null; }
@@ -4739,6 +4721,9 @@ export class Input {
                     if (duration < tapMs && deltaDistSq < TAP_THRESHOLD_DISTANCE_SQ_LOGICAL) {
                         this._calculateTouchCoordinates(endedTouch); this.buttonMask |= 1; this._sendMouseState(); preventDefault = true;
                         setTimeout((): void => { this.buttonMask &= ~1; this._sendMouseState(); }, 10);
+                    } else if (identifier === this._longPressTouchIdentifier && now - this._longPressSince >= LONG_PRESS_MS &&
+                               deltaDistSq < LONG_PRESS_MAX_MOVEMENT_SQ) {
+                        this._calculateTouchCoordinates(endedTouch); this._longPressClick(); preventDefault = true;
                     }
                 } else if (!swipeDetected && identifier === this._activeTouchIdentifier) {
                     this._calculateTouchCoordinates(endedTouch); this.buttonMask &= ~1; this._sendMouseState();
@@ -4775,23 +4760,7 @@ export class Input {
                         if (newTouchData && !newTouchData.longPressCompleted) {
                             const pseudoTouch = { clientX: newTouchData.currentX, clientY: newTouchData.currentY, identifier: newSingleTouchID };
                             this._calculateTouchCoordinates(pseudoTouch);
-                            const physicalXAtPressStart = this.x; const physicalYAtPressStart = this.y;
-                            this._longPressTouchIdentifier = newSingleTouchID;
-                            this._longPressTimer = setTimeout((): void => {
-                                const currentActiveTouchData = this._activeTouches.get(this._longPressTouchIdentifier!);
-                                if (currentActiveTouchData && this._activeTouches.size === 1 && this._longPressTouchIdentifier === currentActiveTouchData.identifier && !this._isTwoFingerGesture && this._activeTouchIdentifier === null && !currentActiveTouchData.longPressCompleted) {
-                                    const dx = currentActiveTouchData.currentX - currentActiveTouchData.startX;
-                                    const dy = currentActiveTouchData.currentY - currentActiveTouchData.startY;
-                                    const distSq = dx * dx + dy * dy;
-                                    if (distSq < LONG_PRESS_MAX_MOVEMENT_SQ) {
-                                        currentActiveTouchData.longPressCompleted = true;
-                                        this.x = physicalXAtPressStart; this.y = physicalYAtPressStart;
-                                        this.buttonMask |= (1 << 2); this._sendMouseState();
-                                        setTimeout((): void => { if ((this.buttonMask & (1 << 2)) !== 0) { this.buttonMask &= ~(1 << 2); this._sendMouseState(); } }, 50);
-                                    }
-                                }
-                                this._longPressTimer = null;
-                            }, LONG_PRESS_MS);
+                            this._armLongPress(newSingleTouchID, now);
                         }
                     }
                 } else if (remainingTouchCount !== 1) {
@@ -4803,6 +4772,58 @@ export class Input {
         if (preventDefault && this.element.contains(event.target as Node | null)) {
             event.preventDefault();
         }
+    }
+
+    /**
+     * Arms the long press of the lone touch `identifier`, resting since `since` (an event
+     * timestamp), to right-click at the pointer's current position.
+     *
+     * The timer only knows the page's clock. A main thread busy past it runs the timer late, and
+     * the browser hands the page a lift made meanwhile only once the thread is free again, after
+     * the timer: a quick tap would right-click. So a timer that ran late waits
+     * `LONG_PRESS_SETTLE_MS` more, as often as that wait runs late too, and clicks only if the
+     * finger is still down; a lift handled first decides from its own timestamp
+     * (`_handleTouchEvent`).
+     */
+    _armLongPress(identifier: number, since: number): void {
+        const x = this.x;
+        const y = this.y;
+        this._longPressTouchIdentifier = identifier;
+        this._longPressSince = since;
+        const wait = (ms: number): void => {
+            const due = performance.now() + ms;
+            this._longPressTimer = setTimeout((): void => {
+                this._longPressTimer = null;
+                if (performance.now() - due > LONG_PRESS_SETTLE_MS) {
+                    wait(LONG_PRESS_SETTLE_MS);
+                    return;
+                }
+                const touchData = this._activeTouches.get(identifier);
+                if (!touchData || touchData.longPressCompleted || this._longPressTouchIdentifier !== identifier ||
+                    this._activeTouches.size !== 1 || this._isTwoFingerGesture || this._activeTouchIdentifier !== null) return;
+                const dx = touchData.currentX - touchData.startX;
+                const dy = touchData.currentY - touchData.startY;
+                if (dx * dx + dy * dy >= LONG_PRESS_MAX_MOVEMENT_SQ) return;
+                touchData.longPressCompleted = true;
+                this.x = x;
+                this.y = y;
+                this._longPressClick();
+            }, ms);
+        };
+        if (this._longPressTimer) clearTimeout(this._longPressTimer);
+        wait(LONG_PRESS_MS);
+    }
+
+    /** Clicks the right button at the pointer, the long press of a touch. */
+    _longPressClick(): void {
+        this.buttonMask |= (1 << 2);
+        this._sendMouseState();
+        setTimeout((): void => {
+            if ((this.buttonMask & (1 << 2)) !== 0) {
+                this.buttonMask &= ~(1 << 2);
+                this._sendMouseState();
+            }
+        }, 50);
     }
 
     /** Starts a two-finger gesture at two touch points, in client coordinates. */

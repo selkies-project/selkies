@@ -50,6 +50,14 @@ function advance(ms) {
     now = end;
 }
 
+/** Holds the main thread for `ms`: the timers that fell due meanwhile run late, as it frees. */
+function stall(ms) {
+    now += ms;
+    const due = timers.filter((t) => t.at <= now).sort((a, b) => a.at - b.at || a.id - b.id);
+    timers = timers.filter((t) => t.at > now);
+    for (const t of due) t.fn();
+}
+
 // --- a page with nothing but an overlay element -----------------------------
 const element = {
     style: { setProperty() {} },
@@ -624,6 +632,34 @@ function pencilTap(input, x, y) {
     const left = leftTransitions(sent).map(([, s]) => s).join(',');
     const right = leftTransitions(sent, 4).map(([, s]) => s).join(',');
     check('direct touch: one rested past the long press is a right click, and no left one',
+        right === 'down,up' && left === '', `right ${right}, left ${left}`);
+}
+{
+    // The main thread is busy past the long press, and its timer runs before the handler of a
+    // lift that came long before it
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    fire(input, 'touchstart', [t], [t]);
+    const lifted = now + 100;
+    stall(900);
+    fire(input, 'touchend', [t], [], lifted);
+    advance(1000);
+    const left = leftTransitions(sent).map(([, s]) => s).join(',');
+    const right = leftTransitions(sent, 4).map(([, s]) => s).join(',');
+    check('direct touch: a tap lifted while the page is busy past the long press clicks, and no right one',
+        left === 'down,up' && right === '', `left ${left}, right ${right}`);
+}
+{
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    fire(input, 'touchstart', [t], [t]);
+    const lifted = now + 900;
+    stall(2000);
+    fire(input, 'touchend', [t], [], lifted);
+    advance(1000);
+    const left = leftTransitions(sent).map(([, s]) => s).join(',');
+    const right = leftTransitions(sent, 4).map(([, s]) => s).join(',');
+    check('direct touch: a long press lifted while the page is busy is a right click, and no left one',
         right === 'down,up' && left === '', `right ${right}, left ${left}`);
 }
 {
