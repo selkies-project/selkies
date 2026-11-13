@@ -8979,10 +8979,6 @@ class WorkerWebSocket {
             if (wanted !== '1') stopMicrophoneCapture();
             else if (!micDemandRefused) startMicrophoneCapture(true);
           }
-        } else {
-          if (window.webrtcInput && window.webrtcInput.on_message && !isSharedMode) {
-            window.webrtcInput.on_message(event.data);
-          }
         }
       }
     }
