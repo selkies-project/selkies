@@ -114,7 +114,7 @@ import type { PrintJobs } from './lib/print-jobs.ts';
 import type { StreamInfo, StreamSample } from './lib/stream-stats.ts';
 import type { VideoWatch } from './lib/present-meter.ts';
 import type { CandidateStats, CodecStats, ConnectionStats, PeerConfig } from './lib/webrtc.ts';
-import type { DisplayLayouts } from './lib/input.ts';
+import type { DisplayLayouts, RoleVerdict } from './lib/input.ts';
 import type { FramerateSpan } from './lib/display-refresh.ts';
 import type { ServerSettingEntry } from './lib/conditional-settings.ts';
 
@@ -495,7 +495,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	let detectedSharedModeType = null;
 	let playerInputTargetIndex: number | undefined = 0;
 	let clientRole: string | null = null;
-	let clientSlot: number | null = null;
+	let clientSlot: number | number[] | null = null;
 
 	/** Render and input preferences, persisted under the keys the WebSocket core uses too. */
 	let antiAliasingEnabled = true;
@@ -1960,7 +1960,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 	 * manual resolution, which the server would refuse.
 	 * @param event
 	 */
-	function handleMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
+	function handleMessage(event: Pick<MessageEvent<DashboardMessage>, 'origin' | 'data'>): void {
 		if (event.origin !== window.location.origin) {
 			console.warn("Received message from unexpected origin");
 			return;
@@ -1968,7 +1968,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 		let message = event.data;
 		switch(message.type) {
 			case "statsOpen":
-				streamStats.setOpen(message.open);
+				streamStats.setOpen(message.open!);
 				break;
 			case "setScaleLocally":
 				if (isSharedMode) { break; }
@@ -2006,8 +2006,8 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 					console.log("setManualResolution ignored: the server keeps this display's size (enable_resize=false).");
 					break;
 				}
-				const width = parseInt(message.width, 10);
-				const height = parseInt(message.height, 10);
+				const width = parseInt(message.width as string, 10);
+				const height = parseInt(message.height as string, 10);
 				if (isNaN(width) || width <= 0 || isNaN(height) || height <= 0) {
 					console.error('Received invalid width/height for setManualResolution:', message);
 					break;
@@ -2067,7 +2067,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				break;
 			case "settings":
 				console.log("Received settings msg from dashboard:", message.settings);
-				handleSettingsMessage(message.settings);
+				handleSettingsMessage(message.settings!);
 				break;
 			case "command":
 				if (isSharedMode) { break; }
@@ -2146,7 +2146,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 				break;
 			case 'gamepadControl': {
 				console.log(`Received gamepad control message: enabled=${message.enabled}`);
-				const newGamepadState = message.enabled;
+				const newGamepadState = message.enabled!;
 				pipelinesToggledByUser.add('gamepad');
 				if (isGamepadEnabled !== newGamepadState) {
 					isGamepadEnabled = newGamepadState;
@@ -2162,10 +2162,10 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 					console.log("Shared mode: Clipboard write to server blocked.");
 					break;
 				}
-				localClipboardSender.sendExplicit(message.text);
+				localClipboardSender.sendExplicit(message.text!);
 				break;
 			case 'printRequest':
-				printDocument(message.url);
+				printDocument(message.url!);
 				break;
 			case 'clipboardCopySecret':
 				incomingClipboard.copySecret();
@@ -2232,7 +2232,7 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 			}
 			case 'setSynth':
 				if (input && typeof input.setSynth === 'function') {
-					input.setSynth(message.value);
+					input.setSynth(message.value as boolean);
 				}
 				break;
 			case 'showVirtualKeyboard': {
@@ -3611,9 +3611,9 @@ export default function webrtc(): {initialize: () => void, cleanup: () => void} 
 					forwardAppsEvent(action);
 				} else if (action.startsWith('auth_success,') || action.startsWith('role_update,')) {
 					const verdict = action.slice(action.indexOf(',') + 1);
-					let perms;
+					let perms: RoleVerdict;
 					try {
-						perms = JSON.parse(verdict);
+						perms = JSON.parse(verdict) as RoleVerdict;
 					} catch (e) {
 						console.error('Failed to parse role verdict:', e);
 						return;

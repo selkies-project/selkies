@@ -157,10 +157,11 @@ import { forwardAppsEvent } from './lib/app-commands.ts';
 import type { ClipboardDigest, ClipboardSkip, LocalClipboardSender } from './lib/clipboard-sync.ts';
 import type { DisplayRefreshWatch } from './lib/display-refresh.ts';
 import type { PresentFigures, VideoWatch } from './lib/present-meter.ts';
-import type { DisplayLayouts } from './lib/input.ts';
+import type { DisplayLayouts, RoleVerdict } from './lib/input.ts';
 import type { EncoderBackends, ServerSettingEntry } from './lib/conditional-settings.ts';
 import type { FramerateSpan } from './lib/display-refresh.ts';
 import type { StreamInfo, StreamSample } from './lib/stream-stats.ts';
+import type { CursorData, DisplayConfig, PrintDocument } from './lib/webrtc.ts';
 
 installAuthGuard();
 installSessionCookie();
@@ -289,6 +290,37 @@ interface SocketClose {
   wasClean?: boolean;
 }
 
+/** A JSON message from the server on the session socket, by its `type`. */
+type ServerMessage =
+  | { type: 'stream_info'; info: StreamInfo }
+  | { type: 'stream_stats'; stats: StreamSample }
+  | { type: 'display_settings' | 'server_settings'; settings: Record<string, ServerSettingEntry> }
+  | { type: 'server_apps'; apps?: unknown }
+  | ({ type: 'print_document' } & PrintDocument)
+  | { type: 'pipeline_status'; video?: boolean; audio?: boolean }
+  | { type: 'stream_resolution'; displayId?: string; width: number | string; height: number | string };
+
+/** What the video worker posts to the page; `ack` alone answers a chunk the page handed it. */
+type VideoWorkerMessage = { ack?: boolean } & (
+  | { type?: undefined }
+  | { type: 'error' | 'presented' | 'decoderError' }
+  | { type: 'needKeyframe'; reason: string }
+  | { type: 'lostFrame'; id: number }
+  | { type: 'decodePace'; fps: number | null }
+  | { type: 'decodeStats'; bytes: number; decodeMs: number; frames: number; shown: PresentFigures }
+  | { type: 'decodeFacts'; format: VideoPixelFormat | null | undefined; hardware: boolean | null }
+  | { type: 'wireStats'; chunks: number; frames: number; presents?: number; lastId: number; rows?: Record<string, number>; gen: number }
+  | { type: 'wireDims'; w: number; h: number }
+  | { type: 'mode'; mode: string; jpegDecode?: boolean; track?: MediaStreamTrack }
+);
+
+/** What the worker-held socket's worker posts to the page. */
+type SocketWorkerMessage =
+  | { type: 'message'; data: string | ArrayBuffer; at?: number }
+  | { type: 'buffered'; amount: number }
+  | { type: 'audioTick' | 'open' | 'error' }
+  | ({ type: 'close' } & SocketClose);
+
 /** A decoded JPEG stripe: a frame or a bitmap, closed once drawn, or an image, which has nothing to close. */
 type StripeImage =
   | (VideoFrame & { width?: undefined; height?: undefined })
@@ -330,7 +362,7 @@ interface SessionSocket {
 let websocket: SessionSocket | null;
 let clientMode: string | null = null;
 let clientRole: string | null = null;
-let clientSlot: number | null = null;
+let clientSlot: number | number[] | null | undefined = null;
 let isTokenAuthMode = false;
 let audioContext: AudioContext | null;
 let audioWorkletNode: AudioWorkletNode | null;
@@ -1261,7 +1293,7 @@ const gamepad = {
  * pixel format of its frames and whether the engine has a hardware decoder
  * for its configuration.
  */
-const workerDecode = { format: undefined, hardware: null };
+const workerDecode: { format: VideoPixelFormat | null | undefined; hardware: boolean | null } = { format: undefined, hardware: null };
 /**
  * The same for the page's own full-frame decoder, which serves the stream
  * where the worker does not decode, with its decode figures, gathered only
@@ -2866,7 +2898,7 @@ function ensureVideoWorker(): boolean {
     videoWorkerInFlight = 0;
     wireSocketToVideoWorker();
     videoWorker.onerror = (e: ErrorEvent): void => { console.warn('video worker error:', e && e.message); deactivateVideoWorker(); };
-    videoWorker.onmessage = (e: MessageEvent): void => {
+    videoWorker.onmessage = (e: MessageEvent<VideoWorkerMessage>): void => {
       const m = e.data;
       if (!m) return;
       if (m.ack) { if (videoWorkerInFlight > 0) videoWorkerInFlight--; return; }
@@ -4477,7 +4509,7 @@ function ensureStripeWorker(): boolean {
   }
   console.info('[Selkies] JPEG stripes: compositing on an OffscreenCanvas in a worker.');
   stripeWorker.onerror = (): void => deactivateStripeWorker();
-  stripeWorker.onmessage = (ev: MessageEvent): void => {
+  stripeWorker.onmessage = (ev: MessageEvent<{ type: string; bitmap: ImageBitmap; at: number } | null>): void => {
     const m = ev.data;
     if (!m || m.type !== 'frame') return;
     if (canvasContext && canvas && canvas.width > 0 && canvas.height > 0) {
@@ -5288,7 +5320,7 @@ function postSidebarButtonUpdate(): void {
  * bug.
  * @param event
  */
-function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
+function receiveMessage(event: Pick<MessageEvent<DashboardMessage>, 'origin' | 'data'>): void {
   if (event.origin !== window.location.origin) {
     console.warn(`Received message from unexpected origin: ${event.origin}. Expected ${window.location.origin}. Ignoring.`);
     return;
@@ -5322,7 +5354,7 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
       // Accepted for frontends to signal; the core has nothing to throttle.
       break;
     case 'statsOpen':
-      streamStats.setOpen(message.open);
+      streamStats.setOpen(message.open!);
       break;
     case 'setScaleLocally':
       if (isSharedMode) {
@@ -5343,7 +5375,7 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
       break;
     case 'setSynth':
       if (window.webrtcInput && typeof window.webrtcInput.setSynth === 'function') {
-        window.webrtcInput.setSynth(message.value);
+        window.webrtcInput.setSynth(message.value as boolean);
       }
       break;
     case 'showVirtualKeyboard': {
@@ -5464,8 +5496,8 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
         console.log("setManualResolution ignored: the server keeps this display's size (enable_resize=false).");
         break;
       }
-      const width = parseInt(message.width, 10);
-      const height = parseInt(message.height, 10);
+      const width = parseInt(message.width as string, 10);
+      const height = parseInt(message.height as string, 10);
       if (isNaN(width) || width <= 0 || isNaN(height) || height <= 0) {
         console.error('Received invalid width/height for setManualResolution:', message);
         break;
@@ -5528,7 +5560,7 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
       break;
     case 'settings':
       console.log('Received settings message:', message.settings);
-      handleSettingsMessage(message.settings);
+      handleSettingsMessage(message.settings!);
       break;
     case 'getStats':
       console.log('Received getStats message.');
@@ -5540,10 +5572,10 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
         console.log("Shared mode: Clipboard write to server blocked.");
         break;
       }
-      sendExplicitClipboard(message.text);
+      sendExplicitClipboard(message.text!);
       break;
     case 'printRequest':
-      printDocument(message.url);
+      printDocument(message.url!);
       break;
     case 'clipboardCopySecret':
       incomingClipboard.copySecret();
@@ -5599,7 +5631,7 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
     case 'pipelineControl': {
       console.log(`Received pipeline control message: pipeline=${message.pipeline}, enabled=${message.enabled}`);
       const pipeline = message.pipeline;
-      const desiredState = message.enabled;
+      const desiredState = message.enabled!;
       let wsMessage = '';
 
       if (pipeline === 'video') {
@@ -5736,7 +5768,7 @@ function receiveMessage(event: Pick<MessageEvent, 'origin' | 'data'>): void {
     }
     case 'gamepadControl': {
       console.log(`Received gamepad control message: enabled=${message.enabled}`);
-      const newGamepadState = message.enabled;
+      const newGamepadState = message.enabled!;
       pipelinesToggledByUser.add('gamepad');
       if (isGamepadEnabled !== newGamepadState) {
         isGamepadEnabled = newGamepadState;
@@ -6936,7 +6968,7 @@ class WorkerWebSocket {
     const workerURL = URL.createObjectURL(blob);
     this._worker = new Worker(workerURL);
     URL.revokeObjectURL(workerURL);
-    this._worker.onmessage = (e: MessageEvent): void => {
+    this._worker.onmessage = (e: MessageEvent<SocketWorkerMessage>): void => {
       const m = e.data;
       if (m.type === 'message') {
         const ev = { data: m.data, at: m.at };
@@ -7496,7 +7528,7 @@ class WorkerWebSocket {
       });
       audioWorkletProcessorPort = audioWorkletNode.port;
       wireDecoderToWorklet();
-      audioWorkletProcessorPort.onmessage = (event: MessageEvent): void => {
+      audioWorkletProcessorPort.onmessage = (event: MessageEvent<{ type: string; size: number; durationMs: number; underrunSamples?: number; droppedOldest?: number; level?: number }>): void => {
         if (event.data.type === 'audioBufferSize') {
             window.currentAudioBufferSize = event.data.size;
             window.currentAudioBufferDuration = event.data.durationMs;
@@ -7527,7 +7559,7 @@ class WorkerWebSocket {
       URL.revokeObjectURL(audioDecoderWorkerURL);
       wireDecoderToWorklet();
       wireSocketToDecoder();
-      audioDecoderWorker.onmessage = (event: MessageEvent): void => {
+      audioDecoderWorker.onmessage = (event: MessageEvent<{ type: string; reason?: string; message?: string; wasm?: boolean; pcmBuffer?: ArrayBuffer; quiet?: boolean }>): void => {
         const {
           type,
           reason,
@@ -8312,10 +8344,10 @@ class WorkerWebSocket {
         return;
       }
       if (event.data.startsWith('AUTH_SUCCESS,')) {
-        let permissions;
+        let permissions: RoleVerdict;
         try {
           const payloadStr = event.data.substring(13);
-          permissions = JSON.parse(payloadStr);
+          permissions = JSON.parse(payloadStr) as RoleVerdict;
         } catch (e) {
           console.error("Failed to parse AUTH_SUCCESS message:", e);
           return;
@@ -8388,10 +8420,10 @@ class WorkerWebSocket {
         }
       }
       if (event.data.startsWith('ROLE_UPDATE,')) {
-        let newPermissions;
+        let newPermissions: RoleVerdict;
         try {
           const payloadStr = event.data.substring(12);
-          newPermissions = JSON.parse(payloadStr);
+          newPermissions = JSON.parse(payloadStr) as RoleVerdict;
         } catch (e) {
           console.error("Failed to parse ROLE_UPDATE message:", e);
           return;
@@ -8527,9 +8559,9 @@ class WorkerWebSocket {
       }
       else if (clientMode === 'websockets') {
         if (event.data.startsWith('{')) {
-          let obj;
+          let obj: ServerMessage;
           try {
-            obj = JSON.parse(event.data);
+            obj = JSON.parse(event.data) as ServerMessage;
           } catch (e) {
             console.error('Error parsing JSON:', e);
             return;
@@ -8570,7 +8602,7 @@ class WorkerWebSocket {
                   framerate = parseFloat(window['framerate'] as string);
               }
               const fr = obj.settings.framerate;
-              framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max } : null;
+              framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max! } : null;
               followDisplayFramerate('server framerate span');
               if (typeof window['video_fullcolor'] === 'boolean') {
                   video_fullcolor = window['video_fullcolor'];
@@ -8624,10 +8656,10 @@ class WorkerWebSocket {
                 enable_binary_clipboard = ebc.locked ? ebc.value : getBoolParam('enable_binary_clipboard', ebc.value);
               }
               const wce = obj.settings && obj.settings.webcam_encoder;
-              if (wce && WEBCAM_ENCODER_PREFERENCES.includes(wce.value)) {
-                const stored = getStringParam('webcam_encoder', wce.value);
-                webcamEncoderPreference = wce.locked || !WEBCAM_ENCODER_PREFERENCES.includes(stored)
-                  ? wce.value : stored;
+              if (wce && WEBCAM_ENCODER_PREFERENCES.includes(wce.value as string)) {
+                const stored = getStringParam('webcam_encoder', wce.value as string);
+                webcamEncoderPreference = (wce.locked || !WEBCAM_ENCODER_PREFERENCES.includes(stored)
+                  ? wce.value : stored) as string;
               }
               const cssScaling = resolvedCssScaling(obj.settings);
               if (cssScaling !== useCssScaling) {
@@ -8652,15 +8684,15 @@ class WorkerWebSocket {
                   console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
                   handleSettingsMessage(changes, true);
               }
-              if (obj.settings.encoder_backends) encoderBackends = obj.settings.encoder_backends.value || null;
+              if (obj.settings.encoder_backends) encoderBackends = (obj.settings.encoder_backends.value || null) as EncoderBackends | null;
               if (typeof window['encoder'] === 'string') settleServerEncoder(window['encoder'], obj.settings.encoder);
               const serverForcesManual = obj.settings && obj.settings.manual_resolution && obj.settings.manual_resolution.value === true;
 
               if (serverForcesManual || window.manual_resolution) {
                   console.log(`Manual resolution mode active (Server forced: ${serverForcesManual}, Client pref: ${window.manual_resolution}). Switching to manual resize handlers.`);
                   if (serverForcesManual) {
-                      const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value, 10) : 0;
-                      const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value, 10) : 0;
+                      const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value as string, 10) : 0;
+                      const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value as string, 10) : 0;
                       if (serverWidth > 0 && serverHeight > 0) {
                           console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
                           window.manual_resolution = true;
@@ -8732,8 +8764,8 @@ class WorkerWebSocket {
              if (sharedClientState === 'error' || sharedClientState === 'idle') {
                console.log(`Shared mode: Received stream_resolution while in state '${sharedClientState}'. Ignoring.`);
              } else {
-               const physicalNewWidth = parseInt(obj.width, 10);
-               const physicalNewHeight = parseInt(obj.height, 10);
+               const physicalNewWidth = parseInt(obj.width as string, 10);
+               const physicalNewHeight = parseInt(obj.height as string, 10);
 
                if (physicalNewWidth > 0 && physicalNewHeight > 0) {
                  // Shared-mode sizing works in physical stream pixels; the
@@ -8762,8 +8794,8 @@ class WorkerWebSocket {
                }
              }
            } else {
-             const appliedWidth = parseInt(obj.width, 10);
-             const appliedHeight = parseInt(obj.height, 10);
+             const appliedWidth = parseInt(obj.width as string, 10);
+             const appliedHeight = parseInt(obj.height as string, 10);
              if (appliedWidth > 0 && appliedHeight > 0) {
                // The realized resolution can differ from the request (encoder
                // alignment, RandR cell snapping, a rejected mode-set); canvas,
@@ -8800,11 +8832,11 @@ class WorkerWebSocket {
              }
            }
          } else {
-            console.warn(`Unexpected JSON message type:`, obj.type, obj);
+            console.warn(`Unexpected JSON message type:`, (obj as { type?: unknown }).type, obj);
           }
         } else if (event.data.startsWith('cursor,')) {
           try {
-            const cursorData = JSON.parse(event.data.substring(7));
+            const cursorData = JSON.parse(event.data.substring(7)) as CursorData;
             if (window.webrtcInput && typeof window.webrtcInput.updateServerCursor === 'function') {
                 window.webrtcInput.updateServerCursor(cursorData);
             }
@@ -8835,7 +8867,7 @@ class WorkerWebSocket {
             incomingClipboard.single('text/plain', event.data.substring(10), consumeInitClipboardFetch());
         } else if (event.data.startsWith('system,')) {
           try {
-            const systemMsg = JSON.parse(event.data.substring(7));
+            const systemMsg = JSON.parse(event.data.substring(7)) as { action?: string };
             if (systemMsg.action === 'reload') window.location.reload();
             else if (typeof systemMsg.action === 'string' &&
                 systemMsg.action.startsWith('command_error,') && !isSharedMode) {
@@ -8897,7 +8929,7 @@ class WorkerWebSocket {
         else if (event.data.startsWith('DISPLAY_CONFIG_UPDATE,')) {
             try {
                 const jsonPayload = event.data.substring(event.data.indexOf(',') + 1);
-                const payload = JSON.parse(jsonPayload);
+                const payload = JSON.parse(jsonPayload) as DisplayConfig;
 
                 latestDisplayLayouts = payload.layouts || null;
                 serverWayland = !!payload.wayland;
@@ -8910,7 +8942,7 @@ class WorkerWebSocket {
                 }
                 followStreamDensity();
                 if (displayId === 'primary') {
-                    const secondaryConnected = payload.displays.includes('display2');
+                    const secondaryConnected = payload.displays!.includes('display2');
                     if (isSecondaryDisplayConnected !== secondaryConnected) {
                         console.log(`Secondary display connection status changed to: ${secondaryConnected}`);
                         isSecondaryDisplayConnected = secondaryConnected;
@@ -10064,7 +10096,7 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<v
     const micEncodeWorkerURL = URL.createObjectURL(new Blob([micEncodeWorkerCode], { type: 'application/javascript' }));
     micEncodeWorker = new Worker(micEncodeWorkerURL);
     URL.revokeObjectURL(micEncodeWorkerURL);
-    micEncodeWorker.onmessage = (event: MessageEvent): void => {
+    micEncodeWorker.onmessage = (event: MessageEvent<{ type: string; buffer: ArrayBuffer; wasm?: boolean; message?: string }>): void => {
       const m = event.data;
       if (m.type === 'chunk') {
         if (!(websocket && websocket.readyState === WebSocket.OPEN && isMicrophoneActive)) return;
@@ -10087,7 +10119,7 @@ async function startMicrophoneCapture(askedByServer: boolean = false): Promise<v
       micEncodeWorker.postMessage({ type: 'wirePort', port: wireLine.port1 }, [wireLine.port1]);
       websocket.connectSend(wireLine.port2);
     }
-    micWorkletNode.port.onmessage = (event: MessageEvent): void => {
+    micWorkletNode.port.onmessage = (event: MessageEvent<ArrayBuffer | null>): void => {
       const pcm16Buffer = event.data;
       if (!(micEncodeWorker && isMicrophoneActive)) return;
       if (!pcm16Buffer || !(pcm16Buffer instanceof ArrayBuffer) || pcm16Buffer.byteLength === 0) return;

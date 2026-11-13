@@ -111,6 +111,32 @@ declare global {
     webkitAudioContext?: typeof AudioContext;
   }
 
+  /**
+   * A message a dashboard posts to the page for the core: `type` names the
+   * command, and the other members are the ones that command reads. `value`
+   * is whatever the command carries, so a handler narrows it before use.
+   */
+  interface DashboardMessage {
+    type?: string;
+    value?: unknown;
+    enabled?: boolean;
+    pipeline?: string;
+    settings?: Record<string, unknown>;
+    deviceId?: string;
+    context?: string;
+    imageBlob?: Blob;
+    text?: string;
+    url?: string;
+    width?: number | string;
+    height?: number | string;
+    open?: boolean;
+    persist?: boolean;
+    audio?: boolean;
+    video?: boolean;
+    microphone?: boolean;
+    gamepad?: boolean;
+  }
+
   interface Navigator {
     audioSession?: { type: string };
     userAgentData?: { brands?: { brand: string; version: string }[]; platform?: string; mobile?: boolean };

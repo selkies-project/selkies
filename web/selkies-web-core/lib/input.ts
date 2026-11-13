@@ -363,6 +363,12 @@ function trackpadGain(speed: number): number {
     return 1 + (TRACKPAD_ACCEL_MAX - 1) * t * t * (3 - 2 * t);
 }
 
+/** The server's verdict on this client: its role, and the gamepad slot or slots its token holds. */
+export interface RoleVerdict {
+    role: string;
+    slot?: number | number[] | null;
+}
+
 /**
  * The one-based gamepad slots a server verdict's `slot` names, in the order the
  * client's pads take them: one number, a list of them (a token holding
@@ -2027,7 +2033,7 @@ export class Input {
      * which left the pad unassociated.
      * @param newSlot
      */
-    updateControllerSlot(newSlot: number | number[] | null): void {
+    updateControllerSlot(newSlot: number | number[] | null | undefined): void {
         const slots = slotList(newSlot);
         if (String(slots) === String(this.controllerSlots)) return;
         console.log(`Input class: Controller slots updated to: ${slots}`);
