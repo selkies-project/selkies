@@ -740,11 +740,16 @@ fn ok_json() -> String {
     "{\"result\":\"ok\"}".to_string()
 }
 
+/// The reply a request that could not run is answered with.
+fn error_json(error: &str) -> String {
+    serde_json::json!({ "error": error }).to_string()
+}
+
 fn handle_action(req: CuActionRequest, backend: &dyn CuBackend) -> String {
     let result = handle_action_inner(req, backend);
     match result {
         Ok(response) => response,
-        Err(e) => format!("{{\"error\":\"{}\"}}", e.replace('"', "\\\"")),
+        Err(e) => error_json(&e),
     }
 }
 
@@ -1162,80 +1167,94 @@ fn named_record_path(dir: Option<&str>, name: &str) -> Result<String, String> {
     }
 }
 
-/// Handle the recorder REST endpoints sharing the CU server: `record_start`,
-/// `record_stop`, and `record_status`, all one JSON round-trip into the same recorder
-/// implementation the Python API and env vars use. Returns `None` for any other URL.
-fn handle_record_endpoint(url: &str, body: &str) -> Option<String> {
-    let reply = match url {
-        "/record_start" => {
-            let req: RecordStartRequest = if body.trim().is_empty() {
-                RecordStartRequest::default()
-            } else {
-                match serde_json::from_str(body) {
-                    Ok(r) => r,
-                    Err(e) => return Some(format!("{{\"error\":\"Invalid JSON: {}\"}}", e)),
-                }
-            };
-            let record_dir = std::env::var("PIXELFLUX_RECORD_DIR")
-                .ok()
-                .filter(|d| !d.is_empty());
-            let path = match req.path {
-                Some(name) => match named_record_path(record_dir.as_deref(), &name) {
-                    Ok(path) => path,
-                    Err(e) => return Some(serde_json::json!({ "error": e }).to_string()),
-                },
-                None => std::env::var("PIXELFLUX_RECORD")
-                    .ok()
-                    .filter(|p| !p.is_empty())
-                    .unwrap_or_else(|| {
-                        let ts = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        // The session's runtime directory is its own; /tmp is shared.
-                        let runtime = std::env::var("XDG_RUNTIME_DIR")
-                            .ok()
-                            .filter(|d| !d.is_empty());
-                        let dir = record_dir
-                            .as_deref()
-                            .or(runtime.as_deref())
-                            .unwrap_or("/tmp");
-                        format!("{dir}/pixelflux-record-{ts}.mp4")
-                    }),
-            };
-            let mut opts = crate::recorder::RecordOptions::from_env(path);
-            if let Some(d) = req.display {
-                opts.display_id = d;
-            }
-            if let Some(f) = req.fps {
-                opts.fps = f;
-            }
-            if let Some(b) = req.bitrate_kbps {
-                opts.bitrate_kbps = b;
-            }
-            if let Some(a) = req.audio_socket {
-                opts.audio_socket = a;
-            }
-            match crate::recorder::start(opts) {
-                Ok(s) => crate::recorder::status_to_json(&s).to_string(),
-                Err(e) => serde_json::json!({ "error": e }).to_string(),
-            }
+/// Start a recording as `POST /record_start` asks for it: `body` is the request's JSON
+/// ([`RecordStartRequest`]; empty takes every default), the reply the recorder's status or
+/// the error that kept it from starting.
+pub fn record_start(body: &str) -> String {
+    let req: RecordStartRequest = if body.trim().is_empty() {
+        RecordStartRequest::default()
+    } else {
+        match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return error_json(&format!("Invalid JSON: {e}")),
         }
-        "/record_stop" => match crate::recorder::stop() {
-            Ok(s) => {
-                let mut v = crate::recorder::status_to_json(&s);
-                v["stopped"] = serde_json::Value::Bool(true);
-                v.to_string()
-            }
-            Err(e) => serde_json::json!({ "error": e }).to_string(),
-        },
-        "/record_status" => match crate::recorder::status() {
-            Some(s) => crate::recorder::status_to_json(&s).to_string(),
-            None => serde_json::json!({ "active": false }).to_string(),
-        },
-        _ => return None,
     };
-    Some(reply)
+    let record_dir = std::env::var("PIXELFLUX_RECORD_DIR")
+        .ok()
+        .filter(|d| !d.is_empty());
+    let path = match req.path {
+        Some(name) => match named_record_path(record_dir.as_deref(), &name) {
+            Ok(path) => path,
+            Err(e) => return error_json(&e),
+        },
+        None => std::env::var("PIXELFLUX_RECORD")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // The session's runtime directory is its own; /tmp is shared.
+                let runtime = std::env::var("XDG_RUNTIME_DIR")
+                    .ok()
+                    .filter(|d| !d.is_empty());
+                let dir = record_dir
+                    .as_deref()
+                    .or(runtime.as_deref())
+                    .unwrap_or("/tmp");
+                format!("{dir}/pixelflux-record-{ts}.mp4")
+            }),
+    };
+    let mut opts = crate::recorder::RecordOptions::from_env(path);
+    if let Some(d) = req.display {
+        opts.display_id = d;
+    }
+    if let Some(f) = req.fps {
+        opts.fps = f;
+    }
+    if let Some(b) = req.bitrate_kbps {
+        opts.bitrate_kbps = b;
+    }
+    if let Some(a) = req.audio_socket {
+        opts.audio_socket = a;
+    }
+    match crate::recorder::start(opts) {
+        Ok(s) => crate::recorder::status_to_json(&s).to_string(),
+        Err(e) => error_json(&e),
+    }
+}
+
+/// Stop the recording as `/record_stop` asks: its final status with `stopped` set, or the
+/// error where none runs.
+pub fn record_stop() -> String {
+    match crate::recorder::stop() {
+        Ok(s) => {
+            let mut v = crate::recorder::status_to_json(&s);
+            v["stopped"] = serde_json::Value::Bool(true);
+            v.to_string()
+        }
+        Err(e) => error_json(&e),
+    }
+}
+
+/// The recorder's status as `/record_status` answers it; `{"active":false}` where none runs.
+pub fn record_status() -> String {
+    match crate::recorder::status() {
+        Some(s) => crate::recorder::status_to_json(&s).to_string(),
+        None => serde_json::json!({ "active": false }).to_string(),
+    }
+}
+
+/// The recorder endpoints sharing the CU server: `record_start`, `record_stop`, and
+/// `record_status`. Returns `None` for any other URL.
+fn handle_record_endpoint(url: &str, body: &str) -> Option<String> {
+    Some(match url {
+        "/record_start" => record_start(body),
+        "/record_stop" => record_stop(),
+        "/record_status" => record_status(),
+        _ => return None,
+    })
 }
 
 /// Socket of the compositor apps run under when it is nested under pixelflux
@@ -1347,12 +1366,11 @@ fn authorized(authorization: Option<&str>) -> bool {
         })
 }
 
-/// Bound listeners for a CU bind: for each comma-separated entry, both loopback
-/// addresses for a bare port and every address the host resolves to for
-/// `host:port`. An address the host lacks (the IPv6 loopback with IPv6 disabled)
-/// is skipped while another binds; any other failure, or nothing binding at all,
-/// is an error.
-fn cu_listeners(bind: &str) -> Result<Vec<TcpListener>, String> {
+/// The addresses a Computer Use bind names, each once: for each comma-separated entry, both
+/// loopback addresses for a bare port and every address the host resolves to for `host:port`.
+/// An entry that is neither, or a bind naming nothing, is an error. Resolving a host name
+/// blocks.
+pub fn bind_addresses(bind: &str) -> Result<Vec<SocketAddr>, String> {
     let mut addrs: Vec<SocketAddr> = Vec::new();
     for entry in bind
         .split(',')
@@ -1385,6 +1403,14 @@ fn cu_listeners(bind: &str) -> Result<Vec<TcpListener>, String> {
             "invalid bind '{bind}': expected a port or host:port"
         ));
     }
+    Ok(addrs)
+}
+
+/// Bound listeners for a CU bind ([`bind_addresses`]). An address the host lacks (the IPv6
+/// loopback with IPv6 disabled) is skipped while another binds; any other failure, or nothing
+/// binding at all, is an error.
+fn cu_listeners(bind: &str) -> Result<Vec<TcpListener>, String> {
+    let addrs = bind_addresses(bind)?;
     let mut listeners = Vec::new();
     let mut skipped = Vec::new();
     for addr in addrs {
@@ -1503,19 +1529,38 @@ pub(crate) fn resolve_backend() -> Result<Box<dyn CuBackend>, String> {
     crate::x11::computer_use::CuX11Backend::connect().map(|be| Box::new(be) as Box<dyn CuBackend>)
 }
 
-/// Run one Computer Use action for a caller inside the process: `body` is the JSON a request to
-/// the server carries, the reply the JSON such a request is answered with, and the backend the
-/// one a request would reach. It needs no listener and checks no token, so what calls it
-/// answers for who may.
+/// A request body that is no Computer Use action, with the JSON reply saying why; a transport
+/// answers it as a bad request.
+#[derive(Debug)]
+pub struct InvalidRequest(pub String);
+
+/// The backend the last action ran on, logged when it changes.
+static LAST_BACKEND: Mutex<&'static str> = Mutex::new("");
+
+/// Run one Computer Use action: `body` is the JSON of a `POST /computer-use` request, the reply
+/// the JSON it is answered with, an action that failed included. The backend and the
+/// framebuffer dimensions are resolved on every call, since the compositor can start, the
+/// stream can resize, or the X server can restart underneath the agent. It checks no token, so
+/// what calls it answers for who may.
+pub fn action(body: &str) -> Result<String, InvalidRequest> {
+    let parsed: CuActionRequest = serde_json::from_str(body)
+        .map_err(|e| InvalidRequest(error_json(&format!("Invalid JSON: {e}"))))?;
+    Ok(match resolve_backend() {
+        Ok(backend) => {
+            let name = backend.name();
+            if std::mem::replace(&mut *LAST_BACKEND.lock().unwrap(), name) != name {
+                println!("[ComputerUse] Using {name} backend");
+            }
+            handle_action(parsed, backend.as_ref())
+        }
+        Err(e) => error_json(&e),
+    })
+}
+
+/// [`action`] for a caller inside the process, which reads why a body was refused from the
+/// reply as it reads any other error.
 pub fn act(body: &str) -> String {
-    let parsed: CuActionRequest = match serde_json::from_str(body) {
-        Ok(request) => request,
-        Err(e) => return serde_json::json!({"error": format!("Invalid JSON: {e}")}).to_string(),
-    };
-    match resolve_backend() {
-        Ok(backend) => handle_action(parsed, backend.as_ref()),
-        Err(e) => serde_json::json!({"error": e}).to_string(),
-    }
+    action(body).unwrap_or_else(|invalid| invalid.0)
 }
 
 /// Expose the captured desktop to an AI agent over HTTP, so a Computer Use client can drive
@@ -1553,36 +1598,15 @@ pub fn run_cu_server(listener: TcpListener) {
         }
     });
 
-    let mut last_backend = "";
     for (mut stream, url, body) in rx {
         if let Some(json) = handle_record_endpoint(&url, &body) {
             cu_respond(&mut stream, 200, &json);
             continue;
         }
-
-        let parsed: CuActionRequest = match serde_json::from_str(&body) {
-            Ok(r) => r,
-            Err(e) => {
-                cu_respond(
-                    &mut stream,
-                    400,
-                    &format!("{{\"error\":\"Invalid JSON: {}\"}}", e),
-                );
-                continue;
-            }
-        };
-
-        let json_response = match resolve_backend() {
-            Ok(backend) => {
-                if backend.name() != last_backend {
-                    last_backend = backend.name();
-                    println!("[ComputerUse] Using {} backend", last_backend);
-                }
-                handle_action(parsed, backend.as_ref())
-            }
-            Err(e) => format!("{{\"error\":\"{}\"}}", e.replace('"', "\\\"")),
-        };
-        cu_respond(&mut stream, 200, &json_response);
+        match action(&body) {
+            Ok(json) => cu_respond(&mut stream, 200, &json),
+            Err(InvalidRequest(json)) => cu_respond(&mut stream, 400, &json),
+        }
     }
 }
 
@@ -1778,6 +1802,62 @@ mod request_tests {
             got.is_none() && answer.starts_with("HTTP/1.1 411"),
             "{answer}"
         );
+    }
+}
+
+#[cfg(test)]
+mod api_tests {
+    use super::{InvalidRequest, act, action, bind_addresses, record_start, record_status};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    /// A body that is no action is told apart from an action that failed, and its reply is
+    /// JSON whatever the parser quotes in it.
+    #[test]
+    fn a_body_that_is_no_action_is_an_invalid_request() {
+        for body in ["", "{", "[]", r#"{"action":7}"#, r#"{"coordinate":[1,2]}"#] {
+            let InvalidRequest(reply) = action(body).expect_err(body);
+            let reply: serde_json::Value = serde_json::from_str(&reply).expect(body);
+            let error = reply["error"].as_str().expect(body);
+            assert!(error.starts_with("Invalid JSON: "), "{error}");
+            assert_eq!(act(body), reply.to_string());
+        }
+    }
+
+    /// The recorder's endpoints answer without a recording: none is active, and a start that
+    /// is not JSON is an error in the reply.
+    #[test]
+    fn the_recorder_answers_with_no_recording() {
+        assert_eq!(record_status(), r#"{"active":false}"#);
+        let reply: serde_json::Value = serde_json::from_str(&record_start("{")).unwrap();
+        assert!(
+            reply["error"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("Invalid JSON: ")),
+            "{reply}"
+        );
+    }
+
+    /// A bare port is both loopback addresses, `host:port` the address it names, an entry
+    /// named twice one address, and anything else an error.
+    #[test]
+    fn a_bind_names_its_addresses() {
+        let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 9500));
+        let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, 9500));
+        assert_eq!(bind_addresses("9500").unwrap(), [v4, v6]);
+        assert_eq!(
+            bind_addresses("9500, 127.0.0.1:9500,9500").unwrap(),
+            [v4, v6]
+        );
+        assert_eq!(
+            bind_addresses("0.0.0.0:9500,[::]:9501").unwrap(),
+            [
+                SocketAddr::from((Ipv4Addr::UNSPECIFIED, 9500)),
+                SocketAddr::from((Ipv6Addr::UNSPECIFIED, 9501)),
+            ]
+        );
+        for bind in ["abc", "70000", "", ",", "127.0.0.1:0,abc"] {
+            assert!(bind_addresses(bind).is_err(), "{bind:?}");
+        }
     }
 }
 
