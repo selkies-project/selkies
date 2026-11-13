@@ -1732,8 +1732,8 @@ export class Input {
     _echoDeltas!: EchoDelta[];
     _echoComposited!: boolean;
     fingerScroll!: boolean;
-    _fingerScrollTimer!: number | null;
-    _echoTimer!: number | null;
+    _fingerScrollTimer!: ReturnType<typeof setTimeout> | null;
+    _echoTimer!: ReturnType<typeof setTimeout> | null;
     _echoAsking!: boolean;
     useCssScaling!: boolean;
     _streamDensity!: number | null;
@@ -1747,7 +1747,7 @@ export class Input {
     _sampleClientY!: number;
     _sampleAnchorX!: number;
     _sampleAnchorY!: number;
-    _geometryTimer!: number | null;
+    _geometryTimer!: ReturnType<typeof setInterval> | null;
     buttonMask!: number;
     gamepadManager!: GamepadManager | null;
     _gamepadAnnounced!: Record<number, number>;
@@ -1794,10 +1794,10 @@ export class Input {
     _guacKeyboardID!: number;
     _EVENT_MARKER!: `_GUAC_KEYBOARD_HANDLED_BY_${number}`;
     _keyDownList!: Record<string, number>;
-    _keyHeartbeatTimer!: number | null;
+    _keyHeartbeatTimer!: ReturnType<typeof setInterval> | null;
     _KEY_HEARTBEAT_INTERVAL!: number;
     _altGrArmed!: boolean;
-    _altGrTimeout!: number | null;
+    _altGrTimeout!: ReturnType<typeof setTimeout> | null;
     _altGrCtrlTime!: number;
     _isSynth!: boolean;
     _altKeysymByCode!: Map<string, number | null>;
@@ -1805,7 +1805,7 @@ export class Input {
     compositionString!: string;
     _pendingChord!: PendingChord | null;
     _momentaryChordMods!: Set<number>;
-    _momentaryChordModsTimer!: number | null;
+    _momentaryChordModsTimer!: ReturnType<typeof setTimeout> | null;
     _chordKeySent!: boolean;
     _lastTextInputCommit!: { data: string; at: number } | null;
     keyboardInputAssist!: HTMLInputElement | null;
@@ -1820,11 +1820,11 @@ export class Input {
     _trackpadMode!: boolean;
     _trackpadTouches!: Map<number, TrackpadTouch>;
     _trackpadGestureMode!: string | null;
-    _trackpadReleaseTimer!: number | null;
+    _trackpadReleaseTimer!: ReturnType<typeof setTimeout> | null;
     _trackpadHandoffAt!: number;
     trackpadSpeed!: number;
     inputAttached!: boolean;
-    _longPressTimer!: number | null;
+    _longPressTimer!: ReturnType<typeof setTimeout> | null;
     _longPressTouchIdentifier!: number | null;
     _longPressSince!: number;
     _sinkMirrors!: Record<string, HTMLElement | null>;

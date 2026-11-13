@@ -16,9 +16,9 @@ import type { StreamClient, StreamInfo, StreamStatsWindow } from './stream-stats
 
 declare global {
   /** A timer handle the page cleared to null: the platform takes it as no timer. */
-  function clearTimeout(id: number | null): void;
+  function clearTimeout(id: ReturnType<typeof setTimeout> | null): void;
   /** An interval handle the page cleared to null: the platform takes it as no timer. */
-  function clearInterval(id: number | null): void;
+  function clearInterval(id: ReturnType<typeof setInterval> | null): void;
   /** The track an insertable-streams reader takes, which the worker typings leave out. */
   interface MediaStreamTrackProcessorInit {
     track: MediaStreamTrack;

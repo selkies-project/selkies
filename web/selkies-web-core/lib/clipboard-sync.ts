@@ -125,7 +125,7 @@ interface HeldSecret {
     /** Whether a take-back is running. */
     busy: boolean;
     /** The timer that makes it due. */
-    timer: number | null;
+    timer: ReturnType<typeof setTimeout> | null;
 }
 
 /** A dashboard's wait for the session's clipboard (`ClipboardSync.request`). */
@@ -910,7 +910,7 @@ export function createIncomingClipboard({
     let current: IncomingTransfer | null = null;
     let generation = 0;
     let lastLanding: Landing | null = null;
-    let stallTimer: number | null = null;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
     let secretNext = false;
     /** The session's clipboard text while it is a secret, for the copy the user asks for. */
     let sessionSecret: string | null = null;

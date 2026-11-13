@@ -140,7 +140,7 @@ export function watchVideo(video: HTMLVideoElement, meter: PresentMeter, delayOf
   const follows = typeof (video as unknown as { requestVideoFrameCallback?: unknown }).requestVideoFrameCallback === 'function';
   const start = quality();
   let total = start.totalVideoFrames, dropped = start.droppedVideoFrames;
-  let handle = 0, timer = 0, last = -1, handed = 0, handedRead = 0, reported = false, counted = false;
+  let handle = 0, timer: ReturnType<typeof setTimeout> | number = 0, last = -1, handed = 0, handedRead = 0, reported = false, counted = false;
   const follow = (): void => {
     timer = 0;
     handle = (video as HTMLVideoElement & { requestVideoFrameCallback: (cb: (now: number, metadata: VideoFrameCallbackMetadata) => void) => number }).requestVideoFrameCallback(onFrame);
