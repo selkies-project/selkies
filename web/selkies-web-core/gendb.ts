@@ -10,9 +10,8 @@ import path from 'node:path';
 
 // The database is curated continuously, so a build takes its branch's newest
 // commit rather than a pinned one, and checks the file it downloads against
-// the object GitHub's API names for that commit: the git blob hash (SHA-1, the
-// only hash the upstream's history carries), read over a separate request from
-// the bytes it covers.
+// the copy GitHub's API serves for that commit: the two come over separate
+// requests to separate hosts and must agree, compared by SHA-256.
 const DB_REPO = 'mdqinc/SDL_GameControllerDB';
 const DB_BRANCH = 'master';
 const DB_FILE = 'gamecontrollerdb.txt';
@@ -113,9 +112,8 @@ async function fetchOk(url: string, headers: Record<string, string> = {}): Promi
   return response;
 }
 
-// git's object hash of a file: SHA-1 over "blob <size>\0" and the content.
-function gitBlobSha(body: Buffer): string {
-  return crypto.createHash('sha1').update(`blob ${body.length}\0`).update(body).digest('hex');
+function sha256(body: Buffer): string {
+  return crypto.createHash('sha256').update(body).digest('hex');
 }
 
 // A token for the two API requests where the build has one: the build secret
@@ -144,11 +142,12 @@ async function main() {
 
   let commit: string | undefined;
   let body: Buffer;
-  let blob: string | undefined;
+  let reference: Buffer;
   for (let attempt = 1; ; attempt++) {
     try {
       commit = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/commits/${DB_BRANCH}`, headers));
-      blob = await shaOf(await fetchOk(`${API}/repos/${DB_REPO}/contents/${DB_FILE}?ref=${commit}`, headers));
+      reference = Buffer.from(await (await fetchOk(`${API}/repos/${DB_REPO}/contents/${DB_FILE}?ref=${commit}`,
+        { ...headers, Accept: 'application/vnd.github.raw+json' })).arrayBuffer());
       const url = `https://raw.githubusercontent.com/${DB_REPO}/${commit}/${DB_FILE}`;
       console.log(`Fetching controller DB from ${url}...`);
       body = Buffer.from(await (await fetchOk(url)).arrayBuffer());
@@ -163,14 +162,15 @@ async function main() {
       await new Promise((resolve) => setTimeout(resolve, FETCH_RETRY_MS));
     }
   }
-  const digest = gitBlobSha(body);
-  if (!/^[0-9a-f]{40}$/.test(String(commit)) || digest !== blob) {
-    console.error(`Controller DB at ${commit} hashes to blob ${digest}, not the ${blob} GitHub names; refusing it.`);
+  const digest = sha256(body);
+  const expected = sha256(reference);
+  if (!/^[0-9a-f]{40}$/.test(String(commit)) || body.length === 0 || digest !== expected) {
+    console.error(`Controller DB at ${commit} hashes to ${digest}, not the ${expected} of GitHub's API copy; refusing it.`);
     process.exitCode = 1;
     return;
   }
   const fileContent = body.toString('utf8');
-  console.log(`Fetched controller DB at ${commit} (blob ${blob}).`);
+  console.log(`Fetched controller DB at ${commit} (sha256 ${digest}).`);
   
   console.log('Starting conversion...');
 
