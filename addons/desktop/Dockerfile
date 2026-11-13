@@ -259,8 +259,9 @@ RUN set -eu; \
     grep -q '^gtk-icon-theme-name = breeze$' /etc/gtk-3.0/settings.ini
 
 # The desktop's defaults, each documented in its own file: the window
-# manager's settings and right-click menu in the openbox format it reads, under
-# /etc/xdg/openbox on both backends; the autostart that prepares the home; the
+# manager's settings in the openbox format it reads, under /etc/xdg/openbox on
+# both backends (its right-click menu is its own built-in one); the autostart
+# that prepares the home; the
 # terminals' look,
 # shared between foot and xfce4-terminal; the applications files and links
 # open with; and the one Terminal entry in the start menu, which
