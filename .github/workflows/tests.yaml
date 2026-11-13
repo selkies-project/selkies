@@ -467,6 +467,10 @@ jobs:
             ~/.cargo/registry/cache
             target
           key: suites-${{ steps.rust.outputs.image }}-${{ runner.arch }}-${{ steps.rust.outputs.toolchain }}-${{ hashFiles('Cargo.lock', 'crates/selkies-suites/**') }}
+          # A changed suite rebuilds the suites' crate alone, on the crates the
+          # last build of this image and toolchain left.
+          restore-keys: |
+            suites-${{ steps.rust.outputs.image }}-${{ runner.arch }}-${{ steps.rust.outputs.toolchain }}-
       - name: Build the Rust suites
         if: contains(inputs.tiers || 'integration or e2e', 'integration')
         run: |
