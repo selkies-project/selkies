@@ -4,12 +4,15 @@
 Draws what motion_scene.py draws on X11, frame for frame and at the same places, into
 wl_shm buffers at the size the compositor configures, again after each resize: the
 background, the strip of squares spelling the frame index, the scrolling checkerboard
-band, the stepping bar and the band of noise along the bottom. Prints
-{"kind": "mapped", "w", "h"} whenever a frame of a new size is shown, and exits after
+band, the stepping bar and the band of noise along the bottom. The buffers live in a
+memfd sealed against shrinking, as toolkits allocate theirs, and the pool is replaced
+by a fresh one every REPLACE_FRAMES frames, as a toolkit replaces its buffers. Prints
+{"kind": "mapped", "w", "h"} whenever a new pool's first frame is shown, and exits after
 WLOBS_DURATION seconds or on SIGTERM.
 
     XDG_RUNTIME_DIR=... wl_motion_scene.py SOCKET
 """
+import fcntl
 import json
 import mmap
 import os
@@ -17,7 +20,6 @@ import random
 import select
 import signal
 import sys
-import tempfile
 import time
 
 from pywayland.client import Display
@@ -31,6 +33,7 @@ SOCKET = sys.argv[1] if len(sys.argv) > 1 else "wayland-1"
 DURATION = float(os.environ.get("WLOBS_DURATION", "60"))
 FPS = 60.0
 BUFFERS = 3
+REPLACE_FRAMES = 300
 # XRGB8888 is little-endian: blue, green, red, unused.
 BACKGROUND = bytes((0x78, 0x28, 0x1E, 0xFF))
 BAR = bytes((0x28, 0x3C, 0xDC, 0xFF))
@@ -91,12 +94,14 @@ class Canvas:
         self.w, self.h, self.stride = w, h, w * 4
         self.noise_h = min(NOISE_H, h)
         self.size = self.stride * h
-        with tempfile.TemporaryFile(dir=os.environ.get("XDG_RUNTIME_DIR", "/tmp")) as backing:
-            fd = backing.fileno()
-            os.ftruncate(fd, BUFFERS * self.size)
-            self.mm = mmap.mmap(fd, BUFFERS * self.size)
-            self.mm[:] = BACKGROUND * (w * h * BUFFERS)
-            self.pool = g["shm"].create_pool(fd, BUFFERS * self.size)
+        fd = os.memfd_create("wl-motion-scene", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        os.ftruncate(fd, BUFFERS * self.size)
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK)
+        self.mm = mmap.mmap(fd, BUFFERS * self.size)
+        self.mm[:] = BACKGROUND * (w * h * BUFFERS)
+        self.pool = g["shm"].create_pool(fd, BUFFERS * self.size)
+        os.close(fd)
+        self.drawn = 0
         self.buffers = [self.pool.create_buffer(b * self.size, w, h, self.stride, WlShm.format.xrgb8888.value)
                         for b in range(BUFFERS)]
         self.free = [True] * BUFFERS
@@ -145,6 +150,7 @@ class Canvas:
         surface.damage_buffer(0, CODE_Y, w, self.h - CODE_Y)
         surface.commit()
         display.flush()
+        self.drawn += 1
         return True
 
 
@@ -154,7 +160,7 @@ fdw = display.get_fd()
 end = time.monotonic() + DURATION
 next_tick = time.monotonic()
 while time.monotonic() < end:
-    if canvas is None or (canvas.w, canvas.h) != asked["size"]:
+    if canvas is None or (canvas.w, canvas.h) != asked["size"] or canvas.drawn >= REPLACE_FRAMES:
         if canvas is not None:
             canvas.close()
         canvas = Canvas(*asked["size"])

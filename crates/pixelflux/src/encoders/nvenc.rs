@@ -5044,6 +5044,26 @@ impl NvencEncoder {
         }
     }
 
+    /// `encode_cpu_packed` for rows a client owns, such as a wl_shm pool's, uploaded without
+    /// page-locking them. The client unmaps its pool whenever it likes, and a registration
+    /// outlives the mapping: a pool mapped later over the same addresses would be read from the
+    /// old pool's pages, or fail to upload where it straddles them.
+    pub fn encode_client_packed(
+        &mut self,
+        pixels: &[u8],
+        src_stride: usize,
+        rgba_input: bool,
+        frame_number: u64,
+        crf: u32,
+        force_idr: bool,
+    ) -> Result<Vec<u8>, String> {
+        let pin = std::mem::replace(&mut self.pin_uploads, false);
+        let out =
+            self.encode_cpu_packed(pixels, src_stride, rgba_input, frame_number, crf, force_idr);
+        self.pin_uploads = pin;
+        out
+    }
+
     /// Run the chroma convert over an array-typed import through `tex`, answering the input
     /// NVENC should be handed. `None` where the session has no convert, or where the driver gave
     /// no texture for the import and NVENC's own conversion stands in, which a 10-bit session,
@@ -7282,6 +7302,55 @@ pub(crate) mod gpu_tests {
                     "source {source}, frame {i}: {psnr:.1} dB against the picture just painted"
                 );
             }
+        }
+    }
+
+    /// A client's memfd pool replaced by one mapped at the same address, as a toolkit swaps its
+    /// buffers, uploads the picture the new pool holds: the rows are read where they lie and
+    /// never page-locked, so no registration keeps the old pool's pages at that address.
+    /// Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_a_client_pool_mapped_where_the_last_one_was_uploads_its_own_picture() {
+        use crate::webcam::decode::VideoDecoder;
+        let (w, h) = (1280usize, 720usize);
+        let len = w * h * 4;
+        let mut enc = NvencEncoder::new(&settings(w as i32, h as i32, 60.0), ptr::null())
+            .expect("NVENC init");
+        assert!(enc.pin_uploads, "the production default pins");
+        let mut dec = VideoDecoder::new(Codec::H264).expect("decoder");
+        let mut at: *mut c_void = ptr::null_mut();
+        for (pool, frames) in [(0, 0..4usize), (1, 4..8usize)] {
+            let fd = crate::memfd_create(c"client-pool", libc::MFD_CLOEXEC);
+            assert!(fd >= 0, "memfd_create");
+            let flags = if at.is_null() {
+                libc::MAP_SHARED
+            } else {
+                libc::MAP_SHARED | libc::MAP_FIXED
+            };
+            // SAFETY: a fresh memfd sized to `len` and mapped whole; the second pool is placed
+            // over the range the first one was unmapped from, which nothing else holds.
+            let rows = unsafe {
+                assert_eq!(libc::ftruncate(fd, len as libc::off_t), 0);
+                let p = libc::mmap(at, len, libc::PROT_READ | libc::PROT_WRITE, flags, fd, 0);
+                libc::close(fd);
+                assert_ne!(p, libc::MAP_FAILED, "mmap");
+                std::slice::from_raw_parts_mut(p as *mut u8, len)
+            };
+            at = rows.as_mut_ptr().cast();
+            for i in frames {
+                rows.copy_from_slice(&moving_frame(w, h, i));
+                let pkt = enc
+                    .encode_client_packed(rows, w * 4, false, i as u64, 25, i == 0)
+                    .expect("encode");
+                let psnr = luma_psnr(&mut dec, &pkt, &moving_frame(w, h, i), w, h);
+                assert!(
+                    psnr > 30.0,
+                    "pool {pool}, frame {i}: {psnr:.1} dB against the picture just painted"
+                );
+            }
+            // SAFETY: the mapping made above, which no slice outlives.
+            unsafe { libc::munmap(at, len) };
         }
     }
 

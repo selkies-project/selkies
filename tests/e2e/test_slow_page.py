@@ -127,6 +127,14 @@ def lag_frames(samples: list) -> list:
     return sorted(((a["index"] - b["index"] + 0x8000) & 0xFFFF) - 0x8000 for a, b in samples)
 
 
+def stuck(samples: list) -> int:
+    """How many of the owner's pictures show no later frame than its previous sample did. The scene
+    moves on sixty frames between two samples, so a picture that does not is a stale frame, which
+    still passes for the frame it claims to be."""
+    return sum(not 0 < ((b["index"] - a["index"]) & 0xFFFF) < 0x8000
+               for (a, _), (b, _) in zip(samples, samples[1:]))
+
+
 def keep_log(name: str, text: str) -> None:
     """The server log of a block's window, beside the run's other logs."""
     with open(os.path.join(H.WORKDIR, f"slow-page-{name}.log"), "w") as f:
@@ -257,6 +265,8 @@ def ws_block(wayland: bool = False) -> "H.Results":
                       f"{len(samples)} samples, worst {worst:.3f}")
             res.check("and so is every picture the owner decodes", owner_worst < D.CORRUPT_FRACTION,
                       f"worst {owner_worst:.3f}")
+            res.check("whose picture moves on between samples", stuck(samples) == 0,
+                      f"{stuck(samples)} stuck")
             res.check("it trails the owner by under a second", bool(lags) and lags[len(lags) // 2] < 60,
                       lags)
             res.check("the drops were answered by the encoder predicting past them",
@@ -358,6 +368,8 @@ def wr_block(engine: str = "chromium", wayland: bool = False) -> "H.Results":
                       f"{len(samples)} samples, worst {worst:.3f}")
             res.check("and so is every picture the owner decodes", owner_worst < D.CORRUPT_FRACTION,
                       f"worst {owner_worst:.3f}")
+            res.check("whose picture moves on between samples", stuck(samples) == 0,
+                      f"{stuck(samples)} stuck")
             res.check("it trails the owner by under a second", bool(lags) and lags[len(lags) // 2] < 60, lags)
             res.check("its drops were answered by the encoder predicting past them",
                       "lost by a peer; the encoder predicts past it" in log and "GOP reset" not in log,

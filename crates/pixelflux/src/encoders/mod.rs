@@ -1242,6 +1242,27 @@ impl FrameEncoder {
         }
     }
 
+    /// `encode_host` for rows a client owns and may unmap after the call, as the wl_shm buffer
+    /// a Wayland capture encodes as it stands: NVENC uploads them without page-locking them
+    /// (`NvencEncoder::encode_client_packed`), and every other session reads them as
+    /// `encode_host` does.
+    pub fn encode_client_host(
+        &mut self,
+        pixels: &[u8],
+        stride: usize,
+        rgba: bool,
+        frame_number: u64,
+        qp: u32,
+        force_idr: bool,
+    ) -> Result<Vec<u8>, String> {
+        match self {
+            FrameEncoder::Nvenc(enc) => {
+                enc.encode_client_packed(pixels, stride, rgba, frame_number, qp, force_idr)
+            }
+            _ => self.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
+        }
+    }
+
     /// Hash the next host frame's bands of `rows` rows where the encoder holds it, beside its
     /// encode (NVENC: `NvencEncoder::hash_next_upload`); false where it cannot, which leaves the
     /// hash to the caller.

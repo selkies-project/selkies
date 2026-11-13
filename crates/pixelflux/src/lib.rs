@@ -1821,7 +1821,7 @@ fn wayland_encode_loop<B: WlPayload>(
                     }
                     match f.shm.as_ref() {
                         Some(shm) => encode_shm_rows(shm, width, height, |rows| {
-                            encoder.encode_host(
+                            encoder.encode_client_host(
                                 rows,
                                 (width.max(0) as usize) * 4,
                                 cfg.use_gpu,
