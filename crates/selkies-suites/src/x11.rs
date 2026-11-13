@@ -320,6 +320,8 @@ pub fn mode_line(display: &str) -> Option<ModeLine> {
     connection
         .extension_information(xf86vidmode::X11_EXTENSION_NAME)
         .ok()??;
+    // The server answers a client that states no version in the extension's first layout.
+    connection.xf86vidmode_set_client_version(2, 2).ok()?;
     let line = connection.xf86vidmode_get_mode_line(0).ok()?.reply().ok()?;
     Some(ModeLine {
         dot_clock: line.dotclock,

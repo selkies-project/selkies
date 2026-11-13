@@ -26,11 +26,12 @@ use crate::server::PageSender;
 /// How long the server is given to accept the socket and send its first message.
 const HELLO: Duration = Duration::from_secs(10);
 
-/// A binary message as it arrived: when, its first four bytes, and its length.
+/// A binary message as it arrived: when, its first twelve bytes (a video message's header), and
+/// its length.
 #[derive(Clone, Copy)]
 pub struct Binary {
     pub at: Instant,
-    pub head: [u8; 4],
+    pub head: [u8; 12],
     pub len: usize,
 }
 
@@ -39,6 +40,27 @@ impl Binary {
     pub fn video_frame_id(&self) -> Option<u16> {
         (self.len >= 4 && matches!(self.head[0], 0x03 | 0x04))
             .then(|| u16::from_be_bytes([self.head[2], self.head[3]]))
+    }
+
+    /// Whether this is a full-frame video message, whose header names its codec, whether it
+    /// decodes alone, and the frame it predicts from.
+    pub fn is_full_frame(&self) -> bool {
+        self.len > 12 && self.head[0] == 0x04
+    }
+
+    /// The wire id of a full frame's codec.
+    pub fn codec(&self) -> u8 {
+        self.head[1] >> 4
+    }
+
+    /// Whether a full frame decodes alone.
+    pub fn is_key(&self) -> bool {
+        self.head[1] & 0x0f == 0x01
+    }
+
+    /// The id of the frame a full frame predicts from; its own id where it names none.
+    pub fn reference(&self) -> u16 {
+        u16::from_be_bytes([self.head[10], self.head[11]])
     }
 }
 
@@ -102,8 +124,8 @@ impl Client {
                                         inbox.texts.push(text.to_owned());
                                     } else if message.is_binary() {
                                         let payload = message.as_payload();
-                                        let mut head = [0u8; 4];
-                                        let taken = payload.len().min(4);
+                                        let mut head = [0u8; 12];
+                                        let taken = payload.len().min(12);
                                         head[..taken].copy_from_slice(&payload[..taken]);
                                         inbox.binaries.push(Binary {
                                             at: Instant::now(),

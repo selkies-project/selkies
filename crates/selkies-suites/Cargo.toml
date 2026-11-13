@@ -22,7 +22,7 @@ workspace = true
 tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync", "io-util"] }
 tokio-websockets = { version = "0.13", default-features = false, features = ["client", "aws_lc_rs", "fastrand"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
-hyper = { version = "1", features = ["client", "http1"] }
+hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = "1"
