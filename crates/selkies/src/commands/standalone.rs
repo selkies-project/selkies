@@ -25,6 +25,7 @@
 //! session, which is how a session starts its server ([`super::session::SESSION_ID_VAR`]).
 
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::settings::Settings;
@@ -44,6 +45,12 @@ pub const PLACEHOLDER_PASSWORD: &str = "mypasswd";
 
 /// The variables the standalone session adds to an environment `get` reads, each only where
 /// that environment sets neither it nor a name the same setting is read under.
+///
+/// The certificate pair is named in the user's state directory, where the server writes a
+/// self-signed one the first time and reuses it after, rather than left at the server's
+/// default: that is the pair Debian's `ssl-cert` installs, whose key is root's and its group's
+/// alone, so on a host that has it the server would find a certificate it cannot use and refuse
+/// to start.
 pub fn defaults(get: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
     let set = |names: &[&str]| names.iter().any(|name| get(name).is_some());
     let mut env = Vec::new();
@@ -55,6 +62,19 @@ pub fn defaults(get: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
     default(&["SELKIES_WAYLAND", "PIXELFLUX_WAYLAND"], "true");
     default(&["SELKIES_DESKTOP"], "true");
     default(&["SELKIES_ENABLE_HTTPS"], "true");
+    let state = get("XDG_STATE_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(get("HOME").unwrap_or_default()).join(".local/state"));
+    let tls = state.join("selkies");
+    default(
+        &["SELKIES_HTTPS_CERT"],
+        &tls.join("selkies.pem").to_string_lossy(),
+    );
+    default(
+        &["SELKIES_HTTPS_KEY"],
+        &tls.join("selkies.key").to_string_lossy(),
+    );
     default(
         &["SELKIES_BASIC_AUTH_USER", "CUSTOM_USER"],
         PLACEHOLDER_USER,
@@ -158,6 +178,25 @@ mod tests {
         assert_eq!(added["SELKIES_ENABLE_HTTPS"], "true");
         assert_eq!(added["SELKIES_BASIC_AUTH_USER"], "ubuntu");
         assert_eq!(added["SELKIES_BASIC_AUTH_PASSWORD"], "mypasswd");
+    }
+
+    #[test]
+    fn the_certificate_is_the_users_own_in_the_state_directory() {
+        let home = env(&[("HOME", "/home/u")]);
+        let added: HashMap<String, String> =
+            defaults(|k| home.get(k).cloned()).into_iter().collect();
+        assert_eq!(
+            added["SELKIES_HTTPS_CERT"],
+            "/home/u/.local/state/selkies/selkies.pem"
+        );
+        assert_eq!(
+            added["SELKIES_HTTPS_KEY"],
+            "/home/u/.local/state/selkies/selkies.key"
+        );
+        let state = env(&[("HOME", "/home/u"), ("XDG_STATE_HOME", "/s")]);
+        let added: HashMap<String, String> =
+            defaults(|k| state.get(k).cloned()).into_iter().collect();
+        assert_eq!(added["SELKIES_HTTPS_CERT"], "/s/selkies/selkies.pem");
     }
 
     #[test]
